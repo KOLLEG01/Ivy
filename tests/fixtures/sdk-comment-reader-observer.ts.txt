@@ -1,0 +1,6 @@
+    const read = this.reader.node.bind(this.reader);
+    this.reader.node = async (pin, taskId, signal) => {
+      const node = await read(pin, taskId, signal);
+      this.remember(hashJson(node), pin);
+      return node;
+    };

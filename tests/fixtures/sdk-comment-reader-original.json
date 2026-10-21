@@ -1,0 +1,707 @@
+{
+  "sourceHash": "sha256:eda30de9d2741fcf4cc19088861a57e2fbc8cd4d5294e1afa3e27e2da6aa47be",
+  "nodeVersion": "v24.18.0",
+  "qualificationLimit": "Negative/malformed JavaScript positions are outside the agreed optional-usize native caller domain.",
+  "cases": [
+    {
+      "name": "valid immutable pin",
+      "value": {
+        "node": {
+          "schemaVersion": 1,
+          "taskId": "task",
+          "kind": "comment",
+          "entry": {
+            "comment": {
+              "commentId": "c1",
+              "sequence": 1,
+              "body": "value"
+            },
+            "receipt": null
+          }
+        },
+        "cacheBytes": 268,
+        "cacheSize": 1
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "params": {
+            "objectId": "n",
+            "revision": 1
+          },
+          "hasSignal": true
+        }
+      ]
+    },
+    {
+      "name": "wrong contract key",
+      "error": {
+        "type": "object",
+        "name": "Error",
+        "message": "The conversation snapshot belongs to another ticket.",
+        "value": {}
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "params": {
+            "objectId": "n",
+            "revision": 1
+          },
+          "hasSignal": true
+        }
+      ]
+    },
+    {
+      "name": "wrong contract version",
+      "error": {
+        "type": "object",
+        "name": "Error",
+        "message": "The conversation snapshot belongs to another ticket.",
+        "value": {}
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "params": {
+            "objectId": "n",
+            "revision": 1
+          },
+          "hasSignal": true
+        }
+      ]
+    },
+    {
+      "name": "wrong parent",
+      "error": {
+        "type": "object",
+        "name": "Error",
+        "message": "The conversation snapshot belongs to another ticket.",
+        "value": {}
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "params": {
+            "objectId": "n",
+            "revision": 1
+          },
+          "hasSignal": true
+        }
+      ]
+    },
+    {
+      "name": "wrong owner",
+      "error": {
+        "type": "object",
+        "name": "Error",
+        "message": "The conversation snapshot belongs to another ticket.",
+        "value": {}
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "params": {
+            "objectId": "n",
+            "revision": 1
+          },
+          "hasSignal": true
+        }
+      ]
+    },
+    {
+      "name": "non-json content",
+      "error": {
+        "type": "object",
+        "name": "Error",
+        "message": "The conversation snapshot belongs to another ticket.",
+        "value": {}
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "params": {
+            "objectId": "n",
+            "revision": 1
+          },
+          "hasSignal": true
+        }
+      ]
+    },
+    {
+      "name": "wrong revision",
+      "error": {
+        "type": "object",
+        "name": "Error",
+        "message": "The conversation snapshot belongs to another ticket.",
+        "value": {}
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "params": {
+            "objectId": "n",
+            "revision": 1
+          },
+          "hasSignal": true
+        }
+      ]
+    },
+    {
+      "name": "wrong task id",
+      "error": {
+        "type": "object",
+        "name": "Error",
+        "message": "The conversation snapshot belongs to another ticket.",
+        "value": {}
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "params": {
+            "objectId": "n",
+            "revision": 1
+          },
+          "hasSignal": true
+        }
+      ]
+    },
+    {
+      "name": "object absent raw TypeError",
+      "error": {
+        "type": "object",
+        "name": "TypeError",
+        "message": "Cannot read properties of undefined (reading 'contractKey')",
+        "value": {}
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "params": {
+            "objectId": "n",
+            "revision": 1
+          },
+          "hasSignal": true
+        }
+      ]
+    },
+    {
+      "name": "revision null raw TypeError",
+      "error": {
+        "type": "object",
+        "name": "TypeError",
+        "message": "Cannot read properties of null (reading 'contractVersion')",
+        "value": {}
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "params": {
+            "objectId": "n",
+            "revision": 1
+          },
+          "hasSignal": true
+        }
+      ]
+    },
+    {
+      "name": "content value null raw TypeError",
+      "error": {
+        "type": "object",
+        "name": "TypeError",
+        "message": "Cannot read properties of null (reading 'taskId')",
+        "value": {}
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "params": {
+            "objectId": "n",
+            "revision": 1
+          },
+          "hasSignal": true
+        }
+      ]
+    },
+    {
+      "name": "object id is not independently compared",
+      "value": {
+        "node": {
+          "schemaVersion": 1,
+          "taskId": "task",
+          "kind": "comment",
+          "entry": {
+            "comment": {
+              "commentId": "c1",
+              "sequence": 1,
+              "body": "value"
+            },
+            "receipt": null
+          }
+        },
+        "cacheBytes": 268,
+        "cacheSize": 1
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "params": {
+            "objectId": "n",
+            "revision": 1
+          },
+          "hasSignal": true
+        }
+      ]
+    },
+    {
+      "name": "schemaVersion is not independently validated",
+      "value": {
+        "node": {
+          "schemaVersion": 2,
+          "taskId": "task",
+          "kind": "comment",
+          "entry": {
+            "comment": {
+              "commentId": "c1",
+              "sequence": 1,
+              "body": "value"
+            },
+            "receipt": null
+          }
+        },
+        "cacheBytes": 268,
+        "cacheSize": 1
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "params": {
+            "objectId": "n",
+            "revision": 1
+          },
+          "hasSignal": true
+        }
+      ]
+    },
+    {
+      "name": "request exception object passes by identity",
+      "error": {
+        "type": "object",
+        "name": "CustomError",
+        "message": "raw\ud800",
+        "value": {
+          "name": "CustomError",
+          "message": "raw\ud800",
+          "code": "specific",
+          "details": {
+            "a": 1
+          }
+        }
+      },
+      "trace": [
+        {
+          "same": true
+        }
+      ]
+    },
+    {
+      "name": "request primitive passes unchanged",
+      "error": {
+        "type": "string",
+        "name": null,
+        "message": null,
+        "value": "raw\ud800"
+      },
+      "trace": []
+    },
+    {
+      "name": "cached hit ignores cancelled signal but checks task",
+      "error": {
+        "type": "object",
+        "name": "Error",
+        "message": "The conversation snapshot belongs to another ticket.",
+        "value": {}
+      },
+      "trace": [
+        {
+          "sameReference": true
+        }
+      ]
+    },
+    {
+      "name": "remember is first-wins and hit does not refresh FIFO",
+      "value": {
+        "firstWins": true
+      },
+      "trace": [
+        {
+          "keys": [
+            "b@1",
+            "c@1"
+          ],
+          "bytes": 536,
+          "size": 268
+        }
+      ]
+    },
+    {
+      "name": "oversized new entry evicts old entries before not caching",
+      "value": true,
+      "trace": [
+        {
+          "keys": [],
+          "bytes": 0,
+          "hugeBytes": 1330,
+          "maximum": 536
+        }
+      ]
+    },
+    {
+      "name": "cache bytes use JSON.stringify UTF16 including escapes",
+      "value": true,
+      "trace": [
+        {
+          "charged": 310,
+          "jsonUtf16": 155,
+          "jsonUtf8": 157,
+          "key": "utf16@1"
+        }
+      ]
+    },
+    {
+      "name": "empty tree",
+      "value": [],
+      "trace": []
+    },
+    {
+      "name": "negative start",
+      "error": {
+        "type": "object",
+        "name": "Error",
+        "message": "The conversation range is invalid.",
+        "value": {}
+      },
+      "trace": []
+    },
+    {
+      "name": "end exceeds length",
+      "error": {
+        "type": "object",
+        "name": "Error",
+        "message": "The conversation range is invalid.",
+        "value": {}
+      },
+      "trace": []
+    },
+    {
+      "name": "start after end",
+      "error": {
+        "type": "object",
+        "name": "Error",
+        "message": "The conversation range is invalid.",
+        "value": {}
+      },
+      "trace": []
+    },
+    {
+      "name": "root length mismatch",
+      "error": {
+        "type": "object",
+        "name": "Error",
+        "message": "The conversation range is invalid.",
+        "value": {}
+      },
+      "trace": []
+    },
+    {
+      "name": "leaf wrong sequence",
+      "error": {
+        "type": "object",
+        "name": "Error",
+        "message": "The conversation sequence is invalid.",
+        "value": {}
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "p": {
+            "objectId": "root",
+            "revision": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "leaf wrong index length",
+      "error": {
+        "type": "object",
+        "name": "Error",
+        "message": "The conversation sequence is invalid.",
+        "value": {}
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "p": {
+            "objectId": "root",
+            "revision": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "empty children",
+      "error": {
+        "type": "object",
+        "name": "Error",
+        "message": "The conversation index is incomplete.",
+        "value": {}
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "p": {
+            "objectId": "root",
+            "revision": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "incomplete children sum",
+      "error": {
+        "type": "object",
+        "name": "Error",
+        "message": "The conversation index is incomplete.",
+        "value": {}
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "p": {
+            "objectId": "root",
+            "revision": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "missing children raw TypeError",
+      "error": {
+        "type": "object",
+        "name": "TypeError",
+        "message": "Cannot read properties of undefined (reading 'length')",
+        "value": {}
+      },
+      "trace": [
+        {
+          "method": "objects.read",
+          "p": {
+            "objectId": "root",
+            "revision": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "depth thirteen refuses before node request",
+      "error": {
+        "type": "object",
+        "name": "Error",
+        "message": "The conversation index is invalid.",
+        "value": {}
+      },
+      "trace": [
+        "d0",
+        "d1",
+        "d2",
+        "d3",
+        "d4",
+        "d5",
+        "d6",
+        "d7",
+        "d8",
+        "d9",
+        "d10",
+        "d11",
+        "d12"
+      ]
+    },
+    {
+      "name": "range follows only intersections and returns independent clones",
+      "value": [
+        {
+          "comment": {
+            "commentId": "c3",
+            "sequence": 3,
+            "body": "\ud800😀",
+            "unknown": 17
+          },
+          "receipt": null
+        }
+      ],
+      "trace": [
+        "root",
+        "right",
+        "c3"
+      ]
+    },
+    {
+      "name": "micro-batches eight with ordered results despite reverse completion",
+      "value": {
+        "maximum": 8,
+        "sequences": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17
+        ]
+      },
+      "trace": [
+        {
+          "start": "root"
+        },
+        {
+          "start": "c1"
+        },
+        {
+          "start": "c2"
+        },
+        {
+          "start": "c3"
+        },
+        {
+          "start": "c4"
+        },
+        {
+          "start": "c5"
+        },
+        {
+          "start": "c6"
+        },
+        {
+          "start": "c7"
+        },
+        {
+          "start": "c8"
+        },
+        {
+          "finish": "c8"
+        },
+        {
+          "finish": "c7"
+        },
+        {
+          "finish": "c6"
+        },
+        {
+          "finish": "c5"
+        },
+        {
+          "finish": "c4"
+        },
+        {
+          "finish": "c3"
+        },
+        {
+          "finish": "c2"
+        },
+        {
+          "finish": "c1"
+        },
+        {
+          "start": "c9"
+        },
+        {
+          "start": "c10"
+        },
+        {
+          "start": "c11"
+        },
+        {
+          "start": "c12"
+        },
+        {
+          "start": "c13"
+        },
+        {
+          "start": "c14"
+        },
+        {
+          "start": "c15"
+        },
+        {
+          "start": "c16"
+        },
+        {
+          "finish": "c16"
+        },
+        {
+          "finish": "c15"
+        },
+        {
+          "finish": "c14"
+        },
+        {
+          "finish": "c13"
+        },
+        {
+          "finish": "c12"
+        },
+        {
+          "finish": "c11"
+        },
+        {
+          "finish": "c10"
+        },
+        {
+          "finish": "c9"
+        },
+        {
+          "start": "c17"
+        },
+        {
+          "finish": "c17"
+        }
+      ]
+    },
+    {
+      "name": "fail-fast preserves initiated peer cache completion",
+      "value": true,
+      "trace": [
+        {
+          "start": "root"
+        },
+        {
+          "start": "slow"
+        },
+        {
+          "start": "failed"
+        },
+        {
+          "observed": "peer failed",
+          "slowCachedBefore": false
+        },
+        {
+          "finish": "slow"
+        },
+        {
+          "slowCachedAfter": true
+        }
+      ]
+    }
+  ]
+}
