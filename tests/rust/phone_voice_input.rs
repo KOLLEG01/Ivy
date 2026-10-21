@@ -90,6 +90,9 @@ fn pause(state: &Arc<Mutex<State>>, ms: u64) -> MicroInputResult<()> {
 }
 struct Input(Arc<Mutex<State>>);
 impl MicroVoiceInput for Input {
+    fn close(&self) -> MicroInputResult<crate::micro::MicroClose> {
+        panic!("unexpected dispose")
+    }
     fn status(&self) -> MicroInputResult<MicroAttachmentStatus> {
         panic!("unexpected status read")
     }

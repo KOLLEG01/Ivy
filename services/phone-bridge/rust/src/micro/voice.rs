@@ -33,6 +33,9 @@ pub struct MicroVoiceObservation {
     pub dictation_sequence: i64,
 }
 pub trait MicroVoiceInput: Send + Sync {
+    /// Start/return device-owned disposal synchronously. Constructor failures
+    /// propagate; an already returned operation retains its eventual failure.
+    fn close(&self) -> MicroInputResult<super::MicroClose>;
     fn status(&self) -> MicroInputResult<MicroAttachmentStatus>;
     fn send_microphone(
         &self,

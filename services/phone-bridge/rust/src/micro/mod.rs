@@ -1,11 +1,13 @@
 //! Phone-owned emulated Micro wire formats and installed-client identity checks.
 //! A report or matching driver inventory does not establish Desktop/Voice ownership.
+mod close;
 mod descriptors;
 mod inventory;
 mod report;
 mod transfer;
 mod voice;
 
+pub use close::{MicroClose, MicroCloseResult};
 pub use descriptors::{
     BUS_ID, DEVICE_ID, SERIAL, configuration, device, export, report_descriptor, string_descriptor,
 };

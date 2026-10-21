@@ -2,6 +2,7 @@
 //! to identify a task, invoke a control or grant audio by itself.
 mod actions;
 mod controls;
+mod input_owner;
 mod voice;
 mod voice_input;
 mod voice_session;
@@ -27,6 +28,7 @@ pub use controls::{
     Control, ControlError, ControlSource, ControlWindow, ControlsObservation, read_controls,
     select_named, validate_labels,
 };
+pub use input_owner::{MicroFactoryError, MicroFactoryResult, VoiceInputClock, VoiceInputOwner};
 pub use voice::{
     START_LABELS, STOP_LABELS, VoiceControlIdentity, VoiceControlObservation, classify_voice,
     voice_labels,
