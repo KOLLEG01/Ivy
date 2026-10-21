@@ -1,0 +1,1 @@
+export const taskBoardAttachmentGuidance = 'Attach files only when explicitly requested or when they add clear value. Limit attachments to what is necessary and keep them as small as possible. Attach build artifacts only when explicitly requested by the user.';

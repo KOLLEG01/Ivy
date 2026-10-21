@@ -169,7 +169,8 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
   identifying the Task and owning service through Ivy MCP. It asks the agent to read the ticket
   and decide what to do; it never assigns a next-step ID or repeats the general workflow guide.
   Agents reread the current ticket/settings/comments at every turn, work in the assigned workspace,
-  post meaningful progress/questions with `authorKind=agent`, and publish non-Git files as Task attachments.
+  post meaningful progress/questions with `authorKind=agent`, and follow the shared
+  [attachment guidance](../instructions/task-board.ts) included in prompts and tool instructions.
 - Comments are the single conversation and handoff surface. Ordinary decisions need no separate
   approval workflow. Native requests retain their original identities in comments; UI buttons and
   MCP answer them through AgentManager. Responses are mirrored into the same timeline; secret
