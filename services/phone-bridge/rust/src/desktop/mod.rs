@@ -16,7 +16,7 @@ pub use voice::{
 };
 pub use voice_session::{DesktopVoiceSession, TimedVoiceControlObservation, VoiceSource};
 #[cfg(all(windows, target_pointer_width = "64"))]
-pub use windows::{DesktopInvokePhase, DesktopReadStage, WindowsControlSource};
+pub use windows::{AccessibilityError, DesktopInvokePhase, DesktopReadStage, WindowsControlSource};
 
 #[cfg(all(test, windows))]
 #[path = "../../../../../tests/rust/phone_desktop_controls.rs"]

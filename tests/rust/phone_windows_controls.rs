@@ -84,7 +84,7 @@ impl Fixture {
         let stage_throw = item.get("stageThrow").unwrap().as_bool().unwrap();
         let mut source = WindowsControlSource::new(
             std::process::id() as i32,
-            true,
+            item.get("action").unwrap().as_str().unwrap() != "observe",
             Some(Box::new(move |s| {
                 trace.borrow_mut().push(IvyJson::object([
                     ("stage", s.stage.into()),
@@ -127,7 +127,7 @@ impl Fixture {
                 source.read(&labels)?;
                 return Ok(IvyJson::Null);
             }
-            if action == "read" {
+            if action == "read" || action == "observe" {
                 return Ok(self.windows(read));
             }
             unsafe {
@@ -273,12 +273,13 @@ fn sdk_com_cache_refresh_invoke_and_lifetime_match_original() {
         input.push(case(0, action, 1, -1, 0, -1, -1, false));
     }
     for mode in 0..29 {
-        for action in ["read", "refresh", "invoke"] {
+        for action in ["observe", "read", "refresh", "invoke"] {
             input.push(case(mode, action, 1, -1, 0, -1, -1, false));
         }
     }
     for windows in [0, 2, 32, 33] {
         input.push(case(0, "read", windows, -1, 0, -1, -1, false));
+        input.push(case(0, "observe", windows, -1, 0, -1, -1, false));
     }
     for stop in [-4, -3, -2, 0, 1, 2, 3] {
         input.push(case(0, "invoke", 1, -1, 0, -1, stop, false));
@@ -286,7 +287,7 @@ fn sdk_com_cache_refresh_invoke_and_lifetime_match_original() {
     input.push(case(0, "read", 1, -1, 0, -1, -1, true));
     // Enumerate each reached native boundary in the successful action, then inject
     // negative and unexpected-success HRESULTs there. Later calls must not run.
-    for action in ["read", "refresh", "invoke"] {
+    for action in ["observe", "read", "refresh", "invoke"] {
         let base = fixture.run(&case(0, action, 1, -1, 0, -1, -1, false));
         let calls = base
             .get("trace")

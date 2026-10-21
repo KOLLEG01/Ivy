@@ -42,7 +42,7 @@ public static partial class WindowsDesktopControls {
         Source source=null;object result=null;int refsBefore=0,refsAfter=0;
         var stages=new List<object>();var labels=new[]{"Mute microphone","Stop voice chat"};
         try {
-            source=new Source(Environment.ProcessId,true,s=>{stages.Add(new{stage=s.Stage,count=s.Count});if(item.GetProperty("stageThrow").GetBoolean())throw new Exception("stage");});
+            source=new Source(Environment.ProcessId,item.GetProperty("action").GetString()!="observe",s=>{stages.Add(new{stage=s.Stage,count=s.Count});if(item.GetProperty("stageThrow").GetBoolean())throw new Exception("stage");});
             var pointer=FixtureAutomation();
             var replacement=(IAutomation)Marshal.GetTypedObjectForIUnknown(pointer,typeof(IAutomation));Marshal.Release(pointer);
             typeof(Source).GetField("automation",BindingFlags.Instance|BindingFlags.NonPublic).SetValue(source,replacement);
@@ -55,7 +55,7 @@ public static partial class WindowsDesktopControls {
                 var read=source.Read(labels);var action=item.GetProperty("action").GetString();
                 if(action=="prepare_changed"){source.Prepare([labels[1],labels[0]]);return null;}
                 if(action=="read_twice"){source.Read(labels);return null;}
-                if(action=="read")return Windows(read);
+                if(action=="read"||action=="observe")return Windows(read);
                 FixturePhase(1);refsBefore=FixtureReferences();
                 object operation=Capture(()=>{
                     if(action=="refresh")return Windows(source.Refresh(new(read[0].Handle,[42,0],[42,1],[42,2])));
