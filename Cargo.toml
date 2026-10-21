@@ -37,6 +37,7 @@ regex = "=1.13.1"
 regress = { version = "=0.12.0", features = ["utf16"] }
 windows-sys = "=0.61.2"
 libc = "=0.2.191"
+socket2 = { version = "=0.6.5", default-features = false }
 
 [profile.release]
 lto = "thin"
