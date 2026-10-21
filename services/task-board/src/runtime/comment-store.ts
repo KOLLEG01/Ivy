@@ -54,6 +54,18 @@ export function validateTaskContent(task: TaskBoard.Task, taskId: string): void 
 export class TaskComments {
   private readonly reader: CommentReader;
   private readonly pins = new Map<string, TaskBoard.ObjectPin>();
+  // Only fingerprints survive body-cache eviction; ticket status writes reuse the exact immutable tree.
+  private readonly fingerprints = new Map<string, string>();
+  private treeKey(tree: CommentTree, taskId: string): string {
+    return hashJson({ taskId, root: tree.root, length: tree.length });
+  }
+  private fingerprint(task: TaskBoard.Task): string {
+    return hashJson({ comments: task.comments.map(hashJson), receipts: task.commentDeliveries.map(hashJson) });
+  }
+  private rememberTree(tree: CommentTree, taskId: string, fingerprint: string): void {
+    if (this.fingerprints.size >= 128) this.fingerprints.delete(this.fingerprints.keys().next().value!);
+    this.fingerprints.set(this.treeKey(tree, taskId), fingerprint);
+  }
   // Active runs may retain the previous header contract until their next publication.
   // Cache only small projections, keyed by immutable history and the referenced gates.
   private readonly summaries = new Map<string, CommentSummary>();
@@ -89,6 +101,7 @@ export class TaskComments {
       const entries = await this.reader.range(commentStore, taskId);
       const full = { ...header, comments: entries.map(entry => entry.comment),
         commentDeliveries: entries.flatMap(entry => entry.receipt ? [entry.receipt] : []) };
+      this.rememberTree(commentStore, taskId, this.fingerprint(full));
       if (!commentStore.summary) {
         const summary = commentSummary(full, taskId);
         if (Buffer.byteLength(JSON.stringify(summary)) <= 64 * 1024) {
@@ -140,7 +153,14 @@ export class TaskComments {
     const current = await this.client.request('objects.read', { objectId: taskId });
     requireThat(current.content.encoding === 'json' && current.object.contractKey === 'task-board/task',
       'task_board_contract_mismatch', 'A conversation needs its owning ticket.');
+    const header = current.content.value as unknown as TreeTask;
+    const fingerprint = this.fingerprint(task);
+    const unchanged = () => !retired && !archivedBodies && current.revision.contractVersion === contractVersion &&
+      header.commentStore?.kind === 'tree' && this.fingerprints.get(this.treeKey(header.commentStore, taskId)) === fingerprint;
+    const reuse = (): TreeTask => ({ ...task, comments: [], commentDeliveries: [], commentStore: header.commentStore });
+    if (unchanged()) return reuse();
     const prior = await this.read(current.content.value, taskId);
+    if (unchanged()) return reuse();
     const immutable = ({ nativeInput: _input, handoff: _handoff, delivery: _delivery, recipient: _recipient, ...body }: TaskBoard.Comment) => body;
     const maintenance = !!retired || !!archivedBodies;
     if (maintenance) requireThat(task.comments.length === prior.comments.length &&
@@ -206,9 +226,10 @@ export class TaskComments {
       }
       level = parents;
     }
-    return { ...task, comments: [], commentDeliveries: [],
-      commentStore: { kind: 'tree', root: level[0] ?? null, length: task.comments.length,
-        ...(['2.3.0', '3.0.0'].includes(contractVersion) ? { summary: commentSummary(task, taskId) } : {}) } };
+    const commentStore: CommentTree = { kind: 'tree', root: level[0] ?? null, length: task.comments.length,
+      ...(['2.3.0', '3.0.0'].includes(contractVersion) ? { summary: commentSummary(task, taskId) } : {}) };
+    this.rememberTree(commentStore, taskId, fingerprint);
+    return { ...task, comments: [], commentDeliveries: [], commentStore };
   }
 
   private async writeRetained(task: TaskBoard.Task, taskId: string, scope: string, contractVersion: string): Promise<StoredTask> {

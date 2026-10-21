@@ -90,6 +90,12 @@ export class TaskBoardNativeInspector {
       return store.write('task-board/native-turn-search', value, saved ? mutation(name, 'advance:' + hashJson({ pin: saved.pin, value })) : mutation(name, 'create'),
         saved ? { objectId: saved.pin.objectId, expectedRevision: saved.pin.revision } : { create: { parentId: runPin.objectId, name } });
     };
+    // Observe metadata first so the selected page already supplies the ordered turn proof.
+    const metadata = await this.read(context, 'thread/read', { threadId: context.threadId, includeTurns: false });
+    requireThat('result' in metadata.reply, 'task_board_native_read_failed', 'Native metadata requires its successful reply.');
+    const thread = nativeRecord(nativeRecord(metadata.reply.result)['thread']);
+    requireThat(thread['id'] === context.threadId && thread['ephemeral'] === false,
+      'task_board_evidence_mismatch', 'Fresh metadata must retain the exact durable primary.');
     for (let index = 0; index < budget; index++) {
       requireThat(visited.size < 1024, 'task_board_native_search_limit', 'The known native turn search exceeded 1024 pages.');
       const identity = hashJson(cursor);
@@ -99,16 +105,10 @@ export class TaskBoardNativeInspector {
       requireThat('result' in turns.reply && nativeArray(nativeRecord(turns.reply.result)['data']).length <= pageSize, 'task_board_native_page_limit', 'The native turn page exceeds its exact requested bound.');
       const page = this.matches(turns, context.turnId); visited.add(identity);
       if (page.found) {
-        const metadata = await this.read(context, 'thread/read', { threadId: context.threadId, includeTurns: false });
-        const fresh = await this.read(context, 'thread/turns/list', params);
-        requireThat('result' in fresh.reply && nativeArray(nativeRecord(fresh.reply.result)['data']).length <= pageSize, 'task_board_native_page_limit', 'The fresh native turn page exceeds its exact requested bound.');
-        requireThat(this.matches(fresh, context.turnId).found, 'task_board_native_state_changed', 'The known turn moved during inspection; inspect again before publication.');
-        requireThat('result' in metadata.reply, 'task_board_native_read_failed', 'Native metadata requires its successful reply.');
-        const thread = nativeRecord(nativeRecord(metadata.reply.result)['thread']);
-        requireThat(thread['id'] === context.threadId && thread['ephemeral'] === false && Date.parse(metadata.observedAt) <= Date.parse(fresh.observedAt),
+        requireThat(Date.parse(metadata.observedAt) <= Date.parse(turns.observedAt),
           'task_board_evidence_mismatch', 'Fresh metadata must retain the exact durable primary and precede its selected turn observation.');
         if (saved) await checkpoint(true);
-        return { kind: 'found', metadata, turns: fresh };
+        return { kind: 'found', metadata, turns };
       }
       cursor = page.nextCursor;
       if (cursor === null) { if (saved) await checkpoint(true); return { kind: 'absent' }; }

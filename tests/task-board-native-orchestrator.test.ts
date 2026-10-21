@@ -397,7 +397,12 @@ test('Run orchestration starts once, leaves unchanged polls ephemeral and comple
   await f.first.drain(f.runId);
   const running = await f.current(); assert.equal(running.value.phase, 'running'); assert.equal(running.value.turnId, 'native-turn');
   const objects = async () => (await f.f.w.f.first.store.page('task-board/native-read-evidence', { limit: 100 })).items.length;
-  const count = await objects(); await f.second.step(f.runId); await f.first.step(f.runId);
+  const count = await objects(), beforePolls = f.f.frames.length;
+  await f.second.step(f.runId); await f.first.step(f.runId);
+  assert.deepEqual(f.f.frames.slice(beforePolls).map(frame => frame['method']).filter(method =>
+    method === 'thread/read' || method === 'thread/turns/list'),
+  ['thread/read', 'thread/turns/list', 'thread/read', 'thread/turns/list'],
+  'each poll reads the selected turn page once, after its metadata');
   assert.deepEqual((await f.current()).pin, running.pin); assert.equal(await objects(), count);
   f.status('completed'); await f.first.drain(f.runId);
   const completed = await f.current(), result = await f.f.w.f.first.store.read('task-board/result', completed.value.result!);

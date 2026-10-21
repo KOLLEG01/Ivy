@@ -173,8 +173,11 @@ test('ticket status revisions share immutable conversation records and retain ex
     { objectId: taskId, expectedRevision: initial.pin.revision });
   const loaded = await store.read('task-board/task', first);
   assert.deepEqual(loaded.value.comments, [comment(1)]);
+  const historyReads = t.mock.method(TaskComments.prototype, 'read');
   const status = await store.write('task-board/task', { ...loaded.value, workRevision: loaded.value.workRevision + 1 }, 'status-only',
     { objectId: taskId, expectedRevision: first.revision });
+  assert.equal(historyReads.mock.callCount(), 0, 'unchanged history needs neither hydration nor tree traversal');
+  historyReads.mock.restore();
   const objects = await store.client.request('objects.query', { contractKey: 'task-board/comment-node', limit: 10 });
   assert.equal(objects.items.length, 1);
   const log = await store.client.request('objects.read', { objectId: objects.items[0]!.objectId });
@@ -184,6 +187,8 @@ test('ticket status revisions share immutable conversation records and retain ex
   const current = await store.read('task-board/task', status);
   await store.write('task-board/task', { ...current.value, comments: [...current.value.comments, comment(2)] }, 'second-comment',
     { objectId: taskId, expectedRevision: status.revision });
+  await assert.rejects(store.write('task-board/task', loaded.value, 'stale-status',
+    { objectId: taskId, expectedRevision: first.revision }), { code: 'revision_conflict' });
   assert.deepEqual((await store.read('task-board/task', first)).value.comments, [comment(1)]);
   assert.deepEqual((await store.read('task-board/task', taskId)).value.comments, [comment(1), comment(2)]);
   const contracts = taskBoardContracts();
@@ -210,6 +215,12 @@ test('conversation metadata snapshots and lost append replies preserve the origi
     { objectId: taskId, expectedRevision: pin.revision });
   assert.equal((await store.read('task-board/task', pin)).value.comments[0]!.delivery, null);
   assert.deepEqual((await store.read('task-board/task', updated)).value.comments, [amended]);
+  const receipt: TaskBoard.CommentDelivery = { commentId: amended.commentId, state: 'delivered',
+    operationId: 'receipt', updatedAt: loaded.value.createdAt, code: null };
+  const delivered = await store.write('task-board/task', { ...loaded.value, comments: [amended], commentDeliveries: [receipt] },
+    'receipt-only', { objectId: taskId, expectedRevision: updated.revision });
+  assert.deepEqual((await store.read('task-board/task', delivered)).value.commentDeliveries, [receipt]);
+  assert.deepEqual((await store.read('task-board/task', updated)).value.commentDeliveries, []);
   await assert.rejects(comments.write({ ...loaded.value, comments: [{ ...amended, body: 'rewritten' }] }, taskId, 'rewrite'),
     { code: 'task_board_comment_mismatch' });
   const next = { ...loaded.value, comments: [amended, comment(2)] };
