@@ -1,0 +1,13 @@
+{
+  "epoch": "SELECT * FROM metadata WHERE key='runtime_epoch'",
+  "families": "SELECT * FROM contract_families ORDER BY rowid",
+  "contracts": "SELECT * FROM contracts ORDER BY rowid",
+  "objects": "SELECT * FROM objects ORDER BY search_id",
+  "revisions": "SELECT * FROM revisions ORDER BY object_id,revision",
+  "search": "SELECT rowid,* FROM object_fts ORDER BY rowid",
+  "retention": "SELECT * FROM retention_families ORDER BY contract_key",
+  "nodes": "SELECT * FROM service_nodes ORDER BY id",
+  "subscriptions": "SELECT * FROM subscriptions ORDER BY node_id,name",
+  "foreignKeys": "PRAGMA foreign_key_check",
+  "integrity": "PRAGMA quick_check"
+}

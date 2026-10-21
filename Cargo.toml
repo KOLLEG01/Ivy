@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["packages/contracts/rust", "packages/store", "packages/sdk/rust", "packages/host-runtime/rust", "packages/cli/rust"]
+members = ["packages/contracts/rust", "packages/store", "packages/sdk/rust", "packages/host-runtime/rust", "packages/cli/rust", "services/hive/rust"]
 
 [workspace.package]
 version = "0.2.40"
@@ -10,6 +10,11 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+ivy-hive = { path = "services/hive/rust" }
+ivy-cli = { path = "packages/cli/rust" }
+getrandom = "=0.4.3"
+aws-lc-rs = { version = "=1.18.2", default-features = false, features = ["aws-lc-sys", "prebuilt-nasm"] }
+hyper = { version = "=1.12.0", default-features = false, features = ["client", "server", "http1"] }
 ivy-contracts = { path = "packages/contracts/rust" }
 ivy-store = { path = "packages/store" }
 ivy-sdk = { path = "packages/sdk/rust" }
@@ -17,6 +22,7 @@ ivy-host-runtime = { path = "packages/host-runtime/rust" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order", "raw_value"] }
 sha2 = "=0.11.1"
+hmac = "=0.13.0"
 ryu-js = "=1.0.3"
 url = "=2.5.8"
 icu_normalizer = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }

@@ -1,3 +1,4 @@
+pub use crate::date_local_seconds::{date_add_local_seconds, date_add_local_seconds_in_zone};
 use crate::{IvyError, IvyResult};
 pub use crate::date_parse::{parse_date, parse_date_in_zone, parse_with_local_offset};
 use chrono::{Datelike, TimeZone as _, Timelike, Utc};

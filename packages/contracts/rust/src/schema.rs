@@ -2,8 +2,30 @@
 use crate::{IvyError, IvyJson, IvyResult, JsString, json::array_index};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
+#[path = "schema_keywords.rs"]
+mod keywords;
+pub use keywords::validate_compiler_keyword_values;
+#[path = "schema_compiler_walk.rs"]
+mod compiler_walk;
+pub use compiler_walk::{CompilerNode, CompilerWalk};
+#[path = "schema_resolution.rs"]
+mod resolution;
+pub use resolution::{CompilerResources, CompilerTarget};
+#[path = "schema_compiler_plan.rs"]
+mod compiler_plan;
+pub use compiler_plan::{CompilerPlan, CompilerReference, CompilerUnit};
 #[path = "schema_meta.rs"]
 mod meta;
+#[path = "schema_resources.rs"]
+mod resources;
+pub use resources::{
+    SchemaResourceGraph, SchemaResourceIndex, SchemaResourceNode, SchemaResourceReference,
+};
+#[path = "schema_runtime.rs"]
+mod runtime;
+#[path = "schema_uri.rs"]
+pub mod uri;
+pub use runtime::{CompiledSchema, SchemaValidators};
 
 /// An admitted finite schema graph. Compilation separately checks keyword values.
 pub struct AdmittedSchema {
@@ -17,6 +39,37 @@ impl AdmittedSchema {
     /// compilation stage; it does not resolve resource IDs or compile validators.
     pub fn validate_meta_schema(&self) -> IvyResult<()> {
         meta::validate(&self.schema)
+    }
+    /// Enumerate compiler resource locations and select isolated compilation.
+    /// URI resolution, duplicate-ID checks and validator compilation are separate.
+    pub fn resource_graph(&self) -> SchemaResourceGraph<'_> {
+        resources::collect(&self.schema)
+    }
+    /// Index local resource scopes and declarations, rejecting duplicate IDs.
+    /// Compiler-wide registrations and validator compilation are separate.
+    pub fn resource_index(&self) -> IvyResult<SchemaResourceIndex<'_>> {
+        resources::index(&self.schema)
+    }
+    /// Check compiler-wide resource collisions and root registration against
+    /// the bundled meta-schemas. Reference compilation remains a separate stage.
+    pub fn registered_resources(&self) -> IvyResult<SchemaResourceIndex<'_>> {
+        resources::register(&self.schema)
+    }
+    /// Select active inline branches and their compiler scopes. Reference target
+    /// compilation, meta-validation and runtime evaluation remain separate.
+    pub fn compiler_walk(&self) -> IvyResult<CompilerWalk<'_>> {
+        compiler_walk::walk(&self.schema)
+    }
+    /// Resolve registered resource aliases and scoped compiler pointers before
+    /// compiling or caching target validators.
+    pub fn compiler_resources(&self) -> IvyResult<CompilerResources<'_>> {
+        resolution::CompilerResources::new(&self.schema)
+    }
+    /// Plan active branches and reference targets under their own root/scopes,
+    /// checking compiled keyword values once per target context. Meta-validation,
+    /// runtime evaluation and cross-call validator caching remain separate.
+    pub fn compiler_plan(&self) -> IvyResult<CompilerPlan<'_>> {
+        compiler_plan::plan(&self.schema)
     }
 }
 

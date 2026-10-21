@@ -18,14 +18,24 @@ fn core() -> IvyResult<&'static SchemaBundle> {
     .as_ref()
     .map_err(Clone::clone)
 }
-pub(crate) fn operation(method: &str, output: bool) -> Option<String> {
+/// Canonical own operation names and descriptors, in catalog order.
+/// The immutable map shares the validators' checked-in catalog cache.
+pub fn operation_catalog() -> &'static serde_json::Map<String, serde_json::Value> {
     static CATALOG: OnceLock<serde_json::Value> = OnceLock::new();
     let catalog = CATALOG.get_or_init(|| {
         serde_json::from_str(include_str!("../../../../specs/schemas/operations.json"))
             .expect("checked-in operation catalog")
     });
     catalog["operations"]
-        .get(method)
+        .as_object()
+        .expect("checked-in operation descriptors")
+}
+/// Look up an own operation name; JavaScript inherited properties are absent.
+pub fn operation_definition(method: &str) -> Option<&'static serde_json::Value> {
+    operation_catalog().get(method)
+}
+pub(crate) fn operation(method: &str, output: bool) -> Option<String> {
+    operation_definition(method)
         .and_then(|definition| definition[if output { "output" } else { "input" }].as_str())
         .map(|fragment| {
             format!("https://ivy.invalid/schemas/hive-operations.schema.json{fragment}")
