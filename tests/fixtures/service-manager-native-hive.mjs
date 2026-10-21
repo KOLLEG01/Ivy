@@ -13,9 +13,18 @@ import {runtimeResetMarker} from '../../packages/host-runtime/src/runtime-mainte
 import {digest} from '../../packages/contracts/src/canonical.ts';
 import {buildNativeDispatchers} from '../../tools/build/build-native-dispatchers.mjs';
 
-const [binary, root, job, ownerBinary, healthBinary] = process.argv.slice(2);
+const [binary, root, job, ownerBinary, healthBinary, mode = 'full', identityPath] = process.argv.slice(2);
+assert.ok(mode === 'full' || mode === 'dispatcher-only');
+const releaseIdentity = mode === 'dispatcher-only' ? JSON.parse(await readFile(identityPath, 'utf8')) : null;
+if (releaseIdentity) {
+  assert.equal(process.platform, 'win32');
+  assert.equal(releaseIdentity.schemaVersion, 1);
+  assert.match(releaseIdentity.buildId, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(releaseIdentity.version, JSON.parse(await readFile('services/service-manager/deploy.json', 'utf8')).version);
+}
 const token = 'isolated-native-manager-fixture';
-const hash = digest('isolated-manager-artifact');
+const hash = releaseIdentity?.buildId ?? digest('isolated-manager-artifact');
+const version = releaseIdentity?.version ?? '1.0.0';
 const configPath = join(root, 'host.json');
 const artifact = join(root, 'artifacts', 'manager');
 const managerData = join(root, 'state', 'instances', 'manager', 'data');
@@ -51,9 +60,9 @@ const accepted = await hostConfig(configPath);
 const journal = new HostJournal(accepted);
 await mkdir(join(artifact,'dist','native'), {recursive:true});
 if (process.platform === 'win32') await copyFile(job, join(artifact,'dist','native','ivy-job.exe'));
-await atomicJson(join(artifact,'dist','build-info.json'), {schemaVersion:1,componentId:'service-manager',version:'1.0.0', buildId:hash});
+await atomicJson(join(artifact,'dist','build-info.json'), {schemaVersion:1,componentId:'service-manager',version, buildId:hash});
 const instance = {schemaVersion:1, hostId:config.hostId, instanceId:'manager', serviceNodeId:'native.manager', componentId:'service-manager',
-  publicBaseUrl, credential:token, version:'1.0.0', buildId:hash, dataRoot:managerData, artifactRoot:artifact, settings:{hostConfigPath:configPath}};
+  publicBaseUrl, credential:token, version, buildId:hash, dataRoot:managerData, artifactRoot:artifact, settings:{hostConfigPath:configPath}};
 await atomicJson(instancePath, instance);
 const candidateId = digest('isolated-fixture-candidate');
 const candidate = {candidateId, componentId:'fixture', artifactRoot:join(root,'artifacts','fixture'), manifestPath:join(root,'artifacts','fixture','manifest.json'),
@@ -221,6 +230,7 @@ try {
     state:'ready',activeDeploymentId:null,code:null,observedAt:new Date().toISOString()});
   await executor();let executorWork = Promise.resolve();
   executorTimer = setInterval(()=>{executorWork=executorWork.then(executor);void executorWork.catch(()=>{});},250);
+  if (mode === 'full') {
   const rejectedStart = code => {
     const output = spawnSync(binary,['--config',instancePath],{env:{...process.env,IVY_NODE_EXECUTABLE:process.execPath,IVY_LAUNCH_ID:'failed-start'},
       windowsHide:true,encoding:'utf8',timeout:10000});
@@ -304,8 +314,9 @@ try {
   const replay = await call('deploy',deploy);assert.equal(replay.deploymentId,record.deploymentId);assert.equal(replay.phase,'failed');
   await stop();
   results.push('host reload refusal, control binding, process replacement replay');
+  }
   if (process.platform==='win32') await qualifyDispatcherOwner();
-  console.log(JSON.stringify({ok:true,results,limitations:['Executor status is a fixture; no native deployment executor or archive/platform acceptance.']}));
+  console.log(JSON.stringify({ok:true,results,...(releaseIdentity ? {mode,identity:releaseIdentity} : {}),limitations:['Executor status is a fixture; no native deployment executor or archive/platform acceptance.']}));
 } finally {
   clearInterval(executorTimer);
   try {await stopDispatcherOwner();await stop();} finally {await hive.close();journal.close();}
