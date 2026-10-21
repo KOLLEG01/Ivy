@@ -122,6 +122,7 @@ impl NativeIncomingPeers {
         self.registered
     }
 }
+#[derive(Clone, PartialEq, Eq)]
 pub struct NativeMicroSettings {
     executable: String,
     hash: String,
@@ -136,6 +137,36 @@ impl NativeMicroSettings {
     }
     pub fn port(&self) -> u16 {
         self.port
+    }
+}
+/// Voice reads the complete DTO before Snapshot validates Micro and hotkey. Keep
+/// deserialization errors separate so a later malformed adoptExisting retains
+/// the original error precedence over an earlier, merely invalid setting.
+pub(crate) struct NativeMicroValue {
+    executable: Option<String>,
+    hash: Option<String>,
+    port: i32,
+}
+impl NativeMicroValue {
+    pub(crate) fn read(value: &IvyJson, raw: &str) -> Result<Self> {
+        let object = value.as_object().ok_or(OutcomeUnknown)?;
+        let names = ["usbipExecutable", "executableHash", "port"];
+        if object.len() != names.len() || names.iter().any(|s| value.get(s).is_none()) {
+            return Err(InvalidRequest);
+        }
+        let fields = Fields::new(value, raw, &names)?;
+        Ok(Self {
+            executable: fields.nullable_string("usbipExecutable")?,
+            hash: fields.nullable_string("executableHash")?,
+            port: fields.int("port", 0)?,
+        })
+    }
+    pub(crate) fn validate(self) -> Result<NativeMicroSettings> {
+        validate_micro(
+            self.executable.ok_or(InvalidRequest)?,
+            self.hash.ok_or(InvalidRequest)?,
+            self.port,
+        )
     }
 }
 /// All pieces must be retained by the native operations owner. A caller must
@@ -570,6 +601,9 @@ fn parse_micro(fields: Fields<'_>) -> Result<NativeMicroSettings> {
     let executable = fields.string("usbipExecutable")?;
     let hash = fields.string("executableHash")?;
     let port = fields.int("port", 0)?;
+    validate_micro(executable, hash, port)
+}
+fn validate_micro(executable: String, hash: String, port: i32) -> Result<NativeMicroSettings> {
     let bytes = executable.as_bytes();
     let sep = |b: u8| b == b'\\' || b == b'/';
     let qualified = bytes.len() >= 2 && sep(bytes[0]) && sep(bytes[1])

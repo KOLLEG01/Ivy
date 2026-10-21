@@ -4,6 +4,7 @@ mod descriptors;
 mod inventory;
 mod report;
 mod transfer;
+mod voice;
 
 pub use descriptors::{
     BUS_ID, DEVICE_ID, SERIAL, configuration, device, export, report_descriptor, string_descriptor,
@@ -14,6 +15,11 @@ pub use report::{
     payload,
 };
 pub use transfer::{ControlTransfer, TransferError, control};
+pub(crate) use voice::dispatch_micro_gesture_with_pause;
+pub use voice::{
+    MicroAttachmentStatus, MicroGestureResult, MicroInputReceipt, MicroInputResult,
+    MicroVoiceInput, MicroVoiceObservation, dispatch_micro_gesture,
+};
 
 #[cfg(all(test, windows))]
 mod tests;

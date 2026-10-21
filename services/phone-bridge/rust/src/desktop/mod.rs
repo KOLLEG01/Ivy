@@ -3,6 +3,7 @@
 mod actions;
 mod controls;
 mod voice;
+mod voice_input;
 mod voice_session;
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod windows;
@@ -29,6 +30,10 @@ pub use controls::{
 pub use voice::{
     START_LABELS, STOP_LABELS, VoiceControlIdentity, VoiceControlObservation, classify_voice,
     voice_labels,
+};
+pub use voice_input::{
+    NativeHotkey, NativeVoiceInput, VoiceDispatchResult, VoiceInputPlan, dispatch_voice,
+    prepare_input_focus,
 };
 pub use voice_session::{DesktopVoiceSession, TimedVoiceControlObservation, VoiceSource};
 #[cfg(all(windows, target_pointer_width = "64"))]
