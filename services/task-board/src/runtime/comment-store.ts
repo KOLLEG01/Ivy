@@ -11,6 +11,19 @@ type CommentReference = { objectId: string; length: number; nativeInputs: Commen
 type StoredTask = TaskBoard.Task & { commentStore?: CommentReference };
 type TreeTask = TaskBoard.Task & { commentStore: CommentTree };
 
+export interface ArchivedCommentBody {
+  commentId: string;
+  bodyHash: string;
+  localPath: string;
+}
+
+export const importedTechnicalComment = (comment: TaskBoard.Comment): boolean =>
+  comment.authorKind === 'system' && comment.author.principalId === 'task-board-record-upgrade' &&
+  /^(?:schedule-context-|retained-findings-)/.test(comment.commentId);
+
+export const archivedCommentNote = (archive: ArchivedCommentBody): string =>
+  'Imported technical metadata archived locally: ' + archive.localPath + '\n\nOriginal text: ' + archive.bodyHash;
+
 export function commentSummary(task: TaskBoard.Task, taskId: string): CommentSummary {
   const open = new Set(openQuestions(task).map(question => question.commentId));
   return {
@@ -103,14 +116,54 @@ export class TaskComments {
 
   async write(task: TaskBoard.Task, taskId: string, scope: string, contractVersion: string = '3.0.0'): Promise<StoredTask | TreeTask> {
     if (!['2.2.0', '2.3.0', '3.0.0'].includes(contractVersion)) return this.writeRetained(task, taskId, scope, contractVersion);
+    return this.writeTree(task, taskId, scope, contractVersion);
+  }
+
+  /** Explicit storage maintenance may remove archived attachments, never conversation text or delivery state. */
+  async retireAttachments(task: TaskBoard.Task, taskId: string, scope: string,
+    retired: ReadonlySet<string>, contractVersion = '3.0.0'): Promise<TreeTask> {
+    requireThat(['2.2.0', '2.3.0', '3.0.0'].includes(contractVersion),
+      'task_board_contract_mismatch', 'Attachment retirement requires an indexed conversation.');
+    return this.writeTree(task, taskId, scope, contractVersion, retired);
+  }
+
+  /** An exact verified export permits replacing generated import dumps, never ordinary comments. */
+  async retireImportedBodies(task: TaskBoard.Task, taskId: string, scope: string,
+    archives: ReadonlyMap<string, ArchivedCommentBody>, contractVersion = '3.0.0'): Promise<TreeTask> {
+    requireThat(['2.2.0', '2.3.0', '3.0.0'].includes(contractVersion),
+      'task_board_contract_mismatch', 'Comment archival requires an indexed conversation.');
+    return this.writeTree(task, taskId, scope, contractVersion, undefined, archives);
+  }
+
+  private async writeTree(task: TaskBoard.Task, taskId: string, scope: string, contractVersion: string,
+    retired?: ReadonlySet<string>, archivedBodies?: ReadonlyMap<string, ArchivedCommentBody>): Promise<TreeTask> {
     const current = await this.client.request('objects.read', { objectId: taskId });
     requireThat(current.content.encoding === 'json' && current.object.contractKey === 'task-board/task',
       'task_board_contract_mismatch', 'A conversation needs its owning ticket.');
     const prior = await this.read(current.content.value, taskId);
     const immutable = ({ nativeInput: _input, handoff: _handoff, delivery: _delivery, recipient: _recipient, ...body }: TaskBoard.Comment) => body;
-    for (let index = 0; index < Math.min(prior.comments.length, task.comments.length); index++)
-      requireThat(hashJson(immutable(prior.comments[index]!)) === hashJson(immutable(task.comments[index]!)),
+    const maintenance = !!retired || !!archivedBodies;
+    if (maintenance) requireThat(task.comments.length === prior.comments.length &&
+      hashJson(task.commentDeliveries) === hashJson(prior.commentDeliveries),
+    'task_board_comment_mismatch', 'Archival must preserve every comment and delivery receipt.');
+    for (let index = 0; index < Math.min(prior.comments.length, task.comments.length); index++) {
+      const before = prior.comments[index]!;
+      let expected = retired ? { ...before, attachments: before.attachments.filter(attachment =>
+        !retired.has(hashJson(attachment.object))) } : immutable(before);
+      const archive = archivedBodies?.get(before.commentId);
+      if (archivedBodies) {
+        expected = before;
+        if (archive) {
+          requireThat(importedTechnicalComment(before) && /^sha256:[a-f0-9]{64}$/.test(archive.bodyHash) &&
+            /^(?:[A-Za-z]:[\\/]|\/)/.test(archive.localPath) && archive.localPath.length <= 1024 &&
+            (hashJson(before.body) === archive.bodyHash || before.body === archivedCommentNote(archive)),
+          'task_board_evidence_mismatch', 'Only an exact archived system import may be compacted.');
+          expected = { ...before, body: archivedCommentNote(archive) };
+        }
+      }
+      requireThat(hashJson(expected) === hashJson(maintenance ? task.comments[index]! : immutable(task.comments[index]!)),
         'task_board_comment_mismatch', 'Published comment content is immutable.');
+    }
     const receipts = new Map(task.commentDeliveries.map(receipt => [receipt.commentId, receipt]));
     const save = async (node: CommentNode): Promise<TaskBoard.ObjectPin> => {
       const hash = hashJson(node), cached = this.pins.get(hash);

@@ -217,7 +217,7 @@ export async function startHive(path: string): Promise<{
           message,
           resource: { instanceId: config.instanceId },
           source: "hive",
-          severity: resolved ? "info" : "error",
+          severity: resolved ? "info" : code === "storage_pressure" ? "warning" : "error",
           status: resolved ? "resolved" : "current",
           firstObservedAt: now,
           lastObservedAt: now,
@@ -371,7 +371,7 @@ export async function startHive(path: string): Promise<{
       )
         await diagnostic(
           "storage_pressure",
-          "Available disk space is below the operating reserve.",
+          "Available disk space is below the operating reserve; Hive continues processing requests.",
         );
       else
         await diagnostic(

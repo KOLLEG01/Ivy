@@ -6,6 +6,10 @@ import { TaskBoardEngine } from '../../../services/task-board/src/runtime/engine
 import { TaskBoardReconciler } from '../../../services/task-board/src/runtime/reconciler.js';
 import { taskBoardRegistry, taskBoardTools } from '../../../services/task-board/src/runtime/registry.js';
 import { TaskBoardStore } from '../../../services/task-board/src/runtime/store.js';
+import { TaskBoardArtifactCleanup } from './runtime/artifact-retention.js';
+import { TaskBoardCommentCleanup } from './runtime/comment-retention.js';
+import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 
 export async function startTaskBoard(path: string) {
   const config = await instanceConfig(path); validateTaskBoard('Settings', config.settings);
@@ -15,10 +19,14 @@ export async function startTaskBoard(path: string) {
   let startedGeneration: number | null = null, wakePending = false, lastTickStartedAt = 0, timerAt = 0;
   let timer: NodeJS.Timeout | null = null, control: NodeJS.Timeout | null = null, activeWork: Promise<void> | null = null, healthWork: Promise<void> = Promise.resolve();
   let retiring: Promise<void> = Promise.resolve();
+  let artifactCleanup: TaskBoardArtifactCleanup | null = null;
+  let commentCleanup: TaskBoardCommentCleanup | null = null;
   const retireRuntime = () => {
-    const previous = runtime, previousEngine = engine;
+    const previous = runtime, previousEngine = engine, previousCleanup = artifactCleanup, previousComments = commentCleanup;
+    artifactCleanup = null;
+    commentCleanup = null;
     runtime = null; engine = null;
-    const work = previous ? Promise.all([previous.stop(), activeWork]).then(() => undefined)
+    const work = previous ? Promise.all([previous.stop(), previousCleanup?.stop(), previousComments?.stop(), activeWork]).then(() => undefined)
       .finally(() => previousEngine?.store.close()) : Promise.resolve();
     retiring = Promise.all([retiring, work]).then(() => undefined);
     return retiring;
@@ -85,6 +93,10 @@ export async function startTaskBoard(path: string) {
         await next.store.protectRunSources();
       } catch (error) { next.store.close(); throw error; }
       engine = next; runtime = new TaskBoardReconciler(next);
+      const cleanupPath = join(config.dataRoot, 'artifact-cleanup.json');
+      artifactCleanup = existsSync(cleanupPath) ? new TaskBoardArtifactCleanup(next.store, cleanupPath) : null;
+      const commentPath = join(config.dataRoot, 'comment-cleanup.json');
+      commentCleanup = existsSync(commentPath) ? new TaskBoardCommentCleanup(next.store, commentPath) : null;
     },
     readiness: async connection => {
       requireThat(engine && runtime && engine.owner.generation === connection.generation, 'service_not_ready', 'Workflow state is not attached to this generation.');
@@ -93,7 +105,7 @@ export async function startTaskBoard(path: string) {
       return { ready: true, diagnostics: runtime.diagnostics };
     },
     onState: state => {
-      if (state.status === 'ready' && state.generation !== startedGeneration) { startedGeneration = state.generation ?? null; kick(); }
+      if (state.status === 'ready' && state.generation !== startedGeneration) { startedGeneration = state.generation ?? null; artifactCleanup?.start(); commentCleanup?.start(); kick(); }
       else if (['offline', 'stopped', 'connecting'].includes(state.status)) {
         void retireRuntime(); startedGeneration = null; if (timer) clearTimeout(timer); timer = null; timerAt = 0;
         void writeHealth(false, state.generation ?? null, 'Hive workflow connection is not ready'+(state.code?': '+state.code:'')+'.').catch(() => undefined);

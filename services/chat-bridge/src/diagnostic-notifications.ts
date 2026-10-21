@@ -133,10 +133,13 @@ export class DiagnosticNotifications {
   private async request(entry: DiagnosticNoticeState, recovery: boolean): Promise<Chat.NotifyRequest> {
     const main = await this.main.find();
     requireThat(main, 'chat_main_missing', 'Operational notifications need the configured Main conversation.');
+    const storageWarning = entry.code === 'storage_pressure' && entry.label === 'hive';
     const text = this.language === 'de'
       ? recovery ? `[Ivy] Erholung festgestellt: ${entry.label} meldet den Fehler ${entry.code} nicht mehr.`
+        : storageWarning ? '[Ivy] Speicherwarnung: Der freie Speicher von Hive liegt unter der Betriebsreserve. Hive arbeitet weiter.'
         : `[Ivy] Anhaltender Fehler bei ${entry.label}: ${entry.code}. Der Dienst oder ein abhängiger Abruf kann blockiert sein; gespeicherte Daten können veraltet sein.`
       : recovery ? `[Ivy] Recovery observed: ${entry.label} no longer reports ${entry.code}.`
+        : storageWarning ? '[Ivy] Storage warning: Hive has less free disk space than its operating reserve. Hive continues processing requests.'
         : `[Ivy] Persistent failure at ${entry.label}: ${entry.code}. The service or a dependent read may be blocked; retained data may be outdated.`;
     return { action: 'notify', operationId: await newOperationId(this.main.store.client), source: main.value.conversation, text };
   }

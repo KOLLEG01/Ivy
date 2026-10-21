@@ -78,6 +78,18 @@
       },
       {
         "area": "data",
+        "path": "artifact-cleanup.json"
+      },
+      {
+        "area": "data",
+        "path": "artifact-cleanup-plan.json"
+      },
+      {
+        "area": "data",
+        "path": "comment-cleanup.json"
+      },
+      {
+        "area": "data",
         "path": "health.json"
       },
       {

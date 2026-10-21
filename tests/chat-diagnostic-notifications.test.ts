@@ -67,6 +67,18 @@ test('persistent diagnostics create one durable Main notice, recover once and re
   assert.equal((await f.queue()).length, 2);
 });
 
+test('Hive storage warnings notify once without claiming that work is blocked', async t => {
+  const f = await fixture(t);
+  f.kernel.registry.diagnostic({ ...f.diagnostic, code: 'storage_pressure', source: 'hive' });
+  await f.monitor().tick(f.signal); f.advance(); await f.monitor().tick(f.signal);
+  const queue = await f.queue(); assert.equal(queue.length, 1);
+  const input = await f.first.store.read('chat-bridge/input', queue[0]!.inputId);
+  assert.match(input.value.payload.text, /Speicherwarnung.*Hive arbeitet weiter/u);
+  assert.doesNotMatch(input.value.payload.text, /Anhaltender Fehler|blockiert|veraltet/u);
+  f.advance(); await f.monitor().tick(f.signal);
+  assert.equal((await f.queue()).length, 1);
+});
+
 test('resource failures share one notice and recover only after the whole group is healthy', async t => {
   const f = await fixture(t);
   const members = Array.from({ length: 4 }, (_, index) => ({ ...f.diagnostic, resource: { objectId: 'signals:run-' + index } }));

@@ -43,7 +43,7 @@ Sources: [server](../services/hive/src/server.ts), [OAuth](../services/hive/src/
   navigation changes.
 - Ancestor archival affects listings without rewriting descendants; explicit child archive state
   survives unarchiving a parent. Cross-links use IDs and exact revisions where required.
-- Permanent deletion is limited to Wiki pages, Wiki attachments, TaskBoard tasks and dashboards. It requires the current
+- Permanent deletion accepts Wiki pages, Wiki attachments, TaskBoard tasks and dashboards. A current owning service may also delete its disposable (`owned`) Objects; every selected descendant must be disposable and belong to that same service. It requires the current
   revision, removes all selected Objects and their revisions in one transaction, and rejects
   external exact references or published assets. Page deletion includes descendants and owned
   attachments; task deletion also includes its linked workflow Objects. A Task with an active

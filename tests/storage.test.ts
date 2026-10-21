@@ -352,6 +352,38 @@ test("permanent deletion removes Wiki subtrees, attachments and every revision a
   assert.equal(writeText("fresh").object.position, 0);
 });
 
+test("only a current owning service can delete unreferenced owned content", t => {
+  const { store, objects, writeText } = fixture(t);
+  const owner = { kind: 'service' as const, serviceName: 'file-owner' };
+  const definition: DataContract = { ...textContract, key: 'files/disposable', owner,
+    retention: { objects: { mode: 'owned' }, revisions: { mode: 'current' } } };
+  objects.register(definition, owner);
+  store.run('INSERT INTO service_nodes VALUES(?,?,?,?,?,?)', 'owner-node', context.principalId, 'host', owner.serviceName, 1, '{}');
+  const service = { ...context, serviceNodeId: 'owner-node', generation: 2 };
+  const root = writeText('archive-root');
+  const file = objects.write(service, { mutationId: 'owned-file', contractVersion: '1.0.0', references: {},
+    create: { contractKey: definition.key, name: 'file', parentId: root.object.id, ownerObjectId: root.object.id },
+    content: { encoding: 'text', value: 'verified archived bytes' } });
+  const remove = { objectId: file.object.id, expectedRevision: 1, mutationId: 'retire-owned-file' };
+  assert.throws(() => objects.delete(context, remove), hasCode('forbidden'));
+  const unregistered = { ...service, generation: undefined };
+  assert.throws(() => objects.delete(unregistered, remove), hasCode('forbidden'));
+  store.run('INSERT INTO service_nodes VALUES(?,?,?,?,?,?)', 'foreign-node', context.principalId, 'host', 'other-owner', 1, '{}');
+  const foreign = { ...service, serviceNodeId: 'foreign-node', generation: 1 };
+  assert.throws(() => objects.delete(foreign, remove), hasCode('forbidden'));
+  const pin = objects.write(context, { objectId: root.object.id, expectedRevision: 1, mutationId: 'pin-owned-file',
+    contractVersion: '1.0.0', references: { file: { objectId: file.object.id, revision: 1 } }, content: { encoding: 'text', value: 'retained proof' } });
+  assert.throws(() => objects.delete(service, remove), hasCode('target_conflict'));
+  const unpinned = objects.write(context, { objectId: root.object.id, expectedRevision: pin.revision.revision, mutationId: 'unpin-owned-file',
+    contractVersion: '1.0.0', references: {}, content: { encoding: 'text', value: 'archived at local path' } });
+  assert.throws(() => objects.delete(service, remove), hasCode('target_conflict'));
+  store.run('DELETE FROM revisions WHERE object_id=? AND revision=?', root.object.id, pin.revision.revision);
+  assert.throws(() => objects.delete(service, { ...remove, expectedRevision: 2 }), hasCode('revision_conflict'));
+  assert.deepEqual(objects.delete(service, remove), { deleted: true });
+  assert.deepEqual(objects.delete(service, remove), { deleted: true });
+  assert.equal(objects.stat({ objectId: root.object.id }).currentRevision, unpinned.revision.revision);
+});
+
 for (const deleteWorkspace of [false, true])
 test(`permanent task deletion ${deleteWorkspace ? "through its workspace" : "directly"} removes workflow records and keeps other workspaces`, (t) => {
   const { objects, store, writeText } = fixture(t);

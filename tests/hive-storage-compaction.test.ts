@@ -22,6 +22,9 @@ test('legacy database compaction waits for space, resumes and preserves retained
   assert.match(waiting.pending!, /waiting/);
   assert.equal(db.prepare('PRAGMA auto_vacuum').get()!['auto_vacuum'], 0);
   assert.equal(statSync(filename).size, before);
+  db.prepare('INSERT INTO payloads VALUES (?,?)').run(99, Buffer.from('Work continues below the reserve.'));
+  assert.equal(db.prepare('SELECT CAST(body AS TEXT) AS body FROM payloads WHERE id=99').get()!['body'], 'Work continues below the reserve.');
+  db.exec('DELETE FROM payloads WHERE id=99;');
   db.close();
   writeFileSync(filename + '.compacting', 'interrupted unfinished copy');
   const converted = openHiveStorage(filename, {}, () => Infinity);

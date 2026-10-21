@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "chat-bridge",
   "kind": "service",
-  "version": "0.2.42",
+  "version": "0.2.43",
   "description": "WhatsApp Main, native commands and durable notification delivery",
   "connectsToHive": true,
   "requirements": {

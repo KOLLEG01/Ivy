@@ -55,6 +55,7 @@ export const componentRoots = {
   ],
   "task-board": [
     "services/task-board/src/main.ts",
+    "services/task-board/src/retire-artifacts.ts",
     "packages/host-runtime/src/health.ts",
   ],
   "phone-bridge": [

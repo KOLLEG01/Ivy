@@ -5,13 +5,16 @@ import { join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { HiveServer } from '../services/hive/src/server.js';
 import { HiveClient, discover, callBound, newOperationId } from '../packages/sdk/src/client.js';
-import { digest } from '../packages/contracts/src/canonical.js';
+import { digest, hashJson } from '../packages/contracts/src/canonical.js';
 import { IvyError } from '../packages/contracts/src/errors.js';
 import type { Host, Operation, TaskBoard, Wire } from '../packages/contracts/src/generated.js';
 import { atomicJson } from '../packages/host-runtime/src/config.js';
 import { startTaskBoard } from '../services/task-board/src/main.js';
+import { retireArtifacts } from '../services/task-board/src/retire-artifacts.js';
 import { fields } from './fixtures/task-board.js';
 import { until } from './fixtures/host.js';
 
@@ -97,4 +100,42 @@ test('actual TaskBoard service serves manual tasks and retains caller outcomes a
     (error: unknown) => error instanceof IvyError && error.code === 'not_found');
   const health = JSON.parse(await readFile(join(config.dataRoot, 'health.json'), 'utf8')) as Host.Health;
   assert.equal(health.ready, true); assert.equal(JSON.stringify(health).includes(token), false);
+  const file = await replacement.runtime!.engine.store.writeAttachment(restored.id, 'archived-maintenance-file', 'archived.bin', Buffer.from('locally archived bytes'));
+  const archivedFile = await user.request('objects.read', file);
+  const beforeCommentArchive = await replacement.runtime!.engine.store.read('task-board/task', restored.id);
+  const importedComment: TaskBoard.Comment = { commentId: 'schedule-context-test-0', sequence: 1,
+    author: { principalId: 'task-board-record-upgrade', serviceNodeId: 'task-board-test', generation: 1, source: 'recovery' },
+    authorKind: 'system', purpose: 'update', body: 'Imported raw metadata '.repeat(1000), requests: [], responses: [],
+    attachments: [], run: null, turnId: null, replyTo: null, delivery: null,
+    createdAt: beforeCommentArchive.value.updatedAt, operationId: 'schedule-context-test-0' };
+  await replacement.runtime!.engine.store.write('task-board/task', { ...beforeCommentArchive.value, comments: [importedComment] },
+    'seed-imported-comment', { objectId: restored.id, expectedRevision: beforeCommentArchive.pin.revision });
+  await atomicJson(join(config.dataRoot, 'comment-cleanup.json'), { schemaVersion: 1, scope: 'verified-comment-archive',
+    archiveManifest: { hostId: 'archive-host', path: '/archive/comments.json', contentHash: digest('comment archive') },
+    remaining: [{ taskId: restored.id, comments: [{ commentId: importedComment.commentId,
+      bodyHash: hashJson(importedComment.body), localPath: '/archive/comments.json' }] }],
+    completedTasks: 0, rewrittenComments: 0, removedCharacters: 0, updatedAt: importedComment.createdAt });
+  await replacement.close();
+  const stopped = spawn(process.execPath, ['-e', ''], { windowsHide: true });
+  await once(stopped, 'exit'); assert.ok(stopped.pid);
+  const planPath = join(root, 'archive-plan.json');
+  await atomicJson(planPath, { schemaVersion: 1, hostId: config.hostId, serviceNodeId: config.serviceNodeId,
+    scope: 'verified-maintenance', archiveManifest: { hostId: 'archive-host', path: '/archive/manifest.json', contentHash: digest('archive') },
+    taskIds: [restored.id], files: [{ object: file, contentHash: archivedFile.revision.contentHash,
+      byteLength: archivedFile.revision.byteLength, localPath: '/archive/archived.bin', ownerTaskId: restored.id }], referencePages: [] });
+  const beforeMaintenance = await user.request('objects.read', { objectId: restored.id });
+  await retireArtifacts(path, planPath, stopped.pid);
+  const job = JSON.parse(await readFile(join(config.dataRoot, 'artifact-cleanup.json'), 'utf8'));
+  assert.deepEqual(job.taskIds, [restored.id]); assert.equal(job.remaining.length, 1);
+  assert.deepEqual(await user.request('objects.read', { objectId: restored.id }), beforeMaintenance,
+    'The stopped-owner maintenance connects through the actual registry without altering an unselected Task.');
+  const resumed = await startTaskBoard(path); cleanups.push(() => resumed.close()); await resumed.service.waitReady();
+  await until(async () => JSON.parse(await readFile(join(config.dataRoot, 'artifact-cleanup.json'), 'utf8')).deletedFiles === 1);
+  await assert.rejects(user.request('objects.read', file), (error: unknown) => error instanceof IvyError && error.code === 'not_found');
+  await until(async () => !!JSON.parse(await readFile(join(config.dataRoot, 'comment-cleanup.json'), 'utf8')).completedAt);
+  const compacted = await resumed.runtime!.engine.store.read('task-board/task', restored.id);
+  assert.match(compacted.value.comments[0]!.body, /archived locally/);
+  assert.ok(compacted.value.comments[0]!.body.length < 512);
+  assert.equal(compacted.value.workRevision, beforeCommentArchive.value.workRevision);
+  assert.deepEqual(compacted.value.latestResult, beforeCommentArchive.value.latestResult);
 });

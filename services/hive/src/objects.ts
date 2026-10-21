@@ -951,11 +951,22 @@ export class Objects {
     return this.store.mutate(context, "objects.delete", params, (principal) => {
       const root = this.row({ objectId: params.objectId });
       const contractKey = String(root["contract_key"]);
-      requireThat(
-        ["wiki/page", "wiki/attachment", "task-board/task", "dashboards/dashboard"].includes(contractKey),
-        "invalid_arguments",
-        "Permanent deletion is available only for Wiki pages, Wiki attachments, TaskBoard tasks and dashboards.",
-      );
+      const documentDeletion = ["wiki/page", "wiki/attachment", "task-board/task", "dashboards/dashboard"].includes(contractKey);
+      let ownedBy: string | null = null;
+      if (!documentDeletion) {
+        const family = this.store.get("SELECT owner,object_mode FROM contract_families WHERE key=?", contractKey)!;
+        requireThat(family["object_mode"] === "owned", "invalid_arguments",
+          "Only user documents or an owning service's disposable Objects can be permanently deleted.");
+        const owner = JSON.parse(String(family["owner"])) as DataContract["owner"];
+        const service = context as Partial<ServiceContext>;
+        const node = service.serviceNodeId ? this.store.get(
+          "SELECT principal_id,service_name FROM service_nodes WHERE id=?", service.serviceNodeId) : undefined;
+        // The transport fences live generations; the retained SQL generation column is only a format placeholder.
+        requireThat(owner.kind === "service" && node && node["principal_id"] === context.principalId &&
+          node["service_name"] === owner.serviceName && Number.isSafeInteger(service.generation) && service.generation! > 0,
+        "forbidden", "Only the current owning service can permanently delete its disposable Objects.");
+        ownedBy = String(family["owner"]);
+      }
       requireThat(
         Number(root["current_revision"]) === params.expectedRevision,
         "revision_conflict",
@@ -969,6 +980,11 @@ export class Objects {
         const id = queue[index]!;
         if (selected.has(id)) continue;
         const row = this.row({ objectId: id });
+        if (ownedBy !== null) {
+          const family = this.store.get("SELECT owner,object_mode FROM contract_families WHERE key=?", row["contract_key"]!)!;
+          requireThat(family["object_mode"] === "owned" && family["owner"] === ownedBy,
+            "target_conflict", "An owned subtree contains retained content or content belonging to another service.");
+        }
         selected.set(id, row);
         if (row["contract_key"] === "task-board/task") {
           const current = this.store.get(

@@ -63,7 +63,9 @@ function preserveTaskFindings(task: TaskBoard.Task): TaskBoard.Task {
     generation: comments.at(-1)?.author.generation ?? 1, source: 'recovery' };
   let sequence = Math.max(0, ...comments.map(comment => comment.sequence));
   for (const group of groups) {
-    const text = findingsText(group.findings), fragments: string[] = [];
+    const text = group.source === 'saved-material'
+      ? 'Imported references for ' + group.findings.length + ' saved results. Details remain with those result records and their attachments.'
+      : findingsText(group.findings), fragments: string[] = [];
     for (let offset = 0; offset < text.length;) {
       let end = Math.min(offset + 48000, text.length);
       if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]!)) end--;
@@ -101,8 +103,7 @@ export function upgradeTaskRecord(value: TaskBoard.Task): TaskBoard.Task {
   const comments = prior.comments.map(upgradeCommentRecord);
   if (!prior.commentStore && nextSteps?.length) {
     const context = 'Previous scheduling notes (context only; decide the work from the ticket):\n\n' +
-      nextSteps.map(step => step.scope + (step.requires.length ? '\n' + JSON.stringify(step.requires) : '')).join('\n\n') +
-      (deliveries?.length ? '\n\nSaved material references:\n' + JSON.stringify(deliveries) : '');
+      nextSteps.map(step => step.scope + (step.requires.length ? '\n' + JSON.stringify(step.requires) : '')).join('\n\n');
     for (let offset = 0; offset < context.length; offset += 48000) {
       const commentId = 'schedule-context-' + prior.updatedAt + '-' + offset;
       if (comments.some(comment => comment.commentId === commentId)) continue;
