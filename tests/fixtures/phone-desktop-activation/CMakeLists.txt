@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.20)
+project(phone_desktop_activation_fixture LANGUAGES CXX)
+add_library(phone_desktop_activation_fixture SHARED fixture.cpp)
+target_compile_features(phone_desktop_activation_fixture PRIVATE cxx_std_17)
+target_compile_definitions(phone_desktop_activation_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

@@ -7,6 +7,8 @@ mod voice_session;
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod windows;
 #[cfg(all(windows, target_pointer_width = "64"))]
+mod windows_activation;
+#[cfg(all(windows, target_pointer_width = "64"))]
 mod windows_input;
 
 pub use actions::{
@@ -15,6 +17,8 @@ pub use actions::{
     InvokeSource, KeyStroke, KeyboardInput, confirm_activation, dispatch_hotkey, invoke_voice,
     launch_desktop, plan_hotkey, validate_application,
 };
+#[cfg(all(windows, target_pointer_width = "64"))]
+pub use windows_activation::WindowsApplicationActivation;
 #[cfg(all(windows, target_pointer_width = "64"))]
 pub use windows_input::WindowsKeyboardInput;
 

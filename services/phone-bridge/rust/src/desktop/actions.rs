@@ -12,12 +12,14 @@ use std::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DesktopActionError {
     Argument(&'static str),
+    Platform(&'static str),
     Unavailable,
 }
 impl std::fmt::Display for DesktopActionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Argument(message) => f.write_str(message),
+            Self::Platform(message) => f.write_str(message),
             Self::Unavailable => f.write_str("Desktop input unavailable."),
         }
     }
