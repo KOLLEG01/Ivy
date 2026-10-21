@@ -1,0 +1,365 @@
+use super::*;
+use ivy_contracts::{
+    IvyJson,
+    json::{parse, stringify},
+};
+use std::{
+    cell::{Cell, RefCell},
+    ffi::{CStr, c_char, c_void},
+    io::Write,
+    process::{Command, Stdio},
+    rc::Rc,
+};
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn LoadLibraryW(path: *const u16) -> *mut c_void;
+    fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
+    fn FreeLibrary(module: *mut c_void) -> i32;
+}
+struct Fixture {
+    module: *mut c_void,
+    reset: unsafe extern "C" fn(i32, i32) -> i32,
+    automation: unsafe extern "C" fn() -> com::Raw,
+    failure: unsafe extern "C" fn(i32, i32, i32),
+    phase: unsafe extern "C" fn(i32),
+    trace: unsafe extern "C" fn() -> *const c_char,
+    references: unsafe extern "C" fn() -> i32,
+    ordinal: unsafe extern "C" fn(isize) -> i32,
+    destroy: unsafe extern "C" fn(),
+}
+impl Fixture {
+    fn load() -> Self {
+        let path = std::env::var("IVY_PHONE_UIA_FIXTURE").expect("SDK-built fixture path required");
+        let path: Vec<u16> = path.encode_utf16().chain([0]).collect();
+        let module = unsafe { LoadLibraryW(path.as_ptr()) };
+        assert!(!module.is_null(), "SDK fixture load failed");
+        macro_rules! symbol {
+            ($name:literal,$ty:ty) => {{
+                let p = unsafe { GetProcAddress(module, concat!($name, "\0").as_ptr()) };
+                assert!(!p.is_null(), $name);
+                unsafe { std::mem::transmute::<*mut c_void, $ty>(p) }
+            }};
+        }
+        Self {
+            module,
+            reset: symbol!("FixtureReset", unsafe extern "C" fn(i32, i32) -> i32),
+            automation: symbol!("FixtureAutomation", unsafe extern "C" fn() -> com::Raw),
+            failure: symbol!("FixtureFailure", unsafe extern "C" fn(i32, i32, i32)),
+            phase: symbol!("FixturePhase", unsafe extern "C" fn(i32)),
+            trace: symbol!("FixtureTrace", unsafe extern "C" fn() -> *const c_char),
+            references: symbol!("FixtureReferences", unsafe extern "C" fn() -> i32),
+            ordinal: symbol!("FixtureWindowOrdinal", unsafe extern "C" fn(isize) -> i32),
+            destroy: symbol!("FixtureDestroy", unsafe extern "C" fn()),
+        }
+    }
+    fn windows(&self, mut windows: Vec<ControlWindow>) -> IvyJson {
+        for window in &mut windows {
+            let handle = String::from_utf16(&window.handle.0)
+                .unwrap()
+                .parse()
+                .unwrap();
+            window.handle = unsafe { (self.ordinal)(handle) }.to_string().into();
+        }
+        super::super::ControlsObservation {
+            observed: true,
+            windows,
+        }
+        .to_json()
+        .remove("windows")
+        .unwrap()
+    }
+    fn run(&self, item: &IvyJson) -> IvyJson {
+        let n = |key| item.get(key).unwrap().as_f64().unwrap() as i32;
+        assert_eq!(unsafe { (self.reset)(n("mode"), n("windows")) }, 1);
+        let stages = Rc::new(RefCell::new(Vec::new()));
+        let trace = stages.clone();
+        let stage_throw = item.get("stageThrow").unwrap().as_bool().unwrap();
+        let mut source = WindowsControlSource::new(
+            std::process::id() as i32,
+            true,
+            Some(Box::new(move |s| {
+                trace.borrow_mut().push(IvyJson::object([
+                    ("stage", s.stage.into()),
+                    ("count", IvyJson::Number(s.count.into())),
+                ]));
+                if stage_throw {
+                    panic!("fixture stage");
+                }
+            })),
+        )
+        .unwrap();
+        // Swap only the provider after real CoInitializeEx/activation. The original
+        // managed oracle makes the same private-field replacement, without editing its bodies.
+        let automation = source.keep(unsafe { (self.automation)() }).unwrap();
+        source.automation = Some(automation);
+        unsafe {
+            (self.failure)(n("failure"), n("hr"), n("hide"));
+        }
+        let labels = vec![
+            JsString::from("Mute microphone"),
+            JsString::from("Stop voice chat"),
+        ];
+        let (mut before, mut after) = (0, 0);
+        let result = capture(|| {
+            unsafe {
+                let table = automation.table::<Automation>();
+                check((table.auto_focus)(automation.raw(), 0))?;
+                check((table.connection_timeout)(automation.raw(), 250))?;
+                check((table.transaction_timeout)(automation.raw(), 500))?;
+            }
+            source.prepare(&labels)?;
+            source.prepare(&labels.clone())?;
+            let read = source.read(&labels)?;
+            let action = item.get("action").unwrap().as_str().unwrap();
+            if action == "prepare_changed" {
+                source.prepare(&[labels[1].clone(), labels[0].clone()])?;
+                return Ok(IvyJson::Null);
+            }
+            if action == "read_twice" {
+                source.read(&labels)?;
+                return Ok(IvyJson::Null);
+            }
+            if action == "read" {
+                return Ok(self.windows(read));
+            }
+            unsafe {
+                (self.phase)(1);
+                before = (self.references)();
+            }
+            let operation = capture(|| {
+                if action == "refresh" {
+                    return source
+                        .refresh(VoiceControlIdentity {
+                            window: read[0].handle.clone(),
+                            parent_id: vec![42, 0],
+                            microphone_id: vec![42, 1],
+                            stop_id: vec![42, 2],
+                        })
+                        .map(|w| self.windows(w));
+                }
+                let current = Cell::new(0);
+                let stop = n("currentStop");
+                source
+                    .invoke(&read[0].handle, &read[0].controls[0], &|| {
+                        let i = current.get();
+                        current.set(i + 1);
+                        i != stop
+                    })
+                    .map(|r| r.as_str().into())
+            });
+            after = unsafe { (self.references)() };
+            Ok(IvyJson::object([("operation", operation)]))
+        });
+        source.close().unwrap();
+        source.close().unwrap();
+        unsafe {
+            (self.destroy)();
+        }
+        IvyJson::object([
+            ("result", result),
+            ("stages", IvyJson::Array(stages.borrow().clone())),
+            (
+                "trace",
+                unsafe { CStr::from_ptr((self.trace)()) }
+                    .to_str()
+                    .unwrap()
+                    .into(),
+            ),
+            ("released", (unsafe { (self.references)() } == 0).into()),
+            ("transientReleased", (before == after).into()),
+        ])
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        unsafe {
+            (self.destroy)();
+            FreeLibrary(self.module);
+        }
+    }
+}
+fn capture(f: impl FnOnce() -> Result<IvyJson, ControlError>) -> IvyJson {
+    match f() {
+        Ok(value) => IvyJson::object([("ok", true.into()), ("value", value)]),
+        Err(error) => {
+            let property = if let ControlError::Provider(error) = error {
+                error
+                    .downcast_ref::<AccessibilityError>()
+                    .and_then(|e| e.property_id)
+            } else {
+                None
+            };
+            IvyJson::object([
+                ("ok", false.into()),
+                (
+                    "propertyId",
+                    property
+                        .map(|v| IvyJson::Number(v.into()))
+                        .unwrap_or(IvyJson::Null),
+                ),
+            ])
+        }
+    }
+}
+fn case(
+    mode: i32,
+    action: &str,
+    windows: i32,
+    failure: i32,
+    hr: i32,
+    hide: i32,
+    current: i32,
+    stage_throw: bool,
+) -> IvyJson {
+    IvyJson::object([
+        ("mode", IvyJson::Number(mode.into())),
+        ("action", action.into()),
+        ("windows", IvyJson::Number(windows.into())),
+        ("failure", IvyJson::Number(failure.into())),
+        ("hr", IvyJson::Number(hr.into())),
+        ("hide", IvyJson::Number(hide.into())),
+        ("currentStop", IvyJson::Number(current.into())),
+        ("stageThrow", stage_throw.into()),
+    ])
+}
+#[test]
+fn sdk_com_cache_refresh_invoke_and_lifetime_match_original() {
+    use std::mem::{offset_of, size_of};
+    assert_eq!(size_of::<Variant>(), 24);
+    assert_eq!(offset_of!(Variant, data), 8);
+    for (actual, slot) in [
+        (offset_of!(Automation, element), 6),
+        (offset_of!(Automation, tree), 13),
+        (offset_of!(Automation, raw_walker), 16),
+        (offset_of!(Automation, cache), 20),
+        (offset_of!(Automation, property), 23),
+        (offset_of!(Automation, auto_focus), 59),
+        (offset_of!(Automation, connection_timeout), 61),
+        (offset_of!(Automation, transaction_timeout), 63),
+        (offset_of!(Element, find_all), 8),
+        (offset_of!(Element, update), 9),
+        (offset_of!(Element, current_ex), 11),
+        (offset_of!(Element, cached_ex), 13),
+        (offset_of!(Element, pattern), 14),
+        (offset_of!(Walker, normalize), 8),
+        (offset_of!(Walker, parent_cached), 9),
+    ] {
+        assert_eq!(actual, slot * size_of::<usize>());
+    }
+    let fixture = Fixture::load();
+    let mut input = Vec::new();
+    for action in ["read", "refresh", "invoke", "prepare_changed", "read_twice"] {
+        input.push(case(0, action, 1, -1, 0, -1, -1, false));
+    }
+    for mode in 0..16 {
+        for action in ["read", "refresh", "invoke"] {
+            input.push(case(mode, action, 1, -1, 0, -1, -1, false));
+        }
+    }
+    for windows in [0, 2, 32, 33] {
+        input.push(case(0, "read", windows, -1, 0, -1, -1, false));
+    }
+    for stop in [0, 1, 2, 3] {
+        input.push(case(0, "invoke", 1, -1, 0, -1, stop, false));
+    }
+    input.push(case(0, "read", 1, -1, 0, -1, -1, true));
+    // Enumerate each reached native boundary in the successful action, then inject
+    // negative and unexpected-success HRESULTs there. Later calls must not run.
+    for action in ["read", "refresh", "invoke"] {
+        let base = fixture.run(&case(0, action, 1, -1, 0, -1, -1, false));
+        let calls = base
+            .get("trace")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .count();
+        for call in 0..calls as i32 {
+            for hr in [0x80070005u32 as i32, 1] {
+                input.push(case(0, action, 1, call, hr, -1, -1, false));
+            }
+        }
+        for hide in [3, 16, calls as i32 - 1] {
+            input.push(case(0, action, 1, -1, 0, hide, -1, false));
+        }
+    }
+    let input = IvyJson::Array(input);
+    let bytes = stringify(&input).into_bytes();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../tests/fixtures/phone-windows-controls/oracle.ps1");
+    let mut child = Command::new(std::env::var("IVY_POWERSHELL").unwrap_or("pwsh".into()))
+        .args(["-NoProfile", "-File"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(&bytes).unwrap();
+    let output = child.wait_with_output().unwrap();
+    let evidence = std::env::var("IVY_PHONE_UIA_TRACE").expect("Evidence path required");
+    std::fs::write(format!("{evidence}.input.json"), &bytes).unwrap();
+    std::fs::write(format!("{evidence}.original.json"), &output.stdout).unwrap();
+    std::fs::write(format!("{evidence}.original.err.log"), &output.stderr).unwrap();
+    assert!(
+        output.status.success(),
+        "original source: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let original = parse(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    let actual: IvyJson = IvyJson::Array(
+        input
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| fixture.run(item))
+            .collect(),
+    );
+    std::fs::write(format!("{evidence}.rust.json"), stringify(&actual)).unwrap();
+    for (index, (expected, actual)) in original
+        .get("rows")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(actual.as_array().unwrap())
+        .enumerate()
+    {
+        assert_eq!(
+            actual,
+            expected,
+            "case {index}: {}",
+            stringify(&input.as_array().unwrap()[index])
+        );
+        assert_eq!(
+            actual.get("released").unwrap().as_bool(),
+            Some(true),
+            "retained native refs at case {index}"
+        );
+        assert_eq!(
+            actual.get("transientReleased").unwrap().as_bool(),
+            Some(true),
+            "transient native refs at case {index}"
+        );
+    }
+    assert_eq!(
+        original.get("rows").unwrap().as_array().unwrap().len(),
+        input.as_array().unwrap().len()
+    );
+    // An existing STA must reject the source without stealing apartment ownership.
+    std::thread::spawn(|| unsafe {
+        assert_eq!(com::CoInitializeEx(std::ptr::null_mut(), 2), 0);
+        assert!(WindowsControlSource::new(0, false, None).is_err());
+        assert_eq!(com::CoInitializeEx(std::ptr::null_mut(), 2), 1);
+        com::CoUninitialize();
+        com::CoUninitialize();
+    })
+    .join()
+    .unwrap();
+    println!(
+        "{} SDK-backed original source cases; exact query traces, scoped releases and HRESULT boundaries",
+        input.as_array().unwrap().len()
+    );
+}
