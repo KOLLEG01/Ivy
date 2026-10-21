@@ -101,18 +101,10 @@ pub struct AudioDesktopIdentity {
 }
 impl AudioDesktopIdentity {
     pub fn new(pid: i32, creation_ticks: i64, image: &Path, application: &str) -> Result<Self> {
-        let parts: Vec<_> = application.split('!').collect();
         if pid <= 0
             || creation_ticks <= 0
             || !image.is_absolute()
-            || parts.len() != 2
-            || application.len() > 128
-            || parts.iter().any(|part| {
-                part.is_empty()
-                    || !part
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
-            })
+            || crate::desktop::validate_application(application).is_err()
         {
             return Err(CallAudioError::InvalidRequest);
         }

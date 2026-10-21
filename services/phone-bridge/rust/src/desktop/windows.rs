@@ -1,6 +1,6 @@
 use super::{
-    Control, ControlError, ControlSource, ControlWindow, VoiceControlIdentity, VoiceSource,
-    select_named, validate_labels,
+    Control, ControlError, ControlSource, ControlWindow, DesktopInvokePhase, InvokeSource,
+    VoiceControlIdentity, VoiceSource, select_named, validate_labels,
 };
 use ivy_contracts::json::JsString;
 use std::{
@@ -36,21 +36,6 @@ fn provider(hresult: i32, property_id: Option<i32>, message: &'static str) -> Co
 }
 fn invalid(message: &'static str) -> ControlError {
     provider(0x80004005u32 as i32, None, message)
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DesktopInvokePhase {
-    NotSubmitted,
-    Submitted,
-    OutcomeUnknown,
-}
-impl DesktopInvokePhase {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::NotSubmitted => "not_submitted",
-            Self::Submitted => "submitted",
-            Self::OutcomeUnknown => "outcome_unknown",
-        }
-    }
 }
 #[derive(Clone, Debug)]
 pub struct DesktopReadStage {
@@ -623,6 +608,28 @@ impl Drop for WindowsControlSource {
     fn drop(&mut self) {
         let _ = self.close();
     }
+}
+impl InvokeSource for WindowsControlSource {
+    fn invoke(
+        &mut self,
+        window: &JsString,
+        control: &Control,
+        current: &dyn Fn() -> bool,
+    ) -> Result<DesktopInvokePhase, ControlError> {
+        WindowsControlSource::invoke(self, window, control, current)
+    }
+}
+/// The enclosing Desktop owner supplies full process identity checks. Source
+/// creation, discovery, rechecks, Invoke and release all remain on this thread.
+pub fn invoke_voice_windows(
+    pid: i32,
+    stop: bool,
+    current: &dyn Fn() -> bool,
+    owner_current: &dyn Fn() -> bool,
+) -> DesktopInvokePhase {
+    super::invoke_voice(stop, current, owner_current, || {
+        WindowsControlSource::new(pid, true, None)
+    })
 }
 
 #[cfg(test)]
