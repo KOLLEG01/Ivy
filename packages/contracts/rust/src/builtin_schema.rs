@@ -19,7 +19,9 @@ impl SchemaBundle {
             .collect::<IvyResult<Vec<_>>>()?;
         Self::from_documents(documents)
     }
-    pub(crate) fn from_documents(documents: Vec<IvyJson>) -> IvyResult<Self> {
+    /// Build from owned, trusted repository documents, such as packaged schemas.
+    /// Dynamic registry schemas require their separate admission path.
+    pub fn from_documents(documents: Vec<IvyJson>) -> IvyResult<Self> {
         let mut identities = HashMap::new();
         let mut patterns = HashMap::new();
         for (index, document) in documents.iter().enumerate() {
