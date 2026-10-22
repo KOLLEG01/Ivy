@@ -31,7 +31,7 @@ export function compileRustBackend({ component, target, root = process.cwd(), id
   const platform = targets.get(target);
   if (!platform) throw new Error('An explicit supported Rust target is required.');
   root = realpathSync(root);
-  const manifest = resolve(root, component === 'host-executor' ? 'packages/host-runtime/rust/Cargo.toml' : `services/${component}/rust/Cargo.toml`);
+  const manifest = resolve(root, `services/${component}/rust/Cargo.toml`);
   if (!existsSync(manifest) || realpathSync(manifest) !== manifest) throw new Error('The component Rust manifest must exist without directory links.');
   const targetDirectory = resolve(root, '.local', 'cargo', component);
   const releaseDirectory = resolve(targetDirectory, target, 'release');

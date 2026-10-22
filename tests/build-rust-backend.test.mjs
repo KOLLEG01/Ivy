@@ -6,9 +6,9 @@ import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { compileRustBackend } from '../tools/build/build-rust-backend.mjs';
 
-function fixture(run) {
+function fixture(run, component = 'example') {
   const root = mkdtempSync(join(tmpdir(), 'ivy-rust-build-'));
-  const manifest = join(root, 'services/example/rust/Cargo.toml');
+  const manifest = join(root, `services/${component}/rust/Cargo.toml`);
   mkdirSync(join(dirname(manifest), 'src'), { recursive: true });
   writeFileSync(join(root, 'Cargo.toml'), '[workspace]\nresolver="3"\nmembers=["services/example/rust"]\n');
   writeFileSync(join(root, 'Cargo.lock'), 'version=4\n[[package]]\nname="ivy-example"\nversion="0.0.0"\n');
@@ -16,7 +16,7 @@ function fixture(run) {
   writeFileSync(manifest, '[package]\nname="ivy-example"\nversion="0.0.0"\nedition="2024"\n[features]\nbrowser=[]\n[[bin]]\nname="ivy-example"\npath="src/main.rs"\nrequired-features=["browser"]\n[[bin]]\nname="ivy-example-helper"\npath="src/helper.rs"\n');
   for (const name of ['main', 'helper']) writeFileSync(join(dirname(manifest), 'src', name + '.rs'), 'fn main(){println!("native-builder");}\n');
   const identity = { schemaVersion: 1, version: '1.2.3', buildId: 'sha256:' + 'a'.repeat(64) };
-  const targets = [{ name: 'ivy-example', kind: ['bin'], 'required-features': ['browser'] }, { name: 'ivy-example-helper', kind: ['bin'] }, { name: 'ivy_example', kind: ['lib'] }];
+  const targets = [{ name: `ivy-${component}`, kind: ['bin'], 'required-features': ['browser'] }, { name: `ivy-${component}-helper`, kind: ['bin'] }, { name: 'ivy_example', kind: ['lib'] }];
   const calls = [];
   const cargo = (args, options) => {
     calls.push({ args, options });
@@ -27,23 +27,24 @@ function fixture(run) {
       return JSON.stringify({ reason: 'compiler-artifact', package_id: 'selected', target, executable });
     }).join('\n');
   };
-  try { run({ root, manifest, identity, targets, calls, cargo, build: extra => compileRustBackend({ root, component: 'example', target: 'x86_64-pc-windows-msvc', identity, cargo, ...extra }) }); }
+  try { run({ root, manifest, identity, targets, calls, cargo, build: extra => compileRustBackend({ root, component, target: 'x86_64-pc-windows-msvc', identity, cargo, ...extra }) }); }
   finally { rmSync(root, { recursive: true, force: true }); }
 }
 
-test('native compilation selects real component binaries, required features and locked isolated outputs', () => fixture(f => {
+for (const component of ['example', 'host-executor']) test(`native compilation selects real component binaries, required features and locked isolated outputs (${component})`, () => fixture(f => {
   const result = f.build();
   assert.equal(result.files.length, 2);
-  assert.equal(readFileSync(result.files[0], 'utf8'), 'fixture ivy-example');
+  assert.equal(readFileSync(result.files[0], 'utf8'), 'fixture ivy-' + component);
+  assert.equal(f.calls[0].args[f.calls[0].args.indexOf('--manifest-path') + 1], f.manifest);
   assert.deepEqual(JSON.parse(readFileSync(join(result.outputDirectory, 'build-info.json'))), f.identity);
   const { args, options } = f.calls[1];
   assert.ok(args.includes('--locked') && args.includes('--release'));
   assert.equal(args[args.indexOf('--features') + 1], 'browser');
   assert.equal(args[args.indexOf('--target') + 1], 'x86_64-pc-windows-msvc');
   assert.equal(options.env.IVY_BUILD_ID, f.identity.buildId);
-  assert.equal(options.env.CARGO_TARGET_DIR, join(f.root, '.local/cargo/example'));
+  assert.equal(options.env.CARGO_TARGET_DIR, join(f.root, '.local/cargo', component));
   assert.equal(existsSync(join(f.root, 'dist')), false);
-}));
+}, component));
 
 test('libraries and unregistered crates never fall back to TypeScript', () => fixture(f => {
   f.targets.splice(0, 2);
