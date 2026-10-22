@@ -111,7 +111,9 @@ export class TaskBoardNativeOrchestrator {
       this.retries.delete(this.retries.keys().next().value!);
     // Recovery only observes retained work. A past outage must not leave a
     // restored provider waiting for a growing, five-minute retry interval.
-    this.retries.set(runId, Date.now() + (publicationContention(error) ? 250 : 30_000));
+    const delay = publicationContention(error) ? 250
+      : error instanceof IvyError && error.code === 'task_board_native_order' ? 1000 : 30_000;
+    this.retries.set(runId, Date.now() + delay);
   }
   async drain(runId: string): Promise<boolean> {
     if ((this.retries.get(runId) ?? 0) > Date.now()) return false;

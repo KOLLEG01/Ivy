@@ -1120,6 +1120,7 @@ test("comments are immutable task material without scheduling user-controlled wo
     result: final.result!,
     acceptance: "Checked.",
   });
+  const acceptedTask = await f.first.store.read("task-board/task", accepted.task!);
   const comment = await f.invoke({
     action: "comment",
     operationId: "comment-op",
@@ -1134,7 +1135,7 @@ test("comments are immutable task material without scheduling user-controlled wo
   });
   const task = await f.first.store.read("task-board/task", comment.task!);
   assert.equal(task.value.workflowState, "done");
-  assert.equal(task.value.workRevision, 2);
+  assert.equal(task.value.workRevision, acceptedTask.value.workRevision);
   assert.equal(task.value.comments.at(-1)?.body, "Please improve this.");
   assert.equal(task.value.commentDeliveries.at(-1)?.state, "queued");
 });

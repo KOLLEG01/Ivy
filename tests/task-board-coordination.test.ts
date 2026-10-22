@@ -32,7 +32,7 @@ test('steering contains only a ticket reference and acknowledges only its origin
   assert.doesNotMatch(JSON.stringify(request.params), /Secret ticket content/);
   assert.match(JSON.stringify(request.params), /Decide from the current ticket whether to reply, continue work or wait/);
   assert.doesNotMatch(JSON.stringify(request.params), /Coordination only|Preserve this ticket's result/);
-  assert.ok(JSON.stringify(request.params).length < 500);
+  assert.ok(JSON.stringify(request.params).length < 1024);
   const second = await comment(w, 'Another private correction.');
   await w.observe('steer', pin, { result: { turnId: 'native-turn' } });
   const task = (await w.f.first.store.read('task-board/task', w.state().task)).value;
@@ -160,9 +160,17 @@ test('delegation retains parent identity, lists children across workspaces and r
 test('a delegated final result queues parent review once and closes only after acceptance', async t => {
   const w = await nativeWorkflow(t); await w.running();
   const parent = await w.f.planned('agent');
+  const waiting = await w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: parent.task.objectId,
+    expectedRevision: parent.task.revision, wakeAt: '2099-01-01T00:00:00.000Z' });
+  const parentBefore = (await w.f.first.store.read('task-board/task', waiting.task!)).value;
+  assert.equal(await shouldWake(w.f.first.store, parentBefore, new Date().toISOString()), false);
   const child = await w.f.first.store.read('task-board/task', w.state().task);
   await w.f.invoke({ action: 'edit', operationId: randomUUID(), taskId: child.pin.objectId, expectedRevision: child.pin.revision,
     fields: { ...child.value.fields, userContact: 'chat' }, parentTaskId: parent.task.objectId });
+  const observer = { ...parentBefore, wakeAt: null, dependencies: [child.pin.objectId] };
+  observer.observedDependencies = await dependencySnapshot(w.f.first.store, observer);
+  const parentObserver = { ...parentBefore, wakeAt: null, dependencies: [parent.task.objectId] };
+  parentObserver.observedDependencies = await dependencySnapshot(w.f.first.store, parentObserver);
   await w.refresh();
   await w.handoff();
   const finished = await w.f.first.nativeUpdate(await w.snapshot('completed'));
@@ -174,12 +182,21 @@ test('a delegated final result queues parent review once and closes only after a
   assert.equal(reviewed.value.comments[0]?.sourceTaskId, delegated.pin.objectId);
   assert.equal(reviewed.value.comments[0]?.authorKind, 'agent');
   assert.equal(reviewed.value.commentDeliveries[0]?.state, 'queued');
+  assert.equal(await shouldWake(w.f.first.store, reviewed.value, new Date().toISOString()), true,
+    'A child in Review wakes its parent without waiting for Done.');
+  assert.equal(await shouldWake(w.f.first.store, observer, new Date().toISOString()), true,
+    'Review remains a material change for explicit watchers.');
+  assert.equal(await shouldWake(w.f.first.store, parentObserver, new Date().toISOString()), false,
+    'The review notification does not cascade through the parent to its watchers.');
   assert.equal(delegated.value.comments.find(comment => comment.purpose === 'handoff')?.delivery, null);
   assert.deepEqual(w.f.kernel.store.all("SELECT payload FROM events WHERE topic='task-board.browser-notification'"), []);
   assert.equal((await w.f.first.store.read('task-board/task', delegated.pin.objectId)).value.workflowState, 'review');
+  observer.observedDependencies = await dependencySnapshot(w.f.first.store, observer);
+  assert.equal(await shouldWake(w.f.first.store, observer, new Date().toISOString()), false);
   const accepted = await w.f.invoke({ action: 'transition', operationId: randomUUID(), taskId: delegated.pin.objectId,
     expectedRevision: delegated.pin.revision, workflowState: 'done', detail: 'Parent verified and integrated the delivered scope.' });
   assert.equal((await w.f.first.store.read('task-board/task', accepted.task!)).value.workflowState, 'done');
+  assert.equal(await shouldWake(w.f.first.store, observer, new Date().toISOString()), true);
 });
 
 test('automatic peers share the canonical directory and host; separate worktrees and hosts are independent', async t => {

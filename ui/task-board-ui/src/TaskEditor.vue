@@ -38,6 +38,7 @@ import WikiLinkPicker from "./WikiLinkPicker.vue";
 import { nativeRead } from "../../../packages/ui-client/src/native";
 import {
   executionEnvironments,
+  executionHostOptions,
   executionModels,
   executionSpeedAvailable,
 } from "./execution-options";
@@ -168,7 +169,9 @@ const blockerOptions = computed(() =>
 );
 
 // Execution: every agent Task names one host; the configured default host is preselected.
-const environments = useRemote(executionEnvironments, 30000, ["services/agent-manager"]);
+// A placed task cannot change host or project; do not load their pickers in the background.
+const environments = useRemote(signal => props.task && taskStarted(props.task.value)
+  ? Promise.resolve(null) : executionEnvironments(signal, false), 30000, ["services/agent-manager"]);
 const executionDefaults = useExecutionDefaults(
   () => props.workspace,
   () => props.task?.value,
@@ -243,6 +246,7 @@ const hostOptions = computed(() => {
   const ids = [...hosts.value.keys()];
   if (host.value && !ids.includes(host.value)) ids.unshift(host.value);
   return ids.map((hostId) => {
+    if (placed.value) return { value: hostId, label: hostId, disabled: true };
     const missing = missingOn(hostId),
       isDefault = hostId === defaultHost.value;
     const notes = [
@@ -267,6 +271,7 @@ const hostOptions = computed(() => {
   });
 });
 const hostProblem = computed(() => {
+  if (placed.value) return "";
   if (!host.value || !environments.value.value) return "";
   if (!online(host.value)) return host.value + " is not ready right now.";
   const missing = missingOn(host.value);
@@ -305,12 +310,21 @@ const hostAgents = computed(
   ),
 );
 const hostAgent = computed(() => hostAgents.value[0]);
+const nativeCatalog = useRemote(async signal => {
+  const hostId = host.value;
+  return { hostId, agents: await executionHostOptions(signal, hostId, props.task?.value.primaryResourceRef?.serviceNodeId) };
+}, 30000, ["services/agent-manager"]);
+watch([host, () => props.task?.value.primaryResourceRef?.serviceNodeId], () => void nativeCatalog.refresh());
+// useRemote keeps the last successful choices during refresh; never use another host's catalog.
+const modelAgents = computed(() => nativeCatalog.value.value?.hostId === host.value
+  ? nativeCatalog.value.value.agents.filter(agent => !props.task?.value.primaryResourceRef ||
+    agent.node.serviceNodeId === props.task.value.primaryResourceRef.serviceNodeId) : []);
 
 // Unchanged values can inherit; explicit selections must survive a previous Run's defaults.
 const nativeModel = ref(form.value.nativeOptions?.model ?? ""),
   reasoningEffort = ref(form.value.nativeOptions?.reasoningEffort ?? ""),
   serviceTier = ref(form.value.nativeOptions?.serviceTier ?? "");
-const nativeChoices = computed(() => executionModels(hostAgents.value));
+const nativeChoices = computed(() => executionModels(modelAgents.value));
 const defaultModel = computed(
   () =>
     configured.value?.nativeOptions.model ??
@@ -335,7 +349,7 @@ const defaultSpeed = computed(
 );
 const shownSpeed = computed(() => serviceTier.value || defaultSpeed.value);
 const serviceTierAvailable = computed(() =>
-  executionSpeedAvailable(hostAgents.value, shownModel.value, shownEffort.value),
+  executionSpeedAvailable(modelAgents.value, shownModel.value, shownEffort.value),
 );
 const chooseModel = (value: string) => {
   nativeModel.value = value;
@@ -346,8 +360,9 @@ const chooseEffort = (value: string) => {
 const chooseSpeed = (value: string) => {
   serviceTier.value = value;
 };
-watch([shownModel, host], () => {
+watch([shownModel, host, nativeChoices], () => {
   if (
+    nativeChoices.value.length &&
     reasoningEffort.value &&
     !nativeEfforts.value.includes(reasoningEffort.value)
   )
@@ -368,7 +383,7 @@ const speedOptions = computed(() => [
 ]);
 const nativeOptionsInvalid = computed(
   () =>
-    hostAgents.value.length > 0 &&
+    modelAgents.value.length > 0 &&
     ((!!nativeModel.value &&
       !nativeChoices.value.some(
         (value) => value.model === nativeModel.value,
@@ -544,6 +559,8 @@ const save = async () => {
         "task",
         props.task.pin.objectId,
         props.workspace.rootObjectId,
+        undefined,
+        { limit: 0 },
       );
       // Unchanged fields are not saved, so the worker is not told about an empty edit.
       const fields = normalizedFields();
@@ -553,7 +570,7 @@ const save = async () => {
         if (!baseFields.value && revision.value !== null)
           baseFields.value = (await readDocument("task", {
             objectId: current.pin.objectId, revision: revision.value,
-          }, props.workspace.rootObjectId)).value.fields;
+          }, props.workspace.rootObjectId, undefined, { limit: 0 })).value.fields;
         if (!baseFields.value || !sameFields(baseFields.value, current.value.fields)) {
           conflict.value = current;
           return;
@@ -828,7 +845,7 @@ const cancel = () => {
                 class="w-full"
                 :model-value="shownModel"
                 :disabled="locked || !nativeChoices.length"
-                :placeholder="hostAgents.length ? 'Host default' : 'Host not ready'"
+                :placeholder="nativeCatalog.loading.value ? 'Loading models…' : 'Host not ready'"
                 @update:model-value="chooseModel"
                 ><option
                   v-if="
@@ -889,6 +906,10 @@ const cancel = () => {
               environments.error.value
             }}</AlertDescription></Alert
           >
+          <Alert v-if="nativeCatalog.error.value" variant="destructive">
+            <AlertTitle>{{ tr('Ausführungsoptionen konnten nicht aktualisiert werden', 'Execution options could not be refreshed') }}</AlertTitle>
+            <AlertDescription>{{ nativeCatalog.error.value }}</AlertDescription>
+          </Alert>
         </FieldGroup>
       </FieldSet>
 

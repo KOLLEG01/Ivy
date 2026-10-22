@@ -705,7 +705,7 @@ const showArrived = () => {
           >{{ item.label }}</Button
         >
         <Button
-          v-if="writable && !terminal && task.value.value"
+          v-if="editable && !terminal && task.value.value"
           variant="ghost"
           size="icon-sm"
           aria-label="Edit task"

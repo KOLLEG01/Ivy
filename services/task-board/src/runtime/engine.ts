@@ -1418,7 +1418,7 @@ export class TaskBoardEngine {
         if (comment.authorKind === "agent")
           next.agentCommentCount = previous.agentCommentCount + 1;
         if (comment.authorKind === "user" || peerComment(comment)) {
-          if (request.agentDelivery !== "none") next.workRevision++;
+          // Delivery wakes this ticket; a message is not a material change for its watchers.
           if (request.agentDelivery !== "none" && next.runtimeWait && ['host', 'capability', 'workspace'].includes(next.runtimeWait.reason))
             next.runtimeWait = { ...next.runtimeWait, retryAt: null };
           if (request.agentDelivery !== "none")

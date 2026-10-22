@@ -18,6 +18,7 @@ import { unstartedArchivedContext, unstartedMissingContext } from '../services/t
 import { TaskBoardReconciler } from '../services/task-board/src/runtime/reconciler.js';
 import { nativeRateLimitRetryAt } from '../services/task-board/src/runtime/native-rate-limit.js';
 import { adoptDirectTurn } from '../services/task-board/src/runtime/native-adoption.js';
+import { shouldWake } from '../services/task-board/src/runtime/wake.js';
 
 async function fixture(t: TestContext, catalogSourceHash?: string) {
   const f = await nativeDriverFixture(t, '0.154.0', 64 * 1024 * 1024, catalogSourceHash); let status = 'inProgress', started = false, readFailed = false, archived = false, unloaded = false, lazyMetadata = false, largeResume = false, outputError: number | null = null;
@@ -339,6 +340,9 @@ test(`${sender} comments reach ${idle ? 'an idle' : 'a running'} agent without a
   const source = sender === 'task' ? await f.f.w.f.invoke({ action: 'create', operationId: randomUUID(),
     fields: before.value.fields }, 'user', f.f.w.f.second) : null;
   if (source) await new TaskBoardScheduler(f.f.w.f.second).task(source.task!.objectId);
+  const watching = await f.f.w.f.invoke({ action: 'create', operationId: randomUUID(), fields: before.value.fields,
+    workflowState: 'waiting', dependencies: [before.pin.objectId] });
+  const observer = (await engine.store.read('task-board/task', watching.task!)).value;
   const page = engine.store.page.bind(engine.store);
   let boardScans = 0;
   engine.store.page = (async (key, query) => {
@@ -357,6 +361,9 @@ test(`${sender} comments reach ${idle ? 'an idle' : 'a running'} agent without a
   const delivery = after.value.commentDeliveries.find(item => item.commentId === commentId)!;
   assert.equal(delivery.state, 'delivered', JSON.stringify({ wait: after.value.runtimeWait, diagnostics: runtime.diagnostics }));
   assert.equal(after.value.workflowState, 'in_progress');
+  assert.equal(after.value.workRevision, before.value.workRevision);
+  assert.equal(await shouldWake(engine.store, observer, new Date().toISOString()), false,
+    'Direct comments wake their recipient, not tickets watching that recipient.');
   assert.equal(boardScans, 0, 'Delivery must not enumerate unrelated tickets.');
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, starts + (idle ? 1 : 0));
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/steer').length, steers + (idle ? 0 : 1));
@@ -669,6 +676,45 @@ test('completion refuses a nonterminal snapshot and final output from another ep
   assert.deepEqual((await f.current()).pin, terminal.pin); assert.equal((await f.current()).value.result, null);
   await publish({ kind: 'completion', snapshot: proof, output, notificationCursor: 0 });
   assert.equal((await f.current()).value.phase, 'completed');
+});
+
+test('native ordering failures retry after one second without duplicating a turn', async t => {
+  const f = await fixture(t), step = f.first.step.bind(f.first);
+  let blocked = true, now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(f.first, 'step', async (runId: string) => {
+    if (blocked) throw new IvyError('task_board_native_order', 'The retained call changed during dispatch.');
+    return step(runId);
+  });
+  await assert.rejects(f.first.drain(f.runId), { code: 'task_board_native_order' });
+  blocked = false;
+  assert.equal(await f.first.drain(f.runId), false);
+  now += 1001;
+  await f.first.drain(f.runId);
+  await f.first.drain(f.runId);
+  assert.equal((await f.current()).value.phase, 'running');
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 1);
+});
+
+test('a concurrent ticket publication delays native dispatch by only a short retry', async t => {
+  const f = await fixture(t), engine = f.f.w.f.first, read = engine.store.read.bind(engine.store);
+  let blocked = true, now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(engine.store, 'read', async (...args: Parameters<typeof read>) => {
+    const result = await read(...args);
+    // A publication can begin after orchestration reads the task but before the driver checks it.
+    if (blocked && args[0] === 'task-board/task' && args[4] === true)
+      return { ...result, value: { ...result.value, publication: { objectId: 'concurrent-publication', revision: 1 } } };
+    return result;
+  });
+  await assert.rejects(f.first.drain(f.runId), { code: 'task_board_publication_busy' });
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 0);
+  blocked = false;
+  assert.equal(await f.first.drain(f.runId), false);
+  now += 251;
+  await f.first.drain(f.runId);
+  assert.equal((await f.current()).value.phase, 'running');
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 1);
 });
 
 for (const restart of [false, true])

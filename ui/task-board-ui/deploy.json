@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "task-board-ui",
   "kind": "app",
-  "version": "0.3.5",
+  "version": "0.3.7",
   "description": "Static TaskBoard task UI",
   "connectsToHive": false,
   "requirements": {
