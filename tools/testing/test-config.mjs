@@ -16,6 +16,7 @@ export const scopes = [
   "tooling",
 ];
 export function scope(file) {
+  if (/host-native-plan/.test(file)) return "host";
   if (/data-collector/.test(file)) return "data-collector";
   if (/dashboards/.test(file)) return "dashboards";
   if (
@@ -401,6 +402,10 @@ export const rustTests = {
   'tests/rust/host-preparation-links.rs': { package: 'ivy-host-runtime', test: 'host-preparation-links' },
   'tests/rust/host-portable-dependencies.rs': { package: 'ivy-host-runtime', test: 'host-portable-dependencies' },
   'tests/rust/host-native-paths.rs': { package: 'ivy-host-runtime', test: 'host-native-paths' },
+  'tests/rust/host-native-plan.rs': {
+    package: 'ivy-host-runtime', test: 'host-native-plan',
+    prerequisites: [{ package: 'ivy-host-runtime', bin: 'ivy-job', platform: 'win32' }],
+  },
   'tests/rust/host-executor-entry.rs': {
     package: 'ivy-host-executor', test: 'host-executor-entry',
     prerequisites: [{ package: 'ivy-host-runtime', bin: 'ivy-job', platform: 'win32' }],

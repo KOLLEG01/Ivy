@@ -8,19 +8,19 @@
   "requirements": {
     "node": ">=24.18.0 <25.0.0",
     "os": [
+      "win32",
       "linux"
     ],
     "arch": [
-      "x64"
+      "x64",
+      "arm64"
     ],
     "hiveProtocol": 1,
     "contracts": []
   },
   "entrypoint": {
-    "executable": "node",
-    "args": [
-      "dist/services/hive/src/main.js"
-    ],
+    "executable": "dist/native/ivy-hive",
+    "args": [],
     "timeoutMs": 30000
   },
   "prepare": [
@@ -47,10 +47,8 @@
   "readiness": {
     "timeoutMs": 180000,
     "command": {
-      "executable": "node",
-      "args": [
-        "dist/packages/host-runtime/src/health.js"
-      ],
+      "executable": "dist/native/ivy-health",
+      "args": [],
       "timeoutMs": 5000
     }
   },

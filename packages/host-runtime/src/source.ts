@@ -11,12 +11,14 @@ import { join, dirname, resolve, isAbsolute, relative, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { atomicJson, jsonFile, inside } from "./config.js";
-import { requireThat } from "../../contracts/src/errors.js";
+import { IvyError, requireThat } from "../../contracts/src/errors.js";
 import { validateHost } from "../../contracts/src/host-validation.js";
 import type { Host } from "../../contracts/src/generated.js";
 import { requireStorageSpace } from "./storage-space.js";
 import { hostStorageAreas, hostConfigurationPath } from "./layout.js";
 import { mapConcurrent } from "./concurrency.js";
+import { materializeNativePlan } from "./native-plan.mjs";
+import { rustRootInputPaths } from "../../../tools/build/rust-root-inputs.mjs";
 
 type SnapshotManifest = Host.SnapshotManifest;
 export async function verifySnapshotMetadata(
@@ -87,7 +89,13 @@ export async function sourceBuildPlan(
     "target_conflict",
     "Source component has more than one deploy plan.",
   );
-  return plans[0]!;
+  let selected: Host.BuildPlan;
+  try { selected = materializeNativePlan(plans[0]!); }
+  catch (error) {
+    throw new IvyError("invalid_arguments", error instanceof Error ? error.message : "Invalid native host plan.");
+  }
+  validateHost("BuildPlan", selected);
+  return selected;
 }
 
 const sourceTopLevels = new Set([
@@ -102,6 +110,7 @@ const sourceTopLevels = new Set([
   "acceptance",
 ]);
 const sourceRootFiles = new Set([
+  ...rustRootInputPaths,
   "package.json",
   "package-lock.json",
   "tsconfig.json",

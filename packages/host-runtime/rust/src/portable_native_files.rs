@@ -8,6 +8,38 @@ pub fn portable_native_files(component_id: &str) -> &'static [&'static str] {
     }
 }
 
+/// Native source artifacts colocate helpers with their selected executable.
+pub fn portable_native_files_for_manifest(
+    manifest: &crate::IvyJson,
+) -> crate::IvyResult<Vec<String>> {
+    if !cfg!(windows) {
+        return Ok(Vec::new());
+    }
+    let files = portable_native_files(&manifest.required("componentId")?.as_str()?);
+    let directory = if crate::native_plan::is_native_plan(manifest) {
+        let executable = manifest
+            .required("entrypoint")?
+            .required("executable")?
+            .as_str()?;
+        Some(
+            executable
+                .rsplit_once('/')
+                .ok_or_else(crate::IvyError::internal)?
+                .0
+                .to_owned(),
+        )
+    } else {
+        None
+    };
+    Ok(files
+        .iter()
+        .map(|file| match &directory {
+            Some(directory) => format!("{directory}/{}", file.rsplit('/').next().unwrap()),
+            None => (*file).to_owned(),
+        })
+        .collect())
+}
+
 /// The caller supplies its admitted package layout; a missing target payload
 /// never falls back to an older or differently targeted helper.
 #[derive(Clone, Copy)]

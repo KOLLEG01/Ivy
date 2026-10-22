@@ -179,8 +179,13 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
   const stub = `const fs=require('node:fs'),path=require('node:path');
     const args=[path.basename(process.argv[1]),...process.argv.slice(2)];
     fs.appendFileSync(process.env.IVY_CARGO_TEST_LOG,JSON.stringify(args)+'\\n');
+    if(args[0]==='metadata')console.log(JSON.stringify({packages:[
+      {name:'ivy-agent-manager',targets:[{name:'agent-interactions',kind:['test']}]},
+      {name:'ivy-service-manager',targets:['service-manager-stop','service-manager-policy'].map(name=>({name,kind:['test']}))},
+      {name:'ivy-phone-bridge',targets:[{name:'phone_media',kind:['test']}]}
+    ]}));
     if(args[0]===process.env.IVY_CARGO_TEST_FAIL)process.exit(7);`;
-  for (const command of ["build", "test"]) writeFileSync(join(root, command), stub);
+  for (const command of ["build", "test", "metadata"]) writeFileSync(join(root, command), stub);
   const run = (fail = "", files = [
     "tests/rust/agent-interactions.rs", "tests/rust/service-manager-stop.rs",
     "tests/rust/service-manager-policy.rs", "tests/rust/service-manager-stop.rs", "tests/rust/phone_media.rs",
@@ -193,20 +198,23 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
     return { result, commands: readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) };
   };
   const expected = [
-    ...(process.platform === "win32" ? [["build", "--locked", "--package", "ivy-host-runtime", "--bin", "ivy-job"]] : []),
-    ["test", "--locked", "--package", "ivy-agent-manager", "--test", "agent-interactions"],
-    ["test", "--locked", "--package", "ivy-service-manager", "--test", "service-manager-stop", "--test", "service-manager-policy"],
-    ["test", "--locked", "--package", "ivy-phone-bridge", "--test", "phone_media"],
+    ...(process.platform === "win32" ? [["build", "--locked", "--package", "ivy-host-runtime", "--package", "ivy-agent-manager", "--package", "ivy-service-manager", "--package", "ivy-phone-bridge", "--bin", "ivy-job"]] : []),
+    ...(process.platform === "win32" ? [["build", "--locked", "--package", "ivy-host-runtime", "--package", "ivy-agent-manager", "--package", "ivy-service-manager", "--package", "ivy-phone-bridge", "--bin", "ivy-health"]] : []),
+    ["metadata", "--locked", "--no-deps", "--format-version", "1"],
+    ["test", "--locked", "--package", "ivy-agent-manager", "--package", "ivy-service-manager", "--package", "ivy-phone-bridge", "--test", "agent-interactions", "--test", "service-manager-stop", "--test", "service-manager-policy", "--test", "phone_media"],
   ];
   const success = run();
   assert.equal(success.result.status, 0, success.result.stderr);
   assert.deepEqual(success.commands, expected);
   const agentOnly = run("", ["tests/rust/agent-interactions.rs"]);
   assert.equal(agentOnly.result.status, 0, agentOnly.result.stderr);
-  assert.deepEqual(agentOnly.commands, expected.slice(0, process.platform === "win32" ? 2 : 1));
-  const failure = run(expected[0][0]);
+  assert.deepEqual(agentOnly.commands, [
+    ...(process.platform === "win32" ? [["build", "--locked", "--package", "ivy-host-runtime", "--package", "ivy-agent-manager", "--bin", "ivy-job"]] : []),
+    ["test", "--locked", "--package", "ivy-agent-manager", "--test", "agent-interactions"],
+  ]);
+  const failure = run(process.platform === "win32" ? "build" : "test");
   assert.equal(failure.result.status, 7, failure.result.stderr);
-  assert.deepEqual(failure.commands, expected.slice(0, 1));
+  assert.deepEqual(failure.commands, expected.slice(0, process.platform === "win32" ? 1 : 2));
 });
 
 test("reporter suppresses successful output and prints useful failures without writing reports", (t) => {

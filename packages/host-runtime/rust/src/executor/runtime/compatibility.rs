@@ -1,8 +1,5 @@
 use super::*;
-use crate::{
-    artifact, native_catalog_compatibility, package_requirements, service_storage, storage_space,
-    target,
-};
+use crate::{artifact, native_catalog_compatibility, service_storage, storage_space, target};
 use ivy_sdk::rpc::{ClientOptions, HiveClient, RequestOptions, RpcClient};
 
 impl NativeActivationRuntime {
@@ -47,58 +44,16 @@ impl NativeActivationRuntime {
         )
         .await
     }
-    fn runtime_requirements(&self, requirements: &IvyJson) -> IvyResult<()> {
-        let strings = |key: &str| -> IvyResult<Option<Vec<String>>> {
-            requirements
-                .get(key)
-                .map(|v| {
-                    v.as_array()
-                        .ok_or_else(IvyError::internal)?
-                        .iter()
-                        .map(IvyJson::as_str)
-                        .collect()
-                })
-                .transpose()
-        };
-        let os = strings("os")?;
-        let arch = strings("arch")?;
-        let os_refs = os
-            .as_ref()
-            .map(|v| v.iter().map(String::as_str).collect::<Vec<_>>());
-        let arch_refs = arch
-            .as_ref()
-            .map(|v| v.iter().map(String::as_str).collect::<Vec<_>>());
-        let arch = match std::env::consts::ARCH {
-            "x86_64" => "x64",
-            "aarch64" => "arm64",
-            v => v,
-        };
-        let node = &self.preparation.node.version;
-        let range = text(requirements, "node")?;
-        let supported = package_requirements::runtime_requirements_satisfied(
-            &package_requirements::Requirements {
-                node: &range,
-                os: os_refs.as_deref(),
-                arch: arch_refs.as_deref(),
+    fn runtime_requirements(&self, manifest: &IvyJson) -> IvyResult<()> {
+        artifact::verify_runtime_requirements(
+            manifest,
+            Some(&self.preparation.node.version),
+            &self.platform,
+            match std::env::consts::ARCH {
+                "x86_64" => "x64",
+                "aarch64" => "arm64",
+                other => other,
             },
-            &package_requirements::Runtime {
-                node,
-                os: &self.platform,
-                arch,
-            },
-        )?;
-        let version = if node.starts_with('v') {
-            node.clone()
-        } else {
-            format!("v{node}")
-        };
-        require(
-            supported,
-            "unsupported_runtime",
-            &format!(
-                "Package does not support {}/{arch} on {version}.",
-                self.platform
-            ),
         )
     }
     pub(super) async fn check_compatibility(
@@ -109,7 +64,7 @@ impl NativeActivationRuntime {
     ) -> IvyResult<()> {
         let candidate = c.journal.candidate(id).await?;
         let manifest = c.journal.manifest(id).await?;
-        self.runtime_requirements(manifest.required("requirements")?)?;
+        self.runtime_requirements(&manifest)?;
         self.service_storage(c, &manifest).await?;
         let entry = field(&manifest, "entrypoint")
             .get("args")

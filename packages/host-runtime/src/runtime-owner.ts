@@ -10,7 +10,7 @@ import { runCommand, startProcess } from "./process.js";
 import type { ProcessResult, RunningProcess } from "./process.js";
 import { IvyError, requireThat } from "../../contracts/src/errors.js";
 import type { Host } from "../../contracts/src/generated.js";
-import { verifyLaunchCandidate } from "./artifact.js";
+import { launchEntrypoint, verifyLaunchCandidate } from "./artifact.js";
 import { requireRuntimeRequirements } from "./package-requirements.js";
 import { serviceLog } from "./service-log.js";
 import { pointerParts } from "../../contracts/src/schema.js";
@@ -314,7 +314,7 @@ export class RuntimeOwner {
     await verifyLaunchCandidate(
       this.journal.candidate(target.candidateId),
       this.host,
-      manifest.entrypoint?.args[0],
+      launchEntrypoint(manifest),
     );
     this.observe("starting");
     this.childResult = null;

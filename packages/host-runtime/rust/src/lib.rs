@@ -52,6 +52,7 @@ pub mod package_requirements;
 pub mod package_updater;
 pub mod paths;
 pub mod native_path;
+pub mod native_plan;
 pub use native_path as node_path;
 pub mod platform;
 pub mod portable_native_files;

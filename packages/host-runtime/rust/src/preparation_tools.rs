@@ -16,7 +16,7 @@ pub async fn preparation_tools(mut executables:IvyJson,bootstrap_root:PathBuf,te
         let mut environment:BTreeMap<OsString,OsString>=["TEMP","TMP","TMPDIR"].into_iter().map(|key|(key.into(),temporary.as_os_str().to_owned())).collect();
         require(executables.as_object().is_some(),"Preparation tool mappings require an object.")?;
         executables.insert("$node",crate::layout::path_json(&node.executable));
-        if cfg!(windows){executables.insert("$job",crate::layout::path_json(&bootstrap_root.join("dist/native/ivy-job.exe")));}
+        if cfg!(windows){executables.insert("$job",crate::layout::path_json(&crate::native_plan::native_binary_path(&bootstrap_root,"ivy-job")));}
         for(name,requested)in json::object_entries(&executables){
             let requested=config::path_value(requested)?;
             require(node_path::is_absolute(Style::native(),&node_path::from_native(&requested)),"Preparation tool mappings require absolute executable paths.")?;

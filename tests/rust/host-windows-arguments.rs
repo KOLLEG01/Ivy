@@ -6,9 +6,14 @@ use windows_arguments::{quote_argument, valid_job_name};
 fn crt_arguments_preserve_quotes_trailing_slashes_and_utf16() {
     for (raw, expected) in [
         ("", "\"\""),
+        ("plain", "plain"),
+        ("/d", "/d"),
+        ("/c", "/c"),
         ("a b", "\"a b\""),
+        ("a\tb", "\"a\tb\""),
         ("a\"b", "\"a\\\"b\""),
-        ("C:\\tail\\", "\"C:\\tail\\\\\""),
+        ("C:\\tail\\", "C:\\tail\\"),
+        ("C:\\space dir\\", "\"C:\\space dir\\\\\""),
         ("slash\\\"quote", "\"slash\\\\\\\"quote\""),
     ] {
         assert_eq!(
@@ -18,7 +23,11 @@ fn crt_arguments_preserve_quotes_trailing_slashes_and_utf16() {
     }
     assert_eq!(
         quote_argument(&[0xd800, 0x61, 0xdc00]),
-        [34, 0xd800, 0x61, 0xdc00, 34]
+        [0xd800, 0x61, 0xdc00]
+    );
+    assert_eq!(
+        quote_argument(&[0xd800, 32, 0xdc00]),
+        [34, 0xd800, 32, 0xdc00, 34]
     );
 }
 

@@ -313,7 +313,7 @@ async fn backup(
         let reserve=runtime_files.iter().map(|f|f.record.bytes as f64).sum::<f64>()+sqlite_bytes*2.0+64.0*1024.0*1024.0;
         require(reserve<=64.0*1024_f64.powi(3),"limit_exceeded","Private backup exceeds its bounded allocation workload.")?;
         storage_space::require_storage_space(native(&parent)?,reserve).await?;
-        let job=b.distribution_root.join("dist/native/ivy-job.exe");
+        let job=crate::native_plan::native_binary_path(&b.distribution_root,"ivy-job");
         backup_files::private_directory(native(&destination)?,job.clone()).await?;created=true;
         let configuration=join(&[destination.clone(),"configuration.json".into()]);
         config::atomic_json(native(&configuration)?,config.clone()).await?;

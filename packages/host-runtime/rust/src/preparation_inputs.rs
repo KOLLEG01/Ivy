@@ -2,7 +2,7 @@
 use crate::{
     IvyError, IvyJson, IvyResult,
     artifact::{FileCompare, artifact_files, artifact_source_identity},
-    candidate_identity::candidate_build_id,
+    candidate_identity::candidate_build_id_for_platform,
     config_file::{CONFIGURATION_BYTES, FileError, read_json},
     node_path,
     preparation_cache::dependency_cache_key_json,
@@ -122,6 +122,26 @@ pub async fn preparation_identity(
     profile: PreparationProfile,
     compare: FileCompare,
 ) -> IvyResult<PreparationIdentity> {
+    preparation_identity_for_platform(
+        source_root,
+        component,
+        version,
+        package_manager,
+        profile,
+        compare,
+        None,
+    )
+    .await
+}
+pub async fn preparation_identity_for_platform(
+    source_root: PathBuf,
+    component: JsString,
+    version: JsString,
+    package_manager: IvyJson,
+    profile: PreparationProfile,
+    compare: FileCompare,
+    native_platform: Option<JsString>,
+) -> IvyResult<PreparationIdentity> {
     internal(
         tokio::spawn(async move {
             let lock = node_path::filesystem_path(&node_path::from_native(
@@ -137,8 +157,12 @@ pub async fn preparation_identity(
             )?;
             let files = artifact_files(source_root, compare).await?;
             let source_identity = artifact_source_identity(&files)?;
-            let build_id =
-                candidate_build_id(&component, &version, &source_identity.clone().into())?;
+            let build_id = candidate_build_id_for_platform(
+                &component,
+                &version,
+                &source_identity.clone().into(),
+                native_platform.as_ref(),
+            )?;
             Ok(PreparationIdentity {
                 dependency_lock_hash,
                 dependency_key,

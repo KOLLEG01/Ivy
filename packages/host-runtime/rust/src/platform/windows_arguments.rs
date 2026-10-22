@@ -2,6 +2,9 @@
 
 /// Quote one UTF-16 argument without losing unpaired Windows filename code units.
 pub fn quote_argument(value: &[u16]) -> Vec<u16> {
+    if !value.is_empty() && !value.iter().any(|unit| matches!(*unit, 9 | 32 | 34)) {
+        return value.to_vec();
+    }
     let mut result = vec![b'"' as u16];
     let mut slashes = 0;
     for &character in value {

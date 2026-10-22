@@ -49,6 +49,11 @@ export async function readReleaseManifest(path: string): Promise<Host.ReleaseMan
   return releaseManifest(await jsonFile<unknown>(path));
 }
 
+export function launchEntrypoint(manifest: Pick<Host.ReleaseManifest, 'entrypoint'>): string | undefined {
+  const command = manifest.entrypoint;
+  return command?.executable.startsWith('dist/native/') ? command.executable : command?.args[0];
+}
+
 /** Deterministic contained-file inventory used for package and source identity.
  * It is not part of normal candidate activation. */
 export async function artifactFiles(root: string): Promise<Array<{ path: string; hash: string; bytes: number; mode: number }>> {
@@ -81,11 +86,16 @@ export async function verifyCandidate(candidate: Host.Candidate, config: Pick<Ho
   if (manifest.kind !== 'app') requireRuntimeRequirements(manifest.requirements);
   requireThat(manifest.buildId === candidate.buildId && manifest.componentId === candidate.componentId,
     'build_mismatch', 'Candidate manifest does not identify its release.');
-  await verifyLaunchCandidate(candidate, config, manifest.entrypoint?.args[0]);
-  if (process.platform === 'win32') for (const file of portableNativeFiles(manifest.componentId)) {
+  const executable = manifest.entrypoint?.executable;
+  const native = executable?.startsWith('dist/native/') ?? false;
+  await verifyLaunchCandidate(candidate, config, launchEntrypoint(manifest));
+  const nativeDirectory = native ? executable!.slice(0, executable!.lastIndexOf('/')) : undefined;
+  const requiredFiles = [...(native ? [manifest.readiness!.command.executable] : []),
+    ...(process.platform === 'win32' ? portableNativeFiles(manifest.componentId, nativeDirectory) : [])];
+  for (const file of requiredFiles) {
     const path = join(candidate.artifactRoot, ...file.split('/')), metadata = await lstat(path).catch(() => null);
     requireThat(metadata?.isFile() && !metadata.isSymbolicLink() && metadata.size > 0 && inside(candidate.artifactRoot, await realpath(path)),
-      'artifact_missing', 'Windows candidate is missing its required native runtime payload.');
+      'artifact_missing', 'Candidate is missing its required native runtime payload.');
   }
   return manifest;
 }

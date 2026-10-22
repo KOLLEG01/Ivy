@@ -1,6 +1,8 @@
 import { compileBackend, stageBackend } from './build-backend.mjs';
 import { buildWeb } from './build-web.mjs';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { buildIdentity } from '../../packages/host-runtime/src/build-identity.mjs';
+import { buildNativeDeployment } from './build-native-deployment.mjs';
 
 const index = process.argv.indexOf('--component');
 const requested = index >= 0 ? process.argv[index + 1] : null;
@@ -11,9 +13,17 @@ const known = new Set([...backendComponents, ...Object.keys(webByComponent)]);
 if (!requested && !all) throw new Error('A component target is required; use --component <component> or --all.');
 if (requested && !known.has(requested)) throw new Error('Unknown component: ' + requested);
 const native = all || (requested && backendComponents.has(requested));
-const identity = all ? compileBackend({ native: true }) : backendComponents.has(requested) ? compileBackend({ native, component: requested }) : null;
-if (all || requested === 'host-executor') await buildWeb();
+const sourcePlan = requested && existsSync(`services/${requested}/deploy.json`)
+  ? JSON.parse(readFileSync(`services/${requested}/deploy.json`, 'utf8')) : null;
+const rust = sourcePlan?.entrypoint?.executable.startsWith('dist/native/');
+const targetIndex = process.argv.indexOf('--target');
+const target = targetIndex >= 0 ? process.argv[targetIndex + 1] : undefined;
+if (targetIndex >= 0 && (!rust || !target || target.startsWith('--') || process.argv.lastIndexOf('--target') !== targetIndex))
+  throw Error('--target requires one explicit native component target.');
+const identity = rust ? buildNativeDeployment({ component: requested, target, identity: buildIdentity() }).identity
+  : all ? compileBackend({ native: true }) : backendComponents.has(requested) ? compileBackend({ native, component: requested }) : null;
+if (all || requested === 'host-executor' && !rust) await buildWeb();
 else if (webByComponent[requested]) await buildWeb({ uis: [webByComponent[requested]] });
-if (identity) stageBackend(identity, requested);
+if (identity && !rust) stageBackend(identity, requested);
 mkdirSync('dist', { recursive: true });
 writeFileSync('dist/build-set.json', JSON.stringify({ schemaVersion: 1, build: identity, component: requested ?? null, all, tests: false }, null, 2) + '\n');

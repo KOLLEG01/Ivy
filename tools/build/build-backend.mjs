@@ -247,6 +247,10 @@ export function stageBackend(identity, component = null) {
     "packages/host-runtime/src/build-identity.mjs",
     "dist/packages/host-runtime/src/build-identity.mjs",
   );
+  cpSync("packages/host-runtime/src/native-plan.mjs", "dist/packages/host-runtime/src/native-plan.mjs");
+  mkdirSync("dist/tools/build", { recursive: true });
+  for (const name of ["rust-root-inputs.mjs", "rust-root-inputs.json", "build-cache.mjs"])
+    cpSync("tools/build/" + name, "dist/tools/build/" + name);
   writeFileSync(
     "dist/build-info.json",
     JSON.stringify(identity, null, 2) + "\n",

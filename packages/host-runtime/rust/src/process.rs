@@ -537,13 +537,9 @@ async fn spawn_resolved_with_stdio(
         None
     };
     let mut process = if use_job {
-        let launcher = paths::realpath(
-            context
-                .job_launcher
-                .as_deref()
-                .unwrap_or(&root.join("dist/native/ivy-job.exe")),
-        )
-        .map_err(io_error)?;
+        let launcher = context.job_launcher.clone()
+            .unwrap_or_else(|| crate::native_plan::native_binary_path(root, "ivy-job"));
+        let launcher = paths::realpath(&launcher).map_err(io_error)?;
         let mut process = TokioCommand::new(launcher);
         process.args([
             OsString::from(if memory_request.is_some() { "--memory-parent" } else { "--parent" }),

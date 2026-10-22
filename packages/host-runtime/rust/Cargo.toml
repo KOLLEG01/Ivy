@@ -30,6 +30,10 @@ name = "host-native-paths"
 path = "../../../tests/rust/host-native-paths.rs"
 
 [[test]]
+name = "host-native-plan"
+path = "../../../tests/rust/host-native-plan.rs"
+
+[[test]]
 name = "host-windows-arguments"
 path = "../../../tests/rust/host-windows-arguments.rs"
 

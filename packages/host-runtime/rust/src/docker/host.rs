@@ -66,7 +66,7 @@ impl DockerHost for NativeDockerHost {
         timeout_ms: f64,
         redact: Vec<JsString>,
     ) -> BoxFuture<'static, IvyResult<ProcessResult>> {
-        let helper = self.bootstrap_root.join("dist/native/ivy-job.exe");
+        let helper = crate::native_plan::native_binary_path(&self.bootstrap_root, "ivy-job");
         Box::pin(async move {
             let root = config_file::path_value(config.required("runtimeRoot")?)?;
             let executables = config

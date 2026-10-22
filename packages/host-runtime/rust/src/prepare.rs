@@ -236,7 +236,9 @@ async fn prepare(
     )
     .await?;
     let runtime_profile = profile(&runtime.node);
-    let identity = preparation_inputs::preparation_identity(
+    let native = crate::native_plan::is_native_plan(&plan);
+    let native_platform = if native { Some(format!("{}-{}", runtime_profile.os.to_utf8()?, runtime_profile.arch.to_utf8()?).into()) } else { None };
+    let identity = preparation_inputs::preparation_identity_for_platform(
         captured_source.clone(),
         component.clone(),
         plan.required("version")?
@@ -246,6 +248,7 @@ async fn prepare(
         package_manager,
         profile(&runtime.node),
         runtime.compare.clone(),
+        native_platform,
     )
     .await?;
     let cache_root = staging
@@ -392,7 +395,7 @@ async fn prepare(
                 &mapped,
                 process::LaunchContext {
                     environment: environment.clone(),
-                    job_launcher: Some(bootstrap.join("dist/native/ivy-job.exe")),
+                    job_launcher: Some(crate::native_plan::native_binary_path(&bootstrap, "ivy-job")),
                     on_output: Some(progress.output_sink()),
                     ..Default::default()
                 },
@@ -410,7 +413,7 @@ async fn prepare(
             }
         }
         let app = plan.get("kind") == Some(&"app".into());
-        let packages = if app {
+        let packages = if app || native {
             Vec::new()
         } else {
             runtime_dependencies::runtime_package_locations(

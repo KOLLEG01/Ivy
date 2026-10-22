@@ -208,7 +208,7 @@ pub async fn source_build_plan(root: impl Into<PathBuf>, component_id: &str) -> 
         }
         match plans.len() {
             0 => Err(IvyError::new("not_found", "Source component has no deploy plan.")),
-            1 => Ok(plans.remove(0)),
+            1 => crate::native_plan::materialize_native_plan_for_host(plans.remove(0)),
             _ => Err(IvyError::new("target_conflict", "Source component has more than one deploy plan.")),
         }
     }).await)?

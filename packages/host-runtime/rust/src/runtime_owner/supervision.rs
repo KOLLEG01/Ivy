@@ -344,8 +344,13 @@ impl Owner {
             .journal
             .manifest(&target.required("candidateId")?.as_str()?)
             .await?;
+        let loaded = if crate::native_plan::is_native_plan(&manifest) {
+            config::native_instance_config(config_path).await
+        } else {
+            config::instance_config(config_path, &self.node).await
+        };
         if target.get("desired") == Some(&IvyJson::from("stopped")) {
-            let config = config::instance_config(config_path, &self.node).await.ok();
+            let config = loaded.ok();
             return Ok(Selected {
                 target,
                 host,
@@ -353,7 +358,7 @@ impl Owner {
                 manifest,
             });
         }
-        let config = config::instance_config(config_path, &self.node).await?;
+        let config = loaded?;
         require(
             config.json().get("instanceId") == Some(&self.instance_id.clone().into())
                 && config.json().get("hostId") == host.get("hostId"),
@@ -403,56 +408,37 @@ impl Owner {
         } else {
             Some(command.executable.clone().into())
         };
-        crate::artifact::verify_launch_candidate(
+        crate::artifact::verify_launch_candidate_with_manifest(
             candidate,
             path(selected.host.required("artifactRoot")?)?,
             selected_entry,
+            selected.manifest.clone(),
         )
         .await?;
-        let requirements = selected.manifest.required("requirements")?;
-        let os = requirements
-            .get("os")
-            .and_then(IvyJson::as_array)
-            .map(|v| v.iter().map(IvyJson::as_str).collect::<IvyResult<Vec<_>>>())
-            .transpose()?;
-        let arch = requirements
-            .get("arch")
-            .and_then(IvyJson::as_array)
-            .map(|v| v.iter().map(IvyJson::as_str).collect::<IvyResult<Vec<_>>>())
-            .transpose()?;
-        let os_refs = os
-            .as_ref()
-            .map(|v| v.iter().map(String::as_str).collect::<Vec<_>>());
-        let arch_refs = arch
-            .as_ref()
-            .map(|v| v.iter().map(String::as_str).collect::<Vec<_>>());
-        require(
-            crate::package_requirements::runtime_requirements_satisfied(
-                &crate::package_requirements::Requirements {
-                    node: &requirements.required("node")?.as_str()?,
-                    os: os_refs.as_deref(),
-                    arch: arch_refs.as_deref(),
-                },
-                &crate::package_requirements::Runtime {
-                    node: &self.node.version,
-                    os: if cfg!(windows) { "win32" } else { "linux" },
-                    arch: if cfg!(target_arch = "aarch64") {
-                        "arm64"
-                    } else {
-                        "x64"
-                    },
-                },
-            )?,
-            "unsupported_runtime",
-            "Selected release does not support the configured Node runtime and platform.",
+        crate::artifact::verify_runtime_requirements(
+            &selected.manifest,
+            Some(&self.node.version),
+            if cfg!(windows) {
+                "win32"
+            } else {
+                std::env::consts::OS
+            },
+            match std::env::consts::ARCH {
+                "x86_64" => "x64",
+                "aarch64" => "arm64",
+                other => other,
+            },
         )?;
         Ok(())
     }
     async fn launch(&mut self) -> IvyResult<()> {
         let selected = self.selected.as_ref().ok_or_else(IvyError::internal)?;
-        let refreshed =
-            config::instance_config(path(selected.target.required("configPath")?)?, &self.node)
-                .await?;
+        let config_path = path(selected.target.required("configPath")?)?;
+        let refreshed = if crate::native_plan::is_native_plan(&selected.manifest) {
+            config::native_instance_config(config_path).await?
+        } else {
+            config::instance_config(config_path, &self.node).await?
+        };
         let previous = selected
             .config
             .as_ref()
@@ -547,7 +533,7 @@ impl Owner {
         );
         Ok(LaunchContext {
             environment,
-            job_launcher: Some(self.bootstrap_root.join("dist/native/ivy-job.exe")),
+            job_launcher: Some(crate::native_plan::native_binary_path(&self.bootstrap_root, "ivy-job")),
             redact: secrets(&selected.host, selected.config.as_ref())?,
             ..Default::default()
         })

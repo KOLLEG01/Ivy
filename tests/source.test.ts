@@ -17,11 +17,24 @@ import { spawnSync } from "node:child_process";
 import {
   captureSource,
   verifySnapshot,
+  sourceBuildPlan,
 } from "../packages/host-runtime/src/source.js";
 import { runCommand } from "../packages/host-runtime/src/process.js";
 import { HostJournal } from "../packages/host-runtime/src/journal.js";
 import { IvyError } from "../packages/contracts/src/errors.js";
 import type { Host } from "../packages/contracts/src/generated.js";
+
+test("source plans reject an unsupported native host with the public argument error", async (t) => {
+  const f = await fixture(t);
+  const plan = JSON.parse(await readFile(resolve("services/data-collector/deploy.json"), "utf8")) as Host.BuildPlan;
+  plan.componentId = "native-fixture";
+  plan.entrypoint!.executable = "dist/native/ivy-native-fixture";
+  plan.requirements.os = [process.platform === "win32" ? "linux" : "win32"];
+  const directory = join(f.source, "services/native-fixture");
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, "deploy.json"), JSON.stringify(plan));
+  await assert.rejects(sourceBuildPlan(f.source, "native-fixture"), { code: "invalid_arguments", outcome: "not_executed" });
+});
 
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), "ivy-source-test-")),

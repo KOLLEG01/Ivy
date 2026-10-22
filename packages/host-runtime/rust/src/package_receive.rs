@@ -1,6 +1,6 @@
 //! Immutable v1 archive receive policy using native tar and shared host primitives.
 use crate::{IvyError, IvyJson, IvyResult, artifact_manifest as artifact, config_file as config, node_path, paths,
-    portable_native_files::portable_native_files, process::{self, LaunchContext}};
+    portable_native_files::portable_native_files_for_manifest, process::{self, LaunchContext}};
 use ivy_contracts::json;
 use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, sync::Arc};
 const MAXIMUM_LIST_BYTES: usize = 8 * 1024 * 1024;
@@ -71,7 +71,7 @@ pub async fn validate_package_archive(archive: PathBuf, expected_hash: String, e
             .map(safe_archive_entry).collect::<IvyResult<Vec<_>>>()?;
         require(entries.len() > 1 && entries.len() <= MAXIMUM_ENTRIES && entries.iter().any(|entry| entry == "component.json")
             && entries.iter().any(|entry| entry == "artifact/dist/build-info.json"), "artifact_changed", "Package archive is incomplete.")?;
-        for file in portable_native_files(&expected_manifest.required("componentId")?.as_str()?) {
+        for file in portable_native_files_for_manifest(&expected_manifest)? {
             require(entries.iter().any(|entry| entry == &format!("artifact/{file}")), "artifact_missing", "Portable package is missing its Windows runtime payload.")?;
         }
         recreate(&extraction_root).await?;
@@ -85,7 +85,7 @@ pub async fn validate_package_archive(archive: PathBuf, expected_hash: String, e
         let manifest = artifact::read_release_manifest(component_path).await?;
         require(json::canonical(&manifest, usize::MAX)? == json::canonical(&expected_manifest, usize::MAX)?,
             "build_mismatch", "Package manifest differs from its authorized identity.")?;
-        for file in portable_native_files(&manifest.required("componentId")?.as_str()?) {
+        for file in portable_native_files_for_manifest(&manifest)? {
             let path = artifact_root.join(file); let metadata = internal(tokio::fs::symlink_metadata(&path).await)?;
             require(metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() > 0
                 && internal(paths::inside(&artifact_root, &internal(paths::realpath(&path))?))?, "artifact_changed", "Portable Windows runtime payload is invalid.")?;
@@ -97,8 +97,12 @@ pub async fn validate_package_archive(archive: PathBuf, expected_hash: String, e
             "build_mismatch", "Package build stamp differs from its manifest.")?;
         if manifest.get("kind") != Some(&IvyJson::from("app")) {
             for command in [manifest.required("entrypoint")?, manifest.required("readiness")?.required("command")?] {
-                let selected = command.get("args").and_then(IvyJson::as_array).and_then(|args| args.first()).and_then(IvyJson::as_js_string);
-                if command.get("executable") == Some(&IvyJson::from("node")) && selected.is_some_and(|entry| entry.0.starts_with(&[100,105,115,116,47])) {
+                let executable = command.get("executable").and_then(IvyJson::as_js_string);
+                let native = executable.is_some_and(|entry| entry.0.starts_with(&"dist/native/".encode_utf16().collect::<Vec<_>>()));
+                let selected = if native {
+                    executable
+                } else { command.get("args").and_then(IvyJson::as_array).and_then(|args| args.first()).and_then(IvyJson::as_js_string) };
+                if (native || command.get("executable") == Some(&IvyJson::from("node"))) && selected.is_some_and(|entry| entry.0.starts_with(&[100,105,115,116,47])) {
                     let path = node_path::Context::current().map_err(|_| IvyError::internal())?.resolve(&[node_path::from_native(&artifact_root), selected.unwrap().clone()]);
                     let path = node_path::to_native(&path); let metadata = internal(tokio::fs::symlink_metadata(&path).await)?;
                     require(internal(paths::inside(&artifact_root, &path))? && metadata.is_file() && !metadata.file_type().is_symlink(),

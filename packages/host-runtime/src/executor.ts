@@ -13,7 +13,7 @@ import { defaultDockerAdapter } from './docker.js';
 import type { DockerAdapter, ManagedProcess } from './docker.js';
 import { defaultSystemdAdapter, renderSystemdUnit, systemdUnitName } from './systemd.js';
 import type { SystemdAdapter, SystemdState } from './systemd.js';
-import { verifyLaunchCandidate } from './artifact.js';
+import { launchEntrypoint, verifyLaunchCandidate } from './artifact.js';
 import { verifyServiceStorage } from './service-storage.js';
 import { runtimeResetActive } from './runtime-maintenance.js';
 import { runCommand, resolveCommand } from './process.js';
@@ -240,7 +240,7 @@ export class HostExecutor {
     }
     if (!handle) {
       this.dockerObservation(instanceId, target, 'starting', 'artifact_verification', 'Checking the selected Docker release.', null, candidate.buildId);
-      await verifyLaunchCandidate(candidate, this.config, manifest.entrypoint?.args[0]);
+      await verifyLaunchCandidate(candidate, this.config, launchEntrypoint(manifest));
       const managed = await this.dockerAdapter.startContainer(this.config, instance, target, config, candidate, manifest, true);
       handle = { target, process: managed, result: null, candidate, manifest, config, startedAt: Date.now(), unreadySince: Date.now(), readinessChecked: false };
       this.dockerHandles.set(instanceId, handle);
@@ -438,7 +438,7 @@ export class HostExecutor {
     const candidate = this.journal.candidate(candidateId), manifest = this.journal.manifest(candidateId);
     requireRuntimeRequirements(manifest.requirements);
     this.serviceStorage(instanceId, manifest);
-    await verifyLaunchCandidate(candidate, this.config, manifest.entrypoint?.args[0]);
+    await verifyLaunchCandidate(candidate, this.config, launchEntrypoint(manifest));
     if (manifest.componentId === 'agent-manager') await verifyConfiguredNativeCatalog(candidate.artifactRoot, instanceId,
       (nativeSettings ?? agentManagerAccountSettings(this.journal.instance(instanceId).settings)) as Agent.Settings);
     if (this.journal.instance(instanceId).engine === 'docker') await this.dockerAdapter.verifyContainerImage(this.config, this.journal.instance(instanceId), candidate, manifest);

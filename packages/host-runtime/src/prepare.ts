@@ -327,7 +327,9 @@ export async function prepareCandidate(snapshot: Host.SourceSnapshot, componentI
   // File permissions differ between Windows and Linux checkouts and have no source meaning.
   // Package requirements and the portable dependency materializer own runtime compatibility.
   const sourceIdentity = hashJson((await artifactFiles(snapshot.sourceRoot)).map(({ path, hash, bytes }) => ({ path, hash, bytes })));
-  const buildId = candidateBuildId(componentId, plan.version, sourceIdentity);
+  const nativePlatform = plan.entrypoint?.executable.startsWith('dist/native/')
+    ? `${plan.requirements.os![0]}-${plan.requirements.arch![0]}` : undefined;
+  const buildId = candidateBuildId(componentId, plan.version, sourceIdentity, nativePlatform);
   const progress = new PreparationProgress(config, componentId, snapshot.snapshotId);
   let lock: ExecutorLock | null = null, cacheLease: ExecutorLock | null = null;
   let journal: HostJournal | null = null;
