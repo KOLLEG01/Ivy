@@ -83,16 +83,26 @@ fn separate(a: &Path, b: &Path) -> IvyResult<bool> {
 }
 /// The caller supplies the discovered dispatcher/host Node runtime; no PATH lookup.
 pub async fn instance_config(path: impl Into<PathBuf>, node: &NodeRuntime) -> IvyResult<InstanceConfig> {
-    let path = path.into();
-    let version = node.version.clone();
+    load_instance_config(path.into(), Some(node.version.clone())).await
+}
+
+/// Native services validate the same public configuration and build identity.
+/// A Node runtime is required only when launching a Node workload.
+pub async fn native_instance_config(path: impl Into<PathBuf>) -> IvyResult<InstanceConfig> {
+    load_instance_config(path.into(), None).await
+}
+
+async fn load_instance_config(path: PathBuf, node_version: Option<String>) -> IvyResult<InstanceConfig> {
     tokio::task::spawn_blocking(move || {
         let config = InstanceConfig::from_json(read_json(&path, CONFIGURATION_BYTES).map_err(FileError::error)?)?;
         if !absolute(&config.data_root) || !absolute(&config.artifact_root) || !separate(&config.data_root, &config.artifact_root)? {
             return Err(IvyError::new("invalid_arguments", "Instance data and artifact roots must be separate absolute paths."));
         }
-        let mut parts = version.split('.');
-        if parts.next() != Some("24") || parts.next().and_then(|part| part.parse::<u64>().ok()).is_none_or(|minor| minor < 18) {
-            return Err(IvyError::new("unsupported_runtime", "This distribution requires pinned Node 24.18 or newer in the 24.x line."));
+        if let Some(version) = node_version {
+            let mut parts = version.split('.');
+            if parts.next() != Some("24") || parts.next().and_then(|part| part.parse::<u64>().ok()).is_none_or(|minor| minor < 18) {
+                return Err(IvyError::new("unsupported_runtime", "This distribution requires pinned Node 24.18 or newer in the 24.x line."));
+            }
         }
         let build = read_json(&config.artifact_root.join("dist/build-info.json"), CONFIGURATION_BYTES).map_err(FileError::error)?;
         if build.is_null() { return Err(IvyError::internal()); }
