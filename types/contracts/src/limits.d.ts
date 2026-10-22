@@ -1,0 +1,24 @@
+/** Complete canonical UTF-8 management/transport document, including envelope. Decision0047. */
+export declare const managementFrameBytes = 33554432;
+export declare const managementSocketBufferBytes: number;
+/** Canonical UTF-8 bytes admitted for one JSON Object content value. */
+export declare const jsonObjectContentBytes = 1048576;
+/** UTF-8 bytes admitted for one text Object content value. */
+export declare const textObjectContentBytes = 1048576;
+/** Decoded bytes admitted for one binary Object before base64 expansion. */
+export declare const binaryObjectContentBytes = 8388608;
+/** Concurrent requests admitted for one HTTP, WebSocket, or SDK connection. */
+export declare const connectionInFlightRequests = 64;
+/** Read micro-batches remain smaller than a browser's logical request budget. */
+export declare const rpcBatchRequests = 8;
+export declare const rpcBatchRequestBytes = 65536;
+/** Aggregate reservations for one authenticated credential or original HTTP client address. */
+export declare const consumerInFlightRequests = 256;
+/** Maximum retained mutation outcomes in the FIFO receipt ring, without a time guarantee. */
+export declare const mutationReceiptCount = 100000;
+/** Total encoded mutation-journal storage retained across all principals. */
+export declare const mutationReceiptJournalBytes: number;
+/** Maximum canonical result retained by one mutation receipt. */
+export declare const mutationReceiptResultBytes = 65536;
+/** Complete serialized MCP tools/list result, including cursors and cache metadata. */
+export declare const mcpDiscoveryResultBytes: number;
