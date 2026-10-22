@@ -12,11 +12,25 @@ where
     F: Fn(T, usize) -> Fut,
     Fut: Future<Output = IvyResult<R>>,
 {
+    map_concurrent_with_error(items, concurrency, action).await
+}
+
+/// Internal I/O owners retain native codes until their cache-miss/EXDEV policy.
+pub(crate) async fn map_concurrent_with_error<T, R, F, Fut, E>(
+    items: Vec<T>,
+    concurrency: usize,
+    action: F,
+) -> Result<Vec<R>, E>
+where
+    F: Fn(T, usize) -> Fut,
+    Fut: Future<Output = Result<R, E>>,
+    E: From<IvyError>,
+{
     if !(1..=8).contains(&concurrency) {
         return Err(IvyError::new(
             "invalid_arguments",
             "Owned concurrent work requires a bounded worker count.",
-        ));
+        ).into());
     }
     let mut items = items.into_iter().enumerate();
     let mut results = Vec::new();

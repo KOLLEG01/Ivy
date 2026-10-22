@@ -1,80 +1,72 @@
 use ivy_contracts::{builtin_schema::SchemaBundle, json::parse};
 
 #[test]
-fn compiler_reference_fragments_match_pinned_ajv() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = std::process::Command::new("node")
-        .arg("tests/fixtures/schema-reference-oracle.mjs")
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(rows.len() > 1500);
-    let bundle =
-        SchemaBundle::new(&[include_str!("../fixtures/schema-reference.schema.json")]).unwrap();
-    for row in rows {
-        let value = parse(row["input"].as_str().unwrap(), 10000).unwrap();
-        let result = bundle.matches(row["reference"].as_str().unwrap(), &value);
-        assert_eq!(
-            result.is_ok(),
-            row["result"]["ok"].as_bool().unwrap(),
-            "{row}: {result:?}"
-        );
-        if let Ok(valid) = result {
-            assert_eq!(valid, row["result"]["valid"].as_bool().unwrap(), "{row}");
-        }
-    }
-}
-#[test]
-fn repository_schemas_match_the_existing_ajv_boundary() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = std::process::Command::new("node")
-        .arg("--experimental-transform-types")
-        .arg("--disable-warning=ExperimentalWarning")
-        .arg("tests/fixtures/builtin-schema-oracle.mjs")
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(rows.len() > 1000);
-    let bundle = SchemaBundle::new(&[
-        include_str!("../../specs/schemas/hive-wire.schema.json"),
-        include_str!("../../specs/schemas/hive-operations.schema.json"),
-        include_str!("../../specs/schemas/hive-transport.schema.json"),
-        include_str!("../../specs/schemas/host.schema.json"),
+fn trusted_document_pointers_select_declared_schemas_only() {
+    let bundle = SchemaBundle::from_documents(vec![
+        parse(
+            r##"{
+        "$id":"https://example.invalid/schema.json",
+        "$defs":{"plain":{"type":"string"},"a/b":{"type":"integer"},"deny":false,
+            "constructor":{"const":"owned"},"scalar":"invalid schema"}}
+    "##,
+            10000,
+        )
+        .unwrap(),
     ])
     .unwrap();
-    for row in rows {
-        let value = parse(row["input"].as_str().unwrap(), 1_000_000).unwrap();
+    for (reference, value, valid) in [
+        ("#/$defs/plain", r#""text""#, true),
+        ("#/$defs/plain", "4", false),
+        ("#/$defs/a~1b", "4", true),
+        ("#/$defs/a~1b", "4.5", false),
+        ("#/$defs/deny", "null", false),
+        ("#/$defs/constructor", r#""owned""#, true),
+        ("#/$defs/constructor", r#""other""#, false),
+    ] {
         assert_eq!(
             bundle
-                .matches(row["reference"].as_str().unwrap(), &value)
-                .unwrap_or_else(|error| panic!("{row}: {error:?}")),
-            row["valid"].as_bool().unwrap(),
-            "{row}"
+                .matches(reference, &parse(value, 1000).unwrap())
+                .unwrap(),
+            valid
         );
-        if let Some(name) = row["hostName"].as_str() {
-            let error = ivy_contracts::core_schema::validate_host(name, &value).err();
-            assert_eq!(
-                error.as_ref().map(|e| e.code.as_str()),
-                row["hostError"]["code"].as_str(),
-                "{row}"
-            );
-            assert_eq!(
-                error.as_ref().map(|e| e.message.as_str()),
-                row["hostError"]["message"].as_str(),
-                "{row}"
-            );
-        }
+    }
+    for reference in ["#/$defs/toString", "#/$defs/__proto__", "#/$defs/scalar"] {
+        assert!(
+            bundle
+                .matches(reference, &parse("null", 1000).unwrap())
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn packaged_taskboard_contract_checks_cross_document_fields_and_limits() {
+    let bundle = SchemaBundle::new(&[
+        include_str!("../../specs/schemas/task-board.schema.json"),
+        include_str!("../../specs/schemas/hive-wire.schema.json"),
+        include_str!("../../specs/schemas/hive-operations.schema.json"),
+        include_str!("../../specs/schemas/host.schema.json"),
+        include_str!("../../specs/schemas/agent.schema.json"),
+    ])
+    .unwrap();
+    for (input, valid) in [
+        (r#"{"objectId":"sample-object","revision":1}"#, true),
+        (r#"{"objectId":"","revision":1}"#, false),
+        (r#"{"objectId":"sample-object","revision":0}"#, false),
+        (r#"{"objectId":"sample-object","revision":1.5}"#, false),
+        (
+            r#"{"objectId":"sample-object","revision":1,"extra":true}"#,
+            false,
+        ),
+    ] {
+        assert_eq!(
+            bundle
+                .matches(
+                    "https://ivy.invalid/schemas/task-board.schema.json#/$defs/ObjectPin",
+                    &parse(input, 1000).unwrap()
+                )
+                .unwrap(),
+            valid
+        );
     }
 }

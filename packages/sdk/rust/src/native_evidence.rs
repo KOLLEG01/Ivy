@@ -48,6 +48,43 @@ fn field<'a>(value: &'a IvyJson, key: &str) -> &'a IvyJson {
         .expect("structurally validated native evidence")
 }
 
+#[derive(Clone, Copy)]
+pub struct NativePayloadLimits {
+    pub request_bytes: usize,
+    pub response_bytes: usize,
+}
+/// Check the original transport envelope before evaluating native parameters,
+/// then the reply envelope before its result. This does not validate authority,
+/// receipt identity or reply-error semantics.
+pub fn validate_native_payload(
+    contract: &ivy_contracts::native_contract::NativeContract,
+    observation: &IvyJson,
+    limits: NativePayloadLimits,
+) -> IvyResult<()> {
+    let method = observation.get("method").and_then(IvyJson::as_js_string)
+        .ok_or_else(|| IvyError::new("native_method_unsupported", "The method is absent from the exact selected native catalog."))?;
+    let params = observation.required("params")?;
+    let fallback = IvyJson::from("00000000-0000-0000-0000-000000000000");
+    let request_id = observation.get("requestId").filter(|id| !id.is_null()).unwrap_or(&fallback);
+    let request = IvyJson::object([
+        ("id", request_id.clone()), ("method", IvyJson::String(method.clone())), ("params", params.clone()),
+    ]);
+    canonical(&request, limits.request_bytes)?;
+    contract.validate_input(method, params, limits.request_bytes)?;
+    if let Some(reply) = observation.get("reply").filter(|reply| !reply.is_null()) {
+        if !matches!(reply, IvyJson::Object(_)) {
+            return Err(IvyError::new("invalid_frame", "Native reply must be an object."));
+        }
+        let mut response = reply.clone();
+        if response.get("id").is_none() {
+            if let Some(id) = observation.get("requestId") { response.insert("id", id.clone()); }
+        }
+        canonical(&response, limits.response_bytes)?;
+        if let Some(result) = reply.get("result") { contract.validate_result(method, result, limits.response_bytes)?; }
+    }
+    Ok(())
+}
+
 /// Accept exactly Date.parse followed by an identical Date.toISOString result.
 /// Arithmetic covers the entire ECMAScript TimeClip range, including extended years.
 pub fn native_instant(value: &JsString, code: Option<&str>) -> IvyResult<i64> {

@@ -37,4 +37,43 @@ for(const year of [-271821,-100000,-10000,-400,-100,-4,-1,0,1,4,99,100,400,9999,
 let state=0x12345678;
 for(let i=0;i<2048;i++){state=(Math.imul(state,1664525)+1013904223)>>>0;values.add(Math.trunc((state/0xffffffff*2-1)*8640000000000000));}
 for(const value of values)add({kind:'date',value:Number.isFinite(value)?value:String(value)},()=>new Date(value).toISOString());
+
+const number = value => Object.is(value, -0) ? '-0' : Number.isFinite(value) ? value : String(value);
+function utc(args) {
+  add({kind: 'utc', value: args.map(number)}, () => {
+    const millis = Date.UTC(...args);
+    return {millis: number(millis), negativeZero: Object.is(millis, -0),
+      iso: Number.isNaN(millis) ? null : new Date(millis).toISOString()};
+  });
+}
+// Fractional years are truncated before the special 0..99 adjustment; all other
+// components overflow independently, including negative months and days.
+for (const year of [-271821, -10000, -400, -100, -4, -1, -0.9, -0, 0, 0.9,
+  1, 4, 99, 99.9, 100, 100.9, 400, 1900, 2000, 2100, 2400, 9999, 10000, 275760]) {
+  for (const month of [-25, -12.9, -1.9, -0, 0, 1, 1.9, 2, 11.9, 12, 25])
+    for (const day of [-31, -0.9, -0, 0, 1, 28.9, 29, 31, 32, 366])
+      utc([year, month, day, 25.9, -61.9, 60.9, -1001.9]);
+}
+for (let year = 0; year <= 99; year++) utc([year, 1, 29, 0, 0, 0, 0]);
+for (let year = 1600; year < 2400; year++) utc([year, 1, 29, 0, 0, 0, 0]);
+for (const base of [[-271821, 3, 20, 0, 0, 0, 0], [275760, 8, 13, 0, 0, 0, 0],
+  [1970, 0, 1, 0, 0, 0, 0]]) {
+  for (const delta of [-1.9, -1, -0.9, -0, 0, 0.9, 1, 1.9]) utc([...base.slice(0, 6), delta]);
+}
+for (let at = 0; at < 7; at++) for (const value of [NaN, Infinity, -Infinity,
+  Number.MAX_VALUE, -Number.MAX_VALUE, 1e20, -1e20, 1e-300, -1e-300]) {
+  const args = [2000, 0, 1, 0, 0, 0, 0]; args[at] = value; utc(args);
+}
+// MakeDay's runtime bounds also apply to otherwise cancelling large inputs.
+for (const year of [-1000000.5, -1000000, -999999.9, -400000, 1000000, 1000000.5])
+  for (const month of [-10000000.5, -10000000, -9999999.9, 0, 10000000, 10000000.5])
+    for (const day of [1, -365241030, 365243970]) utc([year, month, day, 0, 0, 0, 0]);
+for (const hour of [1e10, 1e12, 1e15, 1e20, Number.MAX_VALUE])
+  utc([1970, 0, 1, hour, -hour * 60, 1, 0]);
+for (let i = 0; i < 2048; i++) {
+  const next = () => {state = (Math.imul(state, 1664525) + 1013904223) >>> 0; return state;};
+  utc([Math.trunc(next() / 0xffffffff * 600000 - 300000), next() % 240 - 120,
+    next() % 1000 - 500, next() % 1000 - 500, next() % 1000 - 500,
+    next() % 1000 - 500, next() % 10000 - 5000]);
+}
 process.stdout.write(JSON.stringify(rows));

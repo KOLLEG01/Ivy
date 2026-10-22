@@ -1,29 +1,20 @@
 //! Secretary's configuration values. Generic protected-file and host instance
 //! loading are supplied by HostExecutor; this module owns document policy only.
 use crate::{
-    inbox_evidence::truthy,
     schema::{Schema, validate},
     triage_schema::{self, TriageSchema},
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
-use ivy_host_runtime::{
-    config::protected_json_file,
-    node_path::{self, Context, Style, is_absolute},
-};
-use std::path::PathBuf;
+use ivy_host_runtime::config::protected_json_file;
+use std::path::{Path, PathBuf};
 
 pub const CONFIGURATION_BYTES: usize = 1024 * 1024;
 
 pub fn service_configuration_path(data_root: &JsString) -> IvyResult<JsString> {
-    let context = Context::current().map_err(|_| IvyError::internal())?;
-    let absolute = context.resolve(&[data_root.clone()]);
-    Ok(node_path::join(
-        Style::native(),
-        &[
-            node_path::dirname(Style::native(), &absolute),
-            "config.json".into(),
-        ],
-    ))
+    let root = PathBuf::from(data_root.to_utf8()?);
+    let absolute = std::path::absolute(root).map_err(|_| IvyError::internal())?;
+    let parent = absolute.parent().unwrap_or(&absolute);
+    Ok(parent.join("config.json").to_string_lossy().as_ref().into())
 }
 
 /// Host instance validation precedes this service-specific admission. Settings
@@ -35,7 +26,9 @@ pub fn startup_settings(config: &IvyJson) -> IvyResult<&IvyJson> {
     validate(Schema::Settings, settings)?;
     let identity = settings.required("identity")?;
     if config.get("componentId") == Some(&"secretary".into())
-        && config.get("credential").is_some_and(truthy)
+        && config
+            .get("credential")
+            .is_some_and(|value| !value.is_null())
         && config.get("serviceNodeId") == identity.get("serviceNodeId")
         && config.get("hostId") == identity.get("hostId")
     {
@@ -91,13 +84,7 @@ pub fn delivery_configuration(config: Option<&IvyJson>) -> IvyResult<f64> {
 pub fn triage_configuration(value: &IvyJson) -> IvyResult<IvyJson> {
     triage_schema::validate(TriageSchema::Settings, value)?;
     triage_schema::check(
-        is_absolute(
-            Style::native(),
-            value
-                .required("threadCwd")?
-                .as_js_string()
-                .ok_or_else(IvyError::internal)?,
-        ),
+        Path::new(&value.required("threadCwd")?.as_str()?).is_absolute(),
         "secretary_triage_config_invalid",
     )?;
     Ok(value.clone())
@@ -179,15 +166,7 @@ pub fn microsoft_configuration(value: &IvyJson, settings: &IvyJson) -> IvyResult
                         })
                     })
         });
-        if !admitted
-            || !is_absolute(
-                Style::native(),
-                collector
-                    .required("threadCwd")?
-                    .as_js_string()
-                    .ok_or_else(IvyError::internal)?,
-            )
-        {
+        if !admitted || !Path::new(&collector.required("threadCwd")?.as_str()?).is_absolute() {
             return Err(IvyError::new(
                 "microsoft_source_config_invalid",
                 "An Outlook collector requires this admitted producer, its exact account and an absolute thread directory.",

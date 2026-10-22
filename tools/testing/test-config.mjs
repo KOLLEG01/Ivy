@@ -1,3 +1,5 @@
+import { isRustRootInput } from '../build/rust-root-inputs.mjs';
+
 export const scopes = [
   "data-collector",
   "dashboards",
@@ -17,7 +19,7 @@ export function scope(file) {
   if (/data-collector/.test(file)) return "data-collector";
   if (/dashboards/.test(file)) return "dashboards";
   if (
-    /deployment-plan|build-(cache|inputs|rust-backend)|test-(runner|selection|reporter)/.test(
+    /deployment-plan|build-(cache|inputs|rust-backend|native-dispatchers|native-payloads)|test-(runner|selection|reporter)/.test(
       file,
     )
   )
@@ -30,6 +32,7 @@ export function scope(file) {
   if (/sdk/.test(file)) return "sdk";
   if (/native-|agent-|codex-|claude-|project-locations/.test(file)) return "agent";
   if (/web-e2e\/|ui-(content|live)/.test(file)) return "ui";
+  if (/^tests\/rust\/host-(?:actions|(?:preparation|backup|reset)-actions|reset-clear-cases)\.rs$/.test(file)) return "host";
   if (
     /kernel|storage|backup|transports|connection-auth|hive[-_]|browser-push|contracts|builtin_schema|schema-compiler|concurrency|console-inspection|ui-publication/.test(
       file,
@@ -39,13 +42,16 @@ export function scope(file) {
   return "host";
 }
 export function kind(file) {
+  if (/^tests\/rust\/phone_(?:micro_(?:transport|attachment|client_files|command_output|client)|desktop_(?:controls|actions|activation|process|application)|process_ownership|windows_controls|windows_(?:audio|route|render(?:_(?:pump|format|device|owner|status))?|capture(?:_(?:device|owner))?)|voice_input(?:_owner)?|voice_runtime|call_desktop(?:_faults)?|call_voice(?:_faults)?|audio_mute(?:_windows)?|inventory_windows|loopback_(?:probe|windows)|native_(?:audio|codec|inventory|composition(?:_entry)?|probe|voice_input|bootstrap|desktop|process|call_desktop(?:_faults|_entry)?))\.rs$/.test(file))
+    return "native";
+  if (file === 'tests/secretary-rust/document_process_cases.rs') return 'native';
   if (/tests\/web-e2e\//.test(file)) return "web";
   if (/phone-(audio|hotkey)\.test|phone-.*\.integration/.test(file))
     return "native";
   return "core";
 }
 export function affected(file) {
-  if (/^(?:Cargo\.(?:toml|lock)|rust-toolchain\.toml|packages\/store\/)/.test(file)) return scopes.filter(s => s !== 'tooling');
+  if (isRustRootInput(file) || /^packages\/store\//.test(file)) return scopes.filter(s => s !== 'tooling');
   if (/^(services\/data-collector|docs\/examples\/data-collector|ui\/data-collector-ui)/.test(file)) return ["data-collector"];
   if (/^(services\/dashboards|ui\/dashboards-ui)/.test(file)) return ["dashboards"];
   // Semantic edges cover dynamic native/schema inputs which an import graph cannot see.
@@ -80,7 +86,7 @@ export function affected(file) {
     return scopes.filter((x) => x !== "tooling");
   if (/^services\/service-manager\//.test(file)) return ["host"];
   if (/^packages\/host-runtime\//.test(file))
-    return ["host", "agent", "phone", "hive", "dashboards"];
+    return ["host", "agent", "phone", "hive", "dashboards", "secretary"];
   if (
     /^(services\/phone-bridge|tests\/native-phone|specs\/schemas\/phone|tools\/(?:build|operations|package|testing)\/.*phone)/.test(
       file,
@@ -125,14 +131,238 @@ export const privateRepo = false;
 
 // Explicit Cargo targets keep --files narrow and do not infer service ownership.
 export const rustTests = {
-  'tests/rust/host-protected-config.rs': { package: 'ivy-host-runtime', test: 'host-protected-config' },
-  'tests/rust/sdk-error-outcome.rs': { package: 'ivy-sdk', test: 'sdk-error-outcome' },
-  'tests/secretary-rust/native-service.rs': { package: 'ivy-secretary', test: 'native-service' },
   'tests/secretary-rust/error-outcome.rs': { package: 'ivy-secretary', test: 'error-outcome' },
+  'tests/secretary-rust/native-service.rs': { package: 'ivy-secretary', test: 'native-service' },
+  'tests/rust/phone_windows_route.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'media::windows_route::tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/host-bootstrap-actions.rs': {"package":"ivy-host-runtime","test":"host-actions","filter":"bootstrap_cases::","platforms":["win32","linux"],"architectures":["x64","arm64"],"testThreads":1},
+  'tests/rust/host-bootstrap-installation-cases.rs': {"package":"ivy-host-runtime","lib":true,"filter":"bootstrap::installation::tests::","platforms":["win32","linux"],"architectures":["x64","arm64"],"testThreads":1},
+  'tests/rust/phone_windows_render_pump.rs': {"package":"ivy-phone-bridge","lib":true,"filter":"media::windows_render::tests::","platform":"win32","architectures":["x64","arm64"],"testThreads":1},
+  'tests/rust/phone_windows_render_format.rs': {package: 'ivy-phone-bridge', lib: true, filter: 'media::windows_render::format::tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1},
+  'tests/rust/phone_windows_render_device.rs': {package: 'ivy-phone-bridge', lib: true, filter: 'media::windows_render::device::tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1},
+  'tests/rust/phone_windows_render_owner.rs': {package: 'ivy-phone-bridge', lib: true, filter: 'media::windows_render::worker::tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1},
+  'tests/rust/phone_windows_render_status.rs': {package: 'ivy-phone-bridge', lib: true, filter: 'media::windows_render::status::tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1},
+  'tests/rust/host-actions.rs': {package: 'ivy-host-runtime', test: 'host-actions', platforms: ['win32', 'linux'], architectures: ['x64', 'arm64'], testThreads: 1},
+  'tests/rust/host-preparation-actions.rs': {package: 'ivy-host-runtime', test: 'host-actions', filter: 'preparation_cases::', platforms: ['win32', 'linux'], architectures: ['x64', 'arm64'], testThreads: 1},
+  'tests/rust/host-backup-actions.rs': {package: 'ivy-host-runtime', test: 'host-actions', filter: 'backup_cases::', platforms: ['win32', 'linux'], architectures: ['x64', 'arm64'], testThreads: 1},
+  'tests/rust/host-reset-actions.rs': {package: 'ivy-host-runtime', test: 'host-actions', filter: 'reset_cases::', platforms: ['win32', 'linux'], architectures: ['x64', 'arm64'], testThreads: 1},
+  'tests/rust/host-reset-clear-cases.rs': {"package":"ivy-host-executor","lib":true,"filter":"reset::tests::","platform":"win32","architectures":["x64","arm64"],"testThreads":1},
+  'tests/rust/phone_windows_capture_device.rs': {"package":"ivy-phone-bridge","lib":true,"filter":"media::windows_capture::device::tests::","platform":"win32","architectures":["x64","arm64"],"testThreads":1},
+  'tests/rust/phone_windows_capture_owner.rs': {"package":"ivy-phone-bridge","lib":true,"filter":"media::windows_capture::worker::tests::","platform":"win32","architectures":["x64","arm64"],"testThreads":1},
+  'tests/rust/phone_windows_render.rs': {"package":"ivy-phone-bridge","lib":true,"filter":"media::windows_audio::render::tests::","platform":"win32","architectures":["x64","arm64"],"testThreads":1},
+  'tests/rust/phone_windows_capture.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'media::windows_capture::tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_windows_audio.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'media::windows_audio::tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_native_codec.rs': {
+    package: 'ivy-phone-bridge', test: 'phone_native_rpc',
+    filter: 'call_audio::session::native_operations::commands::codec::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_native_inventory.rs': {
+    package: 'ivy-phone-bridge', test: 'phone_native_rpc',
+    filter: 'call_audio::session::native_operations::commands::inventory::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_inventory_windows.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'native_inventory::windows::tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_native_composition.rs': {
+    package: 'ivy-phone-bridge', test: 'phone_native_rpc',
+    filter: 'call_audio::session::native_operations::commands::composition::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_native_composition_entry.rs': {
+    package: 'ivy-phone-bridge', test: 'phone_native_rpc',
+    filter: 'call_audio::session::native_operations::commands::composition::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_audio_mute.rs': {
+    package: 'ivy-phone-bridge', test: 'phone_native_rpc',
+    filter: 'audio_mute::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_audio_mute_windows.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'media::mute::windows::tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_loopback_probe.rs': {
+    package: 'ivy-phone-bridge', test: 'phone_native_rpc',
+    filter: 'loopback_probe::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_native_probe.rs': {
+    package: 'ivy-phone-bridge', test: 'phone_native_rpc',
+    filter: 'call_audio::session::native_operations::commands::probe::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_loopback_windows.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'loopback_probe::windows::tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_native_audio.rs': {
+    package: 'ivy-phone-bridge', test: 'phone_native_rpc',
+    filter: 'call_audio::session::native_operations::commands::audio::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_native_voice_input.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'native_sip_commands::voice_input_tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_micro_client.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'micro::client::tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+    prerequisites: [{ platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-job' }],
+  },
+  'tests/rust/phone_micro_command_output.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'micro::command_output::tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_micro_client_files.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'micro::client_files::tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_micro_attachment.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'micro::attachment::tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_micro_transport.rs': {
+    package: 'ivy-phone-bridge', test: 'phone_native_rpc',
+    filter: 'micro_transport::',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/store-sqlite-compat.rs': {
+    package: 'ivy-store', test: 'store', filter: 'sqlite_compat::', testThreads: 1,
+  },
+  'tests/rust/phone_native_call_desktop_entry.rs': {
+    package: 'ivy-phone-bridge', test: 'phone_native_rpc',
+    filter: 'call_audio::session::native_operations::commands::desktop::exception_policy::entry::actual_call_owner_keeps_entry_lease_until_process_exit',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_native_call_desktop_faults.rs': {
+    package: 'ivy-phone-bridge', test: 'phone_native_rpc',
+    filter: 'call_audio::session::native_operations::commands::desktop::exception_policy::final_audio_failure_fences_actual_native_release_and_shutdown',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_native_call_desktop.rs': {
+    package: 'ivy-phone-bridge', test: 'phone_native_rpc',
+    filter: 'call_audio::session::native_operations::commands::desktop::native_desktop_dto_receipts_and_retirement',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_call_desktop_faults.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'desktop::call_session::tests::exception_policy::final_audio_failure_retains_call_owner_and_blocks_cleanup_retry',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_call_desktop.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'desktop::call_session::tests::original_call_admission_generations_retained_voice_and_drain',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_voice_runtime.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'desktop::voice_runtime::tests::composed_owner_input_focus_dispatch_and_cleanup_preserve_boundaries',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_call_voice_faults.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'desktop::call_voice::tests::exception_policy::final_audio_failure_preserves_completion_and_fences_cleanup',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_call_voice.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'desktop::call_voice::tests::retained_voice_capture_authority_transitions_and_cleanup',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_native_process.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'native_desktop::tests::process_commands::ownership_validation_projection_and_uncancelled_reads_agree',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_process_ownership.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'native_desktop::tests::process_ownership::scripted_ancestry_and_capture_correlation',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_native_desktop.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'native_desktop::tests::validation_replay_and_shutdown_preserve_original_application_work',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_desktop_application.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'desktop::windows_application::tests::candidate_admission_order_and_cleanup_preserve_original_observation',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_desktop_process.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'desktop::windows_owner::tests::process_identity_window_and_focus_callbacks_preserve_original_checks',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_native_bootstrap.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'native_entry::bootstrap_tests::failed_factory_and_unconfirmed_shutdown_keep_the_process_fence_without_duplicate_cleanup',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_desktop_controls.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'desktop::tests::original_control_boundaries_classification_and_thread_bound_session_agree',
+    platform: 'win32', testThreads: 1,
+  },
+  'tests/rust/phone_windows_controls.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'desktop::windows::tests::sdk_com_cache_refresh_invoke_and_lifetime_match_original',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_desktop_actions.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'desktop::windows_input::tests::original_launch_input_focus_and_invoke_policy_agree',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_desktop_activation.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'desktop::windows_activation::tests::original_activation_hresult_pid_and_cleanup_match_sdk_boundaries',
+    platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1,
+  },
+  'tests/rust/phone_voice_input.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'desktop::voice_input::tests::original_voice_settings_gesture_authority_and_fallback_agree',
+    platform: 'win32', testThreads: 1,
+  },
+  'tests/rust/phone_voice_input_owner.rs': {
+    package: 'ivy-phone-bridge', lib: true,
+    filter: 'desktop::input_owner::tests::original_selection_retry_reentry_and_disposal_owner_agree',
+    platform: 'win32', testThreads: 1,
+  },
+  // Ignored native cases require explicit --files plus --rust-ignored and sealed inputs.
+  'tests/secretary-rust/document_process_cases.rs': {
+    package: 'ivy-secretary', lib: true, filter: 'document_process::tests::', testThreads: 1,
+  },
+  'tests/rust/store-coercion.rs': { package: 'ivy-store', test: 'store-coercion' },
+  'tests/rust/store-mechanics.rs': { package: 'ivy-store', test: 'store', filter: 'storage_mechanics::', testThreads: 1 },
+  'tests/rust/error-outcome.rs': { package: 'ivy-contracts', test: 'error-outcome' },
+  'tests/rust/sdk-error-outcome.rs': { package: 'ivy-sdk', test: 'sdk-error-outcome' },
+  'tests/rust/cli-error-outcome.rs': { package: 'ivy-cli', test: 'cli-error-outcome' },
+  'tests/rust/host-reset-storage.rs': { package: 'ivy-host-executor', test: 'host-reset-storage' },
+  'tests/rust/host-executor-service.rs': { package: 'ivy-host-executor', test: 'host-executor-service' },
+  'tests/rust/sdk-native-http.rs': { package: 'ivy-sdk', lib: true },
+  'tests/rust/sdk-native-http-config.rs': { package: 'ivy-sdk', lib: true, filter: 'native_http_config_tests::', testThreads: 1 },
+  'tests/rust/sdk-fetch-response.rs': { package: 'ivy-sdk', test: 'sdk-fetch-response' },
+  'tests/rust/sdk-fetch-credentials.rs': { package: 'ivy-sdk', test: 'sdk-fetch-credentials' },
+  'tests/rust/sdk-collation.rs': { package: 'ivy-sdk', test: 'sdk-collation' },
+  'tests/rust/phone_sip_tls.rs': { package: 'ivy-phone-bridge', lib: true },
+  'tests/rust/agent-projects.rs': {
+    package: 'ivy-agent-manager', test: 'agent-projects',
+    prerequisites: [{ platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-job' }],
+  },
+  'tests/rust/chat-notices.rs': { package: 'ivy-chat-bridge', test: 'chat-notices' },
+  'tests/rust/chat-result-text.rs': { package: 'ivy-chat-bridge', test: 'chat-result-text' },
+  'tests/rust/chat-collection-reads.rs': { package: 'ivy-chat-bridge', test: 'chat-collection-reads' },
+  'tests/rust/chat-evidence-bytes.rs': { package: 'ivy-chat-bridge', test: 'chat-evidence-bytes' },
   'tests/rust/contracts.rs': { package: 'ivy-contracts', test: 'contracts' },
   'tests/rust/hash.rs': { package: 'ivy-contracts', test: 'hash' },
   'tests/rust/json-depth.rs': { package: 'ivy-contracts', test: 'json-depth' },
   'tests/rust/schema.rs': { package: 'ivy-contracts', test: 'schema' },
+  'tests/rust/schema-runtime.rs': { package: 'ivy-contracts', test: 'schema-runtime' },
   'tests/rust/canonical-bundle.rs': { package: 'ivy-contracts', test: 'canonical-bundle' },
   'tests/rust/domain-schemas.rs': { package: 'ivy-contracts', test: 'domain-schemas' },
   'tests/rust/native-contract.rs': { package: 'ivy-contracts', test: 'native-contract' },
@@ -140,6 +370,7 @@ export const rustTests = {
   'tests/rust/native-catalog-path.rs': { package: 'ivy-contracts', test: 'native-catalog-path' },
   'tests/rust/json-coercion.rs': { package: 'ivy-contracts', test: 'json-coercion' },
   'tests/rust/cli-publish-ui.rs': { package: 'ivy-cli', test: 'cli-publish-ui' },
+  'tests/rust/cli-reset-ui.rs': { package: 'ivy-cli', test: 'cli-reset-ui' },
   'tests/rust/cli-arguments.rs': { package: 'ivy-cli', test: 'cli-arguments' },
   'tests/rust/number-string.rs': { package: 'ivy-contracts', test: 'number-string' },
   'tests/rust/ui-route.rs': { package: 'ivy-contracts', test: 'ui-route' },
@@ -149,16 +380,32 @@ export const rustTests = {
   'tests/rust/sdk-operation-ids.rs': { package: 'ivy-sdk', test: 'sdk-operation-ids' },
   'tests/rust/sdk-native.rs': { package: 'ivy-sdk', test: 'sdk-native' },
   'tests/rust/sdk-native-owner.rs': { package: 'ivy-sdk', test: 'sdk-native-owner' },
+  'tests/rust/sdk-native-callback-errors.rs': { package: 'ivy-sdk', test: 'sdk-native-owner', filter: 'callback_error_bridge::', testThreads: 1 },
+  'tests/rust/sdk-native-plan.rs': { package: 'ivy-sdk', test: 'sdk-native-plan' },
   'tests/rust/sdk-consumers.rs': { package: 'ivy-sdk', test: 'sdk-consumers' },
   'tests/rust/sdk-provider.rs': { package: 'ivy-sdk', test: 'sdk-provider' },
+  'tests/rust/sdk-optional-rpc.rs': { package: 'ivy-sdk', test: 'sdk-optional-rpc' },
   'tests/rust/sdk-native-project.rs': { package: 'ivy-sdk', test: 'sdk-native-project' },
   'tests/rust/sdk-native-discovery.rs': { package: 'ivy-sdk', test: 'sdk-native-discovery' },
   'tests/rust/sdk-date-parse.rs': { package: 'ivy-sdk', test: 'sdk-date-parse' },
-  'tests/secretary-rust/delivery.rs': { package: 'ivy-secretary', test: 'delivery' },
+  'tests/secretary-rust/delivery.rs': {
+    package: 'ivy-secretary', test: 'delivery',
+    prerequisites: [{ platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-job' }],
+  },
   'tests/rust/sdk-native-observations.rs': { package: 'ivy-sdk', test: 'sdk-native-observations' },
   'tests/rust/sdk-native-turn-contents.rs': { package: 'ivy-sdk', test: 'sdk-native-turn-contents' },
   'tests/rust/host-scheduler.rs': { package: 'ivy-host-runtime', test: 'host-scheduler' },
   'tests/rust/host-build-identity.rs': { package: 'ivy-host-runtime', test: 'host-build-identity' },
+  'tests/rust/host-preparation-files.rs': { package: 'ivy-host-runtime', test: 'host-preparation-files' },
+  'tests/rust/host-protected-config.rs': { package: 'ivy-host-runtime', test: 'host-protected-config' },
+  'tests/rust/host-preparation-links.rs': { package: 'ivy-host-runtime', test: 'host-preparation-links' },
+  'tests/rust/host-portable-dependencies.rs': { package: 'ivy-host-runtime', test: 'host-portable-dependencies' },
+  'tests/rust/host-native-paths.rs': { package: 'ivy-host-runtime', test: 'host-native-paths' },
+  'tests/rust/host-executor-entry.rs': {
+    package: 'ivy-host-executor', test: 'host-executor-entry',
+    prerequisites: [{ package: 'ivy-host-runtime', bin: 'ivy-job', platform: 'win32' }],
+  },
+  'tests/rust/host-storage-space-cases.rs': { package: 'ivy-host-runtime', test: 'host-storage-space' },
   'tests/rust/host-paths.rs': { package: 'ivy-host-runtime', test: 'host-paths' },
   'tests/rust/host-windows-arguments.rs': { package: 'ivy-host-runtime', test: 'host-windows-arguments' },
   'tests/rust/host-process-output.rs': { package: 'ivy-host-runtime', test: 'host-process-output' },
@@ -167,21 +414,34 @@ export const rustTests = {
   'tests/rust/host-package-requirements.rs': { package: 'ivy-host-runtime', test: 'host-package-requirements' },
   'tests/rust/host-defaults.rs': { package: 'ivy-host-runtime', test: 'host-defaults' },
   'tests/rust/host-logs.rs': { package: 'ivy-host-runtime', test: 'host-logs' },
+  'tests/rust/agent-claude.rs': { package: 'ivy-agent-manager', test: 'agent-claude' },
+  'tests/rust/agent-claude-adapter.rs': { package: 'ivy-agent-manager', test: 'agent-claude-adapter' },
+  'tests/rust/agent-native-backup-paths.rs': { package: 'ivy-agent-manager', test: 'agent-native-backup-paths' },
+  'tests/rust/agent-skills-files.rs': { package: 'ivy-agent-manager', test: 'agent-skills-files', originalBackend: 'agent-manager' },
+  'tests/rust/agent-offline-import.rs': { package: 'ivy-agent-manager', test: 'agent-offline-import', originalBackend: 'agent-manager' },
   'tests/rust/agent-state.rs': { package: 'ivy-agent-manager', test: 'agent-state' },
   'tests/rust/agent-notifications.rs': { package: 'ivy-agent-manager', test: 'agent-notifications' },
   'tests/rust/agent-interactions.rs': {
     package: 'ivy-agent-manager', test: 'agent-interactions',
     prerequisites: [{ platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-job' }],
   },
-  'tests/rust/agent-instructions.rs': { package: 'ivy-agent-manager', test: 'agent-instructions' },
+  'tests/rust/agent-instructions.rs': { package: 'ivy-agent-manager', test: 'agent-instructions', originalBackend: 'agent-manager' },
+  'tests/rust/agent-native-restore.rs': { package: 'ivy-agent-manager', test: 'agent-native-restore', originalBackend: 'agent-manager' },
   'tests/rust/service-manager-policy.rs': { package: 'ivy-service-manager', test: 'service-manager-policy' },
   'tests/rust/service-manager-data.rs': { package: 'ivy-service-manager', test: 'service-manager-data' },
   'tests/rust/service-manager-shutdown.rs': { package: 'ivy-service-manager', test: 'service-manager-shutdown' },
   'tests/rust/service-manager-stop.rs': {
     package: 'ivy-service-manager', test: 'service-manager-stop',
+    prerequisites: [{ platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-job' }, { platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-health' }],
+  },
+  'tests/rust/chat-queue.rs': { package: 'ivy-chat-bridge', test: 'chat-queue' },
+  'tests/rust/chat-main-context.rs': { package: 'ivy-chat-bridge', test: 'chat-main-context' },
+  'tests/rust/chat-outbox.rs': { package: 'ivy-chat-bridge', test: 'chat-outbox' },
+  'tests/rust/chat-queries.rs': { package: 'ivy-chat-bridge', test: 'chat-queries' },
+  'tests/rust/chat-storage.rs': {
+    package: 'ivy-chat-bridge', test: 'chat-storage',
     prerequisites: [{ platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-job' }],
   },
-  'tests/rust/chat-storage.rs': { package: 'ivy-chat-bridge', test: 'chat-storage' },
   'tests/rust/chat-audio.rs': { package: 'ivy-chat-bridge', test: 'chat-audio' },
   'tests/rust/chat-output.rs': { package: 'ivy-chat-bridge', test: 'chat-output' },
   'tests/rust/chat-identity.rs': { package: 'ivy-chat-bridge', test: 'chat-identity' },
@@ -197,8 +457,18 @@ export const rustTests = {
   'tests/rust/dashboards-png.rs': { package: 'ivy-dashboards', test: 'dashboards-png' },
   'tests/rust/dashboards-document.rs': { package: 'ivy-dashboards', test: 'dashboards-document' },
   'tests/rust/dashboards-renderer.rs': { package: 'ivy-dashboards', test: 'dashboards-renderer' },
+  'tests/rust/hive_push_native.rs': { package: 'ivy-hive', test: 'hive-push-native' },
+  'tests/rust/hive_push_profile.rs': { package: 'ivy-hive', test: 'hive-push-profile' },
+  'tests/rust/hive_package_ui.rs': { package: 'ivy-hive', test: 'hive-package-ui' },
+  'tests/rust/hive_http.rs': { package: 'ivy-hive', test: 'hive-http' },
+  'tests/rust/hive_network.rs': { package: 'ivy-hive', test: 'hive-network' },
+  'tests/rust/hive_dispatch_gate.rs': { package: 'ivy-hive', test: 'hive-network', filter: 'dispatch_gate::', testThreads: 1 },
+  'tests/rust/hive_offline_backup.rs': { package: 'ivy-hive', test: 'hive-offline-backup' },
   'tests/rust/hive_storage_worker.rs': { package: 'ivy-hive', test: 'hive-storage-worker' },
-  'tests/rust/hive_worker_client.rs': { package: 'ivy-hive', test: 'hive-worker-client' },
+  'tests/rust/hive_worker_client.rs': {
+    package: 'ivy-hive', test: 'hive-worker-client',
+    prerequisites: [{ platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-job' }],
+  },
   'tests/rust/phone_media.rs': { package: 'ivy-phone-bridge', test: 'phone_media' },
   'tests/rust/phone_diagnostics.rs': { package: 'ivy-phone-bridge', test: 'phone_diagnostics' },
   'tests/rust/phone_native_rpc.rs': { package: 'ivy-phone-bridge', test: 'phone_native_rpc' },
@@ -211,6 +481,7 @@ export const rustTests = {
   'tests/rust/task-board-operations.rs': { package: 'ivy-task-board', test: 'task-board-operations' },
   'tests/rust/task-board-blobs.rs': { package: 'ivy-task-board', test: 'task-board-blobs' },
   'tests/rust/task-board-output.rs': { package: 'ivy-task-board', test: 'task-board-output' },
+  'tests/rust/task-board-host-runtime.rs': { package: 'ivy-task-board', test: 'task-board-host-runtime' },
   'tests/rust/chat-native-driver.rs': { package: 'ivy-chat-bridge', test: 'chat-native-driver' },
   'tests/rust/chat-registry.rs': { package: 'ivy-chat-bridge', test: 'chat-registry' },
   'tests/rust/chat-input-media.rs': { package: 'ivy-chat-bridge', test: 'chat-input-media' },

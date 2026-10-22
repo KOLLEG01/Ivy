@@ -1,7 +1,6 @@
 //! Reconcile the Voice admission attached to a confirmed inbox notice.
 use crate::{
     assignment_voice::{ForwardedVoiceOutcome, forwarded_voice_outcome, voice_prompt},
-    inbox_evidence::truthy,
     notices::{SecretaryNotices, changed, field, is, need, text},
 };
 use ivy_contracts::{IvyJson, IvyResult};
@@ -16,13 +15,13 @@ impl SecretaryNotices<'_, '_, '_> {
         let decision = field(item.required("value")?, "decision");
         let escalation = field(field(decision, "policy"), "voiceEscalation");
         let voice = field(notice, "voice");
-        if !truthy(voice) || is(voice, "state", "confirmed") {
+        if (voice).is_null() || is(voice, "state", "confirmed") {
             return Ok(());
         }
         need(
             is(field(decision, "assessment"), "notification", "voice")
                 && is(field(decision, "assessment"), "urgency", "critical")
-                && truthy(escalation),
+                && !(escalation).is_null(),
             "secretary_voice_mismatch",
             "Voice escalation requires the original critical decision and configured target.",
         )?;
@@ -81,7 +80,7 @@ impl SecretaryNotices<'_, '_, '_> {
             is(&node, "serviceName", "phone-bridge")
                 && ["connected", "synced", "ready"]
                     .iter()
-                    .all(|key| truthy(field(&node, key))),
+                    .all(|key| field(&node, key) == &IvyJson::Bool(true)),
             "secretary_voice_unavailable",
             "The configured Phone owner is not ready.",
         )?;
@@ -102,7 +101,7 @@ impl SecretaryNotices<'_, '_, '_> {
         )?;
         let mut call_id = field(voice, "callId").clone();
         let prompt = IvyJson::String(voice_prompt(&text(notice, "text")?));
-        if !truthy(&call_id) {
+        if (&call_id).is_null() {
             if !automatic_notifications_allowed(
                 client,
                 self.engine.clock.utc_millis(),
@@ -131,7 +130,7 @@ impl SecretaryNotices<'_, '_, '_> {
                 .cloned()
                 .unwrap_or(IvyJson::Null);
             need(
-                truthy(&call_id),
+                !(&call_id).is_null(),
                 "secretary_voice_unresolved",
                 "PhoneBridge returned no original call identity.",
             )?;
@@ -149,7 +148,7 @@ impl SecretaryNotices<'_, '_, '_> {
                 )
                 .await?;
                 need(
-                    truthy(&forwarded),
+                    !(&forwarded).is_null(),
                     "secretary_voice_unresolved",
                     "PhoneBridge returned no forwarded request outcome.",
                 )?;
@@ -203,7 +202,7 @@ impl SecretaryNotices<'_, '_, '_> {
             ToolCallOptions::default(),
         )
         .await?;
-        if truthy(&forwarded) {
+        if !(&forwarded).is_null() {
             if forwarded_voice_outcome(
                 &forwarded,
                 &call_id,
@@ -222,7 +221,7 @@ impl SecretaryNotices<'_, '_, '_> {
                 ToolCallOptions::default(),
             )
             .await?;
-            if !truthy(&dial) || is(&dial, "phase", "submitted") {
+            if (&dial).is_null() || is(&dial, "phase", "submitted") {
                 return Ok(());
             }
             let receipt = field(&dial, "receipt");
@@ -245,7 +244,7 @@ impl SecretaryNotices<'_, '_, '_> {
                 ToolCallOptions::default(),
             )
             .await?;
-            if !truthy(&prompted) || is(&prompted, "phase", "submitted") {
+            if (&prompted).is_null() || is(&prompted, "phase", "submitted") {
                 return Ok(());
             }
             let receipt = field(&prompted, "receipt");

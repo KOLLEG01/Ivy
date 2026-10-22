@@ -6,6 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+qualification-live-retirement = []
+
+[[test]]
+name = "host-actions"
+path = "../../../tests/rust/host-actions.rs"
+
 [[test]]
 name = "host-scheduler"
 path = "../../../tests/rust/host-scheduler.rs"
@@ -13,6 +20,14 @@ path = "../../../tests/rust/host-scheduler.rs"
 [[test]]
 name = "host-paths"
 path = "../../../tests/rust/host-paths.rs"
+
+[[test]]
+name = "host-storage-space"
+path = "../../../tests/rust/host-storage-space-cases.rs"
+
+[[test]]
+name = "host-native-paths"
+path = "../../../tests/rust/host-native-paths.rs"
 
 [[test]]
 name = "host-windows-arguments"
@@ -43,13 +58,18 @@ name = "host-logs"
 path = "../../../tests/rust/host-logs.rs"
 
 [dependencies]
+async-compression.workspace = true
+base64.workspace = true
+reqwest.workspace = true
+flate2.workspace = true
+tar.workspace = true
 ivy-contracts.workspace = true
 ivy-store.workspace = true
 ivy-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["io"] }
 tokio-tungstenite.workspace = true
 uuid.workspace = true
 chrono.workspace = true
@@ -57,12 +77,8 @@ sha2.workspace = true
 url.workspace = true
 futures-util.workspace = true
 
-[[test]]
-name = "host-protected-config"
-path = "../../../tests/rust/host-protected-config.rs"
-
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_Storage_FileSystem"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_Storage_FileSystem"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -70,3 +86,23 @@ libc.workspace = true
 [[test]]
 name = "host-build-identity"
 path = "../../../tests/rust/host-build-identity.rs"
+
+[[test]]
+name = "host-preparation-files"
+path = "../../../tests/rust/host-preparation-files.rs"
+
+[[test]]
+name = "host-protected-config"
+path = "../../../tests/rust/host-protected-config.rs"
+
+[[test]]
+name = "host-preparation-links"
+path = "../../../tests/rust/host-preparation-links.rs"
+
+[[test]]
+name = "host-portable-dependencies"
+path = "../../../tests/rust/host-portable-dependencies.rs"
+
+[[test]]
+name = "host-windows-process-inspection"
+path = "../../../tests/rust/host-windows-process-inspection.rs"

@@ -1,15 +1,15 @@
 //! Original bounded video policy. OS process ownership remains a required Host binding.
 use crate::{
-    local_files::{native, safe_directory, same_path},
+    local_files::safe_directory,
     media_input::{self, AcquiredMediaPreparer, PrepareFuture, Prepared, REQUEST_BYTES, Source},
     video_schema,
 };
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, Outcome,
     hash::digest,
-    json::{canonical, number_from_string, parse, try_js_string},
+    json::{canonical, parse},
 };
-use ivy_host_runtime::{filesystem, node_path, paths};
+use ivy_host_runtime::filesystem;
 use std::{
     collections::{BTreeMap, VecDeque},
     ffi::OsString,
@@ -61,19 +61,13 @@ fn unavailable(source: &Source, code: &str) -> Prepared {
 }
 fn number(value: Option<&IvyJson>) -> f64 {
     match value {
-        None => f64::NAN,
-        Some(IvyJson::Number(n)) => *n,
-        Some(IvyJson::Null) => 0.0,
-        Some(IvyJson::Bool(b)) => {
-            if *b {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        Some(v) => try_js_string(v)
-            .map(|s| number_from_string(&s))
+        Some(IvyJson::Number(number)) => *number,
+        Some(IvyJson::String(text)) => text
+            .to_utf8()
+            .ok()
+            .and_then(|text| text.parse().ok())
             .unwrap_or(f64::NAN),
+        _ => f64::NAN,
     }
 }
 fn nonnull(value: Option<&IvyJson>) -> Option<&IvyJson> {
@@ -84,37 +78,23 @@ fn object(value: &IvyJson) -> IvyResult<&IvyJson> {
     Ok(value)
 }
 fn path(value: &IvyJson) -> IvyResult<PathBuf> {
-    Ok(node_path::to_native(
-        value
-            .required("path")?
-            .as_js_string()
-            .ok_or_else(IvyError::internal)?,
-    ))
+    Ok(value.required("path")?.as_str()?.into())
 }
 async fn executable(value: &IvyJson) -> IvyResult<()> {
     let selected = path(value)?;
-    check(
-        node_path::is_absolute(
-            node_path::Style::native(),
-            &node_path::from_native(&selected),
-        ),
-        "media_video_decoder_invalid",
-    )?;
-    let metadata = tokio::fs::symlink_metadata(native(&selected))
+    check(selected.is_absolute(), "media_video_decoder_invalid")?;
+    safe_directory(selected.parent().ok_or_else(IvyError::internal)?)?;
+    let metadata = tokio::fs::symlink_metadata(&selected)
         .await
         .map_err(|_| IvyError::internal())?;
     check(
         metadata.is_file()
             && !metadata.file_type().is_symlink()
             && metadata.len() > 0
-            && metadata.len() <= 256 * 1024 * 1024
-            && same_path(
-                &paths::realpath(&selected).map_err(|_| IvyError::internal())?,
-                &selected,
-            )?,
+            && metadata.len() <= 256 * 1024 * 1024,
         "media_video_decoder_invalid",
     )?;
-    let bytes = tokio::fs::read(native(&selected))
+    let bytes = tokio::fs::read(&selected)
         .await
         .map_err(|_| IvyError::internal())?;
     check(
@@ -174,55 +154,8 @@ fn wave(pcm: &[u8]) -> IvyResult<Vec<u8>> {
     value.extend_from_slice(pcm);
     Ok(value)
 }
-/// Number.toPrecision(15) for the positive FPS ratio, including exact binary
-/// midpoint ties (ECMAScript rounds up, Rust's formatter rounds to even).
 fn fps(value: f64) -> String {
-    if !value.is_finite() {
-        return "Infinity".into();
-    }
-    let rendered = format!("{value:.14e}");
-    let (mantissa, exponent) = rendered.split_once('e').unwrap();
-    let mut exponent = exponent.parse::<i32>().unwrap();
-    let mut digits = mantissa.replace('.', "").parse::<u64>().unwrap();
-    let bits = value.to_bits();
-    let m = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
-    let e = ((bits >> 52) & 2047) as i32 - 1023 - 52;
-    let k = exponent - 14;
-    let odd = m >> m.trailing_zeros();
-    if e + 1 - k + m.trailing_zeros() as i32 == 0 {
-        let tie = if k <= 0 {
-            Some(odd)
-        } else {
-            5u64.checked_pow(k as u32)
-                .filter(|p| odd % p == 0)
-                .map(|p| odd / p)
-        };
-        if tie.is_some_and(|v| v % 4 == 1) {
-            digits += 1;
-            if digits == 1_000_000_000_000_000 {
-                digits /= 10;
-                exponent += 1;
-            }
-        }
-    }
-    let digits = format!("{digits:015}");
-    if !(-6..15).contains(&exponent) {
-        format!(
-            "{}.{}e{}{exponent}",
-            &digits[..1],
-            &digits[1..],
-            if exponent >= 0 { "+" } else { "" }
-        )
-    } else if exponent < 0 {
-        format!("0.{}{}", "0".repeat((-exponent - 1) as usize), digits)
-    } else {
-        let at = exponent as usize + 1;
-        if at == 15 {
-            digits
-        } else {
-            format!("{}.{}", &digits[..at], &digits[at..])
-        }
-    }
+    format!("{value:.14}")
 }
 #[derive(Clone)]
 struct Cached {
@@ -256,10 +189,7 @@ impl VideoPreparer {
         commands: Arc<dyn VideoCommands>,
     ) -> IvyResult<Self> {
         video_schema::validate("VideoConfiguration", &configuration)?;
-        check(
-            node_path::is_absolute(node_path::Style::native(), &node_path::from_native(&root)),
-            "media_video_path_invalid",
-        )?;
+        check(root.is_absolute(), "media_video_path_invalid")?;
         let (cancel, _) = watch::channel(false);
         Ok(Self {
             inner: Arc::new(Runtime {
@@ -398,19 +328,8 @@ impl AcquiredMediaPreparer for VideoPreparer {
         Box::pin(self.prepare(source, bytes, maximum))
     }
 }
-enum Failure {
-    Uncoded,
-    Coded(IvyError),
-}
-impl From<IvyError> for Failure {
-    fn from(value: IvyError) -> Self {
-        Self::Coded(value)
-    }
-}
-impl From<std::io::Error> for Failure {
-    fn from(_: std::io::Error) -> Self {
-        Self::Uncoded
-    }
+fn video_io(_: std::io::Error) -> IvyError {
+    IvyError::new("media_video_invalid", "Video decoding I/O failed.")
 }
 impl Runtime {
     async fn command(
@@ -420,9 +339,12 @@ impl Runtime {
         cwd: &Path,
         maximum_bytes: usize,
         timeout_ms: u32,
-    ) -> Result<Vec<u8>, Failure> {
+    ) -> IvyResult<Vec<u8>> {
         if *self.cancel.borrow() {
-            return Err(Failure::Uncoded);
+            return Err(IvyError::new(
+                "media_video_invalid",
+                "Video decoding failed.",
+            ));
         }
         let environment = [
             "SystemRoot",
@@ -453,9 +375,8 @@ impl Runtime {
                 self.cancel.subscribe(),
             )
             .await
-            .map_err(Failure::Coded)
     }
-    async fn temporary(&self) -> Result<PathBuf, Failure> {
+    async fn temporary(&self) -> IvyResult<PathBuf> {
         let root = self.root.clone();
         tokio::task::spawn_blocking(move || {
             let mut builder = std::fs::DirBuilder::new();
@@ -465,13 +386,16 @@ impl Runtime {
                 use std::os::unix::fs::DirBuilderExt;
                 builder.mode(0o700);
             }
-            builder.create(native(&root))?;
+            builder.create(&root).map_err(video_io)?;
             safe_directory(&root)?;
-            let entries = std::fs::read_dir(native(&root))?.collect::<Result<Vec<_>, _>>()?;
+            let entries = std::fs::read_dir(&root)
+                .map_err(video_io)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(video_io)?;
             check(entries.len() < 8, "media_video_scratch_full")?;
             let mut used = 0u64;
             for entry in entries {
-                let kind = entry.file_type()?;
+                let kind = entry.file_type().map_err(video_io)?;
                 let name = entry.file_name();
                 check(
                     kind.is_dir()
@@ -481,11 +405,13 @@ impl Runtime {
                 )?;
                 let directory = root.join(name);
                 safe_directory(&directory)?;
-                let files =
-                    std::fs::read_dir(native(&directory))?.collect::<Result<Vec<_>, _>>()?;
+                let files = std::fs::read_dir(&directory)
+                    .map_err(video_io)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(video_io)?;
                 check(files.len() <= 9, "media_video_scratch_full")?;
                 for file in files {
-                    let metadata = std::fs::symlink_metadata(file.path())?;
+                    let metadata = std::fs::symlink_metadata(file.path()).map_err(video_io)?;
                     check(
                         metadata.is_file() && !metadata.file_type().is_symlink(),
                         "media_video_path_invalid",
@@ -505,22 +431,22 @@ impl Runtime {
                     use std::os::unix::fs::DirBuilderExt;
                     let mut builder = builder;
                     builder.mode(0o700);
-                    match builder.create(native(&path)) {
+                    match builder.create(&path) {
                         Ok(()) => return Ok(path),
                         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                        Err(e) => return Err(Failure::from(e)),
+                        Err(e) => return Err(video_io(e)),
                     }
                 }
                 #[cfg(not(unix))]
-                match builder.create(native(&path)) {
+                match builder.create(&path) {
                     Ok(()) => return Ok(path),
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
-                    Err(e) => return Err(Failure::from(e)),
+                    Err(e) => return Err(video_io(e)),
                 }
             }
         })
         .await
-        .map_err(|_| Failure::Uncoded)?
+        .map_err(|_| IvyError::new("media_video_invalid", "Video decoding failed."))?
     }
     async fn run(&self, source: &Source, bytes: &[u8]) -> IvyResult<Prepared> {
         let Some(format) = video_schema::format(&media_input::mime(source)) else {
@@ -533,21 +459,19 @@ impl Runtime {
             return Ok(unavailable(source, "media_signature_mismatch"));
         }
         let mut directory = None;
-        let result:Result<Prepared,Failure>=async {
-            // Filesystem errors are ordinary original errors; preserve their run
-            // projection as media_video_invalid rather than leaking host details.
-            for name in ["ffmpeg","ffprobe"] {executable(self.configuration.required(name)?).await.map_err(|e|if e.code=="internal_error"{Failure::Uncoded}else{Failure::Coded(e)})?;}
+        let result:IvyResult<Prepared>=async {
+            for name in ["ffmpeg","ffprobe"] {executable(self.configuration.required(name)?).await?;}
             let selected=self.temporary().await?;directory=Some(selected.clone());let input_path=selected.join("source.media");
             let mut options=tokio::fs::OpenOptions::new();options.write(true).create_new(true);
             #[cfg(unix)]{options.mode(0o600);}
             use tokio::io::AsyncWriteExt;
-            let mut file=options.open(native(&input_path)).await?;file.write_all(bytes).await?;drop(file);
+            let mut file=options.open(&input_path).await.map_err(video_io)?;file.write_all(bytes).await.map_err(video_io)?;drop(file);
             let mut input=vec!["-protocol_whitelist".into(),"file".into(),"-f".into(),format.into()];if format=="mov"{input.extend(["-enable_drefs".into(),"0".into()]);}
-            let selected_path=|path:&Path|String::from_utf16_lossy(&node_path::from_native(path).0);
+            let selected_path=|path:&Path|path.to_string_lossy().into_owned();
             let mut args=vec!["-v".into(),"error".into(),"-max_alloc".into(),"67108864".into()];args.extend(input.clone());
             args.extend(["-show_entries".into(),"format=duration,start_time:stream=index,codec_type,width,height,duration,start_time".into(),"-of".into(),"json".into(),selected_path(&input_path)]);
             let probe_bytes=self.command(path(self.configuration.required("ffprobe")?)?,args,&selected,32768,15000).await?;
-            let parsed=parse(&String::from_utf8_lossy(&probe_bytes),usize::MAX).map_err(|_|Failure::Uncoded)?;let probe=object(&parsed)?;
+            let parsed=parse(&String::from_utf8_lossy(&probe_bytes),usize::MAX).map_err(|_|IvyError::new("media_video_invalid", "Video decoding failed."))?;let probe=object(&parsed)?;
             let container=object(probe.get("format").ok_or_else(||IvyError::new("media_video_invalid","Video preparation requires original verified bytes and bounded local decoding."))?)?;
             let duration=number(container.get("duration"));check(duration.is_finite()&&duration>0.0&&duration<=90.0,"media_video_duration_unsupported")?;
             let streams=probe.get("streams").and_then(IvyJson::as_array);check(streams.is_some_and(|s|s.len()<=8),"media_video_streams_unsupported")?;
@@ -560,14 +484,14 @@ impl Runtime {
             let mut common=vec!["-v".into(),"error".into(),"-nostdin".into(),"-xerror".into(),"-max_alloc".into(),"67108864".into(),"-threads".into(),"1".into()];common.extend(input);common.extend(["-i".into(),selected_path(&input_path),"-map_metadata".into(),"-1".into(),"-fflags".into(),"+bitexact".into()]);
             let mut frames_args=common.clone();frames_args.extend(["-map".into(),format!("0:{}",video[0].required("index")?.as_f64().unwrap()),"-an".into(),"-sn".into(),"-dn".into(),"-filter_threads".into(),"1".into(),"-vf".into(),format!("fps=fps={}:start_time=0:round=down,scale=480:480:force_original_aspect_ratio=decrease:force_divisible_by=2",fps(8.0/duration)),"-frames:v".into(),"8".into(),"-c:v".into(),"mjpeg".into(),"-q:v".into(),"3".into(),"-threads".into(),"1".into(),"-flags".into(),"+bitexact".into(),"-f".into(),"image2".into(),selected_path(&selected.join("frame-%02d.jpg"))]);
             self.command(path(self.configuration.required("ffmpeg")?)?,frames_args,&selected,1024,30000).await?;
-            let mut entries=tokio::fs::read_dir(native(&selected)).await?;let mut names=Vec::new();
-            while let Some(entry)=entries.next_entry().await?{let name=entry.file_name().to_string_lossy().into_owned();let b=name.as_bytes();if b.len()==12&&b.starts_with(b"frame-")&&b[6].is_ascii_digit()&&b[7].is_ascii_digit()&&&b[8..]==b".jpg"{names.push(name);}}
+            let mut entries=tokio::fs::read_dir(&selected).await.map_err(video_io)?;let mut names=Vec::new();
+            while let Some(entry)=entries.next_entry().await.map_err(video_io)?{let name=entry.file_name().to_string_lossy().into_owned();let b=name.as_bytes();if b.len()==12&&b.starts_with(b"frame-")&&b[6].is_ascii_digit()&&b[7].is_ascii_digit()&&&b[8..]==b".jpg"{names.push(name);}}
             names.sort();check((1..=8).contains(&names.len()),"media_video_frames_invalid")?;
             let mut frames=Vec::new();let mut parts=Vec::new();
             use base64::{Engine,engine::general_purpose::STANDARD};
-            for (index,name) in names.iter().enumerate(){check(*name==format!("frame-{:02}.jpg",index+1),"media_video_frames_invalid")?;let path=selected.join(name);let metadata=tokio::fs::symlink_metadata(native(&path)).await?;
+            for (index,name) in names.iter().enumerate(){check(*name==format!("frame-{:02}.jpg",index+1),"media_video_frames_invalid")?;let path=selected.join(name);let metadata=tokio::fs::symlink_metadata(&path).await.map_err(video_io)?;
                 check(metadata.is_file()&&!metadata.file_type().is_symlink()&&metadata.len()<=MAXIMUM_FRAME as u64,"media_video_frames_invalid")?;
-                let image=tokio::fs::read(native(&path)).await?;check(image.len()>=4&&image.starts_with(&[255,216])&&image.ends_with(&[255,217]),"media_video_frames_invalid")?;
+                let image=tokio::fs::read(&path).await.map_err(video_io)?;check(image.len()>=4&&image.starts_with(&[255,216])&&image.ends_with(&[255,217]),"media_video_frames_invalid")?;
                 frames.push(IvyJson::object([("inputOffset",IvyJson::Number((index+1)as f64)),("sampleTimeSeconds",IvyJson::Number(index as f64*duration/8.0)),("contentHash",digest(&image).into())]));
                 parts.push(IvyJson::object([("type","image".into()),("url",format!("data:image/jpeg;base64,{}",STANDARD.encode(image)).into())]));
             }
@@ -586,23 +510,19 @@ impl Runtime {
         }.await;
         // An unknown retirement cannot establish the original child-close point.
         // Retain its private scratch instead of deleting possibly active output.
-        let unknown = matches!(&result,Err(Failure::Coded(e))if e.outcome==Outcome::Unknown);
+        let unknown = matches!(&result,Err(error) if error.outcome==Outcome::Unknown);
         if let Some(directory) = directory.filter(|_| !unknown) {
             let root = self.root.clone();
             let actual = tokio::task::spawn_blocking(move || {
-                let actual = paths::realpath(&directory).map_err(|_| IvyError::internal())?;
-                let context = node_path::Context::current().map_err(|_| IvyError::internal())?;
+                safe_directory(&directory)?;
+                let actual = std::fs::canonicalize(&directory).map_err(|_| IvyError::internal())?;
+                let root = std::fs::canonicalize(&root).map_err(|_| IvyError::internal())?;
                 check(
-                    paths::inside(&root, &actual).map_err(|_| IvyError::internal())?
-                        && String::from_utf16_lossy(
-                            &context
-                                .relative(
-                                    &node_path::from_native(&root),
-                                    &node_path::from_native(&actual),
-                                )
-                                .0,
-                        )
-                        .starts_with("video-"),
+                    actual.parent() == Some(root.as_path())
+                        && actual
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|path| path.starts_with("video-")),
                     "media_video_path_invalid",
                 )?;
                 Ok::<PathBuf, IvyError>(actual)
@@ -613,10 +533,8 @@ impl Runtime {
         }
         match result {
             Ok(value) => Ok(value),
-            Err(Failure::Coded(error)) if unknown || *self.cancel.borrow() => Err(error),
-            Err(Failure::Coded(error)) => Ok(unavailable(source, &error.code)),
-            Err(Failure::Uncoded) if *self.cancel.borrow() => Err(IvyError::internal()),
-            Err(Failure::Uncoded) => Ok(unavailable(source, "media_video_invalid")),
+            Err(error) if unknown || *self.cancel.borrow() => Err(error),
+            Err(error) => Ok(unavailable(source, &error.code)),
         }
     }
 }

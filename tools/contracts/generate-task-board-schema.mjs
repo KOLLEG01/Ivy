@@ -235,7 +235,7 @@ defs.NativeUpdateRequest = obj({ action: { const: 'nativeUpdate' }, ...existing,
   obj({ kind: { const: 'unavailable' }, reason: { enum: ['host', 'external_outcome'] }, code: id, detail: str(16384, 1) }),
   obj({ kind: { const: 'cancelUnstarted' } }), obj({ kind: { const: 'retireUnstarted' } }),
 ] } });
-defs.DurableRequest = { oneOf: [ref('ActionRequest'), ref('SchedulerRequest'), ref('NativeUpdateRequest'), ref('ArchiveRequest')] };
+defs.DurableRequest = { anyOf: [ref('ActionRequest'), ref('SchedulerRequest'), ref('NativeUpdateRequest'), ref('ArchiveRequest')] };
 
 defs.NativeLifecycleCall = obj({ key: id,
   owner: obj({ serviceNodeId: id, hostId: id, nativeVersion: id, nativeExecutableHash: hash, catalogHash: hash }),

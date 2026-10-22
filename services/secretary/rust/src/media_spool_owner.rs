@@ -1,7 +1,7 @@
 //! Filesystem admission for the private media journal and its original SQLite owner.
-use crate::local_files::{native, safe_directory};
+use crate::local_files::safe_directory;
 use ivy_contracts::{IvyError, IvyResult};
-use ivy_host_runtime::{filesystem, node_path};
+use ivy_host_runtime::filesystem;
 use ivy_store::{rusqlite::Connection, sqlite};
 use std::{fs, path::Path, time::Duration};
 
@@ -19,25 +19,15 @@ fn private_file(path: &Path) -> IvyResult<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(native(path), fs::Permissions::from_mode(0o600))
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .map_err(|_| IvyError::internal())?;
     }
-    #[cfg(windows)]
-    {
-        // Node chmod(0600) changes Windows' read-only bit, not its DACL.
-        let mut permissions = fs::metadata(native(path))
-            .map_err(|_| IvyError::internal())?
-            .permissions();
-        permissions.set_readonly(false);
-        fs::set_permissions(native(path), permissions).map_err(|_| IvyError::internal())?;
-    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 pub(crate) fn open(root: &Path) -> IvyResult<(Connection, Connection)> {
-    check(
-        node_path::is_absolute(node_path::Style::native(), &node_path::from_native(root)),
-        "media_spool_path_invalid",
-    )?;
+    check(root.is_absolute(), "media_spool_path_invalid")?;
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -45,9 +35,7 @@ pub(crate) fn open(root: &Path) -> IvyResult<(Connection, Connection)> {
         use std::os::unix::fs::DirBuilderExt;
         builder.mode(0o700);
     }
-    builder
-        .create(native(root))
-        .map_err(|_| IvyError::internal())?;
+    builder.create(root).map_err(|_| IvyError::internal())?;
     safe_directory(root)?;
     for name in [
         "owner.sqlite",
@@ -56,7 +44,7 @@ pub(crate) fn open(root: &Path) -> IvyResult<(Connection, Connection)> {
         "media.sqlite-shm",
     ] {
         let path = root.join(name);
-        match fs::symlink_metadata(native(&path)) {
+        match fs::symlink_metadata(&path) {
             Ok(metadata) => check(
                 metadata.is_file()
                     && !metadata.file_type().is_symlink()
@@ -69,7 +57,7 @@ pub(crate) fn open(root: &Path) -> IvyResult<(Connection, Connection)> {
     }
     let owner_path = root.join("owner.sqlite");
     let owner = sqlite::open(
-        &native(&owner_path),
+        &owner_path,
         sqlite::OpenOptions {
             busy_timeout: Duration::ZERO,
             read_only: false,
@@ -92,7 +80,7 @@ pub(crate) fn open(root: &Path) -> IvyResult<(Connection, Connection)> {
     }
     let path = root.join("media.sqlite");
     let db = sqlite::open(
-        &native(&path),
+        &path,
         sqlite::OpenOptions {
             busy_timeout: Duration::from_millis(5000),
             read_only: false,

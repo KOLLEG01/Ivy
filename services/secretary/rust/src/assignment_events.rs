@@ -1,5 +1,4 @@
 //! Durable event effects, historical snapshots, gap rebasing and ACK ordering.
-use crate::assignment_error::{SchedulerFailure, SchedulerResult, untyped};
 use crate::{
     assignment_message::message_channel,
     assignment_scheduler::AssignmentScheduler,
@@ -7,7 +6,7 @@ use crate::{
     inbox_recovery::{RecoveryIssues, RecoveryScan},
     store::Record,
 };
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json, json::try_js_string};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json};
 use ivy_sdk::{
     clock::{date_to_iso, parse_date},
     rpc::RequestOptions,
@@ -18,48 +17,35 @@ pub(crate) struct EventScan {
     pub ready_to_retire: bool,
 }
 
-fn need(ok: bool, code: &str, message: &str) -> SchedulerResult<()> {
+fn need(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
         Ok(())
     } else {
-        Err(IvyError::new(code, message).into())
+        Err(IvyError::new(code, message))
     }
 }
-fn text(value: &IvyJson, key: &str) -> SchedulerResult<JsString> {
+fn text(value: &IvyJson, key: &str) -> IvyResult<JsString> {
     value
         .required(key)?
         .as_js_string()
         .cloned()
-        .ok_or(SchedulerFailure::Uncoded)
+        .ok_or_else(IvyError::internal)
 }
-fn number(value: &IvyJson, key: &str) -> SchedulerResult<f64> {
-    value
-        .required(key)?
-        .as_f64()
-        .ok_or(SchedulerFailure::Uncoded)
-}
-fn joined(parts: &[IvyJson]) -> SchedulerResult<JsString> {
-    let mut result = JsString::default();
-    for part in parts {
-        result.0.extend(coerce_string(part)?.0);
-    }
-    Ok(result)
+fn number(value: &IvyJson, key: &str) -> IvyResult<f64> {
+    value.required(key)?.as_f64().ok_or_else(IvyError::internal)
 }
 impl AssignmentScheduler<'_, '_, '_> {
-    pub(crate) fn event_matches_inner(
-        &self,
-        assignment: &IvyJson,
-        event: &IvyJson,
-    ) -> SchedulerResult<bool> {
+    pub fn event_matches(&self, assignment: &IvyJson, event: &IvyJson) -> IvyResult<bool> {
         let trigger = assignment.required("trigger")?;
-        let own_source = joined(&[
-            "principal:".into(),
+        let own_source: JsString = format!(
+            "principal:{}",
             self.evidence
                 .settings
                 .required("identity")?
                 .required("principalId")?
-                .clone(),
-        ])?;
+                .as_str()?
+        )
+        .into();
         let object_event = event.get("topic") == Some(&"hive.object.changed".into());
         let own = event.get("source") == Some(&IvyJson::String(own_source));
         let payload = event.get("payload");
@@ -84,12 +70,7 @@ impl AssignmentScheduler<'_, '_, '_> {
             return Ok(false);
         }
         if let Some(service_id) = trigger.get("sourceServiceNodeId").filter(|v| !v.is_null()) {
-            if event.get("source")
-                != Some(&IvyJson::String(joined(&[
-                    "service:".into(),
-                    service_id.clone(),
-                ])?))
-            {
+            if event.get("source") != Some(&format!("service:{}", service_id.as_str()?).into()) {
                 return Ok(false);
             }
         }
@@ -99,11 +80,11 @@ impl AssignmentScheduler<'_, '_, '_> {
                 .and_then(|p| p.get("kind"))
                 == trigger.get("eventKind"))
     }
-    pub(crate) async fn revision_at_inner(
+    pub async fn revision_at(
         &self,
         assignment: &IvyJson,
         at: &JsString,
-    ) -> SchedulerResult<Option<IvyJson>> {
+    ) -> IvyResult<Option<IvyJson>> {
         let pin = assignment.required("pin")?;
         let latest = number(pin, "revision")? as i64;
         for revision in (1..=latest).rev() {
@@ -125,7 +106,7 @@ impl AssignmentScheduler<'_, '_, '_> {
                 .get("writtenAt")
                 .filter(|v| !v.is_null())
                 .unwrap_or(candidate.required("value")?.required("updatedAt")?);
-            if parse_date(written_at.as_js_string().ok_or(SchedulerFailure::Uncoded)?)
+            if parse_date(written_at.as_js_string().ok_or_else(IvyError::internal)?)
                 <= parse_date(at)
             {
                 return Ok(Some(candidate));
@@ -139,7 +120,7 @@ impl AssignmentScheduler<'_, '_, '_> {
         configuration: &IvyJson,
         budget: usize,
         issues: &dyn RecoveryIssues,
-    ) -> SchedulerResult<bool> {
+    ) -> IvyResult<bool> {
         let value = assignment.required("value")?;
         let progress_name = JsString::from(format!(
             "event-{}",
@@ -170,7 +151,7 @@ impl AssignmentScheduler<'_, '_, '_> {
         budget: usize,
         issues: &dyn RecoveryIssues,
         mut progress: Option<IvyJson>,
-    ) -> SchedulerResult<EventScan> {
+    ) -> IvyResult<EventScan> {
         let store = self.evidence.store;
         let value = assignment.required("value")?;
         let key = text(value, "assignmentId")?;
@@ -198,7 +179,7 @@ impl AssignmentScheduler<'_, '_, '_> {
             let items = batch
                 .required("items")?
                 .as_array()
-                .ok_or(SchedulerFailure::Uncoded)?;
+                .ok_or_else(IvyError::internal)?;
             let gap = batch.get("gap").filter(|v| !v.is_null());
             if progress.is_none() {
                 need(
@@ -220,10 +201,7 @@ impl AssignmentScheduler<'_, '_, '_> {
                     ("needsRebase", false.into()),
                     (
                         "updatedAt",
-                        IvyJson::String(
-                            date_to_iso(self.clock.utc_millis() as f64)
-                                .map_err(SchedulerFailure::uncoded)?,
-                        ),
+                        IvyJson::String(date_to_iso(self.clock.utc_millis() as f64)?),
                     ),
                 ]);
                 let operation = self
@@ -309,7 +287,7 @@ impl AssignmentScheduler<'_, '_, '_> {
                 }
                 if next.get("needsRebase") == Some(&IvyJson::Bool(true)) && !items.is_empty() {
                     let rebased = self
-                        .revision_at_inner(assignment, &text(&items[0], "occurredAt")?)
+                        .revision_at(assignment, &text(&items[0], "occurredAt")?)
                         .await?;
                     if let Some(gap) =
                         store
@@ -349,7 +327,7 @@ impl AssignmentScheduler<'_, '_, '_> {
                     if next.get("active") == Some(&IvyJson::Bool(true))
                         && next.required("assignmentSnapshot")?.get("enabled")
                             == Some(&IvyJson::Bool(true))
-                        && self.event_matches_inner(next.required("assignmentSnapshot")?, event)?
+                        && self.event_matches(next.required("assignmentSnapshot")?, event)?
                     {
                         let selected = IvyJson::object([
                             ("pin", next.required("assignment")?.clone()),
@@ -358,25 +336,25 @@ impl AssignmentScheduler<'_, '_, '_> {
                         if selected.required("value")?.required("trigger")?.get("kind")
                             == Some(&"object-change".into())
                         {
-                            self.collect_object_event_inner(&selected, event).await?;
+                            self.collect_object_event(&selected, event).await?;
                         } else if text(event, "source")?
                             .0
                             .starts_with(&JsString::from("service:").0)
                             && event.get("payload").and_then(message_channel).is_some()
                         {
-                            self.collect_message_event_inner(&selected, event, configuration)
+                            self.collect_message_event(&selected, event, configuration)
                                 .await?;
                         } else {
                             let trigger = IvyJson::object([
                                 ("kind", "event".into()),
                                 (
                                     "key",
-                                    IvyJson::String(joined(&[
-                                        "event:".into(),
-                                        event.required("sequence")?.clone(),
-                                        ":".into(),
-                                        event.required("mutationId")?.clone(),
-                                    ])?),
+                                    format!(
+                                        "event:{}:{}",
+                                        number(event, "sequence")?,
+                                        event.required("mutationId")?.as_str()?
+                                    )
+                                    .into(),
                                 ),
                                 ("occurredAt", event.required("occurredAt")?.clone()),
                                 (
@@ -446,10 +424,7 @@ impl AssignmentScheduler<'_, '_, '_> {
                     );
                     next.insert(
                         "updatedAt",
-                        IvyJson::String(
-                            date_to_iso(self.clock.utc_millis() as f64)
-                                .map_err(SchedulerFailure::uncoded)?,
-                        ),
+                        IvyJson::String(date_to_iso(self.clock.utc_millis() as f64)?),
                     );
                     progress = Some(store.amend(saved, Record::EventProgress, &next).await?);
                 }
@@ -475,24 +450,7 @@ impl AssignmentScheduler<'_, '_, '_> {
     }
 }
 
-fn coerce_string(value: &IvyJson) -> SchedulerResult<JsString> {
-    untyped(try_js_string(value))
-}
-
 impl AssignmentScheduler<'_, '_, '_> {
-    pub fn event_matches(&self, assignment: &IvyJson, event: &IvyJson) -> IvyResult<bool> {
-        self.event_matches_inner(assignment, event)
-            .map_err(IvyError::from)
-    }
-    pub async fn revision_at(
-        &self,
-        assignment: &IvyJson,
-        at: &JsString,
-    ) -> IvyResult<Option<IvyJson>> {
-        self.revision_at_inner(assignment, at)
-            .await
-            .map_err(IvyError::from)
-    }
     pub async fn events(
         &self,
         assignment: &IvyJson,
@@ -507,6 +465,5 @@ impl AssignmentScheduler<'_, '_, '_> {
             &std::cell::RefCell::new(issues),
         )
         .await
-        .map_err(IvyError::from)
     }
 }

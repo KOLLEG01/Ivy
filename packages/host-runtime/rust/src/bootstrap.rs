@@ -7,6 +7,131 @@ use crate::{
     node_path::{self, Context, Style},
 };
 use ivy_contracts::{JsString, core_schema::validate_host, hash::hash_json, json};
+use std::{fs, path::Path};
+mod installation;
+pub(crate) use installation::BootstrapInstallation;
+
+fn fs_path(path: &Path) -> std::path::PathBuf {
+    node_path::filesystem_path(&node_path::from_native(path))
+}
+
+/// Selected authority precedes immutable history. Pending atomic writes are
+/// retained but never interpreted; stale contract/hash/installation plans have
+/// no execution authority. Other I/O and syntax errors remain failures.
+pub async fn retained_bootstrap_plans(config: IvyJson) -> IvyResult<Vec<IvyJson>> {
+    tokio::task::spawn_blocking(move || {
+        let identity = installation_identity(&config)?;
+        let runtime = crate::config::path_value(config.required("runtimeRoot")?)?;
+        let selected = runtime.join("bootstrap").join(format!("{identity}.json"));
+        let root = runtime.join("bootstrap-plans");
+        let mut entries = match fs::read_dir(fs_path(&root)) {
+            Ok(entries) => entries.collect::<Result<Vec<_>, _>>().map_err(|_| IvyError::internal())?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(_) => return Err(IvyError::internal()),
+        };
+        let accepted = |name: &str| name.len() == 69 && name.ends_with(".json")
+            && name.as_bytes()[..64].iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b));
+        let pending = |name: &str| name.len() == 110 && name.ends_with(".tmp")
+            && name.as_bytes().get(69) == Some(&b'.') && accepted(&name[..69])
+            && name.as_bytes()[70..106].iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b) || *b == b'-');
+        // Name admission is ASCII, so rejecting non-ASCII before slicing also
+        // preserves Node's regexp behavior for malformed native filename bytes.
+        require(entries.len() <= 1000 && entries.iter().all(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str().unwrap_or("");
+            name.is_ascii() && entry.file_type().is_ok_and(|kind| kind.is_file())
+                && (accepted(name) || pending(name))
+        }), "storage_invalid", "Invalid retained bootstrap plan set.")?;
+        entries.sort_by_key(|entry| entry.file_name());
+        let mut paths = Vec::new();
+        match fs::symlink_metadata(fs_path(&selected)) {
+            Ok(_) => paths.push(selected.clone()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(_) => return Err(IvyError::internal()),
+        }
+        for entry in entries {
+            if entry.file_name().to_str().is_some_and(accepted) {
+                paths.push(root.join(entry.file_name()));
+            }
+        }
+        let mut plans = Vec::new();
+        let mut hashes = std::collections::BTreeSet::new();
+        for path in paths {
+            let read = || -> IvyResult<Option<(String, IvyJson)>> {
+                let metadata = fs::symlink_metadata(fs_path(&path)).map_err(|_| IvyError::internal())?;
+                require(metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= 65536,
+                    "storage_invalid", "Retained bootstrap plan is not a bounded regular file.")?;
+                let plan = crate::config::read_json(&path, crate::config::CONFIGURATION_BYTES)
+                    .map_err(crate::config::FileError::error)?;
+                validate_host("BootstrapPlan", &plan)?;
+                let hash = hash_json(&plan)?;
+                require(path == selected || path == root.join(format!("{}.json", &hash[7..])),
+                    "storage_invalid", "Retained bootstrap plan hash changed.")?;
+                let same = plan.get("installationId") == Some(&identity.clone().into())
+                    && plan.get("hostId") == config.get("hostId") && plan.get("runtimeRoot") == config.get("runtimeRoot");
+                require(path != selected || same, "storage_invalid", "Selected bootstrap plan belongs to a different installation.")?;
+                if !same { return Ok(None); }
+                if let Some(scope) = plan.get("linuxResources").filter(|v| truthy(v)) {
+                    linux_resources::validate_linux_resource_scope(scope, Some(&identity))?;
+                }
+                Ok(Some((hash, plan)))
+            };
+            match read() {
+                Ok(Some((hash, plan))) => { if hashes.insert(hash) { plans.push(plan); } },
+                Ok(_) => {},
+                Err(error) if ["invalid_arguments", "storage_invalid", "artifact_changed"].iter().any(|code| error.code == *code) => {},
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(plans)
+    }).await.map_err(|_| IvyError::internal())?
+}
+pub async fn retain_bootstrap_plan(plan: &IvyJson, job_launcher: std::path::PathBuf) -> IvyResult<()> {
+    validate_host("BootstrapPlan", plan)?;
+    if let Some(scope) = plan.get("linuxResources").filter(|value| truthy(value)) {
+        linux_resources::validate_linux_resource_scope(scope, Some(&plan.required("installationId")?.as_str()?))?;
+    }
+    let root = crate::config::path_value(plan.required("runtimeRoot")?)?.join("bootstrap-plans");
+    let path = root.join(format!("{}.json", &hash_json(plan)?[7..]));
+    if !crate::backup_files::exists(&root).await? { crate::backup_files::private_directory(root, job_launcher).await?; }
+    if crate::backup_files::exists(&path).await? {
+        require(hash_json(&crate::config::json_file(path, crate::config::CONFIGURATION_BYTES).await?)? == hash_json(plan)?, "storage_invalid", "Retained bootstrap plan changed.")
+    } else { crate::config::atomic_json(path, plan.clone()).await }
+}
+
+/// Publish only while all bootstrap owners are stopped. Each protected launch
+/// file selects the same exact release as its OS definition.
+pub async fn publish_bootstrap_instance_configurations(plan: &IvyJson, config: &IvyJson, journal: &crate::journal::HostJournal) -> IvyResult<()> {
+    for process in plan.required("processes")?.as_array().ok_or_else(IvyError::internal)? {
+        let Some(path) = process.get("configPath").filter(|value| truthy(value)) else { continue; };
+        let instance = journal.instance(&process.required("instanceId")?.as_str()?).await?;
+        let candidate = journal.candidate(&process.get("candidateId").filter(|value| !value.is_null()).unwrap_or(plan.required("candidateId")?).as_str()?).await?;
+        let manifest = journal.manifest(&candidate.required("candidateId")?.as_str()?).await?;
+        let paths = crate::layout::service_paths(config, &instance)?;
+        let component = instance.required("componentId")?;
+        let mut settings = instance.required("settings")?.clone();
+        if component == &"agent-manager".into() {
+            let context = crate::host_config::HostContext::current()?;
+            settings = crate::layout::agent_manager_account_settings(&settings, &context.account_home, context.paths.style)?;
+        } else if ["host-executor", "service-manager"].iter().any(|name| component == &IvyJson::from(*name)) {
+            if settings.get("hostConfigPath").is_none_or(|value| value.is_null()) {
+                settings.insert("hostConfigPath", crate::layout::host_configuration_path_for_style(config, Style::native())?);
+            }
+        }
+        let mut value = IvyJson::object([
+            ("schemaVersion", IvyJson::Number(1.0)), ("instanceId", instance.required("instanceId")?.clone()),
+            ("serviceNodeId", instance.required("serviceNodeId")?.clone()), ("componentId", component.clone()),
+            ("hostId", config.required("hostId")?.clone()), ("publicBaseUrl", config.required("publicBaseUrl")?.clone()),
+            ("dataRoot", paths.required("data")?.clone()), ("workRoot", paths.required("work")?.clone()), ("logsRoot", paths.required("logs")?.clone()),
+            ("artifactRoot", candidate.required("artifactRoot")?.clone()), ("buildId", candidate.required("buildId")?.clone()),
+            ("version", manifest.required("version")?.clone()), ("settings", settings),
+        ]);
+        if let Some(credential) = instance.get("credential").filter(|value| truthy(value)) { value.insert("credential", credential.clone()); }
+        validate_host("InstanceConfig", &value)?;
+        crate::config::atomic_json(crate::config::path_value(path)?, value).await?;
+    }
+    Ok(())
+}
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
         Ok(())
@@ -160,6 +285,47 @@ pub fn configuration_bootstrap_plan(
     }
     validate_host("BootstrapPlan", &plan)?;
     Ok(plan)
+}
+/// Pick one retained release for each bootstrap component. The caller supplies
+/// the shared default-locale comparator; no byte-order replacement is assumed.
+pub async fn bootstrap_components(
+    config: &IvyJson,
+    journal: &crate::journal::HostJournal,
+    host_candidate: &IvyJson,
+    preferred: &[IvyJson],
+    compare: &crate::artifact::FileCompare,
+) -> IvyResult<Vec<IvyJson>> {
+    let mut result = Vec::new();
+    for instance in config.required("instances")?.as_array().ok_or_else(IvyError::internal)? {
+        let component = instance.required("componentId")?;
+        if instance.get("engine") != Some(&"process".into())
+            || !(component == &"host-executor".into()
+                || host_candidate.required("platform")?.get("os") == Some(&"win32".into()) && component == &"service-manager".into()) { continue; }
+        let installed = journal.installed(&instance.required("instanceId")?.as_str()?).await?;
+        let selected = preferred.iter().find(|value| value.get("candidate").and_then(|value| value.get("componentId")) == Some(component));
+        let candidate = if Some(component) == host_candidate.get("componentId") { Some(host_candidate.clone()) }
+            else if let Some(selected) = selected { Some(selected.required("candidate")?.clone()) }
+            else if let Some(installed) = installed { Some(journal.candidate(&installed.required("candidateId")?.as_str()?).await?) }
+            else {
+                let mut rows = journal.retained_candidates(&component.as_str()?, 1000).await?;
+                if rows.len() > 1 && rows.iter().any(|row| row.get("createdAt").and_then(IvyJson::as_js_string).is_none()) { return Err(IvyError::internal()); }
+                // Both timestamps are schema strings, and stable ties retain the
+                // journal's candidate-id order just as Array.sort does.
+                rows.sort_by(|left, right| compare(right.get("createdAt").and_then(IvyJson::as_js_string).unwrap(), left.get("createdAt").and_then(IvyJson::as_js_string).unwrap()));
+                rows.into_iter().next()
+            };
+        let Some(candidate) = candidate else {
+            if instance.get("enabled").is_some_and(truthy) {
+                return Err(IvyError::new("not_found", format!("No retained bootstrap candidate exists for {}.", component.as_str()?)));
+            }
+            continue;
+        };
+        let manifest = if selected.is_some_and(|selected| selected.get("candidate").and_then(|value| value.get("candidateId")) == candidate.get("candidateId")) {
+            selected.unwrap().required("manifest")?.clone()
+        } else { journal.manifest(&candidate.required("candidateId")?.as_str()?).await? };
+        result.push(IvyJson::object([("candidate", candidate), ("manifest", manifest)]));
+    }
+    Ok(result)
 }
 fn unit_arg(value: &JsString) -> IvyResult<JsString> {
     require(

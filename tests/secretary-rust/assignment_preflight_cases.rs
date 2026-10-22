@@ -289,9 +289,16 @@ async fn compare_preflight(real_process: bool) {
                                 error.required("message").unwrap().as_str().unwrap(),
                             )
                             .with_outcome(outcome),
-                            is_ivy_error: input.get("ivyError") == Some(&IvyJson::Bool(true)),
-                            stdout: input.required("stdout").unwrap().clone(),
-                            stderr: input.required("stderr").unwrap().clone(),
+                            stdout: input
+                                .get("stdout")
+                                .and_then(IvyJson::as_js_string)
+                                .cloned()
+                                .unwrap_or_default(),
+                            stderr: input
+                                .get("stderr")
+                                .and_then(IvyJson::as_js_string)
+                                .cloned()
+                                .unwrap_or_default(),
                         }
                     } else {
                         let string = |key| {

@@ -1,0 +1,10 @@
+MCP compatibility
+
+The inbound classification, envelope diagnostics and standard header behavior in
+src/mcp_inbound.rs, src/mcp_parameters.rs, src/mcp_legacy.rs, src/mcp_dispatch.rs
+and the subscription wire policy in src/mcp_subscription.rs
+are adapted from @modelcontextprotocol/server version 2.0.0.
+The implementation was translated to Rust and integrated with the IvyJson boundary.
+
+The complete licensing notice distributed with that upstream package is retained
+in licenses/mcp-sdk.txt, including its licensing transition and retained terms.

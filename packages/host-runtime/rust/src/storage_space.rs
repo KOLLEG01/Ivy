@@ -3,6 +3,10 @@ use crate::{IvyError, IvyJson, IvyResult, config::path_value, paths::{inside, re
 use std::{fs, io, path::{Path, PathBuf}};
 
 const SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+pub trait RetentionProgress: Send + Sync {
+    fn removed(&self, area: &str);
+    fn skipped(&self, area: &str, reason: &str, requires_attention: bool);
+}
 fn internal<T, E>(result: Result<T, E>) -> IvyResult<T> { result.map_err(|_| IvyError::internal()) }
 
 fn visit(path: &Path, boundary: &Path, depth: usize, files: &mut usize, bytes: &mut f64) -> IvyResult<()> {
@@ -48,44 +52,42 @@ impl RetentionSchedule {
     pub fn failed(&mut self, now: f64) { self.next_scheduled = now + 3_600_000.0; self.next_pressure = now + 3_600_000.0; }
 }
 #[derive(Clone, Copy)]
-struct Space { available: f64, total: f64 }
-fn space(block_size: u64, available_blocks: u64, total_blocks: u64) -> Space {
-    Space { available: (available_blocks as f64 * block_size as f64).clamp(0.0, SAFE_INTEGER), total: total_blocks as f64 * block_size as f64 }
-}
+struct Space { available: u64, total: u64 }
 
 #[cfg(windows)]
 fn measured_space(path: &Path) -> io::Result<Space> {
-    use std::{ffi::c_void, os::windows::{fs::OpenOptionsExt, io::AsRawHandle}};
-    use windows_sys::Win32::Storage::FileSystem::{FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE, FILE_FLAG_BACKUP_SEMANTICS};
-    // Match libuv's Windows statfs: FileFsFullSizeInformation includes the
-    // caller's quota, not merely all free bytes on the underlying volume.
-    #[repr(C)] struct IoStatusBlock { status_or_pointer: *mut c_void, information: usize }
-    #[repr(C)] struct FullSize { total: i64, caller_available: i64, actual_available: i64, sectors_per_unit: u32, bytes_per_sector: u32 }
-    #[link(name = "ntdll")]
-    unsafe extern "system" {
-        fn NtQueryVolumeInformationFile(handle: *mut c_void, status: *mut IoStatusBlock, information: *mut c_void, length: u32, class: u32) -> i32;
-        fn RtlNtStatusToDosError(status: i32) -> u32;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let mut directory = if fs::metadata(path)?.is_dir() {
+        path.to_owned()
+    } else {
+        fs::canonicalize(path)?.parent()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "File has no parent directory."))?
+            .to_owned()
+    };
+    // The Win32 directory parameter requires a trailing separator for UNC paths.
+    directory.push("");
+    let directory = directory.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+    let mut value = Space { available: 0, total: 0 };
+    // SAFETY: the path is NUL-terminated and both output values live through the call.
+    if unsafe { GetDiskFreeSpaceExW(directory.as_ptr(), &mut value.available, &mut value.total, std::ptr::null_mut()) } == 0 {
+        return Err(io::Error::last_os_error());
     }
-    let file = fs::OpenOptions::new().access_mode(FILE_READ_ATTRIBUTES).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(path)?;
-    let mut status = IoStatusBlock { status_or_pointer: std::ptr::null_mut(), information: 0 };
-    let mut information = FullSize { total: 0, caller_available: 0, actual_available: 0, sectors_per_unit: 0, bytes_per_sector: 0 };
-    // SAFETY: the open file owns a valid handle for the call. Both output buffers
-    // use the Windows ABI layouts and remain alive until this synchronous query returns.
-    let result = unsafe { NtQueryVolumeInformationFile(file.as_raw_handle(), &mut status, (&mut information as *mut FullSize).cast(), std::mem::size_of::<FullSize>() as u32, 7) };
-    if result as u32 >> 30 == 3 { return Err(io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(result) } as i32)); }
-    Ok(space(information.sectors_per_unit as u64 * information.bytes_per_sector as u64, information.caller_available as u64, information.total as u64))
+    Ok(value)
 }
 #[cfg(target_os = "linux")]
 fn measured_space(path: &Path) -> io::Result<Space> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
     let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Path contains NUL."))?;
-    let mut value = std::mem::MaybeUninit::<libc::statfs>::zeroed();
-    // SAFETY: path is NUL-terminated; statfs writes the complete native structure
+    let mut value = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    // SAFETY: path is NUL-terminated; statvfs writes the complete native structure
     // on success. Uninitialized contents are never read on the error path.
-    if unsafe { libc::statfs(path.as_ptr(), value.as_mut_ptr()) } != 0 { return Err(io::Error::last_os_error()); }
+    if unsafe { libc::statvfs(path.as_ptr(), value.as_mut_ptr()) } != 0 { return Err(io::Error::last_os_error()); }
     let value = unsafe { value.assume_init() };
-    Ok(space(value.f_bsize as u64, value.f_bavail as u64, value.f_blocks as u64))
+    let block_size = if value.f_frsize == 0 { value.f_bsize } else { value.f_frsize } as u64;
+    let bytes = |blocks: u64| block_size.checked_mul(blocks)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Filesystem byte count exceeds u64."));
+    Ok(Space { available: bytes(value.f_bavail as u64)?, total: bytes(value.f_blocks as u64)? })
 }
 #[cfg(not(any(windows, target_os = "linux")))]
 fn measured_space(_path: &Path) -> io::Result<Space> { Err(io::Error::new(io::ErrorKind::Unsupported, "Unsupported host platform.")) }
@@ -104,9 +106,14 @@ fn probe(mut path: PathBuf) -> io::Result<Space> {
         }
     }
 }
+/// Available bytes for the caller on an existing file or directory's volume.
+/// Preserves OS errors; missing paths are not replaced by an ancestor probe.
+pub fn available_bytes(path: &Path) -> io::Result<u64> {
+    measured_space(path).map(|value| value.available)
+}
 pub async fn available_storage_bytes(path: impl Into<PathBuf>) -> IvyResult<f64> {
     let path = path.into();
-    internal(tokio::task::spawn_blocking(move || internal(measured_space(&path)).map(|v| v.available)).await)?
+    internal(tokio::task::spawn_blocking(move || internal(available_bytes(&path)).map(|value| (value as f64).min(SAFE_INTEGER))).await)?
 }
 pub async fn require_storage_space(path: impl Into<PathBuf>, required_bytes: f64) -> IvyResult<()> {
     let available_bytes = available_storage_bytes(path).await?;
@@ -122,7 +129,7 @@ pub async fn host_storage_space(config: IvyJson) -> IvyResult<IvyJson> {
         internal(tokio::task::spawn_blocking(move || internal(probe(root))).await)?
     }).await?;
     Ok(IvyJson::object([
-        ("availableBytes", IvyJson::object([("runtime", IvyJson::Number(probes[0].available)), ("artifacts", IvyJson::Number(probes[1].available)), ("staging", IvyJson::Number(probes[2].available))])),
-        ("lowSpace", probes.iter().any(|value| storage_is_low(value.available, value.total)).into()),
+        ("availableBytes", IvyJson::object([("runtime", IvyJson::Number((probes[0].available as f64).min(SAFE_INTEGER))), ("artifacts", IvyJson::Number((probes[1].available as f64).min(SAFE_INTEGER))), ("staging", IvyJson::Number((probes[2].available as f64).min(SAFE_INTEGER)))])),
+        ("lowSpace", probes.iter().any(|value| storage_is_low(value.available as f64, value.total as f64)).into()),
     ]))
 }

@@ -2,7 +2,7 @@
 //! the journal; the generation owns this context and its independent workers.
 use crate::{
     assignment_schema::assignment_name,
-    inbox_evidence::{InboxEvidence, source_identity, source_name, truthy},
+    inbox_evidence::{InboxEvidence, source_identity, source_name},
     inbox_recovery::{InboxRecovery, RecoveryScan},
     schema::{Schema, validate},
     store::{Record, mutation},
@@ -130,7 +130,9 @@ impl<'a, 'engine, 'journal> SecretaryEngine<'a, 'engine, 'journal> {
             )
             .await?;
         need(
-            !root.get("effectivelyArchived").is_some_and(truthy),
+            !root
+                .get("effectivelyArchived")
+                .is_some_and(|value| value == &IvyJson::Bool(true)),
             "secretary_scope_conflict",
             "The Secretary root is archived.",
         )?;

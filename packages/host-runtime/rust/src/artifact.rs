@@ -1,53 +1,15 @@
 //! Runtime release-manifest boundary shared by retained and new candidates.
 use crate::{IvyError, IvyJson, IvyResult, config::{path_value, read_json, FileError, CONFIGURATION_BYTES}, node_runtime::NodeRuntime, paths::{inside, realpath}};
 use ivy_contracts::{JsString, core_schema::validate_host};
-use sha2::{Digest, Sha256};
-use std::{fs, io::Read, path::{Path, PathBuf}};
+use std::{fs, path::{Path, PathBuf}};
+pub use crate::streaming_hash::file_hash;
+pub use crate::artifact_inventory::{ArtifactFile, FileCompare, artifact_files, artifact_source_identity, native_file_compare};
 
 fn internal<T, E>(value: Result<T, E>) -> IvyResult<T> { value.map_err(|_| IvyError::internal()) }
 fn require(value: bool, code: &str, message: &str) -> IvyResult<()> {
     if value { Ok(()) } else { Err(IvyError::new(code, message)) }
 }
-fn hash_file(source: &Path) -> IvyResult<String> {
-    let mut file = internal(fs::File::open(source))?;
-    let mut hash = Sha256::new();
-    let mut buffer = vec![0; 4 * 1024 * 1024];
-    loop {
-        let count = internal(file.read(&mut buffer))?;
-        if count == 0 { break; }
-        hash.update(&buffer[..count]);
-    }
-    Ok(format!("sha256:{}", hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect::<String>()))
-}
-pub async fn file_hash(source: impl Into<PathBuf>) -> IvyResult<String> {
-    let source = source.into();
-    internal(tokio::task::spawn_blocking(move || hash_file(&source)).await)?
-}
-/// Check bytes received from another host; local immutable candidate activation
-/// uses the identity stamp and selected entry, without rehashing its entire tree.
-pub async fn verify_transferred_archive(source: impl Into<PathBuf>, expected_hash: &str) -> IvyResult<()> {
-    let source = source.into(); let expected = expected_hash.to_owned();
-    internal(tokio::task::spawn_blocking(move || {
-        require(expected.len() == 71 && expected.starts_with("sha256:") && expected[7..].bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
-            "invalid_arguments", "Transferred archive needs an explicit SHA-256 checksum.")?;
-        let metadata = internal(fs::symlink_metadata(&source))?;
-        require(metadata.is_file() && !metadata.file_type().is_symlink(), "artifact_changed", "Transferred archive must be a regular file.")?;
-        require(hash_file(&source)? == expected, "artifact_changed", "Transferred candidate archive changed.")
-    }).await)?
-}
-
-/// Historical preparation/provenance fields have no launch meaning.
-pub fn release_manifest(value: &IvyJson) -> IvyResult<IvyJson> {
-    let manifest = IvyJson::object([
-        "schemaVersion", "componentId", "kind", "version", "buildId", "connectsToHive", "requirements",
-        "app", "entrypoint", "readiness", "shutdown", "restart", "storage", "runtimeReset",
-    ].into_iter().filter_map(|key| value.get(key).map(|value| (key, value.clone()))));
-    validate_host("ReleaseManifest", &manifest)?;
-    Ok(manifest)
-}
-pub async fn read_release_manifest(source: impl AsRef<Path>) -> IvyResult<IvyJson> {
-    release_manifest(&crate::config::json_file(source.as_ref().to_owned(), crate::config::CONFIGURATION_BYTES).await?)
-}
+pub use crate::artifact_manifest::{verify_transferred_archive, release_manifest, read_release_manifest};
 
 fn verify_launch(candidate: &IvyJson, artifact_root: &Path, entrypoint: Option<&JsString>) -> IvyResult<()> {
     validate_host("Candidate", candidate)?;
@@ -69,6 +31,18 @@ fn verify_launch(candidate: &IvyJson, artifact_root: &Path, entrypoint: Option<&
 pub async fn verify_launch_candidate(candidate: IvyJson, artifact_root: impl Into<PathBuf>, entrypoint: Option<JsString>) -> IvyResult<()> {
     let root = artifact_root.into();
     internal(tokio::task::spawn_blocking(move || verify_launch(&candidate, &root, entrypoint.as_ref())).await)?
+}
+/// Owners call this with the candidate's frozen journal manifest before drain.
+/// Keep the legacy function above available for ordinary v1 callers; inspecting
+/// native intent needs both retained command paths and the shutdown policy.
+pub async fn verify_launch_candidate_with_manifest(candidate:IvyJson,artifact_root:impl Into<PathBuf>,entrypoint:Option<JsString>,manifest:IvyJson)->IvyResult<()>{
+    let root=artifact_root.into();
+    internal(tokio::task::spawn_blocking(move || {
+        verify_launch(&candidate, &root, entrypoint.as_ref())?;
+        let manifest=release_manifest(&manifest)?;
+        require(manifest.get("buildId")==candidate.get("buildId")&&manifest.get("componentId")==candidate.get("componentId"),"build_mismatch","Launch manifest differs from its prepared release identity.")?;
+        crate::native_dispatch::verify(&candidate,&path_value(candidate.required("artifactRoot")?)?,&manifest)
+    }).await)?
 }
 
 /// The v1 dispatcher/host supplies the discovered intentional Node workload
@@ -104,6 +78,7 @@ pub async fn verify_candidate(candidate: IvyJson, artifact_root: impl Into<PathB
             "build_mismatch", "Candidate manifest does not identify its release.")?;
         let entrypoint = manifest.get("entrypoint").and_then(|v| v.get("args")).and_then(IvyJson::as_array).and_then(|args| args.first()).and_then(IvyJson::as_js_string);
         verify_launch(&candidate, &root, entrypoint)?;
+        crate::native_dispatch::verify(&candidate,&candidate_root,&manifest)?;
         if cfg!(windows) {
             for selected in crate::portable_native_files::portable_native_files(&manifest.required("componentId")?.as_str()?) {
                 let local = candidate_root.join(selected);

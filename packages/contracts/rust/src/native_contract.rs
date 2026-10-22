@@ -1,5 +1,5 @@
-//! Retained catalog identity and schema projection. Dynamic argument/result
-//! validation is a separate compiler boundary; these operations do not admit calls.
+//! Retained catalog identity, schema projection and exact argument/result
+//! validation. Invocation authority and provider selection belong to callers.
 use crate::{
     IvyError, IvyJson, IvyResult, JsString,
     agent_schema::validate_agent,
@@ -7,6 +7,7 @@ use crate::{
     hash::{hash_json, tool_definition_hash},
     json::{canonical, js_string},
     limits::MANAGEMENT_FRAME_BYTES,
+    schema::SchemaValidators,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -116,6 +117,7 @@ pub struct NativeContract {
     methods: Vec<(JsString, Definition)>,
     indexes: HashMap<JsString, usize>,
     schemas: Mutex<HashMap<String, Arc<IvyJson>>>,
+    validators: SchemaValidators,
 }
 impl NativeContract {
     pub fn new(catalog: &IvyJson) -> IvyResult<Self> {
@@ -155,6 +157,7 @@ impl NativeContract {
             methods,
             indexes,
             schemas: Mutex::new(HashMap::new()),
+            validators: SchemaValidators::new(),
         })
     }
     pub fn catalog(&self) -> &IvyJson {
@@ -295,6 +298,37 @@ impl NativeContract {
         let mut cache = self.schemas.lock().map_err(|_| IvyError::internal())?;
         Ok(cache.entry(key).or_insert(value).clone())
     }
+
+    pub fn validate_input(
+        &self,
+        method: &JsString,
+        params: &IvyJson,
+        maximum_bytes: usize,
+    ) -> IvyResult<()> {
+        self.validate_template(method, params, &[], maximum_bytes)
+    }
+    pub fn validate_template(
+        &self,
+        method: &JsString,
+        params: &IvyJson,
+        reserved: &[JsString],
+        maximum_bytes: usize,
+    ) -> IvyResult<()> {
+        let schema = self.input_schema(method, reserved)?;
+        self.validators.validate(&schema, params, maximum_bytes)
+    }
+    pub fn validate_result(
+        &self,
+        method: &JsString,
+        result: &IvyJson,
+        maximum_bytes: usize,
+    ) -> IvyResult<()> {
+        self.validators.validate(
+            self.definition(method)?.get("outputSchema").unwrap(),
+            result,
+            maximum_bytes,
+        )
+    }
 }
 type Path = Vec<JsString>;
 fn array_index(key: &JsString) -> Option<usize> {
@@ -341,22 +375,7 @@ fn reference_path(input: &IvyJson, reference: &IvyJson, message: &str) -> IvyRes
     if child(defs, &name.into()).is_some() {
         return Ok(Some(vec!["$defs".into(), name.into()]));
     }
-    // A prototype function can satisfy the original property lookup but is not
-    // an object schema to mutate. Never turn it into an owned schema definition.
-    let boolean_prototype = IvyJson::Object(vec![]);
-    let lookup = if matches!(defs, IvyJson::Bool(_)) {
-        &boolean_prototype
-    } else {
-        defs
-    };
-    if crate::schema_lookup::Value::Json(lookup)
-        .property(name)?
-        .is_some()
-    {
-        Ok(None)
-    } else {
-        Err(invalid())
-    }
+    Err(invalid())
 }
 fn object_arguments(value: &IvyJson) -> bool {
     value.get("type").and_then(IvyJson::as_js_string) == Some(&"object".into())

@@ -28,3 +28,7 @@ path = "../../../tests/rust/service-manager-shutdown.rs"
 [[test]]
 name = "service-manager-stop"
 path = "../../../tests/rust/service-manager-stop.rs"
+
+[[example]]
+name = "prepare-native-service"
+path = "../../../docs/examples/prepare-native-service.rs"

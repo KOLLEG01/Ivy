@@ -9,7 +9,7 @@ use crate::{
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     checked_native_contract::CheckedNativeContracts,
-    json::{canonical, parse, try_js_string},
+    json::{canonical, parse},
 };
 use ivy_sdk::{
     native_evidence::native_instant,
@@ -71,7 +71,7 @@ impl TriageCompletion<'_, '_, '_, '_, '_> {
                 .value
                 .required("input")?
                 .get("media")
-                .is_some_and(crate::inbox_evidence::truthy)
+                .is_some_and(|value| !value.is_null())
             {
                 8 * 1024 * 1024
             } else {
@@ -173,9 +173,9 @@ impl TriageCompletion<'_, '_, '_, '_, '_> {
                 }
                 let state = state
                     .as_ref()
-                    .map(try_js_string)
+                    .map(|value| value.as_js_string().cloned().ok_or_else(IvyError::internal))
                     .transpose()?
-                    .unwrap_or_else(|| "undefined".into());
+                    .unwrap_or_default();
                 check(
                     ["completed", "failed", "interrupted"]
                         .iter()

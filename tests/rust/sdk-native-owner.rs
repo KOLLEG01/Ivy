@@ -7,6 +7,8 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
+#[path = "sdk-native-callback-errors.rs"]
+mod callback_error_bridge;
 fn json(text: &str) -> IvyJson {
     parse(text, usize::MAX).unwrap()
 }
@@ -183,8 +185,11 @@ async fn native_owner_calls_guards_recovery_and_evidence_match_original_typescri
     let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let rows = rows.as_array().unwrap();
     assert!(rows.len() >= 80);
-    for row in rows {
+    for (row, local) in rows.iter().flat_map(|row| [(row, false), (row, true)]) {
         let input = json(row["input"].as_str().unwrap());
+        if local && input.get("action") != Some(&IvyJson::from("dispatch")) {
+            continue;
+        }
         let t = field(&input, "target");
         let target = NativeOwnerIdentity {
             service_node_id: string(t, "serviceNodeId"),
@@ -228,10 +233,28 @@ async fn native_owner_calls_guards_recovery_and_evidence_match_original_typescri
                         .management("custom", json(r#"{"x":"\ud800"}"#), Some("original".into()))
                         .await?
                 }
-                "dispatch" => owner
-                    .dispatch(&call, &guard)
-                    .await?
-                    .unwrap_or(IvyJson::Null),
+                "dispatch" => {
+                    let result = if local {
+                        let state = std::rc::Rc::new(std::cell::RefCell::new(0));
+                        owner
+                            .dispatch_local(&call, || {
+                                let state = state.clone();
+                                let guard = &guard;
+                                async move {
+                                    tokio::task::yield_now().await;
+                                    *state.borrow_mut() += 1;
+                                    guard.check().await
+                                }
+                            })
+                            .await
+                    } else {
+                        fn send<F: std::future::Future + Send>(future: F) -> F {
+                            future
+                        }
+                        send(owner.dispatch(&call, &guard)).await
+                    };
+                    result?.unwrap_or(IvyJson::Null)
+                }
                 "interact" => owner.interact(&call, Some(&guard)).await?,
                 "interaction" => owner.interaction(&"original".into()).await?,
                 "operation" => owner.operation(&call).await?,

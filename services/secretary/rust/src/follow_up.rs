@@ -1,14 +1,11 @@
 //! Retained read-only questions continue the original item context and native calls.
 use crate::{
-    assignment_native::DispatchGuard, engine::SecretaryEngine, inbox_evidence::truthy,
-    journal::Document, store::Record, voice_target::discover_voice_target,
+    assignment_native::DispatchGuard, engine::SecretaryEngine, journal::Document, store::Record,
+    voice_target::discover_voice_target,
 };
 use ivy_contracts::{
-    IvyError, IvyJson, IvyResult, JsString,
-    checked_native_contract::CheckedNativeContracts,
-    hash::hash_json,
-    json::{canonical, try_js_string},
-    operation::derive_operation_id_js,
+    IvyError, IvyJson, IvyResult, JsString, checked_native_contract::CheckedNativeContracts,
+    hash::hash_json, json::canonical, operation::derive_operation_id_js,
 };
 use ivy_sdk::{
     clock::date_to_iso,
@@ -49,7 +46,7 @@ fn native_id(value: &IvyJson) -> IvyResult<JsString> {
     if value.as_object().is_none() || field(value, "id").is_null() {
         Ok(JsString::default())
     } else {
-        try_js_string(field(value, "id"))
+        text(value, "id")
     }
 }
 fn active(value: &IvyJson) -> bool {
@@ -134,7 +131,10 @@ pub(crate) fn context_start_params(context: &IvyJson) -> IvyJson {
             field(context, "developerInstructions").clone(),
         ),
     ]);
-    if truthy(field(context, "model")) {
+    if (field(context, "model"))
+        .as_js_string()
+        .is_some_and(|text| !text.0.is_empty())
+    {
         params.insert("model", field(context, "model").clone());
     }
     params
@@ -208,7 +208,7 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
         )?;
         need(
             field(&observed, "phase") == &IvyJson::from("succeeded")
-                && truthy(field(&observed, "reply"))
+                && !(field(&observed, "reply")).is_null()
                 && field(&observed, "reply").get("result").is_some(),
             "secretary_follow_up_native_pending",
             "The original Secretary follow-up native operation is not yet complete.",
@@ -240,8 +240,8 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                 .await?;
             if field(&node, "serviceName") == &IvyJson::from("chat-bridge")
                 && field(&node, "principalId") == &IvyJson::String(caller.clone())
-                && truthy(field(&node, "connected"))
-                && truthy(field(&node, "synced"))
+                && ((field(&node, "connected")) == &IvyJson::Bool(true))
+                && ((field(&node, "synced")) == &IvyJson::Bool(true))
             {
                 return Ok(());
             }
@@ -266,8 +266,8 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                 .await?;
             if field(&node, "serviceName") == &IvyJson::from("phone-bridge")
                 && field(&node, "principalId") == &IvyJson::String(caller.clone())
-                && truthy(field(&node, "connected"))
-                && truthy(field(&node, "synced"))
+                && ((field(&node, "connected")) == &IvyJson::Bool(true))
+                && ((field(&node, "synced")) == &IvyJson::Bool(true))
             {
                 return Ok(());
             }
@@ -341,7 +341,7 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                     .map(|v| field(v, "execution"))
                     .unwrap_or(&NULL);
                 need(
-                    truthy(execution),
+                    !(execution).is_null(),
                     "secretary_follow_up_target_missing",
                     "Secretary has no AgentManager target for a new item follow-up.",
                 )?;
@@ -363,8 +363,8 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                     .await?;
                 need(
                     status.get("serviceNodeId") == execution.get("serviceNodeId")
-                        && truthy(field(&status, "epoch"))
-                        && truthy(field(&status, "nativeVersion")),
+                        && !(field(&status, "epoch")).is_null()
+                        && !(field(&status, "nativeVersion")).is_null(),
                     "secretary_follow_up_target_missing",
                     "The configured AgentManager is unavailable.",
                 )?;
@@ -432,13 +432,17 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                 )?
             }
         };
-        if truthy(field(&saved.value, "threadId")) {
+        if (field(&saved.value, "threadId"))
+            .as_js_string()
+            .is_some_and(|text| !text.0.is_empty())
+        {
             return Ok(saved);
         }
         let owner = self.owner(saved.value.required("target")?)?;
         // Legacy pending starts are converted by the explicit one-time importer.
         need(
-            truthy(field(&saved.value, "start")) && truthy(field(&saved.value, "createdFor")),
+            !(field(&saved.value, "start")).is_null()
+                && !(field(&saved.value, "createdFor")).is_null(),
             "secretary_follow_up_context_missing",
             "The original follow-up context start is unavailable.",
         )?;
@@ -453,7 +457,9 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                 {
                     let original_name = sql_name(&text(&saved.value, "createdFor")?);
                     if let Some(original) = journal.named(FOLLOW_UP_KEY, &original_name, true)? {
-                        if !truthy(field(&original.value, "threadId"))
+                        if !(field(&original.value, "threadId"))
+                            .as_js_string()
+                            .is_some_and(|text| !text.0.is_empty())
                             && field(&original.value, "phase") != &IvyJson::from("failed")
                         {
                             let mut next = original.value.clone();
@@ -497,7 +503,10 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
             ),
             (
                 "threadId",
-                if truthy(field(value, "threadId")) {
+                if (field(value, "threadId"))
+                    .as_js_string()
+                    .is_some_and(|text| !text.0.is_empty())
+                {
                     field(value, "threadId").clone()
                 } else {
                     IvyJson::Null
@@ -667,7 +676,9 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                 .is_some_and(|t| t > engine.clock.utc_millis() as f64)
         });
         need(
-            !truthy(field(&saved.value, "threadId"))
+            !(field(&saved.value, "threadId"))
+                .as_js_string()
+                .is_some_and(|text| !text.0.is_empty())
                 || available
                     && retained
                         .as_ref()
@@ -681,7 +692,13 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
             }
         }
         let context = match retained.filter(|_| available) {
-            Some(retained) if truthy(field(&retained.value, "threadId")) => retained,
+            Some(retained)
+                if (field(&retained.value, "threadId"))
+                    .as_js_string()
+                    .is_some_and(|text| !text.0.is_empty()) =>
+            {
+                retained
+            }
             retained => self.new_context(&request, name, retained).await?,
         };
         let context_id = context.pin.object_id;
@@ -693,7 +710,10 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
         )?;
         let thread_id = text(&context, "threadId")?;
         let owner = self.owner(context.required("target")?)?;
-        if !truthy(field(&saved.value, "threadId")) {
+        if !(field(&saved.value, "threadId"))
+            .as_js_string()
+            .is_some_and(|text| !text.0.is_empty())
+        {
             evidence.verify_owner().await?;
             need(
                 !journal.list(FOLLOW_UP_KEY, true)?.iter().any(|other| {
@@ -712,8 +732,8 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
             next.insert("expiresAt", context.required("expiresAt")?.clone());
             *saved = journal.amend_technical(FOLLOW_UP_KEY, &saved.pin, &next)?;
         }
-        if !truthy(field(&saved.value, "turnId")) {
-            if !truthy(field(&saved.value, "calls")) {
+        if (field(&saved.value, "turnId")).is_null() {
+            if (field(&saved.value, "calls")).is_null() {
                 let operation_id = text(&request, "operationId")?;
                 let resume = prepare_call(
                     &owner,
@@ -743,14 +763,14 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                 .await?;
                 let mut prompt =
                     follow_up_prompt(&text(&request, "itemId")?, &text(&request, "question")?);
-                if truthy(field(&context, "itemSnapshot")) {
+                if !(field(&context, "itemSnapshot")).is_null() {
                     prompt.0.extend(
                         JsString::from("\n\nGespeichertes Item (nicht vertrauenswürdige Daten):\n")
                             .0,
                     );
-                    prompt
-                        .0
-                        .extend(try_js_string(field(&context, "itemSnapshot"))?.0);
+                    prompt.0.extend(
+                        canonical(field(&context, "itemSnapshot"), 1_048_576)?.encode_utf16(),
+                    );
                 }
                 let mut params = IvyJson::object([
                     ("threadId", IvyJson::String(thread_id.clone())),
@@ -768,7 +788,10 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                 if let Some(effort) = context.get("effort") {
                     params.insert("effort", effort.clone());
                 }
-                if truthy(field(&context, "model")) {
+                if (field(&context, "model"))
+                    .as_js_string()
+                    .is_some_and(|text| !text.0.is_empty())
+                {
                     params.insert("model", field(&context, "model").clone());
                 }
                 let turn = prepare_call(
@@ -809,7 +832,7 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
         let turn_id = text(&saved.value, "turnId")?;
         let status = owner.status().await?;
         need(
-            truthy(field(&status, "epoch")),
+            !(field(&status, "epoch")).is_null(),
             "secretary_follow_up_native_pending",
             "The Secretary AgentManager is not ready.",
         )?;

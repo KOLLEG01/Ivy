@@ -69,7 +69,7 @@ where
 pub async fn reconcile_native_operation_local<T, R, F, H, HF>(
     owner: &dyn NativeOperationOwner,
     call: &NativeOperationCall,
-    mut journal: NativeOperationJournal<T, R>,
+    journal: NativeOperationJournal<T, R>,
     on_absent: Option<H>,
     absence_conflict_code: Option<&str>,
 ) -> IvyResult<NativeReconciliation<T>>
@@ -78,6 +78,32 @@ where
     F: Future<Output = IvyResult<T>>,
     H: FnOnce(NativeOperationCall, IvyJson) -> HF,
     HF: Future<Output = IvyResult<Option<IvyJson>>>,
+{
+    reconcile_native_operation_local_with_error(
+        owner,
+        call,
+        journal,
+        on_absent,
+        absence_conflict_code,
+    )
+    .await
+}
+
+/// Reconcile without converting caller-local callback failures. SDK evidence
+/// errors are lifted with `X::from`; retention and absence errors pass unchanged.
+pub async fn reconcile_native_operation_local_with_error<T, R, F, H, HF, X>(
+    owner: &dyn NativeOperationOwner,
+    call: &NativeOperationCall,
+    mut journal: NativeOperationJournal<T, R>,
+    on_absent: Option<H>,
+    absence_conflict_code: Option<&str>,
+) -> Result<NativeReconciliation<T>, X>
+where
+    X: From<IvyError>,
+    R: FnMut(IvyJson) -> F,
+    F: Future<Output = Result<T, X>>,
+    H: FnOnce(NativeOperationCall, IvyJson) -> HF,
+    HF: Future<Output = Result<Option<IvyJson>, X>>,
 {
     let call = call.clone();
     if let Some(previous) = &journal.previous {
@@ -95,7 +121,8 @@ where
             return Err(IvyError::new(
                 absence_conflict_code.unwrap_or("native_absence_conflict"),
                 "Owner absence cannot erase a previously observed operation or authorize replay.",
-            ));
+            )
+            .into());
         }
         let Some(handler) = on_absent else {
             return Ok(NativeReconciliation::Absent {

@@ -9,7 +9,6 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, checked_native_contract::CheckedNativeContracts,
-    json::try_js_string,
 };
 use ivy_sdk::{
     clock::{Clock, date_to_iso},
@@ -246,7 +245,9 @@ impl AssignmentExecution<'_, '_, '_> {
                 .and_then(|v| v.get("id"))
                 .filter(|v| !v.is_null())
             {
-                Some(id) => IvyJson::String(try_js_string(id)?),
+                Some(id) => {
+                    IvyJson::String(id.as_js_string().cloned().ok_or_else(IvyError::internal)?)
+                }
                 None => "".into(),
             }
         } else {
@@ -343,7 +344,7 @@ impl AssignmentExecution<'_, '_, '_> {
                 .and_then(|v| v.get("id"))
                 .filter(|v| !v.is_null());
             let turn_id = match id {
-                Some(id) => try_js_string(id)?,
+                Some(id) => id.as_js_string().cloned().ok_or_else(IvyError::internal)?,
                 None => JsString::from(""),
             };
             if turn_id.0.is_empty() {

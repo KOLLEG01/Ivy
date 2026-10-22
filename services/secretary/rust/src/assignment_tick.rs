@@ -1,6 +1,5 @@
 //! Serialized assignment scheduler pass using the original per-assignment order.
 use crate::{
-    assignment_error::{SchedulerFailure, SchedulerResult},
     assignment_progress::SchedulerAssignments,
     assignment_scheduler::AssignmentScheduler,
     inbox_recovery::{RecoveryIssues, RecoveryScan},
@@ -10,12 +9,12 @@ use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_sdk::clock::date_to_iso;
 use std::cell::RefCell;
 
-fn text(value: &IvyJson, key: &str) -> SchedulerResult<JsString> {
+fn text(value: &IvyJson, key: &str) -> IvyResult<JsString> {
     value
         .required(key)?
         .as_js_string()
         .cloned()
-        .ok_or(SchedulerFailure::Uncoded)
+        .ok_or_else(IvyError::internal)
 }
 impl SchedulerAssignments {
     /// Called by the owning generation's serialized foreground chain.
@@ -66,7 +65,7 @@ impl SchedulerAssignments {
             let assignment_id = text(assignment.required("value")?, "assignmentId")?;
             let assignment_name = String::from_utf16_lossy(&assignment_id.0);
             let key = format!("assignment:{assignment_name}");
-            let outcome: SchedulerResult<()> = async {
+            let outcome: IvyResult<()> = async {
                 let gap_issue = format!("event-gap:{assignment_name}");
                 let gap = store
                     .journal
@@ -82,24 +81,22 @@ impl SchedulerAssignments {
                     .await?
                 {
                     scheduler
-                        .flush_due_message_windows_inner(&assignment, configuration, now)
+                        .flush_due_message_windows(&assignment, configuration, now)
                         .await?;
                     scheduler
-                        .flush_due_object_windows_inner(&assignment, configuration, now)
+                        .flush_due_object_windows(&assignment, configuration, now)
                         .await?;
                 }
-                scheduler
-                    .schedules_inner(&assignment, configuration, now)
-                    .await?;
+                scheduler.schedules(&assignment, configuration, now).await?;
                 issues.clear(&key);
                 Ok(())
             }
             .await;
             if let Err(error) = outcome {
                 if evidence.cancellation.cancellation.is_cancelled() {
-                    return Err(IvyError::from(error));
+                    return Err(error);
                 }
-                issues.issue(&key, &error.code("secretary_assignment_failed"));
+                issues.issue(&key, &error.code);
             }
         }
         Ok(())

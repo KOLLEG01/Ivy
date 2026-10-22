@@ -3,7 +3,7 @@ use ivy_host_runtime::{node_runtime::NodeRuntime, runtime_owner::RuntimeOwner};
 use std::path::PathBuf;
 
 /// Construction order is retained for reverse cleanup. Existing owners retain
-/// their own startup fallback and never restart for unrelated topology edits.
+/// accepted target policy and never restart for unrelated topology edits.
 pub struct Owners {
     owners: Vec<(JsString, RuntimeOwner)>,
     bootstrap_root: PathBuf,
@@ -107,7 +107,7 @@ pub fn owner_ids(platform: &str, configuration: &IvyJson) -> IvyResult<Vec<JsStr
         .iter()
         .filter(|instance| {
             instance.get("engine") == Some(&IvyJson::from("process"))
-                && !["hive", "host-executor", "service-manager"]
+                && !["host-executor", "service-manager"]
                     .iter()
                     .any(|component| {
                         instance.get("componentId") == Some(&IvyJson::from(*component))

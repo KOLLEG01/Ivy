@@ -12,6 +12,13 @@ tokio.workspace = true
 tokio-util.workspace = true
 tokio-tungstenite.workspace = true
 reqwest.workspace = true
+bytes.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-rustls.workspace = true
+hyper-util = { workspace = true, features = ["client-legacy", "http1"] }
+rustls.workspace = true
+tower-service.workspace = true
 futures-util.workspace = true
 uuid.workspace = true
 serde_json.workspace = true
@@ -20,9 +27,20 @@ iana-time-zone.workspace = true
 jiff-tzdb.workspace = true
 tz-rs.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
 [[test]]
 name = "sdk"
 path = "../../../tests/rust/sdk.rs"
+
+
+[[test]]
+name = "sdk-collation"
+path = "../../../tests/rust/sdk-collation.rs"
 
 [[test]]
 name = "sdk-operation-ids"
@@ -39,6 +57,22 @@ path = "../../../tests/rust/sdk-consumers.rs"
 [[test]]
 name = "sdk-provider"
 path = "../../../tests/rust/sdk-provider.rs"
+
+[[test]]
+name = "sdk-optional-rpc"
+path = "../../../tests/rust/sdk-optional-rpc.rs"
+
+[[test]]
+name = "sdk-error-outcome"
+path = "../../../tests/rust/sdk-error-outcome.rs"
+
+[[test]]
+name = "sdk-fetch-credentials"
+path = "../../../tests/rust/sdk-fetch-credentials.rs"
+
+[[test]]
+name = "sdk-fetch-response"
+path = "../../../tests/rust/sdk-fetch-response.rs"
 
 [[test]]
 name = "sdk-native-project"
@@ -65,5 +99,5 @@ name = "sdk-native-owner"
 path = "../../../tests/rust/sdk-native-owner.rs"
 
 [[test]]
-name = "sdk-error-outcome"
-path = "../../../tests/rust/sdk-error-outcome.rs"
+name = "sdk-native-plan"
+path = "../../../tests/rust/sdk-native-plan.rs"

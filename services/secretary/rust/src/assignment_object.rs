@@ -5,56 +5,37 @@ use ivy_sdk::clock::parse_date;
 pub const OBJECT_WINDOW_KEY: &str = "secretary/object-window";
 
 pub fn pointer(value: &IvyJson, path: &JsString) -> IvyJson {
-    if path.0.is_empty() {
+    let Ok(path) = path.to_utf8() else {
+        return IvyJson::Null;
+    };
+    if path.is_empty() {
         return value.clone();
     }
+    let Some(path) = path.strip_prefix('/') else {
+        return IvyJson::Null;
+    };
     let mut current = value;
-    let mut tokens = path.0[1..].split(|c| *c == 47).peekable();
-    while let Some(part) = tokens.next() {
-        let mut token = Vec::with_capacity(part.len());
-        let mut index = 0;
-        while index < part.len() {
-            if part[index] == 126 && matches!(part.get(index + 1), Some(48 | 49)) {
-                token.push(if part[index + 1] == 49 { 47 } else { 126 });
-                index += 2;
-            } else {
-                token.push(part[index]);
-                index += 1;
+    for token in path.split('/') {
+        let token = token.replace("~1", "/").replace("~0", "~");
+        let selected = match current {
+            IvyJson::Object(_) => current.get(&token),
+            IvyJson::Array(values)
+                if token == "0"
+                    || (!token.is_empty()
+                        && !token.starts_with('0')
+                        && token.bytes().all(|byte| byte.is_ascii_digit())) =>
+            {
+                token
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|index| values.get(index))
             }
-        }
-        let token = JsString(token);
-        current = match current {
-            IvyJson::Object(_) => match current.get_key(&token) {
-                Some(value) => value,
-                None => return IvyJson::Null,
-            },
-            IvyJson::Array(values) => {
-                // Object.hasOwn on an array also exposes its own length property.
-                if token == JsString::from("length") {
-                    return if tokens.peek().is_none() {
-                        IvyJson::Number(values.len() as f64)
-                    } else {
-                        IvyJson::Null
-                    };
-                }
-                let index = if token.0.is_empty() || (token.0.len() > 1 && token.0[0] == 48) {
-                    None
-                } else {
-                    token.0.iter().try_fold(0usize, |n, c| {
-                        if (48..=57).contains(c) {
-                            n.checked_mul(10)?.checked_add(usize::from(*c - 48))
-                        } else {
-                            None
-                        }
-                    })
-                };
-                match index.and_then(|index| values.get(index)) {
-                    Some(value) => value,
-                    None => return IvyJson::Null,
-                }
-            }
-            _ => return IvyJson::Null,
+            _ => None,
         };
+        let Some(selected) = selected else {
+            return IvyJson::Null;
+        };
+        current = selected;
     }
     current.clone()
 }

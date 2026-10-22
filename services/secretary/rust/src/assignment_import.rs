@@ -104,7 +104,7 @@ pub async fn import_schedule_progress(
             if current || latest.required("pin")?.get("revision") == Some(&IvyJson::Number(1.0)) {
                 source.value.required("checkedAt")?.clone()
             } else {
-                IvyJson::String(written_at(&original, "createdAt").map_err(IvyError::from)?)
+                IvyJson::String(written_at(&original, "createdAt")?)
             };
         let progress = IvyJson::object([
             ("schemaVersion", IvyJson::Number(1.0)),
@@ -190,7 +190,7 @@ pub async fn import_event_gap(
         )
         .await?;
     let original = crate::import_record::original(store, Record::Assignment, &latest).await?;
-    let written = written_at(&original, "createdAt").map_err(IvyError::from)?;
+    let written = written_at(&original, "createdAt")?;
     let before_assignment = first.get("gap").is_none_or(IvyJson::is_null)
         && first
             .required("items")?
@@ -339,16 +339,17 @@ pub async fn import_event_subscription(
                     "The archived assignment must retain its original identity.",
                 ));
             }
-            let mut retirement = ivy_contracts::json::try_js_string(row.required("revision")?)?;
-            retirement.0.push(58);
-            retirement.0.extend(
-                values
-                    .get("object.archivedAt")
-                    .map(ivy_contracts::json::try_js_string)
-                    .transpose()?
-                    .unwrap_or_else(|| "undefined".into())
-                    .0,
-            );
+            let revision = row
+                .required("revision")?
+                .as_f64()
+                .ok_or_else(IvyError::internal)?;
+            let archived_at = values
+                .get("object.archivedAt")
+                .filter(|value| !value.is_null())
+                .map(IvyJson::as_str)
+                .transpose()?
+                .unwrap_or_else(|| "null".to_owned());
+            let retirement: JsString = format!("{revision}:{archived_at}").into();
             (
                 id,
                 row.required("objectId")?.clone(),
@@ -429,8 +430,7 @@ pub async fn import_event_subscription(
                     &std::cell::RefCell::new(issues),
                     progress,
                 )
-                .await
-                .map_err(IvyError::from)?;
+                .await?;
             if !ready_to_retire {
                 return Ok(Some(ImportedSubscription {
                     source,

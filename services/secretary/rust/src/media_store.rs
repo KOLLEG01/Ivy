@@ -2,7 +2,7 @@
 //! in the separate spool until the caller verifies final Hive coverage.
 use crate::{
     engine::SecretaryEngine,
-    inbox_evidence::{identity_hash, message_hash, truthy},
+    inbox_evidence::{identity_hash, message_hash},
     media_schema::{MediaSchema, validate_media},
     media_spool::{Attempt, SpoolJournal, Validation},
 };
@@ -10,7 +10,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     hash::{digest, hash_json},
-    json::{canonical, js_string, parse},
+    json::{canonical, parse},
     operation::derive_operation_id_js,
 };
 use ivy_sdk::{operation_ids::new_operation_id, rpc::RequestOptions};
@@ -35,9 +35,7 @@ fn same(a: &IvyJson, b: &IvyJson) -> IvyResult<bool> {
     Ok(canonical(a, FRAME)? == canonical(b, FRAME)?)
 }
 fn named_text(prefix: &str, value: &IvyJson) -> IvyResult<JsString> {
-    let mut units = prefix.encode_utf16().collect::<Vec<_>>();
-    units.extend(js_string(value).0);
-    Ok(JsString(units))
+    Ok(format!("{prefix}{}", value.as_str()?).into())
 }
 fn name_for(kind: &str, intent: &IvyJson, index: Option<usize>) -> IvyResult<JsString> {
     Ok(format!(
@@ -72,37 +70,10 @@ fn coverage_references(value: &IvyJson) -> IvyResult<IvyJson> {
             .enumerate()
             .filter_map(|(n, v)| {
                 v.get("manifest")
-                    .filter(|v| truthy(v))
+                    .filter(|v| !(v).is_null())
                     .map(|v| (format!("manifest-{n}"), v.clone()))
             }),
     ))
-}
-
-// Buffer.from(text,'base64') accepts URL alphabet, ignores non-alphabet bytes,
-// stops at padding and truncates UTF-16 units to bytes. Preserve that read rule.
-fn original_base64(text: &JsString) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    let mut bits = 0;
-    let mut value = 0_u32;
-    for unit in &text.0 {
-        let byte = *unit as u8;
-        let next = match byte {
-            b'=' => break,
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'+' | b'-' => 62,
-            b'/' | b'_' => 63,
-            _ => continue,
-        };
-        value = (value << 6) | u32::from(next);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            bytes.push((value >> bits) as u8);
-        }
-    }
-    bytes
 }
 
 pub type AdmissionFuture<'a> = Pin<Box<dyn Future<Output = IvyResult<()>> + 'a>>;
@@ -234,7 +205,13 @@ impl MediaStore<'_, '_, '_, '_> {
             )
             .await?;
         let items = array(page.required("items")?)?;
-        check(items.len() <= 1 && !page.get("nextCursor").is_some_and(truthy))?;
+        check(
+            items.len() <= 1
+                && !page
+                    .get("nextCursor")
+                    .and_then(IvyJson::as_js_string)
+                    .is_some_and(|text| !text.0.is_empty()),
+        )?;
         items
             .first()
             .map(|v| {
@@ -260,7 +237,9 @@ impl MediaStore<'_, '_, '_, '_> {
                 == Some(&IvyJson::String(self.engine.evidence.store.root.clone()))
                 && object.get("name") == Some(&IvyJson::String(name.clone()))
                 && object.get("contractKey") == Some(&key.into())
-                && !object.get("effectivelyArchived").is_some_and(truthy)
+                && !object
+                    .get("effectivelyArchived")
+                    .is_some_and(|value| value == &IvyJson::Bool(true))
                 && pin.get("revision") == Some(&IvyJson::Number(1.0))
                 && object.get("currentRevision") == Some(&IvyJson::Number(1.0))
                 && revision.get("revision") == Some(&IvyJson::Number(1.0))
@@ -288,7 +267,9 @@ impl MediaStore<'_, '_, '_, '_> {
             object.get("id") == pin.get("objectId")
                 && object.get("ownerObjectId") == Some(owner)
                 && object.get("contractKey") == Some(&"secretary/media-chunk".into())
-                && !object.get("effectivelyArchived").is_some_and(truthy)
+                && !object
+                    .get("effectivelyArchived")
+                    .is_some_and(|value| value == &IvyJson::Bool(true))
                 && object.get("currentRevision") == pin.get("revision")
                 && revision.get("contractVersion") == Some(&"1.0.0".into())
                 && name
@@ -298,12 +279,14 @@ impl MediaStore<'_, '_, '_, '_> {
             content.get("encoding") == Some(&"base64".into())
                 && revision.get("mediaType") == Some(&"application/octet-stream".into()),
         )?;
-        let bytes = original_base64(
-            content
-                .required("value")?
-                .as_js_string()
-                .ok_or_else(IvyError::internal)?,
-        );
+        let bytes = STANDARD
+            .decode(content.required("value")?.as_str()?)
+            .map_err(|_| {
+                IvyError::new(
+                    "media_publication_invalid",
+                    "Media content must be valid base64.",
+                )
+            })?;
         check(
             !bytes.is_empty()
                 && bytes.len() <= CHUNK_BYTES
@@ -439,7 +422,9 @@ impl MediaStore<'_, '_, '_, '_> {
         check(
             object.get("id") == pin.get("objectId")
                 && object.get("contractKey") == Some(&"secretary/media-manifest".into())
-                && !object.get("effectivelyArchived").is_some_and(truthy)
+                && !object
+                    .get("effectivelyArchived")
+                    .is_some_and(|value| value == &IvyJson::Bool(true))
                 && object.get("currentRevision") == pin.get("revision")
                 && revision.get("contractVersion") == Some(&"1.0.0".into()),
         )?;
@@ -534,7 +519,7 @@ impl MediaStore<'_, '_, '_, '_> {
                 )?,
         )?;
         for attachment in array(value.required("attachments")?)? {
-            let Some(pin) = attachment.get("manifest").filter(|v| truthy(v)) else {
+            let Some(pin) = attachment.get("manifest").filter(|v| !(v).is_null()) else {
                 continue;
             };
             let raw = self

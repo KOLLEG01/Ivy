@@ -1,6 +1,6 @@
 //! Original inbox identities and retained-record checks used before recovery effects.
 use crate::store::{Record, Store};
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json, json::js_string};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json};
 use ivy_sdk::{connection_owner::connection_owner, rpc::RequestOptions};
 
 /// Check the live Secretary identity without borrowing the local journal. This
@@ -17,8 +17,12 @@ pub async fn verify_owner(
     let owner = connection_owner(client, service_node_id).await?;
     let identity = settings.required("identity")?;
     need(
-        owner.get("connected").is_some_and(truthy)
-            && owner.get("synced").is_some_and(truthy)
+        owner
+            .get("connected")
+            .is_some_and(|value| value == &IvyJson::Bool(true))
+            && owner
+                .get("synced")
+                .is_some_and(|value| value == &IvyJson::Bool(true))
             && owner.get("principalId") == identity.get("principalId")
             && owner.get("hostId") == identity.get("hostId")
             && owner.get("serviceName") == Some(&IvyJson::from("secretary")),
@@ -36,15 +40,6 @@ fn need(ok: bool, code: &str, message: &str) -> IvyResult<()> {
 }
 fn same(a: &IvyJson, b: &IvyJson) -> IvyResult<bool> {
     Ok(hash_json(a)? == hash_json(b)?)
-}
-pub(crate) fn truthy(value: &IvyJson) -> bool {
-    match value {
-        IvyJson::Null => false,
-        IvyJson::Bool(v) => *v,
-        IvyJson::Number(v) => *v != 0.0 && !v.is_nan(),
-        IvyJson::String(v) => !v.0.is_empty(),
-        _ => true,
-    }
 }
 fn without(value: &IvyJson, keys: &[&str]) -> IvyJson {
     let mut result = value.clone();
@@ -86,7 +81,10 @@ pub(crate) fn ignored_reason(
     source: &IvyJson,
     message: &IvyJson,
 ) -> IvyResult<Option<&'static str>> {
-    if message.get("outgoing").is_some_and(truthy) {
+    if message
+        .get("outgoing")
+        .is_some_and(|value| value == &IvyJson::Bool(true))
+    {
         return Ok(Some("outgoing"));
     }
     let sender = message.required("senderId")?;
@@ -100,7 +98,7 @@ pub(crate) fn ignored_reason(
     }
     if source
         .get("allowedSenderIds")
-        .filter(|v| truthy(v))
+        .filter(|v| !(v).is_null())
         .and_then(IvyJson::as_array)
         .is_some_and(|allowed| !allowed.contains(sender))
     {
@@ -125,29 +123,47 @@ pub fn notice_text(
     let sender = if email {
         sender_id
     } else if internal {
-        if truthy(title) { title } else { &fallback }
-    } else if truthy(sender_id) {
+        if (title)
+            .as_js_string()
+            .is_some_and(|text| !text.0.is_empty())
+        {
+            title
+        } else {
+            &fallback
+        }
+    } else if (sender_id)
+        .as_js_string()
+        .is_some_and(|text| !text.0.is_empty())
+    {
         sender_id
     } else {
         title
     };
-    let body = if email || !truthy(message.required("text")?) {
+    let body = if email
+        || !(message.required("text")?)
+            .as_js_string()
+            .is_some_and(|text| !text.0.is_empty())
+    {
         assessment.required("summary")?
     } else {
         message.required("text")?
     };
-    let mut units = vec![b'[' as u16];
-    units.extend(js_string(message.required("accountId")?).0);
-    units.extend("] ".encode_utf16());
-    units.extend(js_string(sender).0);
-    if email && truthy(title) {
-        units.extend(" – ".encode_utf16());
-        units.extend(js_string(title).0);
+    let mut text = format!(
+        "[{}] {}",
+        message.required("accountId")?.as_str()?,
+        sender.as_str()?
+    );
+    if email
+        && (title)
+            .as_js_string()
+            .is_some_and(|text| !text.0.is_empty())
+    {
+        text.push_str(" – ");
+        text.push_str(&title.as_str()?);
     }
-    units.extend(": ".encode_utf16());
-    units.extend(js_string(body).0);
-    units.truncate(8192);
-    Ok(JsString(units))
+    text.push_str(": ");
+    text.push_str(&body.as_str()?);
+    Ok(JsString(text.encode_utf16().take(8192).collect()))
 }
 
 /// Borrows the engine's admitted settings, journal and generation cancellation.
@@ -189,7 +205,7 @@ impl InboxEvidence<'_, '_> {
             "Select this exact Secretary scope.",
         )?;
         if matches!(action, "capture" | "checkpoint" | "attach") {
-            let allowed = match source_id.filter(|id| truthy(id)) {
+            let allowed = match source_id.filter(|id| !(id).is_null()) {
                 Some(id) => self
                     .source_definition(id)?
                     .required("producerPrincipalIds")?
@@ -261,8 +277,8 @@ impl InboxEvidence<'_, '_> {
             "secretary_evidence_conflict",
             "The item must retain its original source, message and content identity.",
         )?;
-        if let Some(decision) = value.get("decision").filter(|v| truthy(v)) {
-            let valid = match value.get("notice").filter(|v| truthy(v)) {
+        if let Some(decision) = value.get("decision").filter(|v| !(v).is_null()) {
+            let valid = match value.get("notice").filter(|v| !(v).is_null()) {
                 Some(notice) => {
                     notice.get("text")
                         == Some(&IvyJson::String(notice_text(
@@ -282,7 +298,7 @@ impl InboxEvidence<'_, '_> {
             )?;
         } else {
             need(
-                !value.get("notice").is_some_and(truthy),
+                !value.get("notice").is_some_and(|value| !value.is_null()),
                 "secretary_evidence_conflict",
                 "An unassessed item has no notice.",
             )?;
@@ -300,7 +316,7 @@ impl InboxEvidence<'_, '_> {
             && same(&immutable(first), &immutable(value))?;
         let request_valid = if !valid {
             false
-        } else if let Some(request) = value.get("request").filter(|v| truthy(v)) {
+        } else if let Some(request) = value.get("request").filter(|v| !(v).is_null()) {
             request.get("action") == value.get("action")
                 && request.get("operationId") == value.get("operationId")
                 && value.get("requestHash") == Some(&hash_json(request)?.into())
@@ -310,8 +326,11 @@ impl InboxEvidence<'_, '_> {
                 )?
         } else {
             value.get("action") == Some(&"capture".into())
-                && value.get("ignoredReason").is_some_and(truthy)
-                && !value.get("prepared").is_some_and(truthy)
+                && value
+                    .get("ignoredReason")
+                    .and_then(IvyJson::as_js_string)
+                    .is_some_and(|text| !text.0.is_empty())
+                && !value.get("prepared").is_some_and(|value| !value.is_null())
         };
         need(
             valid && request_valid,

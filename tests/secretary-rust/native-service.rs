@@ -1,6 +1,7 @@
 //! Run the native executable against a loopback Hive protocol peer, without Node.
 use futures_util::{SinkExt, StreamExt};
 use ivy_contracts::{
+    IvyJson,
     hash::{hash_json, tool_definition_hash},
     json::{canonical, parse},
 };
@@ -27,6 +28,481 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 const ROOT: &str = "00000000-0000-4000-8000-000000000001";
 const CONFIGURATION: &str = "00000000-0000-4000-8000-000000000099";
 const AT: &str = "2026-01-01T00:00:00.000Z";
+
+#[test]
+fn public_request_ids_are_strings() {
+    use ivy_sdk::service::InvocationContext;
+    use ivy_secretary::service_handlers::{EngineMethod, PublicMethod, admit};
+    let context = InvocationContext::detached(
+        "fixture-user".into(), None, 7, Default::default(),
+        ivy_contracts::IvyError::new("cancelled", "Fixture cancelled."),
+    );
+    let request = |id: Value| {
+        parse(
+            &json!({"expectedScope":settings()["identity"]["scope"],"operationId":id}).to_string(),
+            1024 * 1024,
+        )
+        .unwrap()
+    };
+    let admitted = admit(
+        PublicMethod::OperationRead,
+        &request(json!("native:1792690000000:read")),
+        &context,
+        Some(7),
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(admitted.method, EngineMethod::OperationRead);
+    for id in [json!(1), json!(false), json!(["id"]), Value::Null] {
+        let error = admit(
+            PublicMethod::OperationRead,
+            &request(id),
+            &context,
+            Some(7),
+            || Ok(()),
+        )
+        .err()
+        .expect("A non-string ID must fail");
+        assert_eq!(error.code, "invalid_arguments");
+    }
+}
+
+#[test]
+fn inbox_notice_text_uses_admitted_strings() {
+    use ivy_secretary::inbox_evidence::notice_text;
+    let message =
+        json!({"accountId":"mail","senderId":"alice","title":"Subject","text":"Original text"});
+    let value = |value: Value| parse(&value.to_string(), 1024 * 1024).unwrap();
+    let assessment = value(json!({"summary":"Summary"}));
+    let source = value(json!({"kind":"email"}));
+    assert_eq!(
+        notice_text(&assessment, &value(message.clone()), &source)
+            .unwrap()
+            .to_utf8()
+            .unwrap(),
+        "[mail] alice – Subject: Summary"
+    );
+    let mut invalid = message;
+    invalid["accountId"] = json!(17);
+    assert!(notice_text(&assessment, &value(invalid), &source).is_err());
+    let teams = value(
+        json!({"accountId":"chat","senderId":"user:alice","title":"Team","text":"Original text"}),
+    );
+    assert_eq!(
+        notice_text(&assessment, &teams, &value(json!({"kind":"chat"})))
+            .unwrap()
+            .to_utf8()
+            .unwrap(),
+        "[chat] Team: Original text"
+    );
+}
+
+#[test]
+fn native_results_and_documents_preserve_user_content() {
+    use ivy_secretary::{
+        assignment_decision::assignment_decision,
+        document::{Format, extract},
+        triage_results::result_items,
+    };
+    let decision = json!({"schemaVersion":1,"urgency":"normal","notification":"main","text":"A useful result","reason":"An event occurred"});
+    let fenced = format!("  ```json\n{decision}\n```  ");
+    assert_eq!(
+        assignment_decision(&fenced.into())
+            .unwrap()
+            .required("text")
+            .unwrap(),
+        &IvyJson::from("A useful result")
+    );
+    let assessment = json!({"urgency":"normal","disposition":"record","notification":"none","summary":"Saved observation","question":false,"usefulIntel":true,"task":null});
+    let turn = parse(r#"{"status":"completed","error":null}"#, 1024).unwrap();
+    let mut item = json!({"id":"answer","type":"agentMessage","phase":"final_answer","text":assessment.to_string()});
+    let value = |value: &Value| parse(&value.to_string(), 1_048_576).unwrap();
+    assert_eq!(
+        result_items(&turn, &[value(&item)])
+            .unwrap()
+            .required("summary")
+            .unwrap(),
+        &IvyJson::from("Saved observation")
+    );
+    item["type"] = json!({"toString":"agentMessage"});
+    assert_eq!(
+        result_items(&turn, &[value(&item)]).unwrap_err().code,
+        "secretary_triage_unexpected_action"
+    );
+    let html = extract(
+        Format::Html,
+        b"<html><body><p>Hello</p><p>World</p></body></html>",
+    )
+    .unwrap();
+    assert_eq!(html.schema_version, 1);
+    let text = html
+        .sections
+        .iter()
+        .map(|section| section.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Hello") && text.contains("World"));
+    let bytes = b"Useful original text";
+    let source = ivy_secretary::media_input::Source {
+        name: "message.txt".into(),
+        media_type: Some(" TEXT/PLAIN ; charset=utf-8 ".into()),
+        byte_length: bytes.len(),
+        content_hash: ivy_contracts::hash::digest(bytes),
+    };
+    let prepared = ivy_secretary::media_input::prepare(&source, bytes, 4096.0)
+        .unwrap()
+        .to_json();
+    assert_eq!(
+        prepared
+            .required("input")
+            .unwrap()
+            .required("text")
+            .unwrap(),
+        &IvyJson::from("Useful original text")
+    );
+}
+
+#[test]
+fn object_projection_uses_json_pointer_indices() {
+    use ivy_secretary::assignment_object::pointer;
+    let value = parse(r#"{"items":[{"a/b":{"~key":42}}]}"#, 1024).unwrap();
+    assert_eq!(
+        pointer(&value, &"/items/0/a~1b/~0key".into()),
+        IvyJson::Number(42.0)
+    );
+    for path in ["/items/length", "/items/00", "/items/-1", "items/0"] {
+        assert_eq!(pointer(&value, &path.into()), IvyJson::Null);
+    }
+}
+
+#[test]
+fn schedule_catch_up_remains_bounded() {
+    use ivy_secretary::schedule::{LocalMinute, Schedule, occurrences};
+    let now = 16 * 60_000;
+    let local = |_: i64, _: &str| -> Result<LocalMinute, ivy_contracts::IvyError> {
+        unreachable!("Interval schedules use UTC")
+    };
+    let page = occurrences(Schedule::Interval { minutes: 5 }, now, 0, 2, local).unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|item| item.occurred_at)
+            .collect::<Vec<_>>(),
+        [5 * 60_000, 10 * 60_000]
+    );
+    let next = occurrences(
+        Schedule::Interval { minutes: 5 },
+        now,
+        page.checked_at,
+        2,
+        local,
+    )
+    .unwrap();
+    assert_eq!(
+        next.items
+            .iter()
+            .map(|item| item.occurred_at)
+            .collect::<Vec<_>>(),
+        [15 * 60_000]
+    );
+}
+
+struct MetadataStub(IvyJson);
+impl ivy_sdk::rpc::RpcClient for MetadataStub {
+    fn request<'a>(
+        &'a self,
+        method: &'a str,
+        _: IvyJson,
+        _: ivy_sdk::rpc::RequestOptions,
+    ) -> ivy_sdk::rpc::RequestFuture<'a> {
+        Box::pin(async move {
+            match method {
+                "system.status" => Ok(IvyJson::object([("runtimeEpoch", "fixture-epoch".into())])),
+                "serviceNodes.get" => Ok(self.0.clone()),
+                _ => panic!("Unexpected metadata request: {method}"),
+            }
+        })
+    }
+}
+#[tokio::test]
+async fn inbox_owner_requires_true_connection_flags() {
+    use ivy_secretary::inbox_evidence::verify_owner;
+    let settings = parse(&settings().to_string(), 1024 * 1024).unwrap();
+    let mut owner = json!({"connected":true,"synced":true,"principalId":"secretary-principal","hostId":"fixture-host","serviceName":"secretary"});
+    let client = |owner: &Value| MetadataStub(parse(&owner.to_string(), 1024 * 1024).unwrap());
+    verify_owner(
+        &client(&owner),
+        &"fixture.secretary".into(),
+        &settings,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    for flag in ["connected", "synced"] {
+        for invalid in [json!(false), json!(1), json!("true"), Value::Null] {
+            owner[flag] = invalid;
+            assert_eq!(
+                verify_owner(
+                    &client(&owner),
+                    &"fixture.secretary".into(),
+                    &settings,
+                    &Default::default()
+                )
+                .await
+                .unwrap_err()
+                .code,
+                "secretary_owner_mismatch"
+            );
+        }
+        owner[flag] = json!(true);
+    }
+}
+
+#[test]
+fn teams_complete_pages_keep_false_flags_and_zero_cursors() {
+    use ivy_secretary::teams_projection::teams_page;
+    let value = |value: Value| parse(&value.to_string(), 1024 * 1024).unwrap();
+    let hash = format!("sha256:{}", "a".repeat(64));
+    let configuration = value(
+        json!({"sourceId":"teams","target":{"serviceNodeId":"native","hostId":"host","nativeVersion":"fixture","nativeExecutableHash":hash,"catalogHash":hash},"expectedAccountHash":hash,"profile":{"id":"teams-account","email":"me@example.test"},"since":AT,"maximumChats":8,"maximumMessages":8,"excludedChatIds":[],"pollMs":60000,"threadCwd":std::env::current_dir().unwrap()}),
+    );
+    let source = value(
+        json!({"sourceId":"teams","kind":"teams","accountId":"teams-account","producerPrincipalIds":["producer"],"ownSenderIds":[],"allowedSenderIds":null}),
+    );
+    let selection = value(json!({"since":AT,"until":"2026-01-02T00:00:00.000Z","chat":null}));
+    let observed = "2026-01-02T00:00:01.000Z".into();
+    let mut page = json!({"chats":[],"has_more":false,"next_from_index":0,"next_link":""});
+    let complete = teams_page(
+        &value(page.clone()),
+        &configuration,
+        &source,
+        &selection,
+        &observed,
+    )
+    .unwrap();
+    assert_eq!(
+        complete.required("messagesWithAttachments").unwrap(),
+        &IvyJson::Number(0.0)
+    );
+    for (key, more) in [
+        ("has_more", json!(true)),
+        ("next_from_index", json!(1)),
+        ("next_link", json!("https://example.test/next")),
+    ] {
+        let original = page[key].clone();
+        page[key] = more;
+        assert_eq!(
+            teams_page(
+                &value(page.clone()),
+                &configuration,
+                &source,
+                &selection,
+                &observed
+            )
+            .unwrap_err()
+            .code,
+            "teams_page_incomplete"
+        );
+        page[key] = original;
+    }
+}
+
+#[tokio::test]
+async fn outlook_and_teams_preserve_page_continuations_and_gap_backoff() {
+    use ivy_sdk::{
+        clock::SystemClock, native_evidence::NativeOwnerIdentity, native_owner::NativeOwner,
+        tools::ToolClients,
+    };
+    use ivy_secretary::{
+        engine::SecretaryEngine,
+        inbox_evidence::InboxEvidence,
+        inbox_recovery::RecoveryScan,
+        journal::{Journal, Limits, Pin},
+        microsoft_store::MicrosoftDocument,
+        outlook_native::OutlookNative,
+        store::Store,
+        teams_native::TeamsNative,
+    };
+    use std::cell::RefCell;
+    let value = |value: Value| parse(&value.to_string(), 1024 * 1024).unwrap();
+    let client = Arc::new(MetadataStub(IvyJson::Null));
+    let journal = Journal::open(Path::new(":memory:"), Limits::default()).unwrap();
+    let store = Store {
+        client: client.clone(),
+        root: ROOT.into(),
+        journal: &journal,
+    };
+    let settings = value(settings());
+    let evidence = InboxEvidence {
+        store: &store,
+        settings: &settings,
+        service_node_id: &"fixture.secretary".into(),
+        cancellation: Default::default(),
+    };
+    let tools = Arc::new(ToolClients::new(client));
+    let issues = RefCell::new(RecoveryScan::default());
+    let engine = SecretaryEngine::new(
+        &evidence,
+        &SystemClock,
+        &SystemClock,
+        || "fixture-id".into(),
+        &tools,
+        &issues,
+    );
+    let owner = NativeOwner::new(
+        tools.clone(),
+        "secretary-principal".into(),
+        NativeOwnerIdentity {
+            service_node_id: "fixture.agent".into(),
+            host_id: Some("fixture-host".into()),
+            native_version: "1".into(),
+            native_executable_hash: format!("sha256:{}", "a".repeat(64)).into(),
+            catalog_hash: format!("sha256:{}", "b".repeat(64)).into(),
+        },
+        Default::default(),
+    );
+    let configuration = value(json!({"pollMs":5000}));
+    let outlook = OutlookNative {
+        engine: &engine,
+        configuration: configuration.clone(),
+        owner: owner.clone(),
+    };
+    let teams = TeamsNative {
+        engine: &engine,
+        configuration,
+        owner,
+    };
+    let document = |name: &str, value| MicrosoftDocument {
+        pin: Pin {
+            object_id: name.into(),
+            revision: 1,
+        },
+        value,
+    };
+    let head = value(json!({"pending":{"objectId":"plan","revision":1},"continuation":null}));
+    let plan = document(
+        "plan",
+        value(json!({"selection":{"skip":0,"chat":null},"pageNumber":0})),
+    );
+    let proof = document(
+        "page",
+        value(
+            json!({"gap":null,"page":{"complete":false,"nextIndex":50,"chats":[{"id":"chat-1"}]},"observedAt":AT,"retryAfterSeconds":null}),
+        ),
+    );
+    let next = outlook.next_head(&head, &plan, &proof).unwrap();
+    assert_eq!(next.required("pending").unwrap(), &IvyJson::Null);
+    assert_eq!(next.required("nextPollAt").unwrap(), &IvyJson::from(AT));
+    assert_eq!(
+        next.required("continuation").unwrap(),
+        &value(json!({"selection":{"skip":50,"chat":null},"pageNumber":1}))
+    );
+    let next = teams.next_head(&head, &plan, &proof).unwrap();
+    assert_eq!(
+        next.required("continuation")
+            .unwrap()
+            .required("selection")
+            .unwrap()
+            .required("chat")
+            .unwrap(),
+        &value(json!({"id":"chat-1"}))
+    );
+    assert_eq!(next.required("nextPollAt").unwrap(), &IvyJson::from(AT));
+    let gap = document(
+        "gap",
+        value(
+            json!({"gap":"provider_unavailable","page":null,"observedAt":AT,"retryAfterSeconds":30}),
+        ),
+    );
+    for next in [
+        outlook.next_head(&head, &plan, &gap),
+        teams.next_head(&head, &plan, &gap),
+    ] {
+        let next = next.unwrap();
+        assert_eq!(next.required("continuation").unwrap(), &IvyJson::Null);
+        assert_eq!(
+            next.required("nextPollAt").unwrap(),
+            &IvyJson::from("2026-01-01T00:00:30.000Z")
+        );
+        assert!(next.get("lastCompleteAt").is_none());
+    }
+    let complete = document(
+        "complete",
+        value(json!({"gap":null,"page":{"complete":true,"chats":[]},"observedAt":AT})),
+    );
+    for next in [
+        outlook.next_head(&head, &plan, &complete),
+        teams.next_head(&head, &plan, &complete),
+    ] {
+        let next = next.unwrap();
+        assert_eq!(next.required("lastCompleteAt").unwrap(), &IvyJson::from(AT));
+        assert_eq!(
+            next.required("nextPollAt").unwrap(),
+            &IvyJson::from("2026-01-01T00:00:05.000Z")
+        );
+        assert_eq!(next.required("continuation").unwrap(), &IvyJson::Null);
+    }
+}
+
+struct NoNativeCalls;
+impl ivy_secretary::media_spool::Validation for NoNativeCalls {
+    fn operation(&self, _: &IvyJson) -> ivy_contracts::IvyResult<()> {
+        panic!("Opening a spool must not invoke native work")
+    }
+    fn progress(&self, _: &IvyJson, _: &IvyJson) -> ivy_contracts::IvyResult<()> {
+        panic!("Opening a spool must not advance native work")
+    }
+}
+#[test]
+fn native_spool_ownership_and_link_checks_remain_enforced() {
+    use ivy_secretary::media_spool::SpoolJournal;
+    let directory = Directory(
+        std::env::temp_dir().join(format!("ivy-secretary-spool-{}", uuid::Uuid::new_v4())),
+    );
+    fs::create_dir(&directory.0).unwrap();
+    let owner = parse(r#"{"principalId":"fixture-owner"}"#, 1024).unwrap();
+    let opened = SpoolJournal::open(&directory.0, &owner, NoNativeCalls).unwrap();
+    assert_eq!(
+        SpoolJournal::open(&directory.0, &owner, NoNativeCalls)
+            .err()
+            .unwrap()
+            .code,
+        "media_spool_owned"
+    );
+    drop(opened);
+    drop(SpoolJournal::open(&directory.0, &owner, NoNativeCalls).unwrap());
+    let target = directory.0.join("target");
+    let linked = directory.0.join("linked");
+    fs::create_dir(&target).unwrap();
+    ivy_host_runtime::filesystem::directory_link(&target, &linked).unwrap();
+    assert_eq!(
+        SpoolJournal::open(&linked, &owner, NoNativeCalls)
+            .err()
+            .unwrap()
+            .code,
+        "path_unsafe"
+    );
+    for name in [
+        "owner.sqlite",
+        "media.sqlite",
+        "media.sqlite-wal",
+        "media.sqlite-shm",
+    ] {
+        let root = directory.0.join(format!("hardlink-{name}"));
+        fs::create_dir(&root).unwrap();
+        let original = root.join("retained");
+        fs::write(&original, b"retained bytes").unwrap();
+        fs::hard_link(&original, root.join(name)).unwrap();
+        assert_eq!(
+            SpoolJournal::open(&root, &owner, NoNativeCalls)
+                .err()
+                .unwrap()
+                .code,
+            "media_spool_path_invalid"
+        );
+        assert_eq!(fs::read(original).unwrap(), b"retained bytes");
+    }
+}
 
 struct Directory(PathBuf);
 impl Drop for Directory {

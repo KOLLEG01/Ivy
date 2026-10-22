@@ -14,10 +14,15 @@ hmac.workspace = true
 ryu-js.workspace = true
 regress.workspace = true
 url.workspace = true
+icu_normalizer.workspace = true
 
 [[test]]
 name = "contracts"
 path = "../../../tests/rust/contracts.rs"
+
+[[test]]
+name = "error-outcome"
+path = "../../../tests/rust/error-outcome.rs"
 
 [[test]]
 name = "hash"
@@ -34,6 +39,10 @@ path = "../../../tests/rust/json-depth.rs"
 [[test]]
 name = "schema"
 path = "../../../tests/rust/schema.rs"
+
+[[test]]
+name = "schema-runtime"
+path = "../../../tests/rust/schema-runtime.rs"
 
 [[test]]
 name = "canonical-bundle"

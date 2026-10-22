@@ -1,8 +1,7 @@
+//! URL and form fields used by Hive's HTTP and OAuth interfaces.
 use crate::{IvyError, IvyResult, JsString};
-use url::{Url, quirks};
+use url::Url;
 
-/// URL constructor fields used at JavaScript interoperability boundaries.
-/// Authorization and scheme/host policy belong to the caller.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UrlProjection {
     pub href: String,
@@ -12,109 +11,52 @@ pub struct UrlProjection {
     pub password: String,
     pub hash: String,
 }
-
-/// Parse an absolute URL, with the constructor's USVString conversion and
-/// IvyError::from(TypeError) failure mapping. This does not apply Hive-base policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UrlComponents {
+    pub origin: String,
+    pub pathname: String,
+}
+fn parsed(input: &JsString) -> IvyResult<Url> {
+    Url::parse(&input.to_utf8()?).map_err(|_| IvyError::internal())
+}
+fn projection(url: Url) -> UrlProjection {
+    UrlProjection {
+        href: url.to_string(),
+        protocol: format!("{}:", url.scheme()),
+        hostname: url.host_str().unwrap_or_default().into(),
+        username: url.username().into(),
+        password: url.password().unwrap_or_default().into(),
+        hash: url.fragment().filter(|value| !value.is_empty()).map(|value| format!("#{value}")).unwrap_or_default(),
+    }
+}
 pub fn parse_url(input: &JsString) -> IvyResult<UrlProjection> {
+    Ok(projection(parsed(input)?))
+}
+pub fn parse_url_with_base(input: &JsString, base: &JsString) -> IvyResult<UrlProjection> {
+    Ok(projection(parsed(base)?.join(&input.to_utf8()?).map_err(|_| IvyError::internal())?))
+}
+pub fn url_components(input: &JsString) -> IvyResult<UrlComponents> {
+    let url = parsed(input)?;
+    Ok(UrlComponents { origin: url.origin().ascii_serialization(), pathname: url.path().into() })
+}
+pub fn parse_form(input: &JsString) -> Vec<(JsString, JsString)> {
     let text = String::from_utf16_lossy(&input.0);
-    let url = Url::parse(&text).map_err(|_| IvyError::internal())?;
-    if url.scheme() == "file" {
-        return file_projection(&text);
-    }
-    let mut href = quirks::href(&url).to_string();
-    if url.cannot_be_a_base()
-        && url.path().ends_with(' ')
-        && (url.query().is_some() || url.fragment().is_some())
-    {
-        let last = url.scheme().len() + url.path().len();
-        href.replace_range(last..last + 1, "%20");
-    }
-    Ok(UrlProjection {
-        href,
-        protocol: quirks::protocol(&url).into(),
-        hostname: quirks::hostname(&url).into(),
-        username: quirks::username(&url).into(),
-        password: quirks::password(&url).into(),
-        hash: quirks::hash(&url).into(),
-    })
+    url::form_urlencoded::parse(text.strip_prefix('?').unwrap_or(&text).as_bytes())
+        .map(|(name, value)| (name.as_ref().into(), value.as_ref().into())).collect()
 }
-
-// The URL crate retains older file-path rules (dropping a host at a drive
-// segment and stripping repeated leading slashes). Preserve Node's current
-// file path state while reusing the parser for host/component encoding.
-fn file_projection(input: &str) -> IvyResult<UrlProjection> {
-    let cleaned: String = input
-        .trim_matches(|c: char| c <= '\u{20}')
-        .chars()
-        .filter(|c| !matches!(c, '\t' | '\r' | '\n'))
-        .collect();
-    let rest = &cleaned[cleaned.find(':').ok_or_else(IvyError::internal)? + 1..];
-    let end = rest.find(['?', '#']).unwrap_or(rest.len());
-    let main = rest[..end].replace('\\', "/");
-    let suffix = &rest[end..];
-    let mut authority = "";
-    let mut path = main.as_str();
-    if let Some(rest) = main.strip_prefix("//") {
-        let slash = rest.find('/').unwrap_or(rest.len());
-        let candidate = &rest[..slash];
-        if drive(candidate) {
-            path = rest;
-        } else {
-            authority = candidate;
-            path = &rest[slash..];
+pub fn set_url_search_params(input: &JsString, updates: &[(JsString, JsString)]) -> IvyResult<JsString> {
+    let mut url = parsed(input)?;
+    if !updates.is_empty() {
+        let mut pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+        for (name, value) in updates {
+            let (name, value) = (name.to_utf8()?, value.to_utf8()?);
+            if let Some(index) = pairs.iter().position(|(key, _)| *key == name) {
+                pairs[index].1 = value;
+                let mut position = 0;
+                pairs.retain(|(key, _)| { let keep = *key != name || position == index; position += 1; keep });
+            } else { pairs.push((name, value)); }
         }
+        url.query_pairs_mut().clear().extend_pairs(pairs);
     }
-    let base =
-        Url::parse(&format!("file://{authority}/{suffix}")).map_err(|_| IvyError::internal())?;
-    let hostname = quirks::hostname(&base).to_string();
-    let segments: Vec<_> = path.strip_prefix('/').unwrap_or(path).split('/').collect();
-    let mut normalized: Vec<String> = Vec::new();
-    for (index, segment) in segments.iter().enumerate() {
-        let dotted = segment.to_ascii_lowercase().replace("%2e", ".");
-        if dotted == "." || dotted == ".." {
-            if dotted == ".." && !(normalized.len() == 1 && drive(&normalized[0])) {
-                normalized.pop();
-            }
-            if index + 1 == segments.len() {
-                normalized.push(String::new());
-            }
-            continue;
-        }
-        let segment = if normalized.is_empty() && drive(segment) {
-            format!("{}:", segment.as_bytes()[0] as char)
-        } else {
-            segment.to_string()
-        };
-        let encoded = Url::parse(&format!("https://placeholder.invalid/_/{segment}/"))
-            .map_err(|_| IvyError::internal())?;
-        normalized.push(
-            encoded
-                .path()
-                .strip_prefix("/_/")
-                .and_then(|path| path.strip_suffix('/'))
-                .ok_or_else(IvyError::internal)?
-                .to_string(),
-        );
-    }
-    let mut href = format!("file://{hostname}/{}", normalized.join("/"));
-    if let Some(query) = base.query() {
-        href.push('?');
-        href.push_str(query);
-    }
-    if let Some(fragment) = base.fragment() {
-        href.push('#');
-        href.push_str(fragment);
-    }
-    Ok(UrlProjection {
-        href,
-        protocol: "file:".into(),
-        hostname,
-        username: String::new(),
-        password: String::new(),
-        hash: quirks::hash(&base).into(),
-    })
-}
-fn drive(segment: &str) -> bool {
-    let bytes = segment.as_bytes();
-    bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && matches!(bytes[1], b':' | b'|')
+    Ok(url.to_string().into())
 }

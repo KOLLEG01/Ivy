@@ -1,8 +1,8 @@
-//! Windows mount-point links used by Node's junction directory-link policy.
+//! Native Windows mount-point directory links.
 use std::{fs, io, os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle}, path::Path};
 use windows_sys::Win32::{Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT}, System::IO::DeviceIoControl};
 
-/// `target` is already absolute, with Node path/UTF-8 preprocessing applied.
+/// `target` is already an absolute native path.
 /// Never replace an existing destination. Remove only a newly created empty
 /// link directory if setting its reparse data fails.
 pub(crate) fn create(target: &Path, destination: &Path) -> io::Result<()> {

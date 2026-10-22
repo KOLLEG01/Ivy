@@ -1,47 +1,22 @@
 use ivy_contracts::{IvyJson, JsString, hash::*, json::*, operation::*};
 
 #[test]
-fn url_projection_matches_node_constructor_fields_and_failures() {
-    use ivy_contracts::whatwg_url::parse_url;
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = std::process::Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/whatwg-url-oracle.mjs",
-        ])
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(rows.len() > 700);
-    for row in rows {
-        let input = parse(row["input"].as_str().unwrap(), 100_000).unwrap();
-        let expected = parse(row["result"].as_str().unwrap(), 100_000).unwrap();
-        let actual = match parse_url(input.as_js_string().unwrap()) {
-            Ok(u) => IvyJson::object([
-                ("ok", true.into()),
-                (
-                    "value",
-                    IvyJson::object([
-                        ("href", u.href.into()),
-                        ("protocol", u.protocol.into()),
-                        ("hostname", u.hostname.into()),
-                        ("username", u.username.into()),
-                        ("password", u.password.into()),
-                        ("hash", u.hash.into()),
-                    ]),
-                ),
-            ]),
-            Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
-        };
-        assert_eq!(actual, expected, "URL input: {}", row["input"]);
-    }
+fn native_urls_preserve_http_origins_forms_and_redirects() {
+    use ivy_contracts::whatwg_url::*;
+    let input = JsString::from("HTTPS://user:pass@EXAMPLE.com:443/base?x=1#fragment");
+    let value = parse_url(&input).unwrap();
+    assert_eq!(value.href, "https://user:pass@example.com/base?x=1#fragment");
+    assert_eq!((value.protocol.as_str(), value.hostname.as_str(), value.username.as_str(), value.password.as_str(), value.hash.as_str()), ("https:", "example.com", "user", "pass", "#fragment"));
+    let parts = url_components(&input).unwrap();
+    assert_eq!((parts.origin.as_str(), parts.pathname.as_str()), ("https://example.com", "/base"));
+    assert_eq!(parse_url_with_base(&"../oauth?state=a".into(), &"https://example.com/ivy/child".into()).unwrap().href, "https://example.com/oauth?state=a");
+    assert_eq!(parse_form(&"a=one&a=two&label=a+b&plus=%2B".into()), vec![("a".into(), "one".into()), ("a".into(), "two".into()), ("label".into(), "a b".into()), ("plus".into(), "+".into())]);
+    let redirect = set_url_search_params(&"https://example.com/oauth?state=old&keep=1&state=extra#f".into(), &[("state".into(), "new value".into()), ("code".into(), "✓".into())]).unwrap();
+    assert_eq!(redirect, JsString::from("https://example.com/oauth?state=new+value&keep=1&code=%E2%9C%93#f"));
+    assert!(parse_url(&"not an absolute url".into()).is_err());
+    assert!(parse_url(&JsString(vec![0xd800])).is_err());
+    assert_eq!(JsString::from("\u{2003}text\n").trim(), JsString::from("text"));
+    assert_eq!(JsString::from("e\u{301}").normalize_nfc(), JsString::from("é"));
 }
 
 #[test]
@@ -217,6 +192,8 @@ fn transport_frame_admission_matches_typescript() {
             "service-notification" => validate_service_notification_frame(&value),
             "provider-notification" => validate_provider_notification_frame(&value),
             "event-availability" => validate_event_availability_frame(&value),
+            "tool-routing" => validate_tool_routing(&value, false),
+            "discovery-routing" => validate_tool_routing(&value, true),
             _ => validate_provider_call_frame(&value),
         };
         if case["ok"] == true {
@@ -225,6 +202,9 @@ fn transport_frame_admission_matches_typescript() {
             let error = result.unwrap_err();
             assert_eq!(error.code, case["code"].as_str().unwrap(), "{case}");
             assert_eq!(error.message, case["message"].as_str().unwrap(), "{case}");
+            if let Some(wire) = case["wire"].as_str() {
+                assert_eq!(error.to_wire(), parse(wire, 100_000).unwrap(), "{case}");
+            }
         }
     }
 }

@@ -187,7 +187,7 @@ impl TriageStore<'_> {
                 .is_some_and(|(_, b)| !b.is_empty() && b.len() <= NATIVE_BYTES),
         )?;
         let bytes = saved.unwrap().1;
-        // TextDecoder's default BOM handling is part of the retained JS reader.
+        // Accept an optional UTF-8 BOM in saved JSON evidence.
         let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
         std::str::from_utf8(bytes).ok().and_then(|s| parse(s, NATIVE_BYTES).ok()).ok_or_else(|| IvyError::new("secretary_triage_evidence_invalid", "Triage requires its original item, owner, native intent and complete evidence."))
     }

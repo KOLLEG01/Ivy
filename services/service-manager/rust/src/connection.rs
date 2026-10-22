@@ -1,4 +1,4 @@
-use crate::{health::HealthReporter, reports::Reports};
+use crate::{configuration::Reload, health::HealthReporter, reports::Reports};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, core_schema::validate_host};
 use ivy_host_runtime::{
     config::InstanceConfig,
@@ -8,27 +8,71 @@ use ivy_host_runtime::{
 use ivy_sdk::service::{ServiceOptions, ToolHandler};
 use std::{
     collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 #[derive(Clone, Default)]
-pub struct Admission(Arc<AtomicBool>);
+pub struct Admission(Arc<Work>);
+#[derive(Default)]
+struct Work {
+    state: Mutex<(bool, usize)>,
+    changed: tokio::sync::Notify,
+}
+struct Invocation(Arc<Work>);
+impl Drop for Invocation {
+    fn drop(&mut self) {
+        self.0.state.lock().unwrap().1 -= 1;
+        self.0.changed.notify_waiters();
+    }
+}
 impl Admission {
     pub fn stop(&self) {
-        self.0.store(true, Ordering::Release);
+        self.0.state.lock().unwrap().0 = true;
     }
     pub fn check(&self) -> IvyResult<()> {
-        if self.0.load(Ordering::Acquire) {
+        if self.0.state.lock().unwrap().0 {
             Err(IvyError::new(
                 "service_unavailable",
                 "ServiceManager is stopping.",
             ))
         } else {
             Ok(())
+        }
+    }
+    /// Keep admitted work owned even if a transport waiter is cancelled. The
+    /// SDK provides capacity; this count only joins work during process shutdown.
+    pub async fn run<T: Send + 'static>(
+        &self,
+        work: ivy_sdk::service::ServiceFuture<T>,
+    ) -> IvyResult<T> {
+        let invocation = {
+            let mut state = self.0.state.lock().unwrap();
+            if state.0 {
+                return Err(IvyError::new(
+                    "service_unavailable",
+                    "ServiceManager is stopping.",
+                ));
+            }
+            state.1 += 1;
+            Invocation(self.0.clone())
+        };
+        tokio::spawn(async move {
+            let _invocation = invocation;
+            work.await
+        })
+        .await
+        .map_err(|_| IvyError::internal())?
+    }
+    pub async fn drain(&self) {
+        loop {
+            let changed = self.0.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.0.state.lock().unwrap().1 == 0 {
+                return;
+            }
+            changed.await;
         }
     }
 }
@@ -69,6 +113,7 @@ pub fn options(
     health: HealthReporter,
     mut mutations: HashMap<JsString, ToolHandler>,
     admission: Admission,
+    reload: Reload,
 ) -> IvyResult<ServiceOptions> {
     validate_config(config)?;
     let value = config.json();
@@ -101,10 +146,7 @@ pub fn options(
         *handler = Arc::new(move |args, context| {
             let inner = inner.clone();
             let admission = admission.clone();
-            Box::pin(async move {
-                admission.check()?;
-                inner(args, context).await
-            })
+            Box::pin(async move { admission.run(inner(args, context)).await })
         });
     }
     let reports = Arc::new(tokio::sync::Mutex::new(Reports::default()));
@@ -113,13 +155,16 @@ pub fn options(
         let host_id = host_id.clone();
         let reports = reports.clone();
         let admission = admission.clone();
+        let reload = reload.clone();
         Arc::new(move |connection: ivy_sdk::service::ServiceConnection| {
             let journal = journal.clone();
             let host_id = host_id.clone();
             let reports = reports.clone();
             let admission = admission.clone();
+            let reload = reload.clone();
             Box::pin(async move {
                 admission.check()?;
+                reload().await?;
                 {
                     let mut reports = reports.lock().await;
                     reports.reconcile_from(&connection, host_id.clone()).await?;
@@ -184,8 +229,10 @@ pub fn options(
         let health = readiness_health.clone();
         let admission = admission.clone();
         let service_node_id = service_node_id.clone();
+        let reload = reload.clone();
         Box::pin(async move {
             admission.check()?;
+            reload().await?;
             let executor = reports
                 .lock()
                 .await

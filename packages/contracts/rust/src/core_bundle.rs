@@ -28,9 +28,6 @@ pub fn bundled_schema(reference: &JsString, document: Option<&JsString>) -> IvyR
 }
 pub fn operation_input_schema(method: &str) -> IvyResult<IvyJson> {
     let reference = crate::core_schema::operation(method, false)
-        .or_else(|| {
-            crate::canonical_bundle::inherited_property(method).then(|| "undefined".to_owned())
-        })
         .ok_or_else(|| IvyError::new("not_found", "Unknown canonical operation."))?;
     let schema = bundled_schema(&reference.into(), None)?;
     if schema.get("type") != Some(&IvyJson::from("object")) {

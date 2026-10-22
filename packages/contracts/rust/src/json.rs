@@ -2,6 +2,8 @@ use crate::{IvyError, IvyResult, limits::MANAGEMENT_FRAME_BYTES};
 use std::cmp::Ordering;
 #[path = "json_number.rs"]
 mod number;
+#[path = "json_trim.rs"]
+mod text;
 #[path = "json_value.rs"]
 mod value_traits;
 pub use number::number_from_string;

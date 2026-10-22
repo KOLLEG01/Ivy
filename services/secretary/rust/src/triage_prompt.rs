@@ -3,7 +3,7 @@
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     hash::digest,
-    json::{canonical, parse, try_js_string},
+    json::{canonical, parse},
 };
 use std::sync::OnceLock;
 
@@ -81,8 +81,11 @@ pub fn triage_prompt(
         .0
         .extend("\n\nPersönliche Regeln aus der expliziten Konfiguration:\n".encode_utf16());
     let personal = match settings.get("instructions") {
-        Some(value) => try_js_string(value)?,
-        None => "undefined".into(),
+        Some(value) => value
+            .as_js_string()
+            .cloned()
+            .ok_or_else(IvyError::internal)?,
+        None => JsString::default(),
     };
     developer.0.extend(personal.0);
     Ok(IvyJson::object([

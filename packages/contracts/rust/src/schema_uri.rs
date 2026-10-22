@@ -3,6 +3,7 @@
 use crate::JsString;
 #[path = "schema_uri_resolve.rs"]
 mod resolution;
+pub(super) use resolution::reference_parts;
 pub use resolution::{full_path, resolve};
 
 /// Compiler ID normalization strips only a terminal empty fragment or `#/`.

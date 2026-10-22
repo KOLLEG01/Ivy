@@ -1,11 +1,18 @@
 //! Read-only Windows process identity for domain-owned launch/stop records.
 use std::{io, os::windows::ffi::OsStringExt, path::PathBuf};
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, FILETIME, HANDLE},
+    Foundation::{
+        CloseHandle, ERROR_INVALID_PARAMETER, FILETIME, HANDLE, WAIT_FAILED, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
+    },
     System::Threading::{
-        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+        GetCurrentProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, WaitForSingleObject,
     },
 };
+
+mod parent;
+pub use parent::process_parent_id;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessIdentity {
@@ -24,6 +31,60 @@ impl Drop for Handle {
     }
 }
 
+fn creation_time(process: HANDLE) -> io::Result<u64> {
+    let mut created: FILETIME = unsafe { std::mem::zeroed() };
+    let mut exited = created;
+    let mut kernel = created;
+    let mut user = created;
+    if unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+}
+
+/// Read the current process's exact creation FILETIME without opening a process
+/// or inspecting its image. The pseudo-handle is borrowed and is never closed.
+pub fn current_process_created_filetime() -> io::Result<u64> {
+    creation_time(unsafe { GetCurrentProcess() })
+}
+
+/// Check the exact predecessor identity without waiting or inspecting its image.
+/// Absence or PID reuse retires the old identity; a matching identity needs a
+/// signaled process handle. Access denial and inspection failures remain errors.
+pub fn process_exited(pid: u32, created_filetime: u64) -> io::Result<bool> {
+    if pid == 0 || created_filetime == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Process identity must have a positive PID and creation FILETIME.",
+        ));
+    }
+    let raw = unsafe {
+        OpenProcess(
+            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        )
+    };
+    if raw.is_null() {
+        let error = io::Error::last_os_error();
+        return if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+            Ok(true)
+        } else {
+            Err(error)
+        };
+    }
+    let process = Handle(raw);
+    if creation_time(process.0)? != created_filetime {
+        return Ok(true);
+    }
+    match unsafe { WaitForSingleObject(process.0, 0) } {
+        WAIT_OBJECT_0 => Ok(true),
+        WAIT_TIMEOUT => Ok(false),
+        WAIT_FAILED => Err(io::Error::last_os_error()),
+        _ => Err(io::Error::other("Unexpected process wait result.")),
+    }
+}
+
 /// Not-found means the PID is gone. Access denial and other failures stay errors;
 /// they can never be used as stopped evidence.
 pub fn process_identity(pid: u32) -> io::Result<Option<ProcessIdentity>> {
@@ -37,14 +98,7 @@ pub fn process_identity(pid: u32) -> io::Result<Option<ProcessIdentity>> {
         };
     }
     let process = Handle(raw);
-    let mut created: FILETIME = unsafe { std::mem::zeroed() };
-    let mut exited = created;
-    let mut kernel = created;
-    let mut user = created;
-    if unsafe { GetProcessTimes(process.0, &mut created, &mut exited, &mut kernel, &mut user) } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
+    let created_filetime = creation_time(process.0)?;
     let mut name = vec![0u16; 32768];
     let mut size = name.len() as u32;
     if unsafe { QueryFullProcessImageNameW(process.0, 0, name.as_mut_ptr(), &mut size) } == 0 {
@@ -53,8 +107,7 @@ pub fn process_identity(pid: u32) -> io::Result<Option<ProcessIdentity>> {
     name.truncate(size as usize);
     Ok(Some(ProcessIdentity {
         pid,
-        created_filetime: (u64::from(created.dwHighDateTime) << 32)
-            | u64::from(created.dwLowDateTime),
+        created_filetime,
         image: std::ffi::OsString::from_wide(&name).into(),
     }))
 }

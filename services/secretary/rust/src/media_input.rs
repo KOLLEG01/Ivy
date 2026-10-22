@@ -106,7 +106,6 @@ impl Prepared {
     }
 }
 
-// MIME selection uses ECMAScript trim, including BOM but excluding NEL.
 pub(crate) fn mime(source: &Source) -> String {
     let units = source
         .media_type
@@ -117,9 +116,7 @@ pub(crate) fn mime(source: &Source) -> String {
         .split(|unit| *unit == u16::from(b';'))
         .next()
         .unwrap_or_default();
-    String::from_utf16_lossy(prefix)
-        .trim_matches(|c: char| matches!(c, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}'))
-        .to_lowercase()
+    String::from_utf16_lossy(prefix).trim().to_ascii_lowercase()
 }
 
 /// The selected native request supplies the budget; this function never truncates.
@@ -157,7 +154,7 @@ pub fn prepare(source: &Source, bytes: &[u8], maximum_input_bytes: f64) -> IvyRe
         let Ok(text) = std::str::from_utf8(bytes) else {
             return Ok(unavailable("media_text_encoding_unsupported"));
         };
-        // TextDecoder(ignoreBOM: true) retains a leading BOM, as from_utf8 does.
+        // Preserve the original UTF-8 text, including a leading BOM.
         (
             Kind::Text,
             IvyJson::object([

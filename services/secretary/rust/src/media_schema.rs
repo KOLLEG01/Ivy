@@ -37,21 +37,24 @@ fn need(condition: bool, code: &str, message: &str) -> IvyResult<()> {
     }
 }
 
-// Evidence precision is four-digit-year UTC; native ISO timestamps also admit
-// Date.toISOString's signed six-digit years, within ECMAScript's TimeClip range.
+// Source evidence retains four-digit-year UTC precision. Native timestamps use
+// the shared public timestamp contract.
 fn timestamp_valid(value: &IvyJson, exact_millis: bool) -> bool {
-    if matches!(value, IvyJson::Null) {
-        return !exact_millis;
+    if exact_millis {
+        return value
+            .as_js_string()
+            .is_some_and(|text| ivy_sdk::native_evidence::native_instant(text, None).is_ok());
+    }
+    if value.is_null() {
+        return true;
     }
     let Ok(text) = value.as_str() else {
         return false;
     };
-    let raw = text.as_bytes();
-    let extended = exact_millis && raw.len() == 27 && matches!(raw[0], b'+' | b'-');
-    let b = if extended { &raw[3..] } else { raw };
+    let b = text.as_bytes();
     let fraction = match b.len() {
-        20 if !exact_millis => 0,
-        22..=28 if !exact_millis || b.len() == 24 => b.len() - 21,
+        20 => 0,
+        22..=28 => b.len() - 21,
         _ => return false,
     };
     if b[4] != b'-'
@@ -70,7 +73,7 @@ fn timestamp_valid(value: &IvyJson, exact_millis: bool) -> bool {
             c.is_ascii_digit().then(|| n * 10 + u32::from(c - b'0'))
         })
     };
-    let (Some(mut year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
         number(0, 4),
         number(5, 7),
         number(8, 10),
@@ -80,32 +83,6 @@ fn timestamp_valid(value: &IvyJson, exact_millis: bool) -> bool {
     ) else {
         return false;
     };
-    let mut signed_year = year as i32;
-    if extended {
-        if !raw[1..7].iter().all(u8::is_ascii_digit) {
-            return false;
-        }
-        year = raw[1..7]
-            .iter()
-            .fold(0, |n, c| n * 10 + u32::from(c - b'0'));
-        if (raw[0] == b'+' && year < 10_000) || (raw[0] == b'-' && year == 0) {
-            return false;
-        }
-        signed_year = if raw[0] == b'-' {
-            -(year as i32)
-        } else {
-            year as i32
-        };
-    }
-    if exact_millis {
-        let Some(millis) = number(20, 23) else {
-            return false;
-        };
-        let parts = (signed_year, month, day, hour, minute, second, millis);
-        if parts < (-271_821, 4, 20, 0, 0, 0, 0) || parts > (275_760, 9, 13, 0, 0, 0, 0) {
-            return false;
-        }
-    }
     let days = match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,

@@ -1,81 +1,111 @@
 //! Native path operations shared by host configuration, launch and recovery.
+use crate::{IvyError, IvyResult, native_path};
 use std::{
     io,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
-/// Node's realpath returns ordinary DOS/UNC paths on Windows. Keep native UTF-16
-/// while removing only the extended prefix introduced by std::fs::canonicalize.
+/// Retain the OS canonical spelling, including verbatim Windows paths.
 pub fn realpath(path: &Path) -> io::Result<PathBuf> {
-    let resolved = std::fs::canonicalize(path)?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::{OsStrExt, OsStringExt};
-        let units: Vec<u16> = resolved.as_os_str().encode_wide().collect();
-        let extended: Vec<u16> = "\\\\?\\".encode_utf16().collect();
-        let unc: Vec<u16> = "\\\\?\\UNC\\".encode_utf16().collect();
-        if units.starts_with(&unc) {
-            let mut ordinary: Vec<u16> = "\\\\".encode_utf16().collect();
-            ordinary.extend_from_slice(&units[unc.len()..]);
-            return Ok(std::ffi::OsString::from_wide(&ordinary).into());
-        }
-        if units.starts_with(&extended) && units.get(5) == Some(&(b':' as u16)) {
-            return Ok(std::ffi::OsString::from_wide(&units[extended.len()..]).into());
-        }
-    }
-    Ok(resolved)
+    std::fs::canonicalize(path)
 }
 
 pub fn absolute(path: &Path) -> io::Result<PathBuf> {
-    let path = std::path::absolute(path)?;
-    let mut result = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                result.pop();
-            }
-            component => result.push(component.as_os_str()),
-        }
-    }
-    Ok(result)
+    std::path::absolute(path).map(|path| native_path::lexical(&path))
 }
 
-/// Lexical containment, with the same case-insensitive Windows comparison used
-/// by node:path.relative. Resolve links separately at an effect boundary.
+/// Lexical component containment, using Windows ordinal name comparison on
+/// Windows. Resolve links separately at an effect boundary.
 pub fn inside(root: &Path, path: &Path) -> io::Result<bool> {
-    let root = absolute(root)?;
-    let path = absolute(path)?;
-    #[cfg(windows)]
-    {
-        let root = root.to_string_lossy().to_lowercase();
-        let path = path.to_string_lossy().to_lowercase();
-        Ok(Path::new(&path).starts_with(Path::new(&root)))
+    Ok(native_path::within(&absolute(root)?, &absolute(path)?))
+}
+
+/// Existing native payload admission, shared with helper selection.
+pub(crate) fn direct_native_file(root: &Path, relative: &str) -> IvyResult<PathBuf> {
+    let missing = || {
+        IvyError::new(
+            "artifact_missing",
+            "Native launch needs its complete contained runtime payload.",
+        )
+    };
+    let mut local = root.to_owned();
+    let parts = relative.split('/').collect::<Vec<_>>();
+    for (index, part) in parts.iter().enumerate() {
+        local.push(part);
+        let metadata = std::fs::symlink_metadata(&local).map_err(|_| missing())?;
+        if metadata.file_type().is_symlink()
+            || !if index + 1 == parts.len() {
+                metadata.is_file() && metadata.len() > 0
+            } else {
+                metadata.is_dir()
+            }
+        {
+            return Err(IvyError::new(
+                "artifact_missing",
+                "Native launch needs direct regular payload files and directories.",
+            ));
+        }
     }
-    #[cfg(not(windows))]
-    {
-        Ok(path.starts_with(root))
+    if !inside(root, &realpath(&local).map_err(|_| missing())?).map_err(|_| missing())? {
+        return Err(IvyError::new(
+            "artifact_missing",
+            "Native runtime payload leaves its candidate root.",
+        ));
     }
+    Ok(local)
+}
+
+#[derive(Debug)]
+struct NoAncestor;
+impl std::fmt::Display for NoAncestor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Storage path has no existing ancestor.")
+    }
+}
+impl std::error::Error for NoAncestor {}
+pub fn future_path(path: &ivy_contracts::JsString) -> IvyResult<ivy_contracts::JsString> {
+    resolved_future_path(&native_path::to_native(path))
+        .map(|path| native_path::from_native(&path))
+        .map_err(|error| {
+            if error
+                .get_ref()
+                .is_some_and(|error| error.is::<NoAncestor>())
+            {
+                IvyError::new("target_conflict", "Storage path has no existing ancestor.")
+            } else {
+                IvyError::internal()
+            }
+        })
 }
 
 /// Resolve only the existing ancestor; future descendants are never created by
 /// a path check. Errors other than not-found must not authorize a new location.
 pub fn resolved_future_path(path: &Path) -> io::Result<PathBuf> {
-    let mut ancestor = absolute(path)?;
+    let mut ancestor = std::path::absolute(path)?;
     let mut suffix = Vec::new();
     loop {
-        match std::fs::canonicalize(&ancestor) {
+        match realpath(&ancestor) {
             Ok(mut actual) => {
-                for member in suffix.iter().rev() {
-                    actual.push(member);
+                // Windows can report a missing path for a child of a regular
+                // file. Such an ancestor cannot admit future descendants.
+                if !suffix.is_empty() && !std::fs::metadata(&actual)?.is_dir() {
+                    return Err(io::ErrorKind::NotADirectory.into());
                 }
-                return Ok(actual);
+                for part in suffix.into_iter().rev() {
+                    actual.push(part);
+                }
+                return Ok(native_path::lexical(&actual));
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let name = ancestor.file_name().ok_or(error)?.to_os_string();
+                let name = match ancestor.components().next_back() {
+                    Some(
+                        part @ (std::path::Component::Normal(_) | std::path::Component::ParentDir),
+                    ) => part.as_os_str().to_owned(),
+                    _ => return Err(io::Error::other(NoAncestor)),
+                };
                 suffix.push(name);
                 if !ancestor.pop() {
-                    return Err(io::Error::other("Storage path has no existing ancestor."));
+                    return Err(io::Error::other(NoAncestor));
                 }
             }
             Err(error) => return Err(error),

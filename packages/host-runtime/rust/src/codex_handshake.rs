@@ -1,9 +1,12 @@
 //! Initialization and identity checks shared by the owned and proxy connections.
-use super::codex_rpc::{NativeRpc, RequestOptions};
+use super::{
+    codex_rpc::{NativeRpc, RequestOptions},
+    node_path, paths,
+};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use std::path::Path;
 
-fn whitespace(unit: u16) -> bool {
+pub(crate) fn whitespace(unit: u16) -> bool {
     matches!(unit,0x9..=0xd|0x20|0xa0|0x1680|0x2000..=0x200a|0x2028|0x2029|0x202f|0x205f|0x3000|0xfeff)
 }
 
@@ -110,15 +113,10 @@ pub async fn initialize(rpc: &NativeRpc, settings: Handshake<'_>) -> IvyResult<(
         .get("codexHome")
         .and_then(IvyJson::as_js_string)
         .ok_or_else(mismatch)?;
-    #[cfg(windows)]
-    let observed = {
-        use std::os::windows::ffi::OsStringExt;
-        std::ffi::OsString::from_wide(&observed.0)
-    };
-    #[cfg(not(windows))]
-    let observed = std::ffi::OsString::from(String::from_utf16_lossy(&observed.0));
-    let actual = tokio::fs::canonicalize(observed)
+    let observed = node_path::to_native(observed);
+    let actual = tokio::task::spawn_blocking(move || paths::realpath(&observed))
         .await
+        .map_err(|_| IvyError::internal())?
         .map_err(|_| IvyError::internal())?;
     if actual != settings.expected_home {
         return Err(mismatch());

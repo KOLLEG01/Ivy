@@ -1,8 +1,7 @@
 //! Original account-bound Teams chat/message projection. Preview text is never input.
 use crate::{
-    inbox_evidence::truthy,
     microsoft_schema::validate_microsoft,
-    outlook_projection::{self, whitespace},
+    outlook_projection,
     schema::{Schema, validate},
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json, json::canonical};
@@ -88,7 +87,7 @@ fn sender(value: &JsString) -> bool {
     value.0.len() > start
         && value.0[start..]
             .iter()
-            .all(|c| *c != 58 && !char::from_u32(*c as u32).is_some_and(whitespace))
+            .all(|c| *c != 58 && !char::from_u32(*c as u32).is_some_and(char::is_whitespace))
 }
 pub fn teams_source(configuration: &IvyJson, source: &IvyJson) -> IvyResult<()> {
     check(
@@ -148,15 +147,18 @@ pub fn teams_page(
     let entries = entries.unwrap();
     check(entries.len() <= maximum, "teams_scan_limit")?;
     check(
-        [
-            "next_link",
-            "nextLink",
-            "@odata.nextLink",
-            "has_more",
-            "next_from_index",
-        ]
-        .iter()
-        .all(|key| !page.get(key).is_some_and(truthy)),
+        ["next_link", "nextLink", "@odata.nextLink"]
+            .iter()
+            .all(|key| {
+                page.get(key)
+                    .and_then(IvyJson::as_js_string)
+                    .is_none_or(|text| text.0.is_empty())
+            })
+            && page.get("has_more") != Some(&IvyJson::Bool(true))
+            && page
+                .get("next_from_index")
+                .and_then(IvyJson::as_f64)
+                .is_none_or(|index| index == 0.0),
         "teams_page_incomplete",
     )?;
     let mut excluded = IvyJson::object(

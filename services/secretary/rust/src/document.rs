@@ -54,10 +54,6 @@ impl DocumentText {
     }
 }
 
-// ECMAScript trim differs from Rust's Unicode White_Space (notably BOM and NEL).
-fn trim(text: &str) -> &str {
-    text.trim_matches(|c: char| matches!(c, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}'))
-}
 fn utf8(bytes: &[u8]) -> Result<&str> {
     std::str::from_utf8(bytes).map_err(|_| INVALID)
 }
@@ -118,7 +114,7 @@ fn word_text(bytes: &[u8]) -> Result<String> {
         }
         pending.extend(node.children().rev().map(Pending::Node));
     }
-    Ok(trim(&text).into())
+    Ok(str::trim(&text).into())
 }
 fn selected_part(name: &str) -> bool {
     if matches!(
@@ -368,7 +364,7 @@ fn html(bytes: &[u8]) -> Result<DocumentText> {
         Format::Html,
         vec![Section {
             label: "HTML document".into(),
-            text: trim(&text).into(),
+            text: str::trim(&text).into(),
         }],
     ))
 }
@@ -399,7 +395,7 @@ fn pdf(bytes: &[u8]) -> Result<DocumentText> {
         }
         sections.push(Section {
             label: format!("Page {page}"),
-            text: trim(&text).into(),
+            text: str::trim(&text).into(),
         });
     }
     let mut result = DocumentText::new(Format::Pdf, sections);
@@ -431,7 +427,11 @@ pub fn extract(format: Format, bytes: &[u8]) -> Result<DocumentText> {
     {
         return Err(INVALID);
     }
-    if !value.sections.iter().any(|s| !trim(&s.text).is_empty()) {
+    if !value
+        .sections
+        .iter()
+        .any(|s| !str::trim(&s.text).is_empty())
+    {
         return Err("media_document_no_text");
     }
     Ok(value)

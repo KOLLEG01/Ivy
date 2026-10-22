@@ -2,7 +2,7 @@
 use crate::{
     browser_notice::secretary_browser_notice,
     engine::SecretaryEngine,
-    inbox_evidence::{ignored_reason, truthy},
+    inbox_evidence::ignored_reason,
     notice_evidence::{NoticeMethod, NoticeProvider, notice_evidence},
     policy::assessment_suppression,
     store::{Record, mutation},
@@ -61,8 +61,9 @@ pub(crate) fn changed(
 }
 fn quiet(policy: &IvyJson, urgency: &IvyJson, now: i64) -> IvyResult<bool> {
     let silent = field(policy, "silentTime");
-    if !truthy(silent)
-        || truthy(field(policy, "urgentBypass")) && urgency == &IvyJson::from("critical")
+    if (silent).is_null()
+        || ((field(policy, "urgentBypass")) == &IvyJson::Bool(true))
+            && urgency == &IvyJson::from("critical")
     {
         return Ok(false);
     }
@@ -108,7 +109,9 @@ impl<'a, 'engine, 'journal> SecretaryNotices<'a, 'engine, 'journal> {
         self.engine.evidence.verify_owner().await?;
         let operation_id = field(field(item.required("value")?, "decision"), "operationId");
         need(
-            truthy(operation_id),
+            (operation_id)
+                .as_js_string()
+                .is_some_and(|text| !text.0.is_empty()),
             "secretary_notice_mismatch",
             "A notice update needs its assessment operation identity.",
         )?;
@@ -154,7 +157,7 @@ impl<'a, 'engine, 'journal> SecretaryNotices<'a, 'engine, 'journal> {
         let value = item.required("value")?;
         let decision = field(value, "decision");
         let notice = field(value, "notice");
-        if !truthy(decision) || !truthy(notice) {
+        if (decision).is_null() || (notice).is_null() {
             return Ok(());
         }
         let pin = item.required("pin")?;
@@ -173,8 +176,8 @@ impl<'a, 'engine, 'journal> SecretaryNotices<'a, 'engine, 'journal> {
             need(
                 is(notice, "state", "suppressed")
                     && is(notice, "reason", suppressed)
-                    && !truthy(field(notice, "request"))
-                    && !truthy(field(notice, "evidence")),
+                    && (field(notice, "request")).is_null()
+                    && (field(notice, "evidence")).is_null(),
                 "secretary_notice_mismatch",
                 "A suppressed assessment cannot gain a dispatch.",
             )?;
@@ -239,7 +242,7 @@ impl<'a, 'engine, 'journal> SecretaryNotices<'a, 'engine, 'journal> {
             return Ok(());
         }
         let request = field(notice, "request");
-        if truthy(request)
+        if !(request).is_null()
             && retry
                 .as_ref()
                 .is_some_and(|r| r.value.get("failedOperationId") == request.get("operationId"))
@@ -303,12 +306,12 @@ impl<'a, 'engine, 'journal> SecretaryNotices<'a, 'engine, 'journal> {
                 )
                 .await;
         }
-        if !truthy(request) {
+        if (request).is_null() {
             need(
                 is(notice, "state", "queued")
-                    && !truthy(field(notice, "target"))
+                    && (field(notice, "target")).is_null()
                     && field(notice, "preparedRevision").is_null()
-                    && !truthy(field(notice, "evidence")),
+                    && (field(notice, "evidence")).is_null(),
                 "secretary_notice_mismatch",
                 "Unprepared notices must remain queued.",
             )?;
@@ -319,7 +322,7 @@ impl<'a, 'engine, 'journal> SecretaryNotices<'a, 'engine, 'journal> {
                 Some("minimum_message_age")
             } else if is_quiet {
                 Some("silent_time")
-            } else if !truthy(&target) {
+            } else if (&target).is_null() {
                 Some("channel_not_configured")
             } else {
                 None
@@ -374,7 +377,7 @@ impl<'a, 'engine, 'journal> SecretaryNotices<'a, 'engine, 'journal> {
         }
         let target = field(notice, "target");
         need(
-            truthy(target) && !field(notice, "preparedRevision").is_null(),
+            !(target).is_null() && !field(notice, "preparedRevision").is_null(),
             "secretary_notice_mismatch",
             "A dispatched notice must retain its prepared target revision.",
         )?;
@@ -701,7 +704,7 @@ impl<'a, 'engine, 'journal> SecretaryNotices<'a, 'engine, 'journal> {
             Err(error) => return Err(error),
         };
         need(
-            truthy(&reply),
+            !(&reply).is_null(),
             "secretary_notice_unresolved",
             "The original notification action has no Main reply.",
         )?;

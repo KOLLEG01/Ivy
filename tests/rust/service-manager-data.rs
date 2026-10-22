@@ -35,6 +35,61 @@ impl RpcClient for ReplyQueue {
 }
 
 #[tokio::test]
+async fn mutation_reload_errors_preserve_raw_outcomes_and_admission_order() {
+    use ivy_contracts::{IvyError, JsString, Outcome};
+    use ivy_sdk::service::InvocationContext;
+    use ivy_service_manager::{configuration::Reload, handlers::mutations};
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+    let root = Temp::new();
+    for value in [
+        r#"["unknown"]"#, r#"["completed"]"#, r#"[["not_executed"]]"#,
+        r#""not_executed""#, r#""unknown""#, r#""completed""#,
+    ] {
+        let raw = json(value);
+        for details in [None, Some(IvyJson::Null), Some(IvyJson::object([
+            ("key", IvyJson::String(JsString(vec![0xdfff, 65]))),
+        ]))] {
+            let mut expected = IvyError::new_js(
+                "configuration_changed".into(), JsString(vec![0xd800; 2050]),
+            ).with_provider_outcome(raw.clone());
+            expected.details = details;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let reload: Reload = Arc::new({
+                let calls = calls.clone();
+                let expected = expected.clone();
+                move || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let expected = expected.clone();
+                    Box::pin(async move { Err(expected) })
+                }
+            });
+            let handlers = mutations(reload, root.0.clone());
+            let context = || InvocationContext::detached(
+                "caller".into(), Some("operation".into()), 1, Default::default(),
+                IvyError::new("cancelled", "Fixture cancelled."),
+            );
+            for name in ["host.deploy", "host.rollback", "host.restart", "host.enable", "host.disable"] {
+                let before = calls.load(Ordering::SeqCst);
+                let handler = &handlers[&JsString::from(name)];
+                let error = handler(json(r#"{"instanceId":"instance","operationId":"operation"}"#), context())
+                    .await.unwrap_err();
+                assert_eq!(error, expected, "{name}: {value}");
+                assert_eq!(error.to_wire().get("data").unwrap().get("outcome"), Some(&raw));
+                assert_eq!(calls.load(Ordering::SeqCst), before + 1);
+
+                let conflict = handler(json(r#"{"instanceId":"instance","operationId":"other"}"#), context())
+                    .await.unwrap_err();
+                assert_eq!(conflict.code, "mutation_conflict");
+                assert_eq!(conflict.outcome, Outcome::NotExecuted);
+                assert_eq!(calls.load(Ordering::SeqCst), before + 1, "Admission must precede reload");
+            }
+        }
+    }
+    assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0, "Failed reload must not open a journal");
+}
+
+#[tokio::test]
 async fn publication_retries_failed_acks_without_reallocating_unchanged_reports() {
     let status = json(r#"{"hostId":"host","executor":null,"instances":[]}"#);
     let snapshot = json(r#"{"sequence":12}"#);
@@ -166,12 +221,10 @@ async fn journal_handlers_refresh_executor_and_observe_configuration_reload() {
     let mut config = manager_host(&root);
     let journal = HostJournal::open(config.clone()).await.unwrap();
     let handlers = read_handlers(journal.clone(), "host".into());
-    let context = || ivy_sdk::service::InvocationContext {
-        caller_principal_id: "caller".into(),
-        operation_id: None,
-        generation: 1,
-        signal: Default::default(),
-    };
+    let context = || ivy_sdk::service::InvocationContext::detached(
+        "caller".into(), None, 1, Default::default(),
+        ivy_contracts::IvyError::new("cancelled", "Fixture cancelled."),
+    );
     let status = &handlers[&"host.status".into()];
     let first = status(json("{}"), context()).await.unwrap();
     assert_eq!(first.required("executor").unwrap(), &IvyJson::Null);
@@ -621,9 +674,9 @@ fn bundled_tool_definitions_match_original_manager_exactly() {
 }
 
 #[test]
-fn topology_adds_disabled_instances_without_restarting_existing_owners() {
+fn topology_owns_hive_and_disabled_services_without_restarting_existing_owners() {
     let accepted = json(
-        r#"{"instances":[{"instanceId":"first","componentId":"sample","engine":"process","enabled":true},{"instanceId":"new","componentId":"sample","engine":"process","enabled":false},{"instanceId":"manager","componentId":"service-manager","engine":"process","enabled":true},{"instanceId":"external","componentId":"sample","engine":"docker","enabled":true}]}"#,
+        r#"{"instances":[{"instanceId":"first","componentId":"hive","engine":"process","enabled":true},{"instanceId":"new","componentId":"data-collector","engine":"process","enabled":false},{"instanceId":"host","componentId":"host-executor","engine":"process","enabled":true},{"instanceId":"manager","componentId":"service-manager","engine":"process","enabled":true},{"instanceId":"external","componentId":"sample","engine":"docker","enabled":true}]}"#,
     );
     let desired = topology::owner_ids("win32", &accepted).unwrap();
     assert_eq!(desired, vec!["first".into(), "new".into()]);

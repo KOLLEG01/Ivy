@@ -78,15 +78,6 @@ fn need(ok: bool, code: &str, message: &str) -> IvyResult<()> {
 fn same(a: &IvyJson, b: &IvyJson) -> IvyResult<bool> {
     Ok(hash_json(a)? == hash_json(b)?)
 }
-fn truthy(v: &IvyJson) -> bool {
-    match v {
-        IvyJson::Null => false,
-        IvyJson::Bool(b) => *b,
-        IvyJson::Number(n) => *n != 0.0 && !n.is_nan(),
-        IvyJson::String(s) => !s.0.is_empty(),
-        _ => true,
-    }
-}
 fn pin(value: &IvyJson) -> IvyResult<Pin> {
     Ok(Pin {
         object_id: value.required("objectId")?.as_str()?,
@@ -117,7 +108,7 @@ pub fn record_references(key: Record, value: &IvyJson) -> IvyResult<IvyJson> {
                 .iter()
                 .enumerate()
             {
-                if let Some(pin) = entry.get("pin").filter(|v| truthy(v)) {
+                if let Some(pin) = entry.get("pin").filter(|v| !(v).is_null()) {
                     refs.insert(format!("media-{i}"), pin.clone());
                 }
             }
@@ -155,19 +146,9 @@ fn operation_identity(value: &IvyJson) -> Option<&JsString> {
             .filter(|id| id.issued_at_unix_ms >= 1_000_000_000_000)
             .map(|_| s),
         IvyJson::Array(a) => a.iter().find_map(operation_identity),
-        IvyJson::Object(o) => {
-            // Object.values visits array-index keys before other insertion keys.
-            let mut order: Vec<_> = (0..o.len()).collect();
-            order.sort_by_key(|i| {
-                let index = o[*i].0.to_utf8().ok().and_then(|key| {
-                    key.parse::<u32>()
-                        .ok()
-                        .filter(|n| *n < u32::MAX && n.to_string() == key)
-                });
-                index.map_or((1, 0), |n| (0, n))
-            });
-            order.into_iter().find_map(|i| operation_identity(&o[i].1))
-        }
+        IvyJson::Object(values) => values
+            .iter()
+            .find_map(|(_, value)| operation_identity(value)),
         _ => None,
     }
 }
@@ -199,7 +180,9 @@ impl Store<'_> {
         need(
             !key.local()
                 && object.get("parentId") == Some(&IvyJson::String(self.root.clone()))
-                && !object.get("effectivelyArchived").is_some_and(truthy)
+                && !object
+                    .get("effectivelyArchived")
+                    .is_some_and(|value| value == &IvyJson::Bool(true))
                 && object.get("contractKey") == Some(&IvyJson::from(key.key()))
                 && revision
                     .get("contractVersion")
@@ -312,7 +295,11 @@ impl Store<'_> {
             .as_array()
             .ok_or_else(IvyError::internal)?;
         need(
-            items.len() <= 1 && !page.get("nextCursor").is_some_and(truthy),
+            items.len() <= 1
+                && !page
+                    .get("nextCursor")
+                    .and_then(IvyJson::as_js_string)
+                    .is_some_and(|text| !text.0.is_empty()),
             "secretary_identity_conflict",
             "An original Secretary name must be unique.",
         )?;

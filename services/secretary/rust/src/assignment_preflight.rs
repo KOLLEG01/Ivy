@@ -1,10 +1,7 @@
 //! Secretary preflight admission and completion policy around the Host process driver.
 use crate::{assignment_decision::trimmed, assignment_execution::AssignmentExecution};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
-use ivy_host_runtime::{
-    exec_file::{FileCommand, FileOptions, exec_file},
-    node_path::{filesystem_path, to_native},
-};
+use ivy_host_runtime::exec_file::{FileCommand, FileOptions, exec_file};
 use std::path::{Path, PathBuf};
 
 pub struct PreparedPreflight {
@@ -18,9 +15,8 @@ pub enum PreflightResult {
     },
     Failed {
         error: IvyError,
-        is_ivy_error: bool,
-        stdout: IvyJson,
-        stderr: IvyJson,
+        stdout: JsString,
+        stderr: JsString,
     },
 }
 pub struct AssignmentPreflight<'a, 'b, 'engine, 'journal> {
@@ -54,19 +50,14 @@ impl AssignmentPreflight<'_, '_, '_, '_> {
         let command = value
             .required("assignmentSnapshot")?
             .required("preflight")?;
-        let native = |value: &IvyJson| {
-            value
-                .as_js_string()
-                .map(|text| to_native(text).into_os_string())
-                .ok_or_else(IvyError::internal)
-        };
+        let native =
+            |value: &IvyJson| -> IvyResult<std::ffi::OsString> { Ok(value.as_str()?.into()) };
         let executable = command
             .required("executable")?
             .as_js_string()
             .ok_or_else(IvyError::internal)?;
         let command = FileCommand {
-            // Node's JS executable string crosses UTF-8 before native spawn.
-            executable: filesystem_path(executable).into_os_string(),
+            executable: executable.to_utf8()?.into(),
             args: command
                 .required("args")?
                 .as_array()
@@ -99,25 +90,23 @@ impl AssignmentPreflight<'_, '_, '_, '_> {
             },
         )
         .await;
-        // Original execFile errors are ordinary JS errors. Keep that boundary
-        // even though Host exposes typed failures internally; cancellation is
-        // rethrown by complete, and every other process failure stays fenced.
         let result = match result {
             Ok(result) if result.failure.is_none() => PreflightResult::Completed {
                 stdout: result.stdout,
                 stderr: result.stderr,
             },
             Ok(result) => PreflightResult::Failed {
-                error: IvyError::internal(),
-                is_ivy_error: false,
-                stdout: IvyJson::String(result.stdout),
-                stderr: IvyJson::String(result.stderr),
+                error: IvyError::new(
+                    "secretary_preflight_failed",
+                    "The preflight process did not complete successfully.",
+                ),
+                stdout: result.stdout,
+                stderr: result.stderr,
             },
-            Err(_) => PreflightResult::Failed {
-                error: IvyError::internal(),
-                is_ivy_error: false,
-                stdout: IvyJson::Null,
-                stderr: IvyJson::Null,
+            Err(error) => PreflightResult::Failed {
+                error,
+                stdout: JsString::default(),
+                stderr: JsString::default(),
             },
         };
         self.complete(&prepared, result).await
@@ -149,8 +138,7 @@ impl AssignmentPreflight<'_, '_, '_, '_> {
             started_at,
         }))
     }
-    /// Uses the timestamp captured before process execution. Process errors carry
-    /// both their normalized error and whether the original error was an IvyError.
+    /// Uses the timestamp captured before process execution and the native error.
     pub async fn complete(
         &self,
         prepared: &PreparedPreflight,
@@ -175,7 +163,6 @@ impl AssignmentPreflight<'_, '_, '_, '_> {
             }
             PreflightResult::Failed {
                 error,
-                is_ivy_error,
                 stdout,
                 stderr,
             } => {
@@ -189,14 +176,9 @@ impl AssignmentPreflight<'_, '_, '_, '_> {
                 {
                     return Err(error);
                 }
-                let code = if is_ivy_error {
-                    error.code.as_str()
-                } else {
-                    "secretary_preflight_failed"
-                };
+                let code = error.code.as_str();
                 let parts: Vec<_> = [&stderr, &stdout]
                     .into_iter()
-                    .filter_map(IvyJson::as_js_string)
                     .filter(|s| !trimmed(&s.0).is_empty())
                     .collect();
                 let detail = output(&parts);

@@ -1,8 +1,10 @@
-pub mod hints;
+pub mod configuration;
 pub mod connection;
+pub mod handlers;
+pub mod health;
+pub mod hints;
 pub mod journal;
 pub mod manager;
-pub mod health;
 pub mod policy;
 pub mod registry;
 pub mod reports;

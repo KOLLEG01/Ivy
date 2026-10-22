@@ -488,7 +488,7 @@ pub fn parse_with_local_offset(
     }
 }
 
-fn zone_offset(wall: i64, zone: &tz::TimeZone) -> Option<i64> {
+pub(crate) fn zone_offset(wall: i64, zone: &tz::TimeZone) -> Option<i64> {
     let date = tz::UtcDateTime::from_timespec(wall.div_euclid(1000), 0).ok()?;
     let found = tz::DateTime::find(
         date.year(),
@@ -504,7 +504,7 @@ fn zone_offset(wall: i64, zone: &tz::TimeZone) -> Option<i64> {
     // Use the earlier occurrence in a fold and the pre-transition offset in a gap.
     Some(i64::from(found.earliest()?.local_time_type().ut_offset()) * 1000)
 }
-fn named_zone(name: &str) -> Option<tz::TimeZone> {
+pub(crate) fn named_zone(name: &str) -> Option<tz::TimeZone> {
     jiff_tzdb::get(name)
         .filter(|(exact, _)| *exact == name)
         .and_then(|(_, data)| tz::TimeZone::from_tz_data(data).ok())
@@ -589,24 +589,28 @@ pub fn parse_date_in_zone(value: &JsString, zone: &str) -> f64 {
 }
 /// JavaScript Date.parse(string), using TZ or the system IANA zone for local forms.
 pub fn parse_date(value: &JsString) -> f64 {
+    parse_with_local_offset(value, |wall| {
+        with_runtime_zone(|zone| zone_offset(wall, zone))
+    })
+}
+
+pub(crate) fn with_runtime_zone<T>(action: impl FnOnce(&tz::TimeZone) -> Option<T>) -> Option<T> {
     use std::sync::{Mutex, OnceLock};
     static SYSTEM: OnceLock<String> = OnceLock::new();
     static CACHE: OnceLock<Mutex<Option<(String, tz::TimeZone)>>> = OnceLock::new();
-    parse_with_local_offset(value, |wall| {
-        let name = std::env::var("TZ")
-            .ok()
-            .filter(|name| !cfg!(windows) || !name.is_empty())
-            .unwrap_or_else(|| {
-                SYSTEM
-                    .get_or_init(|| iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".into()))
-                    .clone()
-            });
-        let mut cache = CACHE.get_or_init(|| Mutex::new(None)).lock().ok()?;
-        if cache.as_ref().is_none_or(|(cached, _)| cached != &name) {
-            // ICU uses UTC for an unrecognized TZ identifier.
-            let zone = runtime_zone(&name);
-            *cache = Some((name, zone));
-        }
-        zone_offset(wall, &cache.as_ref()?.1)
-    })
+    let name = std::env::var("TZ")
+        .ok()
+        .filter(|name| !cfg!(windows) || !name.is_empty())
+        .unwrap_or_else(|| {
+            SYSTEM
+                .get_or_init(|| iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".into()))
+                .clone()
+        });
+    let mut cache = CACHE.get_or_init(|| Mutex::new(None)).lock().ok()?;
+    if cache.as_ref().is_none_or(|(cached, _)| cached != &name) {
+        // ICU uses UTC for an unrecognized TZ identifier.
+        let zone = runtime_zone(&name);
+        *cache = Some((name, zone));
+    }
+    action(&cache.as_ref()?.1)
 }

@@ -3,6 +3,50 @@ use ivy_service_manager::shutdown::{Cleanup, CleanupAction, Shutdown};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
+#[tokio::test]
+async fn shutdown_joins_admitted_work_after_its_transport_waiter_disappears() {
+    use ivy_service_manager::connection::Admission;
+    let admission = Admission::default();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let written = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let work = {
+        let (entered, release, written) = (entered.clone(), release.clone(), written.clone());
+        Box::pin(async move {
+            entered.notify_one();
+            release.notified().await;
+            written.store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
+        })
+    };
+    let waiter = tokio::spawn({
+        let admission = admission.clone();
+        async move { admission.run(work).await }
+    });
+    entered.notified().await;
+    waiter.abort();
+    let _ = waiter.await;
+    admission.stop();
+    assert_eq!(
+        admission
+            .run(Box::pin(async { Ok(()) }))
+            .await
+            .unwrap_err()
+            .code,
+        "service_unavailable"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), admission.drain())
+            .await
+            .is_err()
+    );
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(2), admission.drain())
+        .await
+        .unwrap();
+    assert!(written.load(std::sync::atomic::Ordering::Acquire));
+}
+
 fn action(log: &Arc<Mutex<Vec<&'static str>>>, name: &'static str, fail: bool) -> CleanupAction {
     let log = log.clone();
     Box::pin(async move {

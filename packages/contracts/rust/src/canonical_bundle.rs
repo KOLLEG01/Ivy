@@ -1,32 +1,11 @@
 //! Bundling for checked-in canonical documents, separate from submitted schemas.
-use crate::{
-    IvyError, IvyJson, IvyResult, JsString,
-    json::{js_string, parse},
-};
+use crate::{IvyError, IvyJson, IvyResult, JsString, json::parse};
 use url::Url;
 
-// The TS canonical catalogs are ordinary objects, including inherited lookups.
-pub(crate) fn inherited_property(name: &str) -> bool {
-    matches!(
-        name,
-        "constructor"
-            | "hasOwnProperty"
-            | "isPrototypeOf"
-            | "propertyIsEnumerable"
-            | "toLocaleString"
-            | "toString"
-            | "valueOf"
-            | "__proto__"
-            | "__defineGetter__"
-            | "__defineSetter__"
-            | "__lookupGetter__"
-            | "__lookupSetter__"
-    )
-}
-
-pub(crate) struct Bundle {
-    documents: Vec<(&'static str, IvyJson)>,
-    label: &'static str,
+/// Trusted packaged documents and their stable definition-name prefixes.
+pub struct Bundle {
+    documents: Vec<(String, IvyJson)>,
+    label: String,
 }
 struct Resolved<'a> {
     value: &'a IvyJson,
@@ -39,19 +18,66 @@ impl Bundle {
             documents: documents
                 .iter()
                 .map(|(prefix, text)| {
-                    (*prefix, parse(text, text.len()).expect("checked-in schema"))
+                    (
+                        (*prefix).to_owned(),
+                        parse(text, text.len()).expect("checked-in schema"),
+                    )
                 })
                 .collect(),
-            label,
+            label: label.to_owned(),
         }
     }
+    /// Load owned trusted schemas. Prefixes retain the public bundled $defs names.
+    /// Submitted registry schemas use schema admission instead.
+    pub fn from_documents(documents: Vec<(String, IvyJson)>) -> IvyResult<Self> {
+        let mut identities = std::collections::HashSet::new();
+        let mut prefixes = std::collections::HashSet::new();
+        for (prefix, document) in &documents {
+            let id = document
+                .get("$id")
+                .ok_or_else(IvyError::internal)?
+                .as_str()?;
+            if prefix.is_empty()
+                || !prefix.bytes().all(|c| c.is_ascii_alphanumeric())
+                || !prefixes.insert(prefix.clone())
+                || !identities.insert(id)
+            {
+                return Err(IvyError::new(
+                    "internal_error",
+                    "Invalid trusted schema catalog.",
+                ));
+            }
+        }
+        Ok(Self {
+            documents,
+            label: "canonical".to_owned(),
+        })
+    }
+    /// Bundle a named definition from the supplied canonical document ID.
+    pub fn definition(&self, document_id: &str, name: &str) -> IvyResult<IvyJson> {
+        if name.is_empty() || !name.bytes().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(IvyError::new(
+                "internal_error",
+                "Invalid schema definition name.",
+            ));
+        }
+        let document = self
+            .documents
+            .iter()
+            .position(|(_, schema)| {
+                schema
+                    .get("$id")
+                    .is_some_and(|id| id.as_str().ok().as_deref() == Some(document_id))
+            })
+            .ok_or_else(|| {
+                IvyError::new("internal_error", "Unknown canonical schema reference.")
+            })?;
+        self.bundle(&format!("#/$defs/{name}").into(), None, document)
+    }
     fn resolve(&self, reference: &JsString, base: &JsString) -> IvyResult<Resolved<'_>> {
-        // URL takes USVString in JavaScript; only URL inputs replace lone surrogates.
-        // Parse the base even for absolute references, matching new URL(ref, base).
-        let base =
-            Url::parse(&String::from_utf16_lossy(&base.0)).map_err(|_| IvyError::internal())?;
+        let base = Url::parse(&base.to_utf8()?).map_err(|_| IvyError::internal())?;
         let url = base
-            .join(&String::from_utf16_lossy(&reference.0))
+            .join(&reference.to_utf8()?)
             .map_err(|_| IvyError::internal())?;
         let document_id = url.origin().ascii_serialization() + url.path();
         let unknown = || {
@@ -77,11 +103,6 @@ impl Bundle {
         let value = schema
             .get("$defs")
             .and_then(|defs| defs.get(name))
-            .or_else(|| {
-                // Allowed inherited names resolve to functions with no enumerable fields.
-                static EMPTY: IvyJson = IvyJson::Object(Vec::new());
-                inherited_property(name).then_some(&EMPTY)
-            })
             .ok_or_else(|| {
                 IvyError::new(
                     "internal_error",
@@ -148,7 +169,8 @@ impl Bundle {
                         pending.push(Work::Visit(value, document));
                         continue;
                     }
-                    let resolved = self.resolve(&js_string(value), self.id(document))?;
+                    let reference = value.as_js_string().ok_or_else(IvyError::internal)?;
+                    let resolved = self.resolve(reference, self.id(document))?;
                     pending.push(Work::Literal(IvyJson::from(format!(
                         "#/$defs/{}",
                         resolved.alias

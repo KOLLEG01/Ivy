@@ -1,0 +1,93 @@
+[package]
+name = "ivy-hive"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+qualification-live-retirement = ["ivy-host-runtime/qualification-live-retirement"]
+
+[dependencies]
+chrono.workspace = true
+chrono-tz.workspace = true
+regex.workspace = true
+ivy-cli.workspace = true
+ivy-sdk.workspace = true
+p256 = { version = "=0.13.2", default-features = false, features = ["arithmetic"] }
+ecdsa = { version = "=0.16.9", default-features = false, features = ["arithmetic", "hazmat"] }
+http-body-util = { version = "=0.1.5", default-features = false }
+hyper-util = { version = "=0.1.21", default-features = false, features = ["tokio"] }
+hyper.workspace = true
+tokio-tungstenite.workspace = true
+rustls = { version = "=0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
+futures-util.workspace = true
+reqwest.workspace = true
+aws-lc-rs.workspace = true
+ivy-contracts.workspace = true
+ivy-host-runtime.workspace = true
+rusqlite = { workspace = true, features = ["backup", "functions", "hooks"] }
+getrandom.workspace = true
+uuid.workspace = true
+base64.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["io-std"] }
+tokio-util = { workspace = true, features = ["io"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Globalization"] }
+
+[[bin]]
+name = "ivy-hive"
+path = "src/main.rs"
+
+[[bin]]
+name = "ivy-hive-offline-backup"
+path = "src/bin/offline_backup.rs"
+
+[[bin]]
+name = "ivy-hive-inspect-storage"
+path = "src/bin/inspect_storage.rs"
+
+# Integration-test process; no deployment plan references this executable.
+[[bin]]
+name = "ivy-hive-worker-fixture"
+path = "../../../tests/fixtures/hive-worker-child.rs"
+test = false
+bench = false
+
+[[test]]
+name = "hive-storage-worker"
+path = "../../../tests/rust/hive_storage_worker.rs"
+
+[[test]]
+name = "hive-worker-client"
+path = "../../../tests/rust/hive_worker_client.rs"
+
+[[test]]
+name = "hive-push-native"
+path = "../../../tests/rust/hive_push_native.rs"
+
+[[test]]
+name = "hive-push-profile"
+path = "../../../tests/rust/hive_push_profile.rs"
+
+[[test]]
+name = "hive-package-ui"
+path = "../../../tests/rust/hive_package_ui.rs"
+
+[[test]]
+name = "hive-http"
+path = "../../../tests/rust/hive_http.rs"
+
+[[test]]
+name = "hive-offline-backup"
+path = "../../../tests/rust/hive_offline_backup.rs"
+
+[[test]]
+name = "hive-network"
+path = "../../../tests/rust/hive_network.rs"

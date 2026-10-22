@@ -5,6 +5,8 @@ use ivy_contracts::{JsString, core_schema::{validate_host, validate_shared}, has
 use ivy_sdk::clock::{Clock, SystemClock, parse_date};
 use ivy_store::{rusqlite::{Connection, OptionalExtension, Params, params}, sqlite};
 use std::{collections::{BTreeMap, BTreeSet}, fs, path::PathBuf, sync::{Arc, Mutex}, time::Duration};
+#[path = "journal_policy_import.rs"]
+mod policy_import_records;
 
 const TERMINAL: [&str; 4] = ["succeeded", "rolled_back", "failed", "needs_attention"];
 const SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -66,6 +68,11 @@ pub use crate::executor_lock::ExecutorLock;
 pub struct HistoryLimits { pub count: usize, pub bytes: usize }
 impl Default for HistoryLimits { fn default() -> Self { Self { count: 10_000, bytes: 64 * 1024 * 1024 } } }
 struct State { db: Connection, config: IvyJson, clock: Arc<dyn Clock>, history_limits: HistoryLimits }
+#[derive(Default)]
+struct RetentionIds { seen:BTreeSet<String>, order:Vec<String> }
+impl RetentionIds {
+    fn insert(&mut self,id:String) { if self.seen.insert(id.clone()){self.order.push(id);} }
+}
 /// Clones share one connection and configuration. Call `close` before releasing
 /// the final handle when shutdown must wait for all journal work to finish.
 #[derive(Clone)]
@@ -90,10 +97,24 @@ impl HostJournal {
         let state = self.state.clone();
         internal(tokio::task::spawn_blocking(move || { internal(state.lock())?.take(); Ok(()) }).await)?
     }
+    // Only a dedicated, unshared maintenance handle may span async OS/file work
+    // with this transaction open. It serializes other SQLite lifecycle writers.
+    pub(crate) async fn begin_maintenance(&self) -> IvyResult<()> {
+        self.with(|s| internal(s.db.execute_batch("BEGIN IMMEDIATE"))).await
+    }
+    pub(crate) async fn commit_maintenance(&self) -> IvyResult<()> {
+        self.with(|s| internal(s.db.execute_batch("COMMIT"))).await
+    }
+    pub(crate) async fn rollback_maintenance(&self) -> IvyResult<()> {
+        self.with(|s| if s.db.is_autocommit() { Ok(()) } else { internal(s.db.execute_batch("ROLLBACK")) }).await
+    }
     pub async fn config(&self) -> IvyResult<IvyJson> { self.with(|s| Ok(s.config.clone())).await }
+    pub async fn storage_format(&self) -> IvyResult<f64> {
+        self.with(|s| internal(s.db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))).map(|value| value as f64)).await
+    }
     pub async fn accepted_configuration(&self, source: PathBuf) -> IvyResult<IvyJson> { self.with(move |s| read_accepted_configuration(&s.config, &source)).await }
-    /// None means an unassociated legacy target. The owner must retain its
-    /// frozen startup policy; present but invalid evidence is always an error.
+    /// None needs an explicit one-time policy import before normal ownership.
+    /// Present but invalid evidence is always an error, never a fallback.
     pub async fn accepted_target_policy(&self, target: IvyJson) -> IvyResult<Option<IvyJson>> {
         self.with(move |s| s.policy(&target).map(|policy| policy.map(|(_, config)| config))).await
     }
@@ -172,12 +193,45 @@ impl HostJournal {
         let id = candidate_id.to_owned(); self.with(move |s| s.candidate(&id)).await
     }
     pub async fn manifest(&self, candidate_id: &str) -> IvyResult<IvyJson> {
-        let id = candidate_id.to_owned(); self.with(move |s| {
-            let value = s.value("SELECT manifest_json FROM candidates WHERE candidate_id=?", &id)?.ok_or_else(|| IvyError::new("not_found", "Prepared candidate manifest was not found."))?;
-            crate::artifact::release_manifest(&value)
+        let id = candidate_id.to_owned(); self.with(move |s| s.manifest(&id)).await
+    }
+    pub(crate) async fn retained_candidates(&self, component_id: &str, limit: usize) -> IvyResult<Vec<IvyJson>> {
+        let component = component_id.to_owned();
+        self.with(move |s| {
+            let mut statement = internal(s.db.prepare("SELECT candidate_json FROM candidates WHERE component_id=? ORDER BY candidate_id LIMIT ?"))?;
+            let rows = internal(statement.query_map(params![component, limit as i64], |row| row.get::<_, String>(0)))?;
+            rows.map(|row| decoded(&internal(row)?)).collect()
         }).await
     }
+    pub(crate) async fn materialization_snapshot(&self, instance_id: &JsString, candidate_id: &str) -> IvyResult<(IvyJson,IvyJson,IvyJson,IvyJson)> {
+        let instance_id=instance_id.clone();let candidate_id=candidate_id.to_owned();
+        self.with(move |s| Ok((s.config.clone(),s.instance_js(&instance_id)?.clone(),s.candidate(&candidate_id)?,s.manifest(&candidate_id)?))).await
+    }
     pub async fn retention_candidate_ids(&self) -> IvyResult<BTreeSet<String>> { self.with(|s| s.retention_candidate_ids()).await }
+    pub(crate) async fn retention_candidate_order(&self) -> IvyResult<Vec<String>> { self.with(|s| s.retention_candidate_order()).await }
+    pub(crate) async fn preparation_candidate_references(&self) -> IvyResult<Vec<(String,String)>> {
+        self.with(|s| {
+            let mut query=internal(s.db.prepare("SELECT candidate_id,build_id FROM candidates"))?;
+            let rows=internal(query.query_map([],|row|Ok((row.get(0)?,row.get(1)?))))?;
+            internal(rows.collect())
+        }).await
+    }
+    pub(crate) async fn unfinished_preparation_operations(&self) -> IvyResult<Vec<IvyJson>> {
+        self.with(|s| {
+            let mut query=internal(s.db.prepare("SELECT entry_json FROM operations WHERE phase NOT IN ('succeeded','rolled_back')"))?;
+            let rows=internal(query.query_map([],|row|row.get::<_,String>(0)))?;
+            rows.map(|row|decoded(&internal(row)?)).collect()
+        }).await
+    }
+    pub(crate) async fn storage_retention_candidates(&self) -> IvyResult<Vec<(IvyJson,IvyJson)>> {
+        self.with(|s| {
+            let mut query=internal(s.db.prepare("SELECT candidate_id,manifest_json FROM candidates ORDER BY component_id,candidate_id"))?;
+            let rows=internal(query.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))))?;
+            let rows=internal(rows.collect::<Result<Vec<_>,_>>())?;
+            require(rows.len()<=10000,"limit_exceeded","Host candidate inventory exceeds its retention limit.")?;
+            rows.into_iter().map(|(id,manifest)|Ok((s.candidate(&id)?,decoded(&manifest)?))).collect()
+        }).await
+    }
     pub async fn retire_candidate(&self, candidate_id: &str) -> IvyResult<bool> {
         let id = candidate_id.to_owned(); self.with(move |s| s.transaction(|s| {
             let Some(value) = s.text("SELECT candidate_json FROM candidates WHERE candidate_id=?", &id)? else { return Ok(false) };
@@ -413,7 +467,10 @@ impl State {
     fn value(&self, sql: &str, key: &str) -> IvyResult<Option<IvyJson>> { self.text(sql, key)?.map(|s| decoded(&s)).transpose() }
     fn identities(&self, config: &IvyJson) -> IvyResult<()> {
         for instance in config.required("instances")?.as_array().ok_or_else(IvyError::internal)? {
-            let key = format!("instanceIdentity:{}", instance.required("instanceId")?.as_str()?);
+            let id=instance.required("instanceId")?.as_js_string().ok_or_else(IvyError::internal)?;
+            // Node's SQLite text binding uses UTF-8 replacement while stored
+            // JSON and in-memory identity comparisons retain original UTF-16.
+            let key = format!("instanceIdentity:{}",String::from_utf16_lossy(&id.0));
             let identity = encoded(&project(instance, &["componentId", "serviceNodeId"]))?;
             require(self.text("SELECT value FROM meta WHERE key=?", &key)?.is_none_or(|v| v == identity), "target_conflict", "A previously configured instance identity cannot be reused.")?;
             internal(self.db.execute("INSERT OR IGNORE INTO meta VALUES (?,?)", params![key, identity]))?;
@@ -421,8 +478,16 @@ impl State {
         Ok(())
     }
     fn instance(&self, id: &str) -> IvyResult<&IvyJson> {
-        self.config.required("instances")?.as_array().ok_or_else(IvyError::internal)?.iter().find(|i| i.get("instanceId") == Some(&IvyJson::from(id)))
+        self.instance_js(&id.into())
+    }
+    fn instance_js(&self, id: &JsString) -> IvyResult<&IvyJson> {
+        let id=IvyJson::String(id.clone());
+        self.config.required("instances")?.as_array().ok_or_else(IvyError::internal)?.iter().find(|i| i.get("instanceId") == Some(&id))
             .ok_or_else(|| IvyError::new("not_found", "Instance is not in this explicit host configuration."))
+    }
+    fn manifest(&self, id: &str) -> IvyResult<IvyJson> {
+        let value=self.value("SELECT manifest_json FROM candidates WHERE candidate_id=?",id)?.ok_or_else(||IvyError::new("not_found","Prepared candidate manifest was not found."))?;
+        crate::artifact::release_manifest(&value)
     }
     fn normalize_entry(&self, value: IvyJson) -> IvyResult<IvyJson> {
         if !truthy(field(&value, "configurationHash")) { validate_host("JournalEntry", &value)?; return Ok(value) }
@@ -737,16 +802,20 @@ impl State {
         Ok(())
     }
     fn retention_candidate_ids(&self) -> IvyResult<BTreeSet<String>> {
-        let mut live = BTreeSet::new(); let mut protected = BTreeSet::new();
-        let mut installed = BTreeMap::new(); let mut rollback_found = BTreeSet::new(); let mut rollback_selections = BTreeSet::new();
+        Ok(self.retention_candidate_order()?.into_iter().collect())
+    }
+    fn retention_candidate_order(&self) -> IvyResult<Vec<String>> {
+        let mut live = RetentionIds::default(); let mut protected = RetentionIds::default();
+        let mut installed = BTreeMap::new(); let mut installed_order=Vec::new(); let mut rollback_found = BTreeSet::new(); let mut rollback_selections = BTreeSet::new();
         for table in ["installed", "runtime_targets", "observations"] {
             let mut statement = internal(self.db.prepare(&format!("SELECT instance_id,value FROM {table}")))?;
             let rows = internal(statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
             for row in rows { let (instance, text) = internal(row)?; let value = decoded(&text)?;
-                if truthy(field(&value, "candidateId")) { let id = value.required("candidateId")?.as_str()?; live.insert(id.clone()); protected.insert(id.clone()); if table == "installed" { installed.insert(instance, id); } }
+                if truthy(field(&value, "candidateId")) { let id = value.required("candidateId")?.as_str()?; live.insert(id.clone()); protected.insert(id.clone()); if table == "installed" { installed_order.push(instance.clone()); installed.insert(instance, id); } }
             }
         }
-        for (instance, selected) in &installed {
+        for instance in &installed_order {
+            let selected=installed.get(instance).ok_or_else(IvyError::internal)?;
             if let Some(previous) = self.value("SELECT value FROM meta WHERE key=?", &format!("bootstrap-rollback:{instance}"))? {
                 if previous.get("selectedCandidateId") == Some(&IvyJson::from(selected.clone())) {
                     protected.insert(previous.required("candidateId")?.as_str()?); rollback_found.insert(instance.clone()); rollback_selections.insert(selected.clone());
@@ -779,7 +848,7 @@ impl State {
                 if parts.len() == 3 && parts.iter().all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) && (part.len() == 1 || !part.starts_with('0'))) { releases.push((id, component, version)); }
             }
         }
-        for id in &live {
+        for id in &live.order {
             if rollback_selections.contains(id) { continue; }
             let Some(current) = releases.iter().find(|r| &r.0 == id) else { continue };
             let mut previous: Option<&(String, String, String)> = None;
@@ -795,6 +864,6 @@ impl State {
             }
             if let Some(previous) = previous { protected.insert(previous.0.clone()); }
         }
-        Ok(protected)
+        Ok(protected.order)
     }
 }

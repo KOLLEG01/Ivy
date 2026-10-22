@@ -1,6 +1,5 @@
 //! Dormant bounded triage admission, assessment recovery and follow-up context.
 use crate::{
-    inbox_evidence::truthy,
     inbox_recovery::RecoveryIssues,
     triage_completion::TriageCompletion,
     triage_native::TriageNative,
@@ -117,7 +116,7 @@ impl<'a, 'engine, 'store, 'journal> SecretaryTriage<'a, 'engine, 'store, 'journa
         if current
             .required("value")?
             .get("decision")
-            .is_some_and(truthy)
+            .is_some_and(|value| !value.is_null())
             && previous.is_none()
         {
             if !self.native.release_closed(&plan).await? {
@@ -174,7 +173,7 @@ impl<'a, 'engine, 'store, 'journal> SecretaryTriage<'a, 'engine, 'store, 'journa
         }
         check(
             accepted.get("phase") == Some(&"succeeded".into())
-                && accepted.get("effect").is_some_and(truthy)
+                && accepted.get("effect").is_some_and(|value| !value.is_null())
                 && same(accepted.required("request")?, &request)?,
             "secretary_triage_assessment_unconfirmed",
         )?;
@@ -405,7 +404,12 @@ impl<'a, 'engine, 'store, 'journal> SecretaryTriage<'a, 'engine, 'store, 'journa
                 ]),
             ),
         ]);
-        if let Some(cursor) = self.item_cursor.borrow().as_ref().filter(|v| truthy(v)) {
+        if let Some(cursor) = self
+            .item_cursor
+            .borrow()
+            .as_ref()
+            .filter(|v| !(v).is_null())
+        {
             query.insert("cursor", cursor.clone());
         }
         let page = engine

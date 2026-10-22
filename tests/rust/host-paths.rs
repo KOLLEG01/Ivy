@@ -1,56 +1,75 @@
-#[path = "../../packages/host-runtime/rust/src/paths.rs"]
-mod paths;
 use std::{fs, path::PathBuf};
+
+#[path = "host-native-recovery-cases.rs"]
+mod native_recovery_cases;
+
+#[allow(dead_code)]
+#[path = "host-service-fixture.rs"]
+mod service_fixture;
+use service_fixture::{ServiceFixture, fixture_node, host_configuration};
+
+#[path = "host-config-write-cases.rs"]
+mod config_write_cases;
 
 #[path = "host-journal-cases.rs"]
 mod journal_cases;
+#[path = "host-reset-coordinator-cases.rs"]
+mod reset_coordinator_cases;
+#[path = "host-reset-local-cases.rs"]
+mod reset_local_cases;
+#[path = "host-reset-stop-cases.rs"]
+mod reset_stop_cases;
 #[path = "host-artifact-cases.rs"]
 mod artifact_cases;
+#[path = "host-native-dispatch-cases.rs"]
+mod native_dispatch_cases;
+#[path = "host-native-helper-cases.rs"]
+mod native_helper_cases;
+#[path = "host-executor-cases.rs"]
+mod executor_cases;
+#[path = "host-executor-runtime-cases.rs"]
+mod executor_runtime_cases;
+#[path = "host-filesystem-error-cases.rs"]
+mod filesystem_error_cases;
+#[path = "host-filesystem-remove-cases.rs"]
+mod filesystem_remove_cases;
+#[path = "host-package-archive-cases.rs"]
+mod package_archive_cases;
+#[path = "host-filesystem-cases.rs"]
+mod filesystem_cases;
+#[path = "host-build-input-cases.rs"]
+mod build_input_cases;
 #[path = "host-source-cases.rs"]
 mod source_cases;
-#[path = "host-storage-space-cases.rs"]
-mod storage_space_cases;
-#[path = "host-node-path-cases.rs"]
-mod node_path_cases;
+#[path = "host-action-cases.rs"]
+mod action_cases;
+#[path = "host-preparation-cases.rs"]
+mod preparation_cases;
+#[path = "host-policy-import-cases.rs"]
+mod policy_import_cases;
 #[path = "host-layout-cases.rs"]
 mod layout_cases;
-
-#[test]
-fn containment_normalizes_parents_and_rejects_sibling_prefixes() {
-    let root = std::env::temp_dir().join("ivy-path-test");
-    assert!(paths::inside(&root, &root.join("a/../b")).unwrap());
-    assert!(paths::inside(&root, &root).unwrap());
-    assert!(!paths::inside(&root, &root.join("../other")).unwrap());
-    assert!(!paths::inside(&root, &PathBuf::from(format!("{}-sibling", root.display()))).unwrap());
-}
-
-#[test]
-fn future_path_uses_the_existing_ancestor_without_creating_directories() {
-    let root = std::env::temp_dir().join(format!("ivy-future-{}", std::process::id()));
-    fs::create_dir(&root).unwrap();
-    let expected = fs::canonicalize(&root).unwrap().join("missing/leaf");
-    assert_eq!(
-        paths::resolved_future_path(&root.join("missing/leaf")).unwrap(),
-        expected
-    );
-    assert!(!root.join("missing").exists());
-    fs::remove_dir(&root).unwrap();
-}
-
-#[cfg(windows)]
-#[test]
-fn windows_containment_ignores_case() {
-    assert!(
-        paths::inside(
-            std::path::Path::new("C:\\Local\\Owned"),
-            std::path::Path::new("c:\\local\\owned\\child")
-        )
-        .unwrap()
-    );
-}
+#[path = "host-startup-cases.rs"]
+mod host_startup_cases;
+#[path = "host-configuration-updater-cases.rs"]
+mod configuration_updater_cases;
+#[path = "host-bootstrap-restart-cases.rs"]
+mod bootstrap_restart_cases;
+#[path = "host-package-updater-cases.rs"]
+mod package_updater_cases;
+#[path = "host-bootstrap-maintenance-cases.rs"]
+mod bootstrap_maintenance_cases;
+#[path = "host-backup-files-cases.rs"]
+mod backup_files_cases;
+#[path = "host-private-backup-cases.rs"]
+mod private_backup_cases;
+#[path = "host-storage-retention-cases.rs"]
+mod storage_retention_cases;
+#[path = "host-restore-cases.rs"]
+mod restore_cases;
 
 use ivy_contracts::{IvyJson, JsString};
-use ivy_host_runtime::{config, health::HealthFile, node_runtime::NodeRuntime};
+use ivy_host_runtime::{config, health::HealthFile};
 
 fn assert_json_eq(actual: &IvyJson, expected: &IvyJson) {
     assert_eq!(ivy_contracts::json::canonical(actual, usize::MAX).unwrap(), ivy_contracts::json::canonical(expected, usize::MAX).unwrap());
@@ -62,47 +81,13 @@ fn assert_optional_json_eq(actual: Option<IvyJson>, expected: Option<IvyJson>) {
     assert_eq!(actual.as_ref().map(|value| ivy_contracts::json::canonical(value, usize::MAX).unwrap()), expected.as_ref().map(|value| ivy_contracts::json::canonical(value, usize::MAX).unwrap()));
 }
 
-struct ServiceFixture(PathBuf);
-impl ServiceFixture {
-    fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("ivy-config-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(root.join("artifact/dist")).unwrap();
-        Self(root)
-    }
-    fn value(&self) -> IvyJson {
-        IvyJson::object([
-            ("schemaVersion", IvyJson::Number(1.0)),
-            ("hostId", "host".into()), ("instanceId", "renamed-service".into()),
-            ("serviceNodeId", "host.service".into()), ("componentId", "service".into()),
-            ("publicBaseUrl", "https://example.invalid/ivy".into()),
-            ("dataRoot", self.0.join("data").to_string_lossy().to_string().into()),
-            ("artifactRoot", self.0.join("artifact").to_string_lossy().to_string().into()),
-            ("workRoot", self.0.join("work").to_string_lossy().to_string().into()),
-            ("logsRoot", self.0.join("logs").to_string_lossy().to_string().into()),
-            ("buildId", format!("sha256:{}", "a".repeat(64)).into()),
-            ("version", "1.0.0".into()), ("credential", "fixture-credential".into()),
-            ("settings", IvyJson::object([("text", IvyJson::String(JsString(vec![0xd800])))])),
-        ])
-    }
-    async fn save(&self, value: IvyJson) {
-        config::atomic_json(self.0.join("config.json"), value).await.unwrap();
-    }
-    async fn build(&self, value: &IvyJson) {
-        config::atomic_json(self.0.join("artifact/dist/build-info.json"), IvyJson::object([
-            ("buildId", value.required("buildId").unwrap().clone()),
-            ("version", value.required("version").unwrap().clone()),
-        ])).await.unwrap();
-    }
-}
-impl Drop for ServiceFixture { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
-fn fixture_node(version: &str) -> NodeRuntime {
-    NodeRuntime { executable: PathBuf::from("unused-fixture-node"), version: version.into() }
-}
-
 fn compare_config_oracle(input: IvyJson, result: ivy_contracts::IvyResult<IvyJson>) {
+    compare_oracle_fixture(input,result,"tests/fixtures/host-config-oracle.mjs");
+}
+fn compare_oracle_fixture(input: IvyJson, result: ivy_contracts::IvyResult<IvyJson>, fixture: &str) {
     use std::{io::Write, process::{Command, Stdio}};
     let mut child = Command::new("node")
-        .args(["--experimental-transform-types", "--disable-warning=ExperimentalWarning", "tests/fixtures/host-config-oracle.mjs"])
+        .args(["--experimental-transform-types", "--disable-warning=ExperimentalWarning", fixture])
         .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     child.stdin.take().unwrap().write_all(ivy_contracts::json::stringify(&input, usize::MAX).unwrap().as_bytes()).unwrap();
@@ -124,20 +109,6 @@ fn stop_fence() -> IvyJson {
     ])
 }
 
-fn host_configuration(fixture: &ServiceFixture) -> IvyJson {
-    IvyJson::object([
-        ("schemaVersion", IvyJson::Number(1.0)), ("hostId", "fixture-host".into()),
-        ("runtimeRoot", fixture.0.join("state").to_string_lossy().to_string().into()),
-        ("artifactRoot", fixture.0.join("artifacts").to_string_lossy().to_string().into()),
-        ("stagingRoot", fixture.0.join("staging").to_string_lossy().to_string().into()),
-        ("publicBaseUrl", "http://127.0.0.1:39081/ivy".into()),
-        ("executables", IvyJson::object([("node", "fixture-node".into())])),
-        ("instances", IvyJson::Array(vec![IvyJson::object([
-            ("instanceId", "fixture".into()), ("serviceNodeId", "fixture-node".into()), ("componentId", "fixture".into()),
-            ("engine", "process".into()), ("enabled", true.into()), ("settings", IvyJson::object(Vec::<(String, IvyJson)>::new())),
-        ])])),
-    ])
-}
 fn accepted_oracle(operation: &str, args: Vec<IvyJson>, result: ivy_contracts::IvyResult<IvyJson>) {
     compare_config_oracle(IvyJson::object([("kind", "accepted".into()), ("operation", operation.into()), ("args", IvyJson::Array(args))]), result);
 }

@@ -2,9 +2,7 @@
 //! its effect. Retries always use the retained original action and operation ID.
 use crate::{
     engine::SecretaryEngine,
-    inbox_evidence::{
-        identity_hash, ignored_reason, message_hash, notice_text, operation_name, truthy,
-    },
+    inbox_evidence::{identity_hash, ignored_reason, message_hash, notice_text, operation_name},
     inbox_recovery::InboxRecovery,
     policy::assessment_suppression,
     schema::{Schema, validate},
@@ -39,12 +37,6 @@ fn array(value: &IvyJson) -> IvyResult<&[IvyJson]> {
 fn same(a: &IvyJson, b: &IvyJson) -> IvyResult<bool> {
     Ok(hash_json(a)? == hash_json(b)?)
 }
-fn member<'a>(value: Option<&'a IvyJson>, key: &str) -> IvyResult<Option<&'a IvyJson>> {
-    match value {
-        None | Some(IvyJson::Null) => Err(IvyError::internal()),
-        Some(value) => Ok(value.get(key)),
-    }
-}
 fn validate_message(message: &IvyJson, source: &IvyJson) -> IvyResult<()> {
     need(
         message.get("accountId") == source.get("accountId"),
@@ -60,11 +52,8 @@ fn validate_message(message: &IvyJson, source: &IvyJson) -> IvyResult<()> {
             "Observation times must be real UTC instants.",
         )?;
     }
-    if let Some(value) = message.get("url").filter(|value| truthy(value)) {
-        // Web URL consumes a USVString. Only this URL boundary replaces lone
-        // surrogates; message identity and saved bytes remain lossless UTF16.
-        let usv = String::from_utf16_lossy(&value.as_js_string().ok_or_else(IvyError::internal)?.0);
-        let url = url::Url::parse(&usv).map_err(|_| {
+    if let Some(value) = message.get("url").filter(|value| !(value).is_null()) {
+        let url = url::Url::parse(&value.as_str()?).map_err(|_| {
             IvyError::new(
                 "invalid_arguments",
                 "Source links must be absolute HTTP(S) URLs.",
@@ -99,7 +88,9 @@ impl SecretaryEngine<'_, '_, '_> {
         need(
             notification != &IvyJson::from("voice")
                 || assessment.get("urgency") == Some(&"critical".into())
-                    && policy.get("voiceEscalation").is_some_and(truthy),
+                    && policy
+                        .get("voiceEscalation")
+                        .is_some_and(|value| !value.is_null()),
             "invalid_arguments",
             "Voice requires one available escalation target and a critical assessment.",
         )?;
@@ -112,18 +103,19 @@ impl SecretaryEngine<'_, '_, '_> {
             .client
             .request("objects.read", task.clone(), RequestOptions::default())
             .await?;
-        let object = member(Some(&raw), "object")?;
+        let object = raw.required("object")?;
+        let revision = raw.required("revision")?;
+        let content = raw.required("content")?;
         // SEC01 is deliberately unchanged: the exact original version set.
-        let valid = !member(object, "effectivelyArchived")?.is_some_and(truthy)
-            && member(object, "contractKey")? == Some(&"task-board/task".into())
-            && member(member(Some(&raw), "revision")?, "contractVersion")? == Some(&"1.0.0".into())
-            && member(member(Some(&raw), "content")?, "encoding")? == Some(&"json".into())
+        let valid = object.get("effectivelyArchived") != Some(&IvyJson::Bool(true))
+            && object.get("contractKey") == Some(&"task-board/task".into())
+            && revision.get("contractVersion") == Some(&"1.0.0".into())
+            && content.get("encoding") == Some(&"json".into())
             && {
-                let value = member(member(Some(&raw), "content")?, "value")?.ok_or_else(|| {
+                let value = content.get("value").ok_or_else(|| {
                     IvyError::new("invalid_arguments", "Value is outside the JSON domain.")
                 })?;
-                Some(&IvyJson::from(hash_json(value)?))
-                    == member(member(Some(&raw), "revision")?, "contentHash")?
+                Some(&IvyJson::from(hash_json(value)?)) == revision.get("contentHash")
             };
         need(
             valid,
@@ -158,13 +150,13 @@ impl SecretaryEngine<'_, '_, '_> {
                 .client
                 .request("objects.read", pin.clone(), RequestOptions::default())
                 .await?;
-            let object = member(Some(&raw), "object")?;
+            let object = raw.required("object")?;
+            let revision = raw.required("revision")?;
             need(
-                member(object, "contractKey")? == entry.get("contractKey")
-                    && member(object, "ownerObjectId")? == item.required("pin")?.get("objectId")
-                    && !member(object, "effectivelyArchived")?.is_some_and(truthy)
-                    && member(member(Some(&raw), "revision")?, "contentHash")?
-                        == entry.get("contentHash"),
+                object.get("contractKey") == entry.get("contractKey")
+                    && object.get("ownerObjectId") == item.required("pin")?.get("objectId")
+                    && object.get("effectivelyArchived") != Some(&IvyJson::Bool(true))
+                    && revision.get("contentHash") == entry.get("contentHash"),
                 "secretary_media_mismatch",
                 "The media artifact must be exact final data owned by this Secretary item.",
             )?;

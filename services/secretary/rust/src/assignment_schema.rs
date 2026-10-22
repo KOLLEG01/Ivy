@@ -42,17 +42,8 @@ pub fn validate_rules(value: &IvyJson) -> IvyResult<()> {
 
 pub fn validate_execution_target(value: &IvyJson) -> IvyResult<()> {
     validate(Schema::ExecutionTarget, value)?;
-    let path = &value.required("threadCwd")?.as_js_string().unwrap().0;
-    // This is the original lexical node:path.isAbsolute admission, not an OS
-    // filesystem safety check. Windows also admits a root without a drive (\\x).
-    let absolute = if cfg!(windows) {
-        matches!(path.first(), Some(47 | 92))
-            || (matches!(path.first(), Some(65..=90 | 97..=122))
-                && path.get(1) == Some(&58)
-                && matches!(path.get(2), Some(47 | 92)))
-    } else {
-        path.first() == Some(&47)
-    };
+    let path = value.required("threadCwd")?.as_str()?;
+    let absolute = std::path::Path::new(&path).is_absolute();
     need(
         absolute,
         "Secretary task working directories must be absolute.",

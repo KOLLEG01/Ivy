@@ -1,6 +1,6 @@
 //! Private immutable configuration snapshots captured at operation admission.
-use crate::{IvyError, IvyJson, IvyResult, layout::{path, service_paths}, paths::inside};
-use ivy_contracts::{core_schema::validate_host, json};
+use crate::{IvyError, IvyJson, IvyResult, layout::{path, service_paths}, paths::inside, node_path};
+use ivy_contracts::{JsString, core_schema::validate_host, json};
 use std::{fs::{self, OpenOptions}, io::Write, path::{Path, PathBuf}};
 
 const LIMIT: usize = 1024 * 1024;
@@ -11,9 +11,11 @@ fn directory(config: &IvyJson) -> IvyResult<PathBuf> { Ok(path(config.required("
 fn canonical(value: &IvyJson) -> IvyResult<String> { json::canonical(value, ivy_contracts::limits::MANAGEMENT_FRAME_BYTES) }
 fn nullable(value: Option<&IvyJson>) -> &IvyJson { static NULL: IvyJson = IvyJson::Null; value.unwrap_or(&NULL) }
 fn write_snapshot(directory: &Path, target: &Path, value: &IvyJson) -> IvyResult<()> {
+    let directory = node_path::filesystem_path(&node_path::from_native(directory));
+    let target = node_path::filesystem_path(&node_path::from_native(target));
     let mut builder = fs::DirBuilder::new(); builder.recursive(true);
     #[cfg(unix)] { use std::os::unix::fs::DirBuilderExt; builder.mode(0o700); }
-    builder.create(directory).map_err(|_| IvyError::internal())?;
+    builder.create(&directory).map_err(|_| IvyError::internal())?;
     let mut options = OpenOptions::new(); options.write(true).create_new(true);
     #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
     let mut file = options.open(target).map_err(|_| IvyError::internal())?;
@@ -39,12 +41,12 @@ pub fn accepted_instance_configuration_path(config: &IvyJson, revision: &str) ->
     Ok(directory(config)?.join(format!("{revision}.instance.json")))
 }
 fn direct_file(source: &Path, message: &str) -> IvyResult<()> {
-    let metadata = fs::symlink_metadata(source).map_err(|_| IvyError::internal())?;
+    let metadata = fs::symlink_metadata(crate::node_path::filesystem_path(&crate::node_path::from_native(source))).map_err(|_| IvyError::internal())?;
     require(metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= LIMIT as u64, "configuration_changed", message)
 }
 fn read_value(source: &Path, schema: &str, message: &str) -> IvyResult<IvyJson> {
     let read = || -> IvyResult<IvyJson> {
-        let bytes = fs::read(source).map_err(|_| IvyError::internal())?;
+        let bytes = fs::read(crate::node_path::filesystem_path(&crate::node_path::from_native(source))).map_err(|_| IvyError::internal())?;
         let value = json::parse(&String::from_utf8_lossy(&bytes), usize::MAX)?;
         validate_host(schema, &value)?;
         Ok(value)
@@ -52,14 +54,21 @@ fn read_value(source: &Path, schema: &str, message: &str) -> IvyResult<IvyJson> 
     read().map_err(|_| IvyError::new("configuration_changed", message))
 }
 pub fn save_accepted_instance_configuration(config: &IvyJson, source: &Path, revision: &str) -> IvyResult<PathBuf> {
-    require(inside(&path(config.required("runtimeRoot")?)?, source).map_err(|_| IvyError::internal())?, "target_conflict", "Previous runtime configuration leaves host runtime data.")?;
-    direct_file(source, "Previous runtime configuration is not a bounded direct file.")?;
-    let value = read_value(source, "InstanceConfig", "Previous runtime configuration is unreadable or invalid.")?;
+    save_accepted_instance_configuration_js(config, &node_path::from_native(source), revision)
+}
+// Preserve lexical UTF-16 through the containment check on every platform;
+// Node's replacement encoding applies only at the filesystem boundary.
+pub(crate) fn save_accepted_instance_configuration_js(config: &IvyJson, source: &JsString, revision: &str) -> IvyResult<PathBuf> {
+    let root = config.required("runtimeRoot")?.as_js_string().ok_or_else(IvyError::internal)?;
+    require(node_path::Context::current().map_err(|_| IvyError::internal())?.inside(root, source), "target_conflict", "Previous runtime configuration leaves host runtime data.")?;
+    let source = node_path::filesystem_path(source);
+    direct_file(&source, "Previous runtime configuration is not a bounded direct file.")?;
+    let value = read_value(&source, "InstanceConfig", "Previous runtime configuration is unreadable or invalid.")?;
     let directory = directory(config)?;
     // Match the original ordering: the directory is created before revision validation.
     let mut builder = fs::DirBuilder::new(); builder.recursive(true);
     #[cfg(unix)] { use std::os::unix::fs::DirBuilderExt; builder.mode(0o700); }
-    builder.create(&directory).map_err(|_| IvyError::internal())?;
+    builder.create(node_path::filesystem_path(&node_path::from_native(&directory))).map_err(|_| IvyError::internal())?;
     let target = accepted_instance_configuration_path(config, revision)?;
     write_snapshot(&directory, &target, &value)?;
     Ok(target)

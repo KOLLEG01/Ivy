@@ -1,7 +1,7 @@
 //! Publish one retained Outlook page through the original Secretary action journal.
 use crate::{
     engine::SecretaryEngine,
-    inbox_evidence::{identity_hash, ignored_reason, message_hash, source_identity, truthy},
+    inbox_evidence::{identity_hash, ignored_reason, message_hash, source_identity},
     microsoft_schema::MicrosoftRecord,
     microsoft_store::{MicrosoftDocument, pin_value},
     outlook_native::{OutlookNative, outlook_name},
@@ -104,7 +104,7 @@ impl<'a, 'engine, 'store, 'journal> OutlookSource<'a, 'engine, 'store, 'journal>
         proof: &MicrosoftDocument,
         plan: &MicrosoftDocument,
     ) -> IvyResult<IvyJson> {
-        let page = proof.value.get("page").filter(|page| truthy(page));
+        let page = proof.value.get("page").filter(|page| !(page).is_null());
         publication_check(page.is_some())?;
         let messages = page
             .unwrap()
@@ -179,11 +179,16 @@ impl<'a, 'engine, 'store, 'journal> OutlookSource<'a, 'engine, 'store, 'journal>
         })?;
         let definition = value.required("source")?.required("definition")?;
         let capture = request.get("action") == Some(&"capture".into());
-        if capture && value.get("ignoredReason").is_some_and(truthy) {
+        if capture
+            && value
+                .get("ignoredReason")
+                .and_then(IvyJson::as_js_string)
+                .is_some_and(|text| !text.0.is_empty())
+        {
             publication_check(
-                !value.get("effect").is_some_and(truthy)
-                    && !value.get("request").is_some_and(truthy)
-                    && !value.get("prepared").is_some_and(truthy)
+                !value.get("effect").is_some_and(|value| !value.is_null())
+                    && !value.get("request").is_some_and(|value| !value.is_null())
+                    && !value.get("prepared").is_some_and(|value| !value.is_null())
                     && ignored_reason(definition, request.required("message")?)?
                         .is_some_and(|reason| value.get("ignoredReason") == Some(&reason.into())),
             )?;
@@ -191,10 +196,15 @@ impl<'a, 'engine, 'store, 'journal> OutlookSource<'a, 'engine, 'store, 'journal>
         }
         let effect = value
             .get("effect")
-            .filter(|effect| truthy(effect))
+            .filter(|effect| !(effect).is_null())
             .ok_or_else(IvyError::internal)?;
         if capture {
-            publication_check(!value.get("ignoredReason").is_some_and(truthy))?;
+            publication_check(
+                !value
+                    .get("ignoredReason")
+                    .and_then(IvyJson::as_js_string)
+                    .is_some_and(|text| !text.0.is_empty()),
+            )?;
             let item = evidence.item(effect).await?;
             let item = item.required("value")?;
             publication_check(
@@ -229,8 +239,15 @@ impl<'a, 'engine, 'store, 'journal> OutlookSource<'a, 'engine, 'store, 'journal>
         create: bool,
     ) -> IvyResult<MicrosoftDocument> {
         publication_check(
-            !proof.value.get("gap").is_some_and(truthy)
-                && proof.value.get("page").is_some_and(truthy),
+            !proof
+                .value
+                .get("gap")
+                .and_then(IvyJson::as_js_string)
+                .is_some_and(|reason| !reason.0.is_empty())
+                && proof
+                    .value
+                    .get("page")
+                    .is_some_and(|value| !value.is_null()),
         )?;
         let store = self.native.store();
         let name = outlook_name("publication", &pin_value(&proof.pin))?;
@@ -274,13 +291,13 @@ impl<'a, 'engine, 'store, 'journal> OutlookSource<'a, 'engine, 'store, 'journal>
                 &pin_value(&proof.pin),
             )? && captured.len() <= count
                 && publication.pin.revision
-                    == (captured.len() + 1 + usize::from(truthy(checkpoint))) as i64,
+                    == (captured.len() + 1 + usize::from(!(checkpoint).is_null())) as i64,
         )?;
         for (index, pin) in captured.iter().enumerate() {
             self.confirmed(pin, &self.capture_request(proof, index).await?)
                 .await?;
         }
-        if truthy(checkpoint) {
+        if !(checkpoint).is_null() {
             publication_check(captured.len() == count)?;
             self.confirmed(checkpoint, &self.checkpoint_request(proof, plan).await?)
                 .await?;
@@ -289,26 +306,37 @@ impl<'a, 'engine, 'store, 'journal> OutlookSource<'a, 'engine, 'store, 'journal>
     }
     pub async fn head(&self) -> IvyResult<MicrosoftDocument> {
         let head = self.native.raw_head().await?;
-        if let Some(pending) = head.value.get("pending").filter(|value| truthy(value)) {
+        if let Some(pending) = head.value.get("pending").filter(|value| !(value).is_null()) {
             let plan = self.native.plan(pending)?;
             publication_check(
                 plan.value.required("head")?.get("objectId")
                     == Some(&head.pin.object_id.clone().into()),
             )?;
-        } else if let Some(last) = head.value.get("lastPage").filter(|value| truthy(value)) {
+        } else if let Some(last) = head
+            .value
+            .get("lastPage")
+            .filter(|value| !(value).is_null())
+        {
             let proof = self.native.evidence(last).await?;
             let plan = self.native.plan(proof.value.required("plan")?)?;
             publication_check(
                 plan.value.required("head")?.get("objectId")
                     == Some(&head.pin.object_id.clone().into()),
             )?;
-            if !proof.value.get("gap").is_some_and(truthy) {
-                publication_check(truthy(
-                    self.publication(&proof, &plan, false)
+            if !proof
+                .value
+                .get("gap")
+                .and_then(IvyJson::as_js_string)
+                .is_some_and(|reason| !reason.0.is_empty())
+            {
+                publication_check(
+                    !(self
+                        .publication(&proof, &plan, false)
                         .await?
                         .value
-                        .required("checkpoint")?,
-                ))?;
+                        .required("checkpoint")?)
+                    .is_null(),
+                )?;
             }
         }
         Ok(head)
@@ -319,7 +347,11 @@ impl<'a, 'engine, 'store, 'journal> OutlookSource<'a, 'engine, 'store, 'journal>
         plan: &MicrosoftDocument,
     ) -> IvyResult<bool> {
         let publication = self.publication(proof, plan, true).await?;
-        if publication.value.get("checkpoint").is_some_and(truthy) {
+        if publication
+            .value
+            .get("checkpoint")
+            .is_some_and(|value| !value.is_null())
+        {
             return Ok(true);
         }
         let captured = publication
@@ -420,7 +452,11 @@ impl<'a, 'engine, 'store, 'journal> OutlookSource<'a, 'engine, 'store, 'journal>
         let Some(proof) = proof else {
             return Ok("pending");
         };
-        let gap = proof.value.get("gap").is_some_and(truthy);
+        let gap = proof
+            .value
+            .get("gap")
+            .and_then(IvyJson::as_js_string)
+            .is_some_and(|reason| !reason.0.is_empty());
         if !gap && !self.publish(&proof, &plan).await? {
             return Ok("pending");
         }
@@ -434,7 +470,11 @@ impl<'a, 'engine, 'store, 'journal> OutlookSource<'a, 'engine, 'store, 'journal>
             .store()
             .amend(MicrosoftRecord::OutlookHead, &head, &next)
             .await?;
-        self.not_before = if next.get("continuation").is_some_and(truthy) {
+        self.not_before = if next
+            .get("continuation")
+            .and_then(IvyJson::as_object)
+            .is_some()
+        {
             None
         } else {
             next.required("nextPollAt")?.as_js_string().cloned()

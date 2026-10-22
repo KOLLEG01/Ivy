@@ -491,6 +491,34 @@ async fn ordinary_requests_pass_waiting_providers_and_cancelled_waiters_release(
     assert!(queue.acquire(true, &token).await.is_ok());
 }
 #[test]
+fn base_urls_match_original_constructor_and_policy_error_boundaries() {
+    use ivy_contracts::json::parse;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/sdk-base-url-oracle.mjs",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(rows.len() > 700);
+    for row in rows {
+        let input = parse(row["input"].as_str().unwrap(), 100_000).unwrap();
+        let expected = parse(row["result"].as_str().unwrap(), 100_000).unwrap();
+        let value = String::from_utf16_lossy(&input.as_js_string().unwrap().0);
+        let actual = match base_url(&value) {
+            Ok(url) => IvyJson::object([("ok", true.into()), ("value", url.as_str().into())]),
+            Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
+        };
+        assert_eq!(actual, expected, "URL input: {}", row["input"]);
+    }
+}
+
+#[test]
 fn response_identity_and_early_http_refusals() {
     let error = IvyJson::object([
         ("jsonrpc", "2.0".into()),

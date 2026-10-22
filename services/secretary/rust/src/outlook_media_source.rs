@@ -1,6 +1,5 @@
 //! Fair acquisition from retained original captures, followed by verified retirement.
 use crate::{
-    inbox_evidence::truthy,
     media_input::{AcquiredMediaPreparer, Prepared, Source},
     media_schema::{MediaSchema, validate_media},
     media_spool::{SpoolJournal, Validation},
@@ -43,7 +42,11 @@ fn issue(value: &IvyJson) -> IvyResult<Option<JsString>> {
                 .get("attachments")
                 .and_then(IvyJson::as_array)?
                 .iter()
-                .find_map(|attachment| attachment.get("errorCode").filter(|value| truthy(value)))
+                .find_map(|attachment| {
+                    attachment
+                        .get("errorCode")
+                        .filter(|value| !(value).is_null())
+                })
         })
         .and_then(IvyJson::as_js_string)
         .cloned())
@@ -110,7 +113,10 @@ impl<V: Validation> OutlookMediaContext<'_, '_, '_, '_, '_, '_, V> {
             "media_context_mismatch",
         )?;
         let attachment = &attachments[index as usize];
-        let Some(pin) = attachment.get("manifest").filter(|value| truthy(value)) else {
+        let Some(pin) = attachment
+            .get("manifest")
+            .filter(|value| !(value).is_null())
+        else {
             return Ok(None);
         };
         let raw = engine
@@ -189,7 +195,7 @@ impl<'a, 'source, 'engine, 'store, 'journal, V: Validation>
             .iter()
             .find(|value| {
                 value.get("contractKey") == Some(&"secretary/media-coverage".into())
-                    && value.get("pin").is_some_and(truthy)
+                    && value.get("pin").is_some_and(|value| !value.is_null())
             });
         let Some(link) = link else {
             return Ok(None);
@@ -294,12 +300,17 @@ impl<'a, 'source, 'engine, 'store, 'journal, V: Validation>
             let proof = source
                 .evidence(publication.value.required("evidence")?)
                 .await?;
-            if proof.value.get("gap").is_some_and(truthy)
+            if proof
+                .value
+                .get("gap")
+                .and_then(IvyJson::as_js_string)
+                .is_some_and(|reason| !reason.0.is_empty())
                 || !proof
                     .value
                     .get("page")
                     .and_then(|page| page.get("messagesWithAttachments"))
-                    .is_some_and(truthy)
+                    .and_then(IvyJson::as_f64)
+                    .is_some_and(|count| count > 0.0)
             {
                 continue;
             }
@@ -313,8 +324,11 @@ impl<'a, 'source, 'engine, 'store, 'journal, V: Validation>
                 }
             }
             check(
-                list.as_ref()
-                    .is_some_and(|call| call.value.get("observation").is_some_and(truthy)),
+                list.as_ref().is_some_and(|call| {
+                    call.value
+                        .get("observation")
+                        .is_some_and(|value| !value.is_null())
+                }),
                 "media_source_evidence_missing",
             )?;
             let list = list.unwrap();
@@ -333,7 +347,7 @@ impl<'a, 'source, 'engine, 'store, 'journal, V: Validation>
                 check(
                     capture.get("phase") == Some(&"succeeded".into())
                         && capture.get("action") == Some(&"capture".into())
-                        && capture.get("effect").is_some_and(truthy),
+                        && capture.get("effect").is_some_and(|value| !value.is_null()),
                     "media_source_evidence_missing",
                 )?;
                 let item = engine.evidence.item(capture.required("effect")?).await?;

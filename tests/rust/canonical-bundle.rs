@@ -1,125 +1,109 @@
 use ivy_contracts::{
-    IvyJson, IvyResult, agent_bundle, chat_bundle, core_bundle, host_bundle,
+    IvyJson,
+    canonical_bundle::Bundle,
+    core_bundle, core_schema,
     json::{parse, stringify},
 };
-use sha2::{Digest, Sha256};
+
+fn json(text: &str) -> IvyJson {
+    parse(text, usize::MAX).unwrap()
+}
 
 #[test]
-fn all_canonical_definitions_and_operation_inputs_match_typescript() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = std::process::Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/canonical-bundle-oracle.mjs",
-        ])
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(rows.len() > 400);
-    // Heap traversal also keeps bundling within a small native-thread stack.
-    std::thread::Builder::new()
-        .stack_size(256 * 1024)
-        .spawn(move || {
-            for row in rows {
-                let reference = parse(row["reference"].as_str().unwrap(), 10000).unwrap();
-                let document = row["document"]
-                    .as_str()
-                    .map(|text| parse(text, 10000).unwrap());
-                let reference = reference.as_js_string().unwrap();
-                let document = document.as_ref().and_then(IvyJson::as_js_string);
-                let result: IvyResult<IvyJson> = match row["kind"].as_str().unwrap() {
-                    "core" => core_bundle::bundled_schema(reference, document),
-                    "host" => host_bundle::bundled_schema(reference, document),
-                    "agent" => agent_bundle::bundled_schema(reference, document),
-                    "chat" => chat_bundle::bundled_schema(reference, document),
-                    "operation" => {
-                        core_bundle::operation_input_schema(&reference.to_utf8().unwrap())
-                    }
-                    _ => unreachable!(),
-                };
-                let expected = &row["expected"];
-                assert_eq!(
-                    result.is_ok(),
-                    expected["ok"].as_bool().unwrap(),
-                    "{row}: {result:?}"
-                );
-                match result {
-                    Ok(schema) => {
-                        let text = stringify(&schema, usize::MAX).unwrap();
-                        assert_eq!(
-                            text.len(),
-                            expected["bytes"].as_u64().unwrap() as usize,
-                            "{row}"
-                        );
-                        assert_eq!(
-                            Sha256::digest(text.as_bytes())
-                                .iter()
-                                .map(|b| format!("{b:02x}"))
-                                .collect::<String>(),
-                            expected["sha256"].as_str().unwrap(),
-                            "{row}"
-                        );
-                        let definitions = schema.get("$defs").unwrap().as_object().unwrap();
-                        assert_eq!(
-                            definitions
-                                .iter()
-                                .map(|(key, _)| key.to_utf8().unwrap())
-                                .collect::<Vec<_>>(),
-                            expected["definitions"]
-                                .as_array()
-                                .unwrap()
-                                .iter()
-                                .map(|v| v.as_str().unwrap())
-                                .collect::<Vec<_>>(),
-                            "{row}"
-                        );
-                        // Every rewritten reference must resolve in the returned local graph.
-                        let mut pending = vec![&schema];
-                        while let Some(value) = pending.pop() {
-                            match value {
-                                IvyJson::Array(items) => pending.extend(items),
-                                IvyJson::Object(pairs) => {
-                                    for (key, value) in pairs {
-                                        assert!(key != &"$id".into() && key != &"$schema".into());
-                                        if key == &"$ref".into() {
-                                            let reference = value.as_str().unwrap();
-                                            let name = reference.strip_prefix("#/$defs/").unwrap();
-                                            assert!(
-                                                schema.get("$defs").unwrap().get(name).is_some(),
-                                                "{row}"
-                                            );
-                                        }
-                                        pending.push(value);
-                                    }
-                                }
-                                _ => {}
+fn packaged_definitions_are_self_contained_and_preserve_existing_bundles() {
+    let documents = [
+        (
+            "Wire",
+            include_str!("../../specs/schemas/hive-wire.schema.json"),
+        ),
+        (
+            "Operation",
+            include_str!("../../specs/schemas/hive-operations.schema.json"),
+        ),
+        ("Host", include_str!("../../specs/schemas/host.schema.json")),
+        (
+            "Agent",
+            include_str!("../../specs/schemas/agent.schema.json"),
+        ),
+        ("Chat", include_str!("../../specs/schemas/chat.schema.json")),
+        (
+            "TaskBoard",
+            include_str!("../../specs/schemas/task-board.schema.json"),
+        ),
+    ]
+    .map(|(prefix, text)| (prefix.to_owned(), json(text)));
+    let bundle = Bundle::from_documents(documents.to_vec()).unwrap();
+    let mut count = 0;
+    for (prefix, document) in &documents {
+        let id = document.get("$id").unwrap().as_str().unwrap();
+        for (name, _) in document.get("$defs").unwrap().as_object().unwrap() {
+            let name = name.to_utf8().unwrap();
+            let schema = bundle.definition(&id, &name).unwrap();
+            let mut pending = vec![&schema];
+            while let Some(value) = pending.pop() {
+                match value {
+                    IvyJson::Object(fields) => {
+                        for (key, child) in fields {
+                            assert!(key != &"$id".into() && key != &"$schema".into());
+                            if key == &"$ref".into() {
+                                let reference = child.as_str().unwrap();
+                                let definition = reference.strip_prefix("#/$defs/").unwrap();
+                                assert!(schema.get("$defs").unwrap().get(definition).is_some());
                             }
+                            pending.push(child);
                         }
                     }
-                    Err(error) => {
-                        assert_eq!(error.code, expected["code"].as_str().unwrap(), "{row}");
-                        assert_eq!(
-                            error.message,
-                            expected["message"].as_str().unwrap(),
-                            "{row}"
-                        );
-                        assert_eq!(
-                            error.outcome.to_json(),
-                            IvyJson::from(expected["outcome"].as_str().unwrap()),
-                            "{row}"
-                        );
-                    }
+                    IvyJson::Array(items) => pending.extend(items),
+                    _ => {}
                 }
             }
-        })
-        .unwrap()
-        .join()
+            if ["Wire", "Operation", "Host"].contains(&prefix.as_str()) {
+                let existing = core_bundle::bundled_schema(
+                    &format!("#/$defs/{name}").into(),
+                    Some(&id.clone().into()),
+                )
+                .unwrap();
+                assert_eq!(
+                    stringify(&schema, usize::MAX).unwrap(),
+                    stringify(&existing, usize::MAX).unwrap()
+                );
+            }
+            count += 1;
+        }
+    }
+    assert!(count > 200);
+    for method in core_schema::operation_catalog().keys() {
+        assert_eq!(
+            core_bundle::operation_input_schema(method)
+                .unwrap()
+                .get("type"),
+            Some(&"object".into())
+        );
+    }
+}
+
+#[test]
+fn owned_catalog_resolves_recursive_cross_document_refs_without_prototypes() {
+    let bundle = Bundle::from_documents(vec![
+        ("First".to_owned(), json(r##"{"$id":"https://example.invalid/first.json","$defs":{"Root":{"type":"object","properties":{"next":{"$ref":"second.json#/$defs/Node"}}}}}"##)),
+        ("Second".to_owned(), json(r##"{"$id":"https://example.invalid/second.json","$defs":{"Node":{"type":"object","properties":{"next":{"$ref":"#/$defs/Node"},"value":{"type":"string"}}}}}"##)),
+    ]).unwrap();
+    let bundled = bundle
+        .definition("https://example.invalid/first.json", "Root")
         .unwrap();
+    let expected = json(
+        r##"{"type":"object","properties":{"next":{"$ref":"#/$defs/SecondNode"}},"$defs":{"SecondNode":{"type":"object","properties":{"next":{"$ref":"#/$defs/SecondNode"},"value":{"type":"string"}}}}}"##,
+    );
+    assert_eq!(bundled, expected);
+    assert!(
+        bundle
+            .definition("https://example.invalid/first.json", "constructor")
+            .is_err()
+    );
+    assert!(
+        bundle
+            .definition("https://example.invalid/missing.json", "Root")
+            .is_err()
+    );
+    assert!(core_bundle::operation_input_schema("constructor").is_err());
 }

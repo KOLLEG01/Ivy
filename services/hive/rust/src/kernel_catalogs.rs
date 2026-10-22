@@ -1,0 +1,777 @@
+use super::*;
+use ivy_contracts::{
+    core_schema::validate_shared,
+    hash::hash_json,
+    json::{canonical, parse},
+    limits::MANAGEMENT_FRAME_BYTES,
+};
+use rusqlite::{OptionalExtension, params};
+use std::collections::HashSet;
+
+pub(super) const METHODS: &[&str] = &[
+    "system.diagnostics",
+    "contracts.list",
+    "contracts.summaries",
+    "hosts.observations",
+    "hosts.list",
+    "serviceNodes.list",
+    "serviceNodes.get",
+    "serviceNodes.contracts",
+    "namespaces.list",
+    "namespaces.get",
+    "tools.list",
+    "topics.list",
+    "deployments.report",
+    "deployments.list",
+    "deployments.get",
+];
+fn sql<T>(store: &Store, result: rusqlite::Result<T>) -> IvyResult<T> {
+    result.map_err(|e| store.query_error(e))
+}
+fn decode(value: &str) -> IvyResult<IvyJson> {
+    parse(value, usize::MAX).map_err(|_| IvyError::internal())
+}
+fn text(value: &JsString) -> String {
+    String::from_utf16_lossy(&value.0)
+}
+fn optional_string<'a>(value: &'a IvyJson, key: &str) -> Option<&'a JsString> {
+    value.get(key).and_then(IvyJson::as_js_string)
+}
+fn array<'a>(value: &'a IvyJson, key: &str) -> IvyResult<&'a [IvyJson]> {
+    match value.get(key).filter(|v| !v.is_null()) {
+        None => Ok(&[]),
+        Some(v) => v.as_array().ok_or_else(IvyError::internal),
+    }
+}
+fn provider(node: &IvyJson) -> IvyJson {
+    IvyJson::object([
+        ("node", node.clone()),
+        ("eligible", Registry::eligible(node).into()),
+    ])
+}
+fn page(
+    call: &Call<'_>,
+    method: &str,
+    params: &IvyJson,
+    records: Vec<IvyJson>,
+    key: impl Fn(&IvyJson) -> JsString,
+    snapshot: Option<IvyJson>,
+) -> IvyResult<IvyJson> {
+    try_page(
+        call,
+        method,
+        params,
+        records,
+        |record| Ok(key(record)),
+        snapshot,
+    )
+}
+pub(super) fn try_page(
+    call: &Call<'_>,
+    method: &str,
+    params: &IvyJson,
+    mut records: Vec<IvyJson>,
+    key: impl Fn(&IvyJson) -> IvyResult<JsString>,
+    snapshot: Option<IvyJson>,
+) -> IvyResult<IvyJson> {
+    let mut identity = IvyJson::object([("method", method.into())]);
+    for (key, value) in params.as_object().ok_or_else(IvyError::internal)? {
+        if key != &JsString::from("cursor") {
+            identity.insert(key.clone(), value.clone());
+        }
+    }
+    if let Some(snapshot) = snapshot {
+        identity.insert("snapshot", snapshot);
+    }
+    crate::paging::try_catalog_page(
+        call.store,
+        &mut records,
+        &identity,
+        key,
+        params
+            .get("limit")
+            .and_then(IvyJson::as_f64)
+            .map(|v| v as usize),
+        optional_string(params, "cursor"),
+    )
+}
+fn key(value: &IvyJson, name: &str) -> JsString {
+    optional_string(value, name).cloned().unwrap_or_default()
+}
+fn selected(params: &IvyJson, name: &str, value: Option<&IvyJson>) -> bool {
+    !params
+        .get(name)
+        .and_then(IvyJson::as_js_string)
+        .is_some_and(|v| !v.0.is_empty())
+        || params.get(name) == value
+}
+fn prefixed(value: &IvyJson, name: &str, prefix: Option<&IvyJson>) -> IvyResult<bool> {
+    if !prefix
+        .and_then(IvyJson::as_js_string)
+        .is_some_and(|v| !v.0.is_empty())
+    {
+        return Ok(true);
+    }
+    let prefix = prefix
+        .and_then(IvyJson::as_js_string)
+        .ok_or_else(IvyError::internal)?;
+    Ok(string(value, name)?.0.starts_with(&prefix.0))
+}
+pub(super) fn handle(
+    call: &mut Call<'_>,
+    context: &IvyJson,
+    params: &IvyJson,
+    method: &str,
+) -> IvyResult<IvyJson> {
+    match method {
+        "system.diagnostics" => {
+            let records = call
+                .registry
+                .diagnostics(call.store, optional_string(params, "status"))?;
+            try_page(
+                call,
+                method,
+                params,
+                records,
+                |value| {
+                    Ok(hash_json(&IvyJson::object([
+                        (
+                            "resource",
+                            value.get("resource").cloned().unwrap_or(IvyJson::Null),
+                        ),
+                        ("code", value.get("code").cloned().unwrap_or(IvyJson::Null)),
+                        (
+                            "source",
+                            value.get("source").cloned().unwrap_or(IvyJson::Null),
+                        ),
+                    ]))?
+                    .into())
+                },
+                None,
+            )
+        }
+        "contracts.list" | "contracts.summaries" => {
+            let filter = optional_string(params, "key").map(text);
+            let mut statement = sql(
+                call.store,
+                call.store
+                    .connection()
+                    .prepare_cached("SELECT definition FROM contracts WHERE (? IS NULL OR key=?)"),
+            )?;
+            let encoded = sql(
+                call.store,
+                statement.query_map(params![filter, filter], |r| r.get::<_, String>(0)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| call.store.query_error(e))?;
+            let mut records = encoded
+                .iter()
+                .map(|v| decode(v))
+                .collect::<IvyResult<Vec<_>>>()?;
+            if !(params.get("allVersions").and_then(IvyJson::as_bool) == Some(true)) {
+                let mut seen = HashSet::new();
+                let mut latest = vec![];
+                for record in records {
+                    let key = string(&record, "key")?;
+                    if seen.insert(key.clone()) {
+                        latest.push(objects::get_contract(call.store, key, None)?);
+                    }
+                }
+                records = latest;
+            }
+            if method == "contracts.summaries" {
+                records = records
+                    .into_iter()
+                    .map(|record| {
+                        let mut description =
+                            crate::discovery::collapse_whitespace(string(&record, "specMarkdown")?);
+                        description.0.truncate(512);
+                        if description.0.is_empty() {
+                            description = string(&record, "key")?.clone();
+                        }
+                        let mut summary = IvyJson::object(std::iter::empty::<(&str, IvyJson)>());
+                        for name in ["key", "version"] {
+                            if let Some(value) = record.get(name) {
+                                summary.insert(name, value.clone());
+                            }
+                        }
+                        summary.insert("description", IvyJson::String(description));
+                        for name in ["owner", "mediaType"] {
+                            if let Some(value) = record.get(name) {
+                                summary.insert(name, value.clone());
+                            }
+                        }
+                        summary.insert("hasJsonSchema", record.get("jsonSchema").is_some().into());
+                        Ok(summary)
+                    })
+                    .collect::<IvyResult<Vec<_>>>()?;
+            }
+            page(
+                call,
+                method,
+                params,
+                records,
+                |v| {
+                    let mut id = key(v, "key");
+                    id.0.push(64);
+                    id.0.extend(key(v, "version").0);
+                    id
+                },
+                None,
+            )
+        }
+        "hosts.observations" => {
+            let records = call.registry.host_observations(
+                call.store,
+                optional_string(params, "hostId"),
+                call.runtime,
+                (call.clock)(),
+            )?;
+            require(
+                records.len() <= 1000,
+                "limit_exceeded",
+                "Host observation catalog exceeds its operating bound.",
+            )?;
+            page(
+                call,
+                method,
+                params,
+                records,
+                |v| {
+                    key(
+                        v.get("snapshot")
+                            .and_then(|v| v.get("status"))
+                            .unwrap_or(&IvyJson::Null),
+                        "hostId",
+                    )
+                },
+                None,
+            )
+        }
+        "hosts.list" => {
+            let nodes = call
+                .registry
+                .nodes(call.store, call.runtime, (call.clock)())?;
+            let mut seen = HashSet::new();
+            let mut records = vec![];
+            for node in &nodes {
+                let host = field(node, "hostId")?;
+                if seen.insert(string(node, "hostId")?.clone()) {
+                    let owned = nodes
+                        .iter()
+                        .filter(|v| v.get("hostId") == Some(host))
+                        .collect::<Vec<_>>();
+                    records.push(IvyJson::object([
+                        ("hostId", host.clone()),
+                        (
+                            "serviceNodeIds",
+                            IvyJson::Array(
+                                owned
+                                    .iter()
+                                    .map(|v| {
+                                        v.get("serviceNodeId").cloned().unwrap_or(IvyJson::Null)
+                                    })
+                                    .collect(),
+                            ),
+                        ),
+                        (
+                            "connected",
+                            owned
+                                .iter()
+                                .any(|v| {
+                                    v.get("connected").and_then(IvyJson::as_bool) == Some(true)
+                                })
+                                .into(),
+                        ),
+                    ]));
+                }
+            }
+            page(call, method, params, records, |v| key(v, "hostId"), None)
+        }
+        "serviceNodes.list" => {
+            let records = call
+                .registry
+                .nodes(call.store, call.runtime, (call.clock)())?
+                .into_iter()
+                .filter(|v| {
+                    selected(params, "hostId", v.get("hostId"))
+                        && selected(params, "serviceName", v.get("serviceName"))
+                })
+                .collect();
+            page(
+                call,
+                method,
+                params,
+                records,
+                |v| key(v, "serviceNodeId"),
+                None,
+            )
+        }
+        "serviceNodes.get" => call.registry.node(
+            call.store,
+            string(params, "serviceNodeId")?,
+            call.runtime,
+            (call.clock)(),
+        ),
+        "serviceNodes.contracts" => {
+            let id = string(params, "serviceNodeId")?;
+            let node = call
+                .registry
+                .node(call.store, id, call.runtime, (call.clock)())?;
+            let catalog = call
+                .registry
+                .get_registry(call.store, id)?
+                .filter(|value| !value.is_null());
+            let mut records = vec![];
+            for (index, value) in array(
+                catalog.as_ref().unwrap_or(&IvyJson::Null),
+                "requiredContracts",
+            )?
+            .iter()
+            .enumerate()
+            {
+                if selected(params, "key", value.get("key")) {
+                    records.push(IvyJson::object([
+                        ("value", value.clone()),
+                        ("index", IvyJson::Number(index as f64)),
+                    ]));
+                }
+            }
+            let mut identity = IvyJson::object([("records", IvyJson::Array(records.clone()))]);
+            if let Some(captured) = node.get("lastSuccessfulSyncAt") {
+                identity.insert("capturedAt", captured.clone());
+            }
+            let paged = page(
+                call,
+                method,
+                params,
+                records,
+                |v| {
+                    format!(
+                        "{:08}",
+                        v.get("index").and_then(IvyJson::as_f64).unwrap() as usize
+                    )
+                    .into()
+                },
+                Some(hash_json(&identity)?.into()),
+            )?;
+            let mut result = IvyJson::object([
+                ("provider", provider(&node)),
+                ("hasCatalog", catalog.is_some().into()),
+                (
+                    "items",
+                    IvyJson::Array(
+                        field(&paged, "items")?
+                            .as_array()
+                            .ok_or_else(IvyError::internal)?
+                            .iter()
+                            .map(|v| v.get("value").cloned().unwrap_or(IvyJson::Null))
+                            .collect(),
+                    ),
+                ),
+                ("nextCursor", field(&paged, "nextCursor")?.clone()),
+            ]);
+            if let Some(captured) = node.get("lastSuccessfulSyncAt") {
+                result.insert("capturedAt", captured.clone());
+            }
+            Ok(result)
+        }
+        "namespaces.list" => {
+            let mut records: Vec<IvyJson> = vec![];
+            for node in call
+                .registry
+                .nodes(call.store, call.runtime, (call.clock)())?
+            {
+                let catalog = call
+                    .registry
+                    .get_registry(call.store, string(&node, "serviceNodeId")?)?;
+                for namespace in array(catalog.as_ref().unwrap_or(&IvyJson::Null), "namespaces")? {
+                    let name = field(namespace, "namespace")?;
+                    if let Some(record) = records
+                        .iter_mut()
+                        .find(|v| v.get("namespace") == Some(name))
+                    {
+                        let mut providers = field(record, "providers")?
+                            .as_array()
+                            .ok_or_else(IvyError::internal)?
+                            .to_vec();
+                        providers.push(provider(&node));
+                        record.insert("providers", IvyJson::Array(providers));
+                    } else {
+                        records.push(IvyJson::object([
+                            ("namespace", name.clone()),
+                            ("providers", IvyJson::Array(vec![provider(&node)])),
+                        ]));
+                    }
+                }
+            }
+            page(call, method, params, records, |v| key(v, "namespace"), None)
+        }
+        "namespaces.get" => call.registry.snapshot(
+            call.store,
+            string(params, "namespace")?,
+            params,
+            call.runtime,
+            (call.clock)(),
+        ),
+        "tools.list" => {
+            let snapshot = call.registry.snapshot(
+                call.store,
+                string(params, "namespace")?,
+                params,
+                call.runtime,
+                (call.clock)(),
+            )?;
+            let node = field(field(&snapshot, "provider")?, "node")?;
+            let id = string(node, "serviceNodeId")?;
+            let namespace =
+                call.registry
+                    .namespace(call.store, id, string(params, "namespace")?)?;
+            let tools = call.registry.bindings(call.store, id, &namespace)?.to_vec();
+            let identity = IvyJson::object([
+                ("nodeId", IvyJson::String(id.clone())),
+                ("tools", IvyJson::Array(tools.clone())),
+                ("guide", field(&snapshot, "guideMarkdown")?.clone()),
+            ]);
+            let filtered = tools
+                .into_iter()
+                .filter_map(|tool| {
+                    match prefixed(
+                        tool.get("definition").unwrap_or(&IvyJson::Null),
+                        "name",
+                        params.get("namePrefix"),
+                    ) {
+                        Ok(true) => Some(Ok(tool)),
+                        Ok(false) => None,
+                        Err(e) => Some(Err(e)),
+                    }
+                })
+                .collect::<IvyResult<Vec<_>>>()?;
+            let mut result = page(
+                call,
+                method,
+                params,
+                filtered,
+                |v| key(v, "qualifiedName"),
+                Some(hash_json(&identity)?.into()),
+            )?;
+            result.insert("provider", field(&snapshot, "provider")?.clone());
+            result.insert("guideMarkdown", field(&snapshot, "guideMarkdown")?.clone());
+            Ok(result)
+        }
+        "topics.list" => topics(call, params),
+        "deployments.report" => report(call, context, params),
+        "deployments.list" | "deployments.get" => {
+            let records = deployments(call)?;
+            if method == "deployments.get" {
+                return records
+                    .into_iter()
+                    .find(|v| {
+                        v.get("record").is_some_and(|r| {
+                            r.get("hostId") == params.get("hostId")
+                                && r.get("deploymentId") == params.get("deploymentId")
+                        })
+                    })
+                    .ok_or_else(|| IvyError::new("not_found", "Deployment snapshot not found."));
+            }
+            let records = records
+                .into_iter()
+                .filter(|v| {
+                    v.get("record").is_some_and(|r| {
+                        selected(params, "hostId", r.get("hostId"))
+                            && selected(params, "instanceId", r.get("instanceId"))
+                    })
+                })
+                .collect();
+            try_page(
+                call,
+                method,
+                params,
+                records,
+                |v| {
+                    let record = v.get("record").unwrap();
+                    let date = call
+                        .runtime
+                        .parse_date(&string(record, "updatedAt")?.clone());
+                    let mut newest: JsString = (9_007_199_254_740_991.0 - date).to_string().into();
+                    if newest.0.len() < 16 {
+                        let mut prefix = vec![48; 16 - newest.0.len()];
+                        prefix.extend(newest.0);
+                        newest = JsString(prefix);
+                    }
+                    Ok(canonical(
+                        &IvyJson::Array(vec![
+                            IvyJson::String(newest),
+                            record.get("hostId").cloned().unwrap_or(IvyJson::Null),
+                            record.get("deploymentId").cloned().unwrap_or(IvyJson::Null),
+                        ]),
+                        MANAGEMENT_FRAME_BYTES,
+                    )?
+                    .into())
+                },
+                None,
+            )
+        }
+        _ => Err(IvyError::internal()),
+    }
+}
+fn topics(call: &Call<'_>, params: &IvyJson) -> IvyResult<IvyJson> {
+    let resource = params.get("resourceRef");
+    let id = params
+        .get("serviceNodeId")
+        .filter(|v| !v.is_null())
+        .or_else(|| resource.and_then(|v| v.get("serviceNodeId")));
+    let namespace = params
+        .get("namespace")
+        .filter(|v| !v.is_null())
+        .or_else(|| resource.and_then(|v| v.get("namespace")));
+    require(
+        !params
+            .get("serviceNodeId")
+            .and_then(IvyJson::as_js_string)
+            .is_some_and(|v| !v.0.is_empty())
+            || !resource.is_some_and(|v| v.as_object().is_some())
+            || params.get("serviceNodeId") == resource.and_then(|v| v.get("serviceNodeId")),
+        "target_conflict",
+        "Resource and node selectors disagree.",
+    )?;
+    require(
+        !params
+            .get("namespace")
+            .and_then(IvyJson::as_js_string)
+            .is_some_and(|v| !v.0.is_empty())
+            || !resource.is_some_and(|v| v.as_object().is_some())
+            || params.get("namespace") == resource.and_then(|v| v.get("namespace")),
+        "target_conflict",
+        "Resource and namespace selectors disagree.",
+    )?;
+    let nodes = if id
+        .and_then(IvyJson::as_js_string)
+        .is_some_and(|v| !v.0.is_empty())
+    {
+        vec![
+            call.registry.node(
+                call.store,
+                id.and_then(IvyJson::as_js_string)
+                    .ok_or_else(IvyError::internal)?,
+                call.runtime,
+                (call.clock)(),
+            )?,
+        ]
+    } else {
+        call.registry
+            .nodes(call.store, call.runtime, (call.clock)())?
+    };
+    if id
+        .and_then(IvyJson::as_js_string)
+        .is_some_and(|v| !v.0.is_empty())
+    {
+        let node = &nodes[0];
+        require(
+            selected(params, "hostId", node.get("hostId"))
+                && selected(params, "serviceName", node.get("serviceName")),
+            "target_conflict",
+            "The selected resource has a different owner.",
+        )?;
+        if namespace
+            .and_then(IvyJson::as_js_string)
+            .is_some_and(|v| !v.0.is_empty())
+        {
+            call.registry.namespace(
+                call.store,
+                string(node, "serviceNodeId")?,
+                namespace
+                    .and_then(IvyJson::as_js_string)
+                    .ok_or_else(IvyError::internal)?,
+            )?;
+        }
+    }
+    let mut records = vec![];
+    for node in nodes.into_iter().filter(|n| {
+        selected(params, "hostId", n.get("hostId"))
+            && selected(params, "serviceName", n.get("serviceName"))
+    }) {
+        let catalog = call
+            .registry
+            .get_registry(call.store, string(&node, "serviceNodeId")?)?;
+        for ns in array(catalog.as_ref().unwrap_or(&IvyJson::Null), "namespaces")? {
+            if namespace
+                .and_then(IvyJson::as_js_string)
+                .is_some_and(|v| !v.0.is_empty())
+                && ns.get("namespace") != namespace
+            {
+                continue;
+            }
+            for topic in array(ns, "topics")? {
+                if prefixed(topic, "topic", params.get("topicPrefix"))? {
+                    records.push(IvyJson::object([
+                        ("provider", provider(&node)),
+                        ("namespace", field(ns, "namespace")?.clone()),
+                        ("definition", topic.clone()),
+                    ]));
+                }
+            }
+        }
+    }
+    if !id
+        .and_then(IvyJson::as_js_string)
+        .is_some_and(|v| !v.0.is_empty())
+        && !params
+            .get("hostId")
+            .and_then(IvyJson::as_js_string)
+            .is_some_and(|v| !v.0.is_empty())
+        && (!namespace
+            .and_then(IvyJson::as_js_string)
+            .is_some_and(|v| !v.0.is_empty())
+            || is_text(namespace, "hive"))
+        && (!params
+            .get("serviceName")
+            .and_then(IvyJson::as_js_string)
+            .is_some_and(|v| !v.0.is_empty())
+            || is_text(params.get("serviceName"), "hive"))
+    {
+        let mut statement = sql(
+            call.store,
+            call.store
+                .connection()
+                .prepare_cached("SELECT definition FROM topics WHERE owner='hive'"),
+        )?;
+        for row in sql(
+            call.store,
+            statement.query_map([], |r| r.get::<_, String>(0)),
+        )? {
+            let mut topic = decode(&sql(call.store, row)?)?;
+            if !prefixed(&topic, "topic", params.get("topicPrefix"))? {
+                continue;
+            }
+            topic.insert("title", "Object changes".into());
+            topic.insert("description","A Hive object is written, moved, archived or deleted according to the selected topic version.".into());
+            topic.insert("eventKinds", IvyJson::Array(vec![]));
+            records.push(IvyJson::object([
+                ("provider", IvyJson::Null),
+                ("namespace", "hive".into()),
+                ("definition", topic),
+            ]));
+        }
+    }
+    let identity = IvyJson::Array(
+        records
+            .iter()
+            .map(|v| {
+                IvyJson::object([
+                    (
+                        "serviceNodeId",
+                        v.get("provider")
+                            .and_then(|v| v.get("node"))
+                            .and_then(|v| v.get("serviceNodeId"))
+                            .cloned()
+                            .unwrap_or_else(|| "hive".into()),
+                    ),
+                    (
+                        "namespace",
+                        v.get("namespace").cloned().unwrap_or(IvyJson::Null),
+                    ),
+                    (
+                        "definition",
+                        v.get("definition").cloned().unwrap_or(IvyJson::Null),
+                    ),
+                ])
+            })
+            .collect(),
+    );
+    page(
+        call,
+        "topics.list",
+        params,
+        records,
+        |v| {
+            let mut out = v
+                .get("provider")
+                .and_then(|v| v.get("node"))
+                .map(|v| key(v, "serviceNodeId"))
+                .unwrap_or_else(|| "hive".into());
+            for part in [
+                key(v, "namespace"),
+                key(v.get("definition").unwrap_or(&IvyJson::Null), "topic"),
+                key(v.get("definition").unwrap_or(&IvyJson::Null), "version"),
+            ] {
+                out.0.push(31);
+                out.0.extend(part.0);
+            }
+            out
+        },
+        Some(hash_json(&identity)?.into()),
+    )
+}
+fn report(call: &mut Call<'_>, context: &IvyJson, params: &IvyJson) -> IvyResult<IvyJson> {
+    service(context)?;
+    let node = call.registry.node(
+        call.store,
+        string(context, "serviceNodeId")?,
+        call.runtime,
+        (call.clock)(),
+    )?;
+    let now = call.runtime.iso_date((call.clock)())?;
+    let runtime = call.runtime;
+    call.store.transaction(|store|{
+        for record in field(params,"records")?.as_array().ok_or_else(IvyError::internal)?{
+            validate_shared("DeploymentRecord",record)?;
+            crate::paging::utc(&IvyJson::String(string(record, "createdAt")?.clone()),runtime)?;
+            crate::paging::utc(&IvyJson::String(string(record, "updatedAt")?.clone()),runtime)?;
+            require(record.get("hostId")==node.get("hostId"),"target_conflict","Deployment snapshot belongs to another host.")?;
+            let host=text(string(&node,"hostId")?);
+            let id=text(&string(record, "deploymentId")?.clone());
+            let prior=sql(store,store.connection().query_row("SELECT record_json FROM deployment_reports WHERE host_id=? AND deployment_id=?",params![host,id],|r|r.get::<_,String>(0)).optional())?;
+            if let Some(prior)=prior{
+                let previous=decode(&prior)?;
+                require(["deploymentId","hostId","instanceId","componentId","requestHash","previousBuild","createdAt"].iter().all(|key|previous.get(key)==record.get(key))&&(previous.get("targetBuild")==Some(&IvyJson::Null)||previous.get("targetBuild")==record.get("targetBuild")),"target_conflict","Deployment observation cannot reinterpret its original local identity.")?;
+                let phases=["preparing","prepared","checking","draining","activating","verifying","rolling_back"];
+                let before=phases.iter().position(|v|is_text(previous.get("phase"),v));let after=phases.iter().position(|v|is_text(record.get("phase"),v));
+                let valid=string(&previous, "updatedAt")?.clone()<=string(record, "updatedAt")?.clone()&&match before{None=>canonical(&previous,MANAGEMENT_FRAME_BYTES)?==canonical(record,MANAGEMENT_FRAME_BYTES)?,Some(before)=>after.is_none_or(|after|after>=before)};
+                require(valid,"revision_conflict","Deployment observation cannot regress a phase or replace a terminal result.")?;
+            }
+            sql(store,store.connection().execute("INSERT INTO deployment_reports VALUES (?,?,?,?,?) ON CONFLICT(host_id,deployment_id) DO UPDATE SET node_id=excluded.node_id,reported_at=excluded.reported_at,record_json=excluded.record_json",params![host,id,text(string(&node,"serviceNodeId")?),text(&now),canonical(record,MANAGEMENT_FRAME_BYTES)?]))?;
+        }Ok(())
+    })?;
+    Ok(IvyJson::object([("reportedAt", IvyJson::String(now))]))
+}
+fn deployments(call: &Call<'_>) -> IvyResult<Vec<IvyJson>> {
+    let mut statement = sql(
+        call.store,
+        call.store
+            .connection()
+            .prepare_cached("SELECT record_json,node_id,reported_at FROM deployment_reports"),
+    )?;
+    let rows = sql(
+        call.store,
+        statement.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        }),
+    )?
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .map_err(|e| call.store.query_error(e))?;
+    rows.into_iter()
+        .map(|(record, id, at)| {
+            let record = decode(&record)?;
+            let node = call.registry.node(
+                call.store,
+                &id.as_str().into(),
+                call.runtime,
+                (call.clock)(),
+            )?;
+            Ok(IvyJson::object([
+                ("record", record),
+                ("serviceNodeId", id.into()),
+                ("reportedAt", at.into()),
+                (
+                    "stale",
+                    (node.get("connected").and_then(IvyJson::as_bool) != Some(true)).into(),
+                ),
+            ]))
+        })
+        .collect()
+}

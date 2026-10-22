@@ -10,7 +10,6 @@ pub mod assignment_scheduler;
 pub mod assignment_progress;
 pub mod assignment_windows;
 pub mod assignment_events;
-mod assignment_error;
 pub mod assignment_tick;
 pub mod assignment_prompt;
 pub mod assignment_result;

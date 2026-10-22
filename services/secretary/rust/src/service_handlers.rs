@@ -3,7 +3,7 @@
 use crate::{engine::SecretaryEngine, follow_up::SecretaryFollowUp};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, checked_native_contract::CheckedNativeContracts,
-    hash::hash_json, json::try_js_string,
+    hash::hash_json,
 };
 use ivy_sdk::{
     clock::date_to_iso,
@@ -174,10 +174,11 @@ fn need(ok: bool, message: &str) -> IvyResult<()> {
     }
 }
 fn string(value: Option<&IvyJson>) -> IvyResult<IvyJson> {
-    Ok(IvyJson::String(match value {
-        Some(value) => try_js_string(value)?,
-        None => "undefined".into(),
-    }))
+    value
+        .and_then(IvyJson::as_js_string)
+        .cloned()
+        .map(IvyJson::String)
+        .ok_or_else(|| IvyError::new("invalid_arguments", "The request field must be a string."))
 }
 /// Admit only against the selected generation. The connection owns the abort
 /// reason; this callback does not replace it with a domain cancellation error.
@@ -194,21 +195,16 @@ pub fn admit(
     if !matches!(method, PublicMethod::FollowUp | PublicMethod::FollowUpRead) {
         check_signal()?;
     }
-    // Property access on null throws before any domain invocation in the
-    // original callbacks. The registered input schema rejects it on the wire.
-    let property = |key: &str| -> IvyResult<Option<&IvyJson>> {
-        if args.is_null() {
-            Err(IvyError::internal())
-        } else {
-            Ok(args.get(key))
-        }
-    };
-    let routed = || -> IvyResult<bool> {
-        Ok(context
+    need(
+        args.as_object().is_some(),
+        "Tool arguments must be an object.",
+    )?;
+    let routed = || {
+        context
             .operation_id
             .as_ref()
             .map(|id| IvyJson::String(id.clone()))
-            == property("operationId")?.cloned())
+            == args.get("operationId").cloned()
     };
     let caller = IvyJson::String(context.caller_principal_id.clone());
     let call = |method, arguments, wake| {
@@ -232,7 +228,7 @@ pub fn admit(
         ),
         PublicMethod::SaveConfiguration => {
             need(
-                routed()?,
+                routed(),
                 "The configuration and routed operation identities must agree.",
             )?;
             call(
@@ -245,14 +241,14 @@ pub fn admit(
         | PublicMethod::CreateAssignment
         | PublicMethod::UpdateAssignment => {
             need(
-                routed()?,
+                routed(),
                 "The assignment and routed operation identities must agree.",
             )?;
             let allowed = method == PublicMethod::SaveAssignment
                 || if method == PublicMethod::CreateAssignment {
-                    property("assignment")? == Some(&IvyJson::Null)
+                    args.get("assignment") == Some(&IvyJson::Null)
                 } else {
-                    property("assignment")? != Some(&IvyJson::Null)
+                    args.get("assignment") != Some(&IvyJson::Null)
                 };
             need(
                 allowed,
@@ -269,8 +265,8 @@ pub fn admit(
             )
         }
         PublicMethod::Operation | PublicMethod::OperationRead => {
-            let scope = property("expectedScope")?.cloned().unwrap_or(IvyJson::Null);
-            let id = string(property("operationId")?)?;
+            let scope = args.get("expectedScope").cloned().unwrap_or(IvyJson::Null);
+            let id = string(args.get("operationId"))?;
             call(
                 if method == PublicMethod::Operation {
                     EngineMethod::Operation
@@ -285,25 +281,25 @@ pub fn admit(
             EngineMethod::Status,
             vec![
                 caller,
-                property("expectedScope")?.cloned().unwrap_or(IvyJson::Null),
+                args.get("expectedScope").cloned().unwrap_or(IvyJson::Null),
             ],
             false,
         ),
         PublicMethod::FollowUp => {
             need(
-                routed()?,
+                routed(),
                 "The follow-up and routed operation identities must agree.",
             )?;
             call(EngineMethod::FollowUp, vec![args.clone(), caller], true)
         }
         PublicMethod::FollowUpRead => call(
             EngineMethod::FollowUpRead,
-            vec![string(property("operationId")?)?, caller],
+            vec![string(args.get("operationId"))?, caller],
             false,
         ),
         _ => {
             need(
-                property("action")? == Some(&IvyJson::from(method.name())) && routed()?,
+                args.get("action") == Some(&IvyJson::from(method.name())) && routed(),
                 "The domain and routed action identities must agree.",
             )?;
             call(EngineMethod::Action, vec![caller, args.clone()], true)

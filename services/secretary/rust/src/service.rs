@@ -13,9 +13,8 @@ use crate::{
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_host_runtime::{
-    config::{InstanceConfig, instance_config, native_instance_config},
+    config::{InstanceConfig, native_instance_config},
     health::HealthFile,
-    node_runtime::NodeRuntime,
 };
 use ivy_sdk::{
     clock::{Clock, SystemClock, date_to_iso},
@@ -48,9 +47,19 @@ pub fn packaged_job_launcher(artifact_root: &Path) -> IvyResult<Option<PathBuf>>
         let target = match std::env::consts::ARCH {
             "x86_64" => "win32-x64",
             "aarch64" => "win32-arm64",
-            _ => return Err(IvyError::new("unsupported_platform", "Unsupported Windows architecture.")),
+            _ => {
+                return Err(IvyError::new(
+                    "unsupported_platform",
+                    "Unsupported Windows architecture.",
+                ));
+            }
         };
-        Ok(Some(artifact_root.join("dist/native").join(target).join("ivy-job.exe")))
+        Ok(Some(
+            artifact_root
+                .join("dist/native")
+                .join(target)
+                .join("ivy-job.exe"),
+        ))
     }
     #[cfg(not(windows))]
     {
@@ -214,16 +223,6 @@ pub async fn start(path: impl Into<PathBuf>) -> IvyResult<SecretaryService> {
     let job_launcher = packaged_job_launcher(config.artifact_root())?;
     start_configured(config, job_launcher).await
 }
-/// Existing hosts may supply an already discovered Node runtime and Job path.
-/// This changes neither the public configuration nor the v1 package manifest.
-pub async fn start_with_runtime(
-    path: impl Into<PathBuf>,
-    node: &NodeRuntime,
-    job_launcher: Option<PathBuf>,
-) -> IvyResult<SecretaryService> {
-    let config = instance_config(path, node).await?;
-    start_configured(config, job_launcher).await
-}
 async fn start_configured(
     config: InstanceConfig,
     job_launcher: Option<PathBuf>,
@@ -234,8 +233,7 @@ async fn start_configured(
         .required("dataRoot")?
         .as_js_string()
         .ok_or_else(IvyError::internal)?;
-    let service_path =
-        ivy_host_runtime::node_path::to_native(&service_configuration_path(data_root)?);
+    let service_path = PathBuf::from(service_configuration_path(data_root)?.to_utf8()?);
     let minimum_message_age_minutes =
         load_minimum_message_age_minutes(service_path.clone()).await?;
     // Loading validates configured dormant capability without starting it or

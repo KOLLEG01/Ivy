@@ -16,6 +16,12 @@ use tokio::{
     task::JoinHandle,
 };
 
+#[cfg(windows)]
+pub mod root;
+
+#[cfg(all(windows, feature = "qualification-live-retirement"))]
+pub mod qualification;
+
 #[derive(Clone, Debug)]
 pub struct Command {
     pub executable: String,
@@ -56,16 +62,27 @@ pub struct ProcessResult {
 }
 
 #[derive(Clone)]
-pub struct Completion(watch::Receiver<Option<Arc<ProcessResult>>>);
+pub struct Completion {
+    raw: watch::Receiver<Option<Arc<ProcessResult>>>,
+    #[cfg(all(windows, feature = "qualification-live-retirement"))]
+    withheld: bool,
+}
 impl Completion {
+    fn consumer_view(&self, result: Arc<ProcessResult>) -> Arc<ProcessResult> {
+        #[cfg(all(windows, feature = "qualification-live-retirement"))]
+        if self.withheld {
+            return qualification::consumer_view(result);
+        }
+        result
+    }
     pub fn current(&self) -> Option<Arc<ProcessResult>> {
-        self.0.borrow().clone()
+        self.raw.borrow().clone().map(|result| self.consumer_view(result))
     }
     pub async fn wait(&self) -> Arc<ProcessResult> {
-        let mut receiver = self.0.clone();
+        let mut receiver = self.raw.clone();
         loop {
             if let Some(result) = receiver.borrow_and_update().clone() {
-                return result;
+                return self.consumer_view(result);
             }
             if receiver.changed().await.is_err() {
                 return Arc::new(ProcessResult {
@@ -93,6 +110,8 @@ pub struct OwnedProcess {
     group_pid: u32,
     #[cfg(windows)]
     job_retired: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(all(windows, feature = "qualification-live-retirement"))]
+    qualification: qualification::Eligibility,
 }
 
 /// Optional aggregate committed-memory enforcement for one owned Windows Job.
@@ -163,6 +182,10 @@ impl OwnedProcess {
 /// a final stop record; a pending or unproved Windows Job always returns false.
 /// Unix keeps the original ten 50ms probes and accepts only ESRCH as retirement.
 pub async fn owned_process_tree_stopped(process: &OwnedProcess) -> IvyResult<bool> {
+    #[cfg(all(windows, feature = "qualification-live-retirement"))]
+    if process.completion.withheld {
+        return Ok(false);
+    }
     #[cfg(windows)]
     return Ok(process.job_retired.load(std::sync::atomic::Ordering::Acquire));
     #[cfg(unix)]
@@ -370,7 +393,16 @@ pub async fn spawn(
 ) -> IvyResult<OwnedProcess> {
     validate_capture(&context)?;
     let resolved = resolve_command(command, root, executables)?;
-    spawn_resolved(resolved, root, context, None, None).await
+    let process = spawn_resolved(resolved, root, context, None, None).await?;
+    #[cfg(all(windows, feature = "qualification-live-retirement"))]
+    let process = {
+        let mut process = process;
+        if process.qualification == qualification::Eligibility::AcknowledgedRawCandidate {
+            process.qualification = qualification::Eligibility::OrdinaryReady;
+        }
+        process
+    };
+    Ok(process)
 }
 
 /// Use exactly context.environment while retaining ordinary executable/cwd
@@ -604,6 +636,16 @@ async fn spawn_resolved_with_stdio(
     };
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
+    #[cfg(all(windows, feature = "qualification-live-retirement"))]
+    let qualification = if use_job && launch_proof.is_some()
+        && context.raw_output && !ignored_stdio && !context.allow_windows_breakaway
+        && memory_request.is_none() && argv0.is_none() && context.job_name.is_none()
+        && context.on_output.is_none() && stdin.is_some() && stdout.is_some() && stderr.is_some()
+    {
+        qualification::Eligibility::AcknowledgedRawCandidate
+    } else {
+        qualification::Eligibility::Unavailable
+    };
     let make_capture = || {
         Arc::new(Mutex::new(DiagnosticCapture::new(
             context.redact.iter().map(|s| s.0.clone()).collect(),
@@ -770,12 +812,18 @@ async fn spawn_resolved_with_stdio(
         stdin,
         stdout,
         stderr,
-        completion: Completion(completion),
+        completion: Completion {
+            raw: completion,
+            #[cfg(all(windows, feature = "qualification-live-retirement"))]
+            withheld: false,
+        },
         stop,
         #[cfg(unix)]
         group_pid: pid,
         #[cfg(windows)]
         job_retired,
+        #[cfg(all(windows, feature = "qualification-live-retirement"))]
+        qualification,
     })
 }
 

@@ -2,7 +2,7 @@
 use crate::{
     config::triage_configuration,
     engine::SecretaryEngine,
-    inbox_evidence::{ignored_reason, truthy},
+    inbox_evidence::ignored_reason,
     media_input::Prepared,
     microsoft_store::native_call,
     triage_media::{self, Context, Inputs},
@@ -12,7 +12,7 @@ use crate::{
         same, text, triage_name,
     },
 };
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::try_js_string};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_sdk::{
     native_evidence::NativeOwnerIdentity,
     native_operation::{
@@ -146,7 +146,7 @@ impl<'a, 'engine, 'store, 'journal> TriageNative<'a, 'engine, 'store, 'journal> 
         evidence(if phase == &IvyJson::from("pending") {
             completion.is_null() && assessment.is_null() && error.is_null()
         } else if phase == &IvyJson::from("assessed") {
-            truthy(completion) && truthy(assessment) && error.is_null()
+            !(completion).is_null() && !(assessment).is_null() && error.is_null()
         } else {
             !error.is_null() && assessment.is_null()
         })?;
@@ -217,7 +217,10 @@ impl<'a, 'engine, 'store, 'journal> TriageNative<'a, 'engine, 'store, 'journal> 
                         && (cleanup
                             || work.value.get("phase") == Some(&"pending".into())
                                 && same(item.required("pin")?, selected)?
-                                && !item.required("value")?.get("decision").is_some_and(truthy))
+                                && !item
+                                    .required("value")?
+                                    .get("decision")
+                                    .is_some_and(|value| !value.is_null()))
                 }
                 None => false,
             },
@@ -237,7 +240,10 @@ impl<'a, 'engine, 'store, 'journal> TriageNative<'a, 'engine, 'store, 'journal> 
             .await?;
         check(
             same(item.required("pin")?, item_pin)?
-                && !item.required("value")?.get("decision").is_some_and(truthy),
+                && !item
+                    .required("value")?
+                    .get("decision")
+                    .is_some_and(|value| !value.is_null()),
             "secretary_triage_item_changed",
         )?;
         let name = triage_name("plan", item_pin)?;
@@ -258,7 +264,7 @@ impl<'a, 'engine, 'store, 'journal> TriageNative<'a, 'engine, 'store, 'journal> 
                     ("message", value.required("message")?.clone()),
                     (
                         "contentScope",
-                        if truthy(&media.media) {
+                        if !(&media.media).is_null() {
                             "verified_media"
                         } else {
                             "captured_text_or_caption"
@@ -427,7 +433,7 @@ impl<'a, 'engine, 'store, 'journal> TriageNative<'a, 'engine, 'store, 'journal> 
         params: IvyJson,
     ) -> IvyResult<TriageCall> {
         let observed = stored.value.required("observation")?;
-        let observation = if truthy(observed) {
+        let observation = if !(observed).is_null() {
             Some(self.store().native_json("operation", observed)?)
         } else {
             None
@@ -664,9 +670,9 @@ impl<'a, 'engine, 'store, 'journal> TriageNative<'a, 'engine, 'store, 'journal> 
         let result = record(reply.and_then(|r| r.get("result")));
         let status = result
             .get("status")
-            .map(try_js_string)
+            .map(|value| value.as_js_string().cloned().ok_or_else(IvyError::internal))
             .transpose()?
-            .unwrap_or_else(|| "undefined".into());
+            .unwrap_or_default();
         check(
             reply.is_some_and(|r| r.get("result").is_some())
                 && ["unsubscribed", "notLoaded", "notSubscribed"]
@@ -692,7 +698,7 @@ impl<'a, 'engine, 'store, 'journal> TriageNative<'a, 'engine, 'store, 'journal> 
     fn shared_thread(&self, plan: &TriageDocument) -> IvyResult<TriageDocument> {
         let name = self.thread_name(plan)?;
         if let Some(saved) = self.store().find(R::Thread, &name, false)? {
-            if truthy(saved.value.required("plan")?) {
+            if !(saved.value.required("plan")?).is_null() {
                 return Ok(saved);
             }
             let mut next = saved.value.clone();
@@ -715,7 +721,9 @@ impl<'a, 'engine, 'store, 'journal> TriageNative<'a, 'engine, 'store, 'journal> 
             .store()
             .find(R::Thread, &self.thread_name(plan)?, false)?
         {
-            if !truthy(shared.value.required("threadId")?)
+            if !(shared.value.required("threadId")?)
+                .as_js_string()
+                .is_some_and(|text| !text.0.is_empty())
                 && same(shared.value.required("plan")?, &pin_value(&plan.pin))?
             {
                 let mut next = shared.value.clone();
@@ -740,7 +748,10 @@ impl<'a, 'engine, 'store, 'journal> TriageNative<'a, 'engine, 'store, 'journal> 
     }
     fn remember_thread(&self, plan: &TriageDocument, thread: &JsString) -> IvyResult<()> {
         let shared = self.shared_thread(plan)?;
-        if !truthy(shared.value.required("threadId")?) {
+        if !(shared.value.required("threadId")?)
+            .as_js_string()
+            .is_some_and(|text| !text.0.is_empty())
+        {
             let mut next = shared.value.clone();
             next.insert("threadId", IvyJson::String(thread.clone()));
             self.store().amend(R::Thread, &shared, &next)?;
@@ -818,7 +829,9 @@ impl<'a, 'engine, 'store, 'journal> TriageNative<'a, 'engine, 'store, 'journal> 
         )?;
         let shared = self.shared_thread(plan)?;
         if existing.is_none()
-            && !truthy(shared.value.required("threadId")?)
+            && !(shared.value.required("threadId")?)
+                .as_js_string()
+                .is_some_and(|text| !text.0.is_empty())
             && !same(shared.value.required("plan")?, &pin_value(&plan.pin))?
         {
             return Ok(None);
@@ -829,7 +842,10 @@ impl<'a, 'engine, 'store, 'journal> TriageNative<'a, 'engine, 'store, 'journal> 
                 self.call(
                     plan,
                     &"thread".into(),
-                    &if truthy(shared.value.required("threadId")?) {
+                    &if (shared.value.required("threadId")?)
+                        .as_js_string()
+                        .is_some_and(|text| !text.0.is_empty())
+                    {
                         "thread/resume"
                     } else {
                         "thread/start"
@@ -1007,9 +1023,9 @@ impl<'a, 'engine, 'store, 'journal> TriageNative<'a, 'engine, 'store, 'journal> 
             )?;
             let status = observed
                 .get("status")
-                .map(try_js_string)
+                .map(|value| value.as_js_string().cloned().ok_or_else(IvyError::internal))
                 .transpose()?
-                .unwrap_or_else(|| "undefined".into());
+                .unwrap_or_default();
             if !["completed", "failed", "interrupted"]
                 .iter()
                 .any(|s| status == JsString::from(*s))

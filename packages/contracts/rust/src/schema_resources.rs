@@ -43,8 +43,7 @@ pub(super) fn index(schema: &IvyJson) -> IvyResult<SchemaResourceIndex<'_>> {
     let graph = collect(schema);
     let base_id = match schema.get("$id") {
         Some(IvyJson::String(id)) => normalize_id(id),
-        None | Some(IvyJson::Null | IvyJson::Bool(false)) => JsString::default(),
-        Some(IvyJson::Number(n)) if *n == 0.0 => JsString::default(),
+        None => JsString::default(),
         _ => return Err(invalid()),
     };
     let path_prefix = full_path(&base_id)?;
@@ -114,38 +113,20 @@ pub(super) fn index(schema: &IvyJson) -> IvyResult<SchemaResourceIndex<'_>> {
     })
 }
 
-/// Register against a fresh compiler's meta-schemas and ordinary-object names.
+/// Register against the compiler's meta-schemas and declared resource IDs.
 /// Explicit IDs select an isolated compiler; anonymous roots stay unregistered.
 pub(super) fn register(schema: &IvyJson) -> IvyResult<SchemaResourceIndex<'_>> {
     enum Registration<'a> {
         Schema(&'a IvyJson),
         Alias(JsString),
-        Prototype,
-        Function,
     }
     fn lookup<'a, 'b>(
         refs: &'b HashMap<JsString, Registration<'a>>,
         id: &JsString,
     ) -> Option<&'b Registration<'a>> {
-        refs.get(id).or_else(|| {
-            if id == &JsString::from("__proto__") {
-                Some(&Registration::Prototype)
-            } else if inherited(id) {
-                Some(&Registration::Function)
-            } else {
-                None
-            }
-        })
+        refs.get(id)
     }
-    static DOCUMENTS: OnceLock<IvyResult<IvyJson>> = OnceLock::new();
-    let data = DOCUMENTS
-        .get_or_init(|| crate::json::parse(include_str!("schema-meta-data.json"), 1024 * 1024))
-        .as_ref()
-        .map_err(Clone::clone)?;
-    let documents = data
-        .get("schemas")
-        .and_then(IvyJson::as_array)
-        .ok_or_else(IvyError::internal)?;
+    let documents = meta_documents()?;
     let mut refs = HashMap::new();
     for document in documents {
         let id = document
@@ -175,9 +156,6 @@ pub(super) fn register(schema: &IvyJson) -> IvyResult<SchemaResourceIndex<'_>> {
                 }
                 reference.alias = false;
             }
-            // Object.prototype has no schema member, so the compiler treats it
-            // as an existing object without a conflicting schema or new alias.
-            Some(Registration::Prototype) => reference.alias = false,
             _ if reference.alias && reference.id.0.first() != Some(&35) => {
                 refs.insert(
                     reference.id.clone(),
@@ -202,6 +180,17 @@ pub(super) fn register(schema: &IvyJson) -> IvyResult<SchemaResourceIndex<'_>> {
     Ok(index)
 }
 
+pub(super) fn meta_documents() -> IvyResult<&'static [IvyJson]> {
+    static DOCUMENTS: OnceLock<IvyResult<IvyJson>> = OnceLock::new();
+    let data = DOCUMENTS
+        .get_or_init(|| crate::json::parse(include_str!("schema-meta-data.json"), 1024 * 1024))
+        .as_ref()
+        .map_err(Clone::clone)?;
+    data.get("schemas")
+        .and_then(IvyJson::as_array)
+        .ok_or_else(IvyError::internal)
+}
+
 fn contains_id(schema: &IvyJson) -> bool {
     let mut pending = vec![schema];
     while let Some(value) = pending.pop() {
@@ -223,29 +212,7 @@ fn member(key: &JsString, names: &[&str]) -> bool {
     names.iter().any(|name| key == &JsString::from(*name))
 }
 
-// The original traversal uses `key in keywordTable` on ordinary objects.
-// Annotation objects may contain these inherited names despite schema admission.
-fn inherited(key: &JsString) -> bool {
-    member(
-        key,
-        &[
-            "constructor",
-            "__defineGetter__",
-            "__defineSetter__",
-            "hasOwnProperty",
-            "__lookupGetter__",
-            "__lookupSetter__",
-            "isPrototypeOf",
-            "propertyIsEnumerable",
-            "toString",
-            "valueOf",
-            "__proto__",
-            "toLocaleString",
-        ],
-    )
-}
-
-fn append(pointer: &JsString, key: &JsString, escape: bool) -> JsString {
+pub(super) fn append(pointer: &JsString, key: &JsString, escape: bool) -> JsString {
     let mut result = pointer.clone();
     result.0.push(47);
     for unit in &key.0 {
@@ -269,7 +236,7 @@ pub(super) fn collect(schema: &IvyJson) -> SchemaResourceGraph<'_> {
         for (key, value) in entries(schema).into_iter().rev() {
             let path = append(&pointer, key, false);
             if let Some(values) = value.as_array() {
-                if inherited(key) || member(key, &["items", "allOf", "anyOf", "oneOf"]) {
+                if member(key, &["items", "allOf", "anyOf", "oneOf"]) {
                     for (i, child) in values.iter().enumerate().rev() {
                         pending.push((
                             child,
@@ -278,18 +245,16 @@ pub(super) fn collect(schema: &IvyJson) -> SchemaResourceGraph<'_> {
                         ));
                     }
                 }
-            } else if inherited(key)
-                || member(
-                    key,
-                    &[
-                        "$defs",
-                        "definitions",
-                        "properties",
-                        "patternProperties",
-                        "dependencies",
-                    ],
-                )
-            {
+            } else if member(
+                key,
+                &[
+                    "$defs",
+                    "definitions",
+                    "properties",
+                    "patternProperties",
+                    "dependencies",
+                ],
+            ) {
                 for (name, child) in entries(value).into_iter().rev() {
                     pending.push((child, append(&path, name, true), Some(index)));
                 }

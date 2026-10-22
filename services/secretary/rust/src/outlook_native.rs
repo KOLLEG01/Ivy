@@ -10,8 +10,8 @@ use crate::{
     outlook_projection::{microsoft_mcp, microsoft_profile, outlook_arguments, outlook_page},
     source_identity::catalogue_account_hash,
 };
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json, json::js_string};
-use ivy_host_runtime::node_path::{Style, is_absolute};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json};
+
 use ivy_sdk::{
     clock::date_to_iso,
     native_evidence::{NativeOwnerIdentity, native_instant, native_operation_terminal},
@@ -127,13 +127,11 @@ impl<'a, 'engine, 'store, 'journal> OutlookNative<'a, 'engine, 'store, 'journal>
             "microsoft_source_config_invalid",
         )?;
         check(
-            is_absolute(
-                Style::native(),
-                configuration.required("threadCwd")?.as_js_string().unwrap(),
-            ) && same(
-                &microsoft_profile(configuration.required("profile")?)?,
-                configuration.required("profile")?,
-            )?,
+            std::path::Path::new(&configuration.required("threadCwd")?.as_str()?).is_absolute()
+                && same(
+                    &microsoft_profile(configuration.required("profile")?)?,
+                    configuration.required("profile")?,
+                )?,
             "microsoft_source_config_invalid",
         )?;
         instant(configuration, "since")?;
@@ -539,7 +537,7 @@ impl<'a, 'engine, 'store, 'journal> OutlookNative<'a, 'engine, 'store, 'journal>
             check(
                 object(result)?.get("status").is_some_and(|v| {
                     matches!(
-                        js_string(v).to_utf8().unwrap_or_default().as_str(),
+                        v.as_str().unwrap_or_default().as_str(),
                         "unsubscribed" | "notLoaded" | "notSubscribed"
                     )
                 }),
@@ -848,7 +846,10 @@ impl<'a, 'engine, 'store, 'journal> OutlookNative<'a, 'engine, 'store, 'journal>
     ) -> IvyResult<IvyJson> {
         let value = &proof.value;
         let page = value.get("page").filter(|v| !v.is_null());
-        let gap = value.get("gap").is_some_and(crate::inbox_evidence::truthy);
+        let gap = value
+            .get("gap")
+            .and_then(IvyJson::as_js_string)
+            .is_some_and(|reason| !reason.0.is_empty());
         check(gap == page.is_none(), "microsoft_evidence_invalid")?;
         let more = page.is_some_and(|p| p.get("complete") == Some(&false.into()));
         let next_poll = if more {

@@ -233,6 +233,33 @@ impl NativeOwner {
         G: Fn() -> F,
         F: Future<Output = IvyResult<()>>,
     {
+        self.call_management_with_error(
+            name,
+            args,
+            operation_id,
+            guard,
+            reconcile_unknown,
+            reassess,
+            |error: IvyError| error.with_outcome(Outcome::NotExecuted),
+        )
+        .await
+    }
+    async fn call_management_with_error<X, G, F, N>(
+        &self,
+        name: &str,
+        args: IvyJson,
+        operation_id: Option<JsString>,
+        guard: G,
+        reconcile_unknown: bool,
+        reassess: Option<&NativeOperationCall>,
+        retry_guard_failure: N,
+    ) -> Result<IvyJson, X>
+    where
+        X: From<IvyError>,
+        G: Fn() -> F,
+        F: Future<Output = Result<(), X>>,
+        N: Fn(X) -> X,
+    {
         self.check_signal()?;
         let tools = self.tools.service_tools(
             self.target.service_node_id.clone(),
@@ -245,14 +272,14 @@ impl NativeOwner {
         for attempt in 0..=1 {
             let guarded = async {
                 guard().await?;
-                self.check_signal()
+                self.check_signal().map_err(X::from)
             }
             .await;
             if let Err(error) = guarded {
                 return Err(if attempt == 0 {
                     error
                 } else {
-                    error.with_outcome(Outcome::NotExecuted)
+                    retry_guard_failure(error)
                 });
             }
             match call_bound(
@@ -276,7 +303,7 @@ impl NativeOwner {
                         || error.code != "tool_definition_changed"
                         || error.outcome != Outcome::NotExecuted
                     {
-                        return Err(error);
+                        return Err(error.into());
                     }
                     let refreshed = async {
                         let fresh = tools.refresh(&binding).await?;
@@ -404,17 +431,38 @@ impl NativeOwner {
         G: Fn() -> F,
         F: Future<Output = IvyResult<()>>,
     {
+        self.dispatch_local_with_error(call, guard, |error: IvyError| {
+            error.with_outcome(Outcome::NotExecuted)
+        })
+        .await
+    }
+    /// Keep initial guard failures unchanged. Only a guard or immediately
+    /// following signal failure on the recovered retry passes through the mapper.
+    /// Callback errors and futures may borrow caller-local, non-Send state.
+    pub async fn dispatch_local_with_error<X, G, F, N>(
+        &self,
+        call: &NativeOperationCall,
+        guard: G,
+        retry_guard_failure: N,
+    ) -> Result<Option<IvyJson>, X>
+    where
+        X: From<IvyError>,
+        G: Fn() -> F,
+        F: Future<Output = Result<(), X>>,
+        N: Fn(X) -> X,
+    {
         let binding = self
             .binding(&call.method, Some(&call.definition_hash))
             .await?;
         let value = self
-            .call_management_with_guard(
+            .call_management_with_error(
                 "invoke",
                 self.arguments(call, &binding)?,
                 Some(call.operation_id.clone()),
                 guard,
                 true,
                 Some(call),
+                retry_guard_failure,
             )
             .await?;
         Ok((!value.is_null()).then_some(value))

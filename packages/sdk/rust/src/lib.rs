@@ -5,8 +5,12 @@ pub mod assessment;
 mod batching;
 pub mod browser_notice;
 pub mod clock;
+pub mod collation;
+mod collation_loader;
 mod date_parse;
 mod date_format;
+mod date_arithmetic;
+mod date_local_seconds;
 pub mod operation_ids;
 pub mod main_chat;
 pub mod project_inventory;
@@ -17,6 +21,8 @@ pub mod native_operation;
 pub mod native_observations;
 pub mod native_turn_contents;
 pub mod rpc;
+mod fetch_header;
+mod native_http;
 pub mod tools;
 mod service_connection;
 pub mod service;
@@ -25,3 +31,8 @@ mod native_project_path;
 pub mod native_project_membership;
 pub mod native_project;
 pub mod native_plan;
+pub mod native_parameters;
+
+#[cfg(test)]
+#[path = "../../../../tests/rust/sdk-native-http-config.rs"]
+mod native_http_config_tests;

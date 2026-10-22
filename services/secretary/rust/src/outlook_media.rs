@@ -1,10 +1,6 @@
 //! Metadata and signed materialization admission, separate from byte acquisition.
 use crate::media_schema::{MediaSchema, validate_media};
-use ivy_contracts::{
-    IvyError, IvyJson, IvyResult,
-    hash::hash_json,
-    json::{canonical, js_string},
-};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, hash::hash_json, json::canonical};
 use std::collections::HashSet;
 
 pub const MAXIMUM_BYTES: usize = 32 * 1024 * 1024;
@@ -93,7 +89,7 @@ pub fn outlook_attachments(value: &IvyJson, message_id: &IvyJson) -> IvyResult<V
         let raw = record(Some(entry))?;
         let missing = IvyJson::Null;
         let kind = raw.get("attachment_type").unwrap_or(&missing);
-        let kind_string = js_string(kind).to_utf8()?;
+        let kind_string = kind.as_str()?;
         check(
             matches!(
                 kind_string.as_str(),

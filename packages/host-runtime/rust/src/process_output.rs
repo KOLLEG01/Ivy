@@ -1,6 +1,11 @@
 //! Bounded diagnostic capture, including UTF-8 decoding and secrets split across reads.
 //! Raw protocol pipes bypass this module entirely.
 
+#[cfg(windows)]
+mod windows_code_page;
+#[cfg(windows)]
+pub use windows_code_page::{console_output_code_page, WindowsCodePageDecoder};
+
 pub struct Utf8Decoder {
     incomplete: Vec<u8>,
     at_start: bool,

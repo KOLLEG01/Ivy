@@ -29,9 +29,6 @@ pub(crate) fn record(value: Option<&IvyJson>) -> IvyResult<&IvyJson> {
         )
     })
 }
-pub(crate) fn whitespace(c: char) -> bool {
-    matches!(c, '\u{9}'..='\u{d}' | '\u{20}' | '\u{a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}')
-}
 pub(crate) fn text(value: Option<&IvyJson>, maximum: usize, empty: bool) -> IvyResult<String> {
     let value = value.and_then(IvyJson::as_js_string);
     check(
@@ -44,7 +41,7 @@ pub(crate) fn text(value: Option<&IvyJson>, maximum: usize, empty: bool) -> IvyR
             "Microsoft source requires complete account-bound original evidence.",
         )
     })?;
-    check((empty || !value.trim_matches(whitespace).is_empty()) && !value.chars().any(|c| matches!(c, '\u{0}'..='\u{8}' | '\u{b}' | '\u{c}' | '\u{e}'..='\u{1f}' | '\u{fffe}' | '\u{ffff}')), "microsoft_response_invalid")?;
+    check((empty || !value.trim().is_empty()) && !value.chars().any(|c| matches!(c, '\u{0}'..='\u{8}' | '\u{b}' | '\u{c}' | '\u{e}'..='\u{1f}' | '\u{fffe}' | '\u{ffff}')), "microsoft_response_invalid")?;
     Ok(value)
 }
 fn email(value: Option<&IvyJson>) -> IvyResult<String> {
@@ -56,7 +53,7 @@ fn email(value: Option<&IvyJson>) -> IvyResult<String> {
             && parts.next().is_none()
             && !value
                 .chars()
-                .any(|c| whitespace(c) || matches!(c, '<' | '>')),
+                .any(|c| char::is_whitespace(c) || matches!(c, '<' | '>')),
         "microsoft_response_invalid",
     )?;
     Ok(value.to_lowercase())
@@ -371,7 +368,7 @@ pub fn outlook_body(value: &IvyJson) -> IvyResult<String> {
                 .map(Pending::Node),
         );
     }
-    // Original ASCII space folding, followed by ECMAScript trim.
+    // Collapse repeated ASCII spaces in the projected message text.
     let mut folded = String::new();
     let mut space = false;
     for c in parts.chars() {
@@ -403,7 +400,7 @@ pub fn outlook_body(value: &IvyJson) -> IvyResult<String> {
             output.push(c);
         }
     }
-    text(Some(&output.trim_matches(whitespace).into()), 32768, true)
+    text(Some(&output.trim().into()), 32768, true)
 }
 pub fn outlook_page(
     value: &IvyJson,

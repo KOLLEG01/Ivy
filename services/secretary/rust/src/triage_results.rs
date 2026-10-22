@@ -1,10 +1,7 @@
 //! Assessment decoding after the native owner has verified retained turn evidence.
 //! This does not establish native provenance or replace completion verification.
 use crate::schema::{Schema, validate};
-use ivy_contracts::{
-    IvyError, IvyJson, IvyResult, JsString,
-    json::{js_string, parse},
-};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
 use std::collections::HashSet;
 
 fn failure(code: &str) -> IvyError {
@@ -66,24 +63,10 @@ pub fn result_items(turn: &IvyJson, items: &[IvyJson]) -> IvyResult<IvyJson> {
         if !ids.insert(id) {
             return Err(invalid());
         }
-        // String(item.type) runs outside the final-JSON error mapping. JSON
-        // objects with an own noncallable toString cannot produce a primitive;
-        // array joining recursively encounters those objects, but ordinary
-        // object properties are not themselves coerced.
-        let mut pending: Vec<_> = item.get("type").into_iter().collect();
-        while let Some(value) = pending.pop() {
-            match value {
-                IvyJson::Array(values) => pending.extend(values),
-                IvyJson::Object(_) if value.get("toString").is_some() => {
-                    return Err(IvyError::internal());
-                }
-                _ => {}
-            }
-        }
-        let kind = item.get("type").map(js_string);
+        let kind = item.get("type").and_then(IvyJson::as_js_string);
         if !["userMessage", "agentMessage", "reasoning"]
             .iter()
-            .any(|allowed| kind.as_ref() == Some(&JsString::from(*allowed)))
+            .any(|allowed| kind == Some(&JsString::from(*allowed)))
         {
             return Err(failure("secretary_triage_unexpected_action"));
         }
@@ -100,10 +83,8 @@ pub fn result_items(turn: &IvyJson, items: &[IvyJson]) -> IvyResult<IvyJson> {
     if finals.len() != 1 {
         return Err(failure("secretary_triage_final_ambiguous"));
     }
-    let text = final_json_text(finals[0]).ok_or_else(invalid)?;
-    // The original JSON.parse has no separate text-size limit. Its subsequent
-    // SchemaValidators admission bounds the decoded canonical value to 1 MiB.
-    let result = parse(&text, text.len()).map_err(|_| invalid())?;
+    let text = finals[0].to_utf8().map_err(|_| invalid())?;
+    let result = parse(&text, 1_048_576).map_err(|_| invalid())?;
     validate(Schema::Assessment, &result).map_err(|_| invalid())?;
     if result.get("task") != Some(&IvyJson::Null)
         || result.get("disposition") == Some(&IvyJson::from("task"))
@@ -111,34 +92,4 @@ pub fn result_items(turn: &IvyJson, items: &[IvyJson]) -> IvyResult<IvyJson> {
         return Err(invalid());
     }
     Ok(result)
-}
-
-// Native text is an ECMAScript string. Preserve raw lone surrogates inside JSON
-// string tokens when passing it to the shared UTF-8 parser; an escaped lone unit
-// or one outside a string is invalid JSON, not a replacement character.
-pub(crate) fn final_json_text(text: &JsString) -> Option<String> {
-    use std::fmt::Write;
-    let mut output = String::new();
-    let (mut quoted, mut escaped) = (false, false);
-    for unit in char::decode_utf16(text.0.iter().copied()) {
-        match unit {
-            Ok(ch) => {
-                output.push(ch);
-                if escaped {
-                    escaped = false;
-                } else if quoted && ch == '\\' {
-                    escaped = true;
-                } else if ch == '"' {
-                    quoted = !quoted;
-                }
-            }
-            Err(error) => {
-                if !quoted || escaped {
-                    return None;
-                }
-                write!(output, "\\u{:04x}", error.unpaired_surrogate()).ok()?;
-            }
-        }
-    }
-    Some(output)
 }

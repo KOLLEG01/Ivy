@@ -55,9 +55,21 @@ pub fn query_document(item: &IvyJson) -> IvyResult<&IvyJson> {
     }
 }
 
+/// An RPC request may omit its params member without replacing it with JSON null.
+pub trait OptionalRpcClient: RpcClient {
+    fn request_optional<'a>(
+        &'a self,
+        method: &'a str,
+        params: Option<IvyJson>,
+        options: RequestOptions,
+    ) -> RequestFuture<'a>;
+}
+
 pub trait RpcClient: Send + Sync {
     /// Only an actual provider generation owns a bound-owner cache.
-    fn service_connection(&self) -> Option<&crate::service::ServiceConnection> { None }
+    fn service_connection(&self) -> Option<&crate::service::ServiceConnection> {
+        None
+    }
     fn request<'a>(
         &'a self,
         method: &'a str,
@@ -85,14 +97,14 @@ impl Default for RequestOptions {
         }
     }
 }
-pub struct ClientOptions {
-    pub credential: Option<String>,
+pub struct ClientOptions<C = String> {
+    pub credential: Option<C>,
     pub request_calls: Option<usize>,
     pub provider_calls: Option<usize>,
     pub queued_requests: usize,
     pub batch_reads: bool,
 }
-impl Default for ClientOptions {
+impl<C> Default for ClientOptions<C> {
     fn default() -> Self {
         Self {
             credential: None,
@@ -105,8 +117,7 @@ impl Default for ClientOptions {
 }
 
 pub fn base_url(value: &str) -> IvyResult<reqwest::Url> {
-    let mut url = reqwest::Url::parse(value)
-        .map_err(|_| IvyError::new("invalid_arguments", "Expected the canonical Hive base URL."))?;
+    let mut url = reqwest::Url::parse(value).map_err(|_| IvyError::internal())?;
     if !["http", "https"].contains(&url.scheme())
         || !url.username().is_empty()
         || url.password().is_some()
@@ -209,10 +220,15 @@ pub fn response_value(frame: &IvyJson, id: &str) -> IvyResult<IvyJson> {
     Err(failure)
 }
 
+enum Credential {
+    Text(String),
+    Fetch(crate::JsString),
+}
 struct Inner {
     base: reqwest::Url,
     http: reqwest::Client,
-    credential: Option<String>,
+    credential: Option<Credential>,
+    global_fetch_response: bool,
     queue: Option<Arc<RequestQueue>>,
     active: Arc<Semaphore>,
 }
@@ -223,6 +239,27 @@ pub struct HiveClient {
 }
 impl HiveClient {
     pub fn new(value: &str, options: ClientOptions) -> IvyResult<Self> {
+        Self::configured(value, options, Credential::Text, false)
+    }
+    /// Retain JavaScript credentials until fetch-style dispatch and preserve
+    /// fetch redirect/null-body handling. Other HTTP/TLS behavior is shared.
+    pub fn new_js(
+        value: &crate::JsString,
+        options: ClientOptions<crate::JsString>,
+    ) -> IvyResult<Self> {
+        Self::configured(
+            &String::from_utf16_lossy(&value.0),
+            options,
+            Credential::Fetch,
+            true,
+        )
+    }
+    fn configured<C>(
+        value: &str,
+        options: ClientOptions<C>,
+        credential: impl FnOnce(C) -> Credential,
+        global_fetch_response: bool,
+    ) -> IvyResult<Self> {
         let base = base_url(value)?;
         let maximum = options
             .request_calls
@@ -252,7 +289,8 @@ impl HiveClient {
         let inner = Arc::new(Inner {
             base,
             http,
-            credential: options.credential,
+            credential: options.credential.map(credential),
+            global_fetch_response,
             queue,
             active: Arc::new(Semaphore::new(CONNECTION_IN_FLIGHT_REQUESTS)),
         });
@@ -294,16 +332,27 @@ impl HiveClient {
             )
             .header("Content-Type", "application/json")
             .body(body);
-        if let Some(credential) = self
-            .inner
-            .credential
-            .as_ref()
-            .filter(|value| !value.is_empty())
-        {
-            request = request.bearer_auth(credential);
+        match &self.inner.credential {
+            Some(Credential::Text(value)) if !value.is_empty() => {
+                request = request.bearer_auth(value);
+            }
+            Some(Credential::Fetch(value)) => {
+                if let Some(header) =
+                    crate::fetch_header::authorization(value).map_err(|_| unknown())?
+                {
+                    request = request.header(reqwest::header::AUTHORIZATION, header);
+                }
+            }
+            _ => (),
         }
         let response = request.send().await.map_err(|_| unknown())?;
-        if response.status().is_redirection() {
+        if self.inner.global_fetch_response {
+            match response.status().as_u16() {
+                101 | 301 | 302 | 303 | 307 | 308 => return Err(unknown()),
+                204 | 205 | 304 => return Err(invalid("Hive returned no response body.")),
+                _ => (),
+            }
+        } else if response.status().is_redirection() {
             return Err(unknown());
         }
         let mut stream = response.bytes_stream();

@@ -1,7 +1,7 @@
 //! Decode the retained assignment result without changing its UTF-16 text.
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
 fn whitespace(c: u16) -> bool {
-    matches!(c, 9..=13 | 32 | 160 | 5760 | 8192..=8202 | 8232 | 8233 | 8239 | 8287 | 12288 | 65279)
+    char::from_u32(u32::from(c)).is_some_and(char::is_whitespace)
 }
 pub(crate) fn trimmed(text: &[u16]) -> &[u16] {
     let start = text
@@ -34,7 +34,8 @@ pub fn assignment_decision(answer: &JsString) -> IvyResult<IvyJson> {
         }
     }
     let invalid = |message| IvyError::new("secretary_assignment_result_invalid", message);
-    let value = crate::triage_results::final_json_text(&JsString(units.to_vec()))
+    let value = String::from_utf16(units)
+        .ok()
         .and_then(|text| parse(&text, text.len()).ok())
         .ok_or_else(|| invalid("The assignment did not return its required decision."))?;
     if value.as_object().is_none() {

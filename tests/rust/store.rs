@@ -1,4 +1,84 @@
 use ivy_store::{receipts::*, rusqlite::Connection};
+#[path = "store-sqlite-compat.rs"]
+mod sqlite_compat;
+#[path = "store-mechanics.rs"]
+mod storage_mechanics;
+#[test]
+fn receipt_coercion_order_and_release_match_original_typescript() {
+    use ivy_contracts::{IvyJson, IvyResult, json::parse};
+    fn capture(result: IvyResult<IvyJson>) -> IvyJson {
+        match result {
+            Ok(v) => IvyJson::object([("ok", true.into()), ("value", v)]),
+            Err(e) => IvyJson::object([("ok", false.into()), ("error", e.to_wire())]),
+        }
+    }
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/receipt-oracle.mjs",
+            "coercion",
+        ])
+        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let suite = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let rows = suite.as_array().unwrap();
+    assert!(rows.len() > 300);
+    for row in rows {
+        let text = row.get("value").unwrap().as_str().unwrap();
+        let value = parse(&text, usize::MAX).unwrap();
+        assert_eq!(
+            capture(has_unresolved_outcome(&value).map(IvyJson::Bool)),
+            parse(&row.get("detection").unwrap().as_str().unwrap(), usize::MAX).unwrap(),
+            "{text}"
+        );
+        for (index, transaction) in [false, true].into_iter().enumerate() {
+            let db = Connection::open_in_memory().unwrap();
+            let archive = ReceiptArchive::new(&db, ReceiptLimits { count: 0, bytes: 0 }).unwrap();
+            archive.retain("op", "case", &text).unwrap();
+            if transaction {
+                db.execute_batch("BEGIN").unwrap();
+            }
+            let result = capture(archive.release("op", "case").map(|_| IvyJson::Null));
+            let count = |table: &str| -> f64 {
+                let n: i64 = db
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                    .unwrap();
+                n as f64
+            };
+            let snapshot = IvyJson::object([
+                ("result", result),
+                (
+                    "records",
+                    IvyJson::Number(archive.status().unwrap().records as f64),
+                ),
+                ("history", IvyJson::Number(count("receipt_archive_history"))),
+                ("retired", IvyJson::Number(count("receipt_archive_retired"))),
+                ("autocommit", db.is_autocommit().into()),
+            ]);
+            assert_eq!(
+                snapshot,
+                parse(
+                    &row.get("releases").unwrap().as_array().unwrap()[index]
+                        .as_str()
+                        .unwrap(),
+                    usize::MAX
+                )
+                .unwrap(),
+                "{text}, transaction={transaction}"
+            );
+            if transaction {
+                db.execute_batch("ROLLBACK").unwrap();
+            }
+        }
+    }
+}
 #[test]
 fn receipt_coercion_order_and_release_match_original_typescript() {
     use ivy_contracts::{IvyJson, IvyResult, json::parse};

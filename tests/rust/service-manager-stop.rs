@@ -6,7 +6,7 @@ mod owner_cases;
 #[path = "../../packages/host-runtime/rust/src/runtime_owner/stop.rs"]
 mod stop;
 
-use ivy_contracts::{IvyError, json::parse, limits::MANAGEMENT_FRAME_BYTES};
+use ivy_contracts::{IvyError, IvyJson, json::parse, limits::MANAGEMENT_FRAME_BYTES};
 use process::{Command, LaunchContext, OwnedProcess};
 use std::{
     collections::BTreeMap,
@@ -174,4 +174,191 @@ async fn stalled_control_write_cannot_extend_the_stop_deadline() {
     .expect("bounded stop")
     .unwrap();
     assert_ne!(result.error_code.as_deref(), Some("outcome_unknown"));
+}
+
+#[test]
+fn native_executable_interoperates_with_unchanged_hive_and_public_sdk() {
+    let root = Fixture::new();
+    let binary = std::path::PathBuf::from(env!("CARGO_BIN_EXE_ivy-service-manager"));
+    let helper = binary.parent().unwrap().join(if cfg!(windows) {
+        "ivy-job.exe"
+    } else {
+        "ivy-job"
+    });
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "--import",
+            "./tests/fixtures/service-manager-native-loader.mjs",
+            "tests/fixtures/service-manager-native-hive.mjs",
+        ])
+        .arg(&binary)
+        .arg(&root.0)
+        .arg(helper)
+        .arg(std::env::current_exe().unwrap())
+        .arg(binary.parent().unwrap().join(if cfg!(windows) {
+            "ivy-health.exe"
+        } else {
+            "ivy-health"
+        }))
+        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if let Some(path) = std::env::var_os("IVY_MANAGER_INTEGRATION_TRACE") {
+        std::fs::write(path, &output.stdout).unwrap();
+    }
+    let result = parse(
+        std::str::from_utf8(&output.stdout).unwrap().trim(),
+        MANAGEMENT_FRAME_BYTES,
+    )
+    .unwrap();
+    assert_eq!(result.get("ok"), Some(&IvyJson::Bool(true)));
+    assert_eq!(
+        result
+            .required("results")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        if cfg!(windows) { 9 } else { 6 }
+    );
+}
+
+/// The unchanged Hive fixture drives a real Rust RuntimeOwner in this process.
+/// Its child is the retained Node dispatcher and actual Manager binary, not a
+/// second service implementation in the fixture.
+#[cfg(windows)]
+#[tokio::test]
+async fn dispatcher_owner_fixture() {
+    use ivy_host_runtime::{
+        config::json_file, journal::HostJournal, node_runtime::NodeRuntime,
+        runtime_owner::RuntimeOwner,
+    };
+    let Some(request) = std::env::var_os("IVY_MANAGER_DISPATCH_OWNER") else {
+        return;
+    };
+    let request = json_file(PathBuf::from(request), MANAGEMENT_FRAME_BYTES)
+        .await
+        .unwrap();
+    let path = |key: &str| PathBuf::from(request.required(key).unwrap().as_str().unwrap());
+    let host = json_file(path("hostConfigPath"), MANAGEMENT_FRAME_BYTES)
+        .await
+        .unwrap();
+    let journal = HostJournal::open(host.clone()).await.unwrap();
+    let target = request.required("target").unwrap().clone();
+    publish_dispatch_target(&journal, target).await;
+    let node_path = path("nodeExecutable");
+    let node = NodeRuntime::discover(Some(&node_path)).await.unwrap();
+    let owner = RuntimeOwner::for_host(host, "manager".into(), path("bootstrapRoot"), node)
+        .await
+        .unwrap();
+    owner.start().unwrap();
+    let close = path("closePath");
+    let replacement = path("replacementPath");
+    let requested = tokio::time::timeout(Duration::from_secs(60), async {
+        let mut published = false;
+        while !close.exists() {
+            if !published && replacement.exists() {
+                publish_dispatch_target(
+                    &journal,
+                    json_file(replacement.clone(), MANAGEMENT_FRAME_BYTES)
+                        .await
+                        .unwrap(),
+                )
+                .await;
+                published = true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    let result = owner.close().await;
+    journal.close().await.unwrap();
+    result.unwrap();
+    requested.expect("Dispatcher owner fixture exceeded its deadline");
+}
+
+#[cfg(windows)]
+async fn publish_dispatch_target(
+    journal: &ivy_host_runtime::journal::HostJournal,
+    target: IvyJson,
+) {
+    let entry = journal
+        .accept(
+            IvyJson::object([
+                ("action", "deploy".into()),
+                ("instanceId", "manager".into()),
+                (
+                    "candidateId",
+                    target.required("candidateId").unwrap().clone(),
+                ),
+                ("operationId", target.required("revision").unwrap().clone()),
+            ]),
+            None,
+        )
+        .await
+        .unwrap();
+    let id = entry
+        .required("record")
+        .unwrap()
+        .required("deploymentId")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    let empty = || IvyJson::object(Vec::<(String, IvyJson)>::new());
+    journal
+        .advance(&id, "prepared", "checking", empty())
+        .await
+        .unwrap();
+    journal
+        .advance(&id, "checking", "draining", empty())
+        .await
+        .unwrap();
+    journal
+        .advance(
+            &id,
+            "draining",
+            "activating",
+            IvyJson::object([("target", target.clone())]),
+        )
+        .await
+        .unwrap();
+    assert!(
+        journal
+            .accepted_target_policy(target)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn invalid_explicit_configuration_never_falls_back_to_environment() {
+    let root = Fixture::new();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ivy-service-manager"))
+        .args(["--config", "relative.json"])
+        .env("IVY_INSTANCE_CONFIG", root.0.join("private-config.json"))
+        .env_remove("IVY_NODE_EXECUTABLE")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error = parse(
+        std::str::from_utf8(&output.stderr).unwrap().trim(),
+        MANAGEMENT_FRAME_BYTES,
+    )
+    .unwrap();
+    assert_eq!(error.get("code"), Some(&"invalid_arguments".into()));
+    assert_eq!(
+        error.get("message"),
+        Some(&"ServiceManager failed to start.".into())
+    );
+    assert_eq!(error.as_object().unwrap().len(), 2);
 }

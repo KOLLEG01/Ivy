@@ -1,6 +1,5 @@
 //! Original account-bound native attachment reads and final coverage verification.
 use crate::{
-    inbox_evidence::truthy,
     media_schema::{MediaSchema, validate_media},
     media_spool::{SpoolJournal, Validation},
     media_store::{
@@ -19,14 +18,13 @@ use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     agent_schema::validate_agent,
     hash::{digest, hash_json},
-    json::{canonical, js_string},
+    json::canonical,
     operation::derive_operation_id_js,
 };
 use ivy_sdk::{
     native_evidence::{native_instant, native_operation_terminal, validate_native_progress},
     native_operation::{
-        NativeOperationJournal, NativeOperationOwner, NativeReconciliation,
-        reconcile_native_operation_local,
+        NativeOperationJournal, NativeReconciliation, reconcile_native_operation_local,
     },
     native_owner::NativeOwner,
     operation_ids::new_operation_id,
@@ -394,7 +392,7 @@ impl<'a, 'source, 'engine, 'store, 'journal, V: Validation>
                 38 => check(
                     object(Some(result))?.get("status").is_some_and(|value| {
                         matches!(
-                            js_string(value).to_utf8().unwrap_or_default().as_str(),
+                            value.as_str().unwrap_or_default().as_str(),
                             "unsubscribed" | "notLoaded" | "notSubscribed"
                         )
                     }),
@@ -498,7 +496,9 @@ impl<'a, 'source, 'engine, 'store, 'journal, V: Validation>
                     continue;
                 };
                 if attachment.get("attachmentType") != Some(&"fileAttachment".into())
-                    || !attachment.get("payloadFetchSupported").is_some_and(truthy)
+                    || !attachment
+                        .get("payloadFetchSupported")
+                        .is_some_and(|value| value == &IvyJson::Bool(true))
                 {
                     state.results.push(AttachmentResult {
                         attachment: attachment.clone(),
@@ -641,7 +641,7 @@ impl<'a, 'source, 'engine, 'store, 'journal, V: Validation>
                 )?;
             } else {
                 let operation_id = result.and_then(|result| result.operation_id.as_ref());
-                let manifest = saved.get("manifest").filter(|value| truthy(value));
+                let manifest = saved.get("manifest").filter(|value| !(value).is_null());
                 check(
                     operation_id.is_some() && manifest.is_some(),
                     "media_coverage_invalid",

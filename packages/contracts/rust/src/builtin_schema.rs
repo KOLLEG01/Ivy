@@ -40,7 +40,7 @@ impl SchemaBundle {
         let (document, schema) = self.resolve(0, reference)?;
         self.evaluate(document, schema, value)
     }
-    /// AJV-compatible public name lookup into a trusted repository document.
+    /// Named definition lookup into a trusted repository document.
     pub(crate) fn matches_named(
         &self,
         document: &str,
@@ -51,23 +51,18 @@ impl SchemaBundle {
             .identities
             .get(document)
             .ok_or_else(IvyError::internal)?;
-        let mut selected = crate::schema_lookup::Value::Json(&self.documents[document]);
+        let mut selected = &self.documents[document];
         for part in std::iter::once("$defs").chain(name.split('/')) {
             let key = crate::schema_lookup::pointer_key(part)?;
-            let Some(child) = selected.property(&key)? else {
+            let Some(child) = crate::schema_lookup::property(selected, &key) else {
                 return Ok(None);
             };
             selected = child;
         }
-        match selected.schema()? {
-            // AJV rejects the legacy keyword even with strict mode disabled.
-            Some(schema) if schema.get("id").is_some() => Err(IvyError::internal()),
-            Some(schema) => self
-                .evaluate(document, schema, value)
-                .map(Some)
-                .map_err(|_| IvyError::internal()),
-            None => Ok(Some(true)),
-        }
+        let schema = crate::schema_lookup::schema(selected)?;
+        self.evaluate(document, schema, value)
+            .map(Some)
+            .map_err(|_| IvyError::internal())
     }
     fn resolve(&self, current: usize, reference: &str) -> IvyResult<(usize, &IvyJson)> {
         self.resolve_js(current, &reference.into(), false)
@@ -125,19 +120,16 @@ impl SchemaBundle {
             .documents
             .get(document)
             .ok_or_else(IvyError::internal)?;
-        let mut selected = crate::schema_lookup::Value::Json(schema);
+        let mut selected = schema;
         if let Some(start) = split.filter(|start| start + 1 < units.len()) {
             let fragment = JsString(units[start + 1..].to_vec());
             for key in crate::schema_lookup::compiler_pointer_parts(&fragment, strict_percent)? {
-                selected = selected.property(&key)?.ok_or_else(|| {
+                selected = crate::schema_lookup::property(selected, &key).ok_or_else(|| {
                     IvyError::new("internal_error", "Unknown internal schema pointer.")
                 })?;
             }
         }
-        // AJV treats non-schema scalar/function properties as empty schemas;
-        // null and absent properties still fail resolution.
-        static ACCEPT: IvyJson = IvyJson::Bool(true);
-        Ok((document, selected.schema()?.unwrap_or(&ACCEPT)))
+        Ok((document, crate::schema_lookup::schema(selected)?))
     }
 }
 

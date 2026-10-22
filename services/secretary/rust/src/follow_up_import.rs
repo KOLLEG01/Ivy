@@ -96,7 +96,7 @@ pub async fn import_pending_context(
         || before
             .value
             .get("start")
-            .is_some_and(crate::inbox_evidence::truthy)
+            .is_some_and(|value| !value.is_null())
     {
         return Ok(None);
     }

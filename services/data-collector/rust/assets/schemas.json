@@ -1,0 +1,2357 @@
+{
+  "$defs": {
+    "retentionSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "maximumCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "maximumAgeDays": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 36500
+        },
+        "maximumBytes": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "maximumCount",
+        "maximumAgeDays",
+        "maximumBytes"
+      ],
+      "additionalProperties": false
+    },
+    "mcpSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "serviceNodeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "server": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "tools": {
+          "minItems": 1,
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      },
+      "required": [
+        "serviceNodeId",
+        "cwd",
+        "server",
+        "tools"
+      ],
+      "additionalProperties": false,
+      "x-collector-distinct-tools": true
+    },
+    "taskSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "intervalSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 31536000
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        },
+        "memoryMb": {
+          "type": "integer",
+          "minimum": 32,
+          "maximum": 2048
+        },
+        "script": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 262144
+        },
+        "dependencies": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^(?:@[a-z0-9-]+\\/)?[a-z0-9][a-z0-9._-]*$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[a-zA-Z0-9.-]+)?$"
+          }
+        },
+        "config": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/taskSchema/$defs/__schema0"
+          }
+        },
+        "secretNames": {
+          "maxItems": 50,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,127}$"
+          }
+        },
+        "mcp": {
+          "type": "object",
+          "properties": {
+            "serviceNodeId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "cwd": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "server": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "tools": {
+              "minItems": 1,
+              "maxItems": 100,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            }
+          },
+          "required": [
+            "serviceNodeId",
+            "cwd",
+            "server",
+            "tools"
+          ],
+          "additionalProperties": false,
+          "x-collector-distinct-tools": true
+        },
+        "inputSecretName": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "allowUnauthenticatedInput": {
+          "type": "boolean"
+        },
+        "retention": {
+          "type": "object",
+          "properties": {
+            "maximumCount": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            },
+            "maximumAgeDays": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 36500
+            },
+            "maximumBytes": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "maximumCount",
+            "maximumAgeDays",
+            "maximumBytes"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "enabled",
+        "intervalSeconds",
+        "timeoutSeconds",
+        "memoryMb",
+        "script",
+        "dependencies",
+        "config",
+        "secretNames",
+        "retention"
+      ],
+      "additionalProperties": false,
+      "x-collector-input-auth": true,
+      "$defs": {
+        "__schema0": {
+          "x-collector-json": true
+        }
+      }
+    },
+    "settingsSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "rootName": {
+          "default": "DataCollector",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "rootObjectId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retention": {
+          "default": {
+            "maximumCount": 1000,
+            "maximumAgeDays": 7,
+            "maximumBytes": 104857600
+          },
+          "type": "object",
+          "properties": {
+            "maximumCount": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            },
+            "maximumAgeDays": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 36500
+            },
+            "maximumBytes": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "maximumCount",
+            "maximumAgeDays",
+            "maximumBytes"
+          ],
+          "additionalProperties": false
+        },
+        "concurrency": {
+          "default": 2,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "maximumTasks": {
+          "default": 100,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "maximumMemoryMb": {
+          "default": 512,
+          "type": "integer",
+          "minimum": 32,
+          "maximum": 2048
+        },
+        "maximumTimeoutSeconds": {
+          "default": 300,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        },
+        "npmCliPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "secrets": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,127}$"
+          },
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "ingress": {
+          "type": "object",
+          "properties": {
+            "host": {
+              "default": "127.0.0.1",
+              "type": "string"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "routes": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "pattern": "^\\/[a-zA-Z0-9/_-]*$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+              }
+            }
+          },
+          "required": [
+            "port"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/outputSchema/$defs/__schema0"
+        },
+        "state": {
+          "$ref": "#/$defs/outputSchema/$defs/__schema1"
+        },
+        "events": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9_.-]{0,127}$"
+              },
+              "payload": {
+                "$ref": "#/$defs/outputSchema/$defs/__schema2"
+              }
+            },
+            "required": [
+              "name",
+              "payload"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false,
+      "$defs": {
+        "__schema0": {
+          "x-collector-json": true
+        },
+        "__schema1": {
+          "x-collector-json": true
+        },
+        "__schema2": {
+          "x-collector-json": true
+        }
+      }
+    },
+    "runtimeReadSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "view": {
+              "type": "string",
+              "const": "tasks"
+            }
+          },
+          "required": [
+            "view"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "view": {
+              "type": "string",
+              "const": "task"
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+            }
+          },
+          "required": [
+            "view",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "view": {
+              "type": "string",
+              "const": "result"
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+            },
+            "revision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "view",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "view": {
+              "type": "string",
+              "const": "history"
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+            },
+            "cursor": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "view",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "view": {
+              "type": "string",
+              "const": "operation"
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          "required": [
+            "view",
+            "operationId"
+          ]
+        }
+      ]
+    },
+    "runtimeUpdateSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "save"
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "expectedRevision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "task": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "intervalSeconds": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 31536000
+                },
+                "timeoutSeconds": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                },
+                "memoryMb": {
+                  "type": "integer",
+                  "minimum": 32,
+                  "maximum": 2048
+                },
+                "script": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 262144
+                },
+                "dependencies": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string",
+                    "pattern": "^(?:@[a-z0-9-]+\\/)?[a-z0-9][a-z0-9._-]*$"
+                  },
+                  "additionalProperties": {
+                    "type": "string",
+                    "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[a-zA-Z0-9.-]+)?$"
+                  }
+                },
+                "config": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "$ref": "#/$defs/runtimeUpdateSchema/$defs/__schema0"
+                  }
+                },
+                "secretNames": {
+                  "maxItems": 50,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,127}$"
+                  }
+                },
+                "mcp": {
+                  "type": "object",
+                  "properties": {
+                    "serviceNodeId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "cwd": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    },
+                    "server": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "tools": {
+                      "minItems": 1,
+                      "maxItems": 100,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      }
+                    }
+                  },
+                  "required": [
+                    "serviceNodeId",
+                    "cwd",
+                    "server",
+                    "tools"
+                  ],
+                  "additionalProperties": false,
+                  "x-collector-distinct-tools": true
+                },
+                "inputSecretName": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,127}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "allowUnauthenticatedInput": {
+                  "type": "boolean"
+                },
+                "retention": {
+                  "type": "object",
+                  "properties": {
+                    "maximumCount": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 1000000
+                    },
+                    "maximumAgeDays": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "maximum": 36500
+                    },
+                    "maximumBytes": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "maximumCount",
+                    "maximumAgeDays",
+                    "maximumBytes"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "enabled",
+                "intervalSeconds",
+                "timeoutSeconds",
+                "memoryMb",
+                "script",
+                "dependencies",
+                "config",
+                "secretNames",
+                "retention"
+              ],
+              "additionalProperties": false,
+              "x-collector-input-auth": true
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "expectedRevision",
+            "task"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "enable",
+                "delete"
+              ]
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+            },
+            "expectedRevision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "id",
+            "expectedRevision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "disable"
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+            },
+            "expectedRevision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "confirmedStoppedRunId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "id",
+            "expectedRevision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "run"
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+            },
+            "input": {
+              "$ref": "#/$defs/runtimeUpdateSchema/$defs/__schema1"
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "$defs": {
+        "__schema0": {
+          "x-collector-json": true
+        },
+        "__schema1": {
+          "x-collector-json": true
+        }
+      }
+    },
+    "pinSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "objectId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "objectId",
+        "revision"
+      ],
+      "additionalProperties": false
+    },
+    "scriptDocument": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "script": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 262144
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "script"
+      ],
+      "additionalProperties": false
+    },
+    "definitionDocument": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "homeServiceNodeId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "task": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "intervalSeconds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 31536000
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3600
+            },
+            "memoryMb": {
+              "type": "integer",
+              "minimum": 32,
+              "maximum": 2048
+            },
+            "dependencies": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "pattern": "^(?:@[a-z0-9-]+\\/)?[a-z0-9][a-z0-9._-]*$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[a-zA-Z0-9.-]+)?$"
+              }
+            },
+            "config": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/definitionDocument/$defs/__schema0"
+              }
+            },
+            "secretNames": {
+              "maxItems": 50,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,127}$"
+              }
+            },
+            "mcp": {
+              "type": "object",
+              "properties": {
+                "serviceNodeId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "cwd": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "server": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "tools": {
+                  "minItems": 1,
+                  "maxItems": 100,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  }
+                }
+              },
+              "required": [
+                "serviceNodeId",
+                "cwd",
+                "server",
+                "tools"
+              ],
+              "additionalProperties": false,
+              "x-collector-distinct-tools": true
+            },
+            "inputSecretName": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,127}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "allowUnauthenticatedInput": {
+              "type": "boolean"
+            },
+            "retention": {
+              "type": "object",
+              "properties": {
+                "maximumCount": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000000
+                },
+                "maximumAgeDays": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "maximum": 36500
+                },
+                "maximumBytes": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "maximumCount",
+                "maximumAgeDays",
+                "maximumBytes"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "intervalSeconds",
+            "timeoutSeconds",
+            "memoryMb",
+            "dependencies",
+            "config",
+            "secretNames",
+            "retention"
+          ]
+        },
+        "script": {
+          "type": "object",
+          "properties": {
+            "objectId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "revision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "objectId",
+            "revision"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "homeServiceNodeId",
+        "task",
+        "script"
+      ],
+      "additionalProperties": false,
+      "$defs": {
+        "__schema0": {
+          "x-collector-json": true
+        }
+      }
+    },
+    "assignmentDocument": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "jobId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "definitionRevision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "serviceNodeId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "deleted": {
+          "default": false,
+          "type": "boolean"
+        },
+        "rootObjectId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "resultObjectId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "jobId",
+        "definitionRevision",
+        "serviceNodeId",
+        "enabled",
+        "rootObjectId",
+        "resultObjectId"
+      ],
+      "additionalProperties": false
+    },
+    "observationDocument": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "number",
+          "const": 1
+        },
+        "jobId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "serviceNodeId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "assignmentRevision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "definitionRevision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "accepted": {
+          "type": "boolean"
+        },
+        "everAccepted": {
+          "type": "boolean"
+        },
+        "quiesced": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "jobId",
+        "serviceNodeId",
+        "assignmentRevision",
+        "definitionRevision",
+        "accepted",
+        "everAccepted",
+        "quiesced",
+        "error",
+        "observedAt"
+      ],
+      "additionalProperties": false
+    },
+    "definitionReadSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "view": {
+              "type": "string",
+              "const": "definitions"
+            }
+          },
+          "required": [
+            "view"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "view": {
+              "type": "string",
+              "const": "definition"
+            },
+            "jobId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "revision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "view",
+            "jobId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "view": {
+              "type": "string",
+              "const": "definitionHistory"
+            },
+            "jobId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cursor": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "view",
+            "jobId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "view": {
+              "type": "string",
+              "const": "script"
+            },
+            "objectId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "revision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "view",
+            "objectId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "view": {
+              "type": "string",
+              "const": "handoff"
+            },
+            "jobId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "expectedRevision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "view",
+            "jobId",
+            "expectedRevision"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "definitionUpdateSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "save"
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "expectedRevision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "task": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "intervalSeconds": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 31536000
+                },
+                "timeoutSeconds": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600
+                },
+                "memoryMb": {
+                  "type": "integer",
+                  "minimum": 32,
+                  "maximum": 2048
+                },
+                "script": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 262144
+                },
+                "dependencies": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string",
+                    "pattern": "^(?:@[a-z0-9-]+\\/)?[a-z0-9][a-z0-9._-]*$"
+                  },
+                  "additionalProperties": {
+                    "type": "string",
+                    "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[a-zA-Z0-9.-]+)?$"
+                  }
+                },
+                "config": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "$ref": "#/$defs/definitionUpdateSchema/$defs/__schema0"
+                  }
+                },
+                "secretNames": {
+                  "maxItems": 50,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,127}$"
+                  }
+                },
+                "mcp": {
+                  "type": "object",
+                  "properties": {
+                    "serviceNodeId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "cwd": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    },
+                    "server": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "tools": {
+                      "minItems": 1,
+                      "maxItems": 100,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      }
+                    }
+                  },
+                  "required": [
+                    "serviceNodeId",
+                    "cwd",
+                    "server",
+                    "tools"
+                  ],
+                  "additionalProperties": false,
+                  "x-collector-distinct-tools": true
+                },
+                "inputSecretName": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,127}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "allowUnauthenticatedInput": {
+                  "type": "boolean"
+                },
+                "retention": {
+                  "type": "object",
+                  "properties": {
+                    "maximumCount": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 1000000
+                    },
+                    "maximumAgeDays": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "maximum": 36500
+                    },
+                    "maximumBytes": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "maximumCount",
+                    "maximumAgeDays",
+                    "maximumBytes"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "enabled",
+                "intervalSeconds",
+                "timeoutSeconds",
+                "memoryMb",
+                "script",
+                "dependencies",
+                "config",
+                "secretNames",
+                "retention"
+              ],
+              "additionalProperties": false,
+              "x-collector-input-auth": true
+            },
+            "jobId": {
+              "type": "string"
+            },
+            "scriptRef": {
+              "type": "object",
+              "properties": {
+                "objectId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "revision": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "objectId",
+                "revision"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "expectedRevision",
+            "task"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "saveScript"
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "objectId": {
+              "type": "string"
+            },
+            "expectedRevision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "script": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 262144
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "expectedRevision",
+            "script"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "activate"
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "jobId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "definitionRevision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expectedRevision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "serviceNodeId": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "jobId",
+            "definitionRevision",
+            "expectedRevision",
+            "enabled"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "recover"
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "jobId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "expectedRevision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "confirmedStopped": {
+              "type": "boolean",
+              "const": true
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "jobId",
+            "expectedRevision",
+            "confirmedStopped"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "import"
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          "required": [
+            "action",
+            "operationId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "freezeHandoff"
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "jobId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "expectedRevision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "jobId",
+            "expectedRevision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "prepareHandoff"
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "jobId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "expectedRevision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "jobId",
+            "expectedRevision"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "$defs": {
+        "__schema0": {
+          "x-collector-json": true
+        }
+      }
+    },
+    "readSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "anyOf": [
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "view": {
+                  "type": "string",
+                  "const": "tasks"
+                }
+              },
+              "required": [
+                "view"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "view": {
+                  "type": "string",
+                  "const": "task"
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+                }
+              },
+              "required": [
+                "view",
+                "id"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "view": {
+                  "type": "string",
+                  "const": "result"
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+                },
+                "revision": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "view",
+                "id"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "view": {
+                  "type": "string",
+                  "const": "history"
+                },
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+                },
+                "cursor": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "view",
+                "id"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "view": {
+                  "type": "string",
+                  "const": "operation"
+                },
+                "operationId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "view",
+                "operationId"
+              ]
+            }
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "view": {
+                  "type": "string",
+                  "const": "definitions"
+                }
+              },
+              "required": [
+                "view"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "view": {
+                  "type": "string",
+                  "const": "definition"
+                },
+                "jobId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "revision": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "view",
+                "jobId"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "view": {
+                  "type": "string",
+                  "const": "definitionHistory"
+                },
+                "jobId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "cursor": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "view",
+                "jobId"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "view": {
+                  "type": "string",
+                  "const": "script"
+                },
+                "objectId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "revision": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "view",
+                "objectId"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "view": {
+                  "type": "string",
+                  "const": "handoff"
+                },
+                "jobId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "expectedRevision": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "view",
+                "jobId",
+                "expectedRevision"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      ]
+    },
+    "updateSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "anyOf": [
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "const": "save"
+                },
+                "operationId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "expectedRevision": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "task": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "intervalSeconds": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 31536000
+                    },
+                    "timeoutSeconds": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 3600
+                    },
+                    "memoryMb": {
+                      "type": "integer",
+                      "minimum": 32,
+                      "maximum": 2048
+                    },
+                    "script": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 262144
+                    },
+                    "dependencies": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string",
+                        "pattern": "^(?:@[a-z0-9-]+\\/)?[a-z0-9][a-z0-9._-]*$"
+                      },
+                      "additionalProperties": {
+                        "type": "string",
+                        "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[a-zA-Z0-9.-]+)?$"
+                      }
+                    },
+                    "config": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {
+                        "$ref": "#/$defs/updateSchema/$defs/__schema0"
+                      }
+                    },
+                    "secretNames": {
+                      "maxItems": 50,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,127}$"
+                      }
+                    },
+                    "mcp": {
+                      "type": "object",
+                      "properties": {
+                        "serviceNodeId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256
+                        },
+                        "cwd": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 4096
+                        },
+                        "server": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256
+                        },
+                        "tools": {
+                          "minItems": 1,
+                          "maxItems": 100,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256
+                          }
+                        }
+                      },
+                      "required": [
+                        "serviceNodeId",
+                        "cwd",
+                        "server",
+                        "tools"
+                      ],
+                      "additionalProperties": false,
+                      "x-collector-distinct-tools": true
+                    },
+                    "inputSecretName": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,127}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "allowUnauthenticatedInput": {
+                      "type": "boolean"
+                    },
+                    "retention": {
+                      "type": "object",
+                      "properties": {
+                        "maximumCount": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 1000000
+                        },
+                        "maximumAgeDays": {
+                          "type": "number",
+                          "exclusiveMinimum": 0,
+                          "maximum": 36500
+                        },
+                        "maximumBytes": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "maximumCount",
+                        "maximumAgeDays",
+                        "maximumBytes"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "enabled",
+                    "intervalSeconds",
+                    "timeoutSeconds",
+                    "memoryMb",
+                    "script",
+                    "dependencies",
+                    "config",
+                    "secretNames",
+                    "retention"
+                  ],
+                  "additionalProperties": false,
+                  "x-collector-input-auth": true
+                },
+                "jobId": {
+                  "type": "string"
+                },
+                "scriptRef": {
+                  "type": "object",
+                  "properties": {
+                    "objectId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "objectId",
+                    "revision"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "action",
+                "operationId",
+                "expectedRevision",
+                "task"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "const": "saveScript"
+                },
+                "operationId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "objectId": {
+                  "type": "string"
+                },
+                "expectedRevision": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "script": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 262144
+                }
+              },
+              "required": [
+                "action",
+                "operationId",
+                "expectedRevision",
+                "script"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "const": "activate"
+                },
+                "operationId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "jobId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "definitionRevision": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "expectedRevision": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "serviceNodeId": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "action",
+                "operationId",
+                "jobId",
+                "definitionRevision",
+                "expectedRevision",
+                "enabled"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "const": "recover"
+                },
+                "operationId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "jobId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "expectedRevision": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "confirmedStopped": {
+                  "type": "boolean",
+                  "const": true
+                }
+              },
+              "required": [
+                "action",
+                "operationId",
+                "jobId",
+                "expectedRevision",
+                "confirmedStopped"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "const": "import"
+                },
+                "operationId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "action",
+                "operationId"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "const": "freezeHandoff"
+                },
+                "operationId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "jobId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "expectedRevision": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "action",
+                "operationId",
+                "jobId",
+                "expectedRevision"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "const": "prepareHandoff"
+                },
+                "operationId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "jobId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "expectedRevision": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "action",
+                "operationId",
+                "jobId",
+                "expectedRevision"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "enable",
+                "delete"
+              ]
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+            },
+            "expectedRevision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "id",
+            "expectedRevision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "disable"
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+            },
+            "expectedRevision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "confirmedStoppedRunId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "id",
+            "expectedRevision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "const": "run"
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+            },
+            "input": {
+              "$ref": "#/$defs/updateSchema/$defs/__schema1"
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "$defs": {
+        "__schema0": {
+          "x-collector-json": true
+        },
+        "__schema1": {
+          "x-collector-json": true
+        }
+      }
+    }
+  }
+}
