@@ -12,6 +12,10 @@ use ivy_store::{
 };
 use std::{collections::HashSet, path::Path, time::Duration};
 
+#[path = "journal_import.rs"]
+mod import;
+pub use import::ImportedCaptureAcknowledgements;
+
 const FRAME: usize = 33_554_432;
 const SOURCE: &str = "secretary/source";
 const OPERATION: &str = "secretary/operation";
@@ -103,9 +107,22 @@ impl Journal {
             },
         )
         .map_err(storage)?;
+        let journal = Self { db, limits };
+        journal.initialize_schema()?;
+        Ok(journal)
+    }
+    pub(crate) fn initialize_schema(&self) -> IvyResult<()> {
         // Core intentionally neither reads nor changes user_version. Spool is separate.
-        db.execute_batch(include_str!("journal.sql"))
-            .map_err(storage)?;
+        self.db.execute_batch(include_str!("journal.sql")).map_err(storage)
+    }
+    /// The production owner and importer claim the core itself, so an older
+    /// process that does not know an auxiliary lock file cannot keep writing.
+    /// Do not initialize/convert a retained schema before its import backup.
+    pub(crate) fn claim_exclusive(path: &Path, limits: Limits) -> IvyResult<Self> {
+        let db = sqlite::open(path, sqlite::OpenOptions {
+            busy_timeout: Duration::from_millis(5000), read_only: false,
+        }).map_err(storage)?;
+        db.execute_batch("PRAGMA locking_mode=EXCLUSIVE;BEGIN EXCLUSIVE;COMMIT;").map_err(storage)?;
         Ok(Self { db, limits })
     }
     fn transaction<T>(&self, work: impl FnOnce() -> IvyResult<T>) -> IvyResult<T> {

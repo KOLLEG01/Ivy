@@ -112,7 +112,7 @@ fn inheritance_local_bytes_and_version_identities_match_unchanged_typescript() {
                             ]),
                             Err(e) => IvyJson::object([
                                 ("code", e.code.into()),
-                                ("outcome", e.outcome.as_str().into()),
+                                ("outcome", e.outcome.to_json()),
                             ]),
                         });
                         cases.push(IvyJson::object([

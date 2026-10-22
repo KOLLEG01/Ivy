@@ -257,7 +257,7 @@ async fn proxy_failed_upgrade_and_dropped_owners_release_the_pipes() {
         ivy_contracts::IvyJson::object([
             ("code", error.code.into()),
             ("message", error.message.into()),
-            ("outcome", error.outcome.as_str().into())
+            ("outcome", error.outcome.to_json())
         ]),
         ivy_contracts::json::parse(std::str::from_utf8(&oracle.stdout).unwrap(), 65536).unwrap()
     );

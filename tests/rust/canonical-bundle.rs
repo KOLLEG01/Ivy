@@ -111,8 +111,8 @@ fn all_canonical_definitions_and_operation_inputs_match_typescript() {
                             "{row}"
                         );
                         assert_eq!(
-                            error.outcome.as_str(),
-                            expected["outcome"].as_str().unwrap(),
+                            error.outcome.to_json(),
+                            IvyJson::from(expected["outcome"].as_str().unwrap()),
                             "{row}"
                         );
                     }

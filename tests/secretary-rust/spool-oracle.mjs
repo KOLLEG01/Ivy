@@ -83,6 +83,20 @@ if (mode === 'validation-cases') {
   console.log(JSON.stringify(rows));
 }
 else if (mode === 'fixtures') console.log(JSON.stringify({ owner, intent, materialization }));
+else if (mode === 'open-status') {
+  try { const spool=await MediaSpool.open(root,owner); try { console.log(JSON.stringify({value:'opened'})); } finally { spool.close(); } }
+  catch(cause){const error=IvyError.from(cause);console.log(JSON.stringify({code:error.code,outcome:error.outcome}));}
+}
+else if (mode === 'hold') {
+  const spool=await MediaSpool.open(root,owner);
+  try { console.log('held'); for await(const _ of process.stdin) break; }
+  finally { spool.close(); }
+}
+else if (mode === 'verify-rust-interrupted') {
+  const spool=await MediaSpool.open(root,owner);
+  try { const value=spool.get('rust-process-cut');assert.equal(value.phase,'failed');assert.equal(value.errorCode,'media_download_interrupted');console.log(JSON.stringify(value)); }
+  finally { spool.close(); }
+}
 else if (mode === 'validate') {
   let input = ''; for await (const chunk of process.stdin) input += chunk;
   const { name, value } = JSON.parse(input); validateMedia(name, value);

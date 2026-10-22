@@ -41,7 +41,7 @@ fn failure(error: IvyError) -> IvyJson {
             IvyJson::object([
                 ("code", IvyJson::String(error.code_js())),
                 ("message", IvyJson::String(error.message_js())),
-                ("outcome", error.outcome.as_str().into()),
+                ("outcome", error.outcome.to_json()),
             ]),
         ),
     ])

@@ -1,0 +1,108 @@
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import {syncBuiltinESMExports} from 'node:module';
+import {load,rootId,itemId,sourceId,operationId,at,scope,settings as originalSettings,source as originalSource,item as originalItem,accepted as originalAccepted} from './inbox-fixtures.mjs';
+const {MediaStore,mediaRegistry,verifyOutlookMediaAdmission}=await load('services/secretary/src/media-store.js');
+const {SecretaryEngine,operationName,sourceName,identityHash,messageHash}=await load('services/secretary/src/engine.js');
+const {SecretaryStore}=await load('services/secretary/src/store.js');
+const {contractVersion}=await load('services/secretary/src/schema.js');
+const {IvyError,canonical,hashJson,digest}=await load('packages/sdk/src/node.js');
+const wall=1800000000000,uuid='00000000-0000-4000-8000-000000000fff',epoch='fixture-epoch';Date.now=()=>wall;crypto.randomUUID=()=>uuid;syncBuiltinESMExports();
+const clone=structuredClone,rows=[],captureId=epoch+':'+wall+':original-media-capture';
+const settings=clone(originalSettings),principal=settings.identity.principalId;settings.sources[0].producerPrincipalIds=[principal];
+const owner={connected:true,synced:true,principalId:principal,hostId:settings.identity.hostId,serviceName:'secretary'};
+const definition=settings.sources[0],source={...clone(originalSource),definition,definitionHash:hashJson(definition)};
+const message={...originalItem.message,attachments:'expected',messageId:hashJson(['outlook-message','provider-message'])};
+const item={...clone(originalItem),message,identityHash:identityHash('mail',message),messageHash:messageHash(message)};
+const admission={sourceId:'mail',producerPrincipalId:principal,accountId:message.accountId,providerMessageId:'provider-message',itemObjectId:itemId,identityHash:item.identityHash,messageHash:item.messageHash};
+const materialization={attachment:{messageId:admission.providerMessageId,attachmentId:'attachment',attachmentType:'fileAttachment',name:'../inert\ud800.txt',mediaType:'text/plain',providerSizeBytes:13,inline:false,contentId:null,modifiedAt:null,payloadFetchSupported:true},fileId:'original-file',downloadUrl:'https://fixture.oaiusercontent.com/original?sig=synthetic',nativeResponseHash:hashJson('native-response')};
+const intent={operationId:'original-media-acquisition',captureOperationId:captureId,item:{objectId:itemId,revision:1},admission,materializationHash:hashJson(materialization)};
+const request={action:'capture',operationId:captureId,expectedScope:scope,sourceId:'mail',message};
+const capture={...clone(originalAccepted),operationId:captureId,callerPrincipalId:principal,requestHash:hashJson(request),request,sourceId:'mail',source,phase:'succeeded',effect:intent.item,existingEffect:intent.item,captureIdentity:item.identityHash};
+const configuration={sourceId:'mail'};
+const named=(kind,intent,index)=>'media-'+kind+'-'+hashJson([intent,index??null]).slice(7);
+const pin=n=>({objectId:'00000000-0000-4000-8000-'+String(n).padStart(12,'0'),revision:1});
+const error=cause=>{const e=IvyError.from(cause);return{code:e.code,outcome:e.outcome,...(e.code==='internal'?{}:{message:e.message})};};
+const set=(v,path,value)=>{const fields=path.split('.'),key=fields.pop();for(const k of fields)v=v[k];if(value===undefined)delete v[key];else v[key]=clone(value);};
+const normalize=trace=>trace.map(row=>{const result=clone(row);if(result.method==='objects.write')result.params.mutationId='<new-operation>';return result;});
+async function add(label,c={}){
+ const bytes=c.payloadBytes?Buffer.from(c.payloadBytes):c.large?Buffer.alloc(1048576+17,0xff):Buffer.from('Retained\0text','utf8');
+ const input={label,method:c.method??'manifest',args:null,settings:clone(settings),locals:[],payload:{intent:clone(intent),materialization:clone(materialization),evidence:null,bytesBase64:bytes.toString('base64')},guardFailure:!!c.guardFailure,verifyGuard:!!c.verifyGuard,repeats:c.repeats??1};
+ const evidence={schemaVersion:1,attachment:clone(materialization.attachment),fileId:materialization.fileId,materializationHash:intent.materializationHash,downloadUrlHash:hashJson(materialization.downloadUrl),startedAt:at,observedAt:at,byteLength:bytes.length,contentHash:digest(bytes),providerSizeRelation:bytes.length===13?'equal':'different',http:{status:200,contentLength:bytes.length,contentEncoding:null,contentType:'text/plain',contentMd5:null}};input.payload.evidence=evidence;
+ const chunkPins=Array.from({length:Math.ceil(bytes.length/1048576)},(_,n)=>pin(100+n)),manifestPin=pin(100+chunkPins.length),coveragePin=pin(101+chunkPins.length);
+ const manifest={schemaVersion:1,admission:clone(admission),evidence:clone(evidence),chunks:chunkPins},coverage={schemaVersion:1,admission:clone(admission),observedAt:at,gap:null,attachments:[{attachment:clone(materialization.attachment),manifest:manifestPin,errorCode:null}]};
+ const plan={captureOperationId:captureId,admission:clone(admission),item:clone(intent.item)};
+ for(const [path,value]of c.manifestChanges??[])set(manifest,path,value);
+ for(const [path,value]of c.coverageChanges??[])set(coverage,path,value);
+ const currentItem=clone(item);if(c.attached)currentItem.media=[{contractKey:'secretary/media-coverage',pin:coveragePin,contentHash:hashJson(coverage),name:'Outlook attachments',mediaType:'application/json',errorCode:null}];
+ for(const [path,value]of c.itemChanges??[])set(currentItem,path,value);
+ const captureValue=clone(capture);for(const [path,value]of c.captureChanges??[])set(captureValue,path,value);
+ const config=clone(configuration);for(const [path,value]of c.configurationChanges??[])set(config,path,value);
+ input.configuration=config;
+ const selectedAdmission=clone(admission);for(const [path,value]of c.admissionChanges??[])set(selectedAdmission,path,value);
+ if(c.settingsChanges)for(const [path,value]of c.settingsChanges)set(input.settings,path,value);
+ input.locals=[{id:sourceId,key:'secretary/source',name:sourceName('mail'),value:source},...c.missingCapture?[]:[{id:operationId,key:'secretary/operation',name:operationName(principal,captureId),value:captureValue,first:{...clone(capture),phase:'accepted',effect:null,errorCode:null}}]];
+ const records=new Map();let counter=100,store,failed=false;
+ const record=(p,key,name,content,refs={},ownerObjectId=itemId)=>({id:p.objectId,key,name,ownerObjectId,parentId:rootId,currentRevision:p.revision,content:clone(content),references:clone(refs),archived:false});
+ records.set(itemId,record({objectId:itemId,revision:1},'secretary/item','item-'+currentItem.identityHash.slice(7),{encoding:'json',value:currentItem},{},null));
+ const preload=(!['publish','flow','saveCoverage'].includes(input.method)||c.preload)&&!c.absent;
+ if(preload){for(const [n,p]of chunkPins.entries())records.set(p.objectId,record(p,'secretary/media-chunk',named('chunk',intent,n),{encoding:'base64',value:bytes.subarray(n*1048576,(n+1)*1048576).toString('base64')}));records.set(manifestPin.objectId,record(manifestPin,'secretary/media-manifest',named('manifest',intent),{encoding:'json',value:manifest},Object.fromEntries(chunkPins.map((p,n)=>['chunk-'+n,p]))));records.set(coveragePin.objectId,record(coveragePin,'secretary/media-coverage','media-coverage-'+itemId,{encoding:'json',value:coverage},Object.fromEntries(coverage.attachments.flatMap((a,n)=>a.manifest?[['manifest-'+n,a.manifest]]:[]))));counter=102+chunkPins.length;}
+ function raw(r){const isJson=r.content.encoding==='json',bytes=isJson?Buffer.from(canonical(r.content.value)):Buffer.from(r.content.value,'base64');const result={object:{id:r.id,parentId:r.parentId,ownerObjectId:r.ownerObjectId,name:r.name,currentRevision:r.currentRevision,effectivelyArchived:r.archived,contractKey:r.key},revision:{revision:r.currentRevision,contractVersion:r.key.startsWith('secretary/media-')?'1.0.0':contractVersion(r.key),mediaType:isJson?'application/json':'application/octet-stream',contentHash:isJson?hashJson(r.content.value):digest(bytes),byteLength:bytes.length,references:r.key==='secretary/item'?store.objectWriteRequest(r.key,r.content.value,{object:{objectId:r.id,revision:r.currentRevision}},captureId).references:r.references,createdAt:at},content:clone(r.content)};for(const [key,path,value]of c.rawChanges??[])if(key===r.key)set(result,path,value);return result;}
+ const trace=[],steps=[],guards=[];
+ const client={async request(method,p,options){trace.push({method,params:clone(p),timeout:options?.timeoutMs??35000});try{let result;
+  if(method==='serviceNodes.get')result={...owner,...c.owner};
+  else if(method==='system.status')result={runtimeEpoch:epoch};
+  else if(method==='objects.query'){let values=[...records.values()].filter(r=>r.key===p.contractKey);for(const w of p.where.args)if(w.field==='object.parentId')values=values.filter(r=>r.parentId===w.value);else if(w.field==='object.name')values=values.filter(r=>r.name===w.value);else assert.fail(w.field);const items=values.map(r=>({objectId:r.id,revision:r.currentRevision}));if(c.duplicateQuery&&p.contractKey==='secretary/media-coverage'&&items.length)items.push(clone(items[0]));result={items,nextCursor:c.queryCursor&&p.contractKey==='secretary/media-coverage'?'more':null};}
+  else if(method==='objects.read'){const r=records.get(p.objectId);if(!r)throw new IvyError('not_found','Fixture object missing.');result=raw(r);}
+  else if(method==='objects.write'){const inject=!failed&&c.writeFailure&&(!c.writeKey||c.writeKey===(p.create?.contractKey??'secretary/item'));if(inject){failed=true;if(!c.applied)throw new IvyError('fixture_write_failure','Fixture write failure.','unknown');}let r;if(p.create){r=record(pin(counter++),p.create.contractKey,p.create.name,p.content,p.references,p.create.ownerObjectId);records.set(r.id,r);}else{r=records.get(p.objectId);assert(r);if(r.currentRevision!==p.expectedRevision)throw new IvyError('revision_conflict','Fixture revision changed.');r.currentRevision++;r.content=clone(p.content);r.references=clone(p.references);}if(inject)throw new IvyError('fixture_write_failure','Fixture write failure.','unknown');result={object:{id:r.id},revision:{revision:r.currentRevision}};}
+  else assert.fail('Unexpected media RPC '+method);steps.push({method,value:clone(result)});return clone(result);
+ }catch(cause){const e=IvyError.from(cause);steps.push({method,error:{code:e.code,message:e.message,outcome:e.outcome}});throw cause;}}};
+ store=new SecretaryStore(client,rootId);for(const r of input.locals){r.first??=clone(r.value);const revision=hashJson(r.first)===hashJson(r.value)?1:2;r.revision=revision;store.db.prepare('INSERT INTO documents VALUES(?,?,?,?,?,?,?)').run(r.id,r.key,r.name,revision,0,r.key==='secretary/operation'?1:null,canonical(r.value));store.db.prepare('INSERT INTO revisions VALUES(?,?,?)').run(r.id,1,canonical(r.first));if(revision===2)store.db.prepare('INSERT INTO revisions VALUES(?,?,?)').run(r.id,2,canonical(r.value));}
+ const engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings:input.settings,epoch:Promise.resolve(epoch),owner:{serviceNodeId:'fixture.secretary'},signal:new AbortController().signal,now:()=>new Date(at)});
+ const media=new MediaStore(engine,async(a,id)=>{guards.push({admission:clone(a),captureOperationId:id});if(input.guardFailure)throw new IvyError('fixture_guard_failed','Fixture guard failure.');if(input.verifyGuard)await verifyOutlookMediaAdmission({engine,configuration:config},a,id);});
+ input.args=input.method==='verifyAdmission'?[config,selectedAdmission,captureId]:input.method==='coverage'?[intent.item]:input.method==='saveCoverage'?[coverage,plan]:input.method==='payload'||input.method==='manifest'?[manifestPin,c.expectedAdmission===false?null:selectedAdmission]:input.method==='flow'?[coverage,plan]:[];
+ const spool={payload(id){assert.equal(id,intent.operationId);return{attempt:{intent:clone(input.payload.intent),evidence:clone(input.payload.evidence)},bytes:Buffer.from(input.payload.bytesBase64,'base64')};}};
+ const results=[];for(let n=0;n<input.repeats;n++)try{let result;if(input.method==='registry')result=mediaRegistry();else if(input.method==='verifyAdmission'){await verifyOutlookMediaAdmission({engine,configuration:input.args[0]},input.args[1],input.args[2]);result=null;}else if(input.method==='publish')result=await media.publish(spool,intent.operationId);else if(input.method==='flow'){const published=await media.publish(spool,intent.operationId);const value={...coverage,attachments:[{...coverage.attachments[0],manifest:published.pin}]};const saved=await media.saveCoverage(value,plan);const payload=await media.payload(published.pin,admission);result={published,saved,payload:{byteLength:payload.length,contentHash:digest(payload)}};}else if(input.method==='retainedPayload'){const saved=await media.coverage(intent.item);assert(saved);const payload=await media.payload(saved.value.attachments[0].manifest,admission);result={coverage:saved,payload:{byteLength:payload.length,contentHash:digest(payload)},spoolAbsent:true};}else if(input.method==='payload'){const resultBytes=await media.payload(...input.args);result={byteLength:resultBytes.length,contentHash:digest(resultBytes)};}else result=await media[input.method](...input.args);results.push({value:result});}catch(cause){results.push(error(cause));}
+ input.steps=steps;const retained=store.db.prepare('SELECT key,name,current_revision,value_json FROM documents ORDER BY key,name').all().map(r=>({key:r.key,name:r.name,revision:r.current_revision,value:JSON.parse(r.value_json)}));store.close();rows.push({input,expected:{results,trace:normalize(trace),guards,retained}});
+}
+await add('additional dormant registry',{method:'registry'});
+await add('original admission',{method:'verifyAdmission'});
+await add('guarded publish',{method:'publish',verifyGuard:true});
+await add('publish replay',{method:'publish',repeats:2});
+await add('multiple original chunks',{method:'publish',large:true});
+await add('guard refusal before publication',{method:'publish',guardFailure:true});
+await add('publication owner mismatch',{method:'publish',owner:{principalId:'foreign'}});
+for(const applied of [false,true])for(const writeKey of ['secretary/media-chunk','secretary/media-manifest'])await add('uncertain '+writeKey+' '+applied,{method:'publish',writeFailure:true,writeKey,applied,repeats:2});
+await add('existing publish',{method:'publish',preload:true});
+await add('existing manifest differs from original acquisition',{method:'publish',preload:true,manifestChanges:[['evidence.fileId','different-original-file']]});
+await add('existing chunk bytes differ from original acquisition',{method:'publish',preload:true,rawChanges:[['secretary/media-chunk','content.value','AA==']]});
+await add('applied immutable write still needs exact references',{method:'publish',writeFailure:true,writeKey:'secretary/media-manifest',applied:true,rawChanges:[['secretary/media-manifest','revision.references',{}]]});
+await add('complete manifest');await add('complete payload',{method:'payload'});await add('manifest without optional expectation',{expectedAdmission:false});
+await add('complete multiple-chunk payload',{method:'payload',large:true});
+await add('URL alphabet original binary payload',{method:'payload',payloadBytes:[251,255,255],rawChanges:[['secretary/media-chunk','content.value','-___']]});
+await add('current Hive payload without acquisition state',{method:'retainedPayload',attached:true,repeats:2});
+await add('coverage',{method:'coverage'});await add('coverage absent',{method:'coverage',absent:true});await add('duplicate coverage query',{method:'coverage',duplicateQuery:true});await add('unfinished coverage query',{method:'coverage',queryCursor:true});
+await add('save gap coverage and exact replay',{method:'saveCoverage',coverageChanges:[['attachments',[]]],repeats:2});
+await add('publication coverage attach and exact replay',{method:'flow',repeats:2});
+await add('guarded publication coverage attach and exact replay',{method:'flow',verifyGuard:true,repeats:2});
+await add('coverage already attached',{method:'saveCoverage',preload:true,attached:true,repeats:2});
+await add('coverage guard refused',{method:'saveCoverage',guardFailure:true});
+for(const applied of [false,true])await add('uncertain coverage write '+applied,{method:'saveCoverage',coverageChanges:[['attachments',[]]],writeFailure:true,writeKey:'secretary/media-coverage',applied,repeats:2});
+for(const applied of [false,true])await add('uncertain attach '+applied,{method:'saveCoverage',coverageChanges:[['attachments',[]]],writeFailure:true,writeKey:'secretary/item',applied,repeats:2});
+for(const [path,value]of [['object.id','wrong'],['object.ownerObjectId','wrong'],['object.contractKey','wrong'],['object.effectivelyArchived',true],['object.currentRevision',2],['revision.contractVersion','2.0.0'],['revision.mediaType','application/octet-stream'],['revision.contentHash','sha256:'+'f'.repeat(64)],['revision.byteLength',1],['revision.references',{}],['content.encoding','base64']])await add('manifest '+path,{rawChanges:[['secretary/media-manifest',path,value]]});
+for(const [path,value]of [['object.id','wrong'],['object.ownerObjectId','wrong'],['object.contractKey','wrong'],['object.effectivelyArchived',true],['object.currentRevision',2],['revision.contractVersion','2.0.0'],['revision.mediaType','text/plain'],['revision.contentHash','sha256:'+'f'.repeat(64)],['revision.byteLength',1],['content.encoding','json'],['content.value','AA==']])await add('chunk '+path,{method:'payload',rawChanges:[['secretary/media-chunk',path,value]]});
+for(const encoding of ['UmV0YWluZWQAdGV4dA','UmV0 YWlu\nZWQAdGV4dA==','UmV0YWluZWQAdGV4dA==ignored','U\u016dV0YWluZWQAdGV4dA=='])await add('original Buffer base64 '+encoding.slice(0,12),{method:'payload',rawChanges:[['secretary/media-chunk','content.value',encoding]]});
+for(const [path,value]of [['object.parentId','foreign'],['object.name','wrong'],['object.effectivelyArchived',true],['object.currentRevision',2],['revision.revision',2],['revision.contractVersion','2.0.0'],['revision.mediaType','text/plain'],['revision.contentHash','sha256:'+'f'.repeat(64)],['revision.byteLength',1],['revision.references',{}],['content.encoding','base64']])await add('coverage '+path,{method:'coverage',rawChanges:[['secretary/media-coverage',path,value]]});
+await add('manifest wrong original source',{manifestChanges:[['evidence.attachment.messageId','wrong']]});
+await add('manifest incomplete chunks',{manifestChanges:[['chunks',[]]]});
+await add('manifest duplicate original chunk',{manifestChanges:[['chunks',[pin(100),pin(100)]],['evidence.byteLength',1048577],['evidence.http.contentLength',1048577],['evidence.providerSizeRelation','different']]});
+await add('payload complete digest mismatch',{method:'payload',manifestChanges:[['evidence.contentHash','sha256:'+'f'.repeat(64)]]});
+await add('coverage manifest attachment mismatch',{method:'coverage',coverageChanges:[['attachments.0.attachment.name','different']]});
+await add('coverage wrong original item',{method:'coverage',coverageChanges:[['admission.itemObjectId',pin(999).objectId]]});
+await add('save coverage admitted source mismatch',{method:'saveCoverage',coverageChanges:[['admission.messageHash','sha256:'+'f'.repeat(64)],['attachments',[]]]});
+await add('admission missing capture',{method:'verifyAdmission',missingCapture:true});
+for(const [path,value]of [['accountId','other'],['producerPrincipalId','other'],['identityHash','sha256:'+'f'.repeat(64)],['messageHash','sha256:'+'f'.repeat(64)],['providerMessageId','different']])await add('admission '+path,{method:'verifyAdmission',admissionChanges:[[path,value]]});
+await add('admission source configuration',{method:'verifyAdmission',configurationChanges:[['sourceId','other']]});
+for(const [path,value]of [['phase','accepted'],['ignoredReason','outgoing'],['effect.objectId',pin(999).objectId],['request.expectedScope.secretaryId','other'],['requestHash','sha256:'+'f'.repeat(64)]])await add('admission retained '+path,{method:'verifyAdmission',captureChanges:[[path,value]]});
+for(const name of ['original admission','guarded publish','publication coverage attach and exact replay','save gap coverage and exact replay','complete multiple-chunk payload','URL alphabet original binary payload','current Hive payload without acquisition state','guarded publication coverage attach and exact replay'])assert(rows.find(r=>r.input.label===name).expected.results.every(r=>'value'in r),name);
+console.log(JSON.stringify({rootId,nodeId:'fixture.secretary',wall,time:Date.parse(at),uuid,rows}));

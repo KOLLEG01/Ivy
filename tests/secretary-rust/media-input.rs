@@ -106,7 +106,7 @@ fn original_triage_final_assessment_and_turn_identity_differential() {
             Err(error) => IvyJson::object([
                 ("code", error.code.into()),
                 ("message", error.message.into()),
-                ("outcome", error.outcome.as_str().into()),
+                ("outcome", error.outcome.to_json()),
             ]),
         };
         assert_eq!(

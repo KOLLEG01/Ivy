@@ -106,7 +106,7 @@ async fn original_browser_notice_publication_and_receipts() {
                 Err(e) => IvyJson::object([
                     ("code", e.code.into()),
                     ("message", e.message.into()),
-                    ("outcome", e.outcome.as_str().into()),
+                    ("outcome", e.outcome.to_json()),
                 ]),
             });
         }

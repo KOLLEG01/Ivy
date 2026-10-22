@@ -130,21 +130,12 @@ impl AssignmentVoice<'_, '_, '_> {
                 execution.required("pin")?.required("objectId")?,
             )
             .await?;
-        // Read the legacy record even when the current execution already has Voice,
-        // matching the original migration boundary and its storage failures.
-        let legacy = self.evidence.store.journal.named(
-            "secretary/assignment-voice",
-            &value.required("executionId")?.as_str()?,
-            true,
-        )?;
         let mut saved = if let Some(voice) = latest
             .required("value")?
             .get("voice")
             .filter(|v| !v.is_null())
         {
             voice.clone()
-        } else if let Some(legacy) = legacy {
-            self.save(&mut latest, legacy.value).await?
         } else {
             if !eligible {
                 return Ok(VoiceResult::Fallback);

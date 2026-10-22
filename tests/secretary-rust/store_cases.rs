@@ -152,7 +152,7 @@ async fn original_store_records_and_rpc_recovery() {
             Err(error) => IvyJson::object([
                 ("code", error.code.into()),
                 ("message", error.message.into()),
-                ("outcome", error.outcome.as_str().into()),
+                ("outcome", error.outcome.to_json()),
             ]),
         };
         let mut trace = client.trace.lock().unwrap().clone();

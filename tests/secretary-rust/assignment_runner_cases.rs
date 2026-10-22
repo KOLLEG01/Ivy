@@ -182,7 +182,7 @@ async fn original_execution_failure_and_retained_resource_policy() {
             Err(e) => IvyJson::object([
                 ("code", e.code.into()),
                 ("message", e.message.into()),
-                ("outcome", e.outcome.as_str().into()),
+                ("outcome", e.outcome.to_json()),
             ]),
         };
         let mut trace = client.trace.lock().unwrap().clone();

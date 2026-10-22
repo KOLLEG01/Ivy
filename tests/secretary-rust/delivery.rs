@@ -1,37 +1,156 @@
 use ivy_contracts::{IvyError, IvyJson, Outcome, json::parse};
+#[cfg(windows)]
+mod document_resource_cases;
+mod packaging_cases;
+mod triage_workflow_cases;
+mod video_cases;
+mod video_codec_cases;
+mod video_command_cases;
 use ivy_sdk::{rpc::*, tools::ToolClients};
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
 };
 
+// Object.create-based reference cases inject an already resolved epoch promise.
+// Actual constructor ordering and fixed failed waiters have separate cases.
+fn epoch_fixture(value: &ivy_contracts::JsString) -> ivy_sdk::operation_ids::RuntimeEpochWaiter {
+    struct Fixed(ivy_contracts::JsString);
+    impl RpcClient for Fixed {
+        fn request<'a>(
+            &'a self,
+            method: &'a str,
+            _: IvyJson,
+            _: RequestOptions,
+        ) -> RequestFuture<'a> {
+            assert_eq!(method, "system.status");
+            Box::pin(async move {
+                Ok(IvyJson::object([(
+                    "runtimeEpoch",
+                    IvyJson::String(self.0.clone()),
+                )]))
+            })
+        }
+    }
+    ivy_sdk::operation_ids::start_runtime_epoch(Arc::new(Fixed(value.clone())))
+}
+
+// Fault injection after explicit conversion: unused old rows cannot influence
+// the current execution worker, even when their archived JSON is unreadable.
+fn poison_legacy_record(journal: &ivy_secretary::journal::Journal, key: &str, name: &str) {
+    let id = format!("unread-legacy-{key}");
+    journal
+        .db
+        .execute(
+            "INSERT OR REPLACE INTO technical_documents VALUES(?,?,?,?,?)",
+            ivy_store::rusqlite::params![id, key, name, 1, "{}"],
+        )
+        .unwrap();
+    journal
+        .db
+        .execute(
+            "INSERT OR REPLACE INTO technical_revisions VALUES(?,?,?)",
+            ivy_store::rusqlite::params![id, 1, "{"],
+        )
+        .unwrap();
+    assert!(journal.named(key, name, true).is_err());
+}
+
+#[path = "assignment_delivery_cases.rs"]
+mod assignment_delivery_cases;
+#[path = "assignment_driver_cases.rs"]
+mod assignment_driver_cases;
+#[path = "assignment_events_cases.rs"]
+mod assignment_events_cases;
+#[path = "assignment_execution_cases.rs"]
+mod assignment_execution_cases;
+#[path = "assignment_import_cases.rs"]
+mod assignment_import_cases;
+#[path = "assignment_native_cases.rs"]
+mod assignment_native_cases;
+#[path = "assignment_preflight_cases.rs"]
+mod assignment_preflight_cases;
+#[path = "assignment_progress_cases.rs"]
+mod assignment_progress_cases;
+#[path = "assignment_result_cases.rs"]
+mod assignment_result_cases;
+#[path = "assignment_runner_cases.rs"]
+mod assignment_runner_cases;
+#[path = "assignment_scheduler_cases.rs"]
+mod assignment_scheduler_cases;
+#[path = "assignment_tick_cases.rs"]
+mod assignment_tick_cases;
 #[path = "assignment_voice_cases.rs"]
 mod assignment_voice_cases;
 #[path = "assignment_voice_engine_cases.rs"]
 mod assignment_voice_engine_cases;
-#[path = "assignment_delivery_cases.rs"]
-mod assignment_delivery_cases;
-#[path = "assignment_runner_cases.rs"]
-mod assignment_runner_cases;
-#[path = "assignment_result_cases.rs"]
-mod assignment_result_cases;
-#[path = "assignment_native_cases.rs"]
-mod assignment_native_cases;
-#[path = "assignment_execution_cases.rs"]
-mod assignment_execution_cases;
+#[path = "assignment_windows_cases.rs"]
+mod assignment_windows_cases;
 
 #[path = "browser_notice_cases.rs"]
 mod browser_notice_cases;
+#[path = "config_cases.rs"]
+mod config_cases;
+#[path = "engine_assignments_cases.rs"]
+mod engine_assignments_cases;
+#[path = "engine_cases.rs"]
+mod engine_cases;
+#[path = "engine_epoch_cases.rs"]
+mod engine_epoch_cases;
+#[path = "engine_inbox_cases.rs"]
+mod engine_inbox_cases;
+#[path = "execution_import_cases.rs"]
+mod execution_import_cases;
+#[path = "follow_up_cases.rs"]
+mod follow_up_cases;
+#[path = "generation_cases.rs"]
+mod generation_cases;
+#[path = "import_admission_cases.rs"]
+mod import_admission_cases;
 #[path = "inbox_evidence_cases.rs"]
 mod inbox_evidence_cases;
 #[path = "inbox_recovery_cases.rs"]
 mod inbox_recovery_cases;
-#[path = "notice_scan_cases.rs"]
-mod notice_scan_cases;
+#[path = "journal_import_cases.rs"]
+mod journal_import_cases;
+#[path = "media_document_cases.rs"]
+mod media_document_cases;
+#[path = "media_store_cases.rs"]
+mod media_store_cases;
+#[path = "microsoft_store_cases.rs"]
+mod microsoft_store_cases;
 #[path = "notice_evidence_cases.rs"]
 mod notice_evidence_cases;
+#[path = "notice_scan_cases.rs"]
+mod notice_scan_cases;
+#[path = "notices_cases.rs"]
+mod notices_cases;
+#[path = "outlook_media_native_cases.rs"]
+mod outlook_media_native_cases;
+#[path = "outlook_media_source_cases.rs"]
+mod outlook_media_source_cases;
+#[path = "outlook_native_cases.rs"]
+mod outlook_native_cases;
+#[path = "outlook_projection_cases.rs"]
+mod outlook_projection_cases;
+#[path = "outlook_source_cases.rs"]
+mod outlook_source_cases;
+#[path = "reconcile_cases.rs"]
+mod reconcile_cases;
+#[path = "registry_cases.rs"]
+mod registry_cases;
+#[path = "retained_import_cases.rs"]
+mod retained_import_cases;
+#[path = "retained_storage_cases.rs"]
+mod retained_storage_cases;
+#[path = "service_cases.rs"]
+mod service_cases;
+#[path = "service_handlers_cases.rs"]
+mod service_handlers_cases;
 #[path = "store_cases.rs"]
 mod store_cases;
+#[path = "triage_prompt_cases.rs"]
+mod triage_prompt_cases;
 #[path = "workflow_cases.rs"]
 mod workflow_cases;
 
@@ -160,7 +279,7 @@ async fn original_voice_discovery_and_message_unread_rpc_traces() {
                 Err(error) => IvyJson::object([
                     ("code", error.code.into()),
                     ("message", error.message.into()),
-                    ("outcome", error.outcome.as_str().into()),
+                    ("outcome", error.outcome.to_json()),
                 ]),
             });
         }
@@ -178,3 +297,10 @@ async fn original_voice_discovery_and_message_unread_rpc_traces() {
         assert_eq!(&actual, row.required("expected").unwrap(), "case {index}");
     }
 }
+
+#[path = "teams_native_cases.rs"]
+mod teams_native_cases;
+#[path = "teams_projection_cases.rs"]
+mod teams_projection_cases;
+#[path = "teams_source_cases.rs"]
+mod teams_source_cases;

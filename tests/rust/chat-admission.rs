@@ -57,7 +57,7 @@ fn admission_order_limits_and_original_request_hashes_match_typescript() {
                 Json::object([
                     ("code", e.code.into()),
                     ("message", e.message.into()),
-                    ("outcome", e.outcome.as_str().into()),
+                    ("outcome", e.outcome.to_json()),
                 ]),
             )]),
         };

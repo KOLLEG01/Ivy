@@ -22,11 +22,43 @@ impl Outcome {
     }
 }
 
+/// An error's exact JSON outcome. Only matching strings have a literal outcome;
+/// provider coercion never grants an array the not_executed retry classification.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ErrorOutcome(IvyJson);
+
+impl ErrorOutcome {
+    pub fn literal(&self) -> Option<Outcome> {
+        let value = self.0.as_js_string()?;
+        [Outcome::NotExecuted, Outcome::Unknown, Outcome::Completed]
+            .into_iter()
+            .find(|outcome| *value == JsString::from(outcome.as_str()))
+    }
+    pub fn to_json(&self) -> IvyJson {
+        self.0.clone()
+    }
+}
+impl From<Outcome> for ErrorOutcome {
+    fn from(value: Outcome) -> Self {
+        Self(value.as_str().into())
+    }
+}
+impl PartialEq<Outcome> for ErrorOutcome {
+    fn eq(&self, other: &Outcome) -> bool {
+        self.literal() == Some(*other)
+    }
+}
+impl PartialEq<ErrorOutcome> for Outcome {
+    fn eq(&self, other: &ErrorOutcome) -> bool {
+        other == self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct IvyError {
     pub code: String,
     pub message: String,
-    pub outcome: Outcome,
+    pub outcome: ErrorOutcome,
     pub details: Option<IvyJson>,
     /// Exact JS boundary text, when it is not representable as Rust UTF-8.
     pub wire_code: Option<JsString>,
@@ -38,7 +70,7 @@ impl IvyError {
         Self {
             code: code.into(),
             message: message.into(),
-            outcome: Outcome::NotExecuted,
+            outcome: Outcome::NotExecuted.into(),
             details: None,
             wire_code: None,
             wire_message: None,
@@ -70,8 +102,16 @@ impl IvyError {
             .unwrap_or_else(|| self.code.clone().into())
     }
     pub fn with_outcome(mut self, outcome: Outcome) -> Self {
-        self.outcome = outcome;
+        self.outcome = outcome.into();
         self
+    }
+    /// Preserve an already supplied provider value without revalidation or coercion.
+    pub fn with_provider_outcome(mut self, outcome: IvyJson) -> Self {
+        self.outcome = ErrorOutcome(outcome);
+        self
+    }
+    pub fn outcome_json(&self) -> IvyJson {
+        self.outcome.to_json()
     }
     pub fn with_details(mut self, details: IvyJson) -> Self {
         self.details = Some(details);
@@ -110,7 +150,7 @@ impl IvyError {
     pub fn to_wire(&self) -> IvyJson {
         let mut data = IvyJson::object([
             ("code", IvyJson::String(self.code_js())),
-            ("outcome", self.outcome.as_str().into()),
+            ("outcome", self.outcome.to_json()),
         ]);
         if let Some(details) = &self.details {
             data.insert("details", details.clone());

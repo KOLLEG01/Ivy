@@ -106,14 +106,16 @@ async fn original_assignment_write_receipts_and_retry_boundaries() {
             cancellation: RequestOptions::default(),
         };
         let clock = WorkflowClock(corpus.required("now").unwrap().as_f64().unwrap() as i64);
+        let epoch = epoch_fixture(corpus.required("epoch").unwrap().as_js_string().unwrap());
         let workflow = AssignmentWorkflow {
             evidence: &evidence,
-            runtime_epoch: corpus.required("epoch").unwrap().as_js_string().unwrap(),
+            runtime_epoch: &epoch,
             clock: &clock,
         };
         let result = match method.as_str() {
             "validateOperationId" => workflow
                 .validate_operation_id(args[0].as_js_string().unwrap())
+                .await
                 .map(|_| IvyJson::Null),
             "workflowReceipt" => workflow
                 .receipt(&args[0])
@@ -142,7 +144,7 @@ async fn original_assignment_write_receipts_and_retry_boundaries() {
             Err(e) => IvyJson::object([
                 ("code", e.code.into()),
                 ("message", e.message.into()),
-                ("outcome", e.outcome.as_str().into()),
+                ("outcome", e.outcome.to_json()),
             ]),
         };
         let saved = journal.named(WORKFLOW_OPERATION_KEY, &name, true).unwrap();

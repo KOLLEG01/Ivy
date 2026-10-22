@@ -19,12 +19,14 @@ for(const value of [capture,attach,assess,checkpoint])validate('Accepted',value)
 const local=(value,first=value,objectId=operationId)=>({id:objectId,key:'secretary/operation',name:operationName(value.callerPrincipalId,value.operationId),value,first});
 const raw=(value,revision=1)=>({object:{id:itemId,parentId:rootId,name:itemName,effectivelyArchived:false,contractKey:'secretary/item'},revision:{revision,contractVersion:'1.3.0',mediaType:'application/json',contentHash:hashJson(value),byteLength:Buffer.byteLength(canonical(value)),references:Object.fromEntries(value.media.filter(m=>m.pin).map((m,i)=>['media-'+i,m.pin])),createdAt:at},content:{encoding:'json',value}});
 const rows=[];
-async function add(label,{operation=capture,first=operation,records=null,sourceValue=source,sourceFirst=sourceValue,config=settings,hive=null,writeFailure=null,failAt=0,failCode='fixture_failure',failOutcome='unknown',repeats=1,method='apply',limit=10,issues=[],cursor=null,cancelled=false}={}){
+async function add(label,{operation=capture,first=operation,records=null,sourceValue=source,sourceFirst=sourceValue,config=settings,hive=null,writeFailure=null,failAt=0,failCode='fixture_failure',failOutcome='unknown',repeats=1,method='apply',limit=10,issues=[],cursor=null,cancelled=false,independentIssue=false}={}){
  const locals=[{id:sourceId,key:'secretary/source',name:sourceName('mail'),value:sourceValue,first:sourceFirst},...(records??[local(operation,first)])];
- const input=structuredClone({label,method,locals,settings:{...config,recordsPerTick:limit},repeats,issues,cursor,cancelled}),steps=[],trace=[];
+ const input=structuredClone({label,method,locals,settings:{...config,recordsPerTick:limit},repeats,issues,cursor,cancelled,independentIssue}),steps=[],trace=[];
+ let engine;
  let current=structuredClone(hive),writeFailed=false;
  const client={async request(method,params,options){
   trace.push({method,params:structuredClone(params),timeout:options?.timeoutMs??35000});
+  if(independentIssue&&trace.length===2)engine.issue('independent','background_issue');
   try{
    if(trace.length===failAt)throw new IvyError(failCode,'Fixture failure.',failOutcome);
    let result;
@@ -48,7 +50,7 @@ async function add(label,{operation=capture,first=operation,records=null,sourceV
  }};
  const store=new SecretaryStore(client,rootId),abort=new AbortController();if(cancelled)abort.abort(new IvyError('fixture_cancelled','Fixture cancelled.'));
  for(const row of locals){const revision=hashJson(row.first)===hashJson(row.value)?1:2,encoded=canonical(row.value),complete=row.key==='secretary/operation'&&row.value.phase!=='accepted';store.db.prepare('INSERT INTO documents VALUES(?,?,?,?,?,?,?)').run(row.id,row.key,row.name,revision,0,complete?1:null,encoded);store.db.prepare('INSERT INTO revisions VALUES(?,?,?)').run(row.id,1,canonical(row.first));if(revision===2)store.db.prepare('INSERT INTO revisions VALUES(?,?,?)').run(row.id,2,encoded);}
- const engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings:structuredClone(input.settings),owner:{serviceNodeId:'fixture.secretary',generation:1},signal:abort.signal,operationCursor:cursor??undefined,recoveryIssues:new Map(issues)});
+ engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings:structuredClone(input.settings),owner:{serviceNodeId:'fixture.secretary',generation:1},signal:abort.signal,operationCursor:cursor??undefined,recoveryIssues:new Map(issues)});
  const results=[];
  for(let i=0;i<repeats;i++)try{const value=method==='tick'?await engine.tick():await engine.apply({pin:{objectId:operationId,revision:1},value:operation});results.push({value:value??null});}catch(cause){const e=IvyError.from(cause);results.push({code:e.code,message:e.message,outcome:e.outcome});}
  const retained=store.db.prepare('SELECT id,key,current_revision,value_json,completed_at FROM documents ORDER BY id').all().map(row=>({id:row.id,key:row.key,revision:row.current_revision,value:JSON.parse(row.value_json),completed:row.completed_at!==null}));
@@ -87,5 +89,6 @@ await add('bounded recovery diagnostics',{method:'tick',records:scanRecords,limi
 await add('scan continues past poison',{method:'tick',records:scanRecords.slice(31),limit:2,repeats:3});
 await add('scan clears repaired issue',{method:'tick',operation:validIgnored,issues:[[operationId,'old_error']],limit:1,repeats:2});
 await add('scan starts cancelled',{method:'tick',cancelled:true});
+await add('scan permits independent issue during apply owner wait',{method:'tick',operation:validIgnored,issues:[[operationId,'old_error']],limit:1,independentIssue:true});
 assert.ok(rows.length>=60);
 process.stdout.write(JSON.stringify({root:rootId,rows}));

@@ -3,6 +3,11 @@
 Secretary executes scheduled and event-triggered assignments, retains captured inbox items and routes configured notices and follow-up.
 [Requirements](../specs/SECRETARY.md) define capture, media and contact semantics.
 
+The Rust executable accepts `ivy-secretary --config ABSOLUTE_PATH` or `IVY_INSTANCE_CONFIG`.
+Its instance configuration selects the prepared artifact and data directory; startup validates the artifact's build identity.
+Scheduling and inbox APIs run without Node. Assignments that launch JavaScript still need their configured runtime, and Windows preflight commands need the artifact's `ivy-job.exe` when executed.
+Retained journals that require migration use `ivy-secretary import --operation-id ORIGINAL_ID --config ABSOLUTE_PATH` before service startup.
+
 New installations have no assignments. The UI offers editable schedule and event drafts; saving and enabling are explicit actions. Existing assignments remain user configuration.
 The [public MCP examples](examples/secretary/README.md) provide disabled assignment templates for daily briefings, grouped object changes and collector transitions.
 Use **hive_event_topics** to list registered triggers, their providers, event kinds and payload schemas. Filter by service, namespace or topic when needed.

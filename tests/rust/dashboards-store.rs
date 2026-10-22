@@ -115,7 +115,7 @@ async fn original_store_values_errors_and_rpc_transcripts() {
                 J::object([
                     ("code", J::String(e.code_js())),
                     ("message", J::String(e.message_js())),
-                    ("outcome", e.outcome.as_str().into()),
+                    ("outcome", e.outcome.to_json()),
                 ]),
             )]),
         };

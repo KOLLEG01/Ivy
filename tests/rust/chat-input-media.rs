@@ -72,7 +72,7 @@ async fn original_image_pins_bytes_and_container_admission_match_typescript() {
                 Json::object([
                     ("code", e.code.into()),
                     ("message", e.message.into()),
-                    ("outcome", e.outcome.as_str().into()),
+                    ("outcome", e.outcome.to_json()),
                 ]),
             )]),
         };

@@ -1156,8 +1156,10 @@ name = "ivy-secretary"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "futures-util",
  "html5ever",
  "ivy-contracts",
+ "ivy-host-runtime",
  "ivy-sdk",
  "ivy-store",
  "markup5ever_rcdom",
@@ -1166,6 +1168,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
+ "url",
  "uuid",
  "zip",
 ]

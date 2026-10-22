@@ -5,7 +5,7 @@ use crate::{
     assignment_voice_engine::{AssignmentVoice, VoiceResult},
     browser_notice::secretary_browser_notice,
     inbox_evidence::InboxEvidence,
-    inbox_recovery::RecoveryScan,
+    inbox_recovery::{RecoveryIssues, RecoveryScan},
     store::Record,
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json};
@@ -161,6 +161,14 @@ impl AssignmentDelivery<'_, '_, '_> {
         .await
     }
     pub async fn step(&self, execution: &IvyJson, issues: &mut RecoveryScan) -> IvyResult<bool> {
+        self.step_with_issues(execution, &std::cell::RefCell::new(issues))
+            .await
+    }
+    pub(crate) async fn step_with_issues(
+        &self,
+        execution: &IvyJson,
+        issues: &dyn RecoveryIssues,
+    ) -> IvyResult<bool> {
         self.evidence.verify_owner().await?;
         let value = execution.required("value")?;
         need(
@@ -240,15 +248,8 @@ impl AssignmentDelivery<'_, '_, '_> {
                 execution.required("pin")?.required("objectId")?,
             )
             .await?;
-        let legacy = store.journal.named(
-            "secretary/assignment-handoff",
-            &value.required("executionId")?.as_str()?,
-            true,
-        )?;
         let mut saved = if !field(latest.required("value")?, "delivery").is_null() {
             latest.required("value")?.required("delivery")?.clone()
-        } else if let Some(legacy) = legacy {
-            self.save(&mut latest, legacy.value).await?
         } else {
             self.save(
                 &mut latest,
@@ -273,7 +274,7 @@ impl AssignmentDelivery<'_, '_, '_> {
         )?;
         let issue_id = format!("delivery:{}", value.required("executionId")?.as_str()?);
         if is(&saved, "state", "confirmed") || is(&saved, "state", "suppressed") {
-            issues.issues.retain(|(id, _)| id != &issue_id);
+            issues.clear(&issue_id);
             return self.settled(execution, &decision).await;
         }
         let reconcile_only = is(&saved, "state", "outcome_unknown")
@@ -490,7 +491,7 @@ impl AssignmentDelivery<'_, '_, '_> {
         now: i64,
         expires_at: &IvyJson,
         issue_id: &str,
-        issues: &mut RecoveryScan,
+        issues: &dyn RecoveryIssues,
     ) -> IvyResult<bool> {
         let request = saved.required("request")?;
         let observed = async {
@@ -706,7 +707,7 @@ impl AssignmentDelivery<'_, '_, '_> {
             ),
         )
         .await?;
-        issues.issues.retain(|(id, _)| id != issue_id);
+        issues.clear(issue_id);
         self.settled(execution, decision).await
     }
     fn check_operation(

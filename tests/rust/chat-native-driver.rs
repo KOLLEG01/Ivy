@@ -156,7 +156,7 @@ async fn configured_owner_readiness_and_rpc_order_match_original_driver() {
                 Json::object([
                     ("code", e.code.into()),
                     ("message", e.message.into()),
-                    ("outcome", e.outcome.as_str().into()),
+                    ("outcome", e.outcome.to_json()),
                 ]),
             )]),
         };

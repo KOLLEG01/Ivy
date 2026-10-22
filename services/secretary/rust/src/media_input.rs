@@ -1,6 +1,19 @@
 //! Inert native input from complete, verified original attachment bytes.
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::digest, json::stringify};
+use std::{future::Future, pin::Pin};
+
+pub type PrepareFuture<'a> = Pin<Box<dyn Future<Output = IvyResult<Prepared>> + 'a>>;
+/// Composition supplies acquired-input preparation, including the disposable
+/// document worker and any configured video decoder. There is no parser fallback.
+pub trait AcquiredMediaPreparer {
+    fn prepare<'a>(
+        &'a self,
+        source: &'a Source,
+        bytes: &'a [u8],
+        maximum_input_bytes: f64,
+    ) -> PrepareFuture<'a>;
+}
 
 pub const REQUEST_BYTES: usize = 6 * 1024 * 1024;
 
@@ -94,7 +107,7 @@ impl Prepared {
 }
 
 // MIME selection uses ECMAScript trim, including BOM but excluding NEL.
-fn mime(source: &Source) -> String {
+pub(crate) fn mime(source: &Source) -> String {
     let units = source
         .media_type
         .as_ref()

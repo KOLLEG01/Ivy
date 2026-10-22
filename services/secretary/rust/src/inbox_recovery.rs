@@ -4,6 +4,24 @@ use crate::{
     store::{Record, conflict, mutation},
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, hash::hash_json};
+use std::{borrow::BorrowMut, cell::RefCell};
+
+/// Synchronous access keeps foreground and preflight diagnostics ordered without
+/// retaining an exclusive borrow across an RPC wait.
+pub(crate) trait RecoveryIssues {
+    fn issue(&self, key: &str, code: &str);
+    fn clear(&self, key: &str);
+}
+impl<T: BorrowMut<RecoveryScan>> RecoveryIssues for RefCell<T> {
+    fn issue(&self, key: &str, code: &str) {
+        T::borrow_mut(&mut *self.borrow_mut()).issue(key, code);
+    }
+    fn clear(&self, key: &str) {
+        T::borrow_mut(&mut *self.borrow_mut())
+            .issues
+            .retain(|(id, _)| id != key);
+    }
+}
 
 fn need(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
@@ -21,24 +39,6 @@ fn prepared_key(value: &IvyJson) -> IvyResult<Record> {
         "secretary/source" => Ok(Record::Source),
         _ => Err(IvyError::internal()),
     }
-}
-fn ignored(source: &IvyJson, message: &IvyJson) -> IvyResult<bool> {
-    if message.get("outgoing") == Some(&IvyJson::Bool(true)) {
-        return Ok(true);
-    }
-    let sender = message.required("senderId")?;
-    let own = source
-        .required("ownSenderIds")?
-        .as_array()
-        .ok_or_else(IvyError::internal)?;
-    if own.contains(sender) {
-        return Ok(true);
-    }
-    Ok(source
-        .get("allowedSenderIds")
-        .filter(|v| !v.is_null())
-        .and_then(IvyJson::as_array)
-        .is_some_and(|allowed| !allowed.contains(sender)))
 }
 pub struct InboxRecovery<'a, 'engine, 'journal> {
     pub evidence: &'a InboxEvidence<'engine, 'journal>,
@@ -198,10 +198,11 @@ impl InboxRecovery<'_, '_, '_> {
             )?;
             if key == Record::Item {
                 need(
-                    !ignored(
+                    crate::inbox_evidence::ignored_reason(
                         source.unwrap(),
                         prepared.required("value")?.required("message")?,
-                    )?,
+                    )?
+                    .is_none(),
                     "secretary_authorization_changed",
                     "The current source policy no longer admits a new effect for this message.",
                 )?;
@@ -296,6 +297,25 @@ impl RecoveryScan {
         limit: usize,
     ) -> IvyResult<()> {
         recovery.evidence.verify_owner().await?;
+        let ids = self.page(recovery, limit)?;
+        Self::recover_page(recovery, ids, &RefCell::new(self)).await
+    }
+    /// The engine and its independent workers share issues, never an exclusive
+    /// RefCell borrow across RPC waits. The cursor advances before row recovery.
+    pub(crate) async fn tick_shared(
+        state: &RefCell<Self>,
+        recovery: &InboxRecovery<'_, '_, '_>,
+        limit: usize,
+    ) -> IvyResult<()> {
+        recovery.evidence.verify_owner().await?;
+        let ids = state.borrow_mut().page(recovery, limit)?;
+        Self::recover_page(recovery, ids, state).await
+    }
+    fn page(
+        &mut self,
+        recovery: &InboxRecovery<'_, '_, '_>,
+        limit: usize,
+    ) -> IvyResult<Vec<String>> {
         let ids = recovery
             .evidence
             .store
@@ -306,6 +326,13 @@ impl RecoveryScan {
         } else {
             ids.last().cloned()
         };
+        Ok(ids)
+    }
+    async fn recover_page(
+        recovery: &InboxRecovery<'_, '_, '_>,
+        ids: Vec<String>,
+        issues: &dyn RecoveryIssues,
+    ) -> IvyResult<()> {
         for id in ids {
             let result = async {
                 let operation = recovery
@@ -317,12 +344,12 @@ impl RecoveryScan {
             }
             .await;
             match result {
-                Ok(_) => self.issues.retain(|(existing, _)| existing != &id),
+                Ok(_) => issues.clear(&id),
                 Err(error) => {
                     if recovery.evidence.cancellation.cancellation.is_cancelled() {
                         return Err(error);
                     }
-                    self.issue(&id, &error.code);
+                    issues.issue(&id, &error.code);
                 }
             }
         }

@@ -8,7 +8,7 @@ use ivy_contracts::{
     hash::hash_json,
     operation::{derive_operation_id_js, parse_operation_id_js},
 };
-use ivy_sdk::{clock::Clock, rpc::RequestOptions};
+use ivy_sdk::{clock::Clock, operation_ids::RuntimeEpochWaiter, rpc::RequestOptions};
 
 pub const WORKFLOW_OPERATION_KEY: &str = "secretary/public-operation";
 #[derive(Clone, Copy)]
@@ -38,14 +38,14 @@ fn need(ok: bool, code: &str, message: &str) -> IvyResult<()> {
 /// validate their request and current owner before preparing or replaying a write.
 pub struct AssignmentWorkflow<'a, 'engine, 'journal> {
     pub evidence: &'a InboxEvidence<'engine, 'journal>,
-    pub runtime_epoch: &'a JsString,
+    pub runtime_epoch: &'a RuntimeEpochWaiter,
     pub clock: &'a dyn Clock,
 }
 impl AssignmentWorkflow<'_, '_, '_> {
-    pub fn validate_operation_id(&self, id: &JsString) -> IvyResult<()> {
+    pub async fn validate_operation_id(&self, id: &JsString) -> IvyResult<()> {
         let identity = parse_operation_id_js(id)?;
         need(
-            identity.runtime_epoch == *self.runtime_epoch
+            identity.runtime_epoch == self.runtime_epoch.get().await?
                 && identity.issued_at_unix_ms as f64 <= self.clock.utc_millis() as f64 + 60_000.0
                 && identity.issued_at_unix_ms > self.evidence.store.journal.expired_before()?,
             "operation_expired",
@@ -166,7 +166,8 @@ impl AssignmentWorkflow<'_, '_, '_> {
         let row = match prior {
             Some(row) => row,
             None => {
-                self.validate_operation_id(id.as_js_string().ok_or_else(IvyError::internal)?)?;
+                self.validate_operation_id(id.as_js_string().ok_or_else(IvyError::internal)?)
+                    .await?;
                 let write = write.ok_or_else(|| {
                     IvyError::new(
                         "secretary_evidence_missing",

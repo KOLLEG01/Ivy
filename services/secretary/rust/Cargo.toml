@@ -8,10 +8,13 @@ publish = false
 ivy-contracts.workspace = true
 ivy-sdk.workspace = true
 ivy-store.workspace = true
+ivy-host-runtime.workspace = true
+tokio.workspace = true
 uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true
+url.workspace = true
 html5ever = "=0.39.0"
 markup5ever_rcdom = "=0.39.0"
 roxmltree = "=0.21.1"
@@ -19,7 +22,12 @@ zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
 pdf-extract = "=0.12.1"
 
 [dev-dependencies]
-tokio.workspace = true
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
+
+[[test]]
+name = "native-service"
+path = "../../../tests/secretary-rust/native-service.rs"
 
 [[test]]
 name = "document"
@@ -48,3 +56,7 @@ path = "../../../tests/secretary-rust/media-input.rs"
 [[test]]
 name = "delivery"
 path = "../../../tests/secretary-rust/delivery.rs"
+
+[[test]]
+name = "error-outcome"
+path = "../../../tests/secretary-rust/error-outcome.rs"

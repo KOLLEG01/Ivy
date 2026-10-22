@@ -1,4 +1,5 @@
 //! Inbox filtering, independent of global Hive dispatch-time contact restrictions.
+use ivy_contracts::{IvyError, IvyJson, IvyResult};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Urgency {
     Low,
@@ -72,4 +73,39 @@ pub fn quiet(
     } else {
         local_time >= start || local_time < end
     }
+}
+
+fn urgency(value: &IvyJson) -> IvyResult<Urgency> {
+    match value.as_str()?.as_str() {
+        "low" => Ok(Urgency::Low),
+        "normal" => Ok(Urgency::Normal),
+        "high" => Ok(Urgency::High),
+        "critical" => Ok(Urgency::Critical),
+        _ => Err(IvyError::internal()),
+    }
+}
+pub(crate) fn assessment_suppression(
+    assessment: &IvyJson,
+    policy: &IvyJson,
+) -> IvyResult<Option<&'static str>> {
+    let notification = match assessment.required("notification")?.as_str()?.as_str() {
+        "needs_attention" => Notification::NeedsAttention,
+        "none" => Notification::None,
+        "main" => Notification::Main,
+        "voice" => Notification::Voice,
+        _ => return Err(IvyError::internal()),
+    };
+    let disposition = match assessment.required("disposition")?.as_str()?.as_str() {
+        "ignore" => Disposition::Ignore,
+        "record" => Disposition::Record,
+        // For non-none notifications only urgency matters. This enum's Task
+        // represents all other admitted dispositions in that shared policy.
+        _ => Disposition::Task,
+    };
+    Ok(suppression(
+        notification,
+        disposition,
+        urgency(assessment.required("urgency")?)?,
+        urgency(policy.required("minimumMainUrgency")?)?,
+    ))
 }

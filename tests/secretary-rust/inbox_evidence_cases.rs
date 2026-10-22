@@ -142,7 +142,7 @@ async fn original_inbox_identities_and_retained_evidence() {
             Err(error) => IvyJson::object([
                 ("code", error.code.into()),
                 ("message", error.message.into()),
-                ("outcome", error.outcome.as_str().into()),
+                ("outcome", error.outcome.to_json()),
             ]),
         };
         let actual = IvyJson::object([

@@ -28,7 +28,7 @@ impl CliResult {
     pub fn failure(error: &IvyError, deployment_id: Option<&JsString>) -> Self {
         let mut data = IvyJson::object([
             ("message", IvyJson::String(error.message_js())),
-            ("outcome", error.outcome.as_str().into()),
+            ("outcome", error.outcome_json()),
         ]);
         if let Some(details) = &error.details {
             data.insert("details", details.clone());

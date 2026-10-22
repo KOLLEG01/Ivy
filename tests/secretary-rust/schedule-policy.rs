@@ -98,7 +98,7 @@ fn original_object_and_message_event_policy_differential() {
             Err(error) => IvyJson::object([
                 ("code", error.code.into()),
                 ("message", error.message.into()),
-                ("outcome", error.outcome.as_str().into()),
+                ("outcome", error.outcome.to_json()),
             ]),
         };
         assert_eq!(
@@ -164,7 +164,7 @@ fn original_assignment_rules_triggers_and_names_differential() {
             Err(error) => IvyJson::object([
                 ("code", error.code.into()),
                 ("message", error.message.into()),
-                ("outcome", error.outcome.as_str().into()),
+                ("outcome", error.outcome.to_json()),
             ]),
         };
         assert_eq!(

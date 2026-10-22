@@ -3,7 +3,7 @@ use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
 fn whitespace(c: u16) -> bool {
     matches!(c, 9..=13 | 32 | 160 | 5760 | 8192..=8202 | 8232 | 8233 | 8239 | 8287 | 12288 | 65279)
 }
-fn trimmed(text: &[u16]) -> &[u16] {
+pub(crate) fn trimmed(text: &[u16]) -> &[u16] {
     let start = text
         .iter()
         .position(|c| !whitespace(*c))

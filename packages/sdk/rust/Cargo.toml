@@ -63,3 +63,7 @@ path = "../../../tests/rust/sdk-date-parse.rs"
 [[test]]
 name = "sdk-native-owner"
 path = "../../../tests/rust/sdk-native-owner.rs"
+
+[[test]]
+name = "sdk-error-outcome"
+path = "../../../tests/rust/sdk-error-outcome.rs"

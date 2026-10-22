@@ -155,7 +155,7 @@ async fn original_assignment_native_admission_and_recovery() {
             Err(e) => IvyJson::object([
                 ("code", e.code.into()),
                 ("message", e.message.into()),
-                ("outcome", e.outcome.as_str().into()),
+                ("outcome", e.outcome.to_json()),
             ]),
         };
         let saved = journal

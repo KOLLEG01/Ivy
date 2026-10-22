@@ -104,7 +104,7 @@ async fn original_notice_proof_and_bound_provider_calls() {
             Err(e) => IvyJson::object([
                 ("code", e.code.into()),
                 ("message", e.message.into()),
-                ("outcome", e.outcome.as_str().into()),
+                ("outcome", e.outcome.to_json()),
             ]),
         };
         let actual = IvyJson::object([

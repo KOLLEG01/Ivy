@@ -1,10 +1,11 @@
 //! Ordered assignment phase advancement. Process execution belongs to the runtime.
 use crate::{
     assignment_delivery::AssignmentDelivery,
+    assignment_driver::{CollectedPreflight, PreflightWork},
     assignment_execution::AssignmentExecution,
     assignment_message::{message_batch, message_conversation_unread},
     assignment_runner::release_calls,
-    inbox_recovery::RecoveryScan,
+    inbox_recovery::{RecoveryIssues, RecoveryScan},
     store::Record,
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
@@ -42,6 +43,17 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
         preflight: &mut HashSet<JsString>,
         issues: &mut RecoveryScan,
     ) -> IvyResult<Option<IvyJson>> {
+        let work = CollectedPreflight::new(preflight);
+        self.advance_with_work(current, &work, &std::cell::RefCell::new(issues))
+            .await?;
+        Ok(work.jobs.into_inner().pop())
+    }
+    pub(crate) async fn advance_with_work(
+        &self,
+        current: &IvyJson,
+        preflight: &dyn PreflightWork,
+        issues: &dyn RecoveryIssues,
+    ) -> IvyResult<()> {
         let execution = self.execution;
         let evidence = execution.native.evidence;
         let store = evidence.store;
@@ -59,9 +71,9 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
             .any(|p| phase(&current, p))
         {
             if phase(&current, "settled") && unknown(&current) {
-                delivery.step(&current, issues).await?;
+                delivery.step_with_issues(&current, issues).await?;
             }
-            return Ok(None);
+            return Ok(());
         }
         if phase(&current, "queued") {
             let value = current.required("value")?;
@@ -79,7 +91,7 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
                     .as_js_string()
                     .ok_or_else(IvyError::internal)?;
                 if (execution.clock.utc_millis() as f64) < parse_date(due) {
-                    return Ok(None);
+                    return Ok(());
                 }
                 if !message_conversation_unread(store.client.as_ref(), tools, &store.root, &batch)
                     .await?
@@ -91,7 +103,7 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
                     next.insert("completedAt", IvyJson::String(now.clone()));
                     next.insert("updatedAt", IvyJson::String(now));
                     execution.update(&current, &next).await?;
-                    return Ok(None);
+                    return Ok(());
                 }
             }
             let now = execution.now()?;
@@ -116,7 +128,7 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
                 .cloned()
                 .ok_or_else(IvyError::internal)?;
             if preflight.contains(&id) {
-                return Ok(None);
+                return Ok(());
             }
             current = store
                 .read(
@@ -125,7 +137,7 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
                 )
                 .await?;
             if !phase(&current, "preflight") {
-                return Ok(None);
+                return Ok(());
             }
             let value = current.required("value")?;
             if value.required("preflightOutput")? != &IvyJson::Null {
@@ -135,7 +147,7 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
                 ));
             }
             if !preflight.is_empty() {
-                return Ok(None);
+                return Ok(());
             }
             let target = execution.target(value).await?;
             let mut next = value.clone();
@@ -146,14 +158,14 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
                 next.insert("completedAt", IvyJson::String(now.clone()));
                 next.insert("updatedAt", IvyJson::String(now));
                 execution.update(&current, &next).await?;
-                return Ok(None);
+                return Ok(());
             }
             evidence.verify_owner().await?;
             next.insert("preflightOutput", "".into());
             next.insert("updatedAt", IvyJson::String(execution.now()?));
             current = execution.update(&current, &next).await?;
-            preflight.insert(id);
-            return Ok(Some(current));
+            preflight.admit(id, current).await;
+            return Ok(());
         }
         if phase(&current, "starting") {
             current = execution.start(&current).await?;
@@ -161,7 +173,7 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
         if phase(&current, "running") {
             current = execution.run(&current).await?;
         }
-        if phase(&current, "completed") && delivery.step(&current, issues).await? {
+        if phase(&current, "completed") && delivery.step_with_issues(&current, issues).await? {
             current = store
                 .read(
                     Record::Execution,
@@ -182,7 +194,7 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
             current = execution.update(&current, &next).await?;
         }
         if phase(&current, "archived") && unknown(&current) {
-            delivery.step(&current, issues).await?;
+            delivery.step_with_issues(&current, issues).await?;
         }
         if phase(&current, "archiving") {
             current = execution.archive(&current).await?;
@@ -205,6 +217,6 @@ impl AssignmentAdvance<'_, '_, '_, '_> {
         if phase(&current, "deleting") {
             execution.remove(&current).await?;
         }
-        Ok(None)
+        Ok(())
     }
 }

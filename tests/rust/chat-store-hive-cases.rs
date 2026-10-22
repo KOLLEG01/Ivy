@@ -233,7 +233,7 @@ async fn public_hive_persistence_matches_original_store_calls_and_errors() {
                     Json::object([
                         ("code", e.code.into()),
                         ("message", e.message.into()),
-                        ("outcome", e.outcome.as_str().into()),
+                        ("outcome", e.outcome.to_json()),
                     ]),
                 )]),
             };

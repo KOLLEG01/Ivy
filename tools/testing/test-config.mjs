@@ -125,6 +125,10 @@ export const privateRepo = false;
 
 // Explicit Cargo targets keep --files narrow and do not infer service ownership.
 export const rustTests = {
+  'tests/rust/host-protected-config.rs': { package: 'ivy-host-runtime', test: 'host-protected-config' },
+  'tests/rust/sdk-error-outcome.rs': { package: 'ivy-sdk', test: 'sdk-error-outcome' },
+  'tests/secretary-rust/native-service.rs': { package: 'ivy-secretary', test: 'native-service' },
+  'tests/secretary-rust/error-outcome.rs': { package: 'ivy-secretary', test: 'error-outcome' },
   'tests/rust/contracts.rs': { package: 'ivy-contracts', test: 'contracts' },
   'tests/rust/hash.rs': { package: 'ivy-contracts', test: 'hash' },
   'tests/rust/json-depth.rs': { package: 'ivy-contracts', test: 'json-depth' },

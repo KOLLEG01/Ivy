@@ -143,7 +143,7 @@ fn daemon_observation_matches_original_structural_and_coercion_boundary() {
                     Err(error) => IvyJson::object([
                         ("code", error.code.into()),
                         ("message", error.message.into()),
-                        ("outcome", error.outcome.as_str().into()),
+                        ("outcome", error.outcome.to_json()),
                     ]),
                 },
             )

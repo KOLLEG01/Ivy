@@ -120,7 +120,7 @@ pub async fn discover(
         }
         cursor = page
             .get("nextCursor")
-            .filter(|v| !v.is_null() && v.as_js_string().is_none_or(|s| !s.0.is_empty()))
+            .filter(|v| v.as_js_string().is_some_and(|s| !s.0.is_empty()))
             .cloned();
         if cursor.is_none() {
             return Err(IvyError::new(

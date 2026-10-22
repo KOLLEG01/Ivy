@@ -353,7 +353,7 @@ async fn unchanged_typescript_cache_matches_error_replay_ttl_and_fifo_trace() {
         trace.push(result.unwrap_or_else(|error| {
             IvyJson::object([
                 ("code", error.code.into()),
-                ("outcome", error.outcome.as_str().into()),
+                ("outcome", error.outcome.to_json()),
             ])
         }));
     }

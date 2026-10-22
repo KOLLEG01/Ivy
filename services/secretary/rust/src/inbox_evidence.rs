@@ -37,7 +37,7 @@ fn need(ok: bool, code: &str, message: &str) -> IvyResult<()> {
 fn same(a: &IvyJson, b: &IvyJson) -> IvyResult<bool> {
     Ok(hash_json(a)? == hash_json(b)?)
 }
-fn truthy(value: &IvyJson) -> bool {
+pub(crate) fn truthy(value: &IvyJson) -> bool {
     match value {
         IvyJson::Null => false,
         IvyJson::Bool(v) => *v,
@@ -81,6 +81,32 @@ pub fn source_identity(source: &IvyJson) -> IvyResult<IvyJson> {
         ("accountId", source.required("accountId")?.clone()),
         ("kind", source.required("kind")?.clone()),
     ]))
+}
+pub(crate) fn ignored_reason(
+    source: &IvyJson,
+    message: &IvyJson,
+) -> IvyResult<Option<&'static str>> {
+    if message.get("outgoing").is_some_and(truthy) {
+        return Ok(Some("outgoing"));
+    }
+    let sender = message.required("senderId")?;
+    if source
+        .required("ownSenderIds")?
+        .as_array()
+        .ok_or_else(IvyError::internal)?
+        .contains(sender)
+    {
+        return Ok(Some("own_sender"));
+    }
+    if source
+        .get("allowedSenderIds")
+        .filter(|v| truthy(v))
+        .and_then(IvyJson::as_array)
+        .is_some_and(|allowed| !allowed.contains(sender))
+    {
+        return Ok(Some("sender_not_allowed"));
+    }
+    Ok(None)
 }
 pub fn notice_text(
     assessment: &IvyJson,

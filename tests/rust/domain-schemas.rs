@@ -74,8 +74,8 @@ fn domain_contracts_match_typescript_admission_and_errors() {
                 "{summary}"
             );
             assert_eq!(
-                error.outcome.as_str(),
-                row["error"]["outcome"].as_str().unwrap(),
+                error.outcome.to_json(),
+                ivy_contracts::IvyJson::from(row["error"]["outcome"].as_str().unwrap()),
                 "{summary}"
             );
         } else {

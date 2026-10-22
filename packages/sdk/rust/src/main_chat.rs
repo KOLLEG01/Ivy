@@ -95,3 +95,11 @@ pub fn main_notification(value: &IvyJson) -> IvyJson {
             .filter_map(|key| value.get(key).map(|value| (key, value.clone()))),
     )
 }
+
+/// Validate the public notification fields before projecting transport metadata.
+pub fn main_notification_checked(value: &IvyJson) -> IvyResult<IvyJson> {
+    for key in ["action", "operationId", "source", "text"] {
+        value.required(key)?;
+    }
+    Ok(main_notification(value))
+}
