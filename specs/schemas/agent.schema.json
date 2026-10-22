@@ -2607,7 +2607,8 @@
             "0.142.3",
             "0.154.0",
             "0.158.0",
-            "0.159.2"
+            "0.159.2",
+            "0.163.0"
           ]
         },
         "method": {
@@ -4175,6 +4176,200 @@
       ],
       "type": "string"
     },
+    "Read01630ThreadReadd0": {
+      "properties": {
+        "includeTurns": {
+          "description": "When true, include turns and their items from rollout history. Full-history hydration is deprecated for paginated threads; prefer a metadata-only read and page with `thread/turns/list` and `thread/items/list`.",
+          "type": "boolean"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object",
+      "additionalProperties": false
+    },
+    "Read01630ThreadTurnsListd0": {
+      "properties": {
+        "cursor": {
+          "description": "Opaque cursor to pass to the next call to continue after the last turn.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "itemsView": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Read01630ThreadTurnsListd1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How much item detail to include for each returned turn; defaults to summary."
+        },
+        "limit": {
+          "description": "Optional turn page size.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sortDirection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Read01630ThreadTurnsListd2"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional turn pagination direction; defaults to descending."
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object",
+      "additionalProperties": false
+    },
+    "Read01630ThreadTurnsListd1": {
+      "oneOf": [
+        {
+          "description": "`items` was not loaded for this turn. The field is intentionally empty.",
+          "enum": [
+            "notLoaded"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`items` contains only a display summary for this turn.",
+          "enum": [
+            "summary"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`items` contains every ThreadItem available from persisted app-server history for this turn.",
+          "enum": [
+            "full"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Read01630ThreadTurnsListd2": {
+      "enum": [
+        "asc",
+        "desc"
+      ],
+      "type": "string"
+    },
+    "Read01630ThreadItemsListd0": {
+      "properties": {
+        "cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Read01630ThreadItemsListd1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Opaque continuation cursor or an exclusive item anchor in the requested visible turn. An item anchor requires a non-empty `turnId`; ascending (the default) returns items after it, and descending returns items before it. Continue with the returned string cursor."
+        },
+        "limit": {
+          "description": "Optional item page size.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sortDirection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Read01630ThreadItemsListd3"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional item pagination direction; defaults to ascending."
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "description": "Optional turn id to filter by. When omitted, returns items across the thread.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object",
+      "additionalProperties": false
+    },
+    "Read01630ThreadItemsListd1": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/Read01630ThreadItemsListd2"
+        }
+      ],
+      "description": "Starting position for an item-history page."
+    },
+    "Read01630ThreadItemsListd2": {
+      "description": "An exclusive item position within the requested visible turn.",
+      "oneOf": [
+        {
+          "properties": {
+            "itemId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "item"
+              ],
+              "title": "ItemThreadItemsListAnchorType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "itemId",
+            "type"
+          ],
+          "title": "ItemThreadItemsListAnchor",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Json"
+          }
+        }
+      ]
+    },
+    "Read01630ThreadItemsListd3": {
+      "enum": [
+        "asc",
+        "desc"
+      ],
+      "type": "string"
+    },
     "ReadInput": {
       "oneOf": [
         {
@@ -4408,6 +4603,66 @@
             },
             "params": {
               "$ref": "#/$defs/Read01592ThreadItemsListd0"
+            }
+          },
+          "required": [
+            "nativeVersion",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "nativeVersion": {
+              "const": "0.163.0"
+            },
+            "method": {
+              "const": "thread/read"
+            },
+            "params": {
+              "$ref": "#/$defs/Read01630ThreadReadd0"
+            }
+          },
+          "required": [
+            "nativeVersion",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "nativeVersion": {
+              "const": "0.163.0"
+            },
+            "method": {
+              "const": "thread/turns/list"
+            },
+            "params": {
+              "$ref": "#/$defs/Read01630ThreadTurnsListd0"
+            }
+          },
+          "required": [
+            "nativeVersion",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "nativeVersion": {
+              "const": "0.163.0"
+            },
+            "method": {
+              "const": "thread/items/list"
+            },
+            "params": {
+              "$ref": "#/$defs/Read01630ThreadItemsListd0"
             }
           },
           "required": [
@@ -5214,6 +5469,210 @@
             },
             "params": {
               "$ref": "#/$defs/Read01592ThreadItemsListd0"
+            },
+            "reply": {
+              "$ref": "#/$defs/Reply"
+            }
+          },
+          "required": [
+            "schemaVersion",
+            "observationId",
+            "callerPrincipalId",
+            "serviceNodeId",
+            "nativeExecutableHash",
+            "catalogHash",
+            "epoch",
+            "requestId",
+            "observedAt",
+            "requestHash",
+            "nativeVersion",
+            "method",
+            "params",
+            "reply"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schemaVersion": {
+              "const": 1
+            },
+            "observationId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "callerPrincipalId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "serviceNodeId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "nativeExecutableHash": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+            },
+            "catalogHash": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+            },
+            "epoch": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "requestId": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "observedAt": {
+              "type": "string",
+              "maxLength": 64,
+              "minLength": 1
+            },
+            "requestHash": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+            },
+            "nativeVersion": {
+              "const": "0.163.0"
+            },
+            "method": {
+              "const": "thread/read"
+            },
+            "params": {
+              "$ref": "#/$defs/Read01630ThreadReadd0"
+            },
+            "reply": {
+              "$ref": "#/$defs/Reply"
+            }
+          },
+          "required": [
+            "schemaVersion",
+            "observationId",
+            "callerPrincipalId",
+            "serviceNodeId",
+            "nativeExecutableHash",
+            "catalogHash",
+            "epoch",
+            "requestId",
+            "observedAt",
+            "requestHash",
+            "nativeVersion",
+            "method",
+            "params",
+            "reply"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schemaVersion": {
+              "const": 1
+            },
+            "observationId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "callerPrincipalId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "serviceNodeId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "nativeExecutableHash": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+            },
+            "catalogHash": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+            },
+            "epoch": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "requestId": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "observedAt": {
+              "type": "string",
+              "maxLength": 64,
+              "minLength": 1
+            },
+            "requestHash": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+            },
+            "nativeVersion": {
+              "const": "0.163.0"
+            },
+            "method": {
+              "const": "thread/turns/list"
+            },
+            "params": {
+              "$ref": "#/$defs/Read01630ThreadTurnsListd0"
+            },
+            "reply": {
+              "$ref": "#/$defs/Reply"
+            }
+          },
+          "required": [
+            "schemaVersion",
+            "observationId",
+            "callerPrincipalId",
+            "serviceNodeId",
+            "nativeExecutableHash",
+            "catalogHash",
+            "epoch",
+            "requestId",
+            "observedAt",
+            "requestHash",
+            "nativeVersion",
+            "method",
+            "params",
+            "reply"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schemaVersion": {
+              "const": 1
+            },
+            "observationId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "callerPrincipalId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "serviceNodeId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "nativeExecutableHash": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+            },
+            "catalogHash": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+            },
+            "epoch": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "requestId": {
+              "$ref": "#/$defs/RequestId"
+            },
+            "observedAt": {
+              "type": "string",
+              "maxLength": 64,
+              "minLength": 1
+            },
+            "requestHash": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+            },
+            "nativeVersion": {
+              "const": "0.163.0"
+            },
+            "method": {
+              "const": "thread/items/list"
+            },
+            "params": {
+              "$ref": "#/$defs/Read01630ThreadItemsListd0"
             },
             "reply": {
               "$ref": "#/$defs/Reply"

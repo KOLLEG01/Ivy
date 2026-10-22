@@ -35,7 +35,8 @@ export class TaskBoardNativeDriver {
   }
   async prepare(runId: string, slot: NativeSlot, origin: TaskBoard.NativeCallOrigin = { kind: 'initial' }): Promise<TaskBoard.ObjectPin> {
     const { run, task, active } = await this.current(runId), store = this.engine.store;
-    requireThat(slot === 'interrupt' ? !!run.value.cancellation : active && !run.value.cancellation, 'task_board_claim_inactive', 'Only an active uncancelled claim may prepare execution; interruption requires cancellation.');
+    const attachingTurn = slot === 'thread' && !!run.value.turnId && (active || !!run.value.cancellation);
+    requireThat(slot === 'interrupt' ? !!run.value.cancellation : attachingTurn || active && !run.value.cancellation, 'task_board_claim_inactive', 'Only an active claim may prepare execution; retained turns may reattach for observation or cancellation.');
     const operationId = await scopedOperationId(store.client, ['task-board-native-call', run.value.operationId, slot, origin]), name = 'Native call ' + operationId;
     let call = await store.named('task-board/native-call', name);
     if (!call) {
@@ -70,8 +71,9 @@ export class TaskBoardNativeDriver {
    * after the old receipt became uncertain, but only after reading that exact context. */
   async recoverUncertainResume(runId: string): Promise<boolean> {
     const { run, active } = await this.current(runId), pin = run.value.calls.thread;
-    if (!active || run.value.cancellation || run.value.turnId || !pin || !run.value.primaryResourceRef) return false;
-    if (run.value.calls.turn) {
+    const attachingTurn = !!run.value.turnId && (active || !!run.value.cancellation);
+    if ((!active || run.value.cancellation) && !attachingTurn || !pin || !run.value.primaryResourceRef) return false;
+    if (!run.value.turnId && run.value.calls.turn) {
       const turn = await this.engine.store.read('task-board/native-call', run.value.calls.turn.objectId);
       if (turn.pin.revision !== run.value.calls.turn.revision || turn.value.state !== 'prepared' ||
           turn.value.ownerPhase !== null || turn.value.evidence !== null) return false;
@@ -121,7 +123,8 @@ export class TaskBoardNativeDriver {
         const status = await this.status(run.value, call.value);
         requireThat(absence.epoch === status.epoch, 'task_board_native_epoch_changed', 'Absence and current native status must come from the same epoch.');
         const primaryFailed = slot === 'turn' && run.value.calls.thread && (await store.read('task-board/native-call', run.value.calls.thread)).value.ownerPhase === 'failed';
-        if ((!active || run.value.cancellation || primaryFailed || slot === 'steer' && status.epoch !== run.value.nativeEpoch) && slot !== 'interrupt') {
+        const attachingTurn = slot === 'thread' && !!run.value.turnId && (active || !!run.value.cancellation);
+        if ((!active || run.value.cancellation || primaryFailed || slot === 'steer' && status.epoch !== run.value.nativeEpoch) && slot !== 'interrupt' && !attachingTurn) {
           const prevented = await owner.management('prevent', { operationId: call.value.operationId,
             nativeVersion: call.value.request.nativeVersion, method: call.value.request.method, params: nativeRequest.params,
             expectedDefinitionHash: call.value.expectedDefinitionHash }, call.value.operationId);
@@ -139,7 +142,7 @@ export class TaskBoardNativeDriver {
             const { thread, canStartTurn, state } = nativeThreadState(catalogFor(snapshot.nativeVersion, { catalogHash: snapshot.catalogHash }).contract, snapshot.reply.result);
             requireThat(thread['id'] === run.value.primaryResourceRef!.nativeId && thread['ephemeral'] === false,
               'task_board_primary_mismatch', 'Turn dispatch must observe the same saved durable thread.');
-            requireThat(state !== 'notLoaded' || canStartTurn, 'task_board_reattach_required', 'The saved primary was unloaded and must be resumed before turn dispatch.');
+            requireThat(state !== 'notLoaded', 'task_board_reattach_required', 'The saved primary was unloaded and must be resumed before turn dispatch.');
             requireThat(canStartTurn,
               'task_board_native_not_idle', 'The native primary must be currently attached, accept input and have no active turn before its turn starts.');
           }

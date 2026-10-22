@@ -5,8 +5,18 @@ import { mutation, TaskBoardStore } from "./store.js";
 import type { Document } from "./store.js";
 import { sharedProjectKey } from './checks.js';
 
-export const publicationContention = (error: unknown): boolean => error instanceof IvyError &&
-  ['revision_conflict', 'task_board_publication_busy', 'task_board_handoff_pending', 'task_board_contention'].includes(error.code);
+const publicationConflicts = ['revision_conflict', 'task_board_publication_busy', 'task_board_handoff_pending', 'task_board_contention'];
+export const publicationContention = (error: unknown): boolean => error instanceof IvyError && publicationConflicts.includes(error.code);
+
+/** Delay recovery of the original work; an unknown outcome never authorizes a new execution. */
+export function recoveryRetryDelayMs(code?: string): number {
+  if (code && publicationConflicts.includes(code)) return 250;
+  if (code === 'task_board_native_order') return 1000;
+  if (code && ['deadline_exceeded', 'service_unavailable', 'service_not_ready', 'task_board_target_unavailable',
+    'native_unavailable', 'native_capacity', 'native_observation_deadline', 'native_connection_closed',
+    'native_connection_lost', 'native_read_failed', 'native_write_failed', 'task_board_native_unavailable'].includes(code)) return 5000;
+  return 30_000;
+}
 
 /** Serialize only changes to the same ticket, shared index or workspace. */
 export class TaskBoardCoordination {

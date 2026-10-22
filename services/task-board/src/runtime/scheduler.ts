@@ -1,4 +1,5 @@
 import { taskPrompt } from './task-prompt.js';
+import { recoveryRetryDelayMs } from './coordination.js';
 import { forwardDelegatedReview } from './task-delegation.js';
 import { commentsPending, peerComment, queuedInput } from './task-coordination.js';
 import { shouldWake } from './wake.js';
@@ -380,7 +381,7 @@ export class TaskBoardScheduler {
       const reason: TaskBoard.RuntimeWait['reason'] = ['task_board_project_unavailable', 'task_board_workspace_mismatch', 'task_board_workspace_conflict', 'task_board_workspace_reserved', 'target_conflict', 'not_found'].includes(failure.code) ? 'workspace' :
         failure.code === 'task_board_capability_unavailable' ? 'capability' : 'host';
       const runtimeWait: TaskBoard.RuntimeWait = { reason, detail: failure.message.slice(0, 2048), since: value.runtimeWait?.since ?? at,
-        retryAt: rateLimitRetryAt ?? new Date(this.now().getTime() + 30_000).toISOString() };
+        retryAt: rateLimitRetryAt ?? new Date(this.now().getTime() + recoveryRetryDelayMs(failure.code)).toISOString() };
       if (value.runtimeWait?.retryAt && value.runtimeWait.retryAt > at && value.runtimeWait.detail === runtimeWait.detail) return null;
       return { action: 'defer', ...base, runtimeWait };
     }
@@ -432,7 +433,7 @@ export class TaskBoardScheduler {
       requireThat(
         Date.parse(value.preparedAt) >=
           Date.parse(operation.value.updatedAt) +
-            Math.max(30000, this.engine.settings.scheduler.intervalMs),
+            Math.max(recoveryRetryDelayMs(operation.value.error?.code), this.engine.settings.scheduler.intervalMs),
         "task_board_retry_delay",
         "A successor must retain the minimum delay after its conclusive predecessor failure.",
       );
@@ -511,7 +512,7 @@ export class TaskBoardScheduler {
       if (
         this.now().getTime() <
         Date.parse(operation.value.updatedAt) +
-          Math.max(30000, this.engine.settings.scheduler.intervalMs)
+          Math.max(recoveryRetryDelayMs(operation.value.error?.code), this.engine.settings.scheduler.intervalMs)
       )
         return null;
       previousOperation = operation;

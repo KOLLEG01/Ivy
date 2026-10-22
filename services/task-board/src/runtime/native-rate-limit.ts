@@ -6,7 +6,8 @@ import { TaskBoardNativeInspector } from './native-inspector.js';
 import type { Document } from './store.js';
 
 const retryDelayMs = 15 * 60 * 1000;
-const capacityRetryDelayMs = 60 * 1000;
+const capacityRetryDelayMs = 30 * 1000;
+const connectionRetryDelayMs = 10 * 1000;
 const resetGraceMs = 60 * 1000;
 export const rateLimitWaitingDetail = (at: string): string => `Agent temporarily unavailable; automatic continuation after ${at}.`;
 
@@ -62,9 +63,13 @@ export function nativeErrorRetryAt(error: Record<string, Wire.Json>, observedAt:
   const httpStatus = kind ? nativeRecord(nativeRecord(info)[kind])['httpStatusCode'] : null;
   const connectionFailure = ['httpConnectionFailed', 'responseStreamConnectionFailed', 'responseTooManyFailedAttempts'].includes(kind ?? '') &&
     (httpStatus == null || typeof httpStatus === 'number' && ([408, 425, 429].includes(httpStatus) || httpStatus >= 500));
-  if (connectionFailure || ['serverOverloaded', 'rateLimitExceeded', 'responseStreamDisconnected'].includes(kind ?? '') ||
+  if (kind === 'rateLimitExceeded' || connectionFailure && httpStatus === 429)
+    return new Date(failedAt + 60_000).toISOString();
+  if (kind === 'serverOverloaded' || connectionFailure && httpStatus === 503 ||
     /^Selected model is at capacity(?:[.!]|$)/i.test(message))
     return new Date(failedAt + capacityRetryDelayMs).toISOString();
+  if (connectionFailure || kind === 'responseStreamDisconnected')
+    return new Date(failedAt + connectionRetryDelayMs).toISOString();
   if (kind !== 'usageLimitExceeded' &&
     !/^(?:you['’]ve hit your (?:session|weekly|usage) limit\b|Claude [\w ]{1,64} limit reached\b|rate limit (?:reached|exceeded)\b)/i.test(message)) return null;
   const reset = localReset(message, failedAt);

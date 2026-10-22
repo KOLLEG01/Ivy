@@ -46,7 +46,8 @@ test('periodic scans give recovery a turn even when the same waiting Task is alw
 
 const step = async (runtime: TaskBoardReconciler) => { await runtime.tick(); await runtime.settled(); };
 
-test('a conclusively rejected stale publication clears its recovery warning while uncertain conflicts remain visible', async t => {
+for (const [code, delay] of [['revision_conflict', 250], ['deadline_exceeded', 5000]] as const)
+test(`a stale publication recovers its original operation after ${code} while its uncertain outcome remains visible`, async t => {
   let now = Date.now(), attempts = 0;
   t.mock.method(Date, 'now', () => now);
   const f = taskBoardFixture(t), created = await f.create({ control: 'user' });
@@ -56,14 +57,17 @@ test('a conclusively rejected stale publication clears its recovery warning whil
   { principalId: 'user', serviceNodeId: f.first.owner.serviceNodeId, generation: f.first.owner.generation, source: 'user' });
   await f.first.coordination.acquire(operation);
   const runtime = new TaskBoardReconciler(f.first), recover = f.first.recoverOperation.bind(f.first);
-  f.first.recoverOperation = async () => { attempts++; throw new IvyError('revision_conflict', 'Fixture result is uncertain.', 'unknown'); };
+  f.first.recoverOperation = async () => { attempts++; throw new IvyError(code, 'Fixture result is uncertain.', 'unknown'); };
   await step(runtime);
-  assert.ok(runtime.diagnostics.some(value => value.code === 'revision_conflict'));
+  assert.ok(runtime.diagnostics.some(value => value.code === code));
   for (let pass = 0; pass < 6; pass++) await step(runtime);
   assert.equal(attempts, 1, 'Both recovery lanes must respect the retry delay.');
   assert.equal(runtime.recovered, true, 'A failed publication must not hold unrelated startup work.');
   f.first.recoverOperation = recover;
-  now += 251;
+  now += delay - 1;
+  await step(runtime);
+  assert.equal(attempts, 1);
+  now += 2;
   await step(runtime);
   const terminal = await f.first.store.read('task-board/operation', operation.pin.objectId);
   assert.equal(terminal.value.phase, 'failed'); assert.equal(terminal.value.error?.execution, 'not_executed');
@@ -132,20 +136,23 @@ test(`a publication warning follows its original action after another owner has 
   assert.deepEqual(runtime.diagnostics, []);
 });
 
-test('recovery errors stay visible through backoff and clear only after a successful pass', async t => {
+for (const [code, delay] of [['fixture_recovery_error', 30_000], ['native_observation_deadline', 5000]] as const)
+test(`${code} stays visible through backoff and clears only after a successful pass`, async t => {
   const w = await nativeWorkflow(t), runtime = new TaskBoardReconciler(w.f.first);
   let now = Date.now(), attempts = 0;
   t.mock.method(Date, 'now', () => now);
-  runtime.native.step = async () => { if (++attempts === 1) throw new IvyError('fixture_recovery_error', 'Read failed.'); };
+  runtime.native.step = async () => { if (++attempts === 1) throw new IvyError(code, 'Read failed.'); };
   runtime.signals.step = async () => null;
   const process = () => (runtime as unknown as { process: (lane: 'runs', id: string) => Promise<void> }).process('runs', w.state().run.objectId);
   await process(); await process();
   assert.equal(attempts, 1);
-  assert.ok(runtime.diagnostics.some(value => value.code === 'fixture_recovery_error'));
+  assert.ok(runtime.diagnostics.some(value => value.code === code));
   const task = (await w.f.first.store.read('task-board/task', w.state().task.objectId)).value;
   assert.equal(w.f.first.condition(task).state, 'failed');
   assert.match(w.f.first.condition(task).detail, /Read failed.*retry/);
-  now += 30_001; await process();
+  now += delay - 1; await process();
+  assert.equal(attempts, 1);
+  now += 2; await process();
   assert.equal(attempts, 2);
   assert.deepEqual(runtime.diagnostics, []);
   assert.notEqual(w.f.first.condition(task).state, 'failed', 'A successful retry clears the card error without changing the workflow.');

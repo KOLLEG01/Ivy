@@ -2,6 +2,7 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { NativeJournal } from "./journal.js";
+import { nativeReadTimeoutMs } from './rpc.js';
 import { LocalAgentState } from "./hive-state.js";
 import type { SavedState } from "./hive-state.js";
 import { NativeOperations } from "./operations.js";
@@ -589,7 +590,8 @@ export async function startAgentManager(
         if (!read) {
           const revision = noticePolicy.revision;
           read = (async () => {
-            const reply = await owner.rpc.request("thread/read", { threadId, includeTurns: false }, { detachOnTimeout: true });
+            const params = { threadId, includeTurns: false };
+            const reply = await owner.rpc.request("thread/read", params, { detachOnTimeout: true }, nativeReadTimeoutMs('thread/read', params));
             if ("error" in reply) throw new IvyError("native_inventory_unavailable", "Cannot determine the task's notification policy.");
             noticePolicy.setThread(threadId, (reply.result as { thread: Record<string, Wire.Json> }).thread, revision);
           })().finally(() => noticeReads.delete(threadId));
@@ -721,7 +723,7 @@ export async function startAgentManager(
       const reply = await owner.rpc.request(method, args, {
         detachOnTimeout: true,
         priority: "interaction",
-      });
+      }, nativeReadTimeoutMs(method, args));
       context.signal.throwIfAborted();
       available();
       if ("error" in reply)
@@ -980,6 +982,7 @@ export async function startAgentManager(
                   requestId = id;
                 },
               },
+              nativeReadTimeoutMs(request.method, request.params),
             );
             available();
             requireThat(

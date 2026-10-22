@@ -5,7 +5,7 @@ import { PassThrough } from 'node:stream';
 import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
-import { NativeRpc } from '../services/agent-manager/src/rpc.js';
+import { NativeRpc, nativeReadTimeoutMs } from '../services/agent-manager/src/rpc.js';
 import type { NativeRequest, NativeNotification } from '../services/agent-manager/src/rpc.js';
 import { NativeJournal, nativeFrameBytes } from '../services/agent-manager/src/journal.js';
 import { nativeRequestFrameBytes, nativeAnswerFrameBytes } from '../services/agent-manager/src/limits.js';
@@ -24,13 +24,21 @@ function fixture(t: TestContext, onClose: (code: string) => void = () => undefin
 
 test('expired agent reads do not close active requests and accept their late response', async t => {
   const f=fixture(t);
-  const background=f.rpc.request('thread/read',{threadId:'one',includeTurns:false}, {detachOnTimeout:true},10);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const params = { threadId: 'one', includeTurns: false };
+  const background=f.rpc.request('thread/read', params, {detachOnTimeout:true}, nativeReadTimeoutMs('thread/read', params));
   const active=f.rpc.request('account/logout',null);
-  await assert.rejects(background,{code:'native_observation_deadline',details:{method:'thread/read',timeoutMs:10}});
+  const history = f.rpc.request('thread/read', { threadId: 'one', includeTurns: true }, { detachOnTimeout: true },
+    nativeReadTimeoutMs('thread/read', { threadId: 'one', includeTurns: true }));
+  const expired = assert.rejects(background,{code:'native_observation_deadline',details:{method:'thread/read',timeoutMs:15_000}});
+  t.mock.timers.tick(15_000);
+  await expired;
   assert.equal(f.rpc.connected,true);
   f.emit({id:f.sent[0]!['id'],result:{data:[],nextCursor:null}});
   assert.equal(f.rpc.connected,true);
   f.emit({id:f.sent[1]!['id'],result:{}});assert.deepEqual(await active,{result:{}});
+  f.emit({id:f.sent[2]!['id'],result:{thread:{turns:[]}}});
+  assert.deepEqual(await history,{result:{thread:{turns:[]}}});
 });
 
 test('foreground native interactions still dispatch when background observation slots are occupied',async t=>{

@@ -281,7 +281,7 @@ export function useNativeAction(client: RpcClient, key: string) {
     recoveryTimer = setTimeout(async () => {
       if (!document.hidden) await reconcile();
       scheduleRecovery();
-    }, error.value ? 15000 : 3000);
+    }, error.value ? 5000 : 3000);
   };
   const recoverNow = () => {
     if (!document.hidden && pending.value && !busy.value) void reconcile();

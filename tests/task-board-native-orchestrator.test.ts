@@ -68,7 +68,8 @@ async function fixture(t: TestContext, catalogSourceHash?: string) {
     startReply: (value: string) => { startReplyStatus = value; },
     rejectStart: (value: string | null) => { rejectedStart = value; },
     rejectSteers: (count: number) => { rejectedSteers = count; },
-    archive: (value = true) => { archived = value; }, unload: (lazy = false) => { unloaded = true; lazyMetadata = lazy; }, inactive: () => { started = false; },
+    archive: (value = true) => { archived = value; }, unload: (lazy = false) => { unloaded = true; lazyMetadata = lazy; },
+    load: () => { unloaded = false; lazyMetadata = false; }, inactive: () => { started = false; },
     largeResume: () => { largeResume = true; },
     outputs: (items: Wire.Json[]) => { outputItems = items; }, outputError: (code: number) => { outputError = code; },
     error: (value: Wire.Json, at: number | null = null) => { turnError = value; completedAt = at; },
@@ -263,7 +264,8 @@ test(`direct turns on ${platform} platforms are adopted once, survive recovery a
   assert.equal((await engine.store.read('task-board/task', taskId)).pin.revision, finished.pin.revision);
   assert.equal(finished.value.attemptCount, before.value.attemptCount + 1);
   assert.equal(finished.value.commentDeliveries.length, before.value.commentDeliveries.length);
-  assert.equal(f.f.frames.slice(frames).filter(frame => ['thread/start', 'thread/resume', 'turn/start', 'turn/steer'].includes(String(frame['method']))).length, 0);
+  assert.equal(f.f.frames.slice(frames).filter(frame => frame['method'] === 'thread/resume').length, 1, 'Observation subscribes to the directly started turn.');
+  assert.equal(f.f.frames.slice(frames).filter(frame => ['thread/start', 'turn/start', 'turn/steer'].includes(String(frame['method']))).length, 0);
 });
 
 test('direct turn discovery recovers a short completed turn but ignores old history and archived native contexts', async t => {
@@ -387,21 +389,25 @@ for (const status of ['interrupted', 'failed', 'completed']) test(`a ${status} s
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 1);
 });
 
-test('native capacity failures retry after one minute without treating assistant text as an error', () => {
+test('native capacity and connection failures retry promptly while actual rate limits retain their delay', () => {
   const message = 'Selected model is at capacity. Please try a different model.';
   const turn = { status: 'failed', error: { message } };
-  assert.equal(nativeRateLimitRetryAt(turn, '2026-10-12T13:02:58.000Z'), '2026-10-12T13:03:58.000Z');
+  assert.equal(nativeRateLimitRetryAt(turn, '2026-10-12T13:02:58.000Z'), '2026-10-12T13:03:28.000Z');
   assert.equal(nativeRateLimitRetryAt({ status: 'failed', error: { message: 'Backend busy.', codexErrorInfo: 'serverOverloaded' } },
-    '2026-10-12T13:02:58.000Z'), '2026-10-12T13:03:58.000Z');
-  assert.equal(nativeRateLimitRetryAt({ ...turn, completedAt: 1791810178 }, '2026-10-12T14:00:00.000Z'), '2026-10-12T13:03:58.000Z');
+    '2026-10-12T13:02:58.000Z'), '2026-10-12T13:03:28.000Z');
+  assert.equal(nativeRateLimitRetryAt({ ...turn, completedAt: 1791810178 }, '2026-10-12T14:00:00.000Z'), '2026-10-12T13:03:28.000Z');
   assert.equal(nativeRateLimitRetryAt({ status: 'completed', error: { message } }, '2026-10-12T13:02:58.000Z'), null);
   assert.equal(nativeRateLimitRetryAt({ status: 'failed', items: [{ type: 'agentMessage', text: message }] }, '2026-10-12T13:02:58.000Z'), null);
   assert.equal(nativeRateLimitRetryAt({ status: 'failed', error: { message: `Please handle ${message}` } }, '2026-10-12T13:02:58.000Z'), null);
   assert.equal(nativeRateLimitRetryAt({ status: 'failed', error: { message: 'Retry later.', codexErrorInfo: 'rateLimitExceeded' } }, '2026-10-12T13:02:58.000Z'), '2026-10-12T13:03:58.000Z');
-  for (const httpStatusCode of [401, 403, 408, 429, 503]) {
+  for (const httpStatusCode of [401, 403, 408, 425, 429, 500, 503]) {
     assert.equal(nativeRateLimitRetryAt({ status: 'failed', error: { message: 'Connection failed.', codexErrorInfo: { httpConnectionFailed: { httpStatusCode } } } },
-      '2026-10-12T13:02:58.000Z'), httpStatusCode === 401 || httpStatusCode === 403 ? null : '2026-10-12T13:03:58.000Z');
+      '2026-10-12T13:02:58.000Z'), httpStatusCode === 401 || httpStatusCode === 403 ? null :
+      httpStatusCode === 429 ? '2026-10-12T13:03:58.000Z' : httpStatusCode === 503 ? '2026-10-12T13:03:28.000Z' : '2026-10-12T13:03:08.000Z');
   }
+  for (const codexErrorInfo of ['responseStreamDisconnected', 'httpConnectionFailed', 'responseStreamConnectionFailed'])
+    assert.equal(nativeRateLimitRetryAt({ status: 'failed', error: { message: 'Connection lost.', codexErrorInfo } },
+      '2026-10-12T13:02:58.000Z'), '2026-10-12T13:03:08.000Z');
 });
 
 test('a conclusively rejected turn start retries in the same context after capacity recovers', async t => {
@@ -437,7 +443,7 @@ for (const capacity of [false, true]) test(`${capacity ? 'capacity' : 'quota'} f
   assert.equal(run.value.phase, 'failed'); assert.equal(task.value.claim, null);
   assert.equal(task.value.workflowState, 'todo'); assert.equal(task.value.runtimeWait?.reason, 'host');
   assert.equal(engine.condition(task.value).state, 'failed');
-  assert.equal(task.value.runtimeWait?.retryAt, new Date(Date.parse(capacity ? run.value.finishedAt! : reset) + 60000).toISOString());
+  assert.equal(task.value.runtimeWait?.retryAt, new Date(Date.parse(capacity ? run.value.finishedAt! : reset) + (capacity ? 30_000 : 60_000)).toISOString());
   assert.equal(task.value.comments.at(-1)!.body, message);
   const scheduler = new TaskBoardScheduler(engine);
   for (let pass = 0; pass < 2; pass++) assert.equal(await scheduler.task(task.pin.objectId), null);
@@ -970,11 +976,11 @@ test('periodic reconciliation recovers completed work after provider loss and a 
   assert.deepEqual(runtime.diagnostics, []);
 });
 
-for (const lazy of [false, true]) test(`an unloaded primary reattaches once with ${lazy ? 'lazy' : 'idle'} metadata without replacing the prepared turn`, async t => {
+test('an unloaded primary reattaches once without replacing the prepared turn', async t => {
   const f = await fixture(t);
   await f.first.step(f.runId); await f.first.step(f.runId); await f.first.step(f.runId);
   const before = await f.current(), turn = before.value.calls.turn!;
-  f.unload(lazy);
+  f.unload();
   await f.first.step(f.runId);
   const attaching = await f.current();
   assert.notEqual(attaching.value.calls.thread!.objectId, before.value.calls.thread!.objectId);
@@ -987,6 +993,22 @@ for (const lazy of [false, true]) test(`an unloaded primary reattaches once with
   assert.deepEqual(after.value.primaryResourceRef, before.value.primaryResourceRef);
   for (const method of ['thread/start', 'thread/resume', 'turn/start'])
     assert.equal(f.f.frames.filter(frame => frame['method'] === method).length, 1);
+});
+
+test('notLoaded with direct input capability never dispatches the prepared turn', async t => {
+  const f = await fixture(t);
+  await f.first.step(f.runId); await f.first.step(f.runId); await f.first.step(f.runId);
+  const before = await f.current();
+  f.unload(true);
+  await f.first.drain(f.runId);
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 0);
+  assert.deepEqual((await f.current()).value.calls.turn, before.value.calls.turn);
+  assert.equal((await f.current()).value.turnId, null);
+  f.load();
+  await f.second.drain(f.runId);
+  assert.equal((await f.current()).value.phase, 'running');
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 1);
+  assert.equal((await f.current()).value.calls.turn!.objectId, before.value.calls.turn!.objectId);
 });
 
 test('Run orchestration reattaches the original primary before its original turn and confirms cancellation through final material', async t => {
@@ -1338,6 +1360,9 @@ for (const reconnect of [true, false]) test(reconnect ? 'a surviving active turn
   const run = (await f.current()).value;
   assert.equal(run.turnId, 'native-turn'); assert.equal(run.phase, 'running');
   if (reconnect) { assert.notEqual(run.nativeEpoch, epoch); assert.equal(run.nativeEpoch, f.f.epoch()); }
+  const resumes = f.f.frames.filter(frame => frame['method'] === 'thread/resume');
+  assert.equal(resumes.length, reconnect ? 1 : 0, 'A replacement connection must subscribe to the surviving turn.');
+  if (reconnect) assert.ok(f.f.frames.indexOf(resumes[0]!) < f.f.frames.findIndex(frame => frame['method'] === 'turn/steer'));
   const saved = (await f.f.w.f.first.store.read('task-board/task', task.pin.objectId)).value;
   assert.equal(saved.commentDeliveries.find(c => c.commentId === commentId)?.state, 'delivered');
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/steer').length, reconnect ? 1 : 2);

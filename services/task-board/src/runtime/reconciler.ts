@@ -11,7 +11,7 @@ import { routeTaskQuestions } from './question-routing.js';
 import { missingWakeTrigger, wakeCondition } from './wake.js';
 import { adoptDirectTurn } from './native-adoption.js';
 import { nativeRecord, nativeString } from './native-intent.js';
-import { publicationContention } from './coordination.js';
+import { recoveryRetryDelayMs } from './coordination.js';
 
 type Lane = TaskBoard.ScanCursor["lane"];
 const lanes: Lane[] = ["operations", "runs", "tasks", "deliveries"];
@@ -277,7 +277,7 @@ export class TaskBoardReconciler {
       this.clearOperationFailure(id);
     } catch (error) {
       const original = await this.engine.store.read('task-board/operation', id).catch(() => null);
-      this.operationRetries.set(id, { after: Date.now() + (publicationContention(error) ? 250 : 30_000), identity: original
+      this.operationRetries.set(id, { after: Date.now() + recoveryRetryDelayMs(IvyError.from(error).code), identity: original
         ? { callerPrincipalId: original.value.callerPrincipalId, operationId: original.value.operationId }
         : this.operationRetries.get(id)?.identity ?? null });
       throw error;

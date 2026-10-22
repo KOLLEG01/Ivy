@@ -309,7 +309,9 @@ test("a conclusive failed scheduler attempt uses a new operation and allocation 
   assert.ok(first);
   const failed = await f.first.operations.find(f.settings.principalId, first.value.request.operationId);
   assert.equal(failed?.value.phase, "failed");
-  now = Date.parse(failed!.value.updatedAt) + 31_000;
+  now = Date.parse(failed!.value.updatedAt) + 4999;
+  assert.equal(await scheduler.task(planned.task.objectId), null);
+  now++;
   const outcome = await scheduler.task(planned.task.objectId);
   assert.ok(outcome?.run);
   const successor = await f.first.store.named("task-board/scheduler-attempt", name, planned.task.objectId);
@@ -317,4 +319,6 @@ test("a conclusive failed scheduler attempt uses a new operation and allocation 
   assert.notEqual(successor?.value.request.operationId, first.value.request.operationId);
   if (successor?.value.request.action === "start" && first.value.request.action === "start")
     assert.notDeepEqual(successor.value.request.intent, first.value.request.intent);
+  assert.equal(await scheduler.task(planned.task.objectId), null);
+  assert.equal((await f.first.store.page('task-board/run')).items.length, 1);
 });

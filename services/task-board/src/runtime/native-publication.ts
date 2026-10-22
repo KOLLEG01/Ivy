@@ -121,8 +121,6 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
       next.notificationCursor = change.notificationCursor;
       const projected = projectNativeState(run, snapshot.document.value.status, snapshot.document.value.epoch, snapshot.thread, at, change.snapshot);
       next.phase = projected.phase; next.externalOutcome = projected.externalOutcome; runtimeWait = projected.runtimeWait;
-      if (snapshot.document.value.status === 'inProgress' && snapshot.thread['id'] === run.primaryResourceRef?.nativeId &&
-          nativeRecord(snapshot.thread['status'])['type'] === 'active') next.nativeEpoch = snapshot.document.value.epoch;
       detail = 'Saved the exact native turn state with separate read evidence.'; break;
     }
     case 'completion': {
@@ -152,30 +150,33 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
     }
     case 'reattachCall': {
       const change = request.change;
-      requireThat(active && !run.cancellation && run.primaryResourceRef && !run.turnId && run.calls.thread,
-        'task_board_native_order', 'Pre-turn reattachment requires the active uncancelled claim and confirmed primary.');
+      requireThat((active && !run.cancellation || !!run.turnId && (active || !!run.cancellation)) && run.primaryResourceRef && run.calls.thread,
+        'task_board_native_order', 'Reattachment requires the saved primary and an active claim or retained turn cancellation.');
       const call = await validateCall(change.call, 'thread'), origin = call.value.origin;
       requireThat(call.value.state === 'prepared' && origin?.kind === 'reattach' && same(origin.predecessor, run.calls.thread) &&
         change.call.objectId !== run.calls.thread.objectId,
         'task_board_native_intent_mismatch', 'Reattachment must be a new prepared call with the exact retained predecessor.');
       const previous = await observedCall(run.calls.thread, 'thread');
       const priorEpoch = previous.observation.epoch;
-      requireThat(!!priorEpoch && (origin.preparedEpoch !== priorEpoch || previous.observation.phase === 'succeeded'),
+      requireThat(!!priorEpoch && (origin.preparedEpoch !== priorEpoch || previous.observation.phase === 'succeeded' || !!run.turnId && previous.observation.phase === 'failed'),
         'task_board_native_intent_mismatch', 'An uncertain attachment requires a replacement native owner epoch.');
       requireThat(
         (previous.observation.phase === 'succeeded' && priorEpoch === run.nativeEpoch ||
           previous.observation.phase === 'outcome_unknown' &&
           previous.call.value.request.method === 'thread/resume' &&
-          (!run.nativeEpoch || previous.call.value.origin?.kind === 'reattach')) &&
+          (!run.nativeEpoch || previous.call.value.origin?.kind === 'reattach') ||
+          !!run.turnId && previous.observation.phase === 'failed' && previous.call.value.request.method === 'thread/resume') &&
         call.value.operationId !== previous.call.value.operationId,
         'task_board_native_order', 'Reattachment needs the previously confirmed thread operation and a distinct successor identity.');
-      if (run.calls.turn) {
+      if (!run.turnId && run.calls.turn) {
         const turnCall = await store.read('task-board/native-call', run.calls.turn.objectId);
         requireThat(same(turnCall.pin, run.calls.turn) && turnCall.value.state === 'prepared' &&
           turnCall.value.ownerPhase === null && turnCall.value.evidence === null,
           'task_board_outcome_unresolved', 'An observed turn operation cannot be replaced or treated as unstarted by reattachment.');
       }
-      next.calls.thread = change.call; next.phase = 'starting';
+      next.calls.thread = change.call;
+      if (!run.turnId) next.phase = 'starting';
+      else runtimeWait = task.value.runtimeWait;
       detail = 'Attached a retained resume intent for the saved primary.'; break;
     }
     case 'attachCall': {
@@ -201,7 +202,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
         requireThat(!run.cancellation && run.calls.thread, 'task_board_native_order', 'A turn requires thread confirmation and no pending cancellation.');
         requireThat((await observedCall(run.calls.thread, 'thread')).observation.phase === 'succeeded', 'task_board_native_order', 'The primary thread operation is not conclusively successful.');
       }
-      if (change.slot === 'thread') requireThat(!run.cancellation, 'task_board_cancellation_pending', 'Cancellation prevents preparation of a new native context.');
+      if (change.slot === 'thread') requireThat(!run.cancellation || !!run.turnId, 'task_board_cancellation_pending', 'Cancellation prevents preparation of a new native context.');
       next.calls[change.slot] = change.call; detail = 'Attached exact native ' + change.slot + ' intent before dispatch.'; break;
     }
     case 'observeCall': {
@@ -229,7 +230,11 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
         next.phase = 'outcome_unknown'; next.externalOutcome = { state: 'unknown', observedAt: at, evidence: artifact, code: observation.code ?? 'native_operation_pending' };
         runtimeWait = { reason: 'external_outcome', detail, since: at }; kind = 'outcome_unknown';
       } else if (observation.phase === 'failed') {
-        if (change.slot === 'interrupt') {
+        if (change.slot === 'thread' && run.turnId) {
+          next.phase = run.cancellation ? 'cancel_requested' : 'outcome_unknown';
+          next.externalOutcome = { ...run.externalOutcome, state: 'unknown', evidence: artifact, observedAt: at, code: observation.code ?? 'native_reattach_failed' };
+          runtimeWait = { reason: 'external_outcome', detail: 'Reattachment failed; the original turn still requires observation.', since: at };
+        } else if (change.slot === 'interrupt') {
           next.phase = 'cancel_requested'; next.externalOutcome = { ...run.externalOutcome, state: 'unknown', evidence: artifact, observedAt: at, code: observation.code ?? 'native_interrupt_failed' };
           runtimeWait = { reason: 'external_outcome', detail: 'Interruption failed; the native turn still requires terminal observation.', since: at };
         } else completion = { state: 'failed', summary: 'Native ' + change.slot + ' operation failed.\n\n' + (observation.reply && 'error' in observation.reply ? observation.reply.error.message.slice(0, 16384) : observation.code ?? 'No native success was recorded.'), evidence: artifact, code: observation.code ?? 'native_operation_failed',
@@ -243,7 +248,9 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
           requireThat(id && thread['ephemeral'] !== true, 'task_board_primary_mismatch', 'Native context creation must return a durable primary identity.');
           if (call.value.request.method === 'thread/resume') requireThat(id === nativeString((await resolveNativeRequest(store, call.value.request)).params['threadId']), 'task_board_primary_mismatch', 'Resume returned another primary context.');
           next.primaryResourceRef = { serviceNodeId: run.target.serviceNodeId, namespace: 'codex', kind: 'thread', nativeId: id }; next.nativeEpoch = observation.epoch;
-          next.phase = run.cancellation ? 'cancel_requested' : 'starting'; next.externalOutcome = { state: 'not_started', observedAt: at, evidence: artifact, code: null };
+          if (!run.turnId) {
+            next.phase = run.cancellation ? 'cancel_requested' : 'starting'; next.externalOutcome = { state: 'not_started', observedAt: at, evidence: artifact, code: null };
+          } else runtimeWait = task.value.runtimeWait;
         } else if (change.slot === 'turn') {
           const turn = nativeRecord(result['turn']), id = nativeString(turn['id']); requireThat(id, 'task_board_turn_mismatch', 'Turn start must return its exact native identity.');
           next.turnId = id; next.nativeEpoch = observation.epoch; next.phase = run.cancellation ? 'cancel_requested' : 'running';

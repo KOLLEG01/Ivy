@@ -17,7 +17,7 @@ import { claimedWorkflowState } from "./condition.js";
 import { mutation } from "./store.js";
 import type { Document } from "./store.js";
 import { syncNativeComments } from './native-comments.js';
-import { publicationContention } from './coordination.js';
+import { recoveryRetryDelayMs } from './coordination.js';
 import { NativeProgress } from './native-progress.js';
 
 /** One bounded reconciliation pass. Persisted calls and evidence authorize every next action. */
@@ -106,13 +106,12 @@ export class TaskBoardNativeOrchestrator {
       !["succeeded", "failed"].includes(latest.value.ownerPhase ?? "")
     );
   }
-  private postpone(runId: string, error?: unknown): void {
+  private postpone(runId: string, code?: string): void {
     if (this.retries.size >= 1024 && !this.retries.has(runId))
       this.retries.delete(this.retries.keys().next().value!);
     // Recovery only observes retained work. A past outage must not leave a
     // restored provider waiting for a growing, five-minute retry interval.
-    const delay = publicationContention(error) ? 250
-      : error instanceof IvyError && error.code === 'task_board_native_order' ? 1000 : 30_000;
+    const delay = recoveryRetryDelayMs(code);
     this.retries.set(runId, Date.now() + delay);
   }
   async drain(runId: string): Promise<boolean> {
@@ -123,7 +122,7 @@ export class TaskBoardNativeOrchestrator {
       for (let count = 0; count < 8; count++) {
         const before = await this.engine.store.read("task-board/run", runId);
         try { await this.step(runId); }
-        catch (error) { this.postpone(runId, error); throw error; }
+        catch (error) { this.postpone(runId, IvyError.from(error).code); throw error; }
         const after = await this.engine.store.read("task-board/run", runId);
         if (finishedRun(after.value)) { this.threads.delete(runId); this.retries.delete(runId); }
         else if (after.value.primaryResourceRef) {
@@ -137,12 +136,12 @@ export class TaskBoardNativeOrchestrator {
         const waiting = after.value.phase === "starting"
           ? (await this.engine.store.read("task-board/task", after.value.taskId)).value.runtimeWait : null;
         if (after.value.phase === "outcome_unknown" || waiting?.reason === "host")
-          this.postpone(runId);
+          this.postpone(runId, after.value.externalOutcome.code ?? undefined);
         else this.retries.delete(runId);
         if (
           (!["starting", "publishing_result", "cancel_requested"].includes(
             after.value.phase,
-          ) && !await this.unresolved(after, 'steer')) ||
+          ) && !await this.unresolved(after, 'steer') && !await this.unresolved(after, 'thread')) ||
           same(before.pin, after.pin)
         )
           return;
@@ -221,6 +220,10 @@ export class TaskBoardNativeOrchestrator {
         await this.driver.advance(runId, 'steer');
         return;
       }
+      if (await this.unresolved(run, 'thread')) {
+        if (!await this.driver.recoverUncertainResume(runId)) await this.driver.advance(runId, 'thread');
+        return;
+      }
       const inspection = await this.inspector.find(run.pin);
       if (inspection.kind === "pending") return;
       requireThat(
@@ -251,6 +254,18 @@ export class TaskBoardNativeOrchestrator {
           detail: "The original native process tree stopped; the saved unfinished turn cannot continue in the replacement owner.",
         });
         return;
+      }
+      // Reading history does not subscribe this connection to the live thread.
+      // Reuse the retained resume workflow before adopting a replacement epoch
+      // or steering. This never starts another turn or repeats its input.
+      if (status === 'inProgress' && nativeRecord(thread['status'])['type'] === 'active' && (active || run.value.cancellation)) {
+        const attachment = run.value.calls.thread ? await store.read('task-board/native-call', run.value.calls.thread) : null;
+        if (!attachment || attachment.value.epoch !== inspection.turns.epoch || attachment.value.ownerPhase === 'failed') {
+          await this.driver.prepare(runId, 'thread', attachment ? {
+            kind: 'reattach', predecessor: attachment.pin, preparedEpoch: inspection.turns.epoch,
+          } : { kind: 'initial' });
+          return;
+        }
       }
       if (
         status === "inProgress" &&
