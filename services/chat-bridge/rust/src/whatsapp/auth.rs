@@ -1,5 +1,7 @@
 //! Legacy auth.sqlite storage. Values are opaque BufferJSON, including fields
 //! that the native transport does not understand. Opening never re-encodes them.
+use ivy_contracts::{IvyError, IvyResult};
+use ivy_store::sqlite::OwnerLock;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use std::path::Path;
 
@@ -7,7 +9,45 @@ const SCHEMA: &str = "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA b
 CREATE TABLE IF NOT EXISTS auth(category TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(category,id));";
 
 pub struct AuthStore {
-    db: Connection,
+    pub(super) db: Connection,
+}
+
+/// One native account owns its authentication database until it closes. Fields
+/// drop in order, keeping the lock held while the SQLite connection closes.
+pub struct AuthAccount {
+    store: AuthStore,
+    lock: OwnerLock,
+}
+impl AuthAccount {
+    pub fn acquire(auth: &Path, executor_lock: &Path) -> IvyResult<Self> {
+        let lock = OwnerLock::acquire(executor_lock, true).map_err(|_| {
+            IvyError::new(
+                "executor_already_running",
+                "Another owner holds the account lock.",
+            )
+        })?;
+        let store = AuthStore::open(auth).map_err(|_| {
+            IvyError::new(
+                "storage_unavailable",
+                "Authentication storage is unavailable.",
+            )
+        })?;
+        Ok(Self { store, lock })
+    }
+    pub fn store(&mut self) -> &mut AuthStore {
+        &mut self.store
+    }
+    pub fn close(self) -> IvyResult<()> {
+        let Self { store, lock } = self;
+        let result = store.close().map_err(|_| {
+            IvyError::new(
+                "storage_unavailable",
+                "Authentication storage did not close.",
+            )
+        });
+        drop(lock);
+        result
+    }
 }
 
 impl AuthStore {
@@ -28,10 +68,30 @@ impl AuthStore {
             .optional()
     }
 
+    /// Read every category from one committed state for compatibility preflight.
+    /// Keep unknown rows and encoded values intact; inspection never advances keys.
+    pub fn snapshot(&mut self) -> rusqlite::Result<Vec<AuthEntry>> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let entries = {
+            let mut query =
+                tx.prepare("SELECT category,id,value FROM auth ORDER BY category,id")?;
+            query
+                .query_map([], |row| {
+                    Ok(AuthEntry {
+                        category: row.get(0)?,
+                        id: row.get(1)?,
+                        value: row.get(2)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok(entries)
+    }
+
     pub fn set(&self, category: &str, id: &str, value: Option<&str>) -> rusqlite::Result<()> {
-        if self.get(category, id)?.as_deref() == value {
-            return Ok(());
-        }
         set(&self.db, category, id, value)
     }
 
@@ -52,13 +112,38 @@ impl AuthStore {
     }
 }
 
+/// Encoded authentication material. Deliberately has no Debug implementation.
+pub struct AuthEntry {
+    pub category: String,
+    pub id: String,
+    pub value: String,
+}
+
 pub struct AuthMutation<'a> {
     pub category: &'a str,
     pub id: &'a str,
     pub value: Option<&'a str>,
 }
 
-fn set(db: &Connection, category: &str, id: &str, value: Option<&str>) -> rusqlite::Result<()> {
+pub(super) fn set(
+    db: &Connection,
+    category: &str,
+    id: &str,
+    value: Option<&str>,
+) -> rusqlite::Result<()> {
+    // The original store skips identical values, including inside keys.set.
+    // Check each ordered mutation in the transaction so duplicates and deletes
+    // observe earlier entries, without firing triggers for an unchanged row.
+    let previous: Option<String> = db
+        .query_row(
+            "SELECT value FROM auth WHERE category=? AND id=?",
+            (category, id),
+            |row| row.get(0),
+        )
+        .optional()?;
+    if previous.as_deref() == value {
+        return Ok(());
+    }
     match value {
         Some(value) => db.execute("INSERT INTO auth VALUES(?,?,?) ON CONFLICT(category,id) DO UPDATE SET value=excluded.value", (category, id, value))?,
         None => db.execute("DELETE FROM auth WHERE category=? AND id=?", (category, id))?,

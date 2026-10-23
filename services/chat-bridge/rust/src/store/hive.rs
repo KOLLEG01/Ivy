@@ -26,15 +26,6 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
         Err(IvyError::new(code, message))
     }
 }
-fn truthy(value: &Json) -> bool {
-    match value {
-        Json::Null => false,
-        Json::Bool(v) => *v,
-        Json::Number(v) => *v != 0.0 && !v.is_nan(),
-        Json::String(v) => !v.0.is_empty(),
-        _ => true,
-    }
-}
 fn pin_of(value: &Json) -> IvyResult<Pin> {
     Ok(Pin {
         object_id: value.required("object")?.required("id")?.as_str()?,
@@ -74,7 +65,10 @@ impl HiveStore {
         )?;
         require(
             metadata.get("parentId") == Some(&parent.map(Json::from).unwrap_or(Json::Null))
-                && !metadata.get("effectivelyArchived").is_some_and(truthy),
+                && !metadata
+                    .get("effectivelyArchived")
+                    .and_then(Json::as_bool)
+                    .unwrap_or(false),
             "chat_scope_mismatch",
             "The selected ChatBridge record is outside the active configured scope.",
         )?;
@@ -144,7 +138,7 @@ impl HiveStore {
             .as_array()
             .ok_or_else(IvyError::internal)?;
         require(
-            items.len() <= 1 && !page.get("nextCursor").is_some_and(truthy),
+            items.len() <= 1 && !page.get("nextCursor").is_some_and(|value| !value.is_null()),
             "chat_identity_conflict",
             "A ChatBridge durable name must resolve to one record across all versions.",
         )?;
@@ -170,7 +164,7 @@ impl HiveStore {
         let mut references = Json::Object(vec![]);
         match key {
             "chat-bridge/input" => {
-                if let Some(result) = value.get("result").filter(|v| truthy(v)) {
+                if let Some(result) = value.get("result").filter(|v| !(v).is_null()) {
                     references.insert("result", result.clone());
                 }
                 for (index, image) in value
@@ -294,7 +288,8 @@ impl HiveStore {
             !value
                 .required("object")?
                 .get("effectivelyArchived")
-                .is_some_and(truthy)
+                .and_then(Json::as_bool)
+                .unwrap_or(false)
                 && value
                     .required("revision")?
                     .get("revision")

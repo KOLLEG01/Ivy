@@ -7,6 +7,20 @@ use ivy_contracts::{
     json::{parse, stringify},
 };
 use rusqlite::types::Value;
+#[path = "chat-command-cases.rs"]
+mod commands;
+#[path = "chat-desktop-cases.rs"]
+mod desktop;
+#[path = "chat-desktop-host-cases.rs"]
+mod desktop_host;
+#[path = "chat-listener-cases.rs"]
+mod listener;
+#[path = "chat-session-cases.rs"]
+mod session;
+#[path = "chat-wa-runtime-cases.rs"]
+mod wa_runtime;
+#[path = "chat-wa-socket-cases.rs"]
+mod wa_socket;
 use std::{
     io::Write,
     process::{Command, Stdio},

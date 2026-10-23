@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.20)
+project(phone_windows_controls_fixture LANGUAGES CXX)
+add_library(phone_windows_controls_fixture SHARED fixture.cpp)
+target_compile_features(phone_windows_controls_fixture PRIVATE cxx_std_17)
+target_link_libraries(phone_windows_controls_fixture PRIVATE user32 oleaut32)

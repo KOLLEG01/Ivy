@@ -1,3 +1,6 @@
+#[path = "chat-config-cases.rs"]
+mod config_cases;
+
 #[path = "../../services/chat-bridge/rust/src/whatsapp/sender.rs"]
 mod sender;
 use sender::{MessageKey, admitted_sender, jid_phone, needs_lid_mapping, phone};

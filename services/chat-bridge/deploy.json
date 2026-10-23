@@ -7,14 +7,14 @@
   "connectsToHive": true,
   "requirements": {
     "node": ">=24.18.0 <25.0.0",
+    "os": ["win32", "linux"],
+    "arch": ["x64", "arm64"],
     "hiveProtocol": 1,
     "contracts": []
   },
   "entrypoint": {
-    "executable": "node",
-    "args": [
-      "dist/services/chat-bridge/src/main.js"
-    ],
+    "executable": "dist/native/ivy-chat-bridge",
+    "args": [],
     "timeoutMs": 30000
   },
   "prepare": [
@@ -29,22 +29,30 @@
     {
       "executable": "node",
       "args": [
+        "tools/build/build-rust-backend.mjs",
+        "--component",
+        "chat-bridge",
+        "--lib"
+      ],
+      "timeoutMs": 3600000
+    },
+    {
+      "executable": "node",
+      "args": [
         "--max-old-space-size=448",
         "tools/build/build-deployment.mjs",
         "--component",
         "chat-bridge"
       ],
-      "timeoutMs": 300000
+      "timeoutMs": 3600000
     }
   ],
   "checks": [],
   "readiness": {
     "timeoutMs": 60000,
     "command": {
-      "executable": "node",
-      "args": [
-        "dist/packages/host-runtime/src/health.js"
-      ],
+      "executable": "dist/native/ivy-health",
+      "args": [],
       "timeoutMs": 5000
     }
   },

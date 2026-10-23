@@ -4,8 +4,8 @@ import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { jsonFile } from '../../dist/packages/host-runtime/src/config.js';
 import { HiveClient, serviceTools } from '../../dist/packages/sdk/src/client.js';
-import { setupAudioHardware } from '../../dist/services/phone-bridge/src/runtime/audio-hardware-setup.js';
-import { validatePhoneService } from '../../dist/services/phone-bridge/src/runtime/registry.js';
+import { setupAudioHardware } from '../../dist/tools/operations/phone-audio-hardware-setup.js';
+import { validatePhoneService } from '../../dist/tools/operations/phone-contracts.js';
 
 assert.equal(process.platform, 'win32');
 assert.equal(process.argv.length, 3, 'Usage: node tools/operations/setup-phone-audio-hardware.mjs <absolute-request.json>');

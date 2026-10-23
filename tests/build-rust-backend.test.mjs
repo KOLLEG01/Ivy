@@ -4,12 +4,14 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, rmdirSync,
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { compileRustBackend } from '../tools/build/build-rust-backend.mjs';
+import { compileRustBackend, precompileRustLibrary } from '../tools/build/build-rust-backend.mjs';
 import { buildNativeDeployment } from '../tools/build/build-native-deployment.mjs';
 import { componentBuildInputs } from '../tools/build/build-inputs.mjs';
 
 function fixture(run, component = 'example') {
   const root = mkdtempSync(join(tmpdir(), 'ivy-rust-build-'));
+  const previousTarget = process.env.CARGO_TARGET_DIR;
+  delete process.env.CARGO_TARGET_DIR;
   const manifest = join(root, `services/${component}/rust/Cargo.toml`);
   mkdirSync(join(dirname(manifest), 'src'), { recursive: true });
   writeFileSync(join(root, 'Cargo.toml'), '[workspace]\nresolver="3"\nmembers=["services/example/rust"]\n');
@@ -31,7 +33,11 @@ function fixture(run, component = 'example') {
     }).join('\n');
   };
   try { run({ root, manifest, identity, targets, calls, cargo, build: extra => compileRustBackend({ root, component, target: 'x86_64-pc-windows-msvc', identity, cargo, ...extra }) }); }
-  finally { rmSync(root, { recursive: true, force: true }); }
+  finally {
+    if (previousTarget === undefined) delete process.env.CARGO_TARGET_DIR;
+    else process.env.CARGO_TARGET_DIR = previousTarget;
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 for (const component of ['example', 'host-executor']) test(`native compilation selects real component binaries, required features and locked isolated outputs (${component})`, () => fixture(f => {
@@ -54,6 +60,16 @@ test('libraries and unregistered crates never fall back to TypeScript', () => fi
   assert.throws(() => f.build(), /no native service executable/);
   assert.equal(f.calls.length, 1);
   assert.throws(() => f.build({ cargo: () => JSON.stringify({ packages: [], workspace_members: [] }) }), /Register/);
+}));
+
+test('library preparation keeps service features and emits no backend payload', () => fixture(f => {
+  assert.equal(precompileRustLibrary({ root: f.root, component: 'example', target: 'x86_64-pc-windows-msvc', identity: f.identity, cargo: f.cargo }), undefined);
+  const args = f.calls[1].args;
+  assert.ok(args.includes('--lib') && args.includes('--locked') && args.includes('--release'));
+  assert.equal(args.includes('--bin'), false);
+  assert.equal(args[args.indexOf('--features') + 1], 'browser');
+  assert.equal(existsSync(join(f.root, '.local/build')), false);
+  assert.equal(existsSync(join(f.root, 'dist')), false);
 }));
 
 test('missing compiler artifacts cannot reuse old staged executable bytes', () => fixture(f => {

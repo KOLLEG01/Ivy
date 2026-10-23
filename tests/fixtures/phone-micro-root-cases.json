@@ -1,0 +1,13 @@
+[
+  {"mode":"ok","started":true,"completed":true,"exitCode":0,"output":"{\"args\":[\"\",\"space value\",\"quote\\u0022value\",\"\\u00E9\\uD801\\uDC37\",\"tail\\\\\"],\"cwdMatches\":true,\"inherited\":true}","errorCode":null,"descendantsAlive":[]},
+  {"mode":"exit7","started":true,"completed":true,"exitCode":7,"output":"{\"args\":[\"\",\"space value\",\"quote\\u0022value\",\"\\u00E9\\uD801\\uDC37\",\"tail\\\\\"],\"cwdMatches\":true,\"inherited\":true}","errorCode":null,"descendantsAlive":[]},
+  {"mode":"raw","started":true,"completed":true,"exitCode":0,"output":"raw@\u0000","errorCode":null,"descendantsAlive":[]},
+  {"mode":"utf8","started":true,"completed":true,"exitCode":0,"output":"é𐐷","errorCode":null,"descendantsAlive":[]},
+  {"mode":"utf16","started":true,"completed":true,"exitCode":0,"output":"é𐐷","errorCode":null,"descendantsAlive":[]},
+  {"mode":"stderr-bound","started":true,"completed":true,"exitCode":0,"output":"","errorCode":null,"descendantsAlive":[]},
+  {"mode":"stderr-over","started":true,"completed":false,"exitCode":null,"output":"","errorCode":"micro_attach_unknown","descendantsAlive":[]},
+  {"mode":"stdout-over","started":true,"completed":false,"exitCode":null,"output":"","errorCode":"micro_attach_unknown","descendantsAlive":[]},
+  {"mode":"closed-desc","started":true,"completed":true,"exitCode":7,"output":"{\"args\":[\"\",\"space value\",\"quote\\u0022value\",\"\\u00E9\\uD801\\uDC37\",\"tail\\\\\"],\"cwdMatches\":true,\"inherited\":true}","errorCode":null,"descendantsAlive":[true]},
+  {"mode":"held-desc","started":true,"completed":false,"exitCode":null,"output":"","errorCode":"micro_attach_unknown","descendantsAlive":[true]},
+  {"mode":"live-tree","started":true,"completed":false,"exitCode":null,"output":"","errorCode":"micro_attach_unknown","descendantsAlive":[false,false]}
+]

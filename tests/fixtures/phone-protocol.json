@@ -1,0 +1,424 @@
+{
+  "discoveryHint": "PhoneBridge lets agents call configured recipients through a voice agent. Use phone_bridge_status, phone_bridge_call with initialPrompt, phone_bridge_select_voice, phone_bridge_restart_voice and phone_bridge_hangup. Native approvals and questions are available through phone_bridge_voice_inputs and phone_bridge_answer_voice_input.",
+  "namespaces": [
+    {
+      "namespace": "phone",
+      "description": "Phone calls with a voice model, Windows audio or automated announcements",
+      "guideMarkdown": "Use phone_bridge_status for readiness, configured recipient IDs, original call state, current Voice model selection and original operation outcomes. phone_bridge_call requires recipientId, operationId and a nonempty initialPrompt. PhoneBridge creates a local task with GPT-6.1 Sol/high by default and sends the prompt after connection. During the call, *1<M><R># selects model 1 Luna, 2 Sol or 3 Astra and reasoning 1 low, 2 medium, 3 high, 4 xhigh, 5 max or 6 ultra (not Luna). Selection leaves the current task running; *0# creates a new task with the selected model and reasoning, then starts Voice there. Use phone_bridge_hangup to end the call. phone_bridge_status.voiceModels discovers all picker-visible models and their supportedReasoningEfforts from the configured Codex home via model/list, cached for up to 60 seconds. Check voiceModelsError if discovery is unavailable. phone_bridge_select_voice accepts these exact model IDs and efforts without a fixed allowlist. It changes the current task; phone_bridge_restart_voice creates and transfers to a fresh task with that selection and the original greeting. Both require callId and operationId, keep the phone connection, and return the retained operation. Use a new operationId only for a new action; read a lost reply via phone_bridge_status with callId and operationId. Audio speaker voices are separate: phone_bridge_speaker_voices lists native V3 voices and, with callId, selected/effective voice and restartRequired. phone_bridge_select_speaker_voice takes callId, voiceId and operationId; it selects for that call's next Voice session without restarting. Use phone_bridge_restart_voice explicitly to apply now; future calls retain their configured default. A replay returns the original selection outcome. If the recipient already has an incoming or outgoing Voice call, phone_bridge_call forwards initialPrompt unchanged to its current task and returns the existing callId. It waits for setup or a task switch and retains the send under the request operationId, so retries cannot duplicate it. The internal phone.request method also supports the Windows audio route and authorized direct destinations. phone.screen plays an announcement and collects 1/2; phone.bridgeScreening connects an accepted call to Windows audio. Keep operationId and callId after lost replies. Admission does not prove connection: inspect the original call or operation through phone_bridge_status. Development operators can use ivy_dev diagnostics and reconnect tools for recovery.",
+      "tools": [
+        {
+          "namespace": "phone",
+          "name": "speakerVoices",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_speaker_voices",
+              "surface": "ivy"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "List audio speaker voices supported by the configured native Voice runtime for V3 (60-second cache). Optional callId includes selected/effective voices and restartRequired. This is separate from model/reasoning selection.",
+          "inputSchema": "PhoneSpeakerVoiceQuery",
+          "outputSchema": "PhoneSpeakerVoices",
+          "annotations": {
+            "readOnlyHint": true,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "selectSpeakerVoice",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_select_speaker_voice",
+              "surface": "ivy"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Select an audio speaker voice for the original active Voice call, validated against phone_bridge_speaker_voices. Applies on its next Voice session; use phone_bridge_restart_voice explicitly to apply during this call. Does not restart, change the current audio, or change future calls' default. Requires callId, voiceId and operationId; replay returns the original outcome.",
+          "inputSchema": "PhoneSelectSpeakerVoice",
+          "outputSchema": "PhoneOperationResult",
+          "annotations": {
+            "readOnlyHint": false,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "voiceInputs",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_voice_inputs",
+              "surface": "ivy"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Read up to four pending native approvals or questions for the original Voice task, including their exact reply schemas. Nothing is approved automatically.",
+          "inputSchema": "PhoneCallQuery",
+          "outputSchema": "PhoneVoiceInputs",
+          "annotations": {
+            "readOnlyHint": true,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "answerVoiceInput",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_answer_voice_input",
+              "surface": "ivy"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Submit one reply to a current native Voice task input using its exact id and reply schema. A consumed or ended input cannot be sent again; submitted does not confirm the requested task action completed.",
+          "inputSchema": "PhoneVoiceInputAnswer",
+          "outputSchema": "PhoneVoiceInputSubmitted",
+          "annotations": {
+            "readOnlyHint": false,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "probeLoopback",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_diagnostics",
+              "surface": "ivy_dev"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Measure five seconds of Windows loopback activity while idle (administrator only). Play a test tone in another app; returns peak/sample counts without storing audio. New calls interrupt the probe.",
+          "inputSchema": "PhoneStatusQuery",
+          "outputSchema": "PhoneLoopbackProbe",
+          "annotations": {
+            "readOnlyHint": true,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "audioSetup",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_diagnostics",
+              "surface": "ivy_dev"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Check audio device availability and mute settings for Windows routes (administrator only). Readiness covers device checks, not a live audio test; does not change devices.",
+          "inputSchema": "PhoneStatusQuery",
+          "outputSchema": "PhoneAudioSetup",
+          "annotations": {
+            "readOnlyHint": true,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "codecTest",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_diagnostics",
+              "surface": "ivy_dev"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Test installed codecs and resamplers while idle (administrator only). Uses synthetic audio without opening devices or calls; results are cached until the native process restarts.",
+          "inputSchema": "PhoneStatusQuery",
+          "outputSchema": "PhoneCodecTestResult",
+          "annotations": {
+            "readOnlyHint": true,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "inventory",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_diagnostics",
+              "surface": "ivy_dev"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "List Windows audio devices and supported call codecs for configuration (administrator only). Does not open audio streams or change defaults.",
+          "inputSchema": "PhoneStatusQuery",
+          "outputSchema": "PhoneInventory",
+          "annotations": {
+            "readOnlyHint": true,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "reconnect",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_reconnect",
+              "surface": "ivy_dev"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Reconnect the configured SIP registration when no calls are active (administrator only). Keep operationId after uncertain replies.",
+          "inputSchema": "PhoneReconnect",
+          "outputSchema": "SipRegistrationObservation",
+          "annotations": {
+            "readOnlyHint": false,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "calls",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_calls",
+              "surface": "ivy_dev"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "List current calls visible to this caller; use phone.call for details.",
+          "inputSchema": "PhoneStatusQuery",
+          "outputSchema": "PhoneCalls",
+          "annotations": {
+            "readOnlyHint": true,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "history",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_history",
+              "surface": "ivy_dev"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Find current and completed calls by history. Returns this caller’s calls; administrators may inspect all calls.",
+          "inputSchema": "PhoneHistoryQuery",
+          "outputSchema": "PhoneHistory",
+          "annotations": {
+            "readOnlyHint": true,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "logs",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_diagnostics",
+              "surface": "ivy_dev"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Diagnose a call using retained audio, codec and transport logs. Logs can expire; original command receipts remain available.",
+          "inputSchema": "PhoneLogsQuery",
+          "outputSchema": "PhoneLogs",
+          "annotations": {
+            "readOnlyHint": true,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "screen",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_screen",
+              "surface": "ivy_dev"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Call a configured recipient with an automated announcement: 1 accepts, 2 declines. Include an audible automated-call disclosure. Read phone.call for the decision; bridgeScreening connects an accepted call to Windows audio.",
+          "inputSchema": "PhoneScreen",
+          "outputSchema": "PhoneCall",
+          "annotations": {
+            "readOnlyHint": false,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "bridgeScreening",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_bridge_screening",
+              "surface": "ivy_dev"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Connect an accepted screening call to Windows audio in the original call, without redialing or starting Voice.",
+          "inputSchema": "PhoneCallQuery",
+          "outputSchema": "PhoneCall",
+          "annotations": {
+            "readOnlyHint": false,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "status",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_status",
+              "surface": "ivy"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Check phone readiness, configured recipient IDs and this caller’s active or incoming call. voiceModels lists models and their supportedReasoningEfforts from the configured Codex runtime, refreshed automatically with a 60-second cache. voiceModelsError reports catalog failures.",
+          "inputSchema": "PhoneStatusQuery",
+          "outputSchema": "PhoneServiceStatus",
+          "annotations": {
+            "readOnlyHint": true,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "request",
+          "interfaceVersion": "1.0.0",
+          "description": "Call a configured recipient. Choose route=voice and voicePrompt for a voice model conversation; the default route uses Windows audio. Authorized direct destinations require Windows. Success means admitted; check phone.call for connection.",
+          "inputSchema": "PhoneRequest",
+          "outputSchema": "PhoneCall",
+          "annotations": {
+            "readOnlyHint": false,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "voiceCall",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_call",
+              "surface": "ivy"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Call a configured recipient through the voice agent. initialPrompt is required. If that recipient already has a Voice call, send the prompt to its current task and return that call instead of dialing again. Reusing operationId never sends twice. Otherwise deliver the prompt after connection; GPT-6.1 Sol/high is the default task selection. Use phone_bridge_status to check connection and the retained operation outcome.",
+          "inputSchema": "PhoneVoiceCall",
+          "outputSchema": "PhoneCall",
+          "annotations": {
+            "readOnlyHint": false,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "selectVoice",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_select_voice",
+              "surface": "ivy"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Change model and reasoningEffort for subsequent turns in the active Voice task. Read available model IDs and each model's supportedReasoningEfforts from phone_bridge_status.voiceModels; combinations are validated against the configured Codex runtime. Requires callId and a new operationId. Keeps the phone call and task running. Reusing operationId returns the original outcome.",
+          "inputSchema": "PhoneSelectVoice",
+          "outputSchema": "PhoneOperationResult",
+          "annotations": {
+            "readOnlyHint": false,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "restartVoice",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_restart_voice",
+              "surface": "ivy"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Create a new Voice task with the current model and reasoning, transfer the live Voice session and send the original greeting. Keeps the phone call connected. Requires callId and a new operationId; reuse it after lost replies to read the original outcome without another restart.",
+          "inputSchema": "PhoneRestartVoice",
+          "outputSchema": "PhoneOperationResult",
+          "annotations": {
+            "readOnlyHint": false,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "accept",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_accept",
+              "surface": "ivy_dev"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Accept the incoming call returned by phone.status for this caller.",
+          "inputSchema": "PhoneAccept",
+          "outputSchema": "PhoneCall",
+          "annotations": {
+            "readOnlyHint": false,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "call",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_status",
+              "surface": "ivy"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Read an original call’s admission, connection, voice prompt and current state.",
+          "inputSchema": "PhoneCallQuery",
+          "outputSchema": "PhoneCallView",
+          "annotations": {
+            "readOnlyHint": true,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "operation",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_status",
+              "surface": "ivy"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "Read an original command outcome without repeating effects; null means that command has no retained intent.",
+          "inputSchema": "PhoneOperationQuery",
+          "outputSchema": "PhoneOperationResult",
+          "annotations": {
+            "readOnlyHint": true,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "phone",
+          "name": "hangup",
+          "discovery": {
+            "mcp": {
+              "name": "phone_bridge_hangup",
+              "surface": "ivy"
+            }
+          },
+          "interfaceVersion": "1.0.0",
+          "description": "End the original call or screening and release its audio resources. Uncertain cleanup remains blocked for recovery.",
+          "inputSchema": "PhoneCallQuery",
+          "outputSchema": "PhoneCallView",
+          "annotations": {
+            "readOnlyHint": false,
+            "idempotentHint": true
+          }
+        }
+      ],
+      "topics": [],
+      "inventoryKinds": []
+    }
+  ],
+  "contracts": [],
+  "requiredContracts": []
+}

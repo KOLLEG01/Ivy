@@ -1,8 +1,8 @@
 import { compileBackend, stageBackend } from './build-backend.mjs';
-import { buildWeb } from './build-web.mjs';
+import { buildPhoneRuntime } from './build-phone-runtime.mjs';
 import { fingerprint } from './build-cache.mjs';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { selectTests } from '../testing/test-selection.mjs';
 import * as testConfig from '../testing/test-config.mjs';
@@ -17,13 +17,25 @@ const scopes = {
 };
 const scope = scopes[component];
 if (!scope) throw new Error('Unknown component: ' + component);
+if (component === 'phone-bridge') {
+  const directory = resolve('.local/development/phone-bridge');
+  mkdirSync(directory, { recursive: true });
+  if (realpathSync(directory) !== directory) throw Error('Phone development output must not use links.');
+  const outputRoot = resolve(directory, 'dist');
+  if (existsSync(outputRoot) && realpathSync(outputRoot) !== outputRoot) throw Error('Phone development output must not use links.');
+  rmSync(outputRoot, { recursive: true, force: true });
+  await buildPhoneRuntime({ outputRoot });
+  const result = spawnSync(process.execPath, ['tools/testing/test.mjs', '--scope', scope, '--timeout-ms', '3600000'], {
+    stdio: 'inherit', windowsHide: true, env: { ...process.env, IVY_TEST_PHONE_ARTIFACT: directory },
+  });
+  if (result.error) throw result.error;
+  process.exit(result.status ?? 1);
+}
 const identity = scope === 'ui' ? null : compileBackend({ native: true, component });
 if (identity) stageBackend(identity, component);
-if (scope === 'ui' || component === 'hive') await buildWeb({ uis: [component === 'hive' ? 'console' : component] });
-if (component === 'phone-bridge') {
-  const phone = spawnSync(process.execPath, ['tools/build/build-phone-runtime.mjs'], { stdio: 'inherit', windowsHide: true });
-  if (phone.error) throw phone.error;
-  if (phone.status !== 0) process.exit(phone.status ?? 1);
+if (scope === 'ui' || component === 'hive') {
+  const { buildWeb } = await import('./build-web.mjs');
+  await buildWeb({ uis: [component === 'hive' ? 'console' : component] });
 }
 const tests = spawnSync(process.execPath, ['node_modules/typescript/bin/tsc', '-p', 'tsconfig.test.json', '--incremental', '--tsBuildInfoFile', 'dist/.test.tsbuildinfo'], { stdio: 'inherit', windowsHide: true });
 if (tests.error) throw tests.error;

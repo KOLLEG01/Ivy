@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { readDesktopVoiceCandidates, readDesktopVoiceSession } from '../services/phone-bridge/src/runtime/desktop-voice-inventory.js';
+import { readDesktopVoiceCandidates } from '../tools/operations/phone-voice-archive.js';
 
 test('Desktop archive inventory requires positive Voice source and includes native descendant scope', t => {
   const root = mkdtempSync(join(tmpdir(), 'ivy-voice-inventory-')), path = join(root, 'state.sqlite');
@@ -29,32 +29,4 @@ test('Desktop archive inventory requires positive Voice source and includes nati
   assert.throws(() => readDesktopVoiceCandidates(path), { code: 'phone_archive_capacity' });
   db.exec('ALTER TABLE threads RENAME COLUMN thread_source TO unknown_source');
   assert.throws(() => readDesktopVoiceCandidates(path), { code: 'phone_archive_schema_changed' });
-});
-
-test('Desktop Voice readiness reads only the exact unarchived rollout and distinguishes current sessions', t => {
-  const root = mkdtempSync(join(tmpdir(), 'ivy-voice-session-')), path = join(root, 'state.sqlite');
-  const db = new DatabaseSync(path); t.after(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
-  db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY,archived INTEGER,rollout_path TEXT);');
-  const id = randomUUID(), file = join(root, 'voice.jsonl'), sessionId = randomUUID();
-  db.prepare('INSERT INTO threads VALUES(?,0,?)').run(id, file);
-  assert.equal(readDesktopVoiceSession(path, id), null, 'rollout publication can lag the thread');
-  writeFileSync(file, JSON.stringify({ type: 'session_meta', payload: { id } }) + '\n');
-  assert.equal(readDesktopVoiceSession(path, id), null);
-  const event = (type: string, realtime_session_id = sessionId) => JSON.stringify({ type: 'realtime_item', payload: { type, realtime_session_id } });
-  appendFileSync(file, event('realtime_session_started') + '\n');
-  assert.deepEqual(readDesktopVoiceSession(path, id), { sessionId, active: true });
-  appendFileSync(file, event('realtime_session_closed'));
-  assert.deepEqual(readDesktopVoiceSession(path, id), { sessionId, active: true }, 'incomplete append is ignored');
-  appendFileSync(file, '\n');
-  assert.deepEqual(readDesktopVoiceSession(path, id), { sessionId, active: false });
-  const next = randomUUID();
-  appendFileSync(file, JSON.stringify({ type: 'event_msg', payload: { text: 'x'.repeat(600000) } }));
-  assert.equal(readDesktopVoiceSession(path, id), null, 'a window containing only an unfinished long append has no readiness proof');
-  appendFileSync(file, '\n' + event('realtime_session_started', next) + '\n');
-  assert.deepEqual(readDesktopVoiceSession(path, id), { sessionId: next, active: true }, 'bounded tail skips a partial old record');
-  db.prepare('UPDATE threads SET archived=1 WHERE id=?').run(id);
-  assert.equal(readDesktopVoiceSession(path, id), null);
-  db.prepare('UPDATE threads SET archived=0 WHERE id=?').run(id);
-  writeFileSync(file, JSON.stringify({ type: 'session_meta', payload: { id: randomUUID() } }) + '\n');
-  assert.throws(() => readDesktopVoiceSession(path, id), { code: 'phone_voice_reference_changed' });
 });

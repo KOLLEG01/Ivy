@@ -11,6 +11,18 @@ pub fn same_channel(a: &Json, b: &Json) -> bool {
         .all(|key| a.get(key) == b.get(key))
 }
 
+pub(crate) fn expected_bridge(request: &Json) -> IvyResult<&Json> {
+    if request.as_object().is_none() {
+        return Err(IvyError::new(
+            "invalid_arguments",
+            "A request object is required.",
+        ));
+    }
+    request
+        .get("expectedBridge")
+        .ok_or_else(|| IvyError::new("invalid_arguments", "Value is outside the JSON domain."))
+}
+
 pub struct ChatAdmission {
     definition: Json,
     definition_hash: String,
@@ -116,8 +128,8 @@ impl ChatAdmission {
     pub fn send(&self, caller: &JsString, request: &Json) -> IvyResult<AdmittedSend> {
         self.authorize(
             caller,
-            request.required("expectedBridge")?,
-            request.get("channel"),
+            expected_bridge(request)?,
+            request.get("channel").filter(|value| !(value).is_null()),
         )?;
         validate_chat("SendRequest", request)?;
         let payload = request.required("payload")?;

@@ -8,6 +8,7 @@ use ivy_sdk::{
     rpc::{RequestOptions, RpcClient},
 };
 use std::{
+    collections::VecDeque,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -119,6 +120,7 @@ pub struct ChatStore {
     local: Arc<Mutex<local::LocalStore>>,
     clock: Arc<dyn Clock>,
     change_version: Arc<AtomicU64>,
+    pub(crate) native_plans: Mutex<VecDeque<(String, Json)>>,
 }
 impl ChatStore {
     pub async fn open(
@@ -145,6 +147,7 @@ impl ChatStore {
             local: Arc::new(Mutex::new(local)),
             clock,
             change_version: Arc::new(AtomicU64::new(0)),
+            native_plans: Mutex::new(VecDeque::new()),
         })
     }
     async fn local<T: Send + 'static>(
@@ -161,6 +164,14 @@ impl ChatStore {
     }
     pub fn change_version(&self) -> u64 {
         self.change_version.load(Ordering::Relaxed)
+    }
+    pub(crate) fn now_iso(&self) -> IvyResult<String> {
+        date_to_iso(self.now_millis() as f64)
+            .map_err(|_| IvyError::internal())?
+            .to_utf8()
+    }
+    pub(crate) fn now_millis(&self) -> i64 {
+        self.clock.utc_millis()
     }
     pub async fn set_limits(&self, limits: local::Limits) -> StoreResult<()> {
         self.local(move |local| {

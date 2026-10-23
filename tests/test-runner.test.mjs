@@ -39,9 +39,9 @@ test(
   { skip: config.privateRepo },
   () => {
     const phone = selectTests(resolve("."), config, {
-      changed: ["services/phone-bridge/src/runtime/flow.ts"],
+      changed: ["services/phone-bridge/rust/src/service.rs"],
     });
-    assert.ok(phone.some((t) => t.file === "tests/phone-flow.test.ts"));
+    assert.ok(phone.some((t) => t.file === "tests/rust/phone_service_reference.rs"));
     assert.ok(!phone.some((t) => t.scope === "task-board"));
     for (const changed of [
       "services/hive/src/kernel.ts",
@@ -60,7 +60,7 @@ test(
   () => {
     const cases = [
       [
-        "services/phone-bridge/src/runtime/flow.ts",
+        "services/phone-bridge/rust/src/service.rs",
         "phone",
         ["chat", "task-board", "agent"],
       ],

@@ -109,7 +109,6 @@ else if (selected.length === 0) {
         // project to recreate its outputs instead of trusting stale incremental metadata.
         rmSync(resolve(root, 'dist/.test.tsbuildinfo'), { force: true });
         await run(['node_modules/typescript/bin/tsc', '-p', 'tsconfig.test.json', '--incremental', '--tsBuildInfoFile', 'dist/.test.tsbuildinfo'], root, false, Math.max(180000, testTimeout));
-        if (selected.some(t => /phone-.*\.integration/.test(t.file)) && process.platform === 'win32') await run(['tools/testing/build-phone-tests.mjs'], root, false, 300000);
       mkdirSync(resolve(root, 'dist'), { recursive: true });
       writeFileSync(testBuildStamp, JSON.stringify({ fingerprint: fingerprint(testBuildInputs, { selected: pathsForFingerprint(selected) }) }));
     }

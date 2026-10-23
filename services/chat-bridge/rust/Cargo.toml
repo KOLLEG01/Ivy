@@ -7,12 +7,27 @@ license.workspace = true
 
 [dependencies]
 ivy-contracts.workspace = true
+ivy-host-runtime.workspace = true
 ivy-sdk.workspace = true
 ivy-store.workspace = true
 uuid.workspace = true
 base64.workspace = true
 rusqlite.workspace = true
 tokio.workspace = true
+url.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+ureq = { version = "=3.5.0", default-features = false, features = ["rustls"] }
+ogg = "=0.9.2"
+opus = "=0.4.0"
+bytes = "=1.12.1"
+async-trait = "=0.1.92"
+rand = "=0.10.3"
+wacore = { version = "=0.7.0", default-features = false, features = ["legacy-session-interop"] }
+waproto = "=0.7.0"
+whatsapp-rust = { version = "=0.7.0", default-features = false, features = ["tokio-native", "tokio-transport", "ureq-client", "legacy-session-interop"] }
+wacore-libsignal = { version = "=0.7.0", default-features = false, features = ["legacy-session-interop"] }
 
 [[test]]
 name = "chat-native-driver"
@@ -29,6 +44,38 @@ path = "../../../tests/rust/chat-input-media.rs"
 [[test]]
 name = "chat-admission"
 path = "../../../tests/rust/chat-admission.rs"
+
+[[test]]
+name = "chat-queue"
+path = "../../../tests/rust/chat-queue.rs"
+
+[[test]]
+name = "chat-main-context"
+path = "../../../tests/rust/chat-main-context.rs"
+
+[[test]]
+name = "chat-queries"
+path = "../../../tests/rust/chat-queries.rs"
+
+[[test]]
+name = "chat-outbox"
+path = "../../../tests/rust/chat-outbox.rs"
+
+[[test]]
+name = "chat-notices"
+path = "../../../tests/rust/chat-notices.rs"
+
+[[test]]
+name = "chat-result-text"
+path = "../../../tests/rust/chat-result-text.rs"
+
+[[test]]
+name = "chat-collection-reads"
+path = "../../../tests/rust/chat-collection-reads.rs"
+
+[[test]]
+name = "chat-evidence-bytes"
+path = "../../../tests/rust/chat-evidence-bytes.rs"
 
 [[test]]
 name = "chat-storage"

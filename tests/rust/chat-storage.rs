@@ -1,6 +1,12 @@
-use ivy_chat_bridge::whatsapp::auth::{AuthMutation, AuthStore};
+use ivy_chat_bridge::whatsapp::auth::{AuthAccount, AuthMutation, AuthStore};
 use ivy_chat_bridge::whatsapp::journal_io::{JournalIo, StorageUnavailable};
 use rusqlite::{Connection, types::Value};
+#[path = "chat-auth-compat-cases.rs"]
+mod auth_compat;
+#[path = "chat-auth-native-cases.rs"]
+mod auth_native;
+#[path = "chat-auth-backend-cases.rs"]
+mod auth_backend;
 #[path = "chat-store-cases.rs"]
 mod chat_store;
 #[path = "chat-store-hive-cases.rs"]
@@ -79,6 +85,79 @@ fn opaque_auth_fields_are_preserved_and_key_batches_delete_exactly() {
         .unwrap();
     assert_eq!(store.get("session", "fixture").unwrap(), None);
     store.close().unwrap();
+}
+
+#[test]
+fn native_auth_account_lock_is_exclusive_and_released_with_the_store() {
+    let fixture = Fixture::new();
+    let auth = fixture.0.join("auth.sqlite");
+    let lock = fixture.0.join("executor-lock.sqlite");
+    let mut first = AuthAccount::acquire(&auth, &lock).unwrap();
+    first
+        .store()
+        .set("future-category", "retained", Some("{}"))
+        .unwrap();
+    assert!(
+        matches!(AuthAccount::acquire(&auth, &lock), Err(error) if error.code == "executor_already_running")
+    );
+    first.close().unwrap();
+    let mut reopened = AuthAccount::acquire(&auth, &lock).unwrap();
+    assert_eq!(
+        reopened
+            .store()
+            .get("future-category", "retained")
+            .unwrap()
+            .as_deref(),
+        Some("{}")
+    );
+    drop(reopened);
+    assert!(AuthAccount::acquire(&fixture.0.join("missing/auth.sqlite"), &lock).is_err());
+    AuthAccount::acquire(&auth, &lock).unwrap().close().unwrap();
+}
+
+#[test]
+fn ordered_auth_batches_keep_duplicate_writes_and_deletes_as_noops() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join("auth.sqlite");
+    let mut store = AuthStore::open(&path).unwrap();
+    store.set("future-category", "base", Some("{}")).unwrap();
+    let inspect = Connection::open(&path).unwrap();
+    inspect.execute_batch("CREATE TABLE observed(kind TEXT); CREATE TRIGGER inserts BEFORE INSERT ON auth BEGIN INSERT INTO observed VALUES('insert'); END; CREATE TRIGGER updates BEFORE UPDATE ON auth BEGIN INSERT INTO observed VALUES('update'); END; CREATE TRIGGER deletes BEFORE DELETE ON auth BEGIN INSERT INTO observed VALUES('delete'); END;").unwrap();
+    store
+        .set_batch(
+            &[
+                ("base", Some("{}")),
+                ("missing", None),
+                ("ordered", Some("1")),
+                ("ordered", Some("1")),
+                ("ordered", None),
+                ("ordered", Some("2")),
+                ("base", None),
+                ("base", None),
+            ]
+            .into_iter()
+            .map(|(id, value)| AuthMutation {
+                category: "future-category",
+                id,
+                value,
+            })
+            .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(
+        inspect
+            .query_row("SELECT COUNT(*) FROM observed", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        store.get("future-category", "ordered").unwrap().as_deref(),
+        Some("2")
+    );
+    assert_eq!(store.get("future-category", "base").unwrap(), None);
+    store.close().unwrap();
+    inspect.close().unwrap();
 }
 
 #[test]

@@ -1,4 +1,12 @@
-use ivy_chat_bridge::{admission::ChatAdmission, native_driver::ChatNativeDriver};
+use ivy_chat_bridge::{
+    admission::ChatAdmission, native_driver::ChatNativeDriver, store::ChatStore,
+};
+#[path = "chat-native-driver-cases.rs"]
+mod durable;
+#[path = "chat-generation-cases.rs"]
+mod generation;
+#[path = "chat-service-runtime-cases.rs"]
+mod runtime;
 use ivy_contracts::{
     IvyError, IvyJson as Json, Outcome, checked_native_contract::CheckedNativeContracts,
     json::parse,
@@ -100,13 +108,17 @@ async fn configured_owner_readiness_and_rpc_order_match_original_driver() {
         });
         let tools = Arc::new(ToolClients::new(client.clone()));
         let admission = ChatAdmission::new(row.get("definition").unwrap()).unwrap();
+        let store = ChatStore::open(client.clone(), None, None).await.unwrap();
+        let instructions = "".into();
         let driver = ChatNativeDriver::new(
-            client.clone(),
+            &store,
             tools,
             &admission,
             &catalogs,
             "chat-provider".into(),
-        );
+            &instructions,
+        )
+        .unwrap();
         let result = async {
             let value = match row.required("action")?.as_str()?.as_str() {
                 "identity" => {
@@ -160,18 +172,34 @@ async fn configured_owner_readiness_and_rpc_order_match_original_driver() {
                 ]),
             )]),
         };
-        assert_eq!(
-            &actual,
-            row.get("result").unwrap(),
-            "result {:?}",
-            row.get("label")
-        );
-        assert_eq!(
-            &Json::Array(client.calls.lock().unwrap().clone()),
-            row.get("calls").unwrap(),
-            "calls {:?}",
-            row.get("label")
-        );
+        let malformed_flag = ["connected", "synced"].iter().any(|key| {
+            row.get("node")
+                .unwrap()
+                .get(key)
+                .is_none_or(|value| value.as_bool().is_none())
+        });
+        if malformed_flag {
+            assert_eq!(
+                actual.get("error").unwrap().get("code"),
+                Some(&Json::from("chat_principal_mismatch"))
+            );
+            let calls = client.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1, "Invalid flags must refuse native discovery");
+            assert_eq!(calls[0], row.get("calls").unwrap().as_array().unwrap()[0]);
+        } else {
+            assert_eq!(
+                &actual,
+                row.get("result").unwrap(),
+                "result {:?}",
+                row.get("label")
+            );
+            assert_eq!(
+                &Json::Array(client.calls.lock().unwrap().clone()),
+                row.get("calls").unwrap(),
+                "calls {:?}",
+                row.get("label")
+            );
+        }
     }
     assert!(rows.as_array().unwrap().len() >= 45);
 }

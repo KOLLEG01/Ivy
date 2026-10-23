@@ -20,7 +20,10 @@ if (targetIndex >= 0 && (!rust || !target || target.startsWith('--') || process.
   throw Error('--target requires one explicit native component target.');
 const backend = !rust && (all || backendComponents.has(requested))
   ? await import('./build-backend.mjs') : null;
-const identity = rust ? buildNativeDeployment({ component: requested, target, identity: buildIdentity() }).identity
+const nativeResult = rust ? requested === 'phone-bridge'
+  ? await (await import('./build-phone-runtime.mjs')).buildPhoneRuntime({ target, identity: buildIdentity() })
+  : buildNativeDeployment({ component: requested, target, identity: buildIdentity() }) : null;
+const identity = rust ? nativeResult.identity
   : all ? backend.compileBackend({ native: true }) : backend ? backend.compileBackend({ native, component: requested }) : null;
 if (all || requested === 'host-executor' && !rust || webByComponent[requested]) {
   const { buildWeb } = await import('./build-web.mjs');

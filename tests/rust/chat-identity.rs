@@ -1,5 +1,7 @@
 use ivy_chat_bridge::whatsapp::identity::{identity, output_parts};
 use ivy_contracts::{IvyJson, JsString, json::parse};
+#[path = "chat-messages-cases.rs"]
+mod messages;
 
 #[test]
 fn ordinary_json_identities_match_node_without_canonical_reordering() {
@@ -23,12 +25,11 @@ fn ordinary_json_identities_match_node_without_canonical_reordering() {
 #[test]
 fn chunked_ids_and_text_match_the_original_journal_formula() {
     let key = JsString::from("reply-key");
-    let mut units = vec![u16::from(b'a'); 3499];
-    units.extend([0xd83d, 0xde00, 0xd800, u16::from(b'b'), 0xdc00]);
-    let parts = output_parts(&key, &JsString(units.clone())).unwrap();
+    let text = format!("{}😀世界", "a".repeat(3499));
+    let parts = output_parts(&key, &text.into()).unwrap();
     let output = std::process::Command::new("node").args(["--input-type=module", "-e", r#"
         import {createHash} from 'node:crypto';
-        const text='a'.repeat(3499)+'\ud83d\ude00\ud800b\udc00', chars=[...text], parts=[];
+        const text='a'.repeat(3499)+'😀世界', chars=[...text], parts=[];
         for(let offset=0;offset<chars.length;offset+=3500) parts.push({id:createHash('sha256').update(JSON.stringify(['out','reply-key',offset])).digest('hex').slice(0,32).toUpperCase(),text:chars.slice(offset,offset+3500).join('')});
         process.stdout.write(JSON.stringify(parts));
     "#]).output().unwrap();
@@ -49,4 +50,10 @@ fn chunked_ids_and_text_match_the_original_journal_formula() {
         actual == expected,
         "Output chunks differ from Node's original journal formula"
     );
+}
+
+#[test]
+fn output_text_retains_opaque_wire_units() {
+    let parts = output_parts(&"reply-key".into(), &JsString(vec![0xd800])).unwrap();
+    assert_eq!(parts[0].text, JsString(vec![0xd800]));
 }

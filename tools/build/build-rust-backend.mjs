@@ -31,6 +31,12 @@ export function compileRustBackend({ component, target, root = process.cwd(), id
   return compileRustBinaries({ component, target, root, identity, cargo, runtimeFiles });
 }
 
+/** Compile a large service library within its preparation command budget.
+ * The normal executable build still owns payload assembly. */
+export function precompileRustLibrary(options = {}) {
+  return compileRustBinaries({ ...options, libraryOnly: true });
+}
+
 /** Compile only explicitly selected registered helper bins into the same payload
  * format. A helper payload never substitutes for the component service. */
 export function compileRustHelpers({ binaries, ...options } = {}) {
@@ -43,7 +49,7 @@ export function compileRustHelpers({ binaries, ...options } = {}) {
   return compileRustBinaries(options, binaries);
 }
 
-function compileRustBinaries({ component, target, root = process.cwd(), identity, cargo = runCargo, runtimeFiles = [] }, helperNames) {
+function compileRustBinaries({ component, target, root = process.cwd(), identity, cargo = runCargo, runtimeFiles = [], libraryOnly = false }, helperNames) {
   if (!/^[a-z][a-z0-9-]*$/.test(component ?? '')) throw new Error('A component name is required.');
   const platform = typeof target === 'string' && Object.hasOwn(rustBackendTargets, target) ? rustBackendTargets[target] : undefined;
   if (!platform) throw new Error('An explicit supported Rust target is required.');
@@ -84,8 +90,10 @@ function compileRustBinaries({ component, target, root = process.cwd(), identity
   // Explicit required features also include optional binary targets; default
   // features remain enabled (for example the selected component's browser).
   const args = ['build', '--locked', '--release', '--target', target, '--package', selected.name,
-    ...binaries.flatMap(t => ['--bin', t.name]), ...(features.length ? ['--features', features.join(',')] : []), '--message-format=json-render-diagnostics'];
-  const messages = cargo(args, options).split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
+    ...(libraryOnly ? ['--lib'] : binaries.flatMap(t => ['--bin', t.name])), ...(features.length ? ['--features', features.join(',')] : []), '--message-format=json-render-diagnostics'];
+  const output = cargo(args, options);
+  if (libraryOnly) return;
+  const messages = output.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
   const artifacts = new Map();
   for (const message of messages) {
     if (message.reason !== 'compiler-artifact' || message.package_id !== selected.id || !message.executable || !message.target.kind.includes('bin')) continue;
@@ -123,6 +131,9 @@ function compileRustBinaries({ component, target, root = process.cwd(), identity
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   const value = name => process.argv[process.argv.indexOf(name) + 1];
-  if (!process.argv.includes('--component') || !process.argv.includes('--target')) throw new Error('Use --component <name> --target <triple>.');
-  compileRustBackend({ component: value('--component'), target: value('--target') });
+  if (!process.argv.includes('--component')) throw new Error('Use --component <name> [--target <triple>] [--lib].');
+  const target = process.argv.includes('--target') ? value('--target')
+    : Object.keys(rustBackendTargets).find(target => rustBackendTargets[target] === `${process.platform}-${process.arch}`);
+  const build = process.argv.includes('--lib') ? precompileRustLibrary : compileRustBackend;
+  build({ component: value('--component'), target });
 }

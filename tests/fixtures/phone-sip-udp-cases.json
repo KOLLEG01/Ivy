@@ -1,0 +1,22 @@
+[
+  {"count":0,"blocked":false,"stored":null},
+  {"count":0,"blocked":false,"stored":null},
+  {"count":1,"blocked":true,"stored":"10000000000"},
+  {"count":1,"blocked":true,"stored":"10000000000"},
+  {"count":1,"blocked":true,"stored":"10000000000"},
+  {"count":1,"blocked":true,"stored":"10000000000"},
+  {"count":0,"blocked":false,"stored":null},
+  {"count":1,"blocked":true,"stored":"10000000000"},
+  {"count":1,"blocked":true,"stored":"10000000000"},
+  {"count":2,"blocked":true,"stored":"10050000000"},
+  {"count":3,"blocked":true,"stored":"10050000000"},
+  {"count":3,"blocked":false,"stored":null},
+  {"count":3,"blocked":true,"stored":"10050000000"},
+  {"count":3,"blocked":true,"stored":"10000000000"},
+  {"count":3,"blocked":true,"stored":"10000000000"},
+  {"count":2,"blocked":false,"stored":null},
+  {"count":3,"blocked":true,"stored":"10310000000"},
+  {"count":2,"blocked":false,"stored":null},
+  {"count":2,"blocked":true,"stored":"10050000000"},
+  {"count":0,"blocked":false,"stored":null}
+]

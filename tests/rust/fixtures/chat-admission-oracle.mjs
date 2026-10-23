@@ -77,6 +77,9 @@ function add(kind,def=definition,req=request,caller='alice'){
   rows.push(row);
 }
 add('definition');add('send');
+for(const value of [null,{},true,4,'request',[]])add('send',definition,value);
+{const missing=structuredClone(request);delete missing.expectedBridge;add('send',definition,missing);}
+for(const value of [null,false,0,''])add('send',definition,{...request,channel:value});
 for(const caller of ['alice','Alice','bob','\ud800','😀'])add('send',definition,request,caller);
 for(const field of ['principalId','callerPrincipalId','workspaceId','definitionHash'])for(const value of ['different','sha256:'+'b'.repeat(64)])
   add('send',definition,{...request,expectedBridge:{...request.expectedBridge,[field]:value}});

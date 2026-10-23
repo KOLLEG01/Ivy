@@ -1,0 +1,11 @@
+[
+    {"ok":true,"fingerprint":"sha256:e5068371dc73d000a4e2a3eb9bad0beddc74109817818322b4e5d97f217e2aa2","options":[{"settings":{"cwd":"C:\\work\\a\\..\\b"},"artifactRoot":"artifacts","dataRoot":"data\\owned\\codex-runtime","clientName":"ivy-phone-bridge","clientVersion":"0.1.0"}],"requests":[]},
+    {"ok":false,"code":"invalid_arguments","message":"Codex Voice requires its explicit local working directory.","fingerprint":null,"options":[],"requests":[]},
+    {"ok":true,"fingerprint":"sha256:89cc6fa21bfae1d29d5af57ee5eae7bec40f58e97ccf8e5645ae6df9126a680b","options":[{"settings":{"cwd":"/work//a/../b","config":null,"projectId":null},"artifactRoot":"artifacts","dataRoot":"data/owned/codex-runtime","clientName":"ivy-phone-bridge","clientVersion":"0.1.0"}],"requests":[]},
+    {"ok":true,"fingerprint":"sha256:0fab6850a9b9eecef8957fc5f1713518ca526017cd804febed39615f0ac3b458","options":[{"settings":{"cwd":"\\\\server\\share\\x\\..\\","projectId":""},"artifactRoot":"artifacts","dataRoot":"data\\owned\\codex-runtime","clientName":"ivy-phone-bridge","clientVersion":"0.1.0"}],"requests":[]},
+    {"ok":false,"code":"phone_voice_project_missing","message":"Configured Voice project is unavailable in this Codex home.","fingerprint":"sha256:d54bcfb3183e32c29d4d8b5bcaf0992eee38e62a8f1f3068c55da054121b9844","options":[{"settings":{"cwd":"C:\\work\\\ud800","projectId":"p"},"artifactRoot":"artifacts","dataRoot":"data\\owned\\codex-runtime","clientName":"ivy-phone-bridge","clientVersion":"0.1.0"}],"requests":[{"method":"project/read","params":{"projectId":"p"}}]},
+    {"ok":false,"code":"invalid_arguments","message":"Codex Voice requires its explicit local working directory.","fingerprint":null,"options":[],"requests":[]},
+    {"ok":false,"code":"invalid_arguments","message":"Codex Voice requires its explicit local working directory.","fingerprint":null,"options":[],"requests":[]},
+    {"ok":false,"code":"invalid_arguments","message":"Codex Voice requires its explicit local working directory.","fingerprint":null,"options":[],"requests":[]},
+    {"ok":false,"code":"fixture_connect_failed","message":"Scripted connect failure.","fingerprint":null,"options":[{"settings":{"cwd":"C:\\work"},"artifactRoot":"artifacts","dataRoot":"data\\owned\\codex-runtime","clientName":"ivy-phone-bridge","clientVersion":"0.1.0"}],"requests":[]}
+  ]

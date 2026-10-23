@@ -1,0 +1,62 @@
+[package]
+name = "ivy-phone-bridge"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+sha2.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+opus.workspace = true
+nanoaudio-core.workspace = true
+nanoaudio-g722.workspace = true
+rubato.workspace = true
+ivy-contracts = { workspace = true }
+ivy-sdk = { workspace = true }
+ivy-host-runtime = { workspace = true }
+ivy-store = { workspace = true }
+tokio = { workspace = true, features = ["io-std"] }
+rsipstack = { workspace = true }
+tokio-util = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
+subtle = { version = "=2.6.1", default-features = false }
+socket2.workspace = true
+str0m.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader", "Win32_Foundation", "Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_Security_Cryptography", "Win32_System_Threading", "Win32_Networking_WinSock", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis"] }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ivy-phone-bridge"
+path = "src/bin/phone_bridge.rs"
+
+[[bin]]
+name = "ivy-phone-native"
+path = "src/bin/phone_native.rs"
+
+[[test]]
+name = "phone_media"
+path = "../../../tests/rust/phone_media.rs"
+
+[[test]]
+name = "phone_diagnostics"
+path = "../../../tests/rust/phone_diagnostics.rs"
+
+[[test]]
+name = "phone_native_rpc"
+path = "../../../tests/rust/phone_native_rpc.rs"
+
+[[test]]
+name = "phone_service_reference"
+path = "../../../tests/rust/phone_service_reference.rs"
+
+[[test]]
+name = "phone_executables"
+path = "../../../tests/rust/phone_executables.rs"

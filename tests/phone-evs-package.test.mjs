@@ -5,6 +5,7 @@ import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readPhoneEvsBuild, installPhoneEvs, preparePhoneEvs } from '../tools/package/phone-evs-package.mjs';
+import { stagePhoneCompatibility } from '../tools/build/build-phone-runtime.mjs';
 const hash = value => createHash('sha256').update(value).digest('hex');
 
 async function fixture() {
@@ -30,7 +31,7 @@ async function fixture() {
   return { root, work, report, path, save };
 }
 
-test('EVS package reuses exact local build bytes and retains portable provenance and notice', async () => {
+test('EVS package and native Phone layout retain exact selected bytes and notices', async () => {
   const f = await fixture(), built = await readPhoneEvsBuild(f.root, f.path), destination = join(f.root, 'published');
   await installPhoneEvs(f.root, destination, built);
   assert.equal(await readFile(join(destination, 'ivy_phone_evs.dll'), 'utf8'), 'synthetic-library');
@@ -39,6 +40,29 @@ test('EVS package reuses exact local build bytes and retains portable provenance
   assert.equal(provenance.librarySha256, f.report.librarySha256); assert.equal(provenance.abi, 1);
   assert.equal(provenance.work, undefined); assert.equal(provenance.library, undefined);
   await assert.rejects(installPhoneEvs(f.root, destination, built), { code: 'EEXIST' });
+  const platformDirectory = join(f.root, 'dist/native/win32-x64');
+  await mkdir(platformDirectory, {recursive:true});
+  // File-layout fixtures only: these bytes are never executed as a backend.
+  for (const name of ['ivy-phone-native.exe','ivy-job.exe','LICENSE.Ivy','LICENSE.SIPSorcery',
+    'LICENSE.CodexMicro','LICENSE.WaitingMarimba','LICENSE.VSCO2','LICENSE.NAudio'])
+    await writeFile(join(platformDirectory, name), 'selected-' + name);
+  const result = await stagePhoneCompatibility({root:f.root, platformDirectory, evs:built});
+  assert.equal(await readFile(result.executable, 'utf8'), 'selected-ivy-phone-native.exe');
+  assert.equal(result.executableHash, 'sha256:' + hash('selected-ivy-phone-native.exe'));
+  assert.equal(result.evsLibraryHash, 'sha256:' + f.report.librarySha256);
+  assert.equal(await readFile(join(f.root, 'dist/native/ivy-job.exe'), 'utf8'), 'selected-ivy-job.exe');
+  const compatibility = join(f.root, 'dist/native/phone');
+  assert.equal(await readFile(join(compatibility, 'ivy_phone_evs.dll'), 'utf8'), 'synthetic-library');
+  assert.equal(await readFile(join(compatibility, 'licenses/SIPSorcery-10.0.15.md'), 'utf8'), 'selected-LICENSE.SIPSorcery');
+  assert.equal(await readFile(join(compatibility, 'licenses/NAudio-MIT.txt'), 'utf8'), 'selected-LICENSE.NAudio');
+  assert.equal(await readFile(join(compatibility, 'licenses/EVS-reference.md'), 'utf8'), 'synthetic dependency notice');
+  await assert.rejects(stagePhoneCompatibility({root:f.root, platformDirectory, evs:built}), /fresh compatibility destination/);
+  const outputRoot = join(f.root, '.local/development/phone-bridge/dist');
+  await mkdir(join(outputRoot, 'native'), {recursive:true});
+  const development = await stagePhoneCompatibility({root:f.root, outputRoot, platformDirectory, evs:built});
+  assert.equal(development.executable, join(outputRoot, 'native/phone/Ivy.PhoneRuntime.exe'));
+  assert.equal(await readFile(join(outputRoot, 'native/ivy-job.exe'), 'utf8'), 'selected-ivy-job.exe');
+  assert.equal(await readFile(result.executable, 'utf8'), 'selected-ivy-phone-native.exe');
 });
 
 test('EVS test package replaces stale generated files on an explicit refresh', async () => {

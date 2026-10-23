@@ -1,6 +1,8 @@
 use ivy_chat_bridge::admission::ChatAdmission;
 use ivy_contracts::{IvyJson as Json, IvyResult, json::parse};
 use std::process::Command;
+#[path = "chat-operations-cases.rs"]
+mod operations;
 
 #[test]
 fn admission_order_limits_and_original_request_hashes_match_typescript() {
@@ -61,7 +63,20 @@ fn admission_order_limits_and_original_request_hashes_match_typescript() {
                 ]),
             )]),
         };
-        assert_eq!(&actual, row.get("result").unwrap(), "oracle row {index}");
+        let request = row.required("request").unwrap();
+        if row.get("kind") == Some(&Json::from("send"))
+            && (request.as_object().is_none() || request.get("expectedBridge").is_none())
+        {
+            let error = actual.required("error").unwrap();
+            assert_eq!(
+                error.get("code"),
+                Some(&"invalid_arguments".into()),
+                "row {index}"
+            );
+            assert_eq!(error.get("outcome"), Some(&"not_executed".into()));
+        } else {
+            assert_eq!(&actual, row.get("result").unwrap(), "oracle row {index}");
+        }
     }
     assert!(rows.as_array().unwrap().len() > 50);
 }

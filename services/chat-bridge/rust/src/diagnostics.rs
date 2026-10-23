@@ -57,7 +57,7 @@ pub fn diagnostic_notice(value: &Json) -> IvyResult<Json> {
     ]))
 }
 
-fn retain_receipts(state: &mut Json, entry: &Json, kept: &[Json]) -> IvyResult<()> {
+pub(crate) fn retain_receipts(state: &mut Json, entry: &Json, kept: &[Json]) -> IvyResult<()> {
     for kind in ["alert", "recovery"] {
         let pending = optional(entry, kind);
         if !present(pending) || flag(pending, "confirmed") {

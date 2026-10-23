@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["packages/contracts/rust","packages/store","packages/sdk/rust","packages/host-runtime/rust","packages/cli/rust","services/agent-manager/rust","services/chat-bridge/rust","services/dashboards/rust","services/secretary/rust","services/service-manager/rust","services/host-executor/rust","services/hive/rust","services/data-collector/rust","services/task-board/rust"]
+members = ["packages/contracts/rust","packages/store","packages/sdk/rust","packages/host-runtime/rust","packages/cli/rust","services/agent-manager/rust","services/chat-bridge/rust","services/dashboards/rust","services/secretary/rust","services/service-manager/rust","services/host-executor/rust","services/hive/rust","services/data-collector/rust","services/task-board/rust","services/phone-bridge/rust"]
 
 [workspace.package]
 version = "0.2.40"
@@ -53,6 +53,16 @@ regex = "=1.13.1"
 regress = { version = "=0.12.0", features = ["utf16"] }
 windows-sys = "=0.61.2"
 libc = "=0.2.191"
+
+socket2 = { version = "=0.6.5", default-features = false }
+rsipstack = { version = "=0.7.4", default-features = false, features = ["platform-tokio", "rustls", "srv_lookup"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-platform-verifier = "=0.7.1"
+opus = "=0.4.0"
+nanoaudio-core = "=0.1.0"
+nanoaudio-g722 = "=0.1.0"
+rubato = { version = "=5.0.1", default-features = false }
+str0m = { version = "=0.24.1", default-features = false, features = ["rust-crypto"] }
 
 [profile.release]
 lto = "thin"

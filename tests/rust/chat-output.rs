@@ -3,15 +3,18 @@ mod output_chunks;
 use output_chunks::output_chunks;
 
 #[test]
-fn chunk_offsets_match_js_with_astral_and_unpaired_surrogates() {
-    let mut text = vec![u16::from(b'a'); 3499];
-    text.extend([0xd83d, 0xde00, 0xd800, u16::from(b'b'), 0xdc00]);
+fn chunk_offsets_preserve_wire_text_and_astral_characters() {
+    let mut text: Vec<_> = "a".repeat(3499).encode_utf16().collect();
+    text.extend("😀世界".encode_utf16());
+    text.extend([0xd800, 0xdc00, 0xd800, 0xdc00, 0xdfff]);
     let chunks: Vec<_> = output_chunks(&text).collect();
     assert_eq!(chunks.len(), 2);
     assert_eq!(chunks[0].offset, 0);
-    assert_eq!(chunks[0].text.len(), 3501);
+    assert_eq!(
+        char::decode_utf16(chunks[0].text.iter().copied()).count(),
+        3500
+    );
     assert_eq!(chunks[1].offset, 3500);
-    assert_eq!(chunks[1].text, &[0xd800, u16::from(b'b'), 0xdc00]);
     assert_eq!(
         chunks
             .iter()

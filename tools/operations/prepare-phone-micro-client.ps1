@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if (![IO.Path]::IsPathFullyQualified($ClientDirectory) -or ![IO.Directory]::Exists($ClientDirectory)) { throw 'Explicit absolute client directory required.' }
-$microPinsPath = Join-Path $PSScriptRoot '../../services/phone-bridge/native/phone-runtime/micro-usbip-client.json'
+$microPinsPath = Join-Path $PSScriptRoot '../../services/phone-bridge/assets/micro-usbip-client.json'
 $microPins = Get-Content -LiteralPath $microPinsPath -Raw | ConvertFrom-Json -AsHashtable
 if ($microPins.Count -ne 3 -or @('usbip.exe','libusbip.dll','resources.dll').Where({ !$microPins.ContainsKey($_) }).Count -ne 0) {
     throw 'Exact reviewed client manifest required.'

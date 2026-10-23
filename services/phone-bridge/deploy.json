@@ -17,10 +17,8 @@
     "contracts": []
   },
   "entrypoint": {
-    "executable": "node",
-    "args": [
-      "dist/services/phone-bridge/src/main.js"
-    ],
+    "executable": "dist/native/ivy-phone-bridge",
+    "args": [],
     "timeoutMs": 90000
   },
   "prepare": [
@@ -34,29 +32,31 @@
     },
     {
       "args": [
+        "tools/build/build-rust-backend.mjs",
+        "--component",
+        "phone-bridge",
+        "--target",
+        "x86_64-pc-windows-msvc"
+      ],
+      "executable": "node",
+      "timeoutMs": 3600000
+    },
+    {
+      "args": [
         "tools/build/build-deployment.mjs",
         "--component",
         "phone-bridge"
       ],
       "executable": "node",
-      "timeoutMs": 300000
-    },
-    {
-      "args": [
-        "tools/build/build-phone-runtime.mjs"
-      ],
-      "executable": "node",
-      "timeoutMs": 600000
+      "timeoutMs": 3600000
     }
   ],
   "checks": [],
   "readiness": {
     "timeoutMs": 90000,
     "command": {
-      "executable": "node",
-      "args": [
-        "dist/packages/host-runtime/src/health.js"
-      ],
+      "executable": "dist/native/ivy-health",
+      "args": [],
       "timeoutMs": 5000
     }
   },

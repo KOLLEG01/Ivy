@@ -1,0 +1,663 @@
+[
+  {
+    "label": "remove-audio-after-acceptance",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=video $PORT RTP/AVP 96\r\na=rtpmap:96 VP8/90000\r\nm=text $PORT RTP/AVP 98\r\na=rtpmap:98 t140/1000\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "application-only-after-audio",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=sctp-port:5000\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "single-video-preserves-remote",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=video $PORT RTP/AVP 96\r\na=rtpmap:96 VP8/90000\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "initial-video-text-without-audio",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=video $PORT RTP/AVP 96\r\na=rtpmap:96 VP8/90000\r\nm=text $PORT RTP/AVP 98\r\na=rtpmap:98 t140/1000\r\n"
+      },
+      {
+        "op": "answer"
+      },
+      {
+        "op": "offer"
+      }
+    ]
+  },
+  {
+    "label": "audio-video-text-answer-order",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=video $PORT RTP/AVP 96\r\na=rtpmap:96 VP8/90000\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=text $PORT RTP/AVP 98\r\na=rtpmap:98 t140/1000\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "second-audio",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=audio $PORT RTP/AVP 0\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "second-audio-rejection-retains-description",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=audio $PORT RTP/AVP 0\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "inactive-callback-sees-previous-codec",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 0\r\na=inactive\r\na=ssrc:222 cname:audio\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "incompatible-inactive-callback",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 111\r\na=inactive\r\na=ssrc:222 cname:audio\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "callback-throw",
+    "callback": {
+      "op": "throw"
+    },
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 0\r\na=inactive\r\na=ssrc:222 cname:audio\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "callback-offer",
+    "callback": {
+      "op": "offer"
+    },
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 0\r\na=inactive\r\na=ssrc:222 cname:audio\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "callback-status",
+    "callback": {
+      "op": "status"
+    },
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 0\r\na=inactive\r\na=ssrc:222 cname:audio\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "callback-set",
+    "callback": {
+      "op": "set",
+      "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:333 cname:audio\r\n"
+    },
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 0\r\na=inactive\r\na=ssrc:222 cname:audio\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "callback-rejected-nested-set",
+    "callback": {
+      "op": "set",
+      "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 111\r\na=ssrc:333 cname:audio\r\n"
+    },
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 0\r\na=inactive\r\na=ssrc:222 cname:audio\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "failed-video-retains-inactive-track",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=video $PORT RTP/AVP 96\r\na=rtpmap:96 VP8/90000\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=video $PORT RTP/AVP 96\r\na=rtpmap:96 VP9/90000\r\n"
+      },
+      {
+        "op": "answer"
+      },
+      {
+        "op": "offer"
+      }
+    ]
+  },
+  {
+    "label": "failed-text-retains-inactive-track",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=text $PORT RTP/AVP 98\r\na=rtpmap:98 t140/1000\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=text $PORT RTP/AVP 98\r\na=rtpmap:98 different/1000\r\n"
+      },
+      {
+        "op": "answer"
+      },
+      {
+        "op": "offer"
+      }
+    ]
+  },
+  {
+    "label": "single-video-after-multi",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=video $PORT RTP/AVP 96\r\na=rtpmap:96 VP8/90000\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=video $PORT RTP/AVP 96\r\na=rtpmap:96 VP8/90000\r\n"
+      },
+      {
+        "op": "answer"
+      },
+      {
+        "op": "offer"
+      }
+    ]
+  },
+  {
+    "label": "secondary-events",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=audio $PORT RTP/AVP 0 110\r\na=ssrc:111 cname:audio\r\na=rtpmap:110 telephone-event/8000\r\n"
+      },
+      {
+        "op": "answer"
+      },
+      {
+        "op": "offer"
+      }
+    ]
+  },
+  {
+    "label": "absent-audio-preserves-inactive-status",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=inactive\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=video $PORT RTP/AVP 96\r\na=rtpmap:96 VP8/90000\r\nm=text $PORT RTP/AVP 98\r\na=rtpmap:98 t140/1000\r\n"
+      },
+      {
+        "op": "answer"
+      },
+      {
+        "op": "offer"
+      }
+    ]
+  },
+  {
+    "label": "callback-nested-events",
+    "callback": {
+      "op": "set",
+      "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8 112\r\na=ssrc:333 cname:audio\r\na=rtpmap:112 telephone-event/8000\r\n"
+    },
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 0 110\r\na=ssrc:222 cname:audio\r\na=inactive\r\na=rtpmap:110 telephone-event/8000\r\n"
+      },
+      {
+        "op": "answer"
+      },
+      {
+        "op": "offer"
+      }
+    ]
+  },
+  {
+    "label": "inactive-overflow-port",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 65535 RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=inactive\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "static-format-PCMA/16000",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=rtpmap:8 PCMA/16000\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "static-format-PCMA/8000/2",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=rtpmap:8 PCMA/8000/2\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "static-format-PCMA/8000/1",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=rtpmap:8 PCMA/8000/1\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "static-format-PCMA/0",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=rtpmap:8 PCMA/0\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "static-format-PCMA/-1",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=rtpmap:8 PCMA/-1\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "callback-close",
+    "callback": {
+      "op": "close"
+    },
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 0\r\na=inactive\r\na=ssrc:222 cname:audio\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "video-parameter-packetization-mode=0",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=video $PORT RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=video $PORT RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=0\r\n"
+      },
+      {
+        "op": "answer"
+      },
+      {
+        "op": "offer"
+      }
+    ]
+  },
+  {
+    "label": "video-parameter-packetization-mode=0;packetization-mode=1",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=video $PORT RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=video $PORT RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=0;packetization-mode=1\r\n"
+      },
+      {
+        "op": "answer"
+      },
+      {
+        "op": "offer"
+      }
+    ]
+  },
+  {
+    "label": "video-parameter-packetization-mode=1=0",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=video $PORT RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=video $PORT RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1=0\r\n"
+      },
+      {
+        "op": "answer"
+      },
+      {
+        "op": "offer"
+      }
+    ]
+  },
+  {
+    "label": "later-invalid-clock-precedes-codec-failure",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 0 8\r\na=ssrc:111 cname:audio\r\na=rtpmap:0 PCMU/16000\r\na=rtpmap:8 PCMA/0\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "callback-close-invalid-clock",
+    "callback": {
+      "op": "close"
+    },
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=inactive\r\na=rtpmap:8 PCMA/0\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "static-channel-0",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=rtpmap:8 PCMA/8000/0\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "static-channel--1",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=rtpmap:8 PCMA/8000/-1\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "static-channel-256",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=rtpmap:8 PCMA/8000/256\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "static-clock-overflow-fallback",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=rtpmap:8 PCMA/2147483648\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "static-name-fallback",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=rtpmap:8 G722/not-a-number\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "inactive-secondary-clock-not-evaluated",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=audio $PORT RTP/AVP 0\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 0\r\na=ssrc:111 cname:audio\r\nm=audio $PORT RTP/AVP 0\r\na=ssrc:111 cname:audio\r\na=rtpmap:0 PCMU/0\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "inactive-video-clock-not-evaluated",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=video $PORT RTP/AVP 96\r\na=rtpmap:96 VP8/0\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  }
+]

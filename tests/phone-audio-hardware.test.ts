@@ -4,8 +4,8 @@ import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { setupAudioHardware } from '../services/phone-bridge/src/runtime/audio-hardware-setup.js';
-import type { AudioHardwarePorts } from '../services/phone-bridge/src/runtime/audio-hardware-setup.js';
+import { setupAudioHardware } from '../tools/operations/phone-audio-hardware-setup.js';
+import type { AudioHardwarePorts } from '../tools/operations/phone-audio-hardware-setup.js';
 
 for (const mode of ['plan', 'complete', 'partial', 'busy', 'changed'] as const) test('hardware setup retains exact original scope: ' + mode, async t => {
   const root = await mkdtemp(join(tmpdir(), 'ivy-hardware-test-')); t.after(() => rm(root, { recursive: true, force: true }));

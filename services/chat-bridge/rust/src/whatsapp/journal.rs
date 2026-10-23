@@ -264,7 +264,6 @@ impl JournalIo {
                 self.set(&format!("out-automatic:{id}"), &IvyJson::Bool(true))?;
             }
             if prior.is_none() {
-                // node:sqlite replaces unpaired UTF-16 surrogates at SQL binding.
                 self.write(
                     "INSERT OR IGNORE INTO outgoing(id,jid,text) VALUES(?,?,?)",
                     vec![

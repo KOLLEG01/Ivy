@@ -1,0 +1,4 @@
+cmake_minimum_required(VERSION 3.20)
+project(phone_desktop_actions_fixture LANGUAGES CXX)
+add_library(phone_desktop_actions_fixture SHARED fixture.cpp)
+target_compile_features(phone_desktop_actions_fixture PRIVATE cxx_std_17)

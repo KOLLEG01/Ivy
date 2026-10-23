@@ -1,0 +1,692 @@
+{
+  "readyItems": [
+    {
+      "type": "mcpToolCall",
+      "status": "completed",
+      "server": "regular",
+      "tool": "ivy_instructions",
+      "result": {}
+    },
+    {
+      "type": "mcpToolCall",
+      "status": "completed",
+      "server": "regular",
+      "tool": "phone_bridge_status",
+      "result": {}
+    },
+    {
+      "type": "agentMessage",
+      "phase": "final_answer",
+      "text": "READY"
+    }
+  ],
+  "validations": [
+    {
+      "name": "ready",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": {}
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "READY"
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "name": "trim",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": {}
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "﻿\tREADY "
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "name": "wrong-case",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": {}
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "ready"
+          }
+        ]
+      },
+      "expected": "phone_voice_not_ready"
+    },
+    {
+      "name": "not-ready",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": {}
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "NOT_READY"
+          }
+        ]
+      },
+      "expected": "phone_voice_not_ready"
+    },
+    {
+      "name": "phase-null",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": {}
+          },
+          {
+            "type": "agentMessage",
+            "phase": null,
+            "text": "READY"
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "name": "last-final-wins",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": {}
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "READY"
+          },
+          {
+            "type": "agentMessage",
+            "text": "NOT_READY"
+          }
+        ]
+      },
+      "expected": "phone_voice_not_ready"
+    },
+    {
+      "name": "commentary-ignored",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": {}
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "READY"
+          },
+          {
+            "type": "agentMessage",
+            "phase": "commentary",
+            "text": "NOT_READY"
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "name": "missing-status-call",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "READY"
+          }
+        ]
+      },
+      "expected": "phone_voice_not_ready"
+    },
+    {
+      "name": "different-server",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "different",
+            "tool": "phone_bridge_status",
+            "result": {}
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "READY"
+          }
+        ]
+      },
+      "expected": "phone_voice_not_ready"
+    },
+    {
+      "name": "dev-server",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "ivy_dev",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "ivy_dev",
+            "tool": "phone_bridge_status",
+            "result": {}
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "READY"
+          }
+        ]
+      },
+      "expected": "phone_voice_not_ready"
+    },
+    {
+      "name": "first-instructions-remains-authority",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "ivy_dev",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": {}
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "READY"
+          }
+        ]
+      },
+      "expected": "phone_voice_not_ready"
+    },
+    {
+      "name": "failed-instructions",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {},
+            "error": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": {}
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "READY"
+          }
+        ]
+      },
+      "expected": "phone_voice_not_ready"
+    },
+    {
+      "name": "error-false",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {},
+            "error": false
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": {}
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "READY"
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "name": "native-error-result",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": {
+              "isError": true
+            }
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "READY"
+          }
+        ]
+      },
+      "expected": "phone_voice_not_ready"
+    },
+    {
+      "name": "native-zero-error",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": {
+              "isError": 0
+            }
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "READY"
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "name": "empty-result-array",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": []
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "READY"
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "name": "null-result",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": null
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "READY"
+          }
+        ]
+      },
+      "expected": "phone_voice_not_ready"
+    },
+    {
+      "name": "not-completed",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "inProgress",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": {}
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "READY"
+          }
+        ]
+      },
+      "expected": "phone_voice_not_ready"
+    },
+    {
+      "name": "text-array-coercion",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": {}
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": [
+              "READY"
+            ]
+          }
+        ]
+      },
+      "expected": null
+    },
+    {
+      "name": "text-toString-shadow",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": {}
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": {
+              "toString": "READY"
+            }
+          }
+        ]
+      },
+      "expected": "internal_error"
+    },
+    {
+      "name": "null-items",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": null
+      },
+      "expected": "phone_voice_not_ready"
+    },
+    {
+      "name": "null-item",
+      "turn": {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "status": "completed",
+        "items": [
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "ivy_instructions",
+            "result": {}
+          },
+          {
+            "type": "mcpToolCall",
+            "status": "completed",
+            "server": "regular",
+            "tool": "phone_bridge_status",
+            "result": {}
+          },
+          {
+            "type": "agentMessage",
+            "phase": "final_answer",
+            "text": "READY"
+          },
+          null
+        ]
+      },
+      "expected": "internal_error"
+    }
+  ],
+  "scenarios": [
+    {
+      "mode": "new"
+    },
+    {
+      "mode": "unknown"
+    },
+    {
+      "mode": "completed"
+    },
+    {
+      "mode": "changed"
+    },
+    {
+      "mode": "continuing"
+    },
+    {
+      "mode": "failed"
+    },
+    {
+      "mode": "bad-ready"
+    },
+    {
+      "mode": "persist-failure"
+    },
+    {
+      "mode": "missing-cache"
+    }
+  ]
+}

@@ -80,6 +80,16 @@ impl From<String> for IvyJson {
         Self::String(s.into())
     }
 }
+impl From<JsString> for IvyJson {
+    fn from(s: JsString) -> Self {
+        Self::String(s)
+    }
+}
+impl From<f64> for IvyJson {
+    fn from(n: f64) -> Self {
+        Self::Number(n)
+    }
+}
 impl From<bool> for IvyJson {
     fn from(v: bool) -> Self {
         Self::Bool(v)

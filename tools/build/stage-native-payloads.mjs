@@ -46,6 +46,14 @@ function runtimeAssets(component, root, os) {
     for (const name of ['hive-mcp-instructions.md', 'hive-mcp-agent-summary.md', 'hive-mcp-examples.md', 'ivy-dev-mcp-instructions.md'])
       assets.push({ path: 'instructions/' + name, bytes: readFileSync(regular(root, resolve(root, 'instructions', name))) });
   }
+  if (component === 'chat-bridge') {
+    const directory = resolve(root, 'services/chat-bridge/rust/licenses');
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (!entry.isFile() || !/^[A-Za-z0-9_.-]+\.txt$/.test(entry.name)) throw Error('Invalid Chat codec notice.');
+      assets.push({ path: 'licenses/chat-bridge/' + entry.name,
+        bytes: readFileSync(regular(root, resolve(directory, entry.name))) });
+    }
+  }
   // Intentional JavaScript workers remain explicit runtime assets.
   // The existing preparation path resolves its literal PDF.js import through
   // the pinned npm lock and materializes all supported platform dependencies.

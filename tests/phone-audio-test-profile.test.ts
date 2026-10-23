@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { audioTestProfile } from '../services/phone-bridge/src/runtime/audio-test-profile.js';
+import { audioTestProfile } from '../tools/testing/phone-audio-profile.js';
 
 const expected = { G722Only: ['G722'], EvsOnly: ['EVS'], EvsPreferred: ['EVS', 'G722', 'PCMA', 'PCMU'], G722Preferred: ['G722', 'PCMA', 'PCMU'] };
 const settings = {

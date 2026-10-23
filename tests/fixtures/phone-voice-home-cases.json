@@ -1,0 +1,468 @@
+[
+  {
+    "platform": "win32",
+    "settings": {},
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {},
+    "accountHome": "C:\\account",
+    "expectedPath": "C:\\account\\.codex",
+    "expectedSource": "user-home"
+  },
+  {
+    "platform": "win32",
+    "settings": {},
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {
+      "USERPROFILE": "D:\\profile"
+    },
+    "accountHome": "C:\\account",
+    "expectedPath": "D:\\profile\\.codex",
+    "expectedSource": "user-home"
+  },
+  {
+    "platform": "win32",
+    "settings": {
+      "codexHome": "D:\\chosen\\a\\..\\home"
+    },
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {},
+    "accountHome": "C:\\account",
+    "expectedPath": "D:\\chosen\\home",
+    "expectedSource": "host-configuration"
+  },
+  {
+    "platform": "win32",
+    "settings": {
+      "nativeHome": "D:\\chosen\\a\\..\\home"
+    },
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {},
+    "accountHome": "C:\\account",
+    "expectedPath": "D:\\chosen\\home",
+    "expectedSource": "existing-native-home"
+  },
+  {
+    "platform": "win32",
+    "settings": {
+      "codexHome": "D:\\chosen\\a\\..\\home",
+      "nativeHome": "d:\\CHOSEN\\home"
+    },
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {},
+    "accountHome": "C:\\account",
+    "expectedPath": "D:\\chosen\\home",
+    "expectedSource": "host-configuration"
+  },
+  {
+    "platform": "win32",
+    "settings": {
+      "codexHome": "D:\\chosen\\a\\..\\home",
+      "nativeHome": "D:\\different"
+    },
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {},
+    "accountHome": "C:\\account",
+    "expectedError": "invalid_arguments"
+  },
+  {
+    "platform": "win32",
+    "settings": {
+      "codexHome": "  ﻿"
+    },
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {},
+    "accountHome": "C:\\account",
+    "expectedError": "invalid_arguments"
+  },
+  {
+    "platform": "win32",
+    "settings": {
+      "codexHome": null,
+      "nativeHome": "D:\\chosen\\a\\..\\home"
+    },
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {},
+    "accountHome": "C:\\account",
+    "expectedError": "invalid_arguments"
+  },
+  {
+    "platform": "win32",
+    "settings": {
+      "codexHome": "",
+      "nativeHome": "D:\\chosen\\a\\..\\home"
+    },
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {},
+    "accountHome": "C:\\account",
+    "expectedError": "invalid_arguments"
+  },
+  {
+    "platform": "win32",
+    "settings": {},
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {
+      "CODEX_HOME": "  child/../native﻿"
+    },
+    "accountHome": "C:\\account",
+    "expectedPath": "C:\\raw\\work\\native﻿",
+    "expectedSource": "environment"
+  },
+  {
+    "platform": "win32",
+    "settings": {},
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": ".",
+    "environment": {
+      "CODEX_HOME": "child"
+    },
+    "accountHome": "C:\\account",
+    "expectedPath": "C:\\path\\fallback\\child",
+    "expectedSource": "environment"
+  },
+  {
+    "platform": "win32",
+    "settings": {},
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {
+      "CODEX_HOME": " ﻿",
+      "USERPROFILE": "D:\\profile"
+    },
+    "accountHome": "C:\\account",
+    "expectedPath": "C:\\raw\\work\\﻿",
+    "expectedSource": "environment"
+  },
+  {
+    "platform": "win32",
+    "settings": {},
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {
+      "CODEX_HOME": ""
+    },
+    "accountHome": "C:\\account",
+    "expectedPath": "C:\\account\\.codex",
+    "expectedSource": "user-home"
+  },
+  {
+    "platform": "win32",
+    "settings": {},
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {
+      "USERPROFILE": ""
+    },
+    "accountHome": "C:\\account",
+    "expectedError": "invalid_arguments"
+  },
+  {
+    "platform": "win32",
+    "settings": {},
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {
+      "USERPROFILE": "relative"
+    },
+    "accountHome": "C:\\account",
+    "expectedError": "invalid_arguments"
+  },
+  {
+    "platform": "win32",
+    "settings": {},
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {
+      "USERPROFILE": "D:\\ignored"
+    },
+    "accountHome": "C:\\account",
+    "userHome": "D:\\override",
+    "expectedPath": "D:\\override\\.codex",
+    "expectedSource": "user-home"
+  },
+  {
+    "platform": "win32",
+    "settings": {},
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {},
+    "accountHome": "C:\\account",
+    "userHome": "",
+    "expectedError": "invalid_arguments"
+  },
+  {
+    "platform": "win32",
+    "settings": {},
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {},
+    "accountHome": "relative",
+    "expectedError": "invalid_arguments"
+  },
+  {
+    "platform": "win32",
+    "settings": {
+      "codexHome": "C:\\home\\\ud800"
+    },
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {},
+    "accountHome": "C:\\account",
+    "expectedPath": "C:\\home\\\ud800",
+    "expectedSource": "host-configuration"
+  },
+  {
+    "platform": "win32",
+    "settings": {
+      "codexHome": "C:\\ΣΟΣ\\İ"
+    },
+    "pathsCwd": "C:\\path\\fallback",
+    "cwd": "C:\\raw\\work",
+    "environment": {},
+    "accountHome": "C:\\account",
+    "expectedPath": "C:\\ΣΟΣ\\İ",
+    "expectedSource": "host-configuration"
+  },
+  {
+    "platform": "linux",
+    "settings": {},
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {},
+    "accountHome": "/account",
+    "expectedPath": "/account/.codex",
+    "expectedSource": "user-home"
+  },
+  {
+    "platform": "linux",
+    "settings": {},
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {
+      "HOME": "/profile"
+    },
+    "accountHome": "/account",
+    "expectedPath": "/profile/.codex",
+    "expectedSource": "user-home"
+  },
+  {
+    "platform": "linux",
+    "settings": {
+      "codexHome": "/chosen/a/../home"
+    },
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {},
+    "accountHome": "/account",
+    "expectedPath": "/chosen/home",
+    "expectedSource": "host-configuration"
+  },
+  {
+    "platform": "linux",
+    "settings": {
+      "nativeHome": "/chosen/a/../home"
+    },
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {},
+    "accountHome": "/account",
+    "expectedPath": "/chosen/home",
+    "expectedSource": "existing-native-home"
+  },
+  {
+    "platform": "linux",
+    "settings": {
+      "codexHome": "/chosen/a/../home",
+      "nativeHome": "/chosen/home"
+    },
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {},
+    "accountHome": "/account",
+    "expectedPath": "/chosen/home",
+    "expectedSource": "host-configuration"
+  },
+  {
+    "platform": "linux",
+    "settings": {
+      "codexHome": "/chosen/a/../home",
+      "nativeHome": "/different"
+    },
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {},
+    "accountHome": "/account",
+    "expectedError": "invalid_arguments"
+  },
+  {
+    "platform": "linux",
+    "settings": {
+      "codexHome": "  ﻿"
+    },
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {},
+    "accountHome": "/account",
+    "expectedError": "invalid_arguments"
+  },
+  {
+    "platform": "linux",
+    "settings": {
+      "codexHome": null,
+      "nativeHome": "/chosen/a/../home"
+    },
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {},
+    "accountHome": "/account",
+    "expectedError": "invalid_arguments"
+  },
+  {
+    "platform": "linux",
+    "settings": {
+      "codexHome": "",
+      "nativeHome": "/chosen/a/../home"
+    },
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {},
+    "accountHome": "/account",
+    "expectedError": "invalid_arguments"
+  },
+  {
+    "platform": "linux",
+    "settings": {},
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {
+      "CODEX_HOME": "  child/../native﻿"
+    },
+    "accountHome": "/account",
+    "expectedPath": "/raw/work/native﻿",
+    "expectedSource": "environment"
+  },
+  {
+    "platform": "linux",
+    "settings": {},
+    "pathsCwd": "/path/fallback",
+    "cwd": ".",
+    "environment": {
+      "CODEX_HOME": "child"
+    },
+    "accountHome": "/account",
+    "expectedPath": "/path/fallback/child",
+    "expectedSource": "environment"
+  },
+  {
+    "platform": "linux",
+    "settings": {},
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {
+      "CODEX_HOME": " ﻿",
+      "HOME": "/profile"
+    },
+    "accountHome": "/account",
+    "expectedPath": "/raw/work/﻿",
+    "expectedSource": "environment"
+  },
+  {
+    "platform": "linux",
+    "settings": {},
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {
+      "CODEX_HOME": ""
+    },
+    "accountHome": "/account",
+    "expectedPath": "/account/.codex",
+    "expectedSource": "user-home"
+  },
+  {
+    "platform": "linux",
+    "settings": {},
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {
+      "HOME": ""
+    },
+    "accountHome": "/account",
+    "expectedError": "invalid_arguments"
+  },
+  {
+    "platform": "linux",
+    "settings": {},
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {
+      "HOME": "relative"
+    },
+    "accountHome": "/account",
+    "expectedError": "invalid_arguments"
+  },
+  {
+    "platform": "linux",
+    "settings": {},
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {
+      "HOME": "/ignored"
+    },
+    "accountHome": "/account",
+    "userHome": "/override",
+    "expectedPath": "/override/.codex",
+    "expectedSource": "user-home"
+  },
+  {
+    "platform": "linux",
+    "settings": {},
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {},
+    "accountHome": "/account",
+    "userHome": "",
+    "expectedError": "invalid_arguments"
+  },
+  {
+    "platform": "linux",
+    "settings": {},
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {},
+    "accountHome": "relative",
+    "expectedError": "invalid_arguments"
+  },
+  {
+    "platform": "linux",
+    "settings": {
+      "codexHome": "/home/\ud800"
+    },
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {},
+    "accountHome": "/account",
+    "expectedPath": "/home/�",
+    "expectedSource": "host-configuration"
+  },
+  {
+    "platform": "linux",
+    "settings": {
+      "codexHome": "/ΣΟΣ/İ"
+    },
+    "pathsCwd": "/path/fallback",
+    "cwd": "/raw/work",
+    "environment": {},
+    "accountHome": "/account",
+    "expectedPath": "/ΣΟΣ/İ",
+    "expectedSource": "host-configuration"
+  }
+]
