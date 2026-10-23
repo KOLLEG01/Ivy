@@ -78,7 +78,8 @@ test('foreign compiler artifacts and traversal names are rejected before staging
 
 for (const [os, target] of [['win32', 'x86_64-pc-windows-msvc'], ['linux', 'x86_64-unknown-linux-gnu']]) {
   test(`native Host deployment includes its automatic worker and consumed platform assets (${os})`, () => fixture(f => {
-    const helpers = ['ivy-health', 'ivy-job', 'ivy-host-job', 'ivy-bootstrap-auto-worker'];
+    const helpers = ['ivy-health', 'ivy-job', 'ivy-host-job'];
+    f.targets.push({ name: 'ivy-bootstrap-auto-worker', kind: ['bin'] });
     const manifest = join(f.root, 'packages/host-runtime/rust/Cargo.toml');
     mkdirSync(dirname(manifest), { recursive: true });
     writeFileSync(manifest, '[package]\nname="ivy-host-runtime"\nversion="0.0.0"\n');
@@ -109,7 +110,8 @@ for (const [os, target] of [['win32', 'x86_64-pc-windows-msvc'], ['linux', 'x86_
       }).join('\n');
     };
     const result = buildNativeDeployment({ component: 'host-executor', target, root: f.root, identity: f.identity, cargo });
-    assert.deepEqual(helperCalls, [os === 'win32' ? helpers : ['ivy-health', 'ivy-bootstrap-auto-worker']]);
+    assert.deepEqual(helperCalls, [os === 'win32' ? helpers : ['ivy-health']]);
+    assert.ok(f.calls.some(call => call.args[0] === 'build' && call.args.includes('ivy-bootstrap-auto-worker')));
     const suffix = os === 'win32' ? '.exe' : '';
     const output = join(f.root, 'dist');
     assert.deepEqual(result.platforms, [os + '-x64']);

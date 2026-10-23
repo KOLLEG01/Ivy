@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { materializeNativePlan } from '../packages/host-runtime/src/native-plan.mjs';
 import { stageNativePayloads } from '../tools/build/stage-native-payloads.mjs';
@@ -101,9 +101,16 @@ for (const component of ['fixture', 'host-executor']) test(`normal native build 
   writeFileSync(serviceManifest, '# synthetic Cargo metadata fixture\n');
   writeFileSync(helperManifest, '# synthetic Cargo metadata fixture\n');
   writeFileSync(join(root, `services/${component}/deploy.json`), JSON.stringify(source));
+  if (component === 'host-executor') for (const name of ['install-windows.ps1', 'bootstrap-maintenance-windows.ps1', 'windows-principal.ps1']) {
+    const path = join(root, 'packages/host-runtime/assets', name);
+    mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, 'synthetic consumed asset');
+  }
   const identity = { schemaVersion: 1, version: source.version, buildId: 'sha256:' + '2'.repeat(64) };
   const packages = [
-    { id: 'fixture', name: `ivy-${component}`, manifest_path: serviceManifest, targets: [{ name: `ivy-${component}`, kind: ['bin'] }] },
+    { id: 'fixture', name: `ivy-${component}`, manifest_path: serviceManifest, targets: [
+      { name: `ivy-${component}`, kind: ['bin'] },
+      ...(component === 'host-executor' ? [{ name: 'ivy-bootstrap-auto-worker', kind: ['bin'] }] : []),
+    ] },
     { id: 'helpers', name: 'ivy-host-runtime', manifest_path: helperManifest, targets: ['ivy-health', 'ivy-job', 'ivy-host-job'].map(name => ({ name, kind: ['bin'] })) },
   ];
   const calls = [];

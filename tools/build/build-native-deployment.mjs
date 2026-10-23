@@ -20,14 +20,14 @@ export function buildNativeDeployment({ component, target, root = process.cwd(),
   if (!plan.entrypoint?.executable.startsWith('dist/native/')) throw Error('The component does not declare native entry and readiness commands.');
   target ??= Object.keys(rustBackendTargets).find(target => rustBackendTargets[target] === platform);
   const binaries = ['ivy-health', ...(os === 'win32'
-    ? ['ivy-job', ...(component === 'host-executor' ? ['ivy-host-job'] : [])] : []),
-    ...(component === 'host-executor' ? ['ivy-bootstrap-auto-worker'] : [])];
+    ? ['ivy-job', ...(component === 'host-executor' ? ['ivy-host-job'] : [])] : [])];
+  const requiredBinaries = [...binaries, ...(component === 'host-executor' ? ['ivy-bootstrap-auto-worker'] : [])];
   const payloads = [
     compileRustBackend({ component, target, root, identity, cargo }),
     compileRustHelpers({ component: 'host-executor', target, binaries, root, identity, cargo }),
   ];
   const result = stageNativePayloads({ component, root, identity: payloads[0].identity, payloads, plan,
-    requiredBinaries: { [os]: binaries } });
+    requiredBinaries: { [os]: requiredBinaries } });
   return { ...result, plan, staged: true };
 }
 
