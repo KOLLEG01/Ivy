@@ -11,6 +11,8 @@ use std::{
 #[allow(dead_code)]
 mod fixture;
 use fixture::ServiceFixture;
+#[path = "host-build-source-cases.rs"]
+mod source_inputs;
 fn parsed(text: &str) -> J {
     json::parse(text, usize::MAX).unwrap()
 }

@@ -222,6 +222,7 @@ async fn prepare(
     let component_id = component.to_utf8()?;
     let plan = source::source_build_plan(captured_source.clone(), &component_id).await?;
     preparation_inputs::validate_preparation_plan(&component, &plan)?;
+    source::component_source_inputs(captured_source.clone(), component.clone()).await?;
     require(
         crate::native_plan::is_native_plan(&plan)
             || plan.get("kind") == Some(&"app".into())

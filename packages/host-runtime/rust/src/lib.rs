@@ -79,6 +79,7 @@ pub mod runtime_owner;
 pub mod runtime_maintenance;
 pub mod runtime_reset;
 pub mod source;
+mod build_inputs;
 pub mod storage_space;
 pub mod storage_retention;
 pub mod target;

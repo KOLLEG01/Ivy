@@ -2,7 +2,6 @@ import {existsSync,readFileSync,mkdirSync,writeFileSync,symlinkSync,lstatSync,re
 import {registerHooks} from 'node:module';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
-import {homedir} from 'node:os';
 registerHooks({resolve(specifier,context,next){
   if(specifier.startsWith('.')&&specifier.endsWith('.js')){
     const source=new URL(specifier.slice(0,-3)+'.ts',context.parentURL);
@@ -12,7 +11,6 @@ registerHooks({resolve(specifier,context,next){
 }});
 const {IvyError}=await import('../../packages/contracts/src/errors.ts');
 const host=await import('../../packages/host-runtime/src/host-config.ts');
-const layout=await import('../../packages/host-runtime/src/layout.ts');
 const maintenance=await import('../../packages/host-runtime/src/runtime-maintenance.ts');
 const capture=async work=>{try{return {ok:true,value:await work()};}catch(error){return {ok:false,error:IvyError.from(error).toWire()};}};
 const input=JSON.parse(readFileSync(0,'utf8'));
@@ -38,9 +36,7 @@ function tree(root){
   return values;
 }
 let output;
-if(input.kind==='account'){
-  output={osHome:await capture(()=>homedir()),accountHome:await capture(()=>layout.accountHome()),defaultPath:await capture(()=>layout.defaultHostConfigPath()),selected:process.env.IVY_ACCOUNT_UTF16??null};
-}else if(input.kind==='maintenance'){
+if(input.kind==='maintenance'){
   output=[];
   for(const c of input.cases){
     setup(c.setup);

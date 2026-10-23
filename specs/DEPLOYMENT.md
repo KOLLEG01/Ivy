@@ -17,6 +17,11 @@ their native executables directly.
 - Build one selected component from one fixed source snapshot. Keep the checkout stable
   during capture; later edits cannot alter a prepared candidate. Preparation and tests
   are separate from activation.
+- Additional native runtime files are declared in `services/<component>/build-inputs.json`
+  as `{"schemaVersion":1,"targets":{"win32-x64":[".local/native-runtime/win32-x64/example.dll"]}}`.
+  The builder and component preparation select the same target's exact regular files;
+  other local data and targets stay excluded. Supply qualified files before preparation;
+  capture does not acquire missing runtimes. Their bytes participate in source identity.
 - A release is immutable and contains only the selected component and declared runtime
   dependencies. Requirements describe supported runtimes/platforms; configuration, secrets,
   databases and sessions remain outside it.

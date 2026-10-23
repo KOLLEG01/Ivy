@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, rmdirSync, existsSync, symlinkSync, truncateSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { compileRustBackend } from '../tools/build/build-rust-backend.mjs';
 import { buildNativeDeployment } from '../tools/build/build-native-deployment.mjs';
+import { componentBuildInputs } from '../tools/build/build-inputs.mjs';
 
 function fixture(run, component = 'example') {
   const root = mkdtempSync(join(tmpdir(), 'ivy-rust-build-'));
@@ -93,6 +94,12 @@ for (const [os, target] of [['win32', 'x86_64-pc-windows-msvc'], ['linux', 'x86_
       entrypoint: { executable: 'dist/native/ivy-host-executor', args: [], timeoutMs: 5000 },
       readiness: { timeoutMs: 5000, command: { executable: 'dist/native/ivy-health', args: [], timeoutMs: 1000 } } };
     writeFileSync(join(f.root, 'services/host-executor/deploy.json'), JSON.stringify(plan));
+    const runtime = `.local/native-runtime/${os}-x64/${os === 'win32' ? 'runtime.dll' : 'libruntime.so.1'}`;
+    mkdirSync(dirname(join(f.root, runtime)), { recursive: true });
+    writeFileSync(join(f.root, runtime), 'qualified target runtime');
+    writeFileSync(join(f.root, 'services/host-executor/build-inputs.json'), JSON.stringify({ schemaVersion: 1, targets: {
+      [`${os}-x64`]: [runtime], [`${os}-arm64`]: ['.local/not-provisioned-for-this-target'],
+    } }));
     const helperCalls = [];
     const cargo = (args, options) => {
       if (args[0] === 'metadata') {
@@ -111,9 +118,11 @@ for (const [os, target] of [['win32', 'x86_64-pc-windows-msvc'], ['linux', 'x86_
     };
     const result = buildNativeDeployment({ component: 'host-executor', target, root: f.root, identity: f.identity, cargo });
     assert.deepEqual(helperCalls, [os === 'win32' ? helpers : ['ivy-health']]);
-    assert.ok(f.calls.some(call => call.args[0] === 'build' && call.args.includes('ivy-bootstrap-auto-worker')));
+    assert.ok(f.calls.some(call => call.args[0] === 'build' && call.args.includes('ivy-bootstrap-auto-worker'))
+      || helperCalls.some(names => names.includes('ivy-bootstrap-auto-worker')));
     const suffix = os === 'win32' ? '.exe' : '';
     const output = join(f.root, 'dist');
+    assert.equal(readFileSync(join(output, `native/${os}-x64`, runtime.split('/').at(-1)), 'utf8'), 'qualified target runtime');
     assert.deepEqual(result.platforms, [os + '-x64']);
     assert.equal(result.plan.entrypoint.executable, `dist/native/${os}-x64/ivy-host-executor${suffix}`);
     assert.equal(readFileSync(join(output, `native/${os}-x64/ivy-bootstrap-auto-worker${suffix}`), 'utf8'), 'fixture ivy-bootstrap-auto-worker');
@@ -127,6 +136,41 @@ for (const [os, target] of [['win32', 'x86_64-pc-windows-msvc'], ['linux', 'x86_
     assert.equal(existsSync(join(output, 'packages/host-runtime/src/bootstrap-auto-worker.js')), false);
   }, 'host-executor'));
 }
+
+test('declared build inputs reject missing, linked and malformed files before native Cargo effects', () => fixture(f => {
+  const declaration = join(f.root, 'services/example/build-inputs.json');
+  const read = () => componentBuildInputs({ root: f.root, component: 'example', platform: 'win32-x64' });
+  assert.deepEqual(read(), []);
+  const selected = '.local/native-runtime/win32-x64/runtime.dll';
+  const file = join(f.root, selected);
+  const set = files => writeFileSync(declaration, JSON.stringify({ schemaVersion: 1, targets: { 'win32-x64': files } }));
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, 'qualified');
+  set([selected]);
+  assert.deepEqual(read(), [file]);
+  const plan = { componentId: 'example', kind: 'service', requirements: { node: '>=24.0.0 <25.0.0', os: ['win32'], arch: ['x64'] },
+    entrypoint: { executable: 'dist/native/ivy-example', args: [], timeoutMs: 5000 },
+    readiness: { timeoutMs: 5000, command: { executable: 'dist/native/ivy-health', args: [], timeoutMs: 1000 } } };
+  writeFileSync(join(f.root, 'services/example/deploy.json'), JSON.stringify(plan));
+  const build = () => buildNativeDeployment({ component: 'example', target: 'x86_64-pc-windows-msvc', root: f.root, identity: f.identity, cargo: f.cargo });
+  for (const files of [['.local/missing'], ['../outside'], ['/absolute'], ['C:/absolute'], ['.local/*.dll'], ['.local//value'],
+    ['.local/value:stream'], ['.local/value.'], [selected, selected.toUpperCase()], [true]]) {
+    set(files); assert.throws(build);
+  }
+  for (const value of [{ schemaVersion: 2, targets: {} }, { schemaVersion: 1, targets: {}, extra: true },
+    { schemaVersion: 1, targets: { unknown: [] } }, { schemaVersion: 1, targets: { 'win32-x64': true } }]) {
+    writeFileSync(declaration, JSON.stringify(value)); assert.throws(build);
+  }
+  set([selected]);
+  truncateSync(file, 0); assert.throws(build);
+  truncateSync(file, 64 * 1024 * 1024 + 1); assert.throws(build);
+  rmSync(file); symlinkSync(join(f.root, 'Cargo.toml'), file, 'file'); assert.throws(build); rmSync(file);
+  rmdirSync(dirname(file)); symlinkSync(join(f.root, 'services'), dirname(file), process.platform === 'win32' ? 'junction' : 'dir'); assert.throws(build);
+  rmSync(dirname(file)); writeFileSync(declaration, ' '.repeat(64 * 1024 + 1)); assert.throws(build);
+  rmSync(declaration); symlinkSync(join(f.root, 'Cargo.toml'), declaration, 'file'); assert.throws(build);
+  assert.equal(f.calls.length, 0);
+  assert.equal(existsSync(join(f.root, '.local/build')), false);
+}));
 
 test('configured Cargo builds and executes the selected native fixture with required features', { skip: !process.env.IVY_CARGO }, () => fixture(f => {
   const target = new Map([

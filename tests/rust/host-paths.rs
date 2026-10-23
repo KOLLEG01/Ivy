@@ -344,88 +344,333 @@ async fn native_health_cli_preserves_config_precedence_and_json_exit_contract() 
 }
 
 #[tokio::test]
-async fn stop_fence_matches_node_observation_creation_and_exact_clear() {
+async fn stop_fence_native_observation_creation_and_exact_clear() {
     use ivy_host_runtime::process_fence::*;
     let fixture = ServiceFixture::new();
     let canonical = ivy_contracts::json::canonical(&stop_fence(), usize::MAX).unwrap();
-    let states = [None, Some(canonical.clone()), Some(format!("\u{feff}\t{canonical}\r\n")),
-        Some(format!("\u{85}{canonical}")), Some("null".into()), Some("{".into()),
-        Some(" ".repeat(4097)), Some(canonical.replace("native-owner", "different-owner"))];
-    for state in states {
-        for operation in ["processStopFence", "requireClearProcessStopFence", "recordProcessStopFence", "clearProcessStopFence"] {
-            let rust = fixture.0.join("rust"); let node = fixture.0.join("node");
-            for root in [&rust, &node] {
-                fs::create_dir_all(root).unwrap();
-                let path = root.join("process-stop-fence.json");
-                if path.exists() { fs::remove_file(&path).unwrap(); }
-                if let Some(content) = &state { fs::write(path, content).unwrap(); }
+    let mut other = stop_fence();
+    other.insert("ownerId", "different-owner".into());
+    let states = [
+        ("missing", None, None, true),
+        (
+            "canonical",
+            Some(canonical.clone()),
+            Some(stop_fence()),
+            true,
+        ),
+        (
+            "json-space",
+            Some(format!("\t {canonical}\r\n")),
+            Some(stop_fence()),
+            true,
+        ),
+        (
+            "bom",
+            Some(format!("\u{feff}\t{canonical}\r\n")),
+            None,
+            false,
+        ),
+        (
+            "native-space",
+            Some(format!("\u{85}{canonical}\u{85}")),
+            None,
+            true,
+        ),
+        ("null", Some("null".into()), None, false),
+        ("malformed", Some("{".into()), None, false),
+        ("oversize", Some(" ".repeat(4097)), None, false),
+        (
+            "different-owner",
+            Some(ivy_contracts::json::canonical(&other, usize::MAX).unwrap()),
+            Some(other),
+            false,
+        ),
+    ];
+    for (name, content, observed, clears) in states {
+        let root = fixture.0.join(name);
+        fs::create_dir(&root).unwrap();
+        let path = root.join("process-stop-fence.json");
+        if let Some(content) = &content {
+            fs::write(&path, content).unwrap();
+        }
+        let observation = process_stop_fence(&root).await;
+        match observed {
+            Some(expected) => assert_json_eq(&observation.unwrap().unwrap(), &expected),
+            None if content.is_none() => assert!(observation.unwrap().is_none()),
+            None => {
+                let error = observation.unwrap_err();
+                assert_eq!(error.code, "outcome_unknown", "{name}");
+                assert_eq!(error.outcome, ivy_contracts::Outcome::Unknown);
             }
-            let result = match operation {
-                "processStopFence" => process_stop_fence(&rust).await.map(|v| v.unwrap_or(IvyJson::Null)),
-                "requireClearProcessStopFence" => require_clear_process_stop_fence(&rust).await.map(|_| IvyJson::Null),
-                "recordProcessStopFence" => record_process_stop_fence(&rust, stop_fence()).await.map(Into::into),
-                _ => clear_process_stop_fence(&rust, stop_fence()).await.map(Into::into),
-            };
-            compare_config_oracle(IvyJson::object([("kind", "fence".into()), ("operation", operation.into()),
-                ("path", node.to_string_lossy().to_string().into()), ("fence", stop_fence())]), result);
-            assert_eq!(fs::read(rust.join("process-stop-fence.json")).ok(), fs::read(node.join("process-stop-fence.json")).ok());
+        }
+        let admission = require_clear_process_stop_fence(&root).await;
+        if content.is_none() {
+            admission.unwrap();
+            assert!(!clear_process_stop_fence(&root, stop_fence()).await.unwrap());
+        } else {
+            let error = admission.unwrap_err();
+            assert_eq!(error.code, "outcome_unknown", "{name}");
+            assert_eq!(error.outcome, ivy_contracts::Outcome::Unknown);
+        }
+        assert_eq!(
+            record_process_stop_fence(&root, stop_fence())
+                .await
+                .unwrap(),
+            content.is_none(),
+            "{name}"
+        );
+        let retained = content
+            .unwrap_or_else(|| format!("{canonical}\n"))
+            .into_bytes();
+        assert_eq!(fs::read(&path).unwrap(), retained, "{name}");
+        // Every root is disposable and has no running owner; release is established here.
+        assert_eq!(
+            clear_process_stop_fence(&root, stop_fence()).await.unwrap(),
+            clears,
+            "{name}"
+        );
+        if clears {
+            assert!(!path.exists(), "{name}");
+            require_clear_process_stop_fence(&root).await.unwrap();
+        } else {
+            assert_eq!(fs::read(&path).unwrap(), retained, "{name}");
+            assert_eq!(
+                require_clear_process_stop_fence(&root)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "outcome_unknown"
+            );
         }
     }
+}
+
+#[tokio::test]
+async fn stop_fence_clear_requires_valid_utf8_and_canonical_expected_identity() {
+    use ivy_host_runtime::process_fence::*;
+    let fixture = ServiceFixture::new();
+    let path = fixture.0.join("process-stop-fence.json");
+    let mut expected = stop_fence();
+    expected.insert("ownerId", "native-\u{fffd}".into());
+    let canonical = ivy_contracts::json::canonical(&expected, usize::MAX).unwrap();
+    let mut corrupt = canonical.as_bytes().to_vec();
+    let replacement = "\u{fffd}".as_bytes();
+    let index = corrupt
+        .windows(replacement.len())
+        .position(|bytes| bytes == replacement)
+        .unwrap();
+    corrupt.splice(index..index + replacement.len(), [0xff]);
+    let noncanonical = canonical.replacen("\":", "\" : ", 1);
+    assert_json_eq(
+        &ivy_contracts::json::parse(&noncanonical, usize::MAX).unwrap(),
+        &expected,
+    );
+    for bytes in [
+        corrupt,
+        noncanonical.into_bytes(),
+        format!("{canonical}\0").into_bytes(),
+    ] {
+        fs::write(&path, &bytes).unwrap();
+        assert!(
+            !clear_process_stop_fence(&fixture.0, expected.clone())
+                .await
+                .unwrap()
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert!(
+            !record_process_stop_fence(&fixture.0, expected.clone())
+                .await
+                .unwrap()
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            require_clear_process_stop_fence(&fixture.0)
+                .await
+                .unwrap_err()
+                .code,
+            "outcome_unknown"
+        );
+    }
+    fs::write(&path, format!("{canonical}\n")).unwrap();
+    assert!(
+        clear_process_stop_fence(&fixture.0, expected)
+            .await
+            .unwrap()
+    );
+    let mut opaque = stop_fence();
+    opaque.insert("ownerId", IvyJson::String(JsString(vec![78, 0xd800])));
+    assert!(
+        record_process_stop_fence(&fixture.0, opaque.clone())
+            .await
+            .unwrap()
+    );
+    assert_json_eq(
+        &process_stop_fence(&fixture.0).await.unwrap().unwrap(),
+        &opaque,
+    );
+    let before = fs::read(&path).unwrap();
+    assert_eq!(
+        clear_process_stop_fence(&fixture.0, IvyJson::Null)
+            .await
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert!(clear_process_stop_fence(&fixture.0, opaque).await.unwrap());
+    assert!(
+        !clear_process_stop_fence(&fixture.0, stop_fence())
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
 async fn stop_fence_exclusive_writer_and_invalid_marker_fail_closed() {
     use ivy_host_runtime::process_fence::*;
-    let fixture = ServiceFixture::new(); let root = fixture.0.join("fenced");
+    let fixture = ServiceFixture::new();
+    let root = fixture.0.join("fenced");
     let mut writers = Vec::new();
-    for _ in 0..16 { let root = root.clone(); writers.push(tokio::spawn(async move { record_process_stop_fence(root, stop_fence()).await.unwrap() })); }
-    let mut winners = 0; for writer in writers { if writer.await.unwrap() { winners += 1; } }
+    for _ in 0..16 {
+        let root = root.clone();
+        writers.push(tokio::spawn(async move {
+            record_process_stop_fence(root, stop_fence()).await.unwrap()
+        }));
+    }
+    let mut winners = 0;
+    for writer in writers {
+        if writer.await.unwrap() {
+            winners += 1;
+        }
+    }
     assert_eq!(winners, 1);
     let error = require_clear_process_stop_fence(&root).await.unwrap_err();
-    assert_eq!(error.code, "outcome_unknown"); assert_eq!(error.outcome, ivy_contracts::Outcome::Unknown);
+    assert_eq!(error.code, "outcome_unknown");
+    assert_eq!(error.outcome, ivy_contracts::Outcome::Unknown);
     assert!(clear_process_stop_fence(&root, stop_fence()).await.unwrap());
-    let path = root.join("process-stop-fence.json"); fs::create_dir(&path).unwrap();
-    assert_eq!(process_stop_fence(&root).await.unwrap_err().code, "outcome_unknown");
-    compare_config_oracle(IvyJson::object([("kind", "fence".into()), ("operation", "recordProcessStopFence".into()),
-        ("path", root.to_string_lossy().to_string().into()), ("fence", stop_fence())]),
-        record_process_stop_fence(&root, stop_fence()).await.map(Into::into));
+    let path = root.join("process-stop-fence.json");
+    fs::create_dir(&path).unwrap();
+    assert_eq!(
+        process_stop_fence(&root).await.unwrap_err().code,
+        "outcome_unknown"
+    );
+    assert!(
+        !record_process_stop_fence(&root, stop_fence())
+            .await
+            .unwrap()
+    );
+    assert!(path.is_dir());
     assert!(clear_process_stop_fence(&root, stop_fence()).await.is_err());
     fs::remove_dir(&path).unwrap();
-    assert!(record_process_stop_fence(&root, IvyJson::Null).await.is_err());
+    assert!(
+        record_process_stop_fence(&root, IvyJson::Null)
+            .await
+            .is_err()
+    );
     assert!(!path.exists());
 }
 
 #[tokio::test]
-async fn service_configuration_matches_original_node_file_and_identity_boundaries() {
+async fn service_configuration_preserves_file_schema_and_identity_boundaries() {
     let fixture = ServiceFixture::new();
     let path = fixture.0.join("config.json");
     let path_json = IvyJson::from(path.to_string_lossy().to_string());
-    for bytes in [b"null".as_slice(), b"[1,true]", b"{bad", &[b'"', 0xff, b'"'], b"\xef\xbb\xbf{}", b"{\"__proto__\":{\"x\":1},\"text\":\"\\ud800\"}"] {
+    for bytes in [
+        b"null".as_slice(),
+        b"[1,true]",
+        b"{bad",
+        "\"ü 空 😀 �\"".as_bytes(),
+        b"\xef\xbb\xbf{}",
+        b"{\"__proto__\":{\"x\":1},\"text\":\"\\ud800\"}",
+    ] {
         fs::write(&path, bytes).unwrap();
         for limit in [2, 1024] {
-            compare_config_oracle(IvyJson::object([("kind", "file".into()), ("path", path_json.clone()), ("limit", IvyJson::Number(limit as f64))]), config::json_file(&path, limit).await);
+            compare_config_oracle(
+                IvyJson::object([
+                    ("kind", "file".into()),
+                    ("path", path_json.clone()),
+                    ("limit", IvyJson::Number(limit as f64)),
+                ]),
+                config::json_file(&path, limit).await,
+            );
         }
     }
-    let valid = fixture.value(); fixture.build(&valid).await;
-    for mode in ["valid", "unknown-property", "root-overlap", "build-mismatch", "null-build"] {
+    let valid = fixture.value();
+    fixture.build(&valid).await;
+    for mode in [
+        "valid",
+        "unknown-property",
+        "root-overlap",
+        "build-mismatch",
+        "null-build",
+    ] {
         let mut value = valid.clone();
         match mode {
             "unknown-property" => value.insert("extra", true.into()),
-            "root-overlap" => value.insert("dataRoot", value.required("artifactRoot").unwrap().clone()),
+            "root-overlap" => {
+                value.insert("dataRoot", value.required("artifactRoot").unwrap().clone())
+            }
             "build-mismatch" => value.insert("version", "wrong".into()),
-            "null-build" => config::atomic_json(fixture.0.join("artifact/dist/build-info.json"), IvyJson::Null).await.unwrap(),
+            "null-build" => config::atomic_json(
+                fixture.0.join("artifact/dist/build-info.json"),
+                IvyJson::Null,
+            )
+            .await
+            .unwrap(),
             _ => (),
         }
         fixture.save(value).await;
-        compare_config_oracle(IvyJson::object([("kind", "instance".into()), ("path", path_json.clone())]), config::instance_config(&path, &fixture_node("24.18.0")).await.map(|value| value.json().clone()));
+        compare_config_oracle(
+            IvyJson::object([("kind", "instance".into()), ("path", path_json.clone())]),
+            config::instance_config(&path, &fixture_node("24.18.0"))
+                .await
+                .map(|value| value.json().clone()),
+        );
     }
-    for args in [vec![], vec!["--config".to_string()], vec!["--config".into(), "relative".into()], vec!["--config".into(), path.to_string_lossy().to_string(), "--config".into(), "relative".into()]] {
+    for args in [
+        vec![],
+        vec!["--config".to_string()],
+        vec!["--config".into(), "relative".into()],
+        vec![
+            "--config".into(),
+            path.to_string_lossy().to_string(),
+            "--config".into(),
+            "relative".into(),
+        ],
+    ] {
         let native = args.iter().map(Into::into).collect::<Vec<_>>();
-        compare_config_oracle(IvyJson::object([("kind", "path".into()), ("args", IvyJson::Array(args.iter().cloned().map(Into::into).collect())), ("environment", path_json.clone())]), config::configuration_path(&native, Some(path.clone().into_os_string())).map(|p| p.to_string_lossy().to_string().into()));
+        compare_config_oracle(
+            IvyJson::object([
+                ("kind", "path".into()),
+                (
+                    "args",
+                    IvyJson::Array(args.iter().cloned().map(Into::into).collect()),
+                ),
+                ("environment", path_json.clone()),
+            ]),
+            config::configuration_path(&native, Some(path.clone().into_os_string()))
+                .map(|p| p.to_string_lossy().to_string().into()),
+        );
     }
     #[cfg(windows)]
-    for input in ["\\relative-to-drive\\config.json", "/relative-to-drive/config.json", "C:relative.json", "\\\\server\\share\\config.json"] {
-        compare_config_oracle(IvyJson::object([("kind", "path".into()), ("args", IvyJson::Array(vec!["--config".into(), input.into()])), ("environment", IvyJson::Null)]), config::configuration_path(&["--config".into(), input.into()], None).map(|p| p.to_string_lossy().to_string().into()));
+    for input in [
+        "\\relative-to-drive\\config.json",
+        "/relative-to-drive/config.json",
+        "C:relative.json",
+        "\\\\server\\share\\config.json",
+    ] {
+        compare_config_oracle(
+            IvyJson::object([
+                ("kind", "path".into()),
+                (
+                    "args",
+                    IvyJson::Array(vec!["--config".into(), input.into()]),
+                ),
+                ("environment", IvyJson::Null),
+            ]),
+            config::configuration_path(&["--config".into(), input.into()], None)
+                .map(|p| p.to_string_lossy().to_string().into()),
+        );
     }
 }
 
@@ -461,20 +706,90 @@ async fn instance_configuration_checks_build_before_creating_runtime_roots() {
 }
 
 #[tokio::test]
-async fn configuration_selection_and_file_boundary_preserve_original_rules() {
-    let fixture = ServiceFixture::new(); let path = fixture.0.join("config.json");
+async fn configuration_selection_and_json_files_preserve_native_text_and_limits() {
+    let fixture = ServiceFixture::new();
+    let path = fixture.0.join("config.json");
     let env = Some(path.clone().into_os_string());
     assert_eq!(config::configuration_path(&[], env.clone()).unwrap(), path);
     assert!(config::configuration_path(&["--config".into()], env.clone()).is_err());
-    assert!(config::configuration_path(&["--config".into(), "relative".into()], env.clone()).is_err());
-    assert_eq!(config::configuration_path(&["--config".into(), path.clone().into_os_string(), "--config".into(), "relative".into()], None).unwrap(), path);
-    fs::write(&path, [b'"', 0xff, b'"']).unwrap();
-    assert_eq!(config::json_file(&path, 3).await.unwrap(), IvyJson::from("\u{fffd}"));
-    assert_eq!(config::json_file(&path, 2).await.unwrap_err().code, "invalid_arguments");
+    assert!(
+        config::configuration_path(&["--config".into(), "relative".into()], env.clone()).is_err()
+    );
+    assert_eq!(
+        config::configuration_path(
+            &[
+                "--config".into(),
+                path.clone().into_os_string(),
+                "--config".into(),
+                "relative".into()
+            ],
+            None
+        )
+        .unwrap(),
+        path
+    );
+    let valid = "{\"text\":\"ü 空 😀 �\",\"escaped\":\"\\ud800\"}";
+    let expected = IvyJson::object([
+        ("text", "ü 空 😀 �".into()),
+        ("escaped", IvyJson::String(JsString(vec![0xd800]))),
+    ]);
+    fs::write(&path, valid.as_bytes()).unwrap();
+    assert_json_eq(
+        &config::json_file(&path, valid.len()).await.unwrap(),
+        &expected,
+    );
+    assert_eq!(
+        config::json_file_if_present(&path, valid.len())
+            .await
+            .unwrap(),
+        Some(expected)
+    );
+    assert_eq!(
+        config::json_file(&path, valid.len() - 1)
+            .await
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+    let invalid = [b'"', 0xff, b'"'];
+    fs::write(&path, invalid).unwrap();
+    assert_eq!(
+        config::json_file(&path, 3).await.unwrap_err().code,
+        "internal_error"
+    );
+    assert_eq!(
+        config::json_file_if_present(&path, 3)
+            .await
+            .unwrap_err()
+            .code,
+        "internal_error"
+    );
+    assert_eq!(fs::read(&path).unwrap(), invalid);
+    assert_eq!(
+        config::json_file(&path, 2).await.unwrap_err().code,
+        "invalid_arguments"
+    );
     fs::write(&path, "{bad").unwrap();
-    assert_eq!(config::json_file(&path, 100).await.unwrap_err().code, "internal_error");
-    assert_eq!(config::json_file(&fixture.0, 100).await.unwrap_err().code, "invalid_arguments");
-    let mut value = fixture.value(); value.insert("unexpected", true.into());
+    assert_eq!(
+        config::json_file(&path, 100).await.unwrap_err().code,
+        "internal_error"
+    );
+    assert_eq!(
+        config::json_file(&fixture.0, 100).await.unwrap_err().code,
+        "invalid_arguments"
+    );
+    fs::remove_file(&path).unwrap();
+    assert_eq!(
+        config::json_file_if_present(&path, 100).await.unwrap(),
+        None
+    );
+    fs::write(&path, b"null").unwrap();
+    assert_eq!(
+        config::json_file_if_present(&path, 4).await.unwrap(),
+        Some(IvyJson::Null)
+    );
+    let mut value = fixture.value();
+    value.insert("unexpected", true.into());
     assert!(config::InstanceConfig::from_json(value).is_err());
 }
 

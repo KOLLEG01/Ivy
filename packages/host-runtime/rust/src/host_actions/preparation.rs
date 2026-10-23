@@ -42,9 +42,13 @@ impl HostActions {
                 }
                 let paths = node_path::Context::current().map_err(|_| IvyError::internal())?;
                 let original = paths.resolve(&[original]);
-                let snapshot =
-                    source::capture_source(original, config.clone(), this.distribution.clone())
-                        .await?;
+                let snapshot = source::capture_component_source(
+                    original,
+                    config.clone(),
+                    this.distribution.clone(),
+                    component.clone(),
+                )
+                .await?;
                 prepare::prepare_candidate(snapshot, component, config, this.distribution, runtime)
                     .await
             }

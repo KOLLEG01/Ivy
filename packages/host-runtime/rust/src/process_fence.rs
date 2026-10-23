@@ -9,8 +9,8 @@ fn unknown(message: &str) -> IvyError {
 }
 fn already_exists(error: &std::io::Error, path: &Path) -> bool {
     if error.kind() == std::io::ErrorKind::AlreadyExists { return true; }
-    // Win32 CREATE_NEW reports ACCESS_DENIED for an existing directory. Node's
-    // libuv maps that case to EEXIST; preserve exclusive-create's false result.
+    // Windows can report ACCESS_DENIED when CREATE_NEW meets a directory.
+    // It is still an existing marker and must not be replaced.
     #[cfg(windows)] {
         use std::os::windows::fs::MetadataExt;
         if error.raw_os_error() == Some(5) {
@@ -80,13 +80,11 @@ pub async fn record_process_stop_fence(data_root: impl Into<PathBuf>, fence: Ivy
     }).await.map_err(|_| IvyError::internal())?
 }
 
-// ECMAScript trim includes BOM and excludes NEL, unlike Rust's Unicode trim.
-fn js_space(ch: char) -> bool {
-    matches!(ch, '\u{9}'..='\u{d}' | '\u{20}' | '\u{a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}')
-}
-
 /// Call only after external owner-release proof for this exact fence has passed.
-pub async fn clear_process_stop_fence(data_root: impl Into<PathBuf>, expected: IvyJson) -> IvyResult<bool> {
+pub async fn clear_process_stop_fence(
+    data_root: impl Into<PathBuf>,
+    expected: IvyJson,
+) -> IvyResult<bool> {
     validate_host("ProcessStopFence", &expected)?;
     let root = data_root.into();
     tokio::task::spawn_blocking(move || {
@@ -96,8 +94,15 @@ pub async fn clear_process_stop_fence(data_root: impl Into<PathBuf>, expected: I
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(_) => return Err(IvyError::internal()),
         };
-        if String::from_utf8_lossy(&bytes).trim_matches(js_space) != json::canonical(&expected, usize::MAX)? { return Ok(false); }
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            return Ok(false);
+        };
+        if text.trim() != json::canonical(&expected, usize::MAX)? {
+            return Ok(false);
+        }
         fs::remove_file(path).map_err(|_| IvyError::internal())?;
         Ok(true)
-    }).await.map_err(|_| IvyError::internal())?
+    })
+    .await
+    .map_err(|_| IvyError::internal())?
 }

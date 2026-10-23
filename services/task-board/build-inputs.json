@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "win32-x64": [
+      ".local/native-runtime/win32-x64/icudt78.dll",
+      ".local/native-runtime/win32-x64/icuuc78.dll",
+      ".local/native-runtime/win32-x64/icuin78.dll",
+      ".local/native-runtime/win32-x64/LICENSE.icu"
+    ],
+    "win32-arm64": [
+      ".local/native-runtime/win32-arm64/icudt78.dll",
+      ".local/native-runtime/win32-arm64/icuuc78.dll",
+      ".local/native-runtime/win32-arm64/icuin78.dll",
+      ".local/native-runtime/win32-arm64/LICENSE.icu"
+    ],
+    "linux-x64": [
+      ".local/native-runtime/linux-x64/libicudata.so.78",
+      ".local/native-runtime/linux-x64/libicuuc.so.78",
+      ".local/native-runtime/linux-x64/libicui18n.so.78",
+      ".local/native-runtime/linux-x64/LICENSE.icu"
+    ],
+    "linux-arm64": [
+      ".local/native-runtime/linux-arm64/libicudata.so.78",
+      ".local/native-runtime/linux-arm64/libicuuc.so.78",
+      ".local/native-runtime/linux-arm64/libicui18n.so.78",
+      ".local/native-runtime/linux-arm64/LICENSE.icu"
+    ]
+  }
+}

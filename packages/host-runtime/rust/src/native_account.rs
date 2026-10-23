@@ -1,37 +1,28 @@
 //! Executing-account inputs. No profile creation, environment mutation or shell.
 use ivy_contracts::JsString;
-use std::{collections::BTreeMap, io, path::Path};
+use std::{collections::BTreeMap, io};
 
-use crate::node_path::node_utf8 as node_string;
+use crate::native_path::filesystem_name as os_text;
 
 pub fn environment() -> BTreeMap<JsString, JsString> {
     let mut values: BTreeMap<_, _> = std::env::vars_os()
-        .map(|(key, value)| (node_string(&key), node_string(&value)))
+        .map(|(key, value)| (os_text(&key), os_text(&value)))
         .collect();
-    // process.env lookups on Windows ignore key case. Explicit caller-provided
-    // JSON environments retain their own property semantics in layout helpers.
+    // Native Windows lookups ignore key case; retain the canonical home keys.
     #[cfg(windows)]
     for key in ["HOME", "USERPROFILE", "CODEX_HOME"] {
         if let Some(value) = std::env::var_os(key) {
-            values.insert(key.into(), node_string(&value));
+            values.insert(key.into(), os_text(&value));
         }
     }
     values
 }
 
-/// Node os.homedir's native environment/profile lookup, before path validation.
+/// Resolve the executing account's native home before host path validation.
 pub fn os_homedir() -> io::Result<JsString> {
     let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     if let Some(value) = std::env::var_os(key) {
-        #[cfg(windows)]
-        if char::decode_utf16(crate::node_path::from_native(Path::new(&value)).0)
-            .map(|c| c.map_or(3, char::len_utf8))
-            .sum::<usize>()
-            < 3
-        {
-            return Err(io::Error::from(io::ErrorKind::NotFound));
-        }
-        return Ok(node_string(&value));
+        return Ok(os_text(&value));
     }
     profile_home()
 }
@@ -47,10 +38,6 @@ fn profile_home() -> io::Result<JsString> {
     #[link(name = "userenv")]
     unsafe extern "system" {
         fn GetUserProfileDirectoryW(token: HANDLE, path: *mut u16, size: *mut u32) -> i32;
-    }
-    #[link(name = "advapi32")]
-    unsafe extern "system" {
-        fn GetUserNameW(name: *mut u16, size: *mut u32) -> i32;
     }
     unsafe {
         let mut token = null_mut();
@@ -72,15 +59,7 @@ fn profile_home() -> io::Result<JsString> {
             Ok(JsString(home))
         })();
         CloseHandle(token);
-        let home = home?;
-        // libuv's passwd fallback also obtains the account name; preserve its
-        // failure boundary without exposing the name to host configuration.
-        let mut name = [0; 257];
-        let mut size = name.len() as u32;
-        if GetUserNameW(name.as_mut_ptr(), &mut size) == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(node_string(crate::node_path::to_native(&home).as_os_str()))
+        home
     }
 }
 

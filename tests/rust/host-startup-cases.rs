@@ -831,6 +831,35 @@ async fn native_home_admission_preserves_shared_and_owned_storage_boundaries() {
 
 #[tokio::test]
 async fn production_host_loader_uses_the_executing_account_and_bounded_json_file() {
+    let invalid_root = Root::new();
+    let invalid_path = invalid_root.0.join("host.json");
+    let mut invalid = base(&invalid_root.0);
+    let mut instances = invalid
+        .required("instances")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .to_vec();
+    let mut settings = instances[0].required("settings").unwrap().clone();
+    settings.insert("text", "native-�".into());
+    instances[0].insert("settings", settings);
+    invalid.insert("instances", J::Array(instances));
+    let mut bytes = json::stringify(&invalid, usize::MAX).unwrap().into_bytes();
+    let offset = bytes
+        .windows(3)
+        .position(|part| part == b"\xef\xbf\xbd")
+        .unwrap();
+    bytes.splice(offset..offset + 3, [0xff]);
+    fs::write(&invalid_path, &bytes).unwrap();
+    assert_eq!(
+        host_config::host_config(&invalid_path)
+            .await
+            .unwrap_err()
+            .code,
+        "internal_error"
+    );
+    assert!(!invalid_root.0.join("runtime").exists());
+    assert_eq!(fs::read(&invalid_path).unwrap(), bytes);
     let root = Root::new();
     let path = root.0.join("host.json");
     let config = base(&root.0);
@@ -991,63 +1020,46 @@ fn native_account_probe() {
 fn executing_account_environment_preserves_native_utf16_and_profile_selection() {
     let root = Root::new();
     let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    let mut values = vec![
-        None,
-        Some(JsString::from("")),
-        Some("x".into()),
-        Some("é".into()),
-        Some("€".into()),
-        Some("relative/home".into()),
-        Some(node_path::from_native(&root.0.join("home"))),
+    let home = root.0.join("home");
+    let mut cases = vec![
+        ("profile", None, None),
+        ("empty", Some(JsString::from("")), None),
+        ("short-ascii", Some("x".into()), None),
+        ("two-ascii", Some("xy".into()), None),
+        ("short-unicode", Some("é".into()), None),
+        ("unicode", Some("€".into()), None),
+        ("relative", Some("relative/home".into()), None),
+        (
+            "absolute",
+            Some(node_path::from_native(&home)),
+            Some(home.clone()),
+        ),
     ];
     #[cfg(windows)]
-    values.push(Some(JsString(
-        root.0
-            .join("home")
-            .as_os_str()
-            .to_string_lossy()
-            .encode_utf16()
-            .chain([47, 0xd800])
-            .collect(),
-    )));
+    {
+        let opaque = home.join(node_path::to_native(&JsString(vec![0xd800])));
+        cases.push((
+            "opaque",
+            Some(node_path::from_native(&opaque)),
+            Some(opaque.clone()),
+        ));
+        let mut mixed = node_path::from_native(&home);
+        mixed.0.extend([47, 0xd800]);
+        cases.push(("opaque-mixed", Some(mixed), Some(opaque)));
+        let mixed_case = root.0.join("mixed-case-home");
+        cases.push((
+            "mixed-case-key",
+            Some(node_path::from_native(&mixed_case)),
+            Some(mixed_case),
+        ));
+    }
     let selected = if cfg!(windows) {
         JsString(vec![65, 0xd800, 66])
     } else {
         JsString::from("A€B")
     };
-    for (i, value) in values.into_iter().enumerate() {
-        let request = J::object([("kind", "account".into())]);
-        let mut node = Command::new("node");
-        node.args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/host-startup-oracle.mjs",
-        ])
-        .current_dir(repo())
-        .env_remove(key)
-        .env("IVY_ACCOUNT_UTF16", node_path::to_native(&selected))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-        if let Some(value) = &value {
-            node.env(key, node_path::to_native(value));
-        }
-        let mut child = node.spawn().unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(json::stringify(&request, usize::MAX).unwrap().as_bytes())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let mut expected =
-            json::parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
-        let probe = root.0.join(format!("probe-{i}.json"));
+    for (name, value, expected_account) in cases {
+        let probe = root.0.join(format!("probe-{name}.json"));
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args([
@@ -1059,38 +1071,81 @@ fn executing_account_environment_preserves_native_utf16_and_profile_selection() 
             .env("IVY_ACCOUNT_PROBE", &probe)
             .env("IVY_ACCOUNT_UTF16", node_path::to_native(&selected));
         if let Some(value) = &value {
+            let key = if cfg!(windows) && name == "mixed-case-key" {
+                "uSeRpRoFiLe"
+            } else {
+                key
+            };
             command.env(key, node_path::to_native(value));
         }
         let output = command.output().unwrap();
         assert!(
             output.status.success(),
-            "{}",
+            "{name}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         let actual = json::parse(&fs::read_to_string(probe).unwrap(), usize::MAX).unwrap();
-        // Native environment transport preserves OS units independently of Node's decoder.
+        let success = |field| {
+            let item = actual.required(field).unwrap();
+            assert_eq!(
+                item.get("ok"),
+                Some(&J::Bool(true)),
+                "{name}/{field}: {item:?}"
+            );
+            item.required("value").unwrap().clone()
+        };
+        let os_home = success("osHome");
+        if let Some(value) = &value {
+            assert_eq!(os_home, J::String(value.clone()), "{name}");
+        } else {
+            assert!(node_path::to_native(os_home.as_js_string().unwrap()).is_absolute());
+        }
         assert_eq!(
-            actual.required("selected").unwrap(),
-            &J::String(selected.clone())
+            actual.get("selected"),
+            Some(&J::String(selected.clone())),
+            "{name}"
         );
-        expected.insert("selected", J::String(selected.clone()));
-        #[cfg(windows)]
-        if let Some(home) = &value
-            && home.0.contains(&0xd800)
-        {
-            let opaque = root
-                .0
-                .join("home")
-                .join(node_path::to_native(&JsString(vec![0xd800])));
-            for (name, value) in [
-                ("osHome", J::String(home.clone())),
-                ("accountHome", jp(&opaque)),
-                ("defaultPath", jp(&opaque.join(".ivy").join("config.json"))),
-            ] {
-                expected.insert(name, J::object([("ok", true.into()), ("value", value)]));
+        let expected_account = if value.is_none() {
+            Some(node_path::to_native(os_home.as_js_string().unwrap()))
+        } else {
+            expected_account
+        };
+        if let Some(account) = &expected_account {
+            super::assert_json_eq_with_context(
+                &success("accountHome"),
+                &jp(account),
+                &J::from(name),
+            );
+            super::assert_json_eq_with_context(
+                &success("defaultPath"),
+                &jp(&account.join(".ivy").join("config.json")),
+                &J::from(name),
+            );
+            if value.is_some() {
+                assert!(!account.exists(), "{name}: home was created");
+            }
+        } else {
+            for field in ["accountHome", "defaultPath"] {
+                let item = actual.required(field).unwrap();
+                assert_eq!(
+                    item.get("ok"),
+                    Some(&J::Bool(false)),
+                    "{name}/{field}: {item:?}"
+                );
+                assert_eq!(
+                    item.required("error").unwrap().get("code"),
+                    Some(&J::Number(-32602.0)),
+                    "{name}/{field}: {item:?}"
+                );
+                let data = item.required("error").unwrap().required("data").unwrap();
+                assert_eq!(
+                    data.get("code"),
+                    Some(&J::from("invalid_arguments")),
+                    "{name}/{field}: {item:?}"
+                );
+                assert_eq!(data.get("outcome"), Some(&J::from("not_executed")));
             }
         }
-        super::assert_json_eq_with_context(&actual, &expected, &J::Number(i as f64));
     }
 }
 

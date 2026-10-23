@@ -5,6 +5,7 @@ import { materializeNativePlan } from '../../packages/host-runtime/src/native-pl
 import { buildIdentity } from '../../packages/host-runtime/src/build-identity.mjs';
 import { compileRustBackend, compileRustHelpers, rustBackendTargets } from './build-rust-backend.mjs';
 import { stageNativePayloads } from './stage-native-payloads.mjs';
+import { componentBuildInputs } from './build-inputs.mjs';
 
 /** Build and stage only the selected host. A prepared plan never advertises
  * binaries from other targets, and normal preparation needs no retained matrix. */
@@ -19,12 +20,7 @@ export function buildNativeDeployment({ component, target, root = process.cwd(),
   const plan = materializeNativePlan(source, { os, arch });
   if (!plan.entrypoint?.executable.startsWith('dist/native/')) throw Error('The component does not declare native entry and readiness commands.');
   target ??= Object.keys(rustBackendTargets).find(target => rustBackendTargets[target] === platform);
-  // TaskBoard loads the qualified full ICU runtime beside its executable.
-  // The build input stays target-specific and inside the source workspace.
-  const runtimeFiles = component === 'task-board'
-    ? [...(os === 'win32' ? ['icudt78.dll', 'icuuc78.dll', 'icuin78.dll']
-      : ['libicudata.so.78', 'libicuuc.so.78', 'libicui18n.so.78']), 'LICENSE.icu']
-      .map(name => resolve(root, '.local', 'native-runtime', platform, name)) : [];
+  const runtimeFiles = componentBuildInputs({ root, component, platform });
   const binaries = ['ivy-health', ...(os === 'win32'
     ? ['ivy-job', ...(component === 'host-executor' ? ['ivy-host-job'] : [])] : [])];
   const requiredBinaries = [...binaries, ...(component === 'host-executor' ? ['ivy-bootstrap-auto-worker'] : [])];

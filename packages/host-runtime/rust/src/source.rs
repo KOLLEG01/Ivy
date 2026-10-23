@@ -68,10 +68,10 @@ async fn source_paths(source: &JsString, executable: JsString, bootstrap_root: P
 }
 struct SourceFile { path: JsString, absolute: JsString, bytes: u64, mode: u32 }
 type CheckedDirectories = Arc<tokio::sync::Mutex<BTreeMap<JsString, Arc<tokio::sync::OnceCell<IvyResult<()>>>>>>;
-async fn source_files(source: JsString, paths: Vec<JsString>) -> IvyResult<Vec<SourceFile>> {
+async fn source_files(source: JsString, paths: Vec<JsString>, required: BTreeSet<JsString>) -> IvyResult<Vec<SourceFile>> {
     let checked: CheckedDirectories = Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
     let files = map_concurrent(paths, 8, |path, _| {
-        let source = source.clone(); let checked = checked.clone();
+        let source = source.clone(); let checked = checked.clone(); let required = required.contains(&path);
         async move {
             let source_for_file = source.clone();
             let file = blocking(move || {
@@ -80,7 +80,8 @@ async fn source_files(source: JsString, paths: Vec<JsString>) -> IvyResult<Vec<S
                 let local = paths.relative(&source_for_file, &absolute);
                 let metadata = match fs::symlink_metadata(node_path::filesystem_path(&absolute)) {
                     Ok(value) => value,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required => return Ok(None),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(IvyError::new("artifact_missing", "Declared build input is missing.")),
                     Err(_) => return Err(IvyError::internal()),
                 };
                 let above = [46,46,if cfg!(windows) {92} else {47}];
@@ -107,9 +108,32 @@ async fn source_files(source: JsString, paths: Vec<JsString>) -> IvyResult<Vec<S
 /// Capture runs to completion even if a caller drops its waiter. No accepted
 /// journal record refers to mutable checkout inputs or to an incoming directory.
 pub async fn capture_source(original: JsString, config: IvyJson, bootstrap_root: PathBuf) -> IvyResult<IvyJson> {
-    internal(tokio::spawn(capture(original, config, bootstrap_root)).await)?
+    internal(tokio::spawn(capture(original, config, bootstrap_root, None)).await)?
 }
-async fn capture(original: JsString, config: IvyJson, bootstrap_root: PathBuf) -> IvyResult<IvyJson> {
+/// Preparation selects one component without changing the general snapshot API.
+pub async fn capture_component_source(
+    original: JsString,
+    config: IvyJson,
+    bootstrap_root: PathBuf,
+    component: JsString,
+) -> IvyResult<IvyJson> {
+    crate::preparation_inputs::validate_component_id(&component)?;
+    internal(tokio::spawn(capture(original, config, bootstrap_root, Some(component))).await)?
+}
+pub(crate) async fn component_source_inputs(
+    root: PathBuf,
+    component: JsString,
+) -> IvyResult<Vec<JsString>> {
+    blocking(move || {
+        crate::build_inputs::source_inputs(
+            &root,
+            &component.to_utf8()?,
+            crate::portable_native_files::native_platform()?,
+        )
+    })
+    .await
+}
+async fn capture(original: JsString, config: IvyJson, bootstrap_root: PathBuf, component: Option<JsString>) -> IvyResult<IvyJson> {
     let executable = config.get("executables").and_then(|v| v.get("git")).and_then(IvyJson::as_js_string)
         .filter(|v| !v.0.is_empty()).cloned().ok_or_else(|| IvyError::new("invalid_arguments", "Host preparation requires an explicit Git executable."))?;
     require(node_path::is_absolute(Style::native(), &original), "invalid_arguments", "Source must be an explicit absolute checkout path.")?;
@@ -124,10 +148,17 @@ async fn capture(original: JsString, config: IvyJson, bootstrap_root: PathBuf) -
             "target_conflict", "Release source must stay separate from private service state, internal projects, configuration, artifacts and staging.")?;
         Ok(source)
     }).await?;
-    let paths = source_paths(&source, executable, bootstrap_root).await?;
+    let required = match component {
+        Some(component) => component_source_inputs(node_path::filesystem_path(&source), component).await?,
+        None => Vec::new(),
+    };
+    let mut paths = source_paths(&source, executable, bootstrap_root).await?;
+    paths.extend(required.iter().cloned());
+    let paths: Vec<_> = paths.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
+    require(paths.len() <= 20_000, "limit_exceeded", "Source copy exceeds its file limit.")?;
     let snapshot_id = uuid::Uuid::new_v4().to_string();
     require(paths.contains(&"package.json".into()) && paths.contains(&"package-lock.json".into()), "invalid_arguments", "A source candidate needs its package and dependency lock.")?;
-    let files = source_files(source.clone(), paths).await?;
+    let files = source_files(source.clone(), paths, required.into_iter().collect()).await?;
     let bytes: u64 = files.iter().map(|file| file.bytes).sum();
     require(bytes <= 1024 * 1024 * 1024, "limit_exceeded", "Source copy exceeds its byte limit.")?;
     let staging = field(&config, "stagingRoot")?;

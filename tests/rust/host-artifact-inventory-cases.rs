@@ -46,8 +46,10 @@ fn native_file_compare_missing_runtime_is_not_executed() {
 #[tokio::test]
 #[ignore = "requires the pinned ICU payload beside the test executable"]
 async fn native_file_compare_retains_packaged_locale_across_thread_and_inventory() {
+    let corpus = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../tests/fixtures/host-file-compare.json");
     let expected = json::parse(
-        include_str!("../fixtures/host-file-compare.json"),
+        &fs::read_to_string(corpus).expect("Provide the qualified file-compare corpus for this manual test."),
         usize::MAX,
     ).unwrap();
     let paths: Vec<JsString> = expected.required("paths").unwrap().as_array().unwrap()

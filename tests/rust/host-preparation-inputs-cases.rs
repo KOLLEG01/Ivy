@@ -328,14 +328,15 @@ async fn package_manager_accepts_only_pinned_string_values() {
 }
 
 #[tokio::test]
-async fn package_manager_reader_keeps_bounds_syntax_replacement_and_missing_distinct() {
+async fn package_manager_reader_keeps_native_utf8_bounds_syntax_and_missing_distinct() {
     for kind in [
         "missing",
         "directory",
         "syntax",
         "bom",
-        "replacement-unused",
-        "replacement-version",
+        "unicode-unused",
+        "invalid-utf8-unused",
+        "invalid-utf8-version",
         "limit",
         "oversize",
     ] {
@@ -347,11 +348,15 @@ async fn package_manager_reader_keeps_bounds_syntax_replacement_and_missing_dist
                 "package.json",
                 b"\xef\xbb\xbf{\"packageManager\":\"npm@1.2.3\"}",
             ),
-            "replacement-unused" => fixture.write(
+            "unicode-unused" => fixture.package(IvyJson::object([
+                ("packageManager", "npm@1.2.3".into()),
+                ("unused", "ü 空 😀 �".into()),
+            ])),
+            "invalid-utf8-unused" => fixture.write(
                 "package.json",
                 b"{\"packageManager\":\"npm@1.2.3\",\"unused\":\"\xff\"}",
             ),
-            "replacement-version" => {
+            "invalid-utf8-version" => {
                 fixture.write("package.json", b"{\"packageManager\":\"npm@1.2.\xff\"}")
             }
             "limit" | "oversize" => {
@@ -363,16 +368,13 @@ async fn package_manager_reader_keeps_bounds_syntax_replacement_and_missing_dist
             }
             _ => (),
         }
-        let result = compare(
-            input("manager", &fixture),
-            inputs::preparation_package_manager(fixture.0.clone()).await,
-        );
-        if kind == "limit" || kind == "replacement-unused" {
-            succeeds(&result);
+        let result = inputs::preparation_package_manager(fixture.0.clone()).await;
+        if kind == "limit" || kind == "unicode-unused" {
+            assert_eq!(result.unwrap(), IvyJson::from("npm@1.2.3"));
         } else {
-            refuses(
-                &result,
-                if kind == "directory" || kind == "oversize" || kind == "replacement-version" {
+            assert_eq!(
+                result.unwrap_err().code,
+                if kind == "directory" || kind == "oversize" {
                     "invalid_arguments"
                 } else {
                     "internal_error"
@@ -384,7 +386,7 @@ async fn package_manager_reader_keeps_bounds_syntax_replacement_and_missing_dist
 
 #[cfg(windows)]
 #[tokio::test]
-async fn package_manager_metadata_and_read_use_the_same_node_filename_boundary() {
+async fn package_manager_metadata_and_read_preserve_native_windows_filenames() {
     use std::{ffi::OsString, os::windows::ffi::OsStringExt};
     let fixture = Fixture::new();
     fixture.write(
@@ -394,30 +396,48 @@ async fn package_manager_metadata_and_read_use_the_same_node_filename_boundary()
     let requested = fixture.0.join(OsString::from_wide(&[
         0xd800, 45, 115, 111, 117, 114, 99, 101,
     ]));
-    let input = IvyJson::object([
-        ("operation", "manager".into()),
-        ("root", IvyJson::String(node_path::from_native(&requested))),
-    ]);
-    succeeds(&compare(
-        input.clone(),
-        inputs::preparation_package_manager(requested.clone()).await,
-    ));
+    assert_eq!(
+        inputs::preparation_package_manager(requested.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "internal_error"
+    );
     fs::create_dir(&requested).unwrap();
     fs::create_dir(requested.join("package.json")).unwrap();
-    succeeds(&compare(
-        input.clone(),
-        inputs::preparation_package_manager(requested.clone()).await,
-    ));
+    assert_eq!(
+        inputs::preparation_package_manager(requested.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
     fs::remove_dir(requested.join("package.json")).unwrap();
-    fs::write(requested.join("package.json"), b"{}").unwrap();
-    succeeds(&compare(
-        input.clone(),
-        inputs::preparation_package_manager(requested.clone()).await,
-    ));
+    fs::write(
+        requested.join("package.json"),
+        br#"{"packageManager":"npm@9.8.7"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        inputs::preparation_package_manager(requested.clone())
+            .await
+            .unwrap(),
+        IvyJson::from("npm@9.8.7")
+    );
     fixture.write("\u{fffd}-source/package.json", &vec![b' '; 1024 * 1024 + 1]);
-    refuses(
-        &compare(input, inputs::preparation_package_manager(requested).await),
-        "invalid_arguments",
+    assert_eq!(
+        inputs::preparation_package_manager(requested.clone())
+            .await
+            .unwrap(),
+        IvyJson::from("npm@9.8.7")
+    );
+    fs::write(requested.join("package.json"), vec![b' '; 1024 * 1024 + 1]).unwrap();
+    assert_eq!(
+        inputs::preparation_package_manager(requested)
+            .await
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
     );
 }
 
