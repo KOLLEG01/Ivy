@@ -4,7 +4,7 @@ use super::{
 };
 use ivy_contracts::IvyJson as J;
 use ivy_host_runtime::{
-    artifact, config, node_path, preparation_files,
+    artifact, config, native_path, preparation_files,
     preparation_inputs::{self, PreparationProfile},
     source,
 };
@@ -54,7 +54,7 @@ fn declaration(files: &[&str]) -> J {
     ])
 }
 fn setup(f: &ServiceFixture) -> (PathBuf, J, PathBuf) {
-    let checkout = f.0.join("checkout");
+    let checkout = f.0.join("checkout ü 空 😀; '");
     fs::create_dir(&checkout).unwrap();
     let git = std::env::var_os("IVY_TEST_GIT").unwrap_or_else(|| "git".into());
     let output = Command::new(&git)
@@ -81,8 +81,17 @@ fn setup(f: &ServiceFixture) -> (PathBuf, J, PathBuf) {
     let mut host = host_configuration(f);
     host.insert(
         "executables",
-        J::object([("git", J::String(node_path::filesystem_name(&git)))]),
+        J::object([("git", J::String(native_path::filesystem_name(&git)))]),
     );
+    let staging = f.0.join("staging ü 空 😀; '");
+    #[cfg(windows)]
+    let staging = {
+        use std::os::windows::ffi::OsStringExt;
+        let mut name = staging.into_os_string();
+        name.push(std::ffi::OsString::from_wide(&[0xd800]));
+        PathBuf::from(name)
+    };
+    host.insert("stagingRoot", J::String(native_path::from_native(&staging)));
     let bootstrap = f.0.join("bootstrap");
     fs::create_dir_all(bootstrap.join("dist/native")).unwrap();
     #[cfg(windows)]
@@ -102,7 +111,7 @@ async fn capture(
     component: &str,
 ) -> ivy_host_runtime::IvyResult<J> {
     source::capture_component_source(
-        node_path::from_native(root),
+        native_path::from_native(root),
         host.clone(),
         bootstrap.to_owned(),
         component.into(),
@@ -110,7 +119,7 @@ async fn capture(
     .await
 }
 fn snapshot_root(snapshot: &J) -> PathBuf {
-    node_path::filesystem_path(
+    native_path::to_native(
         snapshot
             .required("sourceRoot")
             .unwrap()
@@ -203,7 +212,7 @@ async fn component_capture_materializes_the_normal_native_build_source() {
         );
     }
     let proof = J::object([
-        ("output", J::String(node_path::from_native(&output))),
+        ("output", J::String(native_path::from_native(&output))),
         ("runtimeInputs", J::Array(hashes)),
     ]);
     println!(
@@ -282,7 +291,7 @@ async fn component_capture_selects_exact_runtime_bytes_and_invalidates_only_sour
         .await
         .unwrap();
     assert!(!snapshot_root(&unrelated).join(".local").exists());
-    let general = source::capture_source(node_path::from_native(&checkout), host, bootstrap)
+    let general = source::capture_source(native_path::from_native(&checkout), host, bootstrap)
         .await
         .unwrap();
     assert!(!snapshot_root(&general).join(".local").exists());
@@ -359,7 +368,16 @@ async fn component_capture_refuses_missing_linked_and_malformed_inputs_before_sn
                 .is_err(),
             "{kind}"
         );
-        assert!(!f.0.join("staging").exists(), "{kind}");
+        assert!(
+            !native_path::to_native(
+                host.required("stagingRoot")
+                    .unwrap()
+                    .as_js_string()
+                    .unwrap()
+            )
+            .exists(),
+            "{kind}"
+        );
     }
     for value in [
         parsed(r#"{"schemaVersion":2,"targets":{}}"#),
@@ -377,7 +395,15 @@ async fn component_capture_refuses_missing_linked_and_malformed_inputs_before_sn
                 .await
                 .is_err()
         );
-        assert!(!f.0.join("staging").exists());
+        assert!(
+            !native_path::to_native(
+                host.required("stagingRoot")
+                    .unwrap()
+                    .as_js_string()
+                    .unwrap()
+            )
+            .exists()
+        );
     }
     for files in [
         vec!["../outside"],
@@ -403,7 +429,40 @@ async fn component_capture_refuses_missing_linked_and_malformed_inputs_before_sn
                 .await
                 .is_err()
         );
-        assert!(!f.0.join("staging").exists());
+        assert!(
+            !native_path::to_native(
+                host.required("stagingRoot")
+                    .unwrap()
+                    .as_js_string()
+                    .unwrap()
+            )
+            .exists()
+        );
+    }
+    for key in ["runtimeRoot", "artifactRoot", "stagingRoot", "configPath"] {
+        for inside in [false, true] {
+            if key == "configPath" && !inside {
+                continue;
+            }
+            let f = ServiceFixture::new();
+            let (checkout, mut host, bootstrap) = setup(&f);
+            let private = if inside {
+                checkout.join("private-state")
+            } else {
+                f.0.clone()
+            };
+            host.insert(key, J::String(native_path::from_native(&private)));
+            let error =
+                source::capture_source(native_path::from_native(&checkout), host, bootstrap)
+                    .await
+                    .unwrap_err();
+            assert_eq!(error.code, "target_conflict", "{key}: inside={inside}");
+            assert_eq!(
+                fs::read(checkout.join("package.json")).unwrap(),
+                br#"{"packageManager":"npm@11.0.0"}"#
+            );
+            assert!(!checkout.join("private-state").exists());
+        }
     }
     // A supplied immutable snapshot is re-admitted before temporary build output.
     let f = ServiceFixture::new();
@@ -414,7 +473,14 @@ async fn component_capture_refuses_missing_linked_and_malformed_inputs_before_sn
     plan.insert("componentId", "fixture".into());
     let mut entrypoint = plan.required("entrypoint").unwrap().clone();
     entrypoint.insert("executable", "dist/native/ivy-fixture".into());
+    entrypoint.insert("args", J::Array(Vec::new()));
     plan.insert("entrypoint", entrypoint);
+    let mut readiness = plan.required("readiness").unwrap().clone();
+    let mut command = readiness.required("command").unwrap().clone();
+    command.insert("executable", "dist/native/ivy-health".into());
+    command.insert("args", J::Array(Vec::new()));
+    readiness.insert("command", command);
+    plan.insert("readiness", readiness);
     config::atomic_json(checkout.join("services/fixture/deploy.json"), plan)
         .await
         .unwrap();
@@ -425,12 +491,19 @@ async fn component_capture_refuses_missing_linked_and_malformed_inputs_before_sn
     .await
     .unwrap();
     let general = source::capture_source(
-        node_path::from_native(&checkout),
+        native_path::from_native(&checkout),
         host.clone(),
         bootstrap.clone(),
     )
     .await
     .unwrap();
+    let command_temp = native_path::to_native(
+        host.required("stagingRoot")
+            .unwrap()
+            .as_js_string()
+            .unwrap(),
+    )
+    .join("command-temp");
     let error = ivy_host_runtime::prepare::prepare_candidate(
         general,
         "fixture".into(),
@@ -448,5 +521,5 @@ async fn component_capture_refuses_missing_linked_and_malformed_inputs_before_sn
     .await
     .unwrap_err();
     assert_eq!(error.code, "artifact_missing", "{error:?}");
-    assert!(!f.0.join("staging/command-temp").exists());
+    assert!(!command_temp.exists());
 }

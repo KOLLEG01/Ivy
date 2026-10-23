@@ -41,22 +41,100 @@ async fn source_plan_requires_exactly_one_valid_matching_component() {
 
 #[tokio::test]
 async fn snapshot_metadata_binds_identity_root_schema_and_size_without_walking_source() {
-    let fixture=ServiceFixture::new();let snapshot=snapshot(&fixture);let staging=fixture.0.join("staging");
-    let manifest=IvyJson::object([("schemaVersion",IvyJson::Number(1.0)),("snapshot",snapshot.clone())]);
-    config::atomic_json(staging.join("snapshot.json"),manifest.clone()).await.unwrap();
+    let fixture = ServiceFixture::new();
+    let staging = native_staging(&fixture);
+    let mut snapshot = snapshot(&fixture);
+    snapshot.insert("sourceRoot", path(&staging.join("source")));
+    snapshot.insert("manifestPath", path(&staging.join("snapshot.json")));
+    let manifest = IvyJson::object([
+        ("schemaVersion", IvyJson::Number(1.0)),
+        ("snapshot", snapshot.clone()),
+    ]);
+    config::atomic_json(staging.join("snapshot.json"), manifest.clone())
+        .await
+        .unwrap();
     assert!(!staging.join("source").exists());
-    compare("source","verifySnapshotMetadata",vec![snapshot.clone(),host(&fixture)],source::verify_snapshot_metadata(snapshot.clone(),staging.clone()).await);
-    compare("source","verifySnapshot",vec![snapshot.clone(),host(&fixture)],source::verify_snapshot(snapshot.clone(),staging.clone()).await.map(|_|IvyJson::Null));
-    for key in ["snapshotId","sourceRoot"] {
-        let mut changed=snapshot.clone();changed.insert(key,if key=="sourceRoot" {path(&staging.join("other"))}else{"changed".into()});
-        compare("source","verifySnapshotMetadata",vec![changed.clone(),host(&fixture)],source::verify_snapshot_metadata(changed,staging.clone()).await);
+    assert_json_eq(
+        &source::verify_snapshot_metadata(snapshot.clone(), staging.clone())
+            .await
+            .unwrap(),
+        &manifest,
+    );
+    source::verify_snapshot(snapshot.clone(), staging.clone())
+        .await
+        .unwrap();
+    assert!(!staging.join("source").exists());
+    for key in ["snapshotId", "sourceRoot"] {
+        let mut changed = snapshot.clone();
+        changed.insert(
+            key,
+            if key == "sourceRoot" {
+                path(&staging.join("other"))
+            } else {
+                "changed".into()
+            },
+        );
+        assert_eq!(
+            source::verify_snapshot_metadata(changed, staging.clone())
+                .await
+                .unwrap_err()
+                .code,
+            "artifact_changed",
+            "{key}"
+        );
     }
-    let mut outside=snapshot.clone();outside.insert("sourceRoot",path(&fixture.0.join("outside")));
-    compare("source","verifySnapshotMetadata",vec![outside.clone(),host(&fixture)],source::verify_snapshot_metadata(outside,staging.clone()).await);
-    let mut wrong=manifest.clone();wrong.insert("schemaVersion",IvyJson::Number(2.0));config::atomic_json(staging.join("snapshot.json"),wrong).await.unwrap();
-    compare("source","verifySnapshotMetadata",vec![snapshot.clone(),host(&fixture)],source::verify_snapshot_metadata(snapshot.clone(),staging.clone()).await);
-    fs::write(staging.join("snapshot.json"),vec![b' ';8*1024*1024+1]).unwrap();
-    compare("source","verifySnapshotMetadata",vec![snapshot.clone(),host(&fixture)],source::verify_snapshot_metadata(snapshot,staging).await);
+    for key in ["sourceRoot", "manifestPath"] {
+        let mut outside = snapshot.clone();
+        outside.insert(key, path(&fixture.0.join("outside")));
+        assert_eq!(
+            source::verify_snapshot_metadata(outside, staging.clone())
+                .await
+                .unwrap_err()
+                .code,
+            "target_conflict",
+            "{key}"
+        );
+    }
+    let mut wrong = manifest.clone();
+    wrong.insert("schemaVersion", IvyJson::Number(2.0));
+    config::atomic_json(staging.join("snapshot.json"), wrong)
+        .await
+        .unwrap();
+    assert_eq!(
+        source::verify_snapshot_metadata(snapshot.clone(), staging.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+    fs::write(staging.join("snapshot.json"), b"{").unwrap();
+    assert_eq!(
+        source::verify_snapshot_metadata(snapshot.clone(), staging.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "internal_error"
+    );
+    fs::write(
+        staging.join("snapshot.json"),
+        vec![b' '; 8 * 1024 * 1024 + 1],
+    )
+    .unwrap();
+    assert_eq!(
+        source::verify_snapshot_metadata(snapshot.clone(), staging.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+    fs::remove_file(staging.join("snapshot.json")).unwrap();
+    assert_eq!(
+        source::verify_snapshot_metadata(snapshot, staging)
+            .await
+            .unwrap_err()
+            .code,
+        "internal_error"
+    );
 }
 
 #[test]
