@@ -41,6 +41,7 @@ pub mod native_lifecycle;
 pub mod native_orchestrator;
 pub mod native_plan;
 pub mod native_policies;
+pub mod native_process;
 pub mod native_publication;
 pub mod native_rate_limit;
 pub mod native_recovery;

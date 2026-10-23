@@ -5,6 +5,9 @@ use ivy_contracts::json::stringify;
 use ivy_task_board::native_runtime::{NativeRuntime, NativeRuntimeInputs};
 use std::rc::Rc;
 
+#[path = "task-board-native-process.rs"]
+mod process;
+
 struct PromptOwner(Rc<Cell<bool>>);
 impl Drop for PromptOwner {
     fn drop(&mut self) {

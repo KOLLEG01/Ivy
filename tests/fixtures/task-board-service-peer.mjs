@@ -1,5 +1,5 @@
 import {registerHooks} from 'node:module';
-import {existsSync} from 'node:fs';
+import {existsSync,readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {once} from 'node:events';
 import assert from 'node:assert/strict';
@@ -29,7 +29,10 @@ const delivery=process.argv.includes('--factory-delivery');
 const deliveryBoundary=delivery?(await import('./task-board-delivery-peer.mjs')).deliveryBoundary():null;
 const currentRead=process.argv.includes('--factory-current-read');
 const currentReadBoundary=currentRead?(await import('./task-board-current-read-peer.mjs')).currentReadBoundary():null;
-const nativePolicies=process.argv.includes('--native-policies');
+const nativeProcessArgument=process.argv.find(argument=>argument==='--native-process'||argument.startsWith('--native-process='));
+const nativeProcess=Boolean(nativeProcessArgument);
+const processRequests=nativeProcessArgument?.startsWith('--native-process=')?JSON.parse(readFileSync(nativeProcessArgument.slice('--native-process='.length),'utf8')):[];
+const nativePolicies=process.argv.includes('--native-policies')||nativeProcess;
 const factory=process.argv.includes('--factory')||retirement||observations||driver||control||scheduler||delivery||currentRead||nativePolicies;
 const registry={namespaces:[{namespace:'task-board',description:'Fixture',guideMarkdown:'',tools:[definition,...(process.argv.includes('--engine')||factory?[actionDefinition]:[])],topics:[],inventoryKinds:[]}],contracts:[],requiredContracts:[]};
 const wss=new WebSocketServer({host:'127.0.0.1',port:0,perMessageDeflate:false,maxPayload:32*1024*1024});
@@ -41,6 +44,8 @@ let nativeObservations=null,nativeReads=0;
 wss.on('connection',(socket,request)=>{
   const selected=++generation,pending=new Map();
   let synchronizedRegistry=null;
+  let processInvoked=false;
+  let processNext=0;
   const send=frame=>{if(socket.readyState===1)socket.send(JSON.stringify(frame));};
   const reply=(id,result)=>send({jsonrpc:'2.0',id,result});
   const emit=value=>console.log(JSON.stringify({generation:selected,...value}));
@@ -49,6 +54,11 @@ wss.on('connection',(socket,request)=>{
     const frame=JSON.parse(bytes.toString());
     if(!frame.method){
       emit({kind:'result',frame});
+      if(nativeProcess&&(frame.id==='native-process-workspace'||frame.id==='native-process-request-'+(processNext-1))&&processNext<processRequests.length){
+        const request=processRequests[processNext],tool=synchronizedRegistry.namespaces.flatMap(namespace=>namespace.tools).find(tool=>tool.name===request.name);
+        assert.ok(tool,'Process fixture may invoke only a synchronized tool');
+        send({jsonrpc:'2.0',id:'native-process-request-'+processNext++,method:'provider.invoke',params:{qualifiedName:tool.namespace+'.'+tool.name,arguments:request.arguments,definitionHash:toolDefinitionHash(tool),generation:selected,callerPrincipalId:'process-caller',operationId:request.arguments.operationId}});
+      }
       const id=pending.get(frame.id);pending.delete(frame.id);
       if(id!==undefined)reply(id,frame);
       return;
@@ -59,7 +69,14 @@ wss.on('connection',(socket,request)=>{
     if(controlBoundary?.({method,params,id,selected,send,reply,emit}))return;
     if(deliveryBoundary?.({method,params,id,selected,send,reply,emit}))return;
     if(method==='service.connect')reply(id,{generation:selected});
-    else if(method==='service.heartbeat')reply(id,{ready:params.ready});
+    else if(method==='service.heartbeat'){
+      reply(id,{ready:params.ready});
+      if(nativeProcess&&params.ready&&!processInvoked){
+        processInvoked=true;
+        const tool=synchronizedRegistry.namespaces.flatMap(namespace=>namespace.tools).find(tool=>tool.name==='workspace');
+        send({jsonrpc:'2.0',id:'native-process-workspace',method:'provider.invoke',params:{qualifiedName:'task-board.workspace',arguments:{},definitionHash:toolDefinitionHash(tool),generation:selected,callerPrincipalId:'process-caller-\ud800',operationId:'process-workspace'}});
+      }
+    }
     else if(method==='objects.stat'&&selected===1&&params.objectId==='missing-root')send({jsonrpc:'2.0',id,error:{code:-32000,message:'Refused root.',data:{code:'fixture_refusal',outcome:'unknown',details:{phase:'root'}}}});
     else if(method==='registry.sync'){synchronizedRegistry=structuredClone(params);reply(id,{});}
     else if(['notifications.subscribe','objects.stat'].includes(method))reply(id,{});

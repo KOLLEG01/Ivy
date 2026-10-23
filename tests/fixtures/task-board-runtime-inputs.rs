@@ -349,3 +349,107 @@ async fn native_intent_uses_the_origin_execution_change_flag_before_catalog_or_e
     assert_eq!(store.reads.get(), reads);
     assert!(probe.0.borrow().is_empty());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn current_prompts_materialize_and_retain_exact_calls_against_the_packaged_native_catalog() {
+    let distribution = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let catalogs =
+        ivy_contracts::checked_native_contract::CheckedNativeContracts::new(distribution);
+    let contract = catalogs
+        .checked_native_contract(&"0.159.2".into(), None)
+        .unwrap();
+    let mut plan = Json::object([
+        (
+            "nativeVersion",
+            contract.catalog().required("version").unwrap().clone(),
+        ),
+        (
+            "catalogSourceHash",
+            contract.catalog().required("sourceHash").unwrap().clone(),
+        ),
+        ("turnStart", Json::Object(vec![])),
+    ]);
+    plan.insert(
+        "definitions",
+        Json::object([(
+            "turnStart",
+            hash_json(contract.definition(&"turn/start".into()).unwrap())
+                .unwrap()
+                .into(),
+        )]),
+    );
+    let origins = producer("admission-vectors-v2.json");
+    for row in producer("prompt-vectors.json").as_array().unwrap() {
+        let store = ReadOnlyTask {
+            contracts: runtime_inputs::contracts().unwrap(),
+            task: row.required("task").unwrap().clone(),
+            reads: Cell::new(0),
+        };
+        let mut run = parse(r#"{"taskId":"fixture-task","primaryResourceRef":{"kind":"thread","namespace":"codex","serviceNodeId":"fixture-owner","nativeId":"fixture-thread"},"turnId":"fixture-turn","nativeEpoch":"fixture-epoch","cancellation":null,"owner":{"source":"agent"},"originalRequest":{"action":"continue","expectedRevision":1,"coordinationOnly":true}}"#,usize::MAX).unwrap();
+        run.insert("plan", plan.clone());
+        let mut owner = run.required("owner").unwrap().clone();
+        owner.insert(
+            "serviceNodeId",
+            row.required("serviceNodeId").unwrap().clone(),
+        );
+        run.insert("owner", owner);
+        let intent = NativeIntent {
+            store: &store,
+            catalogs: &catalogs,
+        };
+        let mut origin = origins.as_array().unwrap()[0]
+            .required("value")
+            .unwrap()
+            .clone();
+        origin.insert(
+            "executionChangeRequested",
+            row.required("executionChangeRequested").unwrap().clone(),
+        );
+        let intended = intent
+            .intended_call(&run, NativeSlot::Steer, Some(&origin), &CurrentTaskPrompts)
+            .await
+            .unwrap();
+        let request = intended.required("request").unwrap();
+        assert_eq!(request.get("method"), Some(&"turn/steer".into()));
+        assert_eq!(
+            request
+                .required("params")
+                .unwrap()
+                .required("input")
+                .unwrap()
+                .as_array()
+                .unwrap()[0]
+                .get("text"),
+            row.get("expected")
+        );
+        assert_eq!(
+            intended.get("expectedDefinitionHash"),
+            Some(&Json::from(
+                hash_json(contract.definition(&"turn/steer".into()).unwrap()).unwrap()
+            ))
+        );
+        let retained = intent
+            .retain_native_request(request, &"current-call".into())
+            .unwrap();
+        assert_eq!(
+            hash_json(&intent.resolve_native_request(&retained).unwrap()).unwrap(),
+            hash_json(request).unwrap()
+        );
+        if row.required("executionChangeRequested").unwrap().as_bool() == Some(false) {
+            let initial = intent
+                .intended_call(&run, NativeSlot::Turn, None, &CurrentTaskPrompts)
+                .await
+                .unwrap();
+            let input = initial
+                .required("request")
+                .unwrap()
+                .required("params")
+                .unwrap()
+                .required("input")
+                .unwrap()
+                .as_array()
+                .unwrap();
+            assert_eq!(input.last().unwrap().get("text"), row.get("expected"));
+        }
+    }
+}

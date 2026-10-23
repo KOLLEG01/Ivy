@@ -30,7 +30,7 @@ test('deployment pipelines exclude tests and target only the requested component
   }
 });
 
-for (const component of ['host-executor', 'service-manager', 'hive', 'data-collector', 'dashboards']) test(`native source support and selected host commands (${component})`, () => {
+for (const component of ['host-executor', 'service-manager', 'hive', 'data-collector', 'dashboards', 'task-board']) test(`native source support and selected host commands (${component})`, () => {
   const source = JSON.parse(readFileSync(`services/${component}/deploy.json`, 'utf8'));
   for (const os of ['win32', 'linux']) for (const arch of ['x64', 'arm64']) {
     const selected = materializeNativePlan(source, { os, arch });
@@ -81,7 +81,7 @@ test('native staging needs only the selected host and emits no Node entry shim',
   assert.ok(!existsSync(join(root, 'missing')));
 });
 
-for (const component of ['fixture', 'host-executor']) test(`normal native build selects one target and registered helpers (${component})`, t => {
+for (const component of ['fixture', 'host-executor', 'task-board']) test(`normal native build selects one target and registered helpers (${component})`, t => {
   const root = mkdtempSync(join(tmpdir(), 'ivy-native-build-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const previousTarget = process.env.CARGO_TARGET_DIR, previousCache = process.env.IVY_BUILD_CACHE_ROOT;
@@ -128,6 +128,16 @@ for (const component of ['fixture', 'host-executor']) test(`normal native build 
       return JSON.stringify({ reason: 'compiler-artifact', package_id: pkg.id, target: { name, kind: ['bin'] }, executable });
     }).join('\n');
   };
+  const runtimeNames = ['icudt78.dll', 'icuuc78.dll', 'icuin78.dll', 'LICENSE.icu'];
+  if (component === 'task-board') {
+    const catalogs = join(root, 'specs/native/fixture'); mkdirSync(catalogs, { recursive: true });
+    writeFileSync(join(catalogs, 'catalog.json'), '{}');
+    const runtime = join(root, '.local/native-runtime/win32-x64'); mkdirSync(runtime, { recursive: true });
+    for (const name of runtimeNames.slice(0, -1)) writeFileSync(join(runtime, name), 'selected runtime ' + name);
+    assert.throws(() => buildNativeDeployment({ component, root, target: 'x86_64-pc-windows-msvc', identity, cargo }));
+    assert.equal(calls.length, 0, 'Incomplete runtime inputs must fail before Cargo or staging');
+    writeFileSync(join(runtime, 'LICENSE.icu'), 'selected runtime LICENSE.icu');
+  }
   const built = buildNativeDeployment({ component, root, target: 'x86_64-pc-windows-msvc', identity, cargo });
   assert.deepEqual(built.platforms, ['win32-x64']);
   assert.equal(built.staged, true);
@@ -137,6 +147,11 @@ for (const component of ['fixture', 'host-executor']) test(`normal native build 
   assert.ok(existsSync(join(root, built.plan.entrypoint.executable)));
   assert.ok(existsSync(join(root, built.plan.readiness.command.executable)));
   assert.equal(existsSync(join(root, 'dist/native/win32-x64/ivy-host-job.exe')), component === 'host-executor');
+  if (component === 'task-board') {
+    for (const name of runtimeNames) assert.equal(readFileSync(join(root, 'dist/native/win32-x64', name), 'utf8'), 'selected runtime ' + name);
+    assert.equal(existsSync(join(root, 'dist/specs/native/fixture/catalog.json')), true);
+    assert.equal(existsSync(join(root, 'dist/services/task-board/src/main.js')), false);
+  }
   delete process.env.CARGO_TARGET_DIR;
   targetDirectory = join(root, 'prepared-cache', 'cargo');
   compileRustBackend({ component, root, target: 'x86_64-pc-windows-msvc', identity, cargo });

@@ -378,12 +378,12 @@ async fn retired_unstarted_runs_recover_terminal_publication_without_replacing_c
                 assert_eq!(f(&result.2, "actor"), f(&recovered.2, "actor"));
                 assert_eq!(f(&result.2, "run"), &pin("run"));
                 assert_eq!(f(&result.2, "kind"), &Json::from("intermediate"));
-                assert_eq!(f(&result.2, "content"), &Json::object([
+                assert_eq!(hash_json(f(&result.2, "content")).unwrap(), hash_json(&Json::object([
                     ("summary", if cancelling { "Cancelled before any native turn was prepared.".into() } else { "This superseded attempt closed before a native turn was prepared.".into() }),
                     ("artifacts", Json::Array(vec![])), ("codeReferences", Json::Array(vec![])),
                     ("repositoryResult", Json::Null),
                     ("limitations", Json::Array(vec!["Native completion does not automatically accept the task. Native conversation history remains available from its AgentManager owner while retained there.".into()])),
-                ]));
+                ])).unwrap());
                 assert_eq!(
                     count(
                         &fixture,

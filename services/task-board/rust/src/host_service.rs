@@ -92,6 +92,16 @@ pub async fn prepare<P: Contracts>(
     tools: Vec<JsString>,
 ) -> IvyResult<PreparedTaskBoard> {
     let config = native_instance_config(path).await?;
+    from_config(config, contracts, registry, tools)
+}
+
+/// Compose a configuration already loaded through the native Host boundary.
+pub(crate) fn from_config<P: Contracts>(
+    config: InstanceConfig,
+    contracts: &P,
+    registry: Dependency<Json>,
+    tools: Vec<JsString>,
+) -> IvyResult<PreparedTaskBoard> {
     let value = config.json();
     let text = |key: &str| -> IvyResult<JsString> {
         value

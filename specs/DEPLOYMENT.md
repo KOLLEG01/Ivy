@@ -6,6 +6,14 @@ Local commands and operating procedure: [host operations](#local-host-operations
 
 ## Releases
 
+Native TaskBoard builds require the qualified full ICU 78.3/Unicode 17 runtime
+in `.local/native-runtime/<os>-<arch>/`: `icudt78.dll`, `icuuc78.dll`, `icuin78.dll`
+on Windows, or `libicudata.so.78`, `libicuuc.so.78`, `libicui18n.so.78` on Linux,
+plus `LICENSE.icu`. The selected component build stages these inputs beside its
+binary and includes the native catalogs. Missing inputs fail before compilation.
+Node remains a build prerequisite; the prepared service and health commands run
+their native executables directly.
+
 - Build one selected component from one fixed source snapshot. Keep the checkout stable
   during capture; later edits cannot alter a prepared candidate. Preparation and tests
   are separate from activation.

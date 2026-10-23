@@ -39,13 +39,20 @@ impl<P: TaskPrompts> NativeRuntime<P> {
         path: impl Into<PathBuf>,
         inputs: NativeRuntimeInputs<P>,
     ) -> IvyResult<Self> {
-        let host = host_service::prepare(
-            path,
+        let config = ivy_host_runtime::config::native_instance_config(path).await?;
+        Self::from_config(config, inputs)
+    }
+
+    pub(crate) fn from_config(
+        config: ivy_host_runtime::config::InstanceConfig,
+        inputs: NativeRuntimeInputs<P>,
+    ) -> IvyResult<Self> {
+        let host = host_service::from_config(
+            config,
             &inputs.contracts,
             inputs.registry.dependency(),
             inputs.registry.tool_names().to_vec(),
-        )
-        .await?;
+        )?;
         let journal = NativeJournal::new(
             Some(host.config.data_root().to_owned()),
             HistoryLimits::default(),

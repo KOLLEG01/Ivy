@@ -1,5 +1,7 @@
 use super::*;
-use crate::frozen_contracts::{ContractsBinding, admission};
+#[path = "task-board-current-factory-contracts.rs"]
+mod current_contracts;
+use current_contracts::{ContractsBinding, admission};
 use ivy_contracts::{checked_native_contract::CheckedNativeContracts, hash::hash_json};
 use ivy_task_board::{
     category_projection::CategoryLocale,
@@ -538,7 +540,7 @@ fn configured(peer: &Peer) -> ServiceSetup {
 }
 fn create() -> Json {
     json(
-        r#"{"action":"create","operationId":"factory-create","workflowState":"review","fields":{"title":"Manual factory task","description":"Original durable material","acceptanceCriteria":[],"category":null,"control":"user","priority":2,"executionRequirement":null,"workspaceRequirement":{"kind":"directory_path","path":"/fixture"},"dependencies":[],"nextReviewAt":null,"dueAt":null},"initialResult":{"summary":"Original final material","artifacts":[],"checks":[],"codeReferences":[],"repositoryResult":null,"limitations":[]}}"#,
+        r#"{"action":"create","operationId":"factory-create","workflowState":"review","fields":{"title":"Manual factory task","description":"Original durable material","acceptanceCriteria":[],"category":null,"control":"user","priority":2,"executionRequirement":null,"workspaceRequirement":{"kind":"directory_path","path":"/fixture"},"userContact":"ticket","dueAt":null},"initialResult":{"summary":"Original final material","artifacts":[],"codeReferences":[],"repositoryResult":null,"limitations":[]}}"#,
     )
 }
 fn c(generation: u64, operation: &str) -> InvocationContext {

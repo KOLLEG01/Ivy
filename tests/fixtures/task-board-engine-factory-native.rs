@@ -97,7 +97,9 @@ pub(super) fn baseline() -> (Json, Json) {
         ("taskKey", "TASK-0001".into()),
         ("fields", fields),
         ("workflowState", "in_progress".into()),
-        ("waiting", Json::Null),
+        ("wakeAt", Json::Null),
+        ("dependencies", Json::Array(vec![])),
+        ("runtimeWait", Json::Null),
         ("publication", Json::Null),
         ("primaryResourceRef", primary),
         (
@@ -199,7 +201,7 @@ fn operations(fixture: &Fixture, purpose: &str) -> Vec<(String, u64, Json)> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn native_mirroring_uses_factory_recovery_original_identity_and_frozen_confidential_schema_gate()
+async fn native_mirroring_uses_factory_recovery_original_identity_and_current_confidential_schema_gate()
  {
     for name in ["answered choices", "secret answer"] {
         // Reuse unmodified original input rows, including their exact identity,
@@ -291,9 +293,9 @@ async fn native_mirroring_uses_factory_recovery_original_identity_and_frozen_con
             })
             .await;
             if secret {
-                // The frozen PendingInput schema requires a reply for answered
+                // The current PendingInput schema requires a reply for answered
                 // inputs; source mirroring deliberately redacts a secret reply.
-                // Current-contract approval is required to resolve this gate.
+                // The current contract must still refuse that invalid record.
                 until(|| {
                     peer.frames
                         .lock()
@@ -313,13 +315,14 @@ async fn native_mirroring_uses_factory_recovery_original_identity_and_frozen_con
                 assert!(
                     ds.iter()
                         .any(|d| f(d, "code") == &"invalid_arguments".into()),
-                    "Secret response must retain its exact frozen-schema refusal: {diagnostics:?}"
+                    "Secret response must retain its exact current-schema refusal: {diagnostics:?}"
                 );
                 assert!(operations(&fixture, "update").is_empty());
                 assert!(
                     ds.iter()
                         .any(|d| f(d, "code") == &"invalid_arguments".into()
-                            && f(d, "message") == &"Frozen Operation admission failed.".into())
+                            && f(d, "message")
+                                == &"Value does not match its TaskBoard contract.".into())
                 );
                 assert_eq!(comments(&fixture).len(), 1);
                 assert_eq!(fixture.rows("task-board/task")[0].1, 3);
