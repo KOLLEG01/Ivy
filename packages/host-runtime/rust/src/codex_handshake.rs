@@ -6,11 +6,11 @@ use super::{
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use std::path::Path;
 
-pub(crate) fn whitespace(unit: u16) -> bool {
-    matches!(unit,0x9..=0xd|0x20|0xa0|0x1680|0x2000..=0x200a|0x2028|0x2029|0x202f|0x205f|0x3000|0xfeff)
+fn whitespace(unit: u16) -> bool {
+    char::from_u32(u32::from(unit)).is_some_and(char::is_whitespace)
 }
 
-/// Exact ECMAScript user-agent grammar used by the official daemon handshake.
+/// Read the leading server name/version; client metadata cannot supply a version.
 pub fn initialized_server_version(value: &IvyJson) -> IvyResult<JsString> {
     let unavailable = || {
         IvyError::new(
@@ -92,28 +92,29 @@ pub async fn initialize(rpc: &NativeRpc, settings: Handshake<'_>) -> IvyResult<(
             },
         )
         .await?;
-    let result = reply.get("result").ok_or_else(|| {
-        IvyError::new(
-            "native_initialization_failed",
-            "Codex initialization did not succeed.",
-        )
-    })?;
+    let result = reply
+        .get("result")
+        .filter(|result| result.as_object().is_some())
+        .ok_or_else(|| {
+            IvyError::new(
+                "native_initialization_failed",
+                "Codex initialization did not succeed.",
+            )
+        })?;
     let mismatch = || {
         IvyError::new(
             "native_home_mismatch",
             "Connected app-server belongs to a different Codex home.",
         )
     };
-    // The original property access on a null result throws, unlike an absent
-    // codexHome property. Preserve its generic internal-error boundary.
-    if matches!(result, IvyJson::Null) {
-        return Err(IvyError::internal());
-    }
     let observed = result
         .get("codexHome")
         .and_then(IvyJson::as_js_string)
         .ok_or_else(mismatch)?;
     let observed = node_path::to_native(observed);
+    if !observed.is_absolute() {
+        return Err(mismatch());
+    }
     let actual = tokio::task::spawn_blocking(move || paths::realpath(&observed))
         .await
         .map_err(|_| IvyError::internal())?

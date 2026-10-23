@@ -13,7 +13,7 @@ fn snapshot(fixture: &ServiceFixture) -> IvyJson {
         ("manifestPath",path(&fixture.0.join("staging/snapshot.json"))),("capturedAt","2026-01-01T00:00:00.000Z".into())])
 }
 fn host(fixture: &ServiceFixture) -> IvyJson { IvyJson::object([("stagingRoot",path(&fixture.0.join("staging")))]) }
-fn build_plan() -> IvyJson {
+pub(super) fn build_plan() -> IvyJson {
     // Use the real versioned source contract, then change only its identity.
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let bytes=fs::read_to_string(root.join("services/host-executor/deploy.json")).unwrap();

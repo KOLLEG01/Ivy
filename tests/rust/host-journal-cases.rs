@@ -274,11 +274,11 @@ async fn journal_candidate_retention_preserves_nearest_and_exact_rollback_select
     compare(&config,"manifest",vec![hash("a")],journal.manifest(&hash("a").as_str().unwrap()).await);
     journal.close().await.unwrap();
 }
-fn candidate() -> IvyJson {
+pub(super) fn candidate() -> IvyJson {
     IvyJson::object([("candidateId", hash("a")), ("componentId", "fixture".into()), ("artifactRoot", "artifact".into()), ("manifestPath", "manifest.json".into()), ("createdAt", DATE.into()),
         ("platform", IvyJson::object([("os", "win32".into()), ("arch", "x64".into()), ("node", "24.18.0".into())])), ("buildId", hash("a"))])
 }
-fn manifest() -> IvyJson {
+pub(super) fn manifest() -> IvyJson {
     let value = IvyJson::object([("schemaVersion", IvyJson::Number(1.0)), ("componentId", "fixture".into()), ("kind", "app".into()), ("version", "1.0.0".into()), ("buildId", hash("a")), ("connectsToHive", false.into()),
         ("requirements", IvyJson::object([("node", ">=24.18.0 <25.0.0".into()), ("hiveProtocol", IvyJson::Null), ("contracts", IvyJson::Array(vec![]))])),
         ("app", IvyJson::object([("appId", "fixture".into()), ("dist", "dist/apps/fixture".into()), ("entryPath", "index.html".into())]))]);

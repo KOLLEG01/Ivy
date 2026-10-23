@@ -45,6 +45,8 @@ mod preparation_cases;
 mod policy_import_cases;
 #[path = "host-layout-cases.rs"]
 mod layout_cases;
+#[path = "host-codex-cases.rs"]
+mod codex_cases;
 #[path = "host-startup-cases.rs"]
 mod host_startup_cases;
 #[path = "host-configuration-updater-cases.rs"]

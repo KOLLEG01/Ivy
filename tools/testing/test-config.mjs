@@ -16,7 +16,7 @@ export const scopes = [
   "tooling",
 ];
 export function scope(file) {
-  if (/host-(?:build-input|compiler-tools|service-storage|native-(?:plan|coordinator|recovery))/.test(file)) return "host";
+  if (/host-(?:codex-cases|build-input|compiler-tools|service-storage|native-(?:plan|coordinator|recovery))/.test(file)) return "host";
   if (/data-collector/.test(file)) return "data-collector";
   if (/dashboards/.test(file)) return "dashboards";
   if (
@@ -474,6 +474,9 @@ export const rustTests = {
   'tests/rust/hive_server_constructor.rs': { package: 'ivy-hive', test: 'hive-network', filter: 'native_constructor', testThreads: 1 },
   'tests/rust/host-storage-space-cases.rs': { package: 'ivy-host-runtime', test: 'host-storage-space' },
   'tests/rust/host-paths.rs': { package: 'ivy-host-runtime', test: 'host-paths' },
+  'tests/rust/host-codex-cases.rs': { package: 'ivy-host-runtime', test: 'host-paths', filter: 'codex_cases::', testThreads: 1 },
+  'tests/rust/host-layout-cases.rs': { package: 'ivy-host-runtime', test: 'host-paths', filter: 'layout_cases::', testThreads: 1 },
+  'tests/rust/host-startup-cases.rs': { package: 'ivy-host-runtime', test: 'host-paths', filter: 'host_startup_cases::', testThreads: 1 },
   'tests/rust/host-windows-arguments.rs': { package: 'ivy-host-runtime', test: 'host-windows-arguments' },
   'tests/rust/host-process-output.rs': { package: 'ivy-host-runtime', test: 'host-process-output' },
   'tests/rust/host-process-output-node.rs': { package: 'ivy-host-runtime', test: 'host-process-output-node' },

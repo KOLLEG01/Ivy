@@ -36,7 +36,7 @@ fn invalid(message: &str) -> IvyError {
     IvyError::new("invalid_arguments", message)
 }
 fn space(c: u16) -> bool {
-    matches!(c, 9..=13 | 32 | 160 | 5760 | 8192..=8202 | 8232 | 8233 | 8239 | 8287 | 12288 | 65279)
+    char::from_u32(u32::from(c)).is_some_and(char::is_whitespace)
 }
 fn trim(s: &JsString) -> JsString {
     let start = s.0.iter().position(|c| !space(*c)).unwrap_or(s.0.len());
@@ -165,81 +165,55 @@ pub fn instance_owned_codex_home(
         return Ok(None);
     }
     let home = resolve_codex_home(settings, context)?.path;
-    let local = context.paths.relative(data_root, &home);
-    let outside = if context.paths.style == Style::Windows {
-        [46, 46, 92]
-    } else {
-        [46, 46, 47]
+    Ok(owned_home_at(home, data_root, context))
+}
+
+fn settings_object(settings: &IvyJson) -> IvyResult<&IvyJson> {
+    if settings.as_object().is_none() {
+        return Err(invalid("Codex settings must be an object."));
+    }
+    Ok(settings)
+}
+fn home_settings(settings: &IvyJson) -> IvyResult<HomeSettings> {
+    let settings = settings_object(settings)?;
+    let optional_home = |name: &str| match settings.get(name) {
+        None => Ok(None),
+        Some(IvyJson::String(home)) => Ok(Some(home.clone())),
+        Some(_) => Err(invalid(&format!("{name} must be a string when supplied."))),
     };
-    Ok((!local.0.is_empty()
-        && local.0 != [46, 46]
-        && !local.0.starts_with(&outside)
-        && !node_path::is_absolute(context.paths.style, &local))
-    .then_some(home))
+    Ok(HomeSettings {
+        codex_home: optional_home("codexHome")?,
+        native_home: optional_home("nativeHome")?,
+    })
+}
+pub(crate) fn app_server(settings: &IvyJson) -> IvyResult<Option<&IvyJson>> {
+    let settings = settings_object(settings)?;
+    let Some(server) = settings.get("appServer") else {
+        return Ok(None);
+    };
+    if server.as_object().is_none() {
+        return Err(invalid("appServer must be an object when supplied."));
+    }
+    if server
+        .get("mode")
+        .is_some_and(|mode| mode.as_js_string().is_none())
+    {
+        return Err(invalid("appServer.mode must be a string when supplied."));
+    }
+    Ok(Some(server))
 }
 
-fn json_truthy(value: &IvyJson) -> bool {
-    match value {
-        IvyJson::Null | IvyJson::Bool(false) => false,
-        IvyJson::Number(value) => *value != 0.0 && !value.is_nan(),
-        IvyJson::String(value) => !value.0.is_empty(),
-        _ => true,
-    }
-}
-fn json_setting<'a>(settings: &'a IvyJson, name: &str) -> IvyResult<Option<&'a IvyJson>> {
-    // Property access on null throws; other JSON primitives simply have no
-    // named Codex settings. Preserve the existing IvyError.from boundary.
-    if settings.is_null() {
-        return Err(IvyError::internal());
-    }
-    Ok(settings.get(name))
-}
-
-/// HostConfig settings are extensible JSON, not validated HomeSettings. Keep
-/// presence/nullish selection and native string-method failures at this boundary.
+/// Admit the declared home fields from extensible HostConfig settings, then use
+/// the same native selection and ownership rules as typed callers.
 pub fn resolve_codex_home_json(
     settings: &IvyJson,
     context: &HomeContext<'_>,
 ) -> IvyResult<HomeResolution> {
-    let codex = json_setting(settings, "codexHome")?;
-    let native = json_setting(settings, "nativeHome")?;
-    if codex.is_some_and(json_truthy) && native.is_some_and(json_truthy) {
-        let a = codex
-            .and_then(IvyJson::as_js_string)
-            .ok_or_else(IvyError::internal)?;
-        let b = native
-            .and_then(IvyJson::as_js_string)
-            .ok_or_else(IvyError::internal)?;
-        if home_identity(context.paths.style, a) != home_identity(context.paths.style, b) {
-            return Err(invalid(
-                "codexHome and the existing explicit nativeHome must not select different homes.",
-            ));
-        }
-    }
-    let configured = codex.filter(|value| !value.is_null()).or(native);
-    let Some(configured) = configured else {
-        return resolve_codex_home(&HomeSettings::default(), context);
-    };
-    let path = configured.as_js_string().ok_or_else(IvyError::internal)?;
-    let mut result = resolve_codex_home(
-        &HomeSettings {
-            codex_home: Some(path.clone()),
-            native_home: None,
-        },
-        context,
-    )?;
-    // An explicitly null codexHome can select nativeHome while still supplying
-    // the original host-configuration source label.
-    result.source = if codex.is_some() {
-        "host-configuration"
-    } else {
-        "existing-native-home"
-    };
-    Ok(result)
+    resolve_codex_home(&home_settings(settings)?, context)
 }
 
 pub fn uses_external_app_server_json(settings: &IvyJson) -> IvyResult<bool> {
-    let mode = json_setting(settings, "appServer")?.and_then(|value| value.get("mode"));
+    let mode = app_server(settings)?.and_then(|server| server.get("mode"));
     Ok(mode != Some(&IvyJson::from("owned-stdio"))
         && mode != Some(&IvyJson::from("claude-adapter")))
 }
@@ -250,7 +224,7 @@ pub fn expected_server_home_json(
     settings: &IvyJson,
     context: &HomeContext<'_>,
 ) -> IvyResult<IvyJson> {
-    if let Some(server) = json_setting(settings, "appServer")? {
+    if let Some(server) = app_server(settings)? {
         if server.get("mode") == Some(&IvyJson::from("external-proxy")) {
             if let Some(home) = server.get("expectedCodexHome") {
                 return Ok(home.clone());
@@ -265,35 +239,31 @@ pub fn instance_owned_codex_home_json(
     data_root: &JsString,
     context: &HomeContext<'_>,
 ) -> IvyResult<Option<JsString>> {
-    if json_setting(settings, "codexHome")?.is_none()
-        && json_setting(settings, "nativeHome")?.is_none()
-    {
-        return Ok(None);
-    }
-    let home = resolve_codex_home_json(settings, context)?.path;
-    Ok(owned_home_at(home, data_root, context))
+    instance_owned_codex_home(&home_settings(settings)?, data_root, context)
 }
 
-/// Raw service-path data may be absent or malformed. As in the original helper,
-/// it is inspected only after explicit-home selection and resolution.
+/// Service data is needed only after an explicit home has been resolved.
 pub fn instance_owned_codex_home_data_json(
     settings: &IvyJson,
     data_root: Option<&IvyJson>,
     context: &HomeContext<'_>,
 ) -> IvyResult<Option<JsString>> {
-    if json_setting(settings, "codexHome")?.is_none()
-        && json_setting(settings, "nativeHome")?.is_none()
-    {
+    let settings = home_settings(settings)?;
+    if settings.codex_home.is_none() && settings.native_home.is_none() {
         return Ok(None);
     }
-    let home = resolve_codex_home_json(settings, context)?.path;
+    let home = resolve_codex_home(&settings, context)?.path;
     let data_root = data_root
         .and_then(IvyJson::as_js_string)
         .ok_or_else(IvyError::internal)?;
     Ok(owned_home_at(home, data_root, context))
 }
 
-fn owned_home_at(home: JsString, data_root: &JsString, context: &HomeContext<'_>) -> Option<JsString> {
+fn owned_home_at(
+    home: JsString,
+    data_root: &JsString,
+    context: &HomeContext<'_>,
+) -> Option<JsString> {
     let local = context.paths.relative(data_root, &home);
     let outside = if context.paths.style == Style::Windows {
         [46, 46, 92]

@@ -1,6 +1,7 @@
 use super::{ServiceFixture, assert_json_eq};
 use ivy_contracts::{IvyJson, JsString};
 use ivy_host_runtime::{
+    codex_home::{self, HomeContext},
     default_settings, layout,
     node_path::{self, Style},
 };
@@ -19,6 +20,293 @@ fn with_instance(config: &IvyJson, instance: IvyJson) -> IvyJson {
     let mut result = config.clone();
     result.insert("instances", IvyJson::Array(vec![instance]));
     result
+}
+
+#[test]
+fn native_codex_home_settings_preserve_selection_and_ownership() {
+    let fixture = ServiceFixture::new();
+    let paths = node_path::Context::current().unwrap();
+    let account = node_path::from_native(&fixture.0.join("account"));
+    let inherited = node_path::from_native(&fixture.0.join("inherited"));
+    let environment = BTreeMap::from([("CODEX_HOME".into(), inherited.clone())]);
+    let context = HomeContext {
+        paths: &paths,
+        environment: &environment,
+        user_home: None,
+        cwd: &paths.cwd,
+        account_home: &account,
+    };
+    let data_path = fixture.0.join("data");
+    let data = node_path::from_native(&data_path);
+    let owned = node_path::from_native(&data_path.join("home"));
+    let normalized = node_path::from_native(&data_path.join("home").join("child").join(".."));
+    for name in ["codexHome", "nativeHome"] {
+        let settings = IvyJson::object([(name, IvyJson::String(normalized.clone()))]);
+        let result = codex_home::resolve_codex_home_json(&settings, &context).unwrap();
+        assert_eq!(result.path, owned);
+        assert_eq!(
+            result.source,
+            if name == "codexHome" {
+                "host-configuration"
+            } else {
+                "existing-native-home"
+            }
+        );
+        assert_eq!(
+            codex_home::instance_owned_codex_home_json(&settings, &data, &context).unwrap(),
+            Some(owned.clone())
+        );
+        assert_eq!(
+            codex_home::instance_owned_codex_home_data_json(
+                &settings,
+                Some(&IvyJson::String(data.clone())),
+                &context
+            )
+            .unwrap(),
+            Some(owned.clone())
+        );
+    }
+    let same = IvyJson::object([
+        ("codexHome", IvyJson::String(normalized)),
+        ("nativeHome", IvyJson::String(owned.clone())),
+    ]);
+    assert_eq!(
+        codex_home::resolve_codex_home_json(&same, &context)
+            .unwrap()
+            .source,
+        "host-configuration"
+    );
+    let mut conflict = same.clone();
+    conflict.insert("nativeHome", path(&fixture.0.join("other")));
+    assert_eq!(
+        codex_home::resolve_codex_home_json(&conflict, &context)
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+    let result = codex_home::resolve_codex_home_json(&empty(), &context).unwrap();
+    assert_eq!((result.path, result.source), (inherited, "environment"));
+    assert_eq!(
+        codex_home::instance_owned_codex_home_data_json(
+            &empty(),
+            Some(&IvyJson::Bool(false)),
+            &context
+        )
+        .unwrap(),
+        None
+    );
+    let no_environment = BTreeMap::new();
+    let default_context = HomeContext {
+        environment: &no_environment,
+        ..context
+    };
+    let result = codex_home::resolve_codex_home_json(&empty(), &default_context).unwrap();
+    assert_eq!(
+        (result.path, result.source),
+        (
+            node_path::from_native(&fixture.0.join("account").join(".codex")),
+            "user-home"
+        )
+    );
+    assert_eq!(
+        codex_home::instance_owned_codex_home_json(&empty(), &account, &default_context).unwrap(),
+        None
+    );
+    let cwd = node_path::from_native(&fixture.0);
+    for (inherited, expected, source) in [
+        (" \tchild\r\n", fixture.0.join("child"), "environment"),
+        ("\u{85}child\u{85}", fixture.0.join("child"), "environment"),
+        (
+            "\u{feff}child",
+            fixture.0.join("\u{feff}child"),
+            "environment",
+        ),
+        (
+            " \u{85}\t",
+            fixture.0.join("account").join(".codex"),
+            "user-home",
+        ),
+    ] {
+        let environment = BTreeMap::from([("CODEX_HOME".into(), inherited.into())]);
+        let context = HomeContext {
+            environment: &environment,
+            cwd: &cwd,
+            ..default_context
+        };
+        let actual = codex_home::resolve_codex_home_json(&empty(), &context).unwrap();
+        assert_eq!(
+            (actual.path, actual.source),
+            (node_path::from_native(&expected), source)
+        );
+    }
+    for home in [
+        data_path.clone(),
+        fixture.0.join("data-other").join("home"),
+        data_path.join("..").join("outside"),
+        fixture.0.join("shared"),
+    ] {
+        let settings = IvyJson::object([("codexHome", path(&home))]);
+        assert_eq!(
+            codex_home::instance_owned_codex_home_json(&settings, &data, &context).unwrap(),
+            None
+        );
+    }
+    #[cfg(windows)]
+    {
+        let mut opaque = owned.clone();
+        opaque.0.extend([92, 0xd800]);
+        let settings = IvyJson::object([("codexHome", IvyJson::String(opaque.clone()))]);
+        assert_eq!(
+            codex_home::resolve_codex_home_json(&settings, &context)
+                .unwrap()
+                .path,
+            opaque
+        );
+        assert_eq!(
+            codex_home::instance_owned_codex_home_json(&settings, &data, &context).unwrap(),
+            Some(opaque)
+        );
+        let mut aliases = same;
+        aliases.insert(
+            "nativeHome",
+            IvyJson::String(JsString(
+                owned
+                    .0
+                    .iter()
+                    .map(|c| if (97..=122).contains(c) { c - 32 } else { *c })
+                    .collect(),
+            )),
+        );
+        assert_eq!(
+            codex_home::resolve_codex_home_json(&aliases, &context)
+                .unwrap()
+                .source,
+            "host-configuration"
+        );
+    }
+}
+
+#[test]
+fn native_codex_home_admits_declared_fields_and_defers_external_home_validation() {
+    let fixture = ServiceFixture::new();
+    let paths = node_path::Context::current().unwrap();
+    let environment = BTreeMap::new();
+    let account = node_path::from_native(&fixture.0.join("account"));
+    let context = HomeContext {
+        paths: &paths,
+        environment: &environment,
+        user_home: None,
+        cwd: &paths.cwd,
+        account_home: &account,
+    };
+    let malformed = [
+        IvyJson::Null,
+        false.into(),
+        true.into(),
+        IvyJson::Number(0.0),
+        IvyJson::Number(7.0),
+        IvyJson::Array(vec![]),
+        empty(),
+    ];
+    for settings in malformed.iter().chain([IvyJson::from("primitive")].iter()) {
+        if settings.as_object().is_some() {
+            continue;
+        }
+        assert_eq!(
+            codex_home::resolve_codex_home_json(settings, &context)
+                .unwrap_err()
+                .code,
+            "invalid_arguments"
+        );
+        assert_eq!(
+            codex_home::uses_external_app_server_json(settings)
+                .unwrap_err()
+                .code,
+            "invalid_arguments"
+        );
+    }
+    for name in ["codexHome", "nativeHome"] {
+        for value in &malformed {
+            let mut settings = IvyJson::object([("codexHome", path(&fixture.0.join("valid")))]);
+            settings.insert(name, value.clone());
+            assert_eq!(
+                codex_home::resolve_codex_home_json(&settings, &context)
+                    .unwrap_err()
+                    .code,
+                "invalid_arguments"
+            );
+            assert_eq!(
+                codex_home::instance_owned_codex_home_json(&settings, &account, &context)
+                    .unwrap_err()
+                    .code,
+                "invalid_arguments"
+            );
+        }
+        for home in ["", "  ", "relative"] {
+            let settings = IvyJson::object([(name, home.into())]);
+            assert_eq!(
+                codex_home::resolve_codex_home_json(&settings, &context)
+                    .unwrap_err()
+                    .code,
+                "invalid_arguments"
+            );
+        }
+    }
+    assert!(codex_home::uses_external_app_server_json(&empty()).unwrap());
+    for (mode, external) in [
+        ("owned-stdio", false),
+        ("claude-adapter", false),
+        ("external-proxy", true),
+        ("future-mode", true),
+    ] {
+        let settings = IvyJson::object([("appServer", IvyJson::object([("mode", mode.into())]))]);
+        assert_eq!(
+            codex_home::uses_external_app_server_json(&settings).unwrap(),
+            external
+        );
+        assert_eq!(
+            codex_home::expected_server_home_json(&settings, &context).unwrap(),
+            path(&fixture.0.join("account").join(".codex"))
+        );
+    }
+    for value in &malformed {
+        if value.as_object().is_none() {
+            let settings = IvyJson::object([("appServer", value.clone())]);
+            assert_eq!(
+                codex_home::uses_external_app_server_json(&settings)
+                    .unwrap_err()
+                    .code,
+                "invalid_arguments"
+            );
+        }
+        let settings = IvyJson::object([("appServer", IvyJson::object([("mode", value.clone())]))]);
+        assert_eq!(
+            codex_home::uses_external_app_server_json(&settings)
+                .unwrap_err()
+                .code,
+            "invalid_arguments"
+        );
+    }
+    for expected in malformed
+        .into_iter()
+        .chain([path(&fixture.0.join("shared")), "relative".into()])
+    {
+        let settings = IvyJson::object([
+            ("codexHome", false.into()),
+            ("nativeHome", "relative-ignored".into()),
+            (
+                "appServer",
+                IvyJson::object([
+                    ("mode", "external-proxy".into()),
+                    ("expectedCodexHome", expected.clone()),
+                ]),
+            ),
+        ]);
+        assert_eq!(
+            codex_home::expected_server_home_json(&settings, &context).unwrap(),
+            expected
+        );
+    }
 }
 
 #[test]

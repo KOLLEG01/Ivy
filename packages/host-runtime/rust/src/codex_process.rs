@@ -2,8 +2,7 @@
 use super::{
     codex_connection::{self, Identity, Mode, NativeConnection},
     codex_daemon::{self, file_hash},
-    codex_handshake::whitespace,
-    codex_home::{HomeContext, expected_server_home_json, resolve_codex_home_json},
+    codex_home::{HomeContext, app_server, expected_server_home_json, resolve_codex_home_json},
     codex_rpc::Events,
     codex_windows_shell, config, node_path, paths, process,
     process_fence::require_clear_process_stop_fence,
@@ -55,24 +54,15 @@ pub(crate) fn version_command() -> process::Command {
     }
 }
 
-/// Match String.trim's ECMAScript whitespace, not Rust's wider Unicode trim.
+/// Admit the exact pinned CLI version after native Unicode whitespace trimming.
 pub(crate) fn verify_version_result(
     result: &process::ProcessResult,
     expected_version: &JsString,
 ) -> IvyResult<()> {
-    let units: Vec<_> = result.stdout.encode_utf16().collect();
-    let start = units
-        .iter()
-        .position(|unit| !whitespace(*unit))
-        .unwrap_or(units.len());
-    let end = units
-        .iter()
-        .rposition(|unit| !whitespace(*unit))
-        .map_or(start, |i| i + 1);
     let expected = "codex-cli "
         .encode_utf16()
         .chain(expected_version.0.iter().copied());
-    if result.exit_code != Some(0) || !units[start..end].iter().copied().eq(expected) {
+    if result.exit_code != Some(0) || !result.stdout.trim().encode_utf16().eq(expected) {
         return Err(IvyError::new(
             "native_build_mismatch",
             "Codex CLI version differs from the selected catalog.",
@@ -123,9 +113,12 @@ fn require(test: bool, code: &str, message: &str) -> IvyResult<()> {
 }
 fn text<'a>(value: &'a IvyJson, key: &str) -> IvyResult<&'a JsString> {
     value
-        .required(key)?
-        .as_js_string()
-        .ok_or_else(IvyError::internal)
+        .get(key)
+        .and_then(IvyJson::as_js_string)
+        .ok_or_else(|| IvyError::new("invalid_arguments", format!("{key} must be a string.")))
+}
+fn optional_text<'a>(value: &'a IvyJson, key: &str) -> IvyResult<Option<&'a JsString>> {
+    value.get(key).map(|_| text(value, key)).transpose()
 }
 async fn realpath(path: PathBuf) -> IvyResult<PathBuf> {
     tokio::task::spawn_blocking(move || paths::realpath(&path))
@@ -153,10 +146,7 @@ async fn directories(home: PathBuf, data_root: PathBuf) -> IvyResult<()> {
 /// clients. Owns the stdio child or proxy tunnel, never the external daemon.
 pub async fn start_codex_process(options: StartOptions<'_>) -> IvyResult<NativeConnection> {
     let settings = options.settings;
-    if settings.is_null() {
-        return Err(IvyError::internal());
-    }
-    let server = settings.get("appServer");
+    let server = app_server(settings)?;
     let mode = server.and_then(|value| value.get("mode"));
     require(
         mode != Some(&"claude-adapter".into()),
@@ -193,6 +183,35 @@ pub async fn start_codex_process(options: StartOptions<'_>) -> IvyResult<NativeC
                 "Supported native platform and version required.",
             )
         })?;
+    let executable_hash = text(settings, "nativeExecutableHash")?;
+    let socket = match explicit {
+        Some(server) => optional_text(server, "socketPath")?.cloned(),
+        None => None,
+    };
+    require(
+        socket
+            .as_ref()
+            .is_none_or(|value| node_path::is_absolute(context.paths.style, value)),
+        "invalid_arguments",
+        "Codex proxy requires an absolute local control socket.",
+    )?;
+    let expected = if external {
+        let home = expected_server_home_json(settings, context)?;
+        let home = home.as_js_string().ok_or_else(|| {
+            IvyError::new(
+                "invalid_arguments",
+                "Expected Codex home must be an absolute path string.",
+            )
+        })?;
+        require(
+            node_path::is_absolute(context.paths.style, home),
+            "invalid_arguments",
+            "Expected Codex home must be an absolute path string.",
+        )?;
+        Some(home.clone())
+    } else {
+        None
+    };
     let dist = node_path::join(
         context.paths.style,
         &[options.artifact_root.clone(), "dist".into()],
@@ -204,7 +223,8 @@ pub async fn start_codex_process(options: StartOptions<'_>) -> IvyResult<NativeC
     require(
         catalog.get("provider") == Some(&"codex".into())
             && catalog.get("version") == Some(&IvyJson::String(version.clone()))
-            && catalog.get("nativeExecutableHash") == settings.get("nativeExecutableHash")
+            && catalog.get("nativeExecutableHash")
+                == Some(&IvyJson::String(executable_hash.clone()))
             && catalog
                 .required("clientRequests")?
                 .as_array()
@@ -220,28 +240,14 @@ pub async fn start_codex_process(options: StartOptions<'_>) -> IvyResult<NativeC
         "native_build_mismatch",
         "Configured Codex must match its pinned catalog with realtime startup items.",
     )?;
-    let executable_hash = text(settings, "nativeExecutableHash")?;
     let executable = verify_executable(&node_path::to_native(executable), executable_hash).await?;
     directories(node_path::filesystem_path(&home), data_root.clone()).await?;
     let native_home = realpath(node_path::to_native(&home)).await?;
-    let expected_home = if external {
-        let home = expected_server_home_json(settings, context)?;
-        let home = home.as_js_string().ok_or_else(IvyError::internal)?;
+    let expected_home = if let Some(home) = &expected {
         realpath(node_path::to_native(home)).await?
     } else {
         native_home.clone()
     };
-    let socket = explicit.and_then(|value| value.get("socketPath"));
-    let socket = socket
-        .map(|value| value.as_js_string().cloned().ok_or_else(IvyError::internal))
-        .transpose()?;
-    require(
-        socket
-            .as_ref()
-            .is_none_or(|value| node_path::is_absolute(context.paths.style, value)),
-        "invalid_arguments",
-        "Codex proxy requires an absolute local control socket.",
-    )?;
     require(
         !external || socket.is_some() || expected_home == native_home,
         "native_home_mismatch",
