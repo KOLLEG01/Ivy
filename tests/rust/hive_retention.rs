@@ -1249,7 +1249,7 @@ fn native_owner_readiness_fences_collection_and_survives_storage_restart() {
     )
     .unwrap();
     let published = published.as_array().unwrap();
-    assert_eq!(published.len(), 47);
+    assert_eq!(published.len(), 51);
     let mut writes = std::collections::BTreeMap::new();
     for contract in published {
         let key = contract.get("key").unwrap().as_str().unwrap();
@@ -1294,20 +1294,20 @@ fn native_owner_readiness_fences_collection_and_survives_storage_restart() {
         .unwrap();
     assert!(
         store
-            .metadata("retention_owner_ready:task-board/task:2.3.0")
+            .metadata("retention_owner_ready:task-board/task:3.1.0")
             .unwrap()
             .is_none()
     );
     heartbeat(&mut registry, &mut store, "task-owner", true);
     assert!(
         store
-            .metadata("retention_owner_ready:task-board/task:2.3.0")
+            .metadata("retention_owner_ready:task-board/task:3.1.0")
             .unwrap()
             .is_some()
     );
     assert!(
         store
-            .metadata("retention_owner_ready:task-board/task:2.2.0")
+            .metadata("retention_owner_ready:task-board/task:2.3.0")
             .unwrap()
             .is_none()
     );

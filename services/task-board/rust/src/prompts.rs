@@ -5,6 +5,40 @@ use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, json::string
 
 pub const ATTACHMENT_GUIDANCE: &str = "Attach files only when explicitly requested or when they add clear value. Limit attachments to what is necessary and keep them as small as possible. Attach build artifacts only when explicitly requested by the user.";
 
+/// The current prompt policy consumes the declared execution-change boolean.
+#[derive(Clone, Copy, Default)]
+pub struct CurrentTaskPrompts;
+
+impl crate::native_intent::TaskPrompts for CurrentTaskPrompts {
+    fn task_prompt(
+        &self,
+        task: &Json,
+        owner: &JsString,
+        flag: Option<&Json>,
+    ) -> IvyResult<JsString> {
+        let changed = match flag {
+            None => false,
+            Some(Json::Bool(value)) => *value,
+            _ => {
+                return Err(IvyError::new(
+                    "invalid_arguments",
+                    "Execution-change prompt flag must be a boolean.",
+                ));
+            }
+        };
+        task_prompt(task, owner, changed)
+    }
+
+    fn task_update_prompt(
+        &self,
+        task: &Json,
+        owner: &JsString,
+        changed: bool,
+    ) -> IvyResult<JsString> {
+        task_prompt(task, owner, changed)
+    }
+}
+
 fn text<'a>(value: &'a Json, key: &str) -> IvyResult<&'a JsString> {
     value
         .required(key)?

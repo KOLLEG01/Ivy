@@ -6,6 +6,8 @@ use ivy_task_board::{
     native_policies::{NativePolicies, NativePolicyFactory},
     schema::RuntimeContracts,
 };
+#[path = "task-board-runtime-inputs.rs"]
+mod current_inputs;
 #[path = "task-board-registry.rs"]
 mod registry;
 #[path = "task-board-native-runtime.rs"]
@@ -125,7 +127,7 @@ impl PolicyFactory<RuntimeContracts, fn() -> String, fn() -> JsString, SystemClo
             "invalid_arguments"
         );
         let mut aggregate = json(
-            r#"{"schemaVersion":1,"taskKey":"TASK-0001","fields":{},"workflowState":"todo","publication":null,"primaryResourceRef":null,"claim":null,"attemptCount":0,"lastRun":null,"lastHistory":null,"latestResult":null,"acceptedReview":null,"comments":[],"commentDeliveries":[],"agentCommentCount":0,"workRevision":0,"attachments":[],"createdAt":"2026-01-02T03:04:05.006Z","updatedAt":"2026-01-02T03:04:05.006Z","nextSteps":[],"runtimeWait":null}"#,
+            r#"{"schemaVersion":1,"taskKey":"TASK-0001","fields":{},"workflowState":"todo","publication":null,"primaryResourceRef":null,"claim":null,"attemptCount":0,"lastRun":null,"lastHistory":null,"latestResult":null,"acceptedReview":null,"comments":[],"commentDeliveries":[],"agentCommentCount":0,"workRevision":0,"attachments":[],"createdAt":"2026-01-02T03:04:05.006Z","updatedAt":"2026-01-02T03:04:05.006Z","wakeAt":null,"dependencies":[],"runtimeWait":null}"#,
         );
         aggregate.insert("fields", fields);
         CheckPolicy::aggregate(&policy, &aggregate, &"task".into())
@@ -208,19 +210,7 @@ impl Drop for Root {
     }
 }
 fn contracts() -> RuntimeContracts {
-    let root = PathBuf::from(
-        std::env::var_os("IVY_TASK_BOARD_CURRENT_CONTRACTS")
-            .expect("Supply the finite packaged schema fixture"),
-    );
-    let documents = [
-        "task-board",
-        "chat",
-        "agent",
-        "hive-wire",
-        "hive-operations",
-    ]
-    .map(|name| json(&std::fs::read_to_string(root.join(format!("{name}.schema.json"))).unwrap()));
-    RuntimeContracts::from_documents(documents.into()).unwrap()
+    ivy_task_board::runtime_inputs::contracts().unwrap()
 }
 
 #[tokio::test(flavor = "current_thread")]

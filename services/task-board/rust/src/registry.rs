@@ -54,9 +54,9 @@ impl TaskBoardRegistry {
             let mut discovery = Json::Object(vec![]);
             if !matches!(name.as_str(), "workspace" | "markCommentsRead") {
                 let mcp_name = match name.as_str() {
-                    "edit" | "transition" | "defer" | "reassign" | "newThread" | "cancel"
-                    | "archive" => "task_update".to_owned(),
-                    "read" | "operation" => "task_read".to_owned(),
+                    "edit" | "retargetQuestion" | "transition" | "defer" | "reassign"
+                    | "newThread" | "cancel" | "archive" => "task_update".to_owned(),
+                    "read" | "operation" | "operationReceipt" => "task_read".to_owned(),
                     "list" | "categories" => "task_list".to_owned(),
                     _ => {
                         let mut mcp_name = String::from("task_");
@@ -90,13 +90,33 @@ impl TaskBoardRegistry {
                 .required("mutation")?
                 .as_bool()
                 .ok_or_else(IvyError::internal)?;
+            let mut input = definition("input")?;
+            if name == "comment" {
+                // Current tool guidance is independent of retained request schemas.
+                let mut properties = input.required("properties")?.clone();
+                for (field, description) in [
+                    (
+                        "agentDelivery",
+                        "User comments and directed agent messages queue a ticket-update turn by default. none records without waking. A task’s own agent updates never wake themselves.",
+                    ),
+                    (
+                        "sourceTaskId",
+                        "For a directed message, identify the different sending task and set authorKind=agent. Delivery is queued by default.",
+                    ),
+                ] {
+                    let mut property = properties.required(field)?.clone();
+                    property.insert("description", description.into());
+                    properties.insert(field, property);
+                }
+                input.insert("properties", properties);
+            }
             tools.push(Json::object([
                 ("namespace", "task-board".into()),
                 ("name", name.as_str().into()),
                 ("interfaceVersion", "1.0.0".into()),
                 ("description", Json::String(description.clone())),
                 ("discovery", discovery),
-                ("inputSchema", definition("input")?),
+                ("inputSchema", input),
                 ("outputSchema", definition("output")?),
                 (
                     "annotations",

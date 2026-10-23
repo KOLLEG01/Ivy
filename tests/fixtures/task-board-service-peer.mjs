@@ -40,6 +40,7 @@ let nativeInputs=[];
 let nativeObservations=null,nativeReads=0;
 wss.on('connection',(socket,request)=>{
   const selected=++generation,pending=new Map();
+  let synchronizedRegistry=null;
   const send=frame=>{if(socket.readyState===1)socket.send(JSON.stringify(frame));};
   const reply=(id,result)=>send({jsonrpc:'2.0',id,result});
   const emit=value=>console.log(JSON.stringify({generation:selected,...value}));
@@ -60,7 +61,8 @@ wss.on('connection',(socket,request)=>{
     if(method==='service.connect')reply(id,{generation:selected});
     else if(method==='service.heartbeat')reply(id,{ready:params.ready});
     else if(method==='objects.stat'&&selected===1&&params.objectId==='missing-root')send({jsonrpc:'2.0',id,error:{code:-32000,message:'Refused root.',data:{code:'fixture_refusal',outcome:'unknown',details:{phase:'root'}}}});
-    else if(['registry.sync','notifications.subscribe','objects.stat'].includes(method))reply(id,{});
+    else if(method==='registry.sync'){synchronizedRegistry=structuredClone(params);reply(id,{});}
+    else if(['notifications.subscribe','objects.stat'].includes(method))reply(id,{});
     else if(method==='serviceNodes.get')reply(id,{serviceNodeId:params.serviceNodeId,serviceName:'task-board',connected:true,synced:true,principalId:'fixture-principal'});
     else if(scheduler&&method==='serviceNodes.list'){
       assert.deepEqual(params,{serviceName:'agent-manager',limit:200});
@@ -121,6 +123,12 @@ wss.on('connection',(socket,request)=>{
     // This explicit read-only boundary keeps native dispatch/status/evidence
     // outside the mirroring fixture; the real orchestrator records its refusal.
     else if(factory&&method==='tools.call'&&params.qualifiedName==='agent.status')send({jsonrpc:'2.0',id,error:{code:-32000,message:'Finite native inspection boundary.',data:{code:'fixture_native_stop',outcome:'not_executed',details:{scope:'native-mirroring'}}}});
+    else if(nativePolicies&&method==='test.invokeRegistered'){
+      const tool=synchronizedRegistry?.namespaces.flatMap(namespace=>namespace.tools).find(tool=>tool.name===params.name);
+      assert.ok(tool,'Invoke only a tool from this connection\'s actual registry');
+      const key='invoke-'+(++invocation);pending.set(key,id);
+      send({jsonrpc:'2.0',id:key,method:'provider.invoke',params:{qualifiedName:tool.namespace+'.'+tool.name,arguments:params.arguments,definitionHash:toolDefinitionHash(tool),generation:selected,callerPrincipalId:'caller-\ud800',operationId:params.operationId??'operation-\udfff'}});
+    }
     else if(readHandler&&method==='test.invokeRead'){
       const key='invoke-'+(++invocation);pending.set(key,id);
       send({jsonrpc:'2.0',id:key,method:'provider.invoke',params:{qualifiedName:'task-board.read',arguments:params.arguments,definitionHash:params.definitionHash??toolDefinitionHash(definition),generation:params.generation??7,callerPrincipalId:'caller-\ud800',operationId:'operation-\udfff'}});

@@ -10,17 +10,17 @@
     },
     {
       "key": "task-board/task",
-      "version": "1.8.0",
+      "version": "3.1.0",
       "definition": "#/$defs/Task"
     },
     {
       "key": "task-board/run",
-      "version": "1.1.0",
+      "version": "3.0.0",
       "definition": "#/$defs/Run"
     },
     {
       "key": "task-board/result",
-      "version": "1.0.0",
+      "version": "2.2.0",
       "definition": "#/$defs/Result"
     },
     {
@@ -162,6 +162,11 @@
       "output": "#/$defs/ActionOutcome",
       "mutation": true
     },
+    "retargetQuestion": {
+      "input": "#/$defs/RetargetQuestionRequest",
+      "output": "#/$defs/ActionOutcome",
+      "mutation": true
+    },
     "transition": {
       "input": "#/$defs/TransitionRequest",
       "output": "#/$defs/ActionOutcome",
@@ -209,7 +214,12 @@
     },
     "operation": {
       "input": "#/$defs/OperationQuery",
-      "output": "#/$defs/Operation",
+      "output": "#/$defs/OperationReceipt",
+      "mutation": false
+    },
+    "operationReceipt": {
+      "input": "#/$defs/OperationReceiptQuery",
+      "output": "#/$defs/OperationReceipt",
       "mutation": false
     },
     "workspace": {
@@ -229,7 +239,7 @@
     },
     "read": {
       "input": "#/$defs/TaskQuery",
-      "output": "#/$defs/TaskView",
+      "output": "#/$defs/ReadResult",
       "mutation": false
     },
     "list": {

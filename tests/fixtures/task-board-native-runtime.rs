@@ -1,5 +1,5 @@
-//! Native owner preparation and shutdown before connection. Complete registry
-//! admission/current producer execution require their separate owner deliveries.
+//! Native owner preparation, registered SDK calls and shutdown with packaged
+//! current inputs. These cases exercise an empty workflow and a workspace call.
 use super::*;
 use ivy_contracts::json::stringify;
 use ivy_task_board::native_runtime::{NativeRuntime, NativeRuntimeInputs};
@@ -12,11 +12,21 @@ impl Drop for PromptOwner {
     }
 }
 impl TaskPrompts for PromptOwner {
-    fn task_prompt(&self, _: &Json, _: &JsString, _: Option<&Json>) -> IvyResult<JsString> {
-        panic!("No native execution before connection")
+    fn task_prompt(
+        &self,
+        task: &Json,
+        owner: &JsString,
+        flag: Option<&Json>,
+    ) -> IvyResult<JsString> {
+        ivy_task_board::prompts::CurrentTaskPrompts.task_prompt(task, owner, flag)
     }
-    fn task_update_prompt(&self, _: &Json, _: &JsString, _: bool) -> IvyResult<JsString> {
-        panic!("No native execution before connection")
+    fn task_update_prompt(
+        &self,
+        task: &Json,
+        owner: &JsString,
+        changed: bool,
+    ) -> IvyResult<JsString> {
+        ivy_task_board::prompts::CurrentTaskPrompts.task_update_prompt(task, owner, changed)
     }
 }
 
@@ -73,16 +83,19 @@ fn inputs(
     ))
     .unwrap();
     let weak = Arc::downgrade(&runtime);
-    let contracts = contracts();
-    let registry = registry::fixture(&contracts);
+    let packaged = ivy_task_board::runtime_inputs::packaged(
+        root.0.join("configured artifact"),
+        runtime.executing_default().unwrap(),
+    )
+    .unwrap();
     (
         NativeRuntimeInputs {
-            contracts,
-            catalogs: CheckedNativeContracts::new(root.0.join("configured artifact")),
-            registry,
-            locale: runtime.executing_default().unwrap(),
+            contracts: packaged.contracts,
+            catalogs: packaged.catalogs,
+            registry: packaged.registry,
+            locale: packaged.locale,
             prompts,
-            chat_readable_versions: vec!["explicit-fixture-chat-reader".into()],
+            chat_readable_versions: packaged.chat_readable_versions,
         },
         weak,
     )
@@ -104,7 +117,7 @@ async fn native_runtime_owns_configured_journal_and_resources_until_shutdown() {
         assert!(!data.join("health.json").exists());
         assert_eq!(
             runtime.policies.chat_readable_versions,
-            vec![JsString::from("explicit-fixture-chat-reader")]
+            vec![JsString::from("1.2.0"), JsString::from("1.3.0")]
         );
         assert!(runtime.policies.journal.free_bytes().unwrap().unwrap() > 0.0);
         if open {
@@ -172,4 +185,103 @@ async fn native_runtime_rejects_build_and_service_identity_before_opening_journa
             assert!(!data.exists());
         }
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_runtime_registers_the_full_catalog_and_serves_an_sdk_workspace_call() {
+    let peer = Peer::start_mode(Some("--native-policies")).await;
+    let root = Root::new();
+    let (path, mut config) = instance(&root, true, "task-board");
+    config.insert("publicBaseUrl", peer.url.clone().into());
+    std::fs::write(&path, stringify(&config, 32768).unwrap()).unwrap();
+    let alive = Rc::new(Cell::new(true));
+    let (inputs, locale) = inputs(&root, PromptOwner(alive.clone()));
+    let advertisement = inputs.registry.value().clone();
+    let runtime = NativeRuntime::prepare(&path, inputs).await.unwrap();
+    let client = runtime.host.service.client.clone();
+    let data = runtime.host.config.data_root().to_owned();
+    let shutdown = Notify::new();
+    let script = async {
+        let connection = bounded(client.wait_ready(None)).await.unwrap();
+        let response = bounded(connection.request(
+            "test.invokeRegistered",
+            Json::object([
+                ("name", "workspace".into()),
+                ("arguments", Json::Object(vec![])),
+                ("operationId", "native-runtime-workspace".into()),
+            ]),
+            RequestOptions::default(),
+        ))
+        .await
+        .unwrap();
+        let workspace = response.required("result").unwrap();
+        assert_eq!(workspace.get("serviceNodeId"), config.get("serviceNodeId"));
+        assert_eq!(workspace.get("generation"), Some(&Json::Number(1.0)));
+        let mut caller = JsString::from("caller-");
+        caller.0.push(0xd800);
+        assert_eq!(
+            workspace.get("callerPrincipalId"),
+            Some(&Json::String(caller))
+        );
+        assert_eq!(workspace.get("role"), Some(&"user".into()));
+        assert_eq!(
+            workspace.get("scheduler"),
+            config.required("settings").unwrap().get("scheduler")
+        );
+        chrono::DateTime::parse_from_rfc3339(
+            &workspace.required("observedAt").unwrap().as_str().unwrap(),
+        )
+        .unwrap();
+        until(|| {
+            std::fs::read_to_string(data.join("health.json"))
+                .ok()
+                .is_some_and(|value| json(&value).get("ready") == Some(&Json::Bool(true)))
+        })
+        .await;
+        assert!(alive.get());
+        assert!(locale.upgrade().is_some());
+        shutdown.notify_one();
+    };
+    let (result, ()) =
+        bounded(async { tokio::join!(runtime.run(shutdown.notified()), script) }).await;
+    result.unwrap();
+    assert!(!client.ready());
+    assert!(!alive.get());
+    assert!(locale.upgrade().is_none());
+    let registrations = peer
+        .frames
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|frame| frame.get("method") == Some(&"registry.sync".into()))
+        .map(|frame| frame.required("params").unwrap().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(registrations.len(), 1);
+    assert_eq!(
+        ivy_contracts::hash::hash_json(&registrations[0]).unwrap(),
+        ivy_contracts::hash::hash_json(&advertisement).unwrap()
+    );
+    assert_eq!(
+        registrations[0]
+            .required("contracts")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        51
+    );
+    let health = json(&std::fs::read_to_string(data.join("health.json")).unwrap());
+    assert_eq!(health.get("ready"), Some(&Json::Bool(false)));
+    assert_eq!(health.get("generation"), Some(&Json::Null));
+    assert_eq!(health.get("details"), Some(&"TaskBoard stopped.".into()));
+    assert!(data.join("task-board.sqlite").exists());
+    let database = Connection::open(data.join("task-board.sqlite")).unwrap();
+    database
+        .execute_batch("BEGIN EXCLUSIVE; ROLLBACK;")
+        .unwrap();
+    let _: i64 = database
+        .query_row("SELECT count(*) FROM documents", [], |row| row.get(0))
+        .unwrap();
+    drop(database);
+    peer.finish().await;
 }

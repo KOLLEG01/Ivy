@@ -1,0 +1,279 @@
+//! Current packaged inputs compared with the actual original producers.
+use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::parse};
+use ivy_sdk::collation::LocaleRuntime;
+use ivy_task_board::{
+    evidence_bytes::{BlobStore, ChunkKey},
+    journal_store::Contracts,
+    native_intent::{NativeIntent, NativeSlot, TaskPrompts},
+    operations::{Document, Store},
+    prompts::CurrentTaskPrompts,
+    read_evidence::ReadEvidenceStore,
+    runtime_inputs,
+    schema::RuntimeContracts,
+};
+use std::{
+    cell::{Cell, RefCell},
+    path::PathBuf,
+};
+
+fn producer(name: &str) -> Json {
+    let root = PathBuf::from(
+        std::env::var_os("IVY_TASK_BOARD_PRODUCER")
+            .expect("Supply the actual current producer outputs"),
+    );
+    parse(
+        &std::fs::read_to_string(root.join(name)).unwrap(),
+        usize::MAX,
+    )
+    .unwrap()
+}
+
+#[test]
+fn packaged_inputs_match_current_producer_registry_and_reader_writer_versions() {
+    let locale = LocaleRuntime::load(&PathBuf::from(
+        std::env::var_os("IVY_TEST_LOCALE_RUNTIME").unwrap(),
+    ))
+    .unwrap();
+    let inputs = runtime_inputs::packaged(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."),
+        locale.executing_default().unwrap(),
+    )
+    .unwrap();
+    let expected = producer("registry.json");
+    if hash_json(inputs.registry.value()).unwrap() != hash_json(&expected).unwrap() {
+        let root = PathBuf::from(std::env::var_os("IVY_TASK_BOARD_PRODUCER").unwrap());
+        std::fs::write(
+            root.join("native-registry.actual.json"),
+            ivy_contracts::json::stringify(inputs.registry.value(), usize::MAX).unwrap(),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        hash_json(inputs.registry.value()).unwrap(),
+        hash_json(&expected).unwrap()
+    );
+    let metadata = producer("runtime-inputs.json");
+    for (key, version) in metadata
+        .required("writerVersions")
+        .unwrap()
+        .as_object()
+        .unwrap()
+    {
+        assert_eq!(
+            inputs.contracts.version(&key.to_utf8().unwrap()).unwrap(),
+            version.as_str().unwrap()
+        );
+    }
+    assert_eq!(
+        inputs.chat_readable_versions,
+        vec![JsString::from("1.2.0"), JsString::from("1.3.0")]
+    );
+    assert!(
+        inputs
+            .contracts
+            .readable_version("task-board/task", &"2.3.0".into())
+            .unwrap()
+    );
+    assert!(
+        inputs
+            .contracts
+            .readable_version("task-board/task", &"3.1.0".into())
+            .unwrap()
+    );
+    assert!(
+        !inputs
+            .contracts
+            .readable_version("task-board/task", &"4.0.0".into())
+            .unwrap()
+    );
+}
+
+#[test]
+fn current_prompts_and_local_admission_match_original_producers() {
+    let contracts = runtime_inputs::contracts().unwrap();
+    for row in producer("prompt-vectors.json").as_array().unwrap() {
+        let changed = row.required("executionChangeRequested").unwrap();
+        let owner = row
+            .required("serviceNodeId")
+            .unwrap()
+            .as_js_string()
+            .unwrap();
+        let task = row.required("task").unwrap();
+        let expected = row.required("expected").unwrap().as_js_string().unwrap();
+        assert_eq!(
+            &CurrentTaskPrompts
+                .task_prompt(task, owner, Some(changed))
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            &CurrentTaskPrompts
+                .task_update_prompt(task, owner, changed.as_bool().unwrap())
+                .unwrap(),
+            expected
+        );
+    }
+    let rows = producer("admission-vectors-v2.json");
+    for row in rows.as_array().unwrap() {
+        let definition = row.required("definition").unwrap().as_str().unwrap();
+        let result = contracts.validate_definition(&definition, row.required("value").unwrap());
+        assert_eq!(
+            result.is_ok(),
+            row.required("accepted").unwrap().as_bool().unwrap(),
+            "{definition}"
+        );
+        if let Err(error) = result {
+            assert_eq!(error.code, row.required("code").unwrap().as_str().unwrap());
+        }
+    }
+}
+
+struct ReadOnlyTask {
+    contracts: RuntimeContracts,
+    task: Json,
+    reads: Cell<usize>,
+}
+fn unexpected<T>() -> IvyResult<T> {
+    panic!("Intent preparation attempted a write or evidence effect")
+}
+impl Store for ReadOnlyTask {
+    fn root_object_id(&self) -> Option<JsString> {
+        None
+    }
+    fn contract_version(&self, key: &str) -> IvyResult<String> {
+        self.contracts.version(key)
+    }
+    fn retired_operation(&self, _: &JsString, _: &JsString) -> IvyResult<bool> {
+        unexpected()
+    }
+    fn local_key(&self, _: &JsString) -> IvyResult<Option<String>> {
+        unexpected()
+    }
+    fn complete_local_workflow(&self, _: &JsString, _: &JsString) -> IvyResult<()> {
+        unexpected()
+    }
+    async fn named(&self, _: &str, _: &str, _: Option<&JsString>) -> IvyResult<Option<Document>> {
+        unexpected()
+    }
+    async fn read(&self, key: &str, _: &Json, upgrade: bool) -> IvyResult<Document> {
+        assert_eq!(key, "task-board/task");
+        assert!(upgrade);
+        self.reads.set(self.reads.get() + 1);
+        Ok(Document {
+            pin: Json::object([
+                ("objectId", "fixture-task".into()),
+                ("revision", Json::Number(1.0)),
+            ]),
+            value: self.task.clone(),
+            parent_id: None,
+            content_hash: hash_json(&self.task)?,
+        })
+    }
+    async fn write(&self, _: &str, _: &Json, _: &str, _: &Json) -> IvyResult<Json> {
+        unexpected()
+    }
+    async fn prepared_mutation_id(&self, _: &str) -> IvyResult<JsString> {
+        unexpected()
+    }
+    async fn write_prepared(&self, _: &str, _: &Json, _: &JsString, _: &Json) -> IvyResult<Json> {
+        unexpected()
+    }
+}
+impl BlobStore for ReadOnlyTask {
+    type Pin = Json;
+    type Error = IvyError;
+    fn save(&self, _: ChunkKey, _: &str, _: &JsString, _: &[u8]) -> IvyResult<Json> {
+        unexpected()
+    }
+    fn read(&self, _: ChunkKey, _: &Json, _: &JsString) -> IvyResult<Vec<u8>> {
+        unexpected()
+    }
+}
+impl ReadEvidenceStore for ReadOnlyTask {
+    fn validate(&self, name: &str, value: &Json) -> IvyResult<()> {
+        self.contracts.validate_definition(name, value)
+    }
+    async fn read_document(&self, _: &str, _: &Json, _: bool) -> IvyResult<Document> {
+        unexpected()
+    }
+    async fn write_document(&self, _: &str, _: &Json, _: &str, _: &Json) -> IvyResult<Json> {
+        unexpected()
+    }
+}
+struct PromptProbe(RefCell<Vec<Option<bool>>>);
+impl TaskPrompts for PromptProbe {
+    fn task_prompt(&self, _: &Json, _: &JsString, flag: Option<&Json>) -> IvyResult<JsString> {
+        self.0.borrow_mut().push(flag.map(|v| v.as_bool().unwrap()));
+        Err(IvyError::new(
+            "prompt_probe",
+            "Stopped before catalog access.",
+        ))
+    }
+    fn task_update_prompt(&self, _: &Json, _: &JsString, flag: bool) -> IvyResult<JsString> {
+        self.0.borrow_mut().push(Some(flag));
+        Err(IvyError::new(
+            "prompt_probe",
+            "Stopped before catalog access.",
+        ))
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_intent_uses_the_origin_execution_change_flag_before_catalog_or_effects() {
+    let vectors = producer("prompt-vectors.json");
+    let store = ReadOnlyTask {
+        contracts: runtime_inputs::contracts().unwrap(),
+        task: vectors.as_array().unwrap()[0]
+            .required("task")
+            .unwrap()
+            .clone(),
+        reads: Cell::new(0),
+    };
+    let catalogs =
+        ivy_contracts::checked_native_contract::CheckedNativeContracts::new(PathBuf::new());
+    let run=parse(r#"{"taskId":"fixture-task","primaryResourceRef":{"kind":"thread","namespace":"codex","serviceNodeId":"fixture-owner","nativeId":"fixture-thread"},"turnId":"fixture-turn","nativeEpoch":"fixture-epoch","cancellation":null,"owner":{"serviceNodeId":"fixture.task-board","source":"agent"},"originalRequest":{"action":"continue","expectedRevision":1,"coordinationOnly":true},"plan":{}}"#,usize::MAX).unwrap();
+    let intent = NativeIntent {
+        store: &store,
+        catalogs: &catalogs,
+    };
+    let rows = producer("admission-vectors-v2.json");
+    let original = rows.as_array().unwrap()[0].required("value").unwrap();
+    for changed in [false, true] {
+        let mut origin = original.clone();
+        origin.insert("executionChangeRequested", changed.into());
+        let probe = PromptProbe(RefCell::new(vec![]));
+        assert_eq!(
+            intent
+                .intended_call(&run, NativeSlot::Steer, Some(&origin), &probe)
+                .await
+                .unwrap_err()
+                .code,
+            "prompt_probe"
+        );
+        assert_eq!(*probe.0.borrow(), vec![Some(changed)]);
+    }
+    let probe = PromptProbe(RefCell::new(vec![]));
+    assert_eq!(
+        intent
+            .intended_call(&run, NativeSlot::Turn, None, &probe)
+            .await
+            .unwrap_err()
+            .code,
+        "prompt_probe"
+    );
+    assert_eq!(*probe.0.borrow(), vec![None]);
+    let mut invalid = original.clone();
+    invalid.insert("executionChangeRequested", "true".into());
+    let reads = store.reads.get();
+    let probe = PromptProbe(RefCell::new(vec![]));
+    assert_eq!(
+        intent
+            .intended_call(&run, NativeSlot::Steer, Some(&invalid), &probe)
+            .await
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+    assert_eq!(store.reads.get(), reads);
+    assert!(probe.0.borrow().is_empty());
+}

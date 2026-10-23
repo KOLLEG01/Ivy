@@ -51,6 +51,8 @@ pub struct RuntimeContracts {
 impl RuntimeContracts {
     pub fn from_documents(documents: Vec<IvyJson>) -> IvyResult<Self> {
         let definitions = SchemaBundle::from_documents(documents)?;
+        let metadata = crate::runtime_inputs::metadata()?;
+        let writers = metadata.required("writerVersions")?;
         let mut versions = HashMap::new();
         let mut records = HashMap::new();
         let mut readable: HashMap<String, Vec<JsString>> = HashMap::new();
@@ -69,16 +71,9 @@ impl RuntimeContracts {
             if ordered.get(position) != Some(&JsString::from(version.clone())) {
                 ordered.insert(position, version.clone().into());
             }
-            versions.entry(key.clone()).or_insert_with(|| {
-                match key.as_str() {
-                    "task-board/task" => "2.3.0",
-                    "task-board/run" | "task-board/result" => "2.2.0",
-                    "task-board/configuration" => "1.2.0",
-                    "task-board/delivery" | "task-board/comment-read-state" => "1.1.0",
-                    _ => "1.0.0",
-                }
-                .into()
-            });
+            versions
+                .entry(key.clone())
+                .or_insert(writers.required(&key)?.as_str()?);
             let schema = contract
                 .get("jsonSchema")
                 .map(|s| SchemaBundle::from_documents(vec![s.clone()]))

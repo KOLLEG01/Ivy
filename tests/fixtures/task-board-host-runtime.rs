@@ -54,21 +54,7 @@ async fn until(mut condition: impl FnMut() -> bool) {
     .await
 }
 fn contracts() -> RuntimeContracts {
-    let root = PathBuf::from(
-        std::env::var_os("IVY_TASK_BOARD_CURRENT_CONTRACTS")
-            .expect("Supply the current packaged canonical schema directory"),
-    );
-    let documents = [
-        "task-board",
-        "chat",
-        "agent",
-        "hive-wire",
-        "hive-operations",
-    ]
-    .iter()
-    .map(|name| json(&std::fs::read_to_string(root.join(format!("{name}.schema.json"))).unwrap()))
-    .collect();
-    RuntimeContracts::from_documents(documents).unwrap()
+    ivy_task_board::runtime_inputs::contracts().unwrap()
 }
 fn settings() -> Json {
     json(
@@ -452,6 +438,7 @@ fn native_contracts_keep_public_versions_and_local_workflow_routing() {
     let expected: Vec<JsString> = std::iter::once("1.0.0".into())
         .chain((1..=12).map(|minor| format!("1.{minor}.0").into()))
         .chain((0..=3).map(|minor| format!("2.{minor}.0").into()))
+        .chain(["3.0.0".into(), "3.1.0".into()])
         .collect();
     assert_eq!(versions, expected);
     for version in versions {
@@ -477,8 +464,8 @@ fn native_contracts_keep_public_versions_and_local_workflow_routing() {
         ]
     );
     assert!(contracts.readable_versions("unknown").is_err());
-    assert_eq!(contracts.version("task-board/task").unwrap(), "2.3.0");
-    assert_eq!(contracts.version("task-board/run").unwrap(), "2.2.0");
+    assert_eq!(contracts.version("task-board/task").unwrap(), "3.1.0");
+    assert_eq!(contracts.version("task-board/run").unwrap(), "3.0.0");
     assert_eq!(contracts.version("task-board/result").unwrap(), "2.2.0");
     assert_eq!(contracts.version("task-board/comments").unwrap(), "1.0.0");
     assert!(
@@ -495,7 +482,7 @@ fn native_contracts_keep_public_versions_and_local_workflow_routing() {
     );
     assert!(
         !contracts
-            .readable_version("task-board/task", &"3.0.0".into())
+            .readable_version("task-board/task", &"4.0.0".into())
             .unwrap()
     );
     contracts

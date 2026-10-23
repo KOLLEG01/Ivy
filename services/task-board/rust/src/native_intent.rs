@@ -60,34 +60,27 @@ impl NativeSlot {
         }
     }
 }
-/// Supply the accepted current prompt policy. Preparation does not supply a
-/// legacy/default implementation. `None` retains an omitted coordination flag.
+/// Current prompt policy. An omitted execution-change flag uses the normal prompt.
 pub trait TaskPrompts {
     fn task_prompt(
         &self,
         task: &Json,
         owner: &JsString,
-        coordination_only: Option<&Json>,
+        execution_change_requested: Option<&Json>,
     ) -> IvyResult<JsString>;
     fn task_update_prompt(
         &self,
         task: &Json,
         owner: &JsString,
-        coordination_only: bool,
+        execution_change_requested: bool,
     ) -> IvyResult<JsString>;
 }
 fn field<'a>(value: &'a Json, key: &str) -> &'a Json {
     static NULL: Json = Json::Null;
     value.get(key).unwrap_or(&NULL)
 }
-fn truthy(value: &Json) -> bool {
-    match value {
-        Json::Null => false,
-        Json::Bool(v) => *v,
-        Json::Number(v) => *v != 0.0 && !v.is_nan(),
-        Json::String(v) => !v.0.is_empty(),
-        _ => true,
-    }
+fn present_text(value: &Json) -> bool {
+    value.as_js_string().is_some_and(|text| !text.0.is_empty())
 }
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
@@ -96,23 +89,11 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
         Err(IvyError::new(code, message))
     }
 }
-// Object spread copies own enumerable JSON fields. Strings enumerate UTF-16
-// units, arrays enumerate their elements, and null/other primitives add none.
-fn spread(value: &Json) -> Json {
-    match value {
-        Json::Object(_) => value.clone(),
-        Json::String(s) => Json::object(
-            s.0.iter()
-                .enumerate()
-                .map(|(i, u)| (i.to_string(), Json::String(JsString(vec![*u])))),
-        ),
-        Json::Array(a) => Json::object(
-            a.iter()
-                .enumerate()
-                .map(|(i, v)| (i.to_string(), v.clone())),
-        ),
-        _ => Json::object([] as [(&str, Json); 0]),
-    }
+fn parameters(value: &Json) -> IvyResult<Json> {
+    value
+        .as_object()
+        .map(|_| value.clone())
+        .ok_or_else(IvyError::internal)
 }
 fn task_input(text: JsString) -> Json {
     Json::object([
@@ -147,22 +128,19 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
         let (method, params) = if field(origin, "kind") == &Json::from("steer") {
             require(
                 slot == NativeSlot::Steer
-                    && truthy(primary)
-                    && truthy(field(run, "turnId"))
-                    && truthy(field(run, "nativeEpoch"))
-                    && !truthy(field(run, "cancellation")),
+                    && primary.as_object().is_some()
+                    && present_text(field(run, "turnId"))
+                    && present_text(field(run, "nativeEpoch"))
+                    && field(run, "cancellation").is_null(),
                 "task_board_native_order",
                 "Steering requires the exact active native turn.",
             )?;
             let task =
                 Store::read(self.store, "task-board/task", run.required("taskId")?, true).await?;
-            let request = field(run, "originalRequest");
-            let coordination = field(request, "action") == &Json::from("continue")
-                && field(request, "coordinationOnly") == &Json::Bool(true);
             let text = prompts.task_update_prompt(
                 &task.value,
                 string(run.required("owner")?, "serviceNodeId")?,
-                coordination,
+                field(origin, "executionChangeRequested").as_bool() == Some(true),
             )?;
             (
                 "turn/steer",
@@ -182,7 +160,7 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
                 "Reattachment requires the saved primary thread on the selected native owner.",
             )?;
             definition = "threadResume";
-            let mut params = spread(field(plan, "threadResume"));
+            let mut params = parameters(field(plan, "threadResume"))?;
             params.insert("threadId", primary.required("nativeId")?.clone());
             params.insert("excludeTurns", true.into());
             ("thread/resume", params)
@@ -190,7 +168,7 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
             let task = self.initial_task(run).await?;
             let primary = field(&task.value, "primaryResourceRef");
             require(
-                !truthy(primary)
+                primary.is_null()
                     || (primary.get("namespace") == Some(&Json::from("codex"))
                         && primary.get("kind") == Some(&Json::from("thread"))
                         && primary.get("serviceNodeId")
@@ -198,9 +176,9 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
                 "task_board_primary_mismatch",
                 "The original primary must belong to the selected native owner.",
             )?;
-            if truthy(primary) {
+            if primary.as_object().is_some() {
                 definition = "threadResume";
-                let mut params = spread(field(plan, "threadResume"));
+                let mut params = parameters(field(plan, "threadResume"))?;
                 params.insert("threadId", primary.required("nativeId")?.clone());
                 params.insert("excludeTurns", true.into());
                 ("thread/resume", params)
@@ -210,22 +188,15 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
             }
         } else if slot == NativeSlot::Turn {
             require(
-                truthy(primary) && truthy(field(run, "nativeEpoch")),
+                primary.as_object().is_some() && present_text(field(run, "nativeEpoch")),
                 "task_board_primary_required",
                 "Turn preparation requires the saved primary and native epoch.",
             )?;
             let task = self.initial_task(run).await?;
-            let request = field(run, "originalRequest");
-            let no_coordination = Json::Bool(false);
-            let coordination = if field(request, "action") == &Json::from("continue") {
-                request.get("coordinationOnly")
-            } else {
-                Some(&no_coordination)
-            };
             let text = prompts.task_prompt(
                 &task.value,
                 string(run.required("owner")?, "serviceNodeId")?,
-                coordination,
+                None,
             )?;
             let mut input = if field(run, "owner").get("source") == Some(&Json::from("scheduler")) {
                 vec![]
@@ -236,15 +207,15 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
                     .to_vec()
             };
             input.push(task_input(text));
-            let mut params = spread(field(plan, "turnStart"));
+            let mut params = parameters(field(plan, "turnStart"))?;
             params.insert("threadId", primary.required("nativeId")?.clone());
             params.insert("input", Json::Array(input));
             ("turn/start", params)
         } else {
             require(
-                truthy(primary)
-                    && truthy(field(run, "turnId"))
-                    && truthy(field(run, "cancellation")),
+                primary.as_object().is_some()
+                    && present_text(field(run, "turnId"))
+                    && field(run, "cancellation").as_object().is_some(),
                 "task_board_cancellation_required",
                 "Interruption requires the exact known turn and saved cancellation intent.",
             )?;

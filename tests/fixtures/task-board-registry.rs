@@ -103,19 +103,20 @@ async fn native_registry_keeps_management_private_and_preserves_schema_and_reade
                 == Some(true)
         })
         .count();
-    assert_eq!(guarded, 6);
+    assert_eq!(guarded, 8);
     assert_eq!(
         namespace.required("guideMarkdown").unwrap(),
         &Json::String(text(&catalog()).guide_markdown)
     );
     let tools = namespace.required("tools").unwrap().as_array().unwrap();
-    assert_eq!(tools.len(), 19);
+    assert_eq!(tools.len(), 21);
     let expected = [
         ("configuration", Some("task_configuration"), "ivy", true),
         ("configure", Some("task_configure"), "ivy", false),
         ("savePlan", Some("task_save_plan"), "ivy_dev", false),
         ("create", Some("task_create"), "ivy", false),
         ("edit", Some("task_update"), "ivy", false),
+        ("retargetQuestion", Some("task_update"), "ivy", false),
         ("transition", Some("task_update"), "ivy", false),
         ("defer", Some("task_update"), "ivy", false),
         ("reassign", Some("task_update"), "ivy", false),
@@ -130,6 +131,7 @@ async fn native_registry_keeps_management_private_and_preserves_schema_and_reade
         ),
         ("archive", Some("task_update"), "ivy", false),
         ("operation", Some("task_read"), "ivy", true),
+        ("operationReceipt", Some("task_read"), "ivy", true),
         ("read", Some("task_read"), "ivy", true),
         ("list", Some("task_list"), "ivy", true),
         ("categories", Some("task_list"), "ivy", true),
@@ -288,7 +290,7 @@ async fn native_registry_keeps_management_private_and_preserves_schema_and_reade
         .unwrap();
     assert_eq!(
         task.required("writeVersions").unwrap(),
-        &json(r#"["2.3.0"]"#)
+        &json(r#"["3.1.0"]"#)
     );
     assert!(
         task.required("readVersions")
