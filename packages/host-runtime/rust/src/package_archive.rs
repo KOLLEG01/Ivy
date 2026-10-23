@@ -1,6 +1,6 @@
-//! Immutable v1 package transport. System tar remains the receive boundary.
-use crate::{IvyError, IvyJson, IvyResult, artifact, config, node_path, paths,
-    package_receive::{archive_executables, tar, MAXIMUM_ENTRIES}};
+//! Immutable v1 package transport with native UTF-8 archive paths.
+use crate::{IvyError, IvyJson, IvyResult, artifact, config, native_path, paths,
+    package_receive::{tar, uses_native_archive, MAXIMUM_ENTRIES}};
 use std::{cell::Cell, collections::{BTreeMap, BTreeSet}, fs, io::{self, Read, Write}, path::{Path, PathBuf}, rc::Rc, time::{Duration, Instant}};
 
 pub use crate::package_receive::validate_package_archive;
@@ -18,12 +18,16 @@ async fn archive_result(destination: PathBuf) -> IvyResult<PackageArchive> {
     Ok(PackageArchive { hash: artifact::file_hash(destination.clone()).await?, path: destination, bytes: metadata.len() })
 }
 pub async fn create_package_archive(candidate: IvyJson, executables: BTreeMap<String, PathBuf>) -> IvyResult<PackageArchive> {
-    // Keep the process and its result owner alive if a caller stops waiting.
+    // Keep the archive and its result owner alive if a caller stops waiting.
     internal(tokio::spawn(async move {
         let artifact_root = config::path_value(candidate.required("artifactRoot")?)?;
+        if uses_native_archive(&executables) {
+            let destination = internal(tokio::task::spawn_blocking(move || native_archive(artifact_root, Vec::new())).await)??;
+            return archive_result(destination).await;
+        }
         let root = artifact_root.parent().ok_or_else(IvyError::internal)?;
         let destination = root.join("package.tar.gz");
-        let result = tar(root, &archive_executables(executables), vec!["-czf".into(), destination.clone().into_os_string(),
+        let result = tar(root, &executables, vec!["-czf".into(), destination.clone().into_os_string(),
             "-C".into(), root.as_os_str().into(), "artifact".into(), "component.json".into()], 180_000, None).await?;
         require(!result.truncated, "artifact_changed", "Package archive command output was truncated.")?;
         archive_result(destination).await
@@ -70,13 +74,14 @@ fn native_archive_inner(artifact_root: PathBuf, linux_executables: Vec<PathBuf>,
     let actual_root = internal(paths::realpath(&artifact_root))?;
     let package_root = artifact_root.parent().ok_or_else(IvyError::internal)?;
     let mut selected = BTreeSet::new();
-    let context = internal(node_path::Context::current())?;
+    let absolute_root = internal(paths::absolute(&artifact_root))?;
     for executable in linux_executables {
-        let local = context.relative(&node_path::from_native(&artifact_root), &node_path::from_native(&executable));
-        let local = local.to_utf8().unwrap_or_default().replace('\\', "/"); let parts: Vec<_> = local.split('/').collect();
+        let local = native_path::relative(&absolute_root, &internal(paths::absolute(&executable))?);
+        let parts: Vec<_> = local.iter().collect();
         require(executable.is_absolute() && parts.len() == 4 && parts[0] == "dist" && parts[1] == "native"
-            && matches!(parts[2], "linux-x64" | "linux-arm64") && !parts[3].is_empty()
-            && parts[3].bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')),
+            && matches!(parts[2].to_str(), Some("linux-x64" | "linux-arm64"))
+            && parts[3].to_str().is_some_and(|name| !name.is_empty()
+                && name.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))),
             "invalid_arguments", "Linux package executable must be an explicit contained native target file.")?;
         let metadata = internal(fs::symlink_metadata(&executable))?;
         let actual = internal(paths::realpath(&executable))?;
@@ -122,12 +127,10 @@ fn native_archive_inner(artifact_root: PathBuf, linux_executables: Vec<PathBuf>,
             "artifact_changed", "Native package entry changed during archive creation.")?;
         let mut header = tar::Header::new_gnu(); header.set_metadata(&metadata);
         #[cfg(windows)] header.set_mode(match (directory, metadata.permissions().readonly()) { (true, false) => 0o777, (true, true) => 0o555, (false, false) => 0o666, (false, true) => 0o444 });
-        let local = name.strip_prefix("artifact").ok().and_then(|path| path.to_str()).unwrap_or("").replace('\\', "/");
-        if selected.contains(&local) { header.set_mode(0o755); }
+        if name.strip_prefix("artifact").is_ok_and(|local| selected.contains(local)) { header.set_mode(0o755); }
         let utf8_name = name.to_str().ok_or_else(IvyError::internal)?.replace('\\', "/");
         if !utf8_name.is_ascii() {
-            // PAX path is explicitly UTF-8; raw GNU names are locale-dependent
-            // in the unchanged Windows receiver. The standard library writes it.
+            // Preserve explicit UTF-8 PAX metadata for other v1 receivers too.
             internal(builder.append_pax_extensions([("path", utf8_name.as_bytes())]))?;
         }
         if directory { header.set_size(0); internal(builder.append_data(&mut header, &name, io::empty()))?; }
@@ -142,9 +145,8 @@ fn native_archive_inner(artifact_root: PathBuf, linux_executables: Vec<PathBuf>,
     Ok(destination)
 }
 
-/// Consume stageNativePayloads' exact absolute linuxExecutables. No source modes
-/// are changed. This explicit native writer emits the same v1 artifact/manifest
-/// roots; ordinary callers keep create_package_archive's original tar behavior.
+/// Archive exact selected Linux executables without changing source modes.
+/// The native writer retains the v1 artifact/manifest roots.
 pub async fn create_package_archive_with_linux_executables(candidate: IvyJson, linux_executables: Vec<PathBuf>) -> IvyResult<PackageArchive> {
     internal(tokio::spawn(async move {
         let root = config::path_value(candidate.required("artifactRoot")?)?;
