@@ -1,12 +1,38 @@
-//! Disposable native peer for CLI/connection tests. No account or network access.
+//! Disposable native peer for CLI, shell and connection tests. No account or network access.
 use std::{
     env,
-    fs::OpenOptions,
+    ffi::OsStr,
+    fs::{self, OpenOptions},
     io::{BufRead, Write},
 };
 
 fn main() {
-    if env::args().nth(1).as_deref() == Some("--version") {
+    let argument = env::args_os().nth(1);
+    if argument.as_deref() == Some(OsStr::new("-NoLogo")) {
+        let arguments: Vec<_> = env::args_os().skip(1).collect();
+        assert_eq!(arguments.len(), 5);
+        for (actual, expected) in
+            arguments
+                .iter()
+                .zip(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+        {
+            assert_eq!(actual, OsStr::new(expected));
+        }
+        assert!(
+            arguments[4]
+                .to_str()
+                .unwrap()
+                .contains("GetCurrentPackageFullName")
+        );
+        let executable = env::current_exe().unwrap();
+        let root = executable.parent().unwrap();
+        fs::write(root.join("shell-probe-called"), b"called").unwrap();
+        std::io::stdout()
+            .write_all(&fs::read(root.join("shell-probe.json")).unwrap())
+            .unwrap();
+        return;
+    }
+    if argument.as_deref() == Some(OsStr::new("--version")) {
         print!("{}", env::var("IVY_CODEX_STDOUT").unwrap());
         std::io::stdout().flush().unwrap();
         std::process::exit(env::var("IVY_CODEX_EXIT").unwrap().parse().unwrap());

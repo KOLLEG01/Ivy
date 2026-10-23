@@ -5245,7 +5245,7 @@
       "additionalProperties": false
     },
     "DurableRequest": {
-      "oneOf": [
+      "anyOf": [
         {
           "$ref": "#/$defs/ActionRequest"
         },

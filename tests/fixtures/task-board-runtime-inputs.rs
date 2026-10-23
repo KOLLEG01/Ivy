@@ -128,6 +128,78 @@ fn current_prompts_and_local_admission_match_original_producers() {
     }
 }
 
+#[test]
+fn durable_requests_admit_overlapping_actions_and_keep_nested_record_guards() {
+    let contracts = runtime_inputs::contracts().unwrap();
+    let defer = parse(
+        r#"{"action":"defer","operationId":"defer-fixture","taskId":"fixture-task","expectedRevision":1,"wakeAt":null,"dependencies":[]}"#,
+        usize::MAX,
+    )
+    .unwrap();
+    for definition in ["ActionRequest", "SchedulerRequest", "DurableRequest"] {
+        contracts.validate_definition(definition, &defer).unwrap();
+    }
+    let mut operation = parse(
+        r#"{"schemaVersion":1,"operationId":"record-fixture","callerPrincipalId":"fixture-caller","request":null,"requestHash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","actor":{"principalId":"fixture-caller","serviceNodeId":"fixture.task-board","generation":1,"source":"native"},"createdAt":"2026-01-01T00:00:00.000Z","updatedAt":"2026-01-01T00:00:00.000Z","phase":"accepted","writes":[],"outcome":null,"error":null}"#,
+        usize::MAX,
+    )
+    .unwrap();
+    let mut requests = vec![defer.clone()];
+    for text in [
+        r#"{"action":"transition","operationId":"transition-fixture","taskId":"fixture-task","expectedRevision":1,"workflowState":"todo","detail":null}"#,
+        r#"{"action":"cancel","operationId":"cancel-fixture","taskId":"fixture-task","expectedRevision":1,"reason":"fixture"}"#,
+        r#"{"action":"nativeUpdate","operationId":"native-fixture","taskId":"fixture-task","expectedRevision":1,"run":{"objectId":"fixture-run","revision":1},"change":{"kind":"cancelUnstarted"}}"#,
+        r#"{"action":"archive","operationId":"archive-fixture","taskId":"fixture-task","expectedRevision":1,"archived":true}"#,
+    ] {
+        requests.push(parse(text, usize::MAX).unwrap());
+    }
+    for request in requests {
+        contracts
+            .validate_definition("DurableRequest", &request)
+            .unwrap();
+        operation.insert("requestHash", hash_json(&request).unwrap().into());
+        operation.insert("request", request.clone());
+        contracts
+            .validate_record("task-board/operation", &"1.0.0".into(), &operation)
+            .unwrap();
+        let mut extra = request;
+        extra.insert("unexpected", true.into());
+        assert_eq!(
+            contracts
+                .validate_definition("DurableRequest", &extra)
+                .unwrap_err()
+                .code,
+            "invalid_arguments"
+        );
+        operation.insert("request", extra);
+        assert_eq!(
+            contracts
+                .validate_record("task-board/operation", &"1.0.0".into(), &operation)
+                .unwrap_err()
+                .code,
+            "invalid_arguments"
+        );
+    }
+    for (field, invalid) in [
+        ("action", "unknown".into()),
+        ("expectedRevision", Json::Number(0.0)),
+        ("dependencies", "fixture-task".into()),
+        ("wakeAt", "tomorrow".into()),
+        ("operationId", "".into()),
+    ] {
+        let mut invalid_request = defer.clone();
+        invalid_request.insert(field, invalid);
+        assert_eq!(
+            contracts
+                .validate_definition("DurableRequest", &invalid_request)
+                .unwrap_err()
+                .code,
+            "invalid_arguments",
+            "{field}"
+        );
+    }
+}
+
 struct ReadOnlyTask {
     contracts: RuntimeContracts,
     task: Json,

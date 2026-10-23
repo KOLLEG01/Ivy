@@ -6,7 +6,7 @@ use ivy_host_runtime::{
     codex_home::HomeContext,
     codex_process,
     codex_rpc::{Events, NativeRpc},
-    node_path, paths, process, process_fence,
+    codex_windows_shell, node_path, paths, process, process_fence,
 };
 use std::{
     collections::BTreeMap,
@@ -543,6 +543,293 @@ async fn native_handshake_admits_objects_and_authenticates_home_and_version_befo
         .await
         .0
         .unwrap();
+    }
+}
+
+fn shell_settings(executable: &Path, hash: &str) -> J {
+    J::object([
+        ("executable", J::String(node_path::from_native(executable))),
+        ("executableHash", hash.into()),
+    ])
+}
+
+#[tokio::test]
+async fn windows_shell_settings_use_declared_schema_before_process_effects() {
+    let fixture = ServiceFixture::new();
+    let context = node_path::Context::current().unwrap();
+    let job = fixture.0.join("no-job.exe");
+    let empty_count = fs::read_dir(&fixture.0).unwrap().count();
+    for settings in [None, Some(J::Null)] {
+        assert_eq!(
+            codex_windows_shell::verify_windows_shell(
+                settings.as_ref(),
+                &fixture.0,
+                &job,
+                &context
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "native_shell_required"
+        );
+    }
+    let base = shell_settings(
+        &fixture.0.join("pwsh.exe"),
+        &format!("sha256:{}", "0".repeat(64)),
+    );
+    if !cfg!(windows) {
+        assert_eq!(
+            codex_windows_shell::verify_windows_shell(Some(&base), &fixture.0, &job, &context)
+                .await
+                .unwrap_err()
+                .code,
+            "native_shell_required"
+        );
+        return;
+    }
+    let mut cases = vec![
+        false.into(),
+        true.into(),
+        J::Number(0.0),
+        J::Number(1.0),
+        "".into(),
+        "pwsh.exe".into(),
+        J::Array(vec![]),
+        J::object([] as [(&str, J); 0]),
+    ];
+    for field in ["executable", "executableHash"] {
+        for value in [
+            J::Null,
+            false.into(),
+            J::Number(0.0),
+            J::Array(vec![]),
+            J::object([] as [(&str, J); 0]),
+            "".into(),
+        ] {
+            let mut settings = base.clone();
+            settings.insert(field, value);
+            cases.push(settings);
+        }
+        let mut missing = base.clone();
+        missing.remove(field);
+        cases.push(missing);
+    }
+    for (field, value) in [
+        ("executable", J::from("x".repeat(2049))),
+        ("executableHash", "sha256:invalid".into()),
+        ("packageIdentity", "unpackaged".into()),
+    ] {
+        let mut settings = base.clone();
+        settings.insert(field, value);
+        cases.push(settings);
+    }
+    for settings in cases {
+        assert_eq!(
+            codex_windows_shell::verify_windows_shell(Some(&settings), &fixture.0, &job, &context)
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_arguments",
+            "{settings:?}"
+        );
+    }
+    let mut relative = base;
+    relative.insert("executable", "pwsh.exe".into());
+    assert_eq!(
+        codex_windows_shell::verify_windows_shell(Some(&relative), &fixture.0, &job, &context)
+            .await
+            .unwrap_err()
+            .code,
+        "native_shell_mismatch"
+    );
+    assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), empty_count);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_shell_probe_preserves_digest_package_version_and_utf16_identity() {
+    use std::os::windows::ffi::OsStringExt;
+
+    let fixture = ServiceFixture::new();
+    let context = node_path::Context::current().unwrap();
+    let binary = compile_peer(&fixture);
+    let hash = ivy_host_runtime::streaming_hash::file_hash(&binary)
+        .await
+        .unwrap();
+    assert_eq!(
+        codex_windows_shell::verify_windows_shell(
+            Some(&shell_settings(&binary, &hash)),
+            &fixture.0,
+            &job_launcher(),
+            &context,
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "native_shell_mismatch"
+    );
+    assert!(!fixture.0.join("shell-probe-called").exists());
+    let root = fixture.0.join(OsString::from_wide(&[0xd800]));
+    fs::create_dir(&root).unwrap();
+    let shell = root.join("pwsh.exe");
+    fs::rename(binary, &shell).unwrap();
+    let canonical = paths::realpath(&shell).unwrap();
+    let settings = shell_settings(&shell, &hash);
+    let marker = root.join("shell-probe-called");
+    let mut wrong_hash = settings.clone();
+    wrong_hash.insert(
+        "executableHash",
+        format!("sha256:{}", "0".repeat(64)).into(),
+    );
+    assert_eq!(
+        codex_windows_shell::verify_windows_shell(
+            Some(&wrong_hash),
+            &fixture.0,
+            &job_launcher(),
+            &context
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "native_shell_mismatch"
+    );
+    assert!(!marker.exists());
+    let good = J::object([
+        ("packageStatus", J::Number(15700.0)),
+        ("version", "7.6.0".into()),
+        ("executable", J::String(node_path::from_native(&canonical))),
+    ]);
+    let mut cases: Vec<(String, Result<JsString, &str>)> = ["", "null", "[]", "false", "not json"]
+        .into_iter()
+        .map(|text| (text.into(), Err("native_shell_mismatch")))
+        .collect();
+    for value in [J::Null, false.into(), J::Number(0.0), "15700".into()] {
+        let mut observed = good.clone();
+        observed.insert("packageStatus", value);
+        cases.push((
+            json::stringify(&observed, usize::MAX).unwrap(),
+            Err("native_shell_packaged"),
+        ));
+    }
+    let mut missing_package = good.clone();
+    missing_package.remove("packageStatus");
+    cases.push((
+        json::stringify(&missing_package, usize::MAX).unwrap(),
+        Err("native_shell_packaged"),
+    ));
+    for field in ["version", "executable"] {
+        for value in [
+            J::Null,
+            false.into(),
+            J::Number(0.0),
+            J::String(JsString(vec![0xd800])),
+        ] {
+            let mut observed = good.clone();
+            observed.insert(field, value);
+            cases.push((
+                json::stringify(&observed, usize::MAX).unwrap(),
+                Err("native_shell_mismatch"),
+            ));
+        }
+        let mut missing = good.clone();
+        missing.remove(field);
+        cases.push((
+            json::stringify(&missing, usize::MAX).unwrap(),
+            Err("native_shell_mismatch"),
+        ));
+    }
+    for version in [
+        "7.6",
+        "7.6.0 ",
+        "7.6.0+",
+        "7.6.0-preview/1",
+        "\u{feff}7.6.0",
+    ] {
+        let mut observed = good.clone();
+        observed.insert("version", version.into());
+        cases.push((
+            json::stringify(&observed, usize::MAX).unwrap(),
+            Err("native_shell_mismatch"),
+        ));
+    }
+    let mut other_path = good.clone();
+    other_path.insert(
+        "executable",
+        J::String(node_path::from_native(&fixture.0.join("other.exe"))),
+    );
+    cases.push((
+        json::stringify(&other_path, usize::MAX).unwrap(),
+        Err("native_shell_mismatch"),
+    ));
+    let mut long_version = good.clone();
+    long_version.insert("version", format!("7.6.{}", "1".repeat(260)).into());
+    cases.push((
+        json::stringify(&long_version, usize::MAX).unwrap(),
+        Err("invalid_arguments"),
+    ));
+    for version in ["7.6.0", "7.6.0-preview.1", "7.6.0+build.2"] {
+        let mut observed = good.clone();
+        observed.insert("version", version.into());
+        cases.push((
+            json::stringify(&observed, usize::MAX).unwrap(),
+            Ok(version.into()),
+        ));
+    }
+    let mut case_alias = good;
+    let mut upper = node_path::from_native(&canonical);
+    for unit in &mut upper.0 {
+        if (97..=122).contains(unit) {
+            *unit -= 32;
+        }
+    }
+    case_alias.insert("executable", J::String(upper));
+    cases.push((
+        json::stringify(&case_alias, usize::MAX).unwrap(),
+        Ok("7.6.0".into()),
+    ));
+    for (stdout, expected) in cases {
+        fs::write(root.join("shell-probe.json"), stdout.as_bytes()).unwrap();
+        let result = codex_windows_shell::verify_windows_shell(
+            Some(&settings),
+            &fixture.0,
+            &job_launcher(),
+            &context,
+        )
+        .await;
+        match expected {
+            Err(code) => assert_eq!(result.unwrap_err().code, code, "{stdout}"),
+            Ok(version) => {
+                let status = result.unwrap();
+                assert_json_eq(
+                    &status,
+                    &J::object([
+                        ("executable", J::String(node_path::from_native(&canonical))),
+                        ("executableHash", hash.clone().into()),
+                        ("version", J::String(version)),
+                        ("packageIdentity", "unpackaged".into()),
+                    ]),
+                );
+                let inherited = JsString(vec![88, 0xd800]);
+                let environment = BTreeMap::from([("pAtH".into(), inherited.clone())]);
+                let mut expected = canonical.parent().unwrap().as_os_str().to_os_string();
+                expected.push(OsString::from_wide(&[59]));
+                expected.push(OsString::from_wide(&inherited.0));
+                assert_eq!(
+                    codex_windows_shell::windows_shell_environment(&status, &environment).unwrap(),
+                    BTreeMap::from([("PATH".into(), expected)])
+                );
+                assert_eq!(
+                    codex_windows_shell::windows_shell_environment(&status, &BTreeMap::new())
+                        .unwrap(),
+                    BTreeMap::from([(
+                        "PATH".into(),
+                        canonical.parent().unwrap().as_os_str().to_os_string()
+                    )])
+                );
+            }
+        }
+        assert!(marker.exists(), "Probe did not run: {stdout}");
+        fs::remove_file(&marker).unwrap();
     }
 }
 

@@ -139,20 +139,24 @@ pub async fn verify_windows_shell(
             Err(IvyError::new(code, message))
         }
     };
-    require(
-        cfg!(windows)
-            && settings.is_some_and(|value| match value {
-                IvyJson::Null | IvyJson::Bool(false) => false,
-                IvyJson::Number(number) => *number != 0.0 && !number.is_nan(),
-                IvyJson::String(value) => !value.0.is_empty(),
-                _ => true,
-            }),
-        "native_shell_required",
-        "Windows native execution requires an explicitly configured unpackaged PowerShell.",
-    )?;
-    let settings = settings.unwrap();
+    let settings = match settings {
+        Some(settings) if cfg!(windows) && !matches!(settings, IvyJson::Null) => settings,
+        _ => {
+            return Err(IvyError::new(
+                "native_shell_required",
+                "Windows native execution requires an explicitly configured unpackaged PowerShell.",
+            ));
+        }
+    };
     validate_agent("WindowsShell", settings)?;
-    let configured = settings.required("executable")?.as_js_string().unwrap();
+    let configured = settings
+        .required("executable")?
+        .as_js_string()
+        .ok_or_else(IvyError::internal)?;
+    let configured_hash = settings
+        .required("executableHash")?
+        .as_js_string()
+        .ok_or_else(IvyError::internal)?;
     require(
         node_path::is_absolute(context.style, configured),
         "native_shell_mismatch",
@@ -165,7 +169,8 @@ pub async fn verify_windows_shell(
         .map_err(|_| IvyError::internal())?;
     let text = node_path::from_native(&executable);
     require(
-        node_path::basename(context.style, &text).to_utf8()
+        node_path::basename(context.style, &text)
+            .to_utf8()
             .is_ok_and(|name| name.eq_ignore_ascii_case("pwsh.exe"))
             && tokio::fs::metadata(&executable)
                 .await
@@ -175,7 +180,7 @@ pub async fn verify_windows_shell(
         "The configured native shell must be a direct pwsh.exe executable.",
     )?;
     require(
-        settings.get("executableHash") == Some(&IvyJson::from(file_hash(&executable).await?)),
+        configured_hash == &JsString::from(file_hash(&executable).await?),
         "native_shell_mismatch",
         "Native shell bytes differ from the configured digest.",
     )?;
@@ -191,10 +196,7 @@ pub async fn verify_windows_shell(
     )?;
     let status = IvyJson::object([
         ("executable", IvyJson::String(text)),
-        (
-            "executableHash",
-            settings.required("executableHash")?.clone(),
-        ),
+        ("executableHash", IvyJson::String(configured_hash.clone())),
         ("version", IvyJson::String(observed.version)),
         ("packageIdentity", "unpackaged".into()),
     ]);
@@ -208,7 +210,10 @@ pub fn windows_shell_environment(
 ) -> IvyResult<BTreeMap<OsString, OsString>> {
     let inherited = environment
         .iter()
-        .find(|(key, _)| key.to_utf8().is_ok_and(|name| name.eq_ignore_ascii_case("PATH")))
+        .find(|(key, _)| {
+            key.to_utf8()
+                .is_ok_and(|name| name.eq_ignore_ascii_case("PATH"))
+        })
         .map(|(_, value)| value.0.as_slice())
         .unwrap_or(&[]);
     let executable = shell
