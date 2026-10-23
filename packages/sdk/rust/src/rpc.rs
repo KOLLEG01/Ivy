@@ -220,15 +220,10 @@ pub fn response_value(frame: &IvyJson, id: &str) -> IvyResult<IvyJson> {
     Err(failure)
 }
 
-enum Credential {
-    Text(String),
-    Fetch(crate::JsString),
-}
 struct Inner {
     base: reqwest::Url,
     http: reqwest::Client,
-    credential: Option<Credential>,
-    global_fetch_response: bool,
+    credential: Option<String>,
     queue: Option<Arc<RequestQueue>>,
     active: Arc<Semaphore>,
 }
@@ -239,27 +234,6 @@ pub struct HiveClient {
 }
 impl HiveClient {
     pub fn new(value: &str, options: ClientOptions) -> IvyResult<Self> {
-        Self::configured(value, options, Credential::Text, false)
-    }
-    /// Retain JavaScript credentials until fetch-style dispatch and preserve
-    /// fetch redirect/null-body handling. Other HTTP/TLS behavior is shared.
-    pub fn new_js(
-        value: &crate::JsString,
-        options: ClientOptions<crate::JsString>,
-    ) -> IvyResult<Self> {
-        Self::configured(
-            &String::from_utf16_lossy(&value.0),
-            options,
-            Credential::Fetch,
-            true,
-        )
-    }
-    fn configured<C>(
-        value: &str,
-        options: ClientOptions<C>,
-        credential: impl FnOnce(C) -> Credential,
-        global_fetch_response: bool,
-    ) -> IvyResult<Self> {
         let base = base_url(value)?;
         let maximum = options
             .request_calls
@@ -289,8 +263,7 @@ impl HiveClient {
         let inner = Arc::new(Inner {
             base,
             http,
-            credential: options.credential.map(credential),
-            global_fetch_response,
+            credential: options.credential,
             queue,
             active: Arc::new(Semaphore::new(CONNECTION_IN_FLIGHT_REQUESTS)),
         });
@@ -313,6 +286,25 @@ impl HiveClient {
         };
         Ok(Self { inner, reads })
     }
+    /// Accept UTF-16 configuration through the same native HTTP client.
+    pub fn new_js(
+        value: &crate::JsString,
+        options: ClientOptions<crate::JsString>,
+    ) -> IvyResult<Self> {
+        Self::new(
+            &String::from_utf16_lossy(&value.0),
+            ClientOptions {
+                credential: options
+                    .credential
+                    .map(|value| value.to_utf8())
+                    .transpose()?,
+                request_calls: options.request_calls,
+                provider_calls: options.provider_calls,
+                queued_requests: options.queued_requests,
+                batch_reads: options.batch_reads,
+            },
+        )
+    }
     pub fn base(&self) -> &reqwest::Url {
         &self.inner.base
     }
@@ -332,27 +324,13 @@ impl HiveClient {
             )
             .header("Content-Type", "application/json")
             .body(body);
-        match &self.inner.credential {
-            Some(Credential::Text(value)) if !value.is_empty() => {
+        if let Some(value) = &self.inner.credential {
+            if !value.is_empty() {
                 request = request.bearer_auth(value);
             }
-            Some(Credential::Fetch(value)) => {
-                if let Some(header) =
-                    crate::fetch_header::authorization(value).map_err(|_| unknown())?
-                {
-                    request = request.header(reqwest::header::AUTHORIZATION, header);
-                }
-            }
-            _ => (),
         }
         let response = request.send().await.map_err(|_| unknown())?;
-        if self.inner.global_fetch_response {
-            match response.status().as_u16() {
-                101 | 301 | 302 | 303 | 307 | 308 => return Err(unknown()),
-                204 | 205 | 304 => return Err(invalid("Hive returned no response body.")),
-                _ => (),
-            }
-        } else if response.status().is_redirection() {
+        if response.status().is_redirection() {
             return Err(unknown());
         }
         let mut stream = response.bytes_stream();
