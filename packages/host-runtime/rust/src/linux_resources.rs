@@ -3,7 +3,7 @@ use crate::{
     IvyError, IvyJson, IvyResult,
     linux_host::{LinuxHost, NativeLinuxHost},
 };
-use ivy_contracts::{JsString, core_schema::validate_host, hash::hash_json, json};
+use ivy_contracts::{JsString, core_schema::validate_host, hash::hash_json};
 use std::{io, path::PathBuf, sync::Arc};
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
@@ -28,7 +28,11 @@ fn truthy(value: &IvyJson) -> bool {
     }
 }
 fn text(value: &IvyJson) -> IvyResult<String> {
-    Ok(String::from_utf16_lossy(&json::try_js_string(value)?.0))
+    value.as_str()
+}
+fn budget_text(value: &IvyJson) -> IvyResult<JsString> {
+    value.as_f64().filter(|value| value.is_finite() && value.fract() == 0.0 && (0.0..=9_007_199_254_740_991.0).contains(value))
+        .map(|value| value.to_string().into()).ok_or_else(IvyError::internal)
 }
 pub fn installation_identity(config: &IvyJson) -> IvyResult<String> {
     let value = match config.get("restoredFrom").filter(|value| truthy(value)) {
@@ -181,7 +185,7 @@ pub async fn inspect_linux_slice_with_host(
         let mut values=std::collections::BTreeMap::new();
         for line in crate::linux_host::trimmed(&stdout).0.split(|unit|*unit==10){let index=line.iter().position(|unit|*unit==61);let (key,value)=match index{Some(i)=>(&line[..i],&line[i+1..]),None=>(&line[..line.len().saturating_sub(1)],line)};values.insert(JsString(key.to_vec()),JsString(value.to_vec()));}
         let budget=scope.required("budget")?;
-        let expected=[("FragmentPath",slice_path(&scope)?),("DropInPaths","".into()),("Transient","no".into()),("LoadState","loaded".into()),("MemoryHigh",json::try_js_string(budget.required("memoryHighBytes")?)?),("MemoryMax",json::try_js_string(budget.required("memoryMaxBytes")?)?),("MemorySwapMax","0".into()),("TasksMax",json::try_js_string(budget.required("tasksMax")?)?)];
+        let expected=[("FragmentPath",slice_path(&scope)?),("DropInPaths","".into()),("Transient","no".into()),("LoadState","loaded".into()),("MemoryHigh",budget_text(budget.required("memoryHighBytes")?)?),("MemoryMax",budget_text(budget.required("memoryMaxBytes")?)?),("MemorySwapMax","0".into()),("TasksMax",budget_text(budget.required("tasksMax")?)?)];
         require(expected.into_iter().all(|(key,value)|values.get(&JsString::from(key))==Some(&value)),"target_conflict","Loaded Linux resource definition has different ownership, overrides or limits.")
     }).await)?
 }
@@ -218,7 +222,7 @@ pub fn assert_linux_resource_membership(
             .get(key)
             .and_then(IvyJson::as_js_string)
             .is_some_and(|value| {
-                json::try_js_string(budget.required(budget_key).unwrap()).ok()
+                budget_text(budget.required(budget_key).unwrap()).ok()
                     == Some(crate::linux_host::trimmed(value))
             })
     });

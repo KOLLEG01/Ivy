@@ -77,7 +77,7 @@ pub async fn run(args: &[OsString]) -> IvyResult<()> {
         args,
         &node_path::Context::current().map_err(|_| IvyError::internal())?,
     )?;
-    let node = NodeRuntime::discover(paths.node_executable.as_deref()).await?;
+    let node = NodeRuntime::discover_optional(paths.node_executable.as_deref()).await?;
     let compare = native_file_compare()?;
     // Universal payloads keep native helpers beside this selected executable.
     // Linux does not use the Windows Job helper; no unused file is required.

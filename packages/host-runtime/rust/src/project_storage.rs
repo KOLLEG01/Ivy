@@ -4,7 +4,7 @@ use crate::{
     layout::{self, StorageArea, StorageContext},
     node_path,
 };
-use ivy_contracts::{JsString, hash::hash_json, json};
+use ivy_contracts::{JsString, hash::hash_json};
 
 fn text(value: &IvyJson) -> IvyResult<JsString> {
     value.as_js_string().cloned().ok_or_else(IvyError::internal)
@@ -116,8 +116,8 @@ pub fn restored_storage_areas(
             )
         })?;
         let root = match instance.required("settings")?.get("internalProjectRoot") {
-            Some(v) => json::try_js_string(v)?,
-            None => "undefined".into(),
+            Some(v) => text(v)?,
+            None => return Err(IvyError::new("backup_invalid", "Retained projects require an internal project root.")),
         };
         areas.push(StorageArea {
             key: area.key.clone(),

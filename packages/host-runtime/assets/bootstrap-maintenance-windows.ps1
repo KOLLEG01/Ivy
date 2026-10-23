@@ -5,6 +5,30 @@ $ErrorActionPreference = 'Stop'
 function Quote-IvyArgument([string]$Value) {
   '"' + ([regex]::Replace([regex]::Replace($Value, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1')) + '"'
 }
+function Get-IvyAutomaticLaunch($Plan, $Data) {
+  if ($null -ne $Data.workerExecutable -or $null -ne $Data.hostJobLauncher) {
+    if (-not $Data.workerExecutable -or -not $Data.hostJobLauncher) { throw 'Native maintenance requires both executables.' }
+    $ivyWorker = [IO.Path]::GetFullPath([string]$Data.workerExecutable)
+    $ivyLauncher = [IO.Path]::GetFullPath([string]$Data.hostJobLauncher)
+    $ivyNative = [IO.Path]::GetFullPath((Join-Path ([string]$Plan.artifactRoot) 'dist\native')).TrimEnd('\')
+    $ivyTarget = [IO.Path]::GetDirectoryName($ivyWorker)
+    if ([IO.Path]::GetDirectoryName($ivyTarget) -ine $ivyNative -or
+        [IO.Path]::GetFileName($ivyTarget) -cnotmatch '^win32-(x64|arm64)$' -or
+        [IO.Path]::GetFileName($ivyWorker) -cne 'ivy-bootstrap-auto-worker.exe' -or
+        [IO.Path]::GetDirectoryName($ivyLauncher) -ine $ivyTarget -or
+        [IO.Path]::GetFileName($ivyLauncher) -cne 'ivy-host-job.exe') { throw 'Native maintenance leaves its selected artifact.' }
+    $ivyArgs = @('--parent','0',$ivyWorker,'--config',[string]$Plan.configPath,'--request',[string]$Data.requestPath,
+      '--distribution',[string]$Plan.artifactRoot)
+    if ($Data.nodeRequired -isnot [bool] -or $Data.nodeRequired) { $ivyArgs += @('--node-executable',[string]$Plan.nodeExecutable) }
+  } else {
+    $ivyLauncher = Join-Path ([string]$Plan.artifactRoot) 'dist\native\ivy-host-job.exe'
+    $ivyWorker = Join-Path ([string]$Plan.artifactRoot) 'dist\packages\host-runtime\src\bootstrap-auto-worker.js'
+    $ivyArgs = @('--parent','0',[string]$Plan.nodeExecutable,$ivyWorker,'--config',[string]$Plan.configPath,
+      '--request',[string]$Data.requestPath,'--distribution',[string]$Plan.artifactRoot)
+  }
+  if (-not (Test-Path -LiteralPath $ivyLauncher -PathType Leaf) -or -not (Test-Path -LiteralPath $ivyWorker -PathType Leaf)) { throw 'Automatic bootstrap worker is incomplete.' }
+  @{launcher=$ivyLauncher;args=$ivyArgs}
+}
 function Read-IvyXml([string]$Content) {
   if ($Content.Length -gt 65536) { throw 'Definition is too large.' }
   $ivyDocument = [System.Xml.XmlDocument]::new()
@@ -153,12 +177,11 @@ try {
           [IO.Path]::GetFileName($ivyRequest) -cne 'request.json') { throw 'Automatic request leaves the host runtime.' }
       $ivyName = [string]$ivyPlan.installationId + '-maintenance'
       $ivyDescription = 'IvyNext automatic bootstrap maintenance ' + $ivyOperation + ' host ' + [string]$ivyPlan.hostId
-      $ivyLauncher = Join-Path ([string]$ivyPlan.artifactRoot) 'dist\native\ivy-host-job.exe'
-      $ivyWorker = Join-Path ([string]$ivyPlan.artifactRoot) 'dist\packages\host-runtime\src\bootstrap-auto-worker.js'
-      if (-not (Test-Path -LiteralPath $ivyLauncher -PathType Leaf) -or -not (Test-Path -LiteralPath $ivyWorker -PathType Leaf)) { throw 'Automatic bootstrap worker is incomplete.' }
+      $ivyLaunchData = @{requestPath=$ivyRequest;workerExecutable=$ivyData.workerExecutable;hostJobLauncher=$ivyData.hostJobLauncher;nodeRequired=$ivyData.nodeRequired}
+      $ivyLaunch = Get-IvyAutomaticLaunch $ivyPlan $ivyLaunchData
+      $ivyLauncher = $ivyLaunch.launcher
       $ivyStage = 'inspect-maintenance-task'
-      $ivyArgs = @('--parent','0',[string]$ivyPlan.nodeExecutable,$ivyWorker,'--config',[string]$ivyPlan.configPath,
-        '--request',$ivyRequest,'--distribution',[string]$ivyPlan.artifactRoot)
+      $ivyArgs = $ivyLaunch.args
       $ivyArguments = ($ivyArgs | ForEach-Object { Quote-IvyArgument $_ }) -join ' '
       $ivyExisting = $null; try { $ivyExisting = $ivyFolder.GetTask($ivyName) } catch { if ($_.Exception.HResult -ne -2147024894) { throw } }
       if ($null -ne $ivyExisting -and $ivyExisting.State -in @(2,4)) {

@@ -13,8 +13,16 @@ async fn main() {
     let result = match install_signals(stop.clone()) {
         Ok(signal) => {
             let result = async {
-                let options = entry::Options::parse(&args, std::env::var_os("IVY_HOST_CONFIG"))?;
-                entry::run(options, stop.clone()).await
+                if args
+                    .iter()
+                    .any(|arg| arg == "--manager-executable" || arg == "--manager-config")
+                {
+                    let options =
+                        entry::Options::parse(&args, std::env::var_os("IVY_HOST_CONFIG"))?;
+                    entry::run(options, stop.clone()).await
+                } else {
+                    entry::run_native(&args, stop.clone()).await
+                }
             }
             .await;
             stop.cancel();

@@ -50,13 +50,31 @@ impl Drop for Control {
 #[derive(Clone)]
 pub struct RuntimeOwner(Arc<Control>);
 impl RuntimeOwner {
+    pub(crate) async fn for_host_with_launcher(
+        host: IvyJson,
+        instance_id: String,
+        bootstrap_root: PathBuf,
+        node: Option<NodeRuntime>,
+        job_launcher: PathBuf,
+    ) -> IvyResult<Self> {
+        let owner = Self::for_host(host, instance_id, bootstrap_root, node).await?;
+        owner
+            .0
+            .pending
+            .lock()
+            .map_err(|_| IvyError::internal())?
+            .as_mut()
+            .ok_or_else(IvyError::internal)?
+            .job_launcher = job_launcher;
+        Ok(owner)
+    }
     /// Production policy composition: only an unassociated legacy target uses
     /// this owner's frozen startup configuration. Invalid evidence propagates.
     pub async fn for_host(
         host: IvyJson,
         instance_id: String,
         bootstrap_root: PathBuf,
-        node: NodeRuntime,
+        node: impl Into<Option<NodeRuntime>>,
     ) -> IvyResult<Self> {
         let startup = host.clone();
         let resolver: TargetPolicyResolver = Arc::new(move |journal, target| {
@@ -74,9 +92,10 @@ impl RuntimeOwner {
         host: IvyJson,
         instance_id: String,
         bootstrap_root: PathBuf,
-        node: NodeRuntime,
+        node: impl Into<Option<NodeRuntime>>,
         resolve_policy: TargetPolicyResolver,
     ) -> IvyResult<Self> {
+        let node = node.into();
         require(
             cfg!(windows),
             "unsupported_runtime",
@@ -122,7 +141,7 @@ impl RuntimeOwner {
         let owner = Owner {
             host,
             instance_id,
-            bootstrap_root,
+            job_launcher: crate::native_plan::native_binary_path(&bootstrap_root, "ivy-job"),
             node,
             resolve_policy,
             lock,
@@ -190,8 +209,8 @@ struct Selected {
 struct Owner {
     host: IvyJson,
     instance_id: String,
-    bootstrap_root: PathBuf,
-    node: NodeRuntime,
+    job_launcher: PathBuf,
+    node: Option<NodeRuntime>,
     resolve_policy: TargetPolicyResolver,
     lock: ExecutorLock,
     journal: HostJournal,
@@ -347,7 +366,16 @@ impl Owner {
         let loaded = if crate::native_plan::is_native_plan(&manifest) {
             config::native_instance_config(config_path).await
         } else {
-            config::instance_config(config_path, &self.node).await
+            config::instance_config(
+                config_path,
+                self.node.as_ref().ok_or_else(|| {
+                    IvyError::new(
+                        "unsupported_runtime",
+                        "This workload requires an explicit Node runtime.",
+                    )
+                })?,
+            )
+            .await
         };
         if target.get("desired") == Some(&IvyJson::from("stopped")) {
             let config = loaded.ok();
@@ -417,7 +445,7 @@ impl Owner {
         .await?;
         crate::artifact::verify_runtime_requirements(
             &selected.manifest,
-            Some(&self.node.version),
+            self.node.as_ref().map(|node| node.version.as_str()),
             if cfg!(windows) {
                 "win32"
             } else {
@@ -437,7 +465,16 @@ impl Owner {
         let refreshed = if crate::native_plan::is_native_plan(&selected.manifest) {
             config::native_instance_config(config_path).await?
         } else {
-            config::instance_config(config_path, &self.node).await?
+            config::instance_config(
+                config_path,
+                self.node.as_ref().ok_or_else(|| {
+                    IvyError::new(
+                        "unsupported_runtime",
+                        "This workload requires an explicit Node runtime.",
+                    )
+                })?,
+            )
+            .await?
         };
         let previous = selected
             .config
@@ -533,7 +570,7 @@ impl Owner {
         );
         Ok(LaunchContext {
             environment,
-            job_launcher: Some(crate::native_plan::native_binary_path(&self.bootstrap_root, "ivy-job")),
+            job_launcher: Some(self.job_launcher.clone()),
             redact: secrets(&selected.host, selected.config.as_ref())?,
             ..Default::default()
         })

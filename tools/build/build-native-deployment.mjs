@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { parseArgs } from 'node:util';
 import { resolve } from 'node:path';
 import { materializeNativePlan } from '../../packages/host-runtime/src/native-plan.mjs';
 import { buildIdentity } from '../../packages/host-runtime/src/build-identity.mjs';
@@ -27,4 +28,11 @@ export function buildNativeDeployment({ component, target, root = process.cwd(),
   const result = stageNativePayloads({ component, root, identity: payloads[0].identity, payloads, plan,
     requiredBinaries: { [os]: binaries } });
   return { ...result, plan, staged: true };
+}
+
+if (import.meta.main) {
+  const { values } = parseArgs({ options: {
+    component: { type: 'string' }, target: { type: 'string' },
+  } });
+  buildNativeDeployment({ component: values.component, target: values.target });
 }

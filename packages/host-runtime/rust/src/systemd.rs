@@ -7,7 +7,7 @@ use crate::{
     linux_service_identity::linux_process_user,
 };
 use futures_util::future::BoxFuture;
-use ivy_contracts::{JsString, hash::hash_json, json};
+use ivy_contracts::{JsString, hash::hash_json};
 use std::collections::BTreeMap;
 use std::{io, path::PathBuf, sync::Arc};
 mod host;
@@ -386,8 +386,9 @@ pub fn parse_systemd_state(output: &JsString) -> SystemdState {
     }
     let pid = properties
         .get(&JsString::from("MainPID"))
-        .map(json::number_from_string)
-        .unwrap_or(0.0);
+        .and_then(|value| value.to_utf8().ok())
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|pid| *pid > 0);
     let get = |key: &str| {
         properties
             .get(&JsString::from(key))
@@ -398,11 +399,7 @@ pub fn parse_systemd_state(output: &JsString) -> SystemdState {
         load_state: get("LoadState"),
         active_state: get("ActiveState"),
         sub_state: get("SubState"),
-        main_pid: (pid.is_finite()
-            && pid.fract() == 0.0
-            && pid > 0.0
-            && pid <= 9_007_199_254_740_991.0)
-            .then_some(pid as u64),
+        main_pid: pid.map(u64::from),
     }
 }
 #[derive(Clone)]

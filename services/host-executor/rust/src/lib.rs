@@ -42,12 +42,13 @@ fn option(args: &[OsString], key: &str) -> Option<OsString> {
 
 /// Resolve the original executor argument/environment precedence. Instance
 /// admission precedes host-file selection, including when --config is explicit.
-pub async fn admit(
+pub async fn admit<'a>(
     args: &[OsString],
     environment: &BTreeMap<JsString, JsString>,
     os_home: &JsString,
-    node: &ivy_host_runtime::node_runtime::NodeRuntime,
+    node: impl Into<Option<&'a ivy_host_runtime::node_runtime::NodeRuntime>>,
 ) -> IvyResult<Startup> {
+    let node = node.into();
     let own_path = if args.iter().any(|v| v == "--instance-config") {
         option(args, "--instance-config")
     } else {
@@ -210,7 +211,9 @@ async fn serve_owned(
     }
     let health = startup
         .own
-        .map(|own| HealthFile::with_launch_id(own, startup.launch_id));
+        .map(|own| HealthFile::with_launch_id(own, Some(startup.launch_id
+            .filter(|id| !id.0.is_empty())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string().into()))));
     let mut pulse = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_secs(1),
         Duration::from_secs(1),

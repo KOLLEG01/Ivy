@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime_owner::RuntimeOwner;
 use crate::{
     config::InstanceConfig,
     docker::{DockerAdapter, ManagedContainer},
@@ -7,6 +8,7 @@ use crate::{
     process::{self, LaunchContext, ProcessResult},
     systemd::{SystemdAdapter, SystemdState},
 };
+use futures_util::FutureExt;
 use ivy_contracts::core_schema::validate_host;
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf, sync::Mutex, time::Duration};
 use tokio::sync::Mutex as AsyncMutex;
@@ -43,6 +45,7 @@ struct Unit {
 }
 #[derive(Default)]
 struct Handles {
+    owner: Option<RuntimeOwner>,
     container: Option<Container>,
     unit: Option<Unit>,
 }
@@ -239,11 +242,7 @@ impl NativeActivationRuntime {
         .await
     }
     async fn instance(&self, target: &IvyJson) -> IvyResult<InstanceConfig> {
-        config::instance_config(
-            config::path_value(target.required("configPath")?)?,
-            &self.preparation.node,
-        )
-        .await
+        config::native_instance_config(config::path_value(target.required("configPath")?)?).await
     }
 }
 impl ActivationRuntime for NativeActivationRuntime {
@@ -298,6 +297,48 @@ impl ActivationRuntime for NativeActivationRuntime {
                 let mut handles = slot.lock().await;
                 self.reconcile_unit(c, &instance, target.as_ref(), allow_start, &mut handles)
                     .await
+            } else if self.platform == "win32"
+                && instance.get("componentId") != Some(&"host-executor".into())
+            {
+                let has_manager = c.config.required("instances")?.as_array()
+                    .ok_or_else(IvyError::internal)?.iter().any(|entry| {
+                        entry.get("engine") == Some(&"process".into())
+                            && entry.get("componentId") == Some(&"service-manager".into())
+                    });
+                if has_manager && instance.get("componentId") != Some(&"service-manager".into()) {
+                    return Ok(());
+                }
+                let slot = self.handles(&c.instance_id)?;
+                let mut handles = slot.lock().await;
+                if let Some(owner) = &handles.owner {
+                    if let Some(result) = owner.completion().now_or_never() {
+                        result?;
+                        handles.owner = None;
+                    }
+                }
+                if handles.owner.is_none() {
+                    if !allow_start
+                        && target
+                            .as_ref()
+                            .is_some_and(|target| target.get("desired") == Some(&"running".into()))
+                    {
+                        return Ok(());
+                    }
+                    let owner = RuntimeOwner::for_host_with_launcher(
+                        c.config.clone(),
+                        c.instance_id.clone(),
+                        self.bootstrap_root.clone(),
+                        self.preparation.node.clone(),
+                        self.job_launcher.clone(),
+                    )
+                    .await?;
+                    if let Err(error) = owner.start() {
+                        let _ = owner.close().await;
+                        return Err(error);
+                    }
+                    handles.owner = Some(owner);
+                }
+                Ok(())
             } else {
                 Ok(())
             }
@@ -312,20 +353,31 @@ impl ActivationRuntime for NativeActivationRuntime {
                 .values()
                 .cloned()
                 .collect::<Vec<_>>();
+            let mut result = Ok(());
             for slot in slots {
                 let mut h = slot.lock().await;
+                if let Some(owner) = h.owner.take() {
+                    if let Err(error) = owner.close().await {
+                        if result.is_ok() {
+                            result = Err(error);
+                        }
+                    }
+                }
                 if let Some(container) = h.container.take() {
                     container.process.dispose()
                 }
                 h.unit = None;
             }
-            Ok(())
+            result
         })
     }
 }
 fn executables(config: &IvyJson) -> IvyResult<BTreeMap<String, PathBuf>> {
-    json::object_entries(config.required("executables")?)
-        .into_iter()
+    config
+        .required("executables")?
+        .as_object()
+        .ok_or_else(IvyError::internal)?
+        .iter()
         .map(|(key, value)| Ok((key.to_utf8()?, config::path_value(value)?)))
         .collect()
 }

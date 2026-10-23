@@ -13,6 +13,13 @@ pub struct NodeRuntime {
 }
 
 impl NodeRuntime {
+    /// Absence is a native-host capability choice, never PATH discovery.
+    pub async fn discover_optional(configured: Option<&Path>) -> IvyResult<Option<Self>> {
+        if configured.is_none() && std::env::var_os("IVY_NODE_EXECUTABLE").is_none() {
+            return Ok(None);
+        }
+        Self::discover(configured).await.map(Some)
+    }
     /// The v1 dispatcher supplies its own absolute process.execPath privately.
     /// Explicit host tool configuration takes precedence for host operations.
     pub async fn discover(configured: Option<&Path>) -> IvyResult<Self> {

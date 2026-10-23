@@ -6,7 +6,7 @@ use crate::{
     linux_service_identity::linux_process_user,
     node_path::{self, Context, Style},
 };
-use ivy_contracts::{JsString, core_schema::validate_host, hash::hash_json, json};
+use ivy_contracts::{JsString, core_schema::validate_host, hash::hash_json};
 use std::{fs, path::Path};
 mod installation;
 pub(crate) use installation::BootstrapInstallation;
@@ -431,7 +431,7 @@ pub fn linux_unit(
         "no".into()
     } else {
         policy
-            .map(json::try_js_string)
+            .map(string)
             .transpose()?
             .unwrap_or_else(|| "always".into())
     };
@@ -439,27 +439,17 @@ pub fn linux_unit(
     let delay = match delay {
         None => 2000.0,
         Some(IvyJson::Number(value)) => *value,
-        Some(IvyJson::Bool(value)) => {
-            if *value {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        Some(value) => json::number_from_string(&json::try_js_string(value)?),
+        Some(_) => return Err(IvyError::new("invalid_arguments", "Restart delay must be a number.")),
     };
-    let delay = if delay.is_nan() {
-        f64::NAN
-    } else {
-        (delay / 1000.0).ceil().max(1.0)
-    };
+    require(delay.is_finite() && (0.0..=9_007_199_254_740_991.0).contains(&delay), "invalid_arguments", "Restart delay must be finite and nonnegative.")?;
+    let delay = (delay / 1000.0).ceil().max(1.0);
     let mut parts = vec![
         "[Unit]\nDescription=IvyNext ".into(),
-        json::try_js_string(instance.required("name")?)?,
+        string(instance.required("name")?)?,
         "\nAfter=network.target\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\n".into(),
     ];
     if let Some(user) = instance.get("user").filter(|value| truthy(value)) {
-        let user = json::try_js_string(user)?;
+        let user = string(user)?;
         parts.extend([
             "User=".into(),
             user.clone(),
@@ -468,7 +458,7 @@ pub fn linux_unit(
             "\n".into(),
         ]);
     }
-    parts.extend(["ExecStart=:".into(),JsString(arguments),"\nWorkingDirectory=".into(),directory,"\nRestart=".into(),policy,"\nRestartSec=".into(),json::try_js_string(&IvyJson::Number(delay))?,"\nKillMode=control-group\nTimeoutStopSec=630\nUMask=0077\nNoNewPrivileges=true\nEnvironment=NODE_NO_WARNINGS=1\nEnvironment=IVY_LAUNCH_ID=".into(),launch,"\n".into()]);
+    parts.extend(["ExecStart=:".into(),JsString(arguments),"\nWorkingDirectory=".into(),directory,"\nRestart=".into(),policy,"\nRestartSec=".into(),delay.to_string().into(),"\nKillMode=control-group\nTimeoutStopSec=630\nUMask=0077\nNoNewPrivileges=true\nEnvironment=NODE_NO_WARNINGS=1\nEnvironment=IVY_LAUNCH_ID=".into(),launch,"\n".into()]);
     if let Some(config) = instance.get("configPath").filter(|value| truthy(value)) {
         parts.extend([
             "Environment=IVY_INSTANCE_CONFIG=".into(),

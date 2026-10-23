@@ -24,10 +24,9 @@ struct Coordinator {
     bootstrap_restarts: Option<BootstrapConfigurationRestarts>,
     packages: Option<(PackageUpdater, AutomaticBootstrapUpdater)>,
 }
-/// Explicit service bindings for the independent maintenance owner, locale
-/// comparison, Node qualification and the selected HTTP transport profile.
+/// Explicit maintenance, file ordering, optional Node and HTTP capabilities.
 pub struct PackageUpdateRuntime {
-    pub node: crate::node_runtime::NodeRuntime,
+    pub node: Option<crate::node_runtime::NodeRuntime>,
     pub client: Arc<dyn PackageClient>,
     pub automatic: Arc<dyn AutomaticBootstrapRuntime>,
     pub compare: crate::artifact::FileCompare,
@@ -38,12 +37,13 @@ impl PackageUpdateRuntime {
     /// Compose the real independent maintenance owner while retaining the
     /// caller's explicitly selected package transport and locale bindings.
     pub fn native(
-        node: crate::node_runtime::NodeRuntime,
+        node: impl Into<Option<crate::node_runtime::NodeRuntime>>,
         client: Arc<dyn PackageClient>,
         compare: crate::artifact::FileCompare,
         distribution: std::path::PathBuf,
         job_launcher: std::path::PathBuf,
     ) -> IvyResult<Self> {
+        let node = node.into();
         let os = crate::bootstrap_os::bootstrap_os(
             distribution.clone(),
             job_launcher.clone(),
@@ -378,6 +378,25 @@ impl StatusWriter {
     }
 }
 impl Coordinator {
+    async fn reconcile_retained(&self, active: &[Active]) -> IvyResult<()> {
+        let current = self.base.config().await?;
+        for instance in current.required("instances")?.as_array().ok_or_else(IvyError::internal)? {
+            let id = text(instance, "instanceId")?;
+            if self.options.own_instance_id.as_deref() == Some(id.as_str())
+                || instance.get("componentId") == Some(&"host-executor".into())
+                || active.iter().any(|lane| field(field(&lane.entry, "record"), "instanceId") == &IvyJson::from(id.clone())) {
+                continue;
+            }
+            let Some(target) = self.base.target(&id).await? else { continue };
+            let config = self.base.accepted_target_policy(target.clone()).await?.unwrap_or_else(|| current.clone());
+            let journal = HostJournal::open_with_clock(config.clone(), self.clock.clone()).await?;
+            let context = OperationContext { journal, config, instance_id: id, options: self.options.clone(), cancel: self.cancel.clone(), clock: self.clock.clone() };
+            let result = self.runtime.reconcile(&context, Some(target), true).await;
+            let closed = context.journal.close().await;
+            result.and(closed)?;
+        }
+        Ok(())
+    }
     async fn exclusive(&self, entry: &IvyJson) -> IvyResult<bool> {
         let record = entry.required("record")?;
         // Keep short-circuit/error order: source/HostExecutor need no manifest.
@@ -459,8 +478,12 @@ impl Coordinator {
                 ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop{tokio::select!{biased;_=stopped.cancelled()=>break,_=ticks.tick()=>{let _=status.write("ready").await;}}}
             }));
-            let mut next_configuration=0.0;let mut next_bootstrap_restart=0.0;let mut next_package=0.0;let mut last_hint=String::new();
+            let mut next_configuration=0.0;let mut next_bootstrap_restart=0.0;let mut next_package=0.0;let mut next_reconcile=0.0;let mut last_hint=String::new();
             while !self.cancel.is_cancelled(){
+                if self.clock.utc_millis() as f64 >= next_reconcile {
+                    next_reconcile = self.clock.utc_millis() as f64 + 1000.0;
+                    self.reconcile_retained(&active).await?;
+                }
                 if self.configuration.is_some() || self.packages.is_some() {
                     let config=self.base.config().await?;
                     let hint=config::json_file(config::path_value(config.required("runtimeRoot")?)?.join("desired-state-hint.json"),config::CONFIGURATION_BYTES).await.ok();

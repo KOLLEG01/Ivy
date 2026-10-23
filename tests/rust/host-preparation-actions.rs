@@ -208,12 +208,12 @@ async fn prepare_captures_one_snapshot_then_preserves_missing_plan_error_and_cle
         std::fs::copy(env!("CARGO_BIN_EXE_ivy-job"), helpers.join("ivy-job.exe")).unwrap();
     }
     let runtime = PreparationRuntime {
-        node: ivy_host_runtime::node_runtime::NodeRuntime {
+        node: Some(ivy_host_runtime::node_runtime::NodeRuntime {
             executable: node(),
             version: "24.18.0".into(),
-        },
+        }),
         compare: Arc::new(|_, _| panic!("No artifact inventory admitted")),
-        imports: Arc::new(|_, _| panic!("No parser work admitted")),
+        imports: Some(Arc::new(|_, _| panic!("No parser work admitted"))),
         http: PortableHttp::new(Default::default()).unwrap(),
     };
     let error = actions

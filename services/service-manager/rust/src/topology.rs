@@ -7,15 +7,15 @@ use std::path::PathBuf;
 pub struct Owners {
     owners: Vec<(JsString, RuntimeOwner)>,
     bootstrap_root: PathBuf,
-    node: NodeRuntime,
+    node: Option<NodeRuntime>,
     closed: bool,
 }
 impl Owners {
-    pub fn new(bootstrap_root: PathBuf, node: NodeRuntime) -> Self {
+    pub fn new(bootstrap_root: PathBuf, node: impl Into<Option<NodeRuntime>>) -> Self {
         Self {
             owners: Vec::new(),
             bootstrap_root,
-            node,
+            node: node.into(),
             closed: false,
         }
     }

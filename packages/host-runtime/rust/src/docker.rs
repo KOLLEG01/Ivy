@@ -266,7 +266,7 @@ impl DockerAdapter {
                         "container".into(),
                         "stop".into(),
                         "-t".into(),
-                        json::try_js_string(&IvyJson::Number((grace_ms / 1000.0).ceil()))?,
+                        (grace_ms / 1000.0).ceil().to_string().into(),
                         field(&value, "containerId")?,
                     ],
                     grace_ms + 15000.0,
@@ -482,9 +482,9 @@ impl DockerAdapter {
                         address
                     },
                     ":".into(),
-                    json::try_js_string(port.required("port")?)?,
+                    port.required("port")?.as_f64().ok_or_else(IvyError::internal)?.to_string().into(),
                     ":".into(),
-                    json::try_js_string(port.required("containerPort")?)?,
+                    port.required("containerPort")?.as_f64().ok_or_else(IvyError::internal)?.to_string().into(),
                 ]));
             }
             let image = field(&candidate, "dockerImage")?;

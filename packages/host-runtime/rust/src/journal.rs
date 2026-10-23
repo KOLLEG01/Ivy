@@ -42,7 +42,7 @@ fn project(value: &IvyJson, keys: &[&str]) -> IvyJson {
     IvyJson::object(keys.iter().filter_map(|key| value.get(key).map(|v| (*key, v.clone()))))
 }
 fn legacy_path(config: &IvyJson, hash: &IvyJson) -> IvyResult<PathBuf> {
-    let hash = json::try_js_string(hash)?.to_utf8()?;
+    let hash = hash.as_str()?;
     require(hash.len() == 71 && hash.starts_with("sha256:") && hash.as_bytes()[7..].iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b)), "configuration_changed", "Retained configuration identity is invalid.")?;
     Ok(path(config.required("runtimeRoot")?)?.join("host-configurations").join(format!("{}.json", &hash[7..])))
 }
@@ -309,8 +309,8 @@ impl HostJournal {
             require(status.get("hostId") == s.config.get("hostId"), "target_conflict", "Management status belongs to another host.")?;
             s.transaction(|s| {
                 let prior = s.text("SELECT value FROM meta WHERE key=?", "hostReportSequence")?.unwrap_or_else(|| "0".into());
-                let prior = json::number_from_string(&prior.into());
-                let sequence = if prior.is_nan() { f64::NAN } else { prior.max(minimum_sequence) + 1.0 };
+                let prior = prior.parse::<u64>().map_err(|_| IvyError::internal())?;
+                let sequence = (prior as f64).max(minimum_sequence) + 1.0;
                 require(sequence.is_finite() && sequence.fract() == 0.0 && sequence.abs() <= SAFE_INTEGER, "limit_exceeded", "Host observation sequence is exhausted.")?;
                 let snapshot = IvyJson::object([("sequence", IvyJson::Number(sequence)), ("status", status)]);
                 validate_host("ManagementSnapshot", &snapshot)?;

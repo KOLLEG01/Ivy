@@ -6,7 +6,7 @@ use crate::{
     journal::{HostJournal, requires_bootstrap_replacement},
     node_path,
     node_runtime::NodeRuntime,
-    package_receive, package_requirements, package_validation, preparation_transfer,
+    package_receive, package_validation, preparation_transfer,
 };
 use futures_util::{TryStreamExt, future::BoxFuture};
 use ivy_contracts::{hash::hash_json, json};
@@ -34,6 +34,14 @@ pub trait PackageClient: Send + Sync {
 /// Uses an explicitly composed client (TLS, proxy and decoding policy included).
 /// This adapter does not claim equivalence to a different caller's fetch profile.
 pub struct NativePackageClient(pub reqwest::Client);
+impl NativePackageClient {
+    pub fn new() -> IvyResult<Self> {
+        reqwest::Client::builder()
+            .build()
+            .map(Self)
+            .map_err(|_| IvyError::internal())
+    }
+}
 fn endpoint(base: &str, relative: &str) -> IvyResult<reqwest::Url> {
     let mut base = reqwest::Url::parse(base).map_err(|_| IvyError::internal())?;
     let relative = reqwest::Url::parse(&format!("http://ivy.invalid{relative}"))
@@ -170,7 +178,7 @@ struct State {
 struct Inner {
     journal: HostJournal,
     credential: String,
-    node: NodeRuntime,
+    node: Option<NodeRuntime>,
     client: Arc<dyn PackageClient>,
     state: Mutex<State>,
 }
@@ -180,13 +188,13 @@ impl PackageUpdater {
     pub fn new(
         journal: HostJournal,
         credential: String,
-        node: NodeRuntime,
+        node: impl Into<Option<NodeRuntime>>,
         client: Arc<dyn PackageClient>,
     ) -> Self {
         Self(Arc::new(Inner {
             journal,
             credential,
-            node,
+            node: node.into(),
             client,
             state: Mutex::new(State::default()),
         }))
@@ -236,7 +244,7 @@ fn newer(left: &IvyJson, right: &IvyJson) -> IvyResult<bool> {
             == Ordering::Greater,
     )
 }
-fn platform(node: &NodeRuntime) -> IvyJson {
+fn platform(node: Option<&NodeRuntime>) -> IvyJson {
     IvyJson::object([
         (
             "os",
@@ -258,51 +266,30 @@ fn platform(node: &NodeRuntime) -> IvyJson {
         ),
         (
             "node",
-            if node.version.starts_with('v') {
-                node.version.clone()
-            } else {
-                format!("v{}", node.version)
-            }
+            node.map(|node| {
+                if node.version.starts_with('v') {
+                    node.version.clone()
+                } else {
+                    format!("v{}", node.version)
+                }
+            })
+            .unwrap_or_else(|| "unavailable".into())
             .into(),
         ),
     ])
 }
-fn supported(entry: &IvyJson, node: &NodeRuntime) -> IvyResult<bool> {
-    let requirements = entry.required("manifest")?.required("requirements")?;
-    let strings = |key| -> IvyResult<Option<Vec<String>>> {
-        requirements
-            .get(key)
-            .map(|value| {
-                value
-                    .as_array()
-                    .ok_or_else(IvyError::internal)?
-                    .iter()
-                    .map(IvyJson::as_str)
-                    .collect()
-            })
-            .transpose()
-    };
-    let os = strings("os")?;
-    let arch = strings("arch")?;
-    let os_refs = os
-        .as_ref()
-        .map(|v| v.iter().map(String::as_str).collect::<Vec<_>>());
-    let arch_refs = arch
-        .as_ref()
-        .map(|v| v.iter().map(String::as_str).collect::<Vec<_>>());
+fn supported(entry: &IvyJson, node: Option<&NodeRuntime>) -> IvyResult<bool> {
     let current = platform(node);
-    package_requirements::runtime_requirements_satisfied(
-        &package_requirements::Requirements {
-            node: &text(requirements, "node")?,
-            os: os_refs.as_deref(),
-            arch: arch_refs.as_deref(),
-        },
-        &package_requirements::Runtime {
-            node: &node.version,
-            os: &text(&current, "os")?,
-            arch: &text(&current, "arch")?,
-        },
-    )
+    match artifact::verify_runtime_requirements(
+        entry.required("manifest")?,
+        node.map(|node| node.version.as_str()),
+        &text(&current, "os")?,
+        &text(&current, "arch")?,
+    ) {
+        Ok(()) => Ok(true),
+        Err(error) if error.code == "unsupported_runtime" => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 async fn remove(path: PathBuf) -> IvyResult<()> {
     crate::filesystem::remove_force_raw(path)
@@ -419,7 +406,7 @@ impl Inner {
                 ),
                 ("archiveHash", entry.required("archiveHash")?.clone()),
                 ("createdAt", entry.required("publishedAt")?.clone()),
-                ("platform", platform(&self.node)),
+                ("platform", platform(self.node.as_ref())),
             ]))
         };
         match self.journal.candidate(&build).await {
@@ -429,8 +416,12 @@ impl Inner {
                     "artifact_changed",
                     "Registered package archive differs from Hive.",
                 )?;
-                artifact::verify_candidate(candidate.clone(), artifacts.clone(), &self.node)
-                    .await?;
+                artifact::verify_candidate(
+                    candidate.clone(),
+                    artifacts.clone(),
+                    self.node.as_ref(),
+                )
+                .await?;
                 return Ok(candidate);
             }
             Err(error) if error.code == "not_found" => (),
@@ -444,8 +435,12 @@ impl Inner {
                     "Installed package candidate is invalid.",
                 )?;
                 let candidate = candidate_at(&destination)?;
-                artifact::verify_candidate(candidate.clone(), artifacts.clone(), &self.node)
-                    .await?;
+                artifact::verify_candidate(
+                    candidate.clone(),
+                    artifacts.clone(),
+                    self.node.as_ref(),
+                )
+                .await?;
                 self.journal
                     .save_candidate(candidate.clone(), entry.required("manifest")?.clone())
                     .await?;
@@ -518,7 +513,8 @@ impl Inner {
                 .map_err(|_| IvyError::internal())?
                 .map_err(|_| IvyError::internal())?;
             let candidate = candidate_at(&destination)?;
-            artifact::verify_candidate(candidate.clone(), artifacts.clone(), &self.node).await?;
+            artifact::verify_candidate(candidate.clone(), artifacts.clone(), self.node.as_ref())
+                .await?;
             self.journal
                 .save_candidate(candidate.clone(), entry.required("manifest")?.clone())
                 .await?;
@@ -580,7 +576,7 @@ impl Inner {
                         &text(entry, "version")?,
                         current.as_deref().unwrap(),
                     )? == Ordering::Greater)
-                    && supported(entry, &self.node)?
+                    && supported(entry, self.node.as_ref())?
                 {
                     let candidate = self.import_package(entry).await?;
                     state.pending(BootstrapPackageComponent {
@@ -612,7 +608,7 @@ impl Inner {
         }
         for entry in newest {
             if entry.required("manifest")?.get("kind") == Some(&"app".into())
-                || !supported(&entry, &self.node)?
+                || !supported(&entry, self.node.as_ref())?
             {
                 continue;
             }

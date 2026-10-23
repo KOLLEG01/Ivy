@@ -295,29 +295,6 @@ fn manager_config(root: &Fixture, host: &IvyJson) -> ivy_host_runtime::config::I
     ]))
     .unwrap()
 }
-fn mutation_fixtures()
--> std::collections::HashMap<ivy_contracts::JsString, ivy_sdk::service::ToolHandler> {
-    [
-        "host.deploy",
-        "host.rollback",
-        "host.restart",
-        "host.enable",
-        "host.disable",
-    ]
-    .into_iter()
-    .map(|name| {
-        let handler: ivy_sdk::service::ToolHandler = Arc::new(|_, _| {
-            Box::pin(async {
-                Err(ivy_contracts::IvyError::new(
-                    "fixture_unavailable",
-                    "Mutation fixture must not be invoked.",
-                ))
-            })
-        });
-        (name.into(), handler)
-    })
-    .collect()
-}
 #[tokio::test]
 async fn manager_keeps_local_child_alive_offline_and_finishes_with_unready_health() {
     use ivy_service_manager::manager::Manager;
@@ -355,7 +332,6 @@ async fn manager_keeps_local_child_alive_offline_and_finishes_with_unready_healt
         false,
         node(),
         bootstrap(&root),
-        mutation_fixtures(),
     )
     .await
     .unwrap();
@@ -393,9 +369,8 @@ async fn manager_maintenance_refusal_precedes_journal_or_owner_effects() {
         config,
         accepted,
         true,
-        node(),
+        None,
         root.0.clone(),
-        mutation_fixtures(),
     )
     .await
     .err()

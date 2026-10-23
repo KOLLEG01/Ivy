@@ -8,7 +8,7 @@ use crate::{
     preparation_cache::dependency_cache_key_json,
     streaming_hash,
 };
-use ivy_contracts::{JsString, json};
+use ivy_contracts::JsString;
 use std::path::PathBuf;
 
 fn internal<T, E>(value: Result<T, E>) -> IvyResult<T> {
@@ -57,7 +57,7 @@ pub fn validate_preparation_plan(component: &JsString, plan: &IvyJson) -> IvyRes
     )
 }
 fn pinned_npm(value: &IvyJson) -> IvyResult<bool> {
-    let text = json::try_js_string(value)?;
+    let Some(text) = value.as_js_string() else { return Ok(false); };
     let Some(version) = text.0.strip_prefix(&[110, 112, 109, 64]) else {
         return Ok(false);
     };
@@ -67,7 +67,7 @@ fn pinned_npm(value: &IvyJson) -> IvyResult<bool> {
             .iter()
             .all(|part| !part.is_empty() && part.iter().all(|unit| (48..=57).contains(unit))))
 }
-/// Retain the JSON value used in cache identity, including accepted coercible arrays.
+/// Retain the pinned package manager string used in cache identity.
 pub async fn preparation_package_manager(source_root: PathBuf) -> IvyResult<IvyJson> {
     internal(
         tokio::task::spawn_blocking(move || {

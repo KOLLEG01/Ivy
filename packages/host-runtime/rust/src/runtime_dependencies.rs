@@ -1,6 +1,6 @@
 //! Exact npm v3 package locations for preparation and portable runtime payloads.
 use crate::{IvyError,IvyJson,IvyResult};
-use ivy_contracts::{JsString,json::object_entries};
+use ivy_contracts::JsString;
 use std::collections::BTreeSet;
 
 fn require(ok:bool,code:&str,message:&str)->IvyResult<()>{if ok{Ok(())}else{Err(IvyError::new(code,message))}}
@@ -29,7 +29,7 @@ fn metadata(lock:&IvyJson)->IvyResult<&IvyJson>{
     require(object(lock)&&lock.get("lockfileVersion")==Some(&IvyJson::Number(3.0))&&packages.is_some_and(object),
         "invalid_arguments","Runtime dependency packaging requires npm v3 package location metadata.")?;
     let packages=packages.unwrap();
-    for(location,value)in object_entries(packages){
+    for(location,value)in packages.as_object().ok_or_else(IvyError::internal)?{
         require(object(value),"invalid_arguments","Lockfile package metadata must be an object.")?;
         for key in ["dev","devOptional","optional","link"]{
             require(value.get(key).is_none_or(|v|matches!(v,IvyJson::Bool(_))),"invalid_arguments","Lockfile dependency classification must use booleans.")?;
@@ -42,7 +42,7 @@ fn metadata(lock:&IvyJson)->IvyResult<&IvyJson>{
 }
 pub fn development_package_locations(lock:&IvyJson)->IvyResult<Vec<JsString>>{
     let packages=metadata(lock)?;let mut excluded=Vec::new();
-    for(location,value)in object_entries(packages){
+    for(location,value)in packages.as_object().ok_or_else(IvyError::internal)?{
         if !truth(value.get("dev"))||!module_prefix(location){continue}
         require(!truth(value.get("devOptional")),"invalid_arguments","A package cannot be both exclusively developmental and optionally required at runtime.")?;
         excluded.push(location.clone());
@@ -54,11 +54,11 @@ fn workspace_target(value:&JsString)->bool{
     !u.is_empty()&&u.len()<=2048&&u[0]!=47&&!(u.len()>=3&&(u[0] as u8).is_ascii_alphabetic()&&u[0]<=127&&u[1]==58&&matches!(u[2],47|92))
         &&u.split(|c|matches!(*c,47|92)).all(|p|!p.is_empty()&&p!=[46,46])
 }
-/// Preserve Object.entries/Map insertion order, including lossless UTF-16 targets.
+/// Preserve stored package order and lossless UTF-16 workspace targets.
 pub fn workspace_package_locations(lock:&IvyJson)->IvyResult<Vec<(JsString,JsString)>>{
     if object(lock)&&lock.get("lockfileVersion")==Some(&IvyJson::Number(3.0))&&lock.get("packages").is_none(){return Ok(Vec::new())}
     let packages=metadata(lock)?;let mut links=Vec::new();
-    for(location,value)in object_entries(packages){
+    for(location,value)in packages.as_object().ok_or_else(IvyError::internal)?{
         if !truth(value.get("link")){continue}
         let target=value.get("resolved").and_then(IvyJson::as_js_string);
         require(location.to_utf8().ok().is_some_and(|p|package_location(&p))&&target.is_some_and(workspace_target),
@@ -98,7 +98,7 @@ pub fn runtime_package_locations(lock:&IvyJson,names:impl IntoIterator<Item=JsSt
             let dependencies=value.get(field);
             require(dependencies.is_none_or(object),"invalid_arguments","Runtime dependency metadata must be an object.")?;
             let Some(dependencies)=dependencies else{continue};
-            for(name,_)in object_entries(dependencies){
+            for(name,_)in dependencies.as_object().ok_or_else(IvyError::internal)?{
                 let location=resolved(packages,&owner,name);
                 require(location.is_some()||!required,"artifact_missing","Locked runtime dependency is unavailable.")?;
                 if let Some(location)=location{if seen.insert(location.clone()){selected.push(location)}}

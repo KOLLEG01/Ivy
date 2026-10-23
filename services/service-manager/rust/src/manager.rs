@@ -25,8 +25,8 @@ pub struct Manager {
     shutdown: Arc<Shutdown>,
 }
 impl Manager {
-    pub async fn from_path(path: PathBuf, node: NodeRuntime) -> IvyResult<Self> {
-        let config = config::instance_config(path, &node).await?;
+    pub async fn from_path(path: PathBuf, node: impl Into<Option<NodeRuntime>>) -> IvyResult<Self> {
+        let config = config::native_instance_config(path).await?;
         connection::validate_config(&config)?;
         let host_path = to_native(
             config
@@ -48,7 +48,7 @@ impl Manager {
         config: InstanceConfig,
         accepted: IvyJson,
         reset_active: bool,
-        node: NodeRuntime,
+        node: impl Into<Option<NodeRuntime>>,
         bootstrap_root: PathBuf,
     ) -> IvyResult<Self> {
         connection::validate_config(&config)?;

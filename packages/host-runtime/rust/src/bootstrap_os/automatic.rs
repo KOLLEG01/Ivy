@@ -16,18 +16,30 @@ pub(super) fn worker(plan: &IvyJson, request: &Path, name: &str) -> IvyResult<Wo
     validate_host("BootstrapPlan", plan)?;
     let artifact = config::path_value(plan.required("artifactRoot")?)?;
     let worker = component_native_helper(&artifact, name, NativeHelperLayout::Target)?;
+    let mut args = vec![
+        "--config".into(),
+        text(plan, "configPath")?,
+        "--request".into(),
+        node_path::from_native(request),
+        "--distribution".into(),
+        text(plan, "artifactRoot")?,
+    ];
+    let needs_node = plan
+        .required("processes")?
+        .as_array()
+        .ok_or_else(crate::IvyError::internal)?
+        .iter()
+        .any(|process| {
+            process.get("entrypoint").map_or(true, |entry| {
+                entry.get("executable") == Some(&"node".into())
+            })
+        });
+    if needs_node {
+        args.extend(["--node-executable".into(), text(plan, "nodeExecutable")?]);
+    }
     Ok(Worker {
         executable: node_path::from_native(&worker),
-        args: vec![
-            "--config".into(),
-            text(plan, "configPath")?,
-            "--request".into(),
-            node_path::from_native(request),
-            "--distribution".into(),
-            text(plan, "artifactRoot")?,
-            "--node-executable".into(),
-            text(plan, "nodeExecutable")?,
-        ],
+        args,
     })
 }
 fn text(plan: &IvyJson, key: &str) -> IvyResult<JsString> {
@@ -52,6 +64,14 @@ pub(super) fn windows_request(
             IvyJson::String(node_path::from_native(&request)),
         ),
         ("operationId", operation.into()),
+        (
+            "nodeRequired",
+            selected
+                .args
+                .iter()
+                .any(|arg| arg == &JsString::from("--node-executable"))
+                .into(),
+        ),
         ("workerExecutable", IvyJson::String(selected.executable)),
         (
             "hostJobLauncher",

@@ -22,6 +22,11 @@ path = "../../../tests/rust/host-executor-entry.rs"
 harness = false
 
 [[test]]
+name = "host-native-coordinator"
+path = "../../../tests/rust/host-native-coordinator.rs"
+harness = false
+
+[[test]]
 name = "host-reset-storage"
 path = "../../../tests/rust/host-reset-storage.rs"
 

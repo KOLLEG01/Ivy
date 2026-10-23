@@ -18,7 +18,7 @@ use crate::{
     preparation_tools, preparation_transfer, preparations, process, runtime_dependencies, source,
     storage_space,
 };
-use ivy_contracts::{JsString, core_schema::validate_host, json};
+use ivy_contracts::{JsString, core_schema::validate_host};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -26,12 +26,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Mandatory production parser/locale/transport inputs; no ambient fallback.
+/// Explicit preparation capabilities. Native candidates need no Node or JS parser.
 #[derive(Clone)]
 pub struct PreparationRuntime {
-    pub node: NodeRuntime,
+    pub node: Option<NodeRuntime>,
     pub compare: FileCompare,
-    pub imports: JavaScriptImports,
+    pub imports: Option<JavaScriptImports>,
     pub http: PortableHttp,
 }
 fn internal<T, E>(value: Result<T, E>) -> IvyResult<T> {
@@ -66,7 +66,7 @@ async fn mkdir(path: PathBuf) -> IvyResult<()> {
 async fn actual(path: PathBuf) -> IvyResult<PathBuf> {
     blocking(move || internal(paths::realpath(&path))).await
 }
-fn profile(node: &NodeRuntime) -> PreparationProfile {
+fn profile(node: Option<&NodeRuntime>) -> PreparationProfile {
     PreparationProfile {
         os: if cfg!(windows) {
             "win32"
@@ -80,17 +80,24 @@ fn profile(node: &NodeRuntime) -> PreparationProfile {
             other => other,
         }
         .into(),
-        node: if node.version.starts_with('v') {
-            node.version.clone()
-        } else {
-            format!("v{}", node.version)
-        }
-        .into(),
+        node: node
+            .map(|node| {
+                if node.version.starts_with('v') {
+                    node.version.clone()
+                } else {
+                    format!("v{}", node.version)
+                }
+            })
+            .unwrap_or_else(|| "unavailable".into())
+            .into(),
     }
 }
 fn executables(config: &IvyJson) -> IvyResult<BTreeMap<String, PathBuf>> {
-    json::object_entries(config.required("executables")?)
-        .into_iter()
+    config
+        .required("executables")?
+        .as_object()
+        .ok_or_else(IvyError::internal)?
+        .iter()
         .filter_map(|(name, value)| {
             name.to_utf8()
                 .ok()
@@ -216,6 +223,13 @@ async fn prepare(
     let component_id = component.to_utf8()?;
     let plan = source::source_build_plan(captured_source.clone(), &component_id).await?;
     preparation_inputs::validate_preparation_plan(&component, &plan)?;
+    require(
+        crate::native_plan::is_native_plan(&plan)
+            || plan.get("kind") == Some(&"app".into())
+            || runtime.node.is_some(),
+        "unsupported_runtime",
+        "JavaScript preparation requires an explicit Node runtime.",
+    )?;
     let package_manager =
         preparation_inputs::preparation_package_manager(captured_source.clone()).await?;
     let temporary = staging.join("command-temp");
@@ -235,9 +249,20 @@ async fn prepare(
         runtime.node.clone(),
     )
     .await?;
-    let runtime_profile = profile(&runtime.node);
+    let runtime_profile = profile(runtime.node.as_ref());
     let native = crate::native_plan::is_native_plan(&plan);
-    let native_platform = if native { Some(format!("{}-{}", runtime_profile.os.to_utf8()?, runtime_profile.arch.to_utf8()?).into()) } else { None };
+    let native_platform = if native {
+        Some(
+            format!(
+                "{}-{}",
+                runtime_profile.os.to_utf8()?,
+                runtime_profile.arch.to_utf8()?
+            )
+            .into(),
+        )
+    } else {
+        None
+    };
     let identity = preparation_inputs::preparation_identity_for_platform(
         captured_source.clone(),
         component.clone(),
@@ -246,7 +271,7 @@ async fn prepare(
             .cloned()
             .ok_or_else(IvyError::internal)?,
         package_manager,
-        profile(&runtime.node),
+        profile(runtime.node.as_ref()),
         runtime.compare.clone(),
         native_platform,
     )
@@ -280,18 +305,27 @@ async fn prepare(
         journal = Some(HostJournal::open(config.clone()).await?);
         let journal = journal.as_ref().unwrap();
         if let Some(candidate) =
-            preparations::recover_prepared_build_locked(journal, &build_id, &runtime.node).await?
+            preparations::recover_prepared_build_locked(journal, &build_id, runtime.node.as_ref())
+                .await?
         {
-            artifact::verify_candidate(candidate.clone(), artifact_boundary.clone(), &runtime.node)
-                .await?;
+            artifact::verify_candidate(
+                candidate.clone(),
+                artifact_boundary.clone(),
+                runtime.node.as_ref(),
+            )
+            .await?;
             return Ok(candidate);
         }
         let previous: IvyResult<IvyJson> = async {
             let candidate = journal
                 .candidate_for_build(&component_id, &build_id)
                 .await?;
-            artifact::verify_candidate(candidate.clone(), artifact_boundary.clone(), &runtime.node)
-                .await?;
+            artifact::verify_candidate(
+                candidate.clone(),
+                artifact_boundary.clone(),
+                runtime.node.as_ref(),
+            )
+            .await?;
             Ok(candidate)
         }
         .await;
@@ -376,17 +410,13 @@ async fn prepare(
                 )
                 .await?;
             let command = command(value)?;
-            // Object lookup precedes Node's spawn UTF-8 conversion. Preserve a
-            // UTF-16 mapping key even when it aliases another native spelling.
+            // Select the exact retained tool key before native path conversion.
             let requested = value
                 .required("executable")?
                 .as_js_string()
                 .ok_or_else(IvyError::internal)?;
             let mut mapped = executables.clone();
-            if let Some((_, path)) = json::object_entries(config.required("executables")?)
-                .into_iter()
-                .find(|(name, _)| *name == requested)
-            {
+            if let Some(path) = config.required("executables")?.get_key(requested) {
                 mapped.insert(command.executable.clone(), config::path_value(path)?);
             }
             process::run_command(
@@ -395,7 +425,9 @@ async fn prepare(
                 &mapped,
                 process::LaunchContext {
                     environment: environment.clone(),
-                    job_launcher: Some(crate::native_plan::native_binary_path(&bootstrap, "ivy-job")),
+                    job_launcher: Some(crate::native_plan::native_binary_path(
+                        &bootstrap, "ivy-job",
+                    )),
                     on_output: Some(progress.output_sink()),
                     ..Default::default()
                 },
@@ -418,7 +450,16 @@ async fn prepare(
         } else {
             runtime_dependencies::runtime_package_locations(
                 &package_lock,
-                emitted_runtime_packages(source_root.join("dist"), runtime.imports.clone()).await?,
+                emitted_runtime_packages(
+                    source_root.join("dist"),
+                    runtime.imports.clone().ok_or_else(|| {
+                        IvyError::new(
+                            "unsupported_runtime",
+                            "JavaScript preparation requires an explicit module parser.",
+                        )
+                    })?,
+                )
+                .await?,
             )?
         };
         mkdir(artifact_root.clone()).await?;
@@ -556,7 +597,7 @@ async fn prepare(
             record.as_ref().unwrap().clone(),
             true,
             false,
-            &runtime.node,
+            runtime.node.as_ref(),
         )
         .await?;
         progress

@@ -118,10 +118,10 @@ fn owned<T: Send + 'static>(
 pub struct SystemdBootstrapOs {
     files: Arc<dyn SystemdHost>,
     linux: Arc<dyn LinuxHost>,
-    node: NodeRuntime,
+    node: Option<NodeRuntime>,
 }
 impl SystemdBootstrapOs {
-    pub fn new(distribution: PathBuf, node: NodeRuntime) -> Self {
+    pub fn new(distribution: PathBuf, node: impl Into<Option<NodeRuntime>>) -> Self {
         Self::with_hosts(
             node,
             Arc::new(NativeSystemdHost::new(distribution.clone())),
@@ -131,11 +131,11 @@ impl SystemdBootstrapOs {
     /// Both boundaries describe the same executing host. The native constructor
     /// binds them to one distribution; tests can share an explicit OS model.
     pub fn with_hosts(
-        node: NodeRuntime,
+        node: impl Into<Option<NodeRuntime>>,
         files: Arc<dyn SystemdHost>,
         linux: Arc<dyn LinuxHost>,
     ) -> Self {
-        Self { files, linux, node }
+        Self { files, linux, node: node.into() }
     }
     async fn command(&self, args: Vec<JsString>) -> IvyResult<()> {
         self.show(args).await.map(|_| ())
@@ -260,6 +260,13 @@ impl SystemdBootstrapOs {
         for process in array(next.required("processes")?)?.iter().filter(|p| {
             p.get("user").is_some_and(truthy) && p.get("configPath").is_some_and(truthy)
         }) {
+            let root = process.get("artifactRoot").filter(|v| !v.is_null()).unwrap_or(next.required("artifactRoot")?);
+            let entry = process.get("entrypoint").or_else(|| next.get("entrypoint"));
+            let executable = match entry.and_then(|entry| entry.get("executable")).and_then(J::as_js_string) {
+                Some(file) if file.0.starts_with(&"dist/native/".encode_utf16().collect::<Vec<_>>()) =>
+                    crate::layout::path_json(&crate::paths::direct_native_file(&config::path_value(root)?, &file.to_utf8()?)?),
+                _ => next.required("nodeExecutable")?.clone(),
+            };
             let identity = J::object([
                 ("componentId", process.required("componentId")?.clone()),
                 ("user", process.required("user")?.clone()),
@@ -272,11 +279,11 @@ impl SystemdBootstrapOs {
                         .unwrap_or(next.required("artifactRoot")?)
                         .clone(),
                 ),
-                ("nodeExecutable", next.required("nodeExecutable")?.clone()),
+                ("nodeExecutable", executable),
             ]);
             let runtime = config::instance_config(
                 config::path_value(process.required("configPath")?)?,
-                &self.node,
+                self.node.as_ref(),
             )
             .await?;
             linux_service_identity::ensure_linux_process_identity_with_host(

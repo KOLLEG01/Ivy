@@ -2,7 +2,7 @@
 //! Output contents never enter the progress file. A queued write retains its
 //! ownership when an individual step/close waiter is dropped.
 use crate::{IvyError, IvyJson, IvyResult, config, node_path::{self, Style}, process::OutputSink};
-use ivy_contracts::{JsString, hash::hash_json, json};
+use ivy_contracts::{JsString, hash::hash_json};
 use ivy_sdk::clock::{Clock, SystemClock, parse_date};
 use std::{path::PathBuf, sync::{Arc, Mutex}, time::Duration};
 use tokio::sync::{mpsc, oneshot};
@@ -89,7 +89,7 @@ impl PreparationProgress {
 }
 impl Drop for PreparationProgress {fn drop(&mut self){self.stop.cancel();}}
 
-fn date(value:Option<&IvyJson>)->IvyResult<f64> {Ok(parse_date(&value.map_or_else(||Ok("undefined".into()),json::try_js_string)?))}
+fn date(value:Option<&IvyJson>)->IvyResult<f64> {Ok(value.and_then(IvyJson::as_js_string).map_or(f64::NAN,parse_date))}
 pub async fn preparation_progress(config:&IvyJson,entry:&IvyJson)->IvyResult<Option<IvyJson>> {
     preparation_progress_with_clock(config,entry,&SystemClock).await
 }

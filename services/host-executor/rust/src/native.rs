@@ -86,7 +86,6 @@ impl Bindings {
             job_launcher.clone(),
         );
         let inspector = Arc::new(NativeOfflineHiveInspector::new(
-            preparation.node.clone(),
             job_launcher.clone(),
             NativeHelperLayout::Target,
         ));

@@ -7,7 +7,7 @@ async fn start() -> IvyResult<Manager> {
         &std::env::args_os().skip(1).collect::<Vec<_>>(),
         std::env::var_os("IVY_INSTANCE_CONFIG"),
     )?;
-    let node = NodeRuntime::discover(None).await?;
+    let node = NodeRuntime::discover_optional(None).await?;
     Manager::from_path(path, node).await
 }
 async fn run(manager: Manager) -> IvyResult<()> {

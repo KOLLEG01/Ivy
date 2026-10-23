@@ -25,7 +25,8 @@ pub fn validate_package_authorization(value: &IvyJson) -> IvyResult<IvyJson> {
     // an absent property is undefined, which is outside the JSON domain.
     let manifest = value.get("manifest").ok_or_else(|| IvyError::new("invalid_arguments", "Value is outside the JSON domain."))?;
     validate_host("ReleaseManifest", manifest)?;
-    json::compare_versions(&json::js_string(value.get("version").unwrap_or(&IvyJson::Null)).to_utf8().unwrap_or_default(), "0.0.0")?;
+    let version = value.get("version").and_then(IvyJson::as_js_string).ok_or_else(|| IvyError::new("invalid_arguments", "Package version must be a string."))?.to_utf8().unwrap_or_default();
+    json::compare_versions(&version, "0.0.0")?;
     require(id(value.get("componentId")) && value.get("componentId") == manifest.get("componentId")
         && value.get("version") == manifest.get("version") && hash(value.get("buildId"))
         && value.get("buildId") == manifest.get("buildId") && hash(value.get("archiveHash"))

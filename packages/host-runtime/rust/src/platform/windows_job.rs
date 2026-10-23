@@ -1,7 +1,7 @@
 //! Kernel-owned process trees. The Job is attached during CreateProcessW, before
 //! the child exists, so launcher death cannot orphan an unassigned suspended child.
 
-use super::windows_arguments::{quote_argument, valid_job_name};
+use super::windows_arguments::{application_path, quote_argument, valid_job_name};
 use std::{
     ffi::OsString,
     io,
@@ -232,7 +232,7 @@ pub fn run(arguments: &[OsString]) -> io::Result<u32> {
     let executable = arguments
         .get(executable_index)
         .ok_or_else(|| argument_error("Missing executable."))?;
-    let executable = wide(executable)?;
+    let executable = wide(&application_path(executable))?;
     let raw_job =
         unsafe { CreateJobObjectW(null(), job_name.as_ref().map_or(null(), |n| n.as_ptr())) };
     let last_error = unsafe { GetLastError() };

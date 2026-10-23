@@ -4,7 +4,7 @@ use crate::{
     linux_host::{LinuxHost, NativeLinuxHost},
     node_path::{self, Style},
 };
-use ivy_contracts::{JsString, json};
+use ivy_contracts::JsString;
 use std::{collections::HashSet, io, path::PathBuf, sync::Arc};
 pub const LINUX_AGENT_USER: &str = "ivy-agent";
 pub fn linux_process_user(component_id: &JsString, platform: &str) -> Option<&'static str> {
@@ -212,13 +212,13 @@ pub async fn ensure_linux_process_identity_with_host(
         require(host.platform()=="linux"&&host.user_id()==Some(0)&&identity.get("componentId")==Some(&"agent-manager".into())&&user==&IvyJson::from(LINUX_AGENT_USER),"unsupported_runtime","Linux service identity setup requires the system administrator and the configured AgentManager identity.")?;
         let user=text(user)?;
         let uid=match host.command("/usr/bin/id",vec!["-u".into(),user.clone()],10_000,65_536).await{
-            Ok(value)=>json::number_from_string(&value),
+            Ok(value)=>native_id(&value)?,
             Err(_)=>{
                 host.command("/usr/sbin/useradd",vec!["--system".into(),"--user-group".into(),"--create-home".into(),"--home-dir".into(),concat(&["/var/lib/".into(),user.clone()]),"--shell".into(),"/usr/sbin/nologin".into(),user.clone()],30_000,65_536).await?;
-                json::number_from_string(&host.command("/usr/bin/id",vec!["-u".into(),user.clone()],10_000,65_536).await?)
+                native_id(&host.command("/usr/bin/id",vec!["-u".into(),user.clone()],10_000,65_536).await?)?
             }
         };
-        let gid=json::number_from_string(&host.command("/usr/bin/id",vec!["-g".into(),user.clone()],10_000,65_536).await?);
+        let gid=native_id(&host.command("/usr/bin/id",vec!["-g".into(),user.clone()],10_000,65_536).await?)?;
         require([uid,gid].into_iter().all(|value|value.is_finite()&&value.fract()==0.0&&value>0.0&&value<=9_007_199_254_740_991.0),"access_denied","AgentManager must use a non-administrative Linux user.")?;
         file(host.as_ref(),&user,text(identity.required("configPath")?)?,"r--").await?;
         file(host.as_ref(),&user,text(identity.required("nodeExecutable")?)?,"r-x").await?;
@@ -229,4 +229,8 @@ pub async fn ensure_linux_process_identity_with_host(
         for root in roots(&runtime,settings,true){tree(host.as_ref(),&user,root,true).await?;}
         Ok(())
     }).await.map_err(|_|IvyError::internal())?
+}
+fn native_id(value: &JsString) -> IvyResult<f64> {
+    value.to_utf8()?.trim().parse::<u32>().map(f64::from)
+        .map_err(|_| IvyError::new("access_denied", "Linux identity command returned an invalid numeric ID."))
 }

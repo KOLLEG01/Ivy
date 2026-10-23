@@ -17,7 +17,7 @@ use crate::{
     preparation_progress::preparation_progress_with_clock,
 };
 pub use backup::RestoreRuntime;
-use ivy_contracts::{JsString, core_schema::validate_host, json};
+use ivy_contracts::{JsString, core_schema::validate_host};
 use ivy_sdk::clock::{Clock, SystemClock, parse_date};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -383,7 +383,11 @@ fn terminal(record: &J) -> IvyResult<bool> {
 fn parts(values: &[J]) -> IvyResult<JsString> {
     let mut result = Vec::new();
     for value in values {
-        result.extend(json::try_js_string(value)?.0);
+        match value {
+            J::String(text) => result.extend_from_slice(&text.0),
+            J::Number(number) if number.is_finite() => result.extend(number.to_string().encode_utf16()),
+            _ => return Err(IvyError::internal()),
+        }
     }
     Ok(JsString(result))
 }

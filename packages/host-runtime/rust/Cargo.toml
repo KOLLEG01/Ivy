@@ -100,6 +100,23 @@ name = "host-build-identity"
 path = "../../../tests/rust/host-build-identity.rs"
 
 [[test]]
+name = "host-build-inputs"
+path = "../../../tests/rust/host-build-input-cases.rs"
+
+[[test]]
+name = "host-compiler-tools"
+path = "../../../tests/rust/host-compiler-tools.rs"
+harness = false
+
+[[test]]
+name = "host-native-recovery"
+path = "../../../tests/rust/host-native-recovery-cases.rs"
+
+[[test]]
+name = "host-service-storage"
+path = "../../../tests/rust/host-service-storage.rs"
+
+[[test]]
 name = "host-preparation-files"
 path = "../../../tests/rust/host-preparation-files.rs"
 

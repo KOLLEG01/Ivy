@@ -191,7 +191,7 @@ fn public_owner(owner: &IvyJson) -> IvyJson {
     )
 }
 struct Inner {
-    node: NodeRuntime,
+    node: Option<NodeRuntime>,
     compare: FileCompare,
     os: Arc<dyn BootstrapOs>,
     job_launcher: PathBuf,
@@ -201,7 +201,7 @@ struct Inner {
 pub struct BootstrapMaintenance(Arc<Inner>);
 impl BootstrapMaintenance {
     pub fn new(
-        node: NodeRuntime,
+        node: impl Into<Option<NodeRuntime>>,
         compare: FileCompare,
         os: Arc<dyn BootstrapOs>,
         job_launcher: PathBuf,
@@ -209,14 +209,14 @@ impl BootstrapMaintenance {
         Self::with_clock(node, compare, os, job_launcher, Arc::new(SystemClock))
     }
     pub fn with_clock(
-        node: NodeRuntime,
+        node: impl Into<Option<NodeRuntime>>,
         compare: FileCompare,
         os: Arc<dyn BootstrapOs>,
         job_launcher: PathBuf,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self(Arc::new(Inner {
-            node,
+            node: node.into(),
             compare,
             os,
             job_launcher,
@@ -301,7 +301,7 @@ impl Inner {
                     artifact::verify_candidate(
                         journal.candidate(&id).await?,
                         config::path_value(journal.config().await?.required("artifactRoot")?)?,
-                        &self.node,
+                        self.node.as_ref(),
                     )
                     .await?;
                 }
@@ -490,7 +490,7 @@ impl Inner {
         )?;
         let artifacts = config::path_value(config.required("artifactRoot")?)?;
         let manifest =
-            artifact::verify_candidate(candidate.clone(), artifacts.clone(), &self.node).await?;
+            artifact::verify_candidate(candidate.clone(), artifacts.clone(), self.node.as_ref()).await?;
         let pending = array(next.required("processes")?)?
             .iter()
             .filter(|process| {
@@ -505,7 +505,7 @@ impl Inner {
                     "Bootstrap process release belongs to another component.",
                 )?;
                 let manifest =
-                    artifact::verify_candidate(selected.clone(), artifacts.clone(), &self.node)
+                    artifact::verify_candidate(selected.clone(), artifacts.clone(), self.node.as_ref())
                         .await?;
                 Ok::<_, IvyError>(IvyJson::object([
                     ("candidate", selected),

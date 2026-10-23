@@ -7,8 +7,14 @@
   "connectsToHive": false,
   "requirements": {
     "node": ">=24.18.0 <25.0.0",
-    "os": ["win32", "linux"],
-    "arch": ["x64", "arm64"],
+    "os": [
+      "win32",
+      "linux"
+    ],
+    "arch": [
+      "x64",
+      "arm64"
+    ],
     "hiveProtocol": null,
     "contracts": []
   },
@@ -20,18 +26,12 @@
   "prepare": [
     {
       "executable": "node",
-      "args": ["tools/build/run-npm.mjs", "ci"],
-      "timeoutMs": 600000
-    },
-    {
-      "executable": "node",
       "args": [
-        "--max-old-space-size=448",
-        "tools/build/build-deployment.mjs",
+        "tools/build/build-native-deployment.mjs",
         "--component",
         "host-executor"
       ],
-      "timeoutMs": 300000
+      "timeoutMs": 3600000
     }
   ],
   "checks": [],
@@ -43,7 +43,9 @@
       "timeoutMs": 5000
     }
   },
-  "shutdown": { "timeoutMs": 15000 },
+  "shutdown": {
+    "timeoutMs": 15000
+  },
   "restart": {
     "policy": "always",
     "minimumDelayMs": 1000,
@@ -56,26 +58,80 @@
   },
   "runtimeReset": {
     "delete": [
-      { "area": "host", "path": "deployments.sqlite" },
-      { "area": "host", "path": "deployments.sqlite-wal" },
-      { "area": "host", "path": "deployments.sqlite-shm" },
-      { "area": "host", "path": "accepted-configurations" },
-      { "area": "host", "path": "executor.json" },
-      { "area": "host", "path": "guardians" },
-      { "area": "host", "path": "host-configurations" },
-      { "area": "host", "path": "instances" },
-      { "area": "host", "path": "owners" },
-      { "area": "host", "path": "preparation-progress" },
-      { "area": "data", "path": "health.json" },
-      { "area": "data", "path": "control.json" },
-      { "area": "work", "path": "." },
-      { "area": "logs", "path": "." }
+      {
+        "area": "host",
+        "path": "deployments.sqlite"
+      },
+      {
+        "area": "host",
+        "path": "deployments.sqlite-wal"
+      },
+      {
+        "area": "host",
+        "path": "deployments.sqlite-shm"
+      },
+      {
+        "area": "host",
+        "path": "accepted-configurations"
+      },
+      {
+        "area": "host",
+        "path": "executor.json"
+      },
+      {
+        "area": "host",
+        "path": "guardians"
+      },
+      {
+        "area": "host",
+        "path": "host-configurations"
+      },
+      {
+        "area": "host",
+        "path": "instances"
+      },
+      {
+        "area": "host",
+        "path": "owners"
+      },
+      {
+        "area": "host",
+        "path": "preparation-progress"
+      },
+      {
+        "area": "data",
+        "path": "health.json"
+      },
+      {
+        "area": "data",
+        "path": "control.json"
+      },
+      {
+        "area": "work",
+        "path": "."
+      },
+      {
+        "area": "logs",
+        "path": "."
+      }
     ],
     "preserve": [
-      { "area": "host", "path": "bootstrap" },
-      { "area": "host", "path": "bootstrap-plans" },
-      { "area": "host", "path": "bootstrap-maintenance" },
-      { "area": "host", "path": "bootstrap-automatic" }
+      {
+        "area": "host",
+        "path": "bootstrap"
+      },
+      {
+        "area": "host",
+        "path": "bootstrap-plans"
+      },
+      {
+        "area": "host",
+        "path": "bootstrap-maintenance"
+      },
+      {
+        "area": "host",
+        "path": "bootstrap-automatic"
+      }
     ]
   }
 }

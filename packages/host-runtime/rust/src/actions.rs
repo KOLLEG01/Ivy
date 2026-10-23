@@ -1,7 +1,7 @@
 //! Shared CLI/Manager mutation intake. Acceptance returns the durable journal
 //! entry, including a definite terminal failure, without waiting for execution.
 use crate::{IvyError, IvyJson, IvyResult, journal::{HostJournal, requires_bootstrap_replacement}, node_path::Context, source};
-use ivy_contracts::{JsString, json};
+use ivy_contracts::JsString;
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12,7 +12,7 @@ impl Action {
     }
 }
 /// CLI callers pass their admitted option values. Manager callers use
-/// `from_manager` for the original JS argument conversion and operation binding.
+/// `from_manager` for typed tool arguments and operation binding.
 pub struct LocalAction {
     pub action: Action,
     pub instance_id: JsString,
@@ -21,18 +21,17 @@ pub struct LocalAction {
     pub source: Option<JsString>,
     pub target_build: Option<JsString>,
 }
-fn truthy(value: &IvyJson) -> bool {
-    match value { IvyJson::Null => false, IvyJson::Bool(v) => *v, IvyJson::Number(v) => *v != 0.0 && !v.is_nan(), IvyJson::String(v) => !v.0.is_empty(), _ => true }
-}
 fn manager_string(args: &IvyJson, key: &str) -> IvyResult<JsString> {
-    args.get(key).map_or_else(|| Ok("undefined".into()), json::try_js_string)
+    args.required(key)?.as_js_string().cloned().ok_or_else(|| IvyError::new("invalid_arguments", "Action identifiers must be strings."))
 }
 impl LocalAction {
     pub fn from_manager(action: Action, args: &IvyJson, context_operation_id: Option<&JsString>) -> IvyResult<Self> {
         if context_operation_id.is_some_and(|id| !id.0.is_empty() && args.get("operationId") != Some(&IvyJson::String(id.clone()))) {
             return Err(IvyError::new("mutation_conflict", "Tool and local action operation IDs must match."));
         }
-        let option = |key| args.get(key).filter(|v| truthy(v)).map(json::try_js_string).transpose();
+        let option = |key| args.get(key).filter(|v| !v.is_null()).map(|value| {
+            value.as_js_string().cloned().ok_or_else(|| IvyError::new("invalid_arguments", "Action options must be strings."))
+        }).transpose().map(|value| value.filter(|value| !value.0.is_empty()));
         let result = Self { action, instance_id: manager_string(args, "instanceId")?, operation_id: manager_string(args, "operationId")?,
             candidate_id: option("candidateId")?, source: option("source")?, target_build: option("targetBuild")? };
         if action != Action::Deploy && (result.candidate_id.is_some() || result.source.is_some()) || action != Action::Rollback && result.target_build.is_some() {

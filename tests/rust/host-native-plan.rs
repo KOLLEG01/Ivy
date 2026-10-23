@@ -469,6 +469,43 @@ async fn native_candidate_admits_direct_paths_without_node_and_runs_a_native_pro
                 .and_then(|details| details.get("exitCode")),
             Some(&IvyJson::Number(7.0))
         );
+        // run-npm starts a second Node from process.execPath. A verbatim
+        // lpApplicationName made that real nested main-module load fail at C:.
+        let source_root =
+            fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap();
+        let node = fs::canonicalize(std::env::var_os("IVY_TEST_NODE").unwrap()).unwrap();
+        let package = ivy_contracts::json::parse(
+            &fs::read_to_string(source_root.join("package.json")).unwrap(),
+            65536,
+        )
+        .unwrap();
+        let package_manager = package
+            .required("packageManager")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        let expected = package_manager.strip_prefix("npm@").unwrap();
+        for without_job in [true, false] {
+            let result = process::run_command(
+                &process::Command {
+                    executable: "node".into(),
+                    args: vec!["tools/build/run-npm.mjs".into(), "--version".into()],
+                    cwd: None,
+                    timeout_ms: 30000,
+                },
+                &source_root,
+                &BTreeMap::from([("node".into(), node.clone())]),
+                process::LaunchContext {
+                    job_launcher: Some(PathBuf::from(env!("CARGO_BIN_EXE_ivy-job"))),
+                    without_job,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.stdout.trim(), expected, "without_job={without_job}");
+        }
     }
 }
 

@@ -66,10 +66,15 @@ async fn portable_plan_keeps_empty_set_and_pinned_metadata_refusal_order(){
 }
 
 #[test]
-fn response_status_header_number_and_decoded_byte_integrity_preserve_the_original_limits(){
+fn response_status_decimal_length_and_decoded_bytes_keep_bounded_integrity(){
     for declared in [None,Some(""),Some("0"),Some("-1"),Some("NaN"),Some("infinity"),Some(" 0x4000000 "),Some("67108864"),Some("67108865"),Some("Infinity"),Some("-Infinity"),Some("0b100"),Some("1, 2")]{
         let bytes=b"verified response bytes";let dep=dependency("node_modules/fixture",bytes);let input=IvyJson::object([("operation","policy".into()),("dependency",value(&dep)),("declared",declared.map_or(IvyJson::Null,IvyJson::from)),("bodyBase64",STANDARD.encode(bytes).into())]);
-        compare(input,portable::check_portable_response(true,declared).and_then(|_|portable::verify_portable_bytes(&dep,bytes)).map(|_|IvyJson::object([("byteLength",IvyJson::Number(bytes.len()as f64))])));
+        let result=portable::check_portable_response(true,declared).and_then(|_|portable::verify_portable_bytes(&dep,bytes)).map(|_|IvyJson::object([("byteLength",IvyJson::Number(bytes.len()as f64))]));
+        match declared {
+            None|Some("0"|"67108864")=>{succeeds(&compare(input,result));},
+            Some("67108865")=>assert_eq!(result.unwrap_err().code,"content_too_large"),
+            _=>assert_eq!(result.unwrap_err().code,"artifact_changed"),
+        }
     }
     let bytes=b"bytes";let dep=dependency("node_modules/fixture",bytes);
     refuses(&compare(IvyJson::object([("operation","policy".into()),("dependency",value(&dep)),("responseOk",false.into()),("declared","Infinity".into())]),portable::check_portable_response(false,Some("Infinity")).map(|_|IvyJson::Null)),"service_unavailable");

@@ -16,7 +16,7 @@ export const scopes = [
   "tooling",
 ];
 export function scope(file) {
-  if (/host-native-plan/.test(file)) return "host";
+  if (/host-(?:build-input|compiler-tools|service-storage|native-(?:plan|coordinator|recovery))/.test(file)) return "host";
   if (/data-collector/.test(file)) return "data-collector";
   if (/dashboards/.test(file)) return "dashboards";
   if (
@@ -397,6 +397,20 @@ export const rustTests = {
   'tests/rust/sdk-native-turn-contents.rs': { package: 'ivy-sdk', test: 'sdk-native-turn-contents' },
   'tests/rust/host-scheduler.rs': { package: 'ivy-host-runtime', test: 'host-scheduler' },
   'tests/rust/host-build-identity.rs': { package: 'ivy-host-runtime', test: 'host-build-identity' },
+  'tests/rust/host-build-input-cases.rs': { package: 'ivy-host-runtime', test: 'host-build-inputs' },
+  'tests/rust/host-native-recovery-cases.rs': { package: 'ivy-host-runtime', test: 'host-native-recovery' },
+  'tests/rust/host-service-storage.rs': { package: 'ivy-host-runtime', test: 'host-service-storage' },
+  'tests/rust/host-compiler-tools.rs': {
+    package: 'ivy-host-runtime', test: 'host-compiler-tools',
+    prerequisites: [{ package: 'ivy-host-runtime', bin: 'ivy-job', platform: 'win32' }],
+  },
+  'tests/rust/host-native-coordinator.rs': {
+    package: 'ivy-host-executor', test: 'host-native-coordinator',
+    prerequisites: [
+      { package: 'ivy-host-runtime', bin: 'ivy-job', platform: 'win32' },
+      { package: 'ivy-host-runtime', bin: 'ivy-health' },
+    ],
+  },
   'tests/rust/host-preparation-files.rs': { package: 'ivy-host-runtime', test: 'host-preparation-files' },
   'tests/rust/host-protected-config.rs': { package: 'ivy-host-runtime', test: 'host-protected-config' },
   'tests/rust/host-preparation-links.rs': { package: 'ivy-host-runtime', test: 'host-preparation-links' },

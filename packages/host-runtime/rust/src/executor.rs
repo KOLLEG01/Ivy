@@ -243,13 +243,13 @@ pub async fn wait_for(
                     .unwrap_or_else(|| "process_failed".into());
                 let message = concat(&[
                     "Runtime owner reported ".into(),
-                    json::try_js_string(field(value, "state"))?,
+                    field(value, "state").as_js_string().cloned().ok_or_else(IvyError::internal)?,
                     ": ".into(),
-                    json::try_js_string(&code)?,
+                    code.as_js_string().cloned().ok_or_else(IvyError::internal)?,
                     ". ".into(),
-                    json::try_js_string(field(value, "message"))?,
+                    field(value, "message").as_js_string().cloned().ok_or_else(IvyError::internal)?,
                 ]);
-                let mut error = IvyError::new_js(json::try_js_string(&code)?, message);
+                let mut error = IvyError::new_js(code.as_js_string().cloned().ok_or_else(IvyError::internal)?, message);
                 error.outcome = Outcome::Unknown.into();
                 return Err(error);
             }

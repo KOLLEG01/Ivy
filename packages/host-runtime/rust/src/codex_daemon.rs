@@ -51,7 +51,7 @@ fn path(value: &JsString) -> PathBuf {
     }
 }
 
-/// Preserve the original structural boundary, including String(status) coercion.
+/// Admit the literal lifecycle status, version and native endpoint fields.
 pub fn daemon_observation(value: &IvyJson, expected_version: &JsString) -> IvyResult<IvyJson> {
     require(
         value.as_object().is_some(),
@@ -59,12 +59,9 @@ pub fn daemon_observation(value: &IvyJson, expected_version: &JsString) -> IvyRe
         "Official daemon startup did not return a lifecycle object.",
     )?;
     let status = value.get("status");
-    let status_text = match status {
-        Some(value) => json::try_js_string(value)?,
-        None => "undefined".into(),
-    };
+    let status_text = status.and_then(IvyJson::as_js_string);
     let pid = value.get("pid");
-    require((status_text == JsString::from("started") || status_text == JsString::from("alreadyRunning")) &&
+    require((status_text == Some(&JsString::from("started")) || status_text == Some(&JsString::from("alreadyRunning"))) &&
         value.get("socketPath").is_some_and(absolute) && value.get("managedCodexPath").is_some_and(absolute) &&
         pid.is_none_or(|value| matches!(value, IvyJson::Number(n) if n.is_finite() && *n > 0.0 && *n <= 9_007_199_254_740_991.0 && n.fract() == 0.0)),
         "native_daemon_response_invalid", "Official daemon startup returned an invalid endpoint or process identity.")?;

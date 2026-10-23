@@ -50,8 +50,8 @@ fn separate(a: &Path, b: &Path) -> IvyResult<bool> {
     Ok(!inside(a, b).map_err(|_| IvyError::internal())? && !inside(b, a).map_err(|_| IvyError::internal())?)
 }
 /// The caller supplies the discovered dispatcher/host Node runtime; no PATH lookup.
-pub async fn instance_config(path: impl Into<PathBuf>, node: &NodeRuntime) -> IvyResult<InstanceConfig> {
-    load_instance_config(path.into(), Some(node.version.clone())).await
+pub async fn instance_config<'a>(path: impl Into<PathBuf>, node: impl Into<Option<&'a NodeRuntime>>) -> IvyResult<InstanceConfig> {
+    load_instance_config(path.into(), node.into().map(|node| node.version.clone())).await
 }
 
 /// Native services validate the same public configuration and build identity.

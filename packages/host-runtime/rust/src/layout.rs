@@ -1,7 +1,7 @@
 //! Storage locations shared by host admission and runtime supervision.
 use crate::{IvyError, IvyJson, IvyResult};
 use crate::node_path::{self, Style};
-use ivy_contracts::{JsString, json};
+use ivy_contracts::JsString;
 use std::{collections::BTreeMap, path::{Path, PathBuf}};
 mod storage_api;
 pub use storage_api::{StorageArea, StorageContext, host_storage_areas, storage_path, storage_file, service_paths, service_paths_for_style};
@@ -66,7 +66,7 @@ pub fn agent_manager_account_settings(settings: &IvyJson, home: &JsString, style
             Some(value) => value.clone(),
             None => {
                 let native_home = match selected(settings, "codexHome").or_else(|| selected(settings, "nativeHome")) {
-                    Some(value) => json::try_js_string(value)?,
+                    Some(value) => value.as_js_string().cloned().ok_or_else(IvyError::internal)?,
                     None => node_path::join(style, &[home.clone(), ".codex".into()]),
                 };
                 IvyJson::String(node_path::join(style, &[native_home, "skills".into()]))

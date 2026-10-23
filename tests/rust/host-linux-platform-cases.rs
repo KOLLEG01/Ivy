@@ -924,7 +924,8 @@ async fn systemd_state_and_dynamic_units_retain_exact_launch_identity() {
         "0x2a",
         "\u{feff}42\u{a0}",
     ] {
-        check("systemctl pid coercion",input(&fixture,"systemd","parseSystemdState",vec![format!("LoadState=loaded\r\nActiveState=active\r\nSubState=running\r\nMainPID={pid}\r\n").into()])).await;
+        let state = systemd::parse_systemd_state(&format!("LoadState=loaded\r\nActiveState=active\r\nSubState=running\r\nMainPID={pid}\r\n").into());
+        assert_eq!(state.main_pid, if pid == "42" { Some(42) } else { None }, "{pid}");
     }
     for output in [
         "",
@@ -1297,7 +1298,12 @@ async fn linux_identity_grants_match_original_order_deduplication_and_failure_bo
             vec![identity, runtime],
         );
         request.insert("model", backend);
-        check(mode, request).await;
+        if matches!(mode, "uid-nan" | "uid-unsafe") {
+            let actual = execute(&request).await;
+            assert_eq!(actual.required("operation").unwrap().required("error").unwrap().get("code"), Some(&"access_denied".into()));
+        } else {
+            check(mode, request).await;
+        }
     }
 }
 #[tokio::test]

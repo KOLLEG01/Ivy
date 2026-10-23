@@ -11,14 +11,12 @@ use std::{
 };
 
 /// The executing Node default locale is supplied by the shared runtime binding.
-/// This owner does not substitute ASCII or Rust string ordering for localeCompare.
+/// Callers can supply a comparator without changing retained path spelling.
 pub type FileCompare = Arc<dyn Fn(&JsString, &JsString) -> Ordering + Send + Sync>;
 
-/// Bind the executing package's locale runtime and retain it with the comparator.
+/// Stable native path ordering; the retained UTF-16 spelling is never replaced.
 pub fn native_file_compare() -> IvyResult<FileCompare> {
-    let comparator = ivy_sdk::collation::LocaleRuntime::from_current_executable()?
-        .executing_default()?;
-    Ok(Arc::new(move |left, right| comparator.compare(left, right)))
+    Ok(Arc::new(|left, right| left.0.cmp(&right.0)))
 }
 
 pub use crate::artifact_file::{ArtifactFile, artifact_source_identity};

@@ -21,7 +21,8 @@ test('deployment pipelines exclude tests and target only the requested component
     }
   }
   for (const plan of plans) {
-    const build = plan.prepare.find(command => command.args.includes('tools/build/build-deployment.mjs'));
+    const build = plan.prepare.find(command => command.args.some(arg =>
+      ['tools/build/build-deployment.mjs', 'tools/build/build-native-deployment.mjs'].includes(arg)));
     assert.ok(build, plan.componentId + ' must have a deployment build');
     const componentIndex = build.args.indexOf('--component');
     assert.equal(build.args[componentIndex + 1], plan.componentId, plan.componentId + ' must build itself');

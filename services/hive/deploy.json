@@ -40,7 +40,7 @@
         "--component",
         "hive"
       ],
-      "timeoutMs": 300000
+      "timeoutMs": 3600000
     }
   ],
   "checks": [],

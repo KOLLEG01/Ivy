@@ -232,13 +232,12 @@ fn native_executable_interoperates_with_unchanged_hive_and_public_sdk() {
 }
 
 /// The unchanged Hive fixture drives a real Rust RuntimeOwner in this process.
-/// Its child is the retained Node dispatcher and actual Manager binary, not a
-/// second service implementation in the fixture.
+/// Its child is the actual native Manager binary under the Windows Job.
 #[cfg(windows)]
 #[tokio::test]
 async fn dispatcher_owner_fixture() {
     use ivy_host_runtime::{
-        config::json_file, journal::HostJournal, node_runtime::NodeRuntime,
+        config::json_file, journal::HostJournal,
         runtime_owner::RuntimeOwner,
     };
     let Some(request) = std::env::var_os("IVY_MANAGER_DISPATCH_OWNER") else {
@@ -254,9 +253,7 @@ async fn dispatcher_owner_fixture() {
     let journal = HostJournal::open(host.clone()).await.unwrap();
     let target = request.required("target").unwrap().clone();
     publish_dispatch_target(&journal, target).await;
-    let node_path = path("nodeExecutable");
-    let node = NodeRuntime::discover(Some(&node_path)).await.unwrap();
-    let owner = RuntimeOwner::for_host(host, "manager".into(), path("bootstrapRoot"), node)
+    let owner = RuntimeOwner::for_host(host, "manager".into(), path("bootstrapRoot"), None)
         .await
         .unwrap();
     owner.start().unwrap();

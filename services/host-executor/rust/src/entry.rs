@@ -13,7 +13,93 @@ use ivy_host_runtime::{
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-pub const USAGE: &str = "ivy-host-executor --config ABS_HOST_CONFIG --manager-executable ABS_EXECUTABLE --manager-config ABS_INSTANCE_CONFIG [--instance-config ABS_HOST_INSTANCE_CONFIG] [--job-launcher ABS_EXECUTABLE]";
+pub const USAGE: &str = "ivy-host-executor [--config ABS_HOST_CONFIG] [--instance-config ABS_HOST_INSTANCE_CONFIG] [--distribution ABS_ARTIFACT_ROOT] [--job-launcher ABS_EXECUTABLE]\nBootstrap: ivy-host-executor --config ABS_HOST_CONFIG --manager-executable ABS_EXECUTABLE --manager-config ABS_INSTANCE_CONFIG [--instance-config ABS_HOST_INSTANCE_CONFIG] [--job-launcher ABS_EXECUTABLE]";
+
+/// The normal service owns the existing configuration, activation and update lanes.
+/// Bootstrap-only direct Manager supervision below remains an explicit mode.
+pub async fn run_native(args: &[OsString], stop: CancellationToken) -> IvyResult<()> {
+    use ivy_host_runtime::{
+        artifact, host_config::HostContext, native_plan, node_runtime::NodeRuntime,
+        package_updater::NativePackageClient, portable_http::PortableHttp,
+        prepare::PreparationRuntime,
+    };
+    let started = crate::process_started_at();
+    let mut values = BTreeMap::new();
+    let mut input = args.iter();
+    while let Some(key) = input.next() {
+        if ![
+            "--config",
+            "--instance-config",
+            "--distribution",
+            "--job-launcher",
+        ]
+        .iter()
+        .any(|allowed| key == *allowed)
+        {
+            return Err(invalid(USAGE));
+        }
+        let value = input
+            .next()
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .ok_or_else(|| invalid(USAGE))?;
+        if values.insert(key.clone(), value).is_some() {
+            return Err(invalid("Native service options may appear only once."));
+        }
+    }
+    let context = HostContext::current()?;
+    let startup = crate::admit(args, &context.environment, &context.account_home, None).await?;
+    if let Some(own) = &startup.own {
+        matching_instance(&startup.host, own, "host-executor")?;
+    }
+    let distribution = values
+        .remove(&OsString::from("--distribution"))
+        .or_else(|| {
+            startup
+                .own
+                .as_ref()
+                .map(|own| own.artifact_root().to_path_buf())
+        })
+        .ok_or_else(|| {
+            invalid("Native host startup requires its instance configuration or --distribution.")
+        })?;
+    let configured = startup
+        .host
+        .required("executables")?
+        .get("node")
+        .map(path)
+        .transpose()?;
+    let node = NodeRuntime::discover_optional(configured.as_deref()).await?;
+    let job = values
+        .remove(&OsString::from("--job-launcher"))
+        .unwrap_or_else(|| native_plan::native_binary_path(&distribution, "ivy-job"));
+    let options = ivy_host_runtime::executor::ExecutorOptions {
+        own_instance_id: None,
+        account_home: context.account_home,
+        build_id: startup
+            .own
+            .as_ref()
+            .and_then(|own| own.json().get("buildId"))
+            .and_then(IvyJson::as_js_string)
+            .cloned(),
+    };
+    let preparation = PreparationRuntime {
+        node,
+        compare: artifact::native_file_compare()?,
+        imports: None,
+        http: PortableHttp::new(Default::default())?,
+    };
+    let bindings = crate::Bindings::native_for_startup(
+        &startup,
+        preparation,
+        distribution,
+        job,
+        options,
+        Some(Arc::new(NativePackageClient::new()?)),
+        started,
+    )?;
+    crate::serve(startup, bindings, stop).await
+}
 
 #[derive(Debug)]
 pub struct Options {

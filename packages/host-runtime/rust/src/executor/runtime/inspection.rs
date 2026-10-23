@@ -1,22 +1,17 @@
 use super::*;
-use crate::{
-    node_runtime::NodeRuntime,
-    portable_native_files::{NativeHelperLayout, component_native_helper},
-};
+use crate::portable_native_files::{NativeHelperLayout, component_native_helper};
 use ivy_contracts::limits::MANAGEMENT_FRAME_BYTES;
 use tokio::io::AsyncWriteExt;
 
 /// Offline Hive's native owner is selected from the admitted candidate artifact.
 /// The caller supplies the package layout; a missing payload has no fallback.
 pub struct NativeOfflineHiveInspector {
-    node: NodeRuntime,
     job_launcher: PathBuf,
     layout: NativeHelperLayout,
 }
 impl NativeOfflineHiveInspector {
-    pub fn new(node: NodeRuntime, job_launcher: PathBuf, layout: NativeHelperLayout) -> Self {
+    pub fn new(job_launcher: PathBuf, layout: NativeHelperLayout) -> Self {
         Self {
-            node,
             job_launcher,
             layout,
         }
@@ -24,13 +19,12 @@ impl NativeOfflineHiveInspector {
 }
 impl OfflineHiveInspector for NativeOfflineHiveInspector {
     fn inspect(&self, request: OfflineInspection) -> ExecutorFuture<'_, IvyJson> {
-        let node = self.node.clone();
         let job_launcher = self.job_launcher.clone();
         let layout = self.layout;
         Box::pin(async move {
             // Once accepted, the owner retains the deadline and child tree even
             // when the requesting activation waiter disappears.
-            tokio::spawn(inspect(request, node, job_launcher, layout))
+            tokio::spawn(inspect(request, job_launcher, layout))
                 .await
                 .map_err(|_| IvyError::internal())?
         })
@@ -38,11 +32,10 @@ impl OfflineHiveInspector for NativeOfflineHiveInspector {
 }
 async fn inspect(
     request: OfflineInspection,
-    node: NodeRuntime,
     job_launcher: PathBuf,
     layout: NativeHelperLayout,
 ) -> IvyResult<IvyJson> {
-    let admitted = config::instance_config(request.configuration_path, &node).await?;
+    let admitted = config::native_instance_config(request.configuration_path).await?;
     require(
         admitted.json().get("componentId") == Some(&"hive".into())
             && admitted.artifact_root() == request.artifact_root,

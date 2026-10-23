@@ -143,7 +143,7 @@ async fn checked_boundary(staging:PathBuf,root:PathBuf)->IvyResult<PathBuf>{bloc
 async fn actual(path:PathBuf)->IvyResult<PathBuf>{blocking(move||internal(realpath(&path))).await}
 fn path_field(value:&IvyJson,key:&str)->IvyResult<PathBuf>{crate::config::path_value(value.required(key)?)}
 fn record_change(record:&IvyJson,phase:&str,error:IvyJson)->IvyJson{let mut next=record.clone();next.insert("phase",phase.into());next.insert("updatedAt",now());next.insert("errorCode",error);next}
-async fn publication(journal:&HostJournal,record:&IvyJson,verify_release:bool,node:&NodeRuntime)->IvyResult<(IvyJson,bool)>{
+async fn publication(journal:&HostJournal,record:&IvyJson,verify_release:bool,node:Option<&NodeRuntime>)->IvyResult<(IvyJson,bool)>{
     let host=journal.config().await?;let candidate=record.get("candidate").filter(|v|!v.is_null()).ok_or_else(||IvyError::new("preparation_incomplete","Preparation has no complete publication identity."))?;
     let artifact_root=path_field(&host,"artifactRoot")?;let id=candidate.required("candidateId")?.as_str()?;
     let directory=joined(&joined(&artifact_root,"candidates"),id.get(7..).unwrap_or_default());
@@ -166,7 +166,7 @@ async fn publication(journal:&HostJournal,record:&IvyJson,verify_release:bool,no
 
 /// Internal caller owns the exact build lock for the entire operation. Public
 /// batch/recovery entrypoints retain that ownership after waiter cancellation.
-pub(crate) async fn compact_preparation_locked(journal:&HostJournal,record:IvyJson,trusted:bool,measure:bool,node:&NodeRuntime)->IvyResult<IvyJson>{
+pub(crate) async fn compact_preparation_locked(journal:&HostJournal,record:IvyJson,trusted:bool,measure:bool,node:Option<&NodeRuntime>)->IvyResult<IvyJson>{
     let host=journal.config().await?;let staging=path_field(&host,"stagingRoot")?;let id=record.required("preparationId")?.as_str()?;
     let root=root_of(&staging,&id);let boundary=checked_boundary(staging.clone(),root.clone()).await?;let phase=record.required("phase")?.as_str()?;
     let candidate=record.get("candidate").filter(|v|!v.is_null());
@@ -204,7 +204,7 @@ pub(crate) async fn compact_preparation_locked(journal:&HostJournal,record:IvyJs
     Ok(IvyJson::object([("preparationId",id.into()),("action",if recovered||phase=="unknown"||phase=="publishing"{"recovered"}else{"compacted"}.into()),("candidateId",candidate.required("candidateId")?.clone()),("reclaimedBytes",IvyJson::Number(payloads.iter().map(|(_,_,bytes)|bytes).sum())),("code",IvyJson::Null)]))
 }
 
-pub(crate) async fn recover_prepared_build_locked(journal:&HostJournal,build_id:&str,node:&NodeRuntime)->IvyResult<Option<IvyJson>>{
+pub(crate) async fn recover_prepared_build_locked(journal:&HostJournal,build_id:&str,node:Option<&NodeRuntime>)->IvyResult<Option<IvyJson>>{
     let host=journal.config().await?;let staging=path_field(&host,"stagingRoot")?;let root=root_of(&staging,&preparation_id_for_build(build_id)?);
     if !exists(root.clone()).await?{return Ok(None)}
     let Some(record)=record_at(staging.clone(),root).await? else{return Ok(None)};
@@ -224,23 +224,25 @@ pub(crate) async fn recover_prepared_build_locked(journal:&HostJournal,build_id:
     }
 }
 /// Reconcile exactly one build, never a scan of retained preparation history.
-pub async fn recover_prepared_build(journal:HostJournal,build_id:String,node:NodeRuntime)->IvyResult<Option<IvyJson>>{
+pub async fn recover_prepared_build(journal:HostJournal,build_id:String,node:impl Into<Option<NodeRuntime>>)->IvyResult<Option<IvyJson>>{
+    let node = node.into();
     preparation_id_for_build(&build_id)?;
     internal(tokio::spawn(async move{
         let host=journal.config().await?;let lock=ExecutorLock::acquire(joined(&joined(&path_field(&host,"stagingRoot")?,"build-locks"),&build_id[7..]),false).await?;
-        let result=recover_prepared_build_locked(&journal,&build_id,&node).await;lock.close().await?;result
+        let result=recover_prepared_build_locked(&journal,&build_id,node.as_ref()).await;lock.close().await?;result
     }).await)?
 }
 /// Own locks and journal until every selected build has finished, even if the
 /// caller disconnects. Invalid/unresolved payloads remain visible and retained.
-pub async fn compact_preparations(host:IvyJson,only_build_id:Option<String>,measure_bytes:bool,node:NodeRuntime)->IvyResult<IvyJson>{
+pub async fn compact_preparations(host:IvyJson,only_build_id:Option<String>,measure_bytes:bool,node:impl Into<Option<NodeRuntime>>)->IvyResult<IvyJson>{
+    let node = node.into();
     internal(tokio::spawn(async move{
         let journal=HostJournal::open(host.clone()).await?;
-        let result=compact_all(&host,&journal,only_build_id,measure_bytes,&node).await;
+        let result=compact_all(&host,&journal,only_build_id,measure_bytes,node.as_ref()).await;
         journal.close().await?;result
     }).await)?
 }
-async fn compact_all(host:&IvyJson,journal:&HostJournal,only:Option<String>,measure:bool,node:&NodeRuntime)->IvyResult<IvyJson>{
+async fn compact_all(host:&IvyJson,journal:&HostJournal,only:Option<String>,measure:bool,node:Option<&NodeRuntime>)->IvyResult<IvyJson>{
     let staging=path_field(host,"stagingRoot")?;let mut entries=Vec::new();
     for root in roots(staging.clone()).await?{
         let id=root.file_name().and_then(|v|v.to_str()).ok_or_else(IvyError::internal)?[6..].to_owned();

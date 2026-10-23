@@ -289,12 +289,12 @@ fn runtime(node: &Path, inputs: &Inputs) -> PreparationRuntime {
         }
     });
     PreparationRuntime {
-        node: NodeRuntime {
+        node: Some(NodeRuntime {
             executable: node.into(),
             version: "24.18.0".into(),
-        },
+        }),
         compare,
-        imports: Arc::new(|_, _| panic!("app must not invoke the service parser")),
+        imports: Some(Arc::new(|_, _| panic!("app must not invoke the service parser"))),
         http: PortableHttp::new(reqwest::Client::builder().no_proxy()).unwrap(),
     }
 }
@@ -408,14 +408,14 @@ fn service_runtime(node: &Path, input: &Inputs) -> PreparationRuntime {
     let mut runtime = runtime(node, input);
     // Exact fixture source bindings only. Parser compatibility is covered by
     // the original TypeScript AST corpus; production must supply that binding.
-    runtime.imports = Arc::new(|_, source| {
+    runtime.imports = Some(Arc::new(|_, source| {
         if source == &JsString::from(SERVICE_MAIN) {
             Ok(vec!["fixture-dep".into()])
         } else {
             assert_eq!(source, &JsString::from(SERVICE_HEALTH));
             Ok(Vec::new())
         }
-    });
+    }));
     runtime
 }
 fn advance_service_plan(input: &Inputs) {
@@ -481,7 +481,6 @@ async fn native_activation_runtime_prepares_real_captured_service_and_registers_
     .unwrap();
     let preparation = service_runtime(&tools.0, &input);
     let inspector = NativeOfflineHiveInspector::new(
-        preparation.node.clone(),
         tools.2.clone(),
         NativeHelperLayout::Target,
     );
@@ -599,7 +598,7 @@ async fn parser_failure_keeps_raw_error_code_message_progress_and_replaces_only_
         .with_outcome(Outcome::Unknown)
         .with_details("old details".into());
     let mut runtime = service_runtime(&tools.0, &actual);
-    runtime.imports = Arc::new(move |_, _| Err(failure.clone()));
+    runtime.imports = Some(Arc::new(move |_, _| Err(failure.clone())));
     let error = prepare::prepare_candidate(
         actual.snapshot.clone(),
         "fixture".into(),

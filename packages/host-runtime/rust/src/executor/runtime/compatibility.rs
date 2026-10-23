@@ -47,7 +47,7 @@ impl NativeActivationRuntime {
     fn runtime_requirements(&self, manifest: &IvyJson) -> IvyResult<()> {
         artifact::verify_runtime_requirements(
             manifest,
-            Some(&self.preparation.node.version),
+            self.preparation.node.as_ref().map(|node| node.version.as_str()),
             &self.platform,
             match std::env::consts::ARCH {
                 "x86_64" => "x64",

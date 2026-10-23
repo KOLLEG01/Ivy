@@ -1,6 +1,6 @@
 //! Pinned optional npm platform payloads; system tar owns archive extraction.
 use crate::{IvyError, IvyJson, IvyResult, config, filesystem, node_path::{self, Style}, process::{self, LaunchContext}};
-use ivy_contracts::{JsString, json};
+use ivy_contracts::JsString;
 use sha2::{Digest, Sha512};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use std::{collections::{BTreeMap, BTreeSet}, fs, io::Write, path::{Path, PathBuf}};
@@ -75,8 +75,15 @@ pub async fn portable_dependency_plan(lock: IvyJson, selected: Vec<JsString>, ar
 /// that header even when Content-Encoding changes the resulting byte length.
 pub fn check_portable_response(successful: bool, declared_length: Option<&str>) -> IvyResult<()> {
     require(successful, "service_unavailable", "Pinned portable runtime dependency is unavailable.")?;
-    let declared = json::number_from_string(&declared_length.unwrap_or("0").into());
-    require(declared == 0.0 || declared.is_nan() || declared <= MAXIMUM_PORTABLE_PACKAGE_BYTES as f64,
+    let declared = match declared_length {
+        None => 0,
+        Some(value) => {
+            let value = value.trim();
+            require(!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()), "artifact_changed", "Portable dependency Content-Length must be decimal bytes.")?;
+            value.parse::<u64>().map_err(|_| IvyError::new("content_too_large", "Portable runtime dependency exceeds its package limit."))?
+        }
+    };
+    require(declared <= MAXIMUM_PORTABLE_PACKAGE_BYTES as u64,
         "content_too_large", "Portable runtime dependency exceeds its package limit.")
 }
 pub fn verify_portable_bytes(value: &PortableDependency, bytes: &[u8]) -> IvyResult<()> {

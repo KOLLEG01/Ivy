@@ -24,9 +24,9 @@ impl PackageClient for UnusedPackages {
 }
 fn preparation() -> PreparationRuntime {
     PreparationRuntime {
-        node: fixture_node("24.18.0"),
+        node: Some(fixture_node("24.18.0")),
         compare: Arc::new(|_, _| panic!("No artifact inventory is admitted")),
-        imports: Arc::new(|_, _| panic!("No preparation/parser work is admitted")),
+        imports: Some(Arc::new(|_, _| panic!("No preparation/parser work is admitted"))),
         // Unused explicit test input; this does not qualify a transport profile.
         http: PortableHttp::new(Default::default()).unwrap(),
     }
@@ -144,8 +144,8 @@ async fn native_factory_retains_configured_identity_credentials_and_explicit_bin
         if let Some(runtime) = bindings.packages {
             assert!(Arc::ptr_eq(&runtime.client, &packages));
             assert!(Arc::ptr_eq(&runtime.compare, &compare));
-            assert_eq!(runtime.node.executable, node.executable);
-            assert_eq!(runtime.node.version, node.version);
+            assert_eq!(runtime.node.as_ref().unwrap().executable, node.as_ref().unwrap().executable);
+            assert_eq!(runtime.node.as_ref().unwrap().version, node.as_ref().unwrap().version);
             assert_eq!(runtime.distribution, f.0.join("retained-current-package"));
             assert_eq!(runtime.job_launcher, f.0.join("unused-ivy-job"));
             let error = runtime

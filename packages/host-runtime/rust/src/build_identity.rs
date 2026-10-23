@@ -1,8 +1,4 @@
-use ivy_contracts::{
-    IvyError, IvyJson, IvyResult,
-    hash::digest,
-    json::{parse, try_js_string},
-};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, hash::digest, json::parse};
 use std::{
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
@@ -19,11 +15,20 @@ pub fn build_identity(root: &Path) -> IvyResult<BuildIdentity> {
     let bytes = std::fs::read(root.join("package.json")).map_err(|_| IvyError::internal())?;
     let package =
         parse(&String::from_utf8_lossy(&bytes), usize::MAX).map_err(|_| IvyError::internal())?;
-    // JSON.parse accepts primitive roots; only null forbids property access.
-    if package.is_null() {
+    if package.as_object().is_none() {
         return Err(IvyError::internal());
     }
     let version = package.get("version").cloned();
+    let version_text = version
+        .as_ref()
+        .map(|version| {
+            version
+                .as_js_string()
+                .map(|value| String::from_utf16_lossy(&value.0))
+                .ok_or_else(IvyError::internal)
+        })
+        .transpose()?
+        .unwrap_or_default();
     let supplied = std::env::var("IVY_BUILD_ID").ok();
     let build_id = match supplied {
         Some(id)
@@ -36,7 +41,7 @@ pub fn build_identity(root: &Path) -> IvyResult<BuildIdentity> {
             id
         }
         _ => {
-            let version = version_text(version.as_ref())?;
+            let version = version_text;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_err(|_| IvyError::internal())?
@@ -60,11 +65,4 @@ impl BuildIdentity {
         fields.push(("buildId", self.build_id.clone().into()));
         IvyJson::object(fields)
     }
-}
-
-fn version_text(version: Option<&IvyJson>) -> IvyResult<String> {
-    let Some(version) = version else {
-        return Ok("undefined".into());
-    };
-    Ok(String::from_utf16_lossy(&try_js_string(version)?.0))
 }

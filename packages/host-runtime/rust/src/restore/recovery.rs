@@ -139,8 +139,8 @@ pub async fn relocate_projects(
                     .ok_or_else(IvyError::internal)?;
                 let value = |instance: &J| -> IvyResult<JsString> {
                     match instance.required("settings")?.get("internalProjectRoot") {
-                        Some(v) => json::try_js_string(v),
-                        None => Ok("undefined".into()),
+                        Some(v) => text(v),
+                        None => Err(IvyError::new("backup_invalid", "Retained projects require an internal project root.")),
                     }
                 };
                 let before = value(prior)?;

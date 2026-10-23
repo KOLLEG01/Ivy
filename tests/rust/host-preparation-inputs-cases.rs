@@ -277,7 +277,7 @@ fn component_and_validated_plan_gates_keep_the_original_preflight_rules() {
 }
 
 #[tokio::test]
-async fn package_manager_keeps_original_coercion_and_accepted_raw_values() {
+async fn package_manager_accepts_only_pinned_string_values() {
     let values = vec![
         "npm@1.2.3".into(),
         "npm@01.002.3".into(),
@@ -303,11 +303,13 @@ async fn package_manager_keeps_original_coercion_and_accepted_raw_values() {
     ];
     for value in values {
         let fixture = Fixture::new();
-        fixture.package(manager(value));
-        compare(
-            input("manager", &fixture),
-            inputs::preparation_package_manager(fixture.0.clone()).await,
-        );
+        fixture.package(manager(value.clone()));
+        let actual = inputs::preparation_package_manager(fixture.0.clone()).await;
+        if matches!(value.as_str().as_deref(), Ok("npm@1.2.3" | "npm@01.002.3")) {
+            assert_eq!(actual.unwrap(), value);
+        } else {
+            assert_eq!(actual.unwrap_err().code, "invalid_arguments");
+        }
     }
     for value in [
         IvyJson::Null,

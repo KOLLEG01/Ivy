@@ -10,8 +10,9 @@ pub use systemd::SystemdBootstrapOs;
 pub fn bootstrap_os(
     distribution: PathBuf,
     job_launcher: PathBuf,
-    node: crate::node_runtime::NodeRuntime,
+    node: impl Into<Option<crate::node_runtime::NodeRuntime>>,
 ) -> IvyResult<std::sync::Arc<dyn BootstrapOs>> {
+    let node = node.into();
     if cfg!(windows) {
         Ok(std::sync::Arc::new(WindowsBootstrapOs::new(
             distribution,

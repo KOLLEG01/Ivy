@@ -463,10 +463,7 @@ fn field<'a>(value: &'a IvyJson, key: &str) -> &'a IvyJson {
     value.get(key).unwrap_or(&NULL)
 }
 fn date(value: &IvyJson, key: &str) -> IvyResult<f64> {
-    value
-        .get(key)
-        .map(|value| json::try_js_string(value).map(|text| parse_date(&text)))
-        .unwrap_or(Ok(f64::NAN))
+    Ok(value.get(key).and_then(IvyJson::as_js_string).map_or(f64::NAN, parse_date))
 }
 fn truthy(value: &IvyJson) -> bool {
     match value {

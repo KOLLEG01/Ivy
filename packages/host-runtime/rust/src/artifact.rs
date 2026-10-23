@@ -230,12 +230,12 @@ pub async fn verify_launch_candidate_with_manifest(
         .await,
     )?
 }
-pub async fn verify_candidate(
+pub async fn verify_candidate<'a>(
     candidate: IvyJson,
     artifact_root: impl Into<PathBuf>,
-    node: &NodeRuntime,
+    node: impl Into<Option<&'a NodeRuntime>>,
 ) -> IvyResult<IvyJson> {
-    verify_candidate_for_runtime(candidate, artifact_root.into(), Some(node.version.clone())).await
+    verify_candidate_for_runtime(candidate, artifact_root.into(), node.into().map(|node| node.version.clone())).await
 }
 /// Native source plans do not require Node discovery for artifact admission.
 pub async fn verify_native_candidate(

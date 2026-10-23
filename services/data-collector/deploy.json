@@ -27,20 +27,11 @@
     {
       "executable": "node",
       "args": [
-        "tools/build/run-npm.mjs",
-        "ci"
-      ],
-      "timeoutMs": 600000
-    },
-    {
-      "executable": "node",
-      "args": [
-        "--max-old-space-size=448",
-        "tools/build/build-deployment.mjs",
+        "tools/build/build-native-deployment.mjs",
         "--component",
         "data-collector"
       ],
-      "timeoutMs": 300000
+      "timeoutMs": 3600000
     }
   ],
   "checks": [],

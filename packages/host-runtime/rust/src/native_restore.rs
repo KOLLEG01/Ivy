@@ -195,6 +195,20 @@ fn digest(db: &Connection, inverse: &Replacements) -> IvyResult<String> {
             .iter()
             .map(|name| (*name).into())
             .collect();
+        // The retained v1 digest puts canonical unsigned column labels first.
+        // Encode that storage format directly, without a JSON object traversal.
+        let mut columns: Vec<_> = (0..names.len()).collect();
+        columns.sort_by_key(|&index| {
+            let number = names[index].to_utf8().ok().and_then(|name| {
+                name.parse::<u32>()
+                    .ok()
+                    .filter(|number| *number < u32::MAX && number.to_string() == name)
+            });
+            match number {
+                Some(number) => (0, number, index),
+                None => (1, 0, index),
+            }
+        });
         let mut rows = sqlite(statement.query([]))?;
         let mut count = 0;
         while let Some(row) = sqlite(rows.next())? {
@@ -204,8 +218,9 @@ fn digest(db: &Connection, inverse: &Replacements) -> IvyResult<String> {
                 "limit_exceeded",
                 "Native recovery table exceeds its bounded row workload.",
             )?;
-            let mut object = IvyJson::object([] as [(&str, IvyJson); 0]);
-            for (index, name) in names.iter().enumerate() {
+            let mut values = Vec::with_capacity(columns.len());
+            for &index in &columns {
+                let name = &names[index];
                 let (kind, value) = match sqlite(row.get_ref(index))? {
                     ValueRef::Null => ("null", IvyJson::Null),
                     ValueRef::Integer(value) => ("bigint", value.to_string().into()),
@@ -222,18 +237,13 @@ fn digest(db: &Connection, inverse: &Replacements) -> IvyResult<String> {
                         ("string", IvyJson::String(value))
                     }
                 };
-                object.insert(
-                    name.clone(),
-                    IvyJson::Array(vec![IvyJson::String(name.clone()), kind.into(), value]),
-                );
+                values.push(IvyJson::Array(vec![
+                    IvyJson::String(name.clone()),
+                    kind.into(),
+                    value,
+                ]));
             }
-            // Object.entries enumerates integer-index column names first.
-            let values = IvyJson::Array(
-                json::object_entries(&object)
-                    .into_iter()
-                    .map(|(_, value)| value.clone())
-                    .collect(),
-            );
+            let values = IvyJson::Array(values);
             hash.update(json::canonical(&values, MANAGEMENT_FRAME_BYTES)?);
             hash.update(b"\n");
         }
