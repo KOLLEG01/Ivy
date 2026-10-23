@@ -11,7 +11,7 @@ pub struct FileCommand {
     pub args: Vec<OsString>,
     pub cwd: Option<PathBuf>,
     pub timeout_ms: u32,
-    /// Each stream has its own limit, as in Node execFile.
+    /// Each decoded UTF-8 stream has its own byte limit.
     pub maximum_buffer_bytes: usize,
 }
 #[derive(Default)]
@@ -47,7 +47,7 @@ impl SpawnOptions {
     }
 }
 
-/// Node executable/cwd lookup and exact argv share execFile's resolver. All three
+/// Native executable/cwd lookup and exact argv share the file resolver. All three
 /// streams are actual null devices, so no pipe/capture or stdin writer is created.
 /// The caller owns its deadline/domain errors; retain OwnedProcess and await its
 /// completion/stop plus owned_process_tree_stopped before claiming retirement.
@@ -121,36 +121,56 @@ async fn execute(command: FileCommand, bootstrap_root: PathBuf, options: FileOpt
     tokio::spawn(run(command, bootstrap_root, options, input)).await.map_err(|_| IvyError::internal())
 }
 
-/// Source's original spawnSync closes stdin and counts raw bytes across both
-/// streams. Keep that private policy separate from public execFile semantics.
+/// Source tools close stdin and count raw bytes across both streams.
+/// Public exec-file capture instead limits each decoded UTF-8 stream.
 pub(crate) async fn source_output(command: FileCommand, bootstrap_root: PathBuf) -> IvyResult<FileResult> {
     Ok(tokio::spawn(run(command, bootstrap_root, FileOptions::default(), Input::Closed)).await.map_err(|_| IvyError::internal())?.result)
 }
 
-async fn collect<R: AsyncRead + Unpin>(mut pipe: R, maximum: usize, stream: OutputStream, overflow: mpsc::Sender<OutputStream>, stop_capture: CancellationToken, text: Arc<Mutex<Vec<u16>>>, combined: Option<Arc<std::sync::atomic::AtomicUsize>>) -> std::io::Result<()> {
+async fn collect<R: AsyncRead + Unpin>(
+    mut pipe: R,
+    maximum: usize,
+    stream: OutputStream,
+    overflow: mpsc::Sender<OutputStream>,
+    stop_capture: CancellationToken,
+    text: Arc<Mutex<String>>,
+    combined: Option<Arc<std::sync::atomic::AtomicUsize>>,
+) -> std::io::Result<()> {
     let mut decoder = Utf8Decoder::preserving_bom();
-    let mut length = 0;
     let mut bytes = vec![0u8; 65536];
     loop {
         let read = pipe.read(&mut bytes).await?;
-        let chunk = decoder.decode(&bytes[..read], read == 0);
         if !stop_capture.is_cancelled() {
-            let mut text=text.lock().unwrap_or_else(|p|p.into_inner());
-            if let Some(total) = &combined {
-                if total.fetch_add(read, std::sync::atomic::Ordering::Relaxed).saturating_add(read) > maximum {
-                    stop_capture.cancel(); let _ = overflow.try_send(stream);
-                    continue;
+            if combined.as_ref().is_some_and(|total| {
+                total
+                    .fetch_add(read, std::sync::atomic::Ordering::Relaxed)
+                    .saturating_add(read)
+                    > maximum
+            }) {
+                stop_capture.cancel();
+                let _ = overflow.try_send(stream);
+            } else {
+                let chunk = decoder.decode_text(&bytes[..read], read == 0);
+                let mut text = text.lock().unwrap_or_else(|p| p.into_inner());
+                let available = if combined.is_some() {
+                    chunk.len()
+                } else {
+                    maximum.saturating_sub(text.len())
+                };
+                let mut end = available.min(chunk.len());
+                while !chunk.is_char_boundary(end) {
+                    end -= 1;
+                }
+                text.push_str(&chunk[..end]);
+                if chunk.len() > available {
+                    stop_capture.cancel();
+                    let _ = overflow.try_send(stream);
                 }
             }
-            let chunk_bytes = if combined.is_some() { 0 } else { String::from_utf16_lossy(&chunk).len() };
-            if length + chunk_bytes > maximum {
-                // execFile counts encoded bytes but slices the overflowing
-                // decoded chunk by UTF-16 units, including a split surrogate.
-                text.extend_from_slice(&chunk[..chunk.len().min(maximum - length)]);
-                stop_capture.cancel(); let _ = overflow.try_send(stream);
-            } else { length += chunk_bytes; text.extend(chunk); }
         }
-        if read == 0 { break; }
+        if read == 0 {
+            break;
+        }
     }
     Ok(())
 }
@@ -180,7 +200,7 @@ async fn run(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions
     };
     let (overflow, mut exceeded) = mpsc::channel(2);
     let stop_capture = CancellationToken::new();
-    let out=Arc::new(Mutex::new(Vec::new()));let err=Arc::new(Mutex::new(Vec::new()));
+    let out=Arc::new(Mutex::new(String::new()));let err=Arc::new(Mutex::new(String::new()));
     let combined = synchronous_input.then(|| Arc::new(std::sync::atomic::AtomicUsize::new(0)));
     let mut stdout = tokio::spawn(collect(child.stdout.take().unwrap(), command.maximum_buffer_bytes, OutputStream::Stdout, overflow.clone(), stop_capture.clone(),out.clone(),combined.clone()));
     let mut stderr = tokio::spawn(collect(child.stderr.take().unwrap(), command.maximum_buffer_bytes, OutputStream::Stderr, overflow.clone(), stop_capture.clone(),err.clone(),combined));
@@ -200,8 +220,8 @@ async fn run(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions
         stdout.abort();stderr.abort();failure=Some(FileFailure::Unknown);
     }
     if let Some(writer) = writer { writer.abort(); let _ = writer.await; }
-    let stdout=JsString(std::mem::take(&mut *out.lock().unwrap_or_else(|p|p.into_inner())));
-    let stderr=JsString(std::mem::take(&mut *err.lock().unwrap_or_else(|p|p.into_inner())));
+    let stdout=std::mem::take(&mut *out.lock().unwrap_or_else(|p|p.into_inner())).into();
+    let stderr=std::mem::take(&mut *err.lock().unwrap_or_else(|p|p.into_inner())).into();
     if failure.is_none() { failure = exceeded.try_recv().ok().map(FileFailure::MaxBuffer); }
     let Some(result) = result else { return FileResult { stdout, stderr, exit_code: None, signal: None, failure: Some(FileFailure::Unknown) }.into() };
     if result.error_code.is_some() { failure = Some(FileFailure::Unknown); }
@@ -244,44 +264,82 @@ fn resolve_executable(file: &std::ffi::OsStr, cwd: &Path, environment: &BTreeMap
 }
 
 #[cfg(windows)]
-fn resolve_executable(file: &std::ffi::OsStr, cwd: &Path, environment: &BTreeMap<OsString, OsString>) -> std::io::Result<PathBuf> {
-    use std::os::windows::ffi::OsStrExt;
-    let file: Vec<u16> = file.encode_wide().collect();
-    if file.is_empty() || file == [46] || file.contains(&0) { return Err(std::io::Error::from(std::io::ErrorKind::NotFound)) }
-    let lower=String::from_utf16_lossy(&file).trim_end_matches([' ','.']).to_ascii_lowercase();
-    if lower.ends_with(".cmd") || lower.ends_with(".bat") { return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)) }
-    let separator = |c: &u16| matches!(*c, 47 | 92 | 58);
-    let start = file.iter().rposition(separator).map_or(0, |i|i+1);
-    let name = &file[start..];
-    let extension = name.iter().position(|c|*c==46).is_some_and(|i|i+1<name.len());
-    let context = node_path::Context { cwd: node_path::from_native(cwd), ..node_path::Context::current()? };
-    let candidate = |directory: &[u16], exact: bool| -> Option<PathBuf> {
-        let mut parts = directory.to_vec();
-        if !parts.is_empty() && !parts.last().is_some_and(separator) { parts.push(92); }
-        parts.extend_from_slice(name);
-        let test = |units: Vec<u16>| { let path = node_path::to_native(&context.resolve(&[JsString(units)])); path.is_file().then_some(path) };
-        if exact { if let Some(found) = test(parts.clone()) { return Some(found) } }
-        if parts.last() != Some(&46) { parts.push(46); }
-        for extension in ["com", "exe"] { let mut value = parts.clone();value.extend(extension.encode_utf16());if let Some(found) = test(value) { return Some(found) } }
+fn resolve_executable(
+    file: &std::ffi::OsStr,
+    cwd: &Path,
+    environment: &BTreeMap<OsString, OsString>,
+) -> std::io::Result<PathBuf> {
+    use std::{ffi::OsStr, io, os::windows::ffi::OsStrExt};
+
+    let bytes = file.as_encoded_bytes();
+    if file.is_empty() || file == "." || bytes.contains(&0) {
+        return Err(io::ErrorKind::NotFound.into());
+    }
+    let end = bytes
+        .iter()
+        .rposition(|byte| !matches!(*byte, b' ' | b'.'))
+        .map_or(0, |position| position + 1);
+    if [b".cmd", b".bat"].iter().any(|suffix| {
+        bytes[..end]
+            .get(end.saturating_sub(suffix.len())..)
+            .is_some_and(|value| value.eq_ignore_ascii_case(*suffix))
+    }) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+
+    let name = Path::new(file)
+        .file_name()
+        .unwrap_or_default()
+        .as_encoded_bytes();
+    let exact = name
+        .iter()
+        .position(|byte| *byte == b'.')
+        .is_some_and(|position| position + 1 < name.len());
+    let candidate = |path: PathBuf| -> Option<PathBuf> {
+        let path = std::path::absolute(path).ok()?;
+        if exact && path.is_file() {
+            return Some(path);
+        }
+        for extension in ["com", "exe"] {
+            let mut name = path.as_os_str().to_os_string();
+            if !name.as_encoded_bytes().ends_with(b".") {
+                name.push(".");
+            }
+            name.push(extension);
+            let path = PathBuf::from(name);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
         None
     };
-    if start != 0 { return candidate(&file[..start], extension).ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound)) }
-    // This API observes the executing process's NoDefaultCurrentDirectory...,
-    // as does libuv's NeedCurrentDirectoryForExePathW, not a child-env override.
-    #[link(name="kernel32")] unsafe extern "system" { fn NeedCurrentDirectoryForExePathW(name: *const u16) -> i32; }
-    if unsafe { NeedCurrentDirectoryForExePathW([0u16].as_ptr()) } != 0 { if let Some(found)=candidate(&[],extension) { return Ok(found) } }
-    let path = environment.iter().find(|(key,_)|key.to_string_lossy().eq_ignore_ascii_case("PATH")).map(|(_,value)|value.encode_wide().collect::<Vec<_>>()).unwrap_or_default();
-    let mut start=0;
-    while start < path.len() {
-        if path[start]==59 { start+=1;continue; }
-        let mut end=start;
-        if matches!(path[start],34|39) { end=start+1;while end<path.len() && path[end]!=path[start] { end+=1; } }
-        while end<path.len() && path[end]!=59 { end+=1; }
-        let mut directory=&path[start..end];
-        if directory.first().is_some_and(|c|matches!(*c,34|39)) { directory=&directory[1..]; }
-        if directory.last().is_some_and(|c|matches!(*c,34|39)) { directory=&directory[..directory.len()-1]; }
-        if !directory.is_empty() { if let Some(found)=candidate(directory,extension) { return Ok(found) } }
-        start=end.saturating_add(1);
+    if bytes
+        .iter()
+        .any(|byte| matches!(*byte, b'/' | b'\\' | b':'))
+    {
+        return candidate(cwd.join(file)).ok_or_else(|| io::ErrorKind::NotFound.into());
     }
-    Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn NeedCurrentDirectoryForExePathW(name: *const u16) -> i32;
+    }
+    let filename: Vec<u16> = file.encode_wide().chain([0]).collect();
+    // SAFETY: the checked filename is NUL-terminated and lives through the call.
+    // The executing account's Windows policy controls current-directory search.
+    if unsafe { NeedCurrentDirectoryForExePathW(filename.as_ptr()) } != 0 {
+        if let Some(found) = candidate(cwd.join(file)) {
+            return Ok(found);
+        }
+    }
+    let path = environment
+        .iter()
+        .find(|(key, _)| key.as_encoded_bytes().eq_ignore_ascii_case(b"PATH"))
+        .map_or(OsStr::new(""), |(_, value)| value.as_os_str());
+    for directory in std::env::split_paths(path).filter(|path| !path.as_os_str().is_empty()) {
+        if let Some(found) = candidate(cwd.join(directory).join(file)) {
+            return Ok(found);
+        }
+    }
+    Err(io::ErrorKind::NotFound.into())
 }

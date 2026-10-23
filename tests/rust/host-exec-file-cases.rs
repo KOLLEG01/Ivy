@@ -51,17 +51,135 @@ fn private_job_argv0_is_lossless_optional_and_rejects_missing_values() {
 }
 
 #[tokio::test]
-async fn exec_file_matches_node_utf8_arguments_environment_exit_and_buffer_failures() {
-    for mode in ["text","args","exit","missing","stdout","stderr"] {
-        let mut command=command(if matches!(mode,"stdout"|"stderr") {"large"}else{mode});
-        if matches!(mode,"stdout"|"stderr") {command.args.push(mode.into());command.maximum_buffer_bytes=1024;}
-        if mode=="missing" {command.executable=std::env::temp_dir().join("ivy-missing-executable-98713").into_os_string();}
-        if mode=="args" {command.args.extend(["".into(),"spaces and quotes\"".into(),"trailing\\".into(),"€😀".into()]);}
-        let mut environment:BTreeMap<_,_>=std::env::vars_os().collect();environment.insert("IVY_EXEC_FILE_VALUE".into(),"inherited-exact-value".into());
-        let expected=oracle(&command,Some(&environment));let mut options=options();options.environment=Some(environment);
-        let actual=run(command,options).await;
-        assert_eq!(json::canonical(&project(&actual),usize::MAX).unwrap(),json::canonical(&expected,usize::MAX).unwrap(),"{mode}");
-        if mode=="exit" {assert_eq!(actual.exit_code,Some(7));}
+async fn exec_file_preserves_utf8_arguments_environment_exit_and_buffer_limits() {
+    for mode in ["text", "args", "exit", "missing", "stdout", "stderr"] {
+        let mut command = command(if matches!(mode, "stdout" | "stderr") {
+            "large"
+        } else {
+            mode
+        });
+        if matches!(mode, "stdout" | "stderr") {
+            command.args.push(mode.into());
+            command.maximum_buffer_bytes = 1024;
+        }
+        if mode == "missing" {
+            command.executable = std::env::temp_dir()
+                .join("ivy-missing-executable-98713")
+                .into_os_string();
+        }
+        if mode == "args" {
+            command.args.extend([
+                "".into(),
+                "spaces and quotes\"".into(),
+                "trailing\\".into(),
+                "€😀".into(),
+            ]);
+        }
+        let mut environment: BTreeMap<_, _> = std::env::vars_os().collect();
+        environment.insert("IVY_EXEC_FILE_VALUE".into(), "inherited-exact-value".into());
+        let mut launch = options();
+        launch.environment = Some(environment);
+        let actual = run(command, launch).await;
+        let (stdout, stderr, failure) = match mode {
+            "text" => ("\u{feff}😀€��".into(), "retained stderr".into(), None),
+            "args" => {
+                let args = IvyJson::object([
+                    (
+                        "args",
+                        IvyJson::Array(
+                            ["", "spaces and quotes\"", "trailing\\", "€😀"]
+                                .into_iter()
+                                .map(IvyJson::from)
+                                .collect(),
+                        ),
+                    ),
+                    ("cwd", os_json(std::env::current_dir().unwrap().as_os_str())),
+                    ("env", "inherited-exact-value".into()),
+                ]);
+                assert_eq!(
+                    json::parse(&String::from_utf16(&actual.stdout.0).unwrap(), usize::MAX)
+                        .unwrap(),
+                    args
+                );
+                (actual.stdout.clone(), "".into(), None)
+            }
+            "exit" => (
+                "partial stdout".into(),
+                "partial stderr".into(),
+                Some(FileFailure::Exit),
+            ),
+            "missing" => ("".into(), "".into(), Some(FileFailure::Spawn)),
+            "stdout" => (
+                "x".repeat(1024).into(),
+                "".into(),
+                Some(FileFailure::MaxBuffer(OutputStream::Stdout)),
+            ),
+            "stderr" => (
+                "".into(),
+                "x".repeat(1024).into(),
+                Some(FileFailure::MaxBuffer(OutputStream::Stderr)),
+            ),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            (actual.stdout, actual.stderr, actual.failure),
+            (stdout, stderr, failure),
+            "{mode}"
+        );
+        if mode == "exit" {
+            assert_eq!(actual.exit_code, Some(7));
+        }
+    }
+
+    let cases: &[(&str, usize, &[u8], &str, bool)] = &[
+        ("both", 8, "😀€x".as_bytes(), "😀€x", false),
+        ("stdout", 7, "😀€x".as_bytes(), "😀€", true),
+        ("stdout", 3, "😀x".as_bytes(), "", true),
+        ("stderr", 5, "a😀€".as_bytes(), "a😀", true),
+        ("stdout", 0, b"", "", false),
+        ("stdout", 0, b"a", "", true),
+        ("stdout", 3, &[0xff, b'b'], "�", true),
+        ("stderr", 2, &[0xff], "", true),
+        ("stdout", 3, &[0xe2, 0x82], "�", false),
+        ("stdout", 2, &[0xe2, 0x82], "", true),
+        ("stdout", 3, "\u{feff}".as_bytes(), "\u{feff}", false),
+        ("stdout", 2, "\u{feff}".as_bytes(), "", true),
+        ("stdout", 4, "😀".as_bytes(), "😀", false),
+    ];
+    for &(stream, maximum, bytes, expected, exceeded) in cases {
+        let mut command = command("bytes");
+        command.args.extend([
+            stream.into(),
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+                .into(),
+        ]);
+        command.maximum_buffer_bytes = maximum;
+        let actual = run(command, options()).await;
+        let failure = exceeded.then_some(FileFailure::MaxBuffer(if stream == "stderr" {
+            OutputStream::Stderr
+        } else {
+            OutputStream::Stdout
+        }));
+        assert_eq!(actual.failure, failure, "{stream}/{maximum}/{bytes:?}");
+        let stdout = String::from_utf16(&actual.stdout.0).unwrap();
+        let stderr = String::from_utf16(&actual.stderr.0).unwrap();
+        assert_eq!(
+            stdout,
+            if stream == "stderr" { "" } else { expected },
+            "{stream}/{maximum}/{bytes:?}"
+        );
+        assert_eq!(
+            stderr,
+            if stream == "stdout" { "" } else { expected },
+            "{stream}/{maximum}/{bytes:?}"
+        );
+        assert!(stdout.len() <= maximum && stderr.len() <= maximum);
+        if !exceeded {
+            assert_eq!((actual.exit_code, actual.signal), (Some(0), None));
+        }
     }
 }
 
@@ -98,16 +216,215 @@ fn assert_retired(pid:u32) {
 
 #[tokio::test]
 async fn exec_file_searches_selected_cwd_path_and_ignores_windows_pathext() {
-    let root=super::Root::new();let directory=root.0.join("bin;quoted");std::fs::create_dir(&directory).unwrap();
-    let name=if cfg!(windows){"fixture-exec.exe"}else{"fixture-exec"};std::fs::copy(node(),directory.join(name)).unwrap();
-    let mut command=command("argv0");command.executable="fixture-exec".into();command.cwd=Some(root.0.clone());
-    let mut env:BTreeMap<_,_>=std::env::vars_os().filter(|(k,_)|!k.to_string_lossy().eq_ignore_ascii_case("PATH")).collect();
-    env.insert("PATH".into(),if cfg!(windows){format!("\"{}\"",directory.display()).into()}else{directory.as_os_str().to_owned()});
-    let expected=oracle(&command,Some(&env));let mut launch=options();launch.environment=Some(env);
-    let result=run(command,launch).await;assert_eq!(json::canonical(&project(&result),usize::MAX).unwrap(),json::canonical(&expected,usize::MAX).unwrap());
-    #[cfg(windows)] {
-        std::fs::write(root.0.join("script.cmd"),"@echo unsafe").unwrap();let mut command=self::command("args");command.executable=root.0.join("script.cmd").into_os_string();
-        assert_eq!(run(command,options()).await.failure,Some(FileFailure::Spawn));
+    #[cfg(windows)]
+    {
+        use std::{
+            fs,
+            os::windows::ffi::{OsStrExt, OsStringExt},
+            process::Command,
+        };
+        let root = super::Root::new();
+        let receiver = root.0.join("argv0-receiver.exe");
+        let build = Command::new("rustc")
+            .arg(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../tests/fixtures/host-argv0-receiver.rs"),
+            )
+            .arg("-o")
+            .arg(&receiver)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let units = |value: &std::ffi::OsStr| {
+            IvyJson::Array(
+                value
+                    .encode_wide()
+                    .map(|n| IvyJson::Number(n as f64))
+                    .collect(),
+            )
+        };
+        let tail: Vec<OsString> = vec![
+            "".into(),
+            "spaces and \"quotes\"".into(),
+            "trailing\\".into(),
+            "Grüße-🙂".into(),
+            OsString::from_wide(&[0xd800, 34, 32, 0xdc00, 92]),
+        ];
+        let mut environment: BTreeMap<_, _> = std::env::vars_os()
+            .filter(|(key, _)| {
+                ["SystemRoot", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR"]
+                    .iter()
+                    .any(|name| key.as_encoded_bytes().eq_ignore_ascii_case(name.as_bytes()))
+            })
+            .collect();
+        environment.insert("PATHEXT".into(), ".wrong".into());
+        for (index, prefix) in ["bin;quoted-", "bin-ending-"].iter().enumerate() {
+            let mut name: Vec<u16> = prefix.encode_utf16().chain([0xd800]).collect();
+            if index == 1 {
+                name.push(39);
+            }
+            let relative = PathBuf::from(OsString::from_wide(&name));
+            let directory = root.0.join(&relative);
+            fs::create_dir(&directory).unwrap();
+            fs::copy(&receiver, directory.join("fixture-exec.com")).unwrap();
+            fs::write(directory.join("fixture-exec.exe"), b"unselected executable").unwrap();
+            fs::copy(&receiver, directory.join("path-only.wrong")).unwrap();
+            for mode in [
+                "com",
+                "explicit-com",
+                "exe",
+                "relative-path",
+                "relative-executable",
+                "absolute",
+            ] {
+                if mode == "exe" {
+                    fs::remove_file(directory.join("fixture-exec.com")).unwrap();
+                    fs::copy(&receiver, directory.join("fixture-exec.exe")).unwrap();
+                }
+                let executable: OsString = match mode {
+                    "explicit-com" => "fixture-exec.com".into(),
+                    "relative-executable" => relative.join("fixture-exec.exe").into_os_string(),
+                    "absolute" => directory.join("fixture-exec.exe").into_os_string(),
+                    _ => "fixture-exec".into(),
+                };
+                let receipt = format!("args-{index}-{mode}.json");
+                let mut env = environment.clone();
+                let selected = if mode == "relative-path" {
+                    relative.clone()
+                } else {
+                    directory.clone()
+                };
+                env.insert(
+                    "Path".into(),
+                    std::env::join_paths([
+                        PathBuf::new(),
+                        root.0.join("missing"),
+                        selected,
+                        PathBuf::new(),
+                    ])
+                    .unwrap(),
+                );
+                env.insert("IVY_EXEC_FILE_ARGUMENTS".into(), receipt.clone().into());
+                let mut launch = options();
+                launch.environment = Some(env);
+                let result = run(
+                    FileCommand {
+                        executable: executable.clone(),
+                        args: tail.clone(),
+                        cwd: Some(root.0.clone()),
+                        timeout_ms: 10000,
+                        maximum_buffer_bytes: 65536,
+                    },
+                    launch,
+                )
+                .await;
+                assert_eq!(
+                    result.failure, None,
+                    "directory={index}, mode={mode}: {result:?}"
+                );
+                assert_eq!((result.exit_code, result.signal), (Some(0), None));
+                assert!(result.stdout.0.is_empty() && result.stderr.0.is_empty());
+                let actual = json::parse(
+                    &fs::read_to_string(root.0.join(receipt)).unwrap(),
+                    usize::MAX,
+                )
+                .unwrap();
+                let expected = IvyJson::Array(
+                    std::iter::once(units(&executable))
+                        .chain(tail.iter().map(|arg| units(arg)))
+                        .collect(),
+                );
+                assert_eq!(actual, expected, "directory={index}, mode={mode}");
+            }
+            for (failure_index, executable) in [
+                OsString::from("path-only"),
+                root.0
+                    .join("missing")
+                    .join("fixture-exec.exe")
+                    .into_os_string(),
+                OsString::from(""),
+                OsString::from("."),
+                OsString::from_wide(&[b'x' as u16, 0, b'y' as u16]),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let receipt = format!("unlaunched-{index}-{failure_index}.json");
+                let mut env = environment.clone();
+                env.insert("PATH".into(), std::env::join_paths([&directory]).unwrap());
+                env.insert("IVY_EXEC_FILE_ARGUMENTS".into(), receipt.clone().into());
+                let mut launch = options();
+                launch.environment = Some(env);
+                let result = run(
+                    FileCommand {
+                        executable,
+                        args: tail.clone(),
+                        cwd: Some(root.0.clone()),
+                        timeout_ms: 10000,
+                        maximum_buffer_bytes: 65536,
+                    },
+                    launch,
+                )
+                .await;
+                assert_eq!(
+                    result.failure,
+                    Some(FileFailure::Spawn),
+                    "{index}/{failure_index}"
+                );
+                assert!(!root.0.join(receipt).exists());
+            }
+        }
+        // Valid PE bytes under script names must still be refused before launch.
+        for (index, name) in ["script.cmd", "script.BAT", ".CMD", "script.cmd. "]
+            .iter()
+            .enumerate()
+        {
+            fs::copy(&receiver, root.0.join(name)).unwrap();
+            let receipt = format!("script-unlaunched-{index}.json");
+            let mut env = environment.clone();
+            env.insert("IVY_EXEC_FILE_ARGUMENTS".into(), receipt.clone().into());
+            let mut launch = options();
+            launch.environment = Some(env);
+            let result = run(
+                FileCommand {
+                    executable: root.0.join(name).into_os_string(),
+                    args: tail.clone(),
+                    cwd: Some(root.0.clone()),
+                    timeout_ms: 10000,
+                    maximum_buffer_bytes: 65536,
+                },
+                launch,
+            )
+            .await;
+            assert_eq!(result.failure, Some(FileFailure::Spawn), "{name}");
+            assert!(!root.0.join(receipt).exists());
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let root = super::Root::new();
+        let directory = root.0.join("bin;quoted");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::copy(node(), directory.join("fixture-exec")).unwrap();
+        let mut command = command("argv0");
+        command.executable = "fixture-exec".into();
+        command.cwd = Some(root.0.clone());
+        let mut env: BTreeMap<_, _> = std::env::vars_os()
+            .filter(|(k, _)| !k.to_string_lossy().eq_ignore_ascii_case("PATH"))
+            .collect();
+        env.insert("PATH".into(), directory.as_os_str().to_owned());
+        let expected = oracle(&command, Some(&env));
+        let mut launch = options();
+        launch.environment = Some(env);
+        let result = run(command, launch).await;
+        assert_eq!(
+            json::canonical(&project(&result), usize::MAX).unwrap(),
+            json::canonical(&expected, usize::MAX).unwrap()
+        );
     }
 }
 

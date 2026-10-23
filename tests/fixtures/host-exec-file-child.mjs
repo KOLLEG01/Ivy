@@ -10,6 +10,9 @@ switch(mode) {
   case 'argv0':process.stdout.write(process.argv0);break;
   case 'exit':process.stdout.write('partial stdout');process.stderr.write('partial stderr');process.exitCode=7;break;
   case 'large':process[args[0]].write('x'.repeat(8192));await new Promise(resolve=>setTimeout(resolve,30000));break;
+  case 'bytes':
+    for(const stream of args[0]==='both'?['stdout','stderr']:[args[0]])process[stream].write(Buffer.from(args[1],'hex'));
+    break;
   case 'closed':process.stdout.end();process.stderr.end();await new Promise(resolve=>setTimeout(resolve,30000));break;
   case 'stdin':readFileSync(0);process.stdout.write('got EOF');break;
   case 'sleep':process.stdout.write('ready');if(args[0])writeFileSync(args[0],String(process.pid));await new Promise(resolve=>setTimeout(resolve,30000));break;

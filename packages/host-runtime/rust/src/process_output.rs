@@ -2,6 +2,7 @@
 //! Raw protocol pipes bypass this module entirely.
 
 #[cfg(windows)]
+#[path = "process_output/windows_code_page.rs"]
 mod windows_code_page;
 #[cfg(windows)]
 pub use windows_code_page::{console_output_code_page, WindowsCodePageDecoder};
@@ -21,31 +22,42 @@ impl Default for Utf8Decoder {
 }
 
 impl Utf8Decoder {
-    /// Node StringDecoder retains the initial BOM; diagnostic TextDecoder does not.
-    pub fn preserving_bom() -> Self { Self { incomplete: Vec::new(), at_start: false } }
+    /// Tool output retains its leading BOM; diagnostic capture omits it.
+    pub fn preserving_bom() -> Self {
+        Self {
+            incomplete: Vec::new(),
+            at_start: false,
+        }
+    }
     pub fn decode(&mut self, bytes: &[u8], final_chunk: bool) -> Vec<u16> {
+        self.decode_text(bytes, final_chunk)
+            .encode_utf16()
+            .collect()
+    }
+
+    pub(crate) fn decode_text(&mut self, bytes: &[u8], final_chunk: bool) -> String {
         self.incomplete.extend_from_slice(bytes);
-        let mut result = Vec::new();
+        let mut result = String::new();
         let mut consumed = 0;
         while consumed < self.incomplete.len() {
             let remaining = &self.incomplete[consumed..];
             match std::str::from_utf8(remaining) {
                 Ok(text) => {
-                    result.extend(text.encode_utf16());
+                    result.push_str(text);
                     consumed = self.incomplete.len();
                 }
                 Err(error) => {
                     // valid_up_to is a UTF-8 character boundary.
                     let valid = std::str::from_utf8(&remaining[..error.valid_up_to()]).unwrap();
-                    result.extend(valid.encode_utf16());
+                    result.push_str(valid);
                     consumed += error.valid_up_to();
                     match error.error_len() {
                         Some(length) => {
-                            result.push(0xfffd);
+                            result.push(char::REPLACEMENT_CHARACTER);
                             consumed += length;
                         }
                         None if final_chunk => {
-                            result.push(0xfffd);
+                            result.push(char::REPLACEMENT_CHARACTER);
                             consumed = self.incomplete.len();
                         }
                         None => break,
@@ -54,11 +66,11 @@ impl Utf8Decoder {
             }
         }
         self.incomplete.drain(..consumed);
-        // TextDecoder's default consumes one initial BOM, including when its
-        // bytes span reads. Later U+FEFF characters remain ordinary text.
+        // Diagnostic capture consumes one initial BOM, including when its bytes
+        // span reads. Later U+FEFF characters remain ordinary text.
         if self.at_start && !result.is_empty() {
             self.at_start = false;
-            if result[0] == 0xfeff {
+            if result.starts_with('\u{feff}') {
                 result.remove(0);
             }
         }

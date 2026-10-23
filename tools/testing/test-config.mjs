@@ -482,6 +482,10 @@ export const rustTests = {
   'tests/rust/host-process-output.rs': { package: 'ivy-host-runtime', test: 'host-process-output' },
   'tests/rust/host-process-output-node.rs': { package: 'ivy-host-runtime', test: 'host-process-output-node' },
   'tests/rust/host-process.rs': { package: 'ivy-host-runtime', test: 'host-process' },
+  'tests/rust/host-exec-file-deadline.rs': {
+    package: 'ivy-host-runtime', lib: true, filter: 'exec_file::deadline_cases::',
+    prerequisites: [{ package: 'ivy-host-runtime', bin: 'ivy-job', platform: 'win32' }],
+  },
   'tests/rust/host-package-requirements.rs': { package: 'ivy-host-runtime', test: 'host-package-requirements' },
   'tests/rust/host-defaults.rs': { package: 'ivy-host-runtime', test: 'host-defaults' },
   'tests/rust/host-logs.rs': { package: 'ivy-host-runtime', test: 'host-logs' },
