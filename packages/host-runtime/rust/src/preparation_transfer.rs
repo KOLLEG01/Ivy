@@ -1,13 +1,10 @@
 //! Transfer a completed staged payload without deleting its cross-volume copy.
-use crate::{IvyError, IvyResult, filesystem, node_path, preparation_copy};
+use crate::{IvyError, IvyResult, filesystem, preparation_copy};
 use std::{
     fs, io,
     path::{Path, PathBuf},
 };
 
-fn fs_path(path: &Path) -> PathBuf {
-    node_path::filesystem_path(&node_path::from_native(path))
-}
 fn cross_device(error: &io::Error) -> bool {
     #[cfg(windows)]
     {
@@ -22,8 +19,7 @@ fn copy_payload(source: &Path, destination: &Path, directory: bool) -> io::Resul
     if directory {
         preparation_copy::entry(source, destination, false, true, &|_| Ok(true))
     } else {
-        // copyFile follows both paths and completes without copying an identical
-        // existing file. Avoid truncating that file through a native copy API.
+        // Follow both paths, but do not truncate a file through its own identity.
         let source_identity = filesystem::stat_identity(source)?;
         match filesystem::stat_identity(destination) {
             Ok(destination_identity)
@@ -37,7 +33,7 @@ fn copy_payload(source: &Path, destination: &Path, directory: bool) -> io::Resul
             Err(error) if error.kind() == io::ErrorKind::NotFound => (),
             Err(error) => return Err(error),
         }
-        fs::copy(fs_path(source), fs_path(destination))?;
+        fs::copy(source, destination)?;
         Ok(())
     }
 }

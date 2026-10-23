@@ -128,7 +128,7 @@ impl Context {
     }
 }
 
-fn relative(from: &Path, to: &Path) -> PathBuf {
+pub(crate) fn relative(from: &Path, to: &Path) -> PathBuf {
     let from: Vec<_> = from.components().collect();
     let dest: Vec<_> = to.components().collect();
     let common = from

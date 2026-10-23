@@ -1,48 +1,35 @@
-use ivy_contracts::json;
-use ivy_host_runtime::{
-    IvyJson, IvyResult, filesystem, node_path, preparation_transfer as payload,
-};
+use ivy_host_runtime::{IvyResult, filesystem, preparation_transfer as payload};
 use std::{
-    fs,
-    io::Write,
+    collections::BTreeMap,
+    fs, io,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
 };
-static CORPUS: Mutex<()> = Mutex::new(());
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
-        let temporary = std::env::temp_dir();
-        let root = temporary.join(format!(
-            "ivy-preparation-transfer-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+        let temporary = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let mut name = std::ffi::OsString::from(format!(
+            "ivy-preparation-transfer-{}-",
+            uuid::Uuid::new_v4()
         ));
+        name.push(opaque_name());
+        let root = temporary.join(name);
         assert_eq!(root.parent(), Some(temporary.as_path()));
         fs::create_dir(&root).unwrap();
         fs::create_dir(root.join("actual")).unwrap();
-        fs::create_dir(root.join("original")).unwrap();
         Self(root)
     }
-    fn root(&self, label: &str) -> PathBuf {
-        self.0.join(label)
+    fn root(&self) -> PathBuf {
+        self.0.join("actual")
     }
     fn write(&self, local: &str, bytes: &[u8]) {
-        for label in ["actual", "original"] {
-            let path = self.root(label).join(local);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, bytes).unwrap();
-        }
+        let path = self.root().join(local);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
     }
     fn mkdir(&self, local: &str) {
-        for label in ["actual", "original"] {
-            fs::create_dir_all(self.root(label).join(local)).unwrap();
-        }
+        fs::create_dir_all(self.root().join(local)).unwrap();
     }
 }
 impl Drop for Fixture {
@@ -56,7 +43,7 @@ impl Drop for Fixture {
                 if metadata.is_dir() {
                     if let Ok(entries) = fs::read_dir(path) {
                         for entry in entries.flatten() {
-                            writable(&entry.path())
+                            writable(&entry.path());
                         }
                     }
                 }
@@ -69,71 +56,72 @@ impl Drop for Fixture {
         }
         #[cfg(windows)]
         writable(&self.0);
-        let _ = fs::remove_dir_all(&self.0);
+        let temporary = fs::canonicalize(std::env::temp_dir()).unwrap();
+        if self.0.parent() == Some(temporary.as_path()) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
 }
-fn path(path: &Path) -> IvyJson {
-    IvyJson::String(node_path::from_native(path))
-}
-fn root() -> PathBuf {
-    std::env::var_os("IVY_HOST_SOURCE_ROOT").map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."),
-        PathBuf::from,
-    )
-}
-fn append(row: IvyJson) {
-    if let Some(file) = std::env::var_os("IVY_HOST_PREPARATION_TRANSFER_CORPUS") {
-        let _guard = CORPUS.lock().unwrap();
-        writeln!(
-            fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(file)
-                .unwrap(),
-            "{}",
-            json::stringify(&row, usize::MAX).unwrap()
-        )
-        .unwrap();
+fn opaque_name() -> std::ffi::OsString {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        let mut name = std::ffi::OsString::from("native ü 空 😀; ' ");
+        name.push(std::ffi::OsString::from_wide(&[0xd800]));
+        name
+    }
+    #[cfg(not(windows))]
+    {
+        "native ü 空 😀; '".into()
     }
 }
-fn wire(result: IvyResult<()>) -> IvyJson {
-    match result {
-        Ok(()) => IvyJson::object([("ok", true.into()), ("value", IvyJson::Null)]),
-        Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
+#[derive(Debug, PartialEq, Eq)]
+enum Entry {
+    Directory(u32),
+    File(Vec<u8>, u32),
+    Link(PathBuf),
+}
+type Tree = BTreeMap<PathBuf, Entry>;
+fn mode(metadata: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o777
+    }
+    #[cfg(windows)]
+    {
+        u32::from(metadata.permissions().readonly())
     }
 }
-fn oracle(input: &IvyJson) -> IvyJson {
-    let mut child = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/host-preparation-cache-oracle.mjs",
-        ])
-        .current_dir(root())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(json::stringify(input, usize::MAX).unwrap().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    json::parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
+fn tree(root: &Path) -> Tree {
+    fn walk(root: &Path, local: &Path, result: &mut Tree) {
+        for entry in fs::read_dir(root.join(local)).unwrap() {
+            let entry = entry.unwrap();
+            let local = local.join(entry.file_name());
+            let metadata = fs::symlink_metadata(entry.path()).unwrap();
+            let value = if metadata.file_type().is_symlink() {
+                Entry::Link(fs::read_link(entry.path()).unwrap())
+            } else if metadata.is_dir() {
+                Entry::Directory(mode(&metadata))
+            } else {
+                assert!(metadata.is_file());
+                Entry::File(fs::read(entry.path()).unwrap(), mode(&metadata))
+            };
+            result.insert(local.clone(), value);
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                walk(root, &local, result);
+            }
+        }
+    }
+    let mut result = Tree::new();
+    walk(root, Path::new(""), &mut result);
+    result
 }
-fn succeeds(result: &IvyJson) {
-    assert_eq!(result.get("ok"), Some(&true.into()));
+fn succeeds(result: &IvyResult<()>) {
+    assert!(result.is_ok(), "{result:?}");
 }
-fn refuses(result: &IvyJson) {
-    assert_eq!(result.get("ok"), Some(&false.into()));
+fn refuses(result: &IvyResult<()>) {
+    assert_eq!(result.as_ref().unwrap_err().code, "internal_error");
 }
 async fn operation(
     operation: &str,
@@ -141,51 +129,19 @@ async fn operation(
     source: &str,
     destination: &str,
     directory: bool,
-    trees: bool,
-) -> (IvyJson, IvyJson) {
-    let actual = fixture.root("actual");
-    let original = fixture.root("original");
-    let result = wire(match operation {
+) -> IvyResult<()> {
+    let root = fixture.root();
+    match operation {
         "transfer" => {
-            payload::transfer_prepared_payload(
-                actual.join(source),
-                actual.join(destination),
-                directory,
-            )
-            .await
+            payload::transfer_prepared_payload(root.join(source), root.join(destination), directory)
+                .await
         }
         "copyPayload" => {
-            payload::copy_prepared_payload(actual.join(source), actual.join(destination), directory)
+            payload::copy_prepared_payload(root.join(source), root.join(destination), directory)
                 .await
         }
         _ => unreachable!(),
-    });
-    let mut input = IvyJson::object([
-        ("operation", operation.into()),
-        ("originalRoot", path(&original)),
-        ("sourceLocal", source.into()),
-        ("cacheLocal", destination.into()),
-        ("directory", directory.into()),
-    ]);
-    if trees {
-        input.insert("actualRoot", path(&actual));
     }
-    let expected = oracle(&input);
-    append(IvyJson::object([
-        ("input", input.clone()),
-        ("actual", result.clone()),
-        ("expected", expected.clone()),
-    ]));
-    assert_eq!(
-        &result,
-        expected.required("operation").unwrap(),
-        "{}",
-        json::stringify(&input, usize::MAX).unwrap()
-    );
-    if trees {
-        assert_eq!(expected.get("actualTree"), expected.get("originalTree"));
-    }
-    (result, input)
 }
 
 #[tokio::test]
@@ -199,17 +155,13 @@ async fn same_volume_rename_preserves_payload_identity_and_observed_directory_li
         };
         fixture.write(item, b"prepared bytes\x00\xff");
         fixture.mkdir("published");
-        let original = filesystem::stat_identity(&fixture.root("actual").join(item)).unwrap();
+        let root = fixture.root();
+        let identity = filesystem::stat_identity(&root.join(item)).unwrap();
+        let target = root.join("payload/deep");
         if directory {
-            for label in ["actual", "original"] {
-                let root = fixture.root(label);
-                filesystem::directory_link(
-                    &root.join("payload/deep"),
-                    &root.join("payload/observed"),
-                )
-                .unwrap();
-            }
+            filesystem::directory_link(&target, &root.join("payload/observed")).unwrap();
         }
+        let link_target = directory.then(|| fs::read_link(root.join("payload/observed")).unwrap());
         succeeds(
             &operation(
                 "transfer",
@@ -217,21 +169,35 @@ async fn same_volume_rename_preserves_payload_identity_and_observed_directory_li
                 "payload",
                 "published/payload",
                 directory,
-                true,
             )
-            .await
-            .0,
+            .await,
         );
-        assert!(!fixture.root("actual").join("payload").exists());
+        assert!(!root.join("payload").exists());
         let moved = if directory {
             "published/payload/deep/ü 空 😀"
         } else {
             "published/payload"
         };
         assert_eq!(
-            filesystem::stat_identity(&fixture.root("actual").join(moved)).unwrap(),
-            original
+            fs::read(root.join(moved)).unwrap(),
+            b"prepared bytes\x00\xff"
         );
+        assert_eq!(
+            filesystem::stat_identity(&root.join(moved)).unwrap(),
+            identity
+        );
+        if let Some(target) = link_target {
+            assert!(
+                fs::symlink_metadata(root.join("published/payload/observed"))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(
+                fs::read_link(root.join("published/payload/observed")).unwrap(),
+                target
+            );
+        }
     }
 }
 
@@ -254,27 +220,15 @@ async fn ordinary_rename_errors_never_select_a_copy_or_remove_existing_bytes() {
             "file-to-directory" => ("payload/value", "existing", false),
             _ => ("payload/value", "invalid\0name", false),
         };
-        refuses(
-            &operation("transfer", &fixture, source, destination, directory, true)
-                .await
-                .0,
-        );
-        assert_eq!(
-            fs::read(fixture.root("actual").join("payload/value")).unwrap(),
-            b"source stays"
-        );
-        assert_eq!(
-            fs::read(fixture.root("actual").join("existing/retained")).unwrap(),
-            b"destination stays"
-        );
+        let before = tree(&fixture.root());
+        refuses(&operation("transfer", &fixture, source, destination, directory).await);
+        assert_eq!(tree(&fixture.root()), before, "{scenario}");
     }
     let fixture = Fixture::new();
     fixture.write("payload", b"self identity");
-    operation("transfer", &fixture, "payload", "payload", false, true).await;
-    assert_eq!(
-        fs::read(fixture.root("actual").join("payload")).unwrap(),
-        b"self identity"
-    );
+    let before = tree(&fixture.root());
+    succeeds(&operation("transfer", &fixture, "payload", "payload", false).await);
+    assert_eq!(tree(&fixture.root()), before);
 }
 
 #[tokio::test]
@@ -283,6 +237,14 @@ async fn directory_copy_phase_merges_independent_files_and_creates_missing_paren
         let fixture = Fixture::new();
         fixture.write("payload/pkg/deep/ü 空 😀", b"independent prepared bytes");
         fixture.write("payload/ordinary", b"replacement");
+        fixture.mkdir("payload/empty/nested");
+        let root = fixture.root();
+        let opaque = PathBuf::from("pkg/deep").join(opaque_name());
+        fs::write(root.join("payload").join(&opaque), b"opaque payload").unwrap();
+        fixture.write(
+            "payload/pkg/deep/native ü 空 😀; ' �",
+            b"replacement neighbor",
+        );
         let destination = if existing {
             fixture.write("published/ordinary", b"old bytes");
             fixture.write("published/retained", b"retained sibling");
@@ -290,32 +252,57 @@ async fn directory_copy_phase_merges_independent_files_and_creates_missing_paren
         } else {
             "published/deep/payload"
         };
-        for label in ["actual", "original"] {
-            let file = fixture.root(label).join("payload/pkg/deep/ü 空 😀");
-            let mut permissions = fs::metadata(&file).unwrap().permissions();
-            permissions.set_readonly(true);
-            fs::set_permissions(file, permissions).unwrap();
+        let mut permissions = fs::metadata(root.join("payload/pkg/deep/ü 空 😀"))
+            .unwrap()
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(root.join("payload/pkg/deep/ü 空 😀"), permissions).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(root.join("payload"), fs::Permissions::from_mode(0o750)).unwrap();
+            fs::set_permissions(root.join("payload/pkg"), fs::Permissions::from_mode(0o751))
+                .unwrap();
+            if existing {
+                fs::set_permissions(root.join(destination), fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
         }
-        succeeds(
-            &operation("copyPayload", &fixture, "payload", destination, true, true)
-                .await
-                .0,
+        let source_before = tree(&root.join("payload"));
+        let mut expected = tree(&root.join("payload"));
+        if existing {
+            expected.insert(
+                "retained".into(),
+                Entry::File(
+                    b"retained sibling".to_vec(),
+                    mode(&fs::metadata(root.join("published/retained")).unwrap()),
+                ),
+            );
+        }
+        let expected_root_mode = mode(
+            &fs::metadata(if existing {
+                root.join(destination)
+            } else {
+                root.join("payload")
+            })
+            .unwrap(),
         );
-        for label in ["actual", "original"] {
-            let root = fixture.root(label);
-            assert_eq!(
-                fs::read(root.join("payload/ordinary")).unwrap(),
-                b"replacement"
-            );
-            assert_eq!(
-                fs::read(root.join(destination).join("ordinary")).unwrap(),
-                b"replacement"
-            );
-            assert_ne!(
-                filesystem::stat_identity(&root.join("payload/ordinary")).unwrap(),
-                filesystem::stat_identity(&root.join(destination).join("ordinary")).unwrap()
-            );
-        }
+        succeeds(&operation("copyPayload", &fixture, "payload", destination, true).await);
+        assert_eq!(tree(&root.join(destination)), expected);
+        assert_eq!(tree(&root.join("payload")), source_before);
+        assert_eq!(
+            mode(&fs::metadata(root.join(destination)).unwrap()),
+            expected_root_mode
+        );
+        assert_ne!(
+            filesystem::stat_identity(&root.join("payload/ordinary")).unwrap(),
+            filesystem::stat_identity(&root.join(destination).join("ordinary")).unwrap()
+        );
+        fs::write(root.join("payload/ordinary"), b"changed source").unwrap();
+        assert_eq!(
+            fs::read(root.join(destination).join("ordinary")).unwrap(),
+            b"replacement"
+        );
     }
 }
 
@@ -331,6 +318,7 @@ async fn file_copy_phase_retains_source_and_does_not_create_destination_parents(
     ] {
         let fixture = Fixture::new();
         fixture.write("payload", b"file phase bytes");
+        let root = fixture.root();
         let destination = match scenario {
             "replace" => {
                 fixture.write("published", b"old bytes");
@@ -338,46 +326,74 @@ async fn file_copy_phase_retains_source_and_does_not_create_destination_parents(
             }
             "readonly-destination" => {
                 fixture.write("published", b"old readonly bytes");
-                for label in ["actual", "original"] {
-                    let file = fixture.root(label).join("published");
-                    let mut permissions = fs::metadata(&file).unwrap().permissions();
-                    permissions.set_readonly(true);
-                    fs::set_permissions(file, permissions).unwrap();
-                }
+                let file = root.join("published");
+                let mut permissions = fs::metadata(&file).unwrap().permissions();
+                permissions.set_readonly(true);
+                fs::set_permissions(file, permissions).unwrap();
                 "published"
             }
             "missing-parent" => "absent/published",
             "self" => "payload",
             "hardlink" => {
-                for label in ["actual", "original"] {
-                    let root = fixture.root(label);
-                    fs::hard_link(root.join("payload"), root.join("published")).unwrap();
-                }
+                fs::hard_link(root.join("payload"), root.join("published")).unwrap();
                 "published"
             }
             _ => "published",
         };
-        let result = operation("copyPayload", &fixture, "payload", destination, false, true)
-            .await
-            .0;
-        if scenario == "new" || scenario == "replace" {
-            succeeds(&result)
+        let result = operation("copyPayload", &fixture, "payload", destination, false).await;
+        match scenario {
+            "missing-parent" => {
+                refuses(&result);
+                assert!(!root.join("absent").exists());
+            }
+            "readonly-destination" => {
+                #[cfg(windows)]
+                {
+                    refuses(&result);
+                    assert_eq!(
+                        fs::read(root.join(destination)).unwrap(),
+                        b"old readonly bytes"
+                    );
+                }
+                #[cfg(unix)]
+                {
+                    // Effective account privileges decide whether this native copy may write.
+                    if result.is_ok() {
+                        assert_eq!(
+                            fs::read(root.join(destination)).unwrap(),
+                            b"file phase bytes"
+                        );
+                    } else {
+                        refuses(&result);
+                        assert_eq!(
+                            fs::read(root.join(destination)).unwrap(),
+                            b"old readonly bytes"
+                        );
+                    }
+                }
+            }
+            _ => {
+                succeeds(&result);
+                assert_eq!(
+                    fs::read(root.join(destination)).unwrap(),
+                    b"file phase bytes"
+                );
+                let from = filesystem::stat_identity(&root.join("payload")).unwrap();
+                let to = filesystem::stat_identity(&root.join(destination)).unwrap();
+                if ["self", "hardlink"].contains(&scenario) {
+                    assert_eq!(from, to);
+                } else {
+                    assert_ne!(from, to);
+                }
+            }
         }
-        if scenario == "missing-parent" {
-            refuses(&result)
-        }
-        assert_eq!(
-            fs::read(fixture.root("actual").join("payload")).unwrap(),
-            b"file phase bytes"
-        );
+        assert_eq!(fs::read(root.join("payload")).unwrap(), b"file phase bytes");
     }
 }
 
-fn relative_link(target: &str, destination: &Path, directory: bool) -> std::io::Result<()> {
+fn relative_link(target: &str, destination: &Path, directory: bool) -> io::Result<()> {
     #[cfg(windows)]
     {
-        // The Windows reparse target uses native separators. A slash-spelled
-        // target can be read verbatim yet fail when copyFile follows it.
         let target = target.replace('/', "\\");
         if directory {
             std::os::windows::fs::symlink_dir(target, destination)
@@ -396,70 +412,37 @@ async fn directory_copy_uses_absolute_link_targets_and_keeps_existing_target_gua
     let fixture = Fixture::new();
     fixture.mkdir("payload");
     fixture.write("external/value", b"outside link target remains");
-    let first = relative_link(
-        "../external/./value",
-        &fixture.root("actual").join("payload/file-link"),
-        false,
-    );
-    if let Err(error) = first {
-        assert!(
-            cfg!(windows)
-                && (error.kind() == std::io::ErrorKind::PermissionDenied
-                    || error.raw_os_error() == Some(1314))
-        );
-        assert!(
-            std::env::var_os("IVY_REQUIRE_FILE_SYMLINKS").is_none(),
-            "successful link qualification is required on this account"
-        );
-        for label in ["actual", "original"] {
-            let root = fixture.root(label);
-            filesystem::directory_link(&root.join("external"), &root.join("payload/dir-link"))
-                .unwrap();
-        }
-        refuses(
-            &operation("copyPayload", &fixture, "payload", "published", true, true)
-                .await
-                .0,
-        );
-        append(IvyJson::object([("unavailable","successful relative-link creation/default copy requires native Windows symlink privilege".into()),("scope","actual junction-copy refusal was compared against the original".into())]));
-        return;
-    }
+    let root = fixture.root();
     relative_link(
         "../external/./value",
-        &fixture.root("original").join("payload/file-link"),
+        &root.join("payload/file-link"),
         false,
     )
     .unwrap();
-    for label in ["actual", "original"] {
-        relative_link(
-            "../external",
-            &fixture.root(label).join("payload/dir-link"),
-            true,
-        )
-        .unwrap();
-        assert_eq!(
-            fs::read(fixture.root(label).join("payload/file-link")).unwrap(),
-            b"outside link target remains"
+    relative_link("../external", &root.join("payload/dir-link"), true).unwrap();
+    let source_target = fs::read_link(root.join("payload/file-link")).unwrap();
+    succeeds(&operation("copyPayload", &fixture, "payload", "published", true).await);
+    for path in ["published/file-link", "published/dir-link"] {
+        assert!(
+            fs::symlink_metadata(root.join(path))
+                .unwrap()
+                .file_type()
+                .is_symlink()
         );
+        assert!(fs::read_link(root.join(path)).unwrap().is_absolute());
     }
-    succeeds(
-        &operation("copyPayload", &fixture, "payload", "published", true, true)
-            .await
-            .0,
+    assert_eq!(
+        fs::read(root.join("published/file-link")).unwrap(),
+        b"outside link target remains"
     );
-    for label in ["actual", "original"] {
-        let root = fixture.root(label);
-        assert_eq!(
-            fs::read(root.join("published/file-link")).unwrap(),
-            b"outside link target remains"
-        );
-        assert_eq!(
-            fs::read_link(root.join("payload/file-link")).unwrap(),
-            PathBuf::from("../external/./value")
-        );
-        let target = fs::read_link(root.join("published/file-link")).unwrap();
-        assert!(target.is_absolute());
-    }
+    assert_eq!(
+        fs::read(root.join("published/dir-link/value")).unwrap(),
+        b"outside link target remains"
+    );
+    assert_eq!(
+        fs::read_link(root.join("payload/file-link")).unwrap(),
+        source_target
+    );
     succeeds(
         &operation(
             "copyPayload",
@@ -467,20 +450,21 @@ async fn directory_copy_uses_absolute_link_targets_and_keeps_existing_target_gua
             "payload/file-link",
             "copied-file",
             false,
-            true,
         )
-        .await
-        .0,
+        .await,
+    );
+    assert!(
+        !fs::symlink_metadata(root.join("copied-file"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read(root.join("copied-file")).unwrap(),
+        b"outside link target remains"
     );
     fixture.write("sink/value", b"old destination target");
-    for label in ["actual", "original"] {
-        relative_link(
-            "../sink/value",
-            &fixture.root(label).join("published/file-sink"),
-            false,
-        )
-        .unwrap();
-    }
+    relative_link("../sink/value", &root.join("published/file-sink"), false).unwrap();
     succeeds(
         &operation(
             "copyPayload",
@@ -488,53 +472,35 @@ async fn directory_copy_uses_absolute_link_targets_and_keeps_existing_target_gua
             "external/value",
             "published/file-sink",
             false,
-            true,
         )
-        .await
-        .0,
+        .await,
     );
-    for label in ["actual", "original"] {
-        let root = fixture.root(label);
-        assert!(
-            !fs::symlink_metadata(root.join("copied-file"))
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-        assert_eq!(
-            fs::read(root.join("sink/value")).unwrap(),
-            b"outside link target remains"
-        );
-        assert!(
-            fs::symlink_metadata(root.join("published/file-sink"))
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-    }
+    assert_eq!(
+        fs::read(root.join("sink/value")).unwrap(),
+        b"outside link target remains"
+    );
+    assert!(
+        fs::symlink_metadata(root.join("published/file-sink"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
     let fixture = Fixture::new();
     fixture.mkdir("payload");
     fixture.mkdir("published");
     fixture.write("external/parent/child/value", b"existing target stays");
-    for label in ["actual", "original"] {
-        let root = fixture.root(label);
-        relative_link("../external/parent", &root.join("payload/link"), true).unwrap();
-        relative_link(
-            "../external/parent/child",
-            &root.join("published/link"),
-            true,
-        )
-        .unwrap();
-    }
-    refuses(
-        &operation("copyPayload", &fixture, "payload", "published", true, true)
-            .await
-            .0,
-    );
-    assert_eq!(
-        fs::read(fixture.root("actual").join("external/parent/child/value")).unwrap(),
-        b"existing target stays"
-    );
+    let root = fixture.root();
+    relative_link("../external/parent", &root.join("payload/link"), true).unwrap();
+    relative_link(
+        "../external/parent/child",
+        &root.join("published/link"),
+        true,
+    )
+    .unwrap();
+    let before = tree(&root);
+    refuses(&operation("copyPayload", &fixture, "payload", "published", true).await);
+    assert_eq!(tree(&root), before);
 }
 
 #[tokio::test]
@@ -545,36 +511,39 @@ async fn directory_copy_refuses_self_subdirectories_type_changes_and_shared_file
         "directory-to-file",
         "file-to-directory",
         "same-inode",
+        "aliased-subdirectory",
+        "aliased-missing-parents",
     ] {
         let fixture = Fixture::new();
         fixture.write("payload/value", b"source unchanged");
         fixture.write("ordinary", b"ordinary unchanged");
+        let root = fixture.root();
         let (source, destination) = match scenario {
             "self" => ("payload", "payload"),
             "subdirectory" => ("payload", "payload/child"),
             "directory-to-file" => ("payload", "ordinary"),
             "file-to-directory" => ("ordinary", "payload"),
+            "aliased-subdirectory" | "aliased-missing-parents" => {
+                fixture.mkdir("aliases");
+                filesystem::directory_link(&root.join("payload"), &root.join("aliases/link"))
+                    .unwrap();
+                (
+                    "payload",
+                    if scenario == "aliased-subdirectory" {
+                        "aliases/link/child"
+                    } else {
+                        "aliases/link/missing/child"
+                    },
+                )
+            }
             _ => {
-                for label in ["actual", "original"] {
-                    let root = fixture.root(label);
-                    fs::hard_link(root.join("ordinary"), root.join("hardlink")).unwrap();
-                }
+                fs::hard_link(root.join("ordinary"), root.join("hardlink")).unwrap();
                 ("ordinary", "hardlink")
             }
         };
-        refuses(
-            &operation("copyPayload", &fixture, source, destination, true, true)
-                .await
-                .0,
-        );
-        assert_eq!(
-            fs::read(fixture.root("actual").join("payload/value")).unwrap(),
-            b"source unchanged"
-        );
-        assert_eq!(
-            fs::read(fixture.root("actual").join("ordinary")).unwrap(),
-            b"ordinary unchanged"
-        );
+        let before = tree(&root);
+        refuses(&operation("copyPayload", &fixture, source, destination, true).await);
+        assert_eq!(tree(&root), before, "{scenario}");
     }
 }
 
@@ -602,8 +571,8 @@ fn admitted_transfer_and_copy_complete_after_the_waiter_is_dropped() {
                 release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
             });
             entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-            let source = fixture.root("actual").join("payload");
-            let destination = fixture.root("actual").join("published");
+            let source = fixture.root().join("payload");
+            let destination = fixture.root().join("published");
             let mut future: std::pin::Pin<Box<dyn Future<Output = IvyResult<()>>>> = if copying {
                 Box::pin(payload::copy_prepared_payload(
                     source.clone(),
@@ -640,50 +609,42 @@ fn admitted_transfer_and_copy_complete_after_the_waiter_is_dropped() {
             assert_eq!(source.exists(), copying);
         });
     }
-    append(IvyJson::object([("observation","real rename and copy jobs were queued behind the test's blocking worker, their Pending waiters dropped, then both admitted jobs completed without a product hook".into())]));
 }
 
 #[cfg(windows)]
 #[tokio::test]
-async fn file_copy_phase_preserves_the_original_account_sharing_outcome() {
+async fn file_copy_phase_preserves_native_sharing_refusal_and_recovers_after_release() {
     use std::os::windows::fs::OpenOptionsExt;
     let fixture = Fixture::new();
     fixture.write("payload", b"held prepared source");
-    let holds = ["actual", "original"].map(|label| {
-        fs::OpenOptions::new()
-            .read(true)
-            .share_mode(0)
-            .open(fixture.root(label).join("payload"))
-            .unwrap()
-    });
-    operation(
-        "copyPayload",
-        &fixture,
-        "payload",
-        "published",
-        false,
-        false,
-    )
-    .await;
-    drop(holds);
-    let input = IvyJson::object([
-        ("operation", "snapshot".into()),
-        ("actualRoot", path(&fixture.root("actual"))),
-        ("originalRoot", path(&fixture.root("original"))),
-    ]);
-    let snapshot = oracle(&input);
-    assert_eq!(snapshot.get("actualTree"), snapshot.get("originalTree"));
+    let root = fixture.root();
+    let before = tree(&root);
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(root.join("payload"))
+        .unwrap();
+    refuses(&operation("copyPayload", &fixture, "payload", "published", false).await);
+    assert!(!root.join("published").exists());
+    drop(held);
+    assert_eq!(tree(&root), before);
+    succeeds(&operation("copyPayload", &fixture, "payload", "published", false).await);
     assert_eq!(
-        fs::read(fixture.root("actual").join("payload")).unwrap(),
+        fs::read(root.join("payload")).unwrap(),
         b"held prepared source"
     );
-    append(IvyJson::object([("observation","sharing handles were retained for both native copy phases; exact filesystem projection was compared after release".into()),("snapshot",snapshot)]));
+    assert_eq!(
+        fs::read(root.join("published")).unwrap(),
+        b"held prepared source"
+    );
 }
 
 #[tokio::test]
 async fn cross_volume_transfer_uses_an_explicit_existing_fixture_volume() {
     let Some(base) = std::env::var_os("IVY_HOST_CROSS_DEVICE_TMP") else {
-        append(IvyJson::object([("unavailable","native EXDEV payload transfer".into()),("reason","IVY_HOST_CROSS_DEVICE_TMP is not configured; actual copy phases are compared directly without injecting an EXDEV event or provisioning a volume".into())]));
+        eprintln!(
+            "Unavailable: native EXDEV/error17 transfer needs IVY_HOST_CROSS_DEVICE_TMP; direct copy cases do not establish an actual cross-volume rename."
+        );
         assert!(std::env::var_os("IVY_REQUIRE_CROSS_DEVICE").is_none());
         return;
     };
@@ -713,7 +674,7 @@ async fn cross_volume_transfer_uses_an_explicit_existing_fixture_volume() {
     };
     fixture.write("volume-probe", b"cross-volume probe");
     let error = fs::hard_link(
-        fixture.root("actual").join("volume-probe"),
+        fixture.root().join("volume-probe"),
         cross.path.join("must-not-link"),
     )
     .unwrap_err();
@@ -723,56 +684,42 @@ async fn cross_volume_transfer_uses_an_explicit_existing_fixture_volume() {
     assert_eq!(error.raw_os_error(), Some(libc::EXDEV));
     for directory in [false, true] {
         let name = if directory { "directory" } else { "file" };
-        let source_local = if directory {
-            "payload-directory"
+        let source = fixture.root().join(name);
+        if directory {
+            fixture.write("directory/deep/value", b"actual cross-volume bytes");
         } else {
-            "payload-file"
-        };
-        let source_file = if directory {
-            "payload-directory/value"
-        } else {
-            "payload-file"
-        };
-        fixture.write(source_file, b"actual cross-volume bytes");
-        for label in ["actual", "original"] {
-            fs::create_dir_all(cross.path.join(label)).unwrap();
+            fixture.write("file", b"actual cross-volume bytes");
         }
-        let source_actual = fixture.root("actual").join(source_local);
-        let destination_actual = cross.path.join("actual").join(name);
-        let destination_original = cross.path.join("original").join(name);
-        let result = wire(
-            payload::transfer_prepared_payload(
-                source_actual.clone(),
-                destination_actual.clone(),
-                directory,
-            )
-            .await,
+        let destination = cross.path.join(name);
+        succeeds(
+            &payload::transfer_prepared_payload(source.clone(), destination.clone(), directory)
+                .await,
         );
-        let input = IvyJson::object([
-            ("operation", "transfer".into()),
-            ("directory", directory.into()),
-            ("actualRoot", path(&fixture.root("actual"))),
-            ("originalRoot", path(&fixture.root("original"))),
-            (
-                "sourceOriginal",
-                path(&fixture.root("original").join(source_local)),
-            ),
-            ("destinationActual", path(&destination_actual)),
-            ("destinationOriginal", path(&destination_original)),
-        ]);
-        let expected = oracle(&input);
-        append(IvyJson::object([
-            ("input", input),
-            ("actual", result.clone()),
-            ("expected", expected.clone()),
-        ]));
-        assert_eq!(&result, expected.required("operation").unwrap());
-        assert_eq!(expected.get("actualTree"), expected.get("originalTree"));
+        let source_file = if directory {
+            source.join("deep/value")
+        } else {
+            source.clone()
+        };
+        let destination_file = if directory {
+            destination.join("deep/value")
+        } else {
+            destination.clone()
+        };
+        assert!(
+            source.exists(),
+            "native cross-volume fallback must retain its source"
+        );
         assert_eq!(
-            expected.get("actualDestinationTree"),
-            expected.get("originalDestinationTree")
+            fs::read(&source_file).unwrap(),
+            b"actual cross-volume bytes"
         );
-        succeeds(&result);
-        assert!(source_actual.exists());
+        assert_eq!(
+            fs::read(&destination_file).unwrap(),
+            b"actual cross-volume bytes"
+        );
+        assert_ne!(
+            filesystem::stat_identity(&source_file).unwrap(),
+            filesystem::stat_identity(&destination_file).unwrap()
+        );
     }
 }

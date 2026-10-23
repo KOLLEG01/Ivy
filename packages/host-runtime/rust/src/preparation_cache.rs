@@ -1,12 +1,10 @@
 //! npm cache materialization under the caller's live dependency-cache lease.
-//! The default-locale comparator is mandatory; this module supplies no fallback.
+//! Workspace metadata uses the caller's comparator without an implicit fallback.
 use crate::{
     IvyError, IvyJson, IvyResult,
     concurrency::map_concurrent_with_error,
     config_file::{self, FileError},
-    config_write, filesystem,
-    node_path::{self, Context, Style},
-    preparation_links,
+    config_write, filesystem, native_path, preparation_links,
 };
 use ivy_contracts::{JsString, hash::hash_json};
 use std::{
@@ -67,23 +65,24 @@ async fn blocking<T: Send + 'static>(
         .await
         .map_err(|_| Error::Ivy(IvyError::internal()))?
 }
-fn fs_path(path: &Path) -> PathBuf {
-    node_path::filesystem_path(&node_path::from_native(path))
-}
 fn local(root: &Path, path: &JsString) -> PathBuf {
-    let mut parts = vec![node_path::from_native(root)];
-    parts.extend(
-        path.0
-            .split(|c| *c == 47)
-            .map(|part| JsString(part.to_vec())),
-    );
-    node_path::to_native(&node_path::join(Style::native(), &parts))
+    let mut local = root.to_owned();
+    for part in path.0.split(|c| *c == 47) {
+        local.push(native_path::to_native(&JsString(part.to_vec())));
+    }
+    native_path::lexical(&local)
 }
 fn parent(path: &Path) -> PathBuf {
-    node_path::to_native(&node_path::dirname(
-        Style::native(),
-        &node_path::from_native(path),
-    ))
+    path.parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| {
+            if path.has_root() {
+                path
+            } else {
+                Path::new(".")
+            }
+        })
+        .to_owned()
 }
 fn map_links(links: Links) -> Links {
     let mut result: Links = Vec::new();
@@ -113,7 +112,7 @@ fn occupied(error: &io::Error) -> bool {
     )
 }
 fn read_metadata(path: &Path) -> Result<IvyJson> {
-    config_file::read_json(&fs_path(path), 4096).map_err(|error| match error {
+    config_file::read_json(path, 4096).map_err(|error| match error {
         FileError::Missing => Error::Io(io::ErrorKind::NotFound.into()),
         FileError::Invalid(error) => Error::Ivy(error),
         FileError::Io(error) => Error::Io(error),
@@ -213,7 +212,7 @@ impl PreparationCache {
                 let modules = cache.join("node_modules");
                 let check = modules.clone();
                 blocking(move || {
-                    fs::metadata(fs_path(&check))?;
+                    fs::metadata(&check)?;
                     Ok(())
                 })
                 .await?;
@@ -248,7 +247,7 @@ impl PreparationCache {
         let modules = source.join("node_modules");
         let check = modules.clone();
         match blocking(move || {
-            fs::metadata(fs_path(&check))?;
+            fs::metadata(&check)?;
             Ok(())
         })
         .await
@@ -272,7 +271,7 @@ impl PreparationCache {
         }
         let directory = parent(&cache);
         blocking(move || {
-            fs::create_dir_all(fs_path(&directory))?;
+            fs::create_dir_all(&directory)?;
             Ok(())
         })
         .await?;
@@ -281,7 +280,7 @@ impl PreparationCache {
         let temporary = PathBuf::from(temporary);
         let path = temporary.clone();
         blocking(move || {
-            fs::create_dir_all(fs_path(&path))?;
+            fs::create_dir_all(&path)?;
             Ok(())
         })
         .await?;
@@ -313,7 +312,7 @@ impl PreparationCache {
                 Err(error) => return Err(error),
             }
             config_write::atomic_json(
-                fs_path(&temporary.join("cache.json")),
+                temporary.join("cache.json"),
                 IvyJson::object([
                     ("schemaVersion", IvyJson::Number(3.0)),
                     ("key", IvyJson::String(self.key.clone())),
@@ -374,18 +373,14 @@ fn workspace_path(path: &JsString, links: &Links) -> bool {
 async fn copy_external(source: PathBuf, destination: PathBuf, links: Links) -> Result<()> {
     let root = destination.clone();
     blocking(move || {
-        fs::create_dir_all(fs_path(&root))?;
+        fs::create_dir_all(&root)?;
         Ok(())
     })
     .await?;
     let scan = source.join("node_modules");
     let names = blocking(move || {
-        fs::read_dir(fs_path(&scan))?
-            .map(|entry| {
-                Ok(node_path::to_native(&node_path::node_utf8(
-                    &entry?.file_name(),
-                )))
-            })
+        fs::read_dir(&scan)?
+            .map(|entry| Ok(entry?.file_name()))
             .collect::<Result<Vec<_>>>()
     })
     .await?;
@@ -396,10 +391,14 @@ async fn copy_external(source: PathBuf, destination: PathBuf, links: Links) -> R
         let links = links.clone();
         blocking(move || {
             crate::preparation_copy::entry(&from, &to, true, true, &|path| {
-                let local = Context::current()?.relative(
-                    &node_path::from_native(&source),
-                    &node_path::from_native(path),
-                );
+                let relative = path.strip_prefix(&source).map_err(io::Error::other)?;
+                // Opaque Unix names cannot equal wire text. Any excluded parent
+                // was filtered before traversal reached this entry.
+                #[cfg(unix)]
+                if relative.as_os_str().to_str().is_none() {
+                    return Ok(true);
+                }
+                let local = native_path::from_native(relative);
                 let local = JsString(
                     local
                         .0

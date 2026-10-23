@@ -174,6 +174,23 @@ fn directory_links_resolve_to_the_target_without_authorizing_an_escape() {
         filesystem::stat_identity(&outside).unwrap()
     );
     assert!(filesystem::directory_link(&root, &link).is_err());
+    #[cfg(windows)]
+    {
+        let target = fixture.0.join("relative-target");
+        let parent = fixture.0.join("relative-parent");
+        fs::create_dir(&target).unwrap();
+        fs::create_dir(&parent).unwrap();
+        fs::write(target.join("value"), b"relative junction target").unwrap();
+        filesystem::directory_link(Path::new("../relative-target"), &parent.join("link")).unwrap();
+        assert_eq!(
+            fs::read(parent.join("link/value")).unwrap(),
+            b"relative junction target"
+        );
+        assert_eq!(
+            paths::realpath(&parent.join("link")).unwrap(),
+            paths::realpath(&target).unwrap()
+        );
+    }
 }
 
 #[tokio::test]

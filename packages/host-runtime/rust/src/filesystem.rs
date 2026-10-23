@@ -1,5 +1,5 @@
 //! Shared filesystem identity, access, timestamps and owned payload removal.
-use crate::{IvyError,IvyResult,node_path};
+use crate::{IvyError,IvyResult,paths};
 use std::{fs,path::{Path,PathBuf}};
 #[cfg(windows)]
 #[path = "filesystem/windows_junction.rs"]
@@ -15,17 +15,27 @@ pub(crate) fn rename_raw(source:&Path,destination:&Path)->std::io::Result<()> {
 
 /// Preparation directory links: a Windows junction or a relative Unix symlink.
 /// This synchronous primitive preserves OS errors for the owning cache policy.
-pub fn directory_link(source:&Path,destination:&Path)->std::io::Result<()>{
-    let context=node_path::Context::current()?;
-    let source=node_path::from_native(source);let destination_text=node_path::from_native(destination);
-    let parent=node_path::dirname(context.style,&destination_text);
-    #[cfg(windows)] {
-        let target=context.resolve(&[parent,source]);
-        windows_junction::create(&node_path::to_native(&target),destination)
+pub fn directory_link(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| {
+            if destination.has_root() {
+                destination
+            } else {
+                Path::new(".")
+            }
+        });
+    #[cfg(windows)]
+    {
+        let target = paths::absolute(&parent.join(source))?;
+        windows_junction::create(&target, destination)
     }
-    #[cfg(unix)] {
-        let target=context.relative(&parent,&source);
-        std::os::unix::fs::symlink(node_path::to_native(&target),destination)
+    #[cfg(unix)]
+    {
+        let target =
+            crate::native_path::relative(&paths::absolute(parent)?, &paths::absolute(source)?);
+        std::os::unix::fs::symlink(target, destination)
     }
 }
 

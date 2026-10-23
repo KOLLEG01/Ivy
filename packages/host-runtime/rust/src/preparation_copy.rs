@@ -1,10 +1,9 @@
 //! Non-dereferencing copies used by cache and candidate preparation.
-use crate::{node_path, preparation_links};
-use std::{fs, io, path::{Path, PathBuf}};
-
-fn fs_path(path: &Path) -> std::path::PathBuf {
-    node_path::filesystem_path(&node_path::from_native(path))
-}
+use crate::preparation_links;
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 pub(crate) fn entry(
     source: &Path,
@@ -16,21 +15,21 @@ pub(crate) fn entry(
     if !filter(source)? {
         return Ok(());
     }
-    let metadata = fs::symlink_metadata(fs_path(source))?;
+    let metadata = fs::symlink_metadata(source)?;
     let prior =
         preparation_links::check_copy_paths(source, destination, metadata.is_dir(), parents)?;
     if metadata.file_type().is_symlink() {
         return preparation_links::copy_link_entry(source, destination, verbatim_symlinks, parents);
     }
     if parents {
-        let parent = node_path::dirname(
-            node_path::Style::native(),
-            &node_path::from_native(destination),
-        );
-        match fs::metadata(node_path::filesystem_path(&parent)) {
+        let parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        match fs::metadata(parent) {
             Ok(_) => (),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir_all(node_path::filesystem_path(&parent))?;
+                fs::create_dir_all(parent)?;
             }
             Err(error) => return Err(error),
         }
@@ -38,9 +37,9 @@ pub(crate) fn entry(
     if metadata.is_dir() {
         let created = prior.is_none();
         if created {
-            fs::create_dir(fs_path(destination))?;
+            fs::create_dir(destination)?;
         }
-        for item in fs::read_dir(fs_path(source))? {
+        for item in fs::read_dir(source)? {
             let name = PathBuf::from(item?.file_name());
             entry(
                 &source.join(&name),
@@ -51,13 +50,13 @@ pub(crate) fn entry(
             )?;
         }
         if created {
-            fs::set_permissions(fs_path(destination), metadata.permissions())?;
+            fs::set_permissions(destination, metadata.permissions())?;
         }
     } else if metadata.is_file() {
         if prior.is_some() {
-            fs::remove_file(fs_path(destination))?;
+            fs::remove_file(destination)?;
         }
-        fs::copy(fs_path(source), fs_path(destination))?;
+        fs::copy(source, destination)?;
     } else {
         return Err(io::ErrorKind::InvalidInput.into());
     }

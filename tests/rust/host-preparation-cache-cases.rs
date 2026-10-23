@@ -1,52 +1,37 @@
 use ivy_contracts::{JsString, json};
 use ivy_host_runtime::{
-    IvyJson, IvyResult, filesystem, node_path,
+    IvyJson, IvyResult, filesystem,
     preparation_cache::{self, PreparationCache, WorkspaceCompare},
 };
 use std::{
-    cmp::Ordering,
     fs,
-    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
 };
-static CORPUS: Mutex<()> = Mutex::new(());
 const KEY: &str = "fixture-cache-key";
 type Links = Vec<(JsString, JsString)>;
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
-        let temporary = std::env::temp_dir();
-        let root = temporary.join(format!(
-            "ivy-preparation-cache-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let temporary = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let mut name =
+            std::ffi::OsString::from(format!("ivy-preparation-cache-{}-", uuid::Uuid::new_v4()));
+        name.push(opaque_name());
+        let root = temporary.join(name);
         assert_eq!(root.parent(), Some(temporary.as_path()));
         fs::create_dir(&root).unwrap();
-        fs::create_dir(root.join("actual")).unwrap();
-        fs::create_dir(root.join("original")).unwrap();
         Self(root)
     }
-    fn root(&self, label: &str) -> PathBuf {
-        self.0.join(label)
+    fn root(&self) -> PathBuf {
+        self.0.clone()
     }
-    fn write(&self, local: &str, bytes: &[u8]) {
-        for label in ["actual", "original"] {
-            let path = self.root(label).join(local);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, bytes).unwrap();
-        }
+    fn write(&self, local: impl AsRef<Path>, bytes: &[u8]) {
+        let path = self.root().join(local);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
     }
     fn mkdir(&self, local: &str) {
-        for label in ["actual", "original"] {
-            fs::create_dir_all(self.root(label).join(local)).unwrap();
-        }
+        fs::create_dir_all(self.root().join(local)).unwrap();
     }
     fn metadata(&self, value: &IvyJson) {
         self.write(
@@ -79,17 +64,25 @@ impl Drop for Fixture {
         }
         #[cfg(windows)]
         writable(&self.0);
-        let _ = fs::remove_dir_all(&self.0);
+        let base = fs::canonicalize(std::env::temp_dir()).unwrap();
+        if self.0.parent() == Some(base.as_path()) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
 }
-fn root() -> PathBuf {
-    std::env::var_os("IVY_HOST_SOURCE_ROOT").map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."),
-        PathBuf::from,
-    )
-}
-fn path(path: &Path) -> IvyJson {
-    IvyJson::String(node_path::from_native(path))
+fn opaque_name() -> std::ffi::OsString {
+    let mut name = std::ffi::OsString::from("native ü 空 😀; ' ");
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        name.push(std::ffi::OsString::from_wide(&[0xd800]));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        name.push(std::ffi::OsString::from_vec(vec![0xff]));
+    }
+    name
 }
 fn links(values: &[(&str, &str)]) -> Links {
     values
@@ -97,120 +90,18 @@ fn links(values: &[(&str, &str)]) -> Links {
         .map(|(location, target)| ((*location).into(), (*target).into()))
         .collect()
 }
-fn links_json(links: &Links) -> IvyJson {
-    IvyJson::Array(
-        links
-            .iter()
-            .map(|(location, target)| {
-                IvyJson::Array(vec![
-                    IvyJson::String(location.clone()),
-                    IvyJson::String(target.clone()),
-                ])
-            })
-            .collect(),
-    )
-}
-fn append(value: IvyJson) {
-    if let Some(file) = std::env::var_os("IVY_HOST_PREPARATION_CACHE_CORPUS") {
-        let _guard = CORPUS.lock().unwrap();
-        writeln!(
-            fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(file)
-                .unwrap(),
-            "{}",
-            json::stringify(&value, usize::MAX).unwrap()
-        )
-        .unwrap();
-    }
-}
 fn wire(result: IvyResult<IvyJson>) -> IvyJson {
     match result {
         Ok(value) => IvyJson::object([("ok", true.into()), ("value", value)]),
         Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
     }
 }
-fn oracle(input: &IvyJson) -> IvyJson {
-    let mut child = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/host-preparation-cache-oracle.mjs",
-        ])
-        .current_dir(root())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(json::stringify(input, usize::MAX).unwrap().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    json::parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
-}
-// This finite fixture matrix is read from the actual original Node locale.
-// It is not a production comparator, a guessed locale or a fallback ordering.
 fn identity(links: &Links) -> PreparationCache {
-    let input = IvyJson::object([("operation", "order".into()), ("links", links_json(links))]);
-    let expected = oracle(&input);
-    let value = expected
-        .required("operation")
-        .unwrap()
-        .required("value")
-        .unwrap();
-    let keys = value
-        .required("keys")
-        .unwrap()
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|key| match key {
-            IvyJson::String(value) => value.clone(),
-            _ => panic!("Node key must be a string"),
-        })
-        .collect::<Vec<_>>();
-    let matrix = value
-        .required("matrix")
-        .unwrap()
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|row| {
-            row.as_array()
-                .unwrap()
-                .iter()
-                .map(|cell| match cell {
-                    IvyJson::Number(value) if *value < 0.0 => Ordering::Less,
-                    IvyJson::Number(value) if *value > 0.0 => Ordering::Greater,
-                    IvyJson::Number(0.0) => Ordering::Equal,
-                    _ => panic!("Node comparator result must be signed"),
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    append(IvyJson::object([("comparisonProfile", expected)]));
-    let compare: WorkspaceCompare = Arc::new(move |left, right| {
-        let a = keys
-            .iter()
-            .position(|key| key == left)
-            .expect("unqualified comparator operand");
-        let b = keys
-            .iter()
-            .position(|key| key == right)
-            .expect("unqualified comparator operand");
-        matrix[a][b]
-    });
-    PreparationCache::new(KEY.into(), links.clone(), compare)
+    PreparationCache::new(
+        KEY.into(),
+        links.clone(),
+        ivy_host_runtime::artifact::native_file_compare().unwrap(),
+    )
 }
 fn metadata(entries: IvyJson) -> IvyJson {
     IvyJson::object([
@@ -219,6 +110,12 @@ fn metadata(entries: IvyJson) -> IvyJson {
         ("externalOnly", true.into()),
         ("workspaceLinks", entries),
     ])
+}
+fn assert_json_eq(actual: &IvyJson, expected: &IvyJson) {
+    assert_eq!(
+        json::canonical(actual, usize::MAX).unwrap(),
+        json::canonical(expected, usize::MAX).unwrap()
+    );
 }
 fn succeeds(result: &IvyJson, value: IvyJson) {
     assert_eq!(
@@ -238,7 +135,7 @@ fn refuses(result: &IvyJson, code: &str) {
         Some(&code.into())
     );
 }
-async fn compare(
+async fn operation(
     operation: &str,
     fixture: &Fixture,
     links: &Links,
@@ -246,70 +143,54 @@ async fn compare(
     cache_local: &str,
 ) -> IvyJson {
     let identity = identity(links);
-    let actual = fixture.root("actual");
-    let original = fixture.root("original");
+    let actual = fixture.root();
     let source = actual.join(source_local);
     let cache = actual.join(cache_local);
-    let actual_result = wire(match operation {
+    wire(match operation {
         "restore" => identity.restore(source, cache).await.map(IvyJson::Bool),
         "retain" => identity.retain(source, cache).await.map(|_| IvyJson::Null),
         "copy" => preparation_cache::copy_external_dependencies(source, cache, links.clone())
             .await
             .map(|_| IvyJson::Null),
         _ => unreachable!(),
-    });
-    let input = IvyJson::object([
-        ("operation", operation.into()),
-        ("actualRoot", path(&actual)),
-        ("originalRoot", path(&original)),
-        ("sourceLocal", source_local.into()),
-        ("cacheLocal", cache_local.into()),
-        ("key", KEY.into()),
-        ("links", links_json(links)),
-    ]);
-    let expected = oracle(&input);
-    append(IvyJson::object([
-        ("input", input.clone()),
-        ("actual", actual_result.clone()),
-        ("expected", expected.clone()),
-    ]));
-    assert_eq!(
-        &actual_result,
-        expected.required("operation").unwrap(),
-        "{}",
-        json::stringify(
-            &IvyJson::object([("input", input), ("expected", expected.clone())]),
-            usize::MAX
-        )
-        .unwrap()
-    );
-    assert_eq!(expected.get("actualTree"), expected.get("originalTree"));
-    actual_result
+    })
 }
 
 #[test]
 fn schema_three_key_keeps_process_version_and_all_runtime_coordinates() {
-    for (os, arch, node) in [
-        ("win32", "x64", "v24.18.0"),
-        ("win32", "arm64", "v24.18.1"),
-        ("linux", "x64", "v24.18.0"),
-        ("linux", "arm64", "v24.19.0"),
-        ("win32", "x64", "24.18.0"),
+    for (os, arch, node, expected) in [
+        (
+            "win32",
+            "x64",
+            "v24.18.0",
+            "sha256:dbd69d4da66d0c529831014f182e9d284be1d08d52de714c84eac29f50b699cc",
+        ),
+        (
+            "win32",
+            "arm64",
+            "v24.18.1",
+            "sha256:5362ee5e8c78c51d927b527bc0fb0bcdb6a97942faad9e734e24ccf9c9c67dbb",
+        ),
+        (
+            "linux",
+            "x64",
+            "v24.18.0",
+            "sha256:63abf4e39aa6c72f4241e83b6a1bac7ae164cd87c4db5f108633b5e90eecc3c6",
+        ),
+        (
+            "linux",
+            "arm64",
+            "v24.19.0",
+            "sha256:e5e842fb66e82a4dcd5d37c1c0b9a53e790f54a1b6ad232bc6098638140e2d05",
+        ),
+        (
+            "win32",
+            "x64",
+            "24.18.0",
+            "sha256:9401f14f9552ed4e50cda576f83230cf1c7c1282469b5cb3a5de474d2b744c36",
+        ),
     ] {
-        let input = IvyJson::object([
-            ("operation", "key".into()),
-            ("lockHash", "sha256:lock ü 空 😀".into()),
-            ("packageManager", "npm@11.11.0".into()),
-            (
-                "profile",
-                IvyJson::object([
-                    ("platform", os.into()),
-                    ("arch", arch.into()),
-                    ("version", node.into()),
-                ]),
-            ),
-        ]);
-        let actual = wire(
+        assert_eq!(
             preparation_cache::dependency_cache_key(
                 "sha256:lock ü 空 😀".into(),
                 "npm@11.11.0".into(),
@@ -317,20 +198,14 @@ fn schema_three_key_keeps_process_version_and_all_runtime_coordinates() {
                 arch.into(),
                 node.into(),
             )
-            .map(IvyJson::from),
+            .unwrap(),
+            expected,
         );
-        let expected = oracle(&input);
-        assert_eq!(&actual, expected.required("operation").unwrap());
-        append(IvyJson::object([
-            ("input", input),
-            ("actual", actual),
-            ("expected", expected),
-        ]));
     }
 }
 
 #[test]
-fn cache_metadata_uses_original_map_updates_stable_locale_ties_and_full_entry_hash() {
+fn cache_metadata_preserves_map_updates_supplied_order_stable_ties_and_full_entry_hash() {
     let links = links(&[
         ("node_modules/Z", "last"),
         ("node_modules/é", "composed"),
@@ -341,19 +216,42 @@ fn cache_metadata_uses_original_map_updates_stable_locale_ties_and_full_entry_ha
         ("node_modules/Z", "updated"),
         ("node_modules/空 😀", "unicode"),
     ]);
-    let identity = identity(&links);
-    let actual = wire(Ok(identity.workspace_entries()));
-    let input = IvyJson::object([
-        ("operation", "entries".into()),
-        ("links", links_json(&links)),
-    ]);
-    let expected = oracle(&input);
-    assert_eq!(&actual, expected.required("operation").unwrap());
-    append(IvyJson::object([
-        ("input", input),
-        ("actual", actual),
-        ("expected", expected),
-    ]));
+    let groups: Vec<Vec<JsString>> = [
+        vec!["node_modules/空 😀"],
+        vec!["node_modules/a"],
+        vec!["node_modules/A"],
+        vec!["node_modules/ä"],
+        vec!["node_modules/é", "node_modules/e\u{301}"],
+        vec!["node_modules/Z"],
+    ]
+    .into_iter()
+    .map(|group| group.into_iter().map(JsString::from).collect())
+    .collect();
+    let compare: WorkspaceCompare = Arc::new(move |left, right| {
+        let rank = |value: &JsString| {
+            groups
+                .iter()
+                .position(|group| group.contains(value))
+                .unwrap()
+        };
+        rank(left).cmp(&rank(right))
+    });
+    let identity = PreparationCache::new(KEY.into(), links.clone(), compare);
+    let expected = [
+        ("node_modules/空 😀", "unicode"),
+        ("node_modules/a", "lower"),
+        ("node_modules/A", "upper"),
+        ("node_modules/ä", "umlaut"),
+        ("node_modules/é", "composed"),
+        ("node_modules/e\u{301}", "decomposed"),
+        ("node_modules/Z", "updated"),
+    ]
+    .into_iter()
+    .map(|(location, target)| {
+        IvyJson::object([("location", location.into()), ("target", target.into())])
+    })
+    .collect();
+    assert_eq!(identity.workspace_entries(), IvyJson::Array(expected));
     let valid = metadata(identity.workspace_entries());
     let mut extra_top = valid.clone();
     extra_top.insert("ignored", true.into());
@@ -393,19 +291,6 @@ fn cache_metadata_uses_original_map_updates_stable_locale_ties_and_full_entry_ha
     ] {
         let actual = wire(identity.valid_metadata(&metadata).map(IvyJson::Bool));
         succeeds(&actual, accept.into());
-        let input = IvyJson::object([
-            ("operation", "valid".into()),
-            ("links", links_json(&links)),
-            ("key", KEY.into()),
-            ("metadata", metadata),
-        ]);
-        let expected = oracle(&input);
-        assert_eq!(&actual, expected.required("operation").unwrap());
-        append(IvyJson::object([
-            ("input", input),
-            ("actual", actual),
-            ("expected", expected),
-        ]));
     }
 }
 
@@ -419,35 +304,74 @@ async fn restore_miss_invalid_json_bounded_file_and_missing_modules_keep_distinc
         "directory",
         "missing-modules",
         "modules-file",
+        "missing-workspace",
+        "workspace-conflict",
     ] {
         let fixture = Fixture::new();
-        let links = vec![];
-        fixture.mkdir("source");
+        fixture.write("source/retained", b"source retained");
+        fixture.write("outside/retained", b"outside retained");
+        let links = match scenario {
+            "missing-workspace" => links(&[("node_modules/workspace", "packages/missing")]),
+            "workspace-conflict" => links(&[("../outside", "packages/good")]),
+            _ => vec![],
+        };
+        let identity = PreparationCache::new(
+            KEY.into(),
+            links,
+            ivy_host_runtime::artifact::native_file_compare().unwrap(),
+        );
         if scenario != "absent" {
-            fixture.metadata(&metadata(IvyJson::Array(vec![])));
+            fixture.metadata(&metadata(identity.workspace_entries()));
         }
         match scenario {
             "wrong-key" => {
-                let mut value = metadata(IvyJson::Array(vec![]));
+                let mut value = metadata(identity.workspace_entries());
                 value.insert("key", "different".into());
                 fixture.metadata(&value);
             }
             "syntax" => fixture.write("cache/cache.json", b"{"),
             "oversize" => fixture.write("cache/cache.json", &vec![b' '; 4097]),
             "directory" => {
-                for label in ["actual", "original"] {
-                    fs::remove_file(fixture.root(label).join("cache/cache.json")).unwrap();
-                }
-                fixture.mkdir("cache/cache.json");
+                fs::remove_file(fixture.root().join("cache/cache.json")).unwrap();
+                fs::create_dir(fixture.root().join("cache/cache.json")).unwrap();
             }
             "modules-file" => fixture.write("cache/node_modules", b"not a directory"),
+            "missing-workspace" => {
+                fixture.mkdir("cache/node_modules");
+                fixture.write(
+                    "source/node_modules/workspace/retained",
+                    b"destination retained",
+                );
+            }
+            "workspace-conflict" => {
+                fixture.mkdir("cache/node_modules");
+                fixture.mkdir("source/packages/good");
+            }
             _ => (),
         }
-        let result = compare("restore", &fixture, &links, "source", "cache").await;
+        let root = fixture.root();
+        let result = identity
+            .restore(root.join("source"), root.join("cache"))
+            .await;
         match scenario {
-            "syntax" | "modules-file" => refuses(&result, "internal_error"),
-            "oversize" | "directory" => refuses(&result, "invalid_arguments"),
-            _ => succeeds(&result, false.into()),
+            "syntax" | "modules-file" => assert_eq!(result.unwrap_err().code, "internal_error"),
+            "oversize" | "directory" => assert_eq!(result.unwrap_err().code, "invalid_arguments"),
+            "workspace-conflict" => assert_eq!(result.unwrap_err().code, "target_conflict"),
+            _ => assert!(!result.unwrap()),
+        }
+        assert_eq!(
+            fs::read(root.join("source/retained")).unwrap(),
+            b"source retained"
+        );
+        assert_eq!(
+            fs::read(root.join("outside/retained")).unwrap(),
+            b"outside retained"
+        );
+        if scenario == "missing-workspace" {
+            assert_eq!(
+                fs::read(root.join("source/node_modules/workspace/retained")).unwrap(),
+                b"destination retained"
+            );
         }
     }
 }
@@ -475,12 +399,18 @@ async fn retain_then_restore_keeps_external_identity_and_current_workspace_bytes
     );
     fixture.write("source/packages/current/value", b"current source");
     succeeds(
-        &compare("retain", &fixture, &links, "source", "cache").await,
+        &operation("retain", &fixture, &links, "source", "cache").await,
         IvyJson::Null,
     );
-    for label in ["actual", "original"] {
-        let source = fixture.root(label).join("source");
-        let cache = fixture.root(label).join("cache");
+    assert_json_eq(
+        &ivy_host_runtime::config::json_file(fixture.root().join("cache/cache.json"), 4096)
+            .await
+            .unwrap(),
+        &metadata(identity(&links).workspace_entries()),
+    );
+    {
+        let source = fixture.root().join("source");
+        let cache = fixture.root().join("cache");
         assert!(!cache.join("node_modules/z-workspace").exists());
         assert!(!cache.join("node_modules/a-workspace").exists());
         assert_eq!(
@@ -493,25 +423,20 @@ async fn retain_then_restore_keeps_external_identity_and_current_workspace_bytes
         );
     }
     succeeds(
-        &compare("retain", &fixture, &links, "source", "cache").await,
+        &operation("retain", &fixture, &links, "source", "cache").await,
         IvyJson::Null,
     );
-    for label in ["actual", "original"] {
-        fs::remove_dir_all(fixture.root(label).join("source/node_modules")).unwrap();
+    {
+        fs::remove_dir_all(fixture.root().join("source/node_modules")).unwrap();
     }
     fixture.write("source/packages/current/value", b"changed workspace source");
     succeeds(
-        &compare("restore", &fixture, &links, "source", "cache").await,
+        &operation("restore", &fixture, &links, "source", "cache").await,
         true.into(),
     );
-    for label in ["actual", "original"] {
+    {
         assert_eq!(
-            fs::read(
-                fixture
-                    .root(label)
-                    .join("source/node_modules/a-workspace/value")
-            )
-            .unwrap(),
+            fs::read(fixture.root().join("source/node_modules/a-workspace/value")).unwrap(),
             b"changed workspace source"
         );
     }
@@ -541,14 +466,14 @@ async fn missing_workspace_is_a_partial_restore_miss_but_policy_conflict_stays_a
             b"destination unchanged",
         );
         fixture.write("outside/retained", b"outside unchanged");
-        let result = compare("restore", &fixture, &links, "source", "cache").await;
+        let result = operation("restore", &fixture, &links, "source", "cache").await;
         if missing {
             succeeds(&result, false.into())
         } else {
             refuses(&result, "target_conflict")
         }
-        for label in ["actual", "original"] {
-            let root = fixture.root(label);
+        {
+            let root = fixture.root();
             assert_eq!(
                 fs::read(root.join("source/node_modules/z-workspace/value")).unwrap(),
                 b"workspace bytes"
@@ -594,36 +519,47 @@ async fn retain_existing_identity_skips_modules_check_but_syntax_and_type_errors
             fixture.mkdir("cache/cache.json");
         }
         if scenario == "modules-file" {
-            for label in ["actual", "original"] {
-                fs::remove_dir_all(fixture.root(label).join("source/node_modules")).unwrap();
+            {
+                fs::remove_dir_all(fixture.root().join("source/node_modules")).unwrap();
             }
             fixture.write("source/node_modules", b"not a directory");
         }
-        let result = compare("retain", &fixture, &links, "source", "cache").await;
+        let result = operation("retain", &fixture, &links, "source", "cache").await;
         if scenario == "syntax" || scenario == "modules-file" {
             refuses(&result, "internal_error")
-        } else if scenario == "source-absent" || scenario == "valid-without-cached-modules" {
-            succeeds(&result, IvyJson::Null)
+        } else {
+            succeeds(&result, IvyJson::Null);
         }
-        if scenario == "syntax" || scenario == "valid-without-cached-modules" {
+        if scenario != "source-absent" && scenario != "modules-file" {
             assert_eq!(
-                fs::read(
-                    fixture
-                        .root("actual")
-                        .join("source/node_modules/external/value")
-                )
-                .unwrap(),
+                fs::read(fixture.root().join("source/node_modules/external/value")).unwrap(),
                 b"source bytes"
             );
         }
+        if scenario == "oversize" || scenario == "directory" {
+            assert_json_eq(
+                &ivy_host_runtime::config::json_file(fixture.root().join("cache/cache.json"), 4096)
+                    .await
+                    .unwrap(),
+                &metadata(IvyJson::Array(vec![])),
+            );
+            assert_eq!(
+                filesystem::stat_identity(
+                    &fixture.root().join("source/node_modules/external/value")
+                )
+                .unwrap(),
+                filesystem::stat_identity(
+                    &fixture.root().join("cache/node_modules/external/value")
+                )
+                .unwrap(),
+            );
+        }
         assert!(
-            !fs::read_dir(fixture.root("actual"))
+            !fs::read_dir(fixture.root()).unwrap().any(|entry| entry
                 .unwrap()
-                .any(|entry| entry
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .ends_with(".tmp")),
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")),
             "failed retention must drain cleanup"
         );
     }
@@ -631,8 +567,44 @@ async fn retain_existing_identity_skips_modules_check_but_syntax_and_type_errors
 
 #[tokio::test]
 async fn copy_phase_excludes_only_workspace_paths_preserves_bytes_and_refuses_self_copy() {
+    fn files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        fn walk(
+            root: &Path,
+            local: &Path,
+            found: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+        ) {
+            for entry in fs::read_dir(root.join(local)).unwrap() {
+                let entry = entry.unwrap();
+                let local = local.join(entry.file_name());
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    walk(root, &local, found);
+                } else {
+                    assert!(kind.is_file());
+                    found.insert(local, fs::read(entry.path()).unwrap());
+                }
+            }
+        }
+        let mut found = std::collections::BTreeMap::new();
+        walk(root, Path::new(""), &mut found);
+        found
+    }
     let fixture = Fixture::new();
-    let links = links(&[("node_modules/@scope/workspace", "packages/current")]);
+    let opaque = PathBuf::from(opaque_name());
+    let replacement = PathBuf::from(opaque.as_os_str().to_string_lossy().into_owned());
+    let mut links = links(&[("node_modules/@scope/workspace", "packages/current")]);
+    links.push((
+        format!("node_modules/{}", replacement.to_str().unwrap()).into(),
+        "packages/replacement".into(),
+    ));
+    fixture.write(
+        Path::new("source/node_modules").join(&opaque),
+        b"opaque external bytes",
+    );
+    fixture.write(
+        Path::new("source/node_modules").join(&replacement),
+        b"excluded replacement workspace",
+    );
     fixture.write(
         "source/node_modules/@scope/workspace/deep/value",
         b"workspace excluded",
@@ -648,93 +620,107 @@ async fn copy_phase_excludes_only_workspace_paths_preserves_bytes_and_refuses_se
     fixture.write("source/node_modules/ordinary", b"ordinary bytes");
     fixture.write("cache/ordinary", b"replaced bytes");
     fixture.write("cache/retained", b"destination sibling");
-    for label in ["actual", "original"] {
-        let file = fixture
-            .root(label)
-            .join("source/node_modules/pkg/deep/ü 空 😀");
-        let mut permissions = fs::metadata(&file).unwrap().permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(file, permissions).unwrap();
-    }
-    succeeds(
-        &compare("copy", &fixture, &links, "source", "cache").await,
-        IvyJson::Null,
+    let root = fixture.root();
+    let file = root.join("source/node_modules/pkg/deep/ü 空 😀");
+    let mut permissions = fs::metadata(&file).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&file, permissions).unwrap();
+    let source_before = files(&root.join("source"));
+    preparation_cache::copy_external_dependencies(root.join("source"), root.join("cache"), links)
+        .await
+        .unwrap();
+    assert_eq!(
+        files(&root.join("cache")),
+        [
+            (
+                PathBuf::from("@scope/workspace-old/value"),
+                b"prefix sibling retained".to_vec()
+            ),
+            (
+                PathBuf::from("pkg/deep/ü 空 😀"),
+                b"external bytes\x00\xff".to_vec()
+            ),
+            (PathBuf::from("ordinary"), b"ordinary bytes".to_vec()),
+            (PathBuf::from("retained"), b"destination sibling".to_vec()),
+            (opaque.clone(), b"opaque external bytes".to_vec()),
+        ]
+        .into_iter()
+        .collect()
     );
-    for label in ["actual", "original"] {
-        let root = fixture.root(label);
-        assert!(!root.join("cache/@scope/workspace").exists());
-        assert_eq!(
-            fs::read(root.join("cache/@scope/workspace-old/value")).unwrap(),
-            b"prefix sibling retained"
-        );
-        assert_ne!(
-            filesystem::stat_identity(&root.join("source/node_modules/ordinary")).unwrap(),
-            filesystem::stat_identity(&root.join("cache/ordinary")).unwrap()
-        );
-    }
+    assert!(!root.join("cache/@scope/workspace").exists());
+    assert!(!root.join("cache").join(&replacement).exists());
+    assert_eq!(
+        fs::metadata(&file).unwrap().permissions(),
+        fs::metadata(root.join("cache/pkg/deep/ü 空 😀"))
+            .unwrap()
+            .permissions()
+    );
+    assert_eq!(files(&root.join("source")), source_before);
+    assert_ne!(
+        filesystem::stat_identity(&root.join("source/node_modules/ordinary")).unwrap(),
+        filesystem::stat_identity(&root.join("cache/ordinary")).unwrap()
+    );
+    assert_ne!(
+        filesystem::stat_identity(&root.join("source/node_modules").join(&opaque)).unwrap(),
+        filesystem::stat_identity(&root.join("cache").join(&opaque)).unwrap()
+    );
+    fs::write(
+        root.join("source/node_modules/ordinary"),
+        b"later workspace bytes",
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(root.join("cache/ordinary")).unwrap(),
+        b"ordinary bytes"
+    );
+
     let fixture = Fixture::new();
     fixture.write(
         "source/node_modules/pkg/value",
         b"unchanged self-copy source",
     );
-    refuses(
-        &compare("copy", &fixture, &vec![], "source", "source/node_modules").await,
-        "internal_error",
-    );
-    assert_eq!(
-        fs::read(fixture.root("actual").join("source/node_modules/pkg/value")).unwrap(),
-        b"unchanged self-copy source"
-    );
-    append(IvyJson::object([("unavailable","real EXDEV cache rename path".into()),("scope","the actual external-copy phase was compared directly; no second volume is configured and no cross-device event was injected".into())]));
+    let root = fixture.root();
+    let before = files(&root.join("source"));
+    let error = preparation_cache::copy_external_dependencies(
+        root.join("source"),
+        root.join("source/node_modules"),
+        vec![],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "internal_error");
+    assert_eq!(files(&root.join("source")), before);
 }
 
 #[tokio::test]
-async fn external_copy_keeps_observed_link_targets_or_the_original_privilege_refusal() {
+async fn external_copy_keeps_observed_native_link_targets_and_target_bytes() {
     let fixture = Fixture::new();
     fixture.mkdir("source/node_modules");
     fixture.write("target/value", b"outside link target bytes");
-    for label in ["actual", "original"] {
-        let root = fixture.root(label);
-        filesystem::directory_link(
-            &root.join("target"),
-            &root.join("source/node_modules/observed"),
-        )
+    let root = fixture.root();
+    let source_link = root.join("source/node_modules/observed");
+    filesystem::directory_link(&root.join("target"), &source_link).unwrap();
+    let target = fs::read_link(&source_link).unwrap();
+    preparation_cache::copy_external_dependencies(root.join("source"), root.join("cache"), vec![])
+        .await
         .unwrap();
-    }
-    let result = compare("copy", &fixture, &vec![], "source", "cache").await;
-    if cfg!(unix) || std::env::var_os("IVY_REQUIRE_FILE_SYMLINKS").is_some() {
-        succeeds(&result, IvyJson::Null)
-    } else if result.get("ok") != Some(&true.into()) {
-        #[cfg(windows)]
-        {
-            let error = std::os::windows::fs::symlink_file(
-                fixture.root("actual").join("target/value"),
-                fixture.root("actual").join("privilege-probe"),
-            )
-            .unwrap_err();
-            assert!(
-                error.kind() == std::io::ErrorKind::PermissionDenied
-                    || error.raw_os_error() == Some(1314)
-            );
-        }
-        append(IvyJson::object([
-            (
-                "unavailable",
-                "successful cache copy of an observed link requires native file-symlink privilege"
-                    .into(),
-            ),
-            (
-                "scope",
-                "the actual Rust/original refusal and unchanged target were compared".into(),
-            ),
-        ]));
-    }
-    for label in ["actual", "original"] {
-        assert_eq!(
-            fs::read(fixture.root(label).join("target/value")).unwrap(),
-            b"outside link target bytes"
-        );
-    }
+    let destination = root.join("cache/observed");
+    assert!(
+        fs::symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_link(&destination).unwrap(), target);
+    assert_eq!(
+        fs::read(destination.join("value")).unwrap(),
+        b"outside link target bytes"
+    );
+    assert_eq!(
+        fs::read(root.join("target/value")).unwrap(),
+        b"outside link target bytes"
+    );
+    assert_eq!(fs::read_link(&source_link).unwrap(), target);
 }
 
 #[tokio::test]
@@ -743,11 +729,11 @@ async fn cache_publication_retains_native_long_path_behavior() {
     fixture.write("source/node_modules/pkg/value", b"long cache path bytes");
     let cache = format!("{}cache", "long-directory-component/".repeat(12));
     succeeds(
-        &compare("retain", &fixture, &vec![], "source", &cache).await,
+        &operation("retain", &fixture, &vec![], "source", &cache).await,
         IvyJson::Null,
     );
     assert_eq!(
-        fs::read(fixture.root("actual").join("source/node_modules/pkg/value")).unwrap(),
+        fs::read(fixture.root().join("source/node_modules/pkg/value")).unwrap(),
         b"long cache path bytes"
     );
 }
@@ -760,7 +746,7 @@ async fn cancelling_retention_waiter_preserves_admitted_publication_and_workspac
     };
     use std::time::{Duration, Instant};
     let fixture = Fixture::new();
-    let root = fixture.root("actual");
+    let root = fixture.root();
     let links = links(&[
         ("node_modules/z-workspace", "packages/current"),
         ("node_modules/a-workspace", "node_modules/z-workspace"),
@@ -840,62 +826,42 @@ async fn cancelling_retention_waiter_preserves_admitted_publication_and_workspac
         fs::read(cache.join("node_modules/external/value")).unwrap(),
         b"retained external bytes"
     );
-    append(IvyJson::object([("observation","cancelled caller waiter after the real source move; admitted retention completed cache publication and both ordered workspace links".into())]));
 }
 
 #[cfg(windows)]
 #[tokio::test]
-async fn retained_cache_reader_matches_original_account_sharing_behavior() {
+async fn retained_cache_reader_preserves_native_sharing_refusal_and_recovers_after_release() {
+    use ivy_host_runtime::config;
     use std::os::windows::fs::OpenOptionsExt;
     let fixture = Fixture::new();
     fixture.write("source/node_modules/pkg/value", b"unchanged source");
-    fixture.metadata(&metadata(IvyJson::Array(vec![])));
-    let holds = ["actual", "original"].map(|label| {
-        fs::OpenOptions::new()
-            .read(true)
-            .share_mode(0)
-            .open(fixture.root(label).join("cache/cache.json"))
-            .unwrap()
-    });
-    // Keep the same exclusive handle for Rust and the original child. The
-    // executing account's backup semantics may still permit both reads.
-    // Snapshot after release so it cannot introduce another sharing outcome.
-    let identity = identity(&vec![]);
-    let result = wire(
-        identity
-            .retain(
-                fixture.root("actual").join("source"),
-                fixture.root("actual").join("cache"),
-            )
-            .await
-            .map(|_| IvyJson::Null),
+    let expected = metadata(IvyJson::Array(vec![]));
+    fixture.metadata(&expected);
+    let root = fixture.root();
+    let cache_file = root.join("cache/cache.json");
+    let before = fs::read(&cache_file).unwrap();
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&cache_file)
+        .unwrap();
+    assert_eq!(fs::read(&cache_file).unwrap_err().raw_os_error(), Some(32));
+    let result = operation("retain", &fixture, &vec![], "source", "cache").await;
+    refuses(&result, "internal_error");
+    drop(held);
+    assert_eq!(fs::read(&cache_file).unwrap(), before);
+    assert_eq!(
+        fs::read(root.join("source/node_modules/pkg/value")).unwrap(),
+        b"unchanged source"
     );
-    let input = IvyJson::object([
-        ("operation", "retain".into()),
-        ("originalRoot", path(&fixture.root("original"))),
-        ("key", KEY.into()),
-        ("links", IvyJson::Array(vec![])),
-    ]);
-    let expected = oracle(&input);
-    assert_eq!(&result, expected.required("operation").unwrap());
-    if result.get("ok") == Some(&true.into()) {
-        succeeds(&result, IvyJson::Null);
-    } else {
-        refuses(&result, "internal_error");
-    }
-    drop(holds);
-    let snapshot = oracle(&IvyJson::object([
-        ("operation", "snapshot".into()),
-        ("actualRoot", path(&fixture.root("actual"))),
-        ("originalRoot", path(&fixture.root("original"))),
-    ]));
-    assert_eq!(snapshot.get("actualTree"), snapshot.get("originalTree"));
-    append(IvyJson::object([
-        ("input", input),
-        ("actual", result),
-        ("expected", expected),
-        ("snapshot", snapshot),
-    ]));
+    succeeds(
+        &operation("retain", &fixture, &vec![], "source", "cache").await,
+        IvyJson::Null,
+    );
+    assert_json_eq(
+        &config::json_file(&cache_file, 4096).await.unwrap(),
+        &expected,
+    );
 }
 
 #[tokio::test]
@@ -904,10 +870,25 @@ async fn cache_validation_ivy_errors_are_ignored_only_by_initial_retention() {
     fixture.write("source/node_modules/pkg/value", b"installed source bytes");
     fixture.write("cache/cache.json",br#"{"schemaVersion":3,"key":"fixture-cache-key","externalOnly":true,"workspaceLinks":[{"location":"node_modules/pkg","target":"packages/pkg","extra":1e400}]}"#);
     refuses(
-        &compare("restore", &fixture, &vec![], "source", "cache").await,
+        &operation("restore", &fixture, &vec![], "source", "cache").await,
         "invalid_arguments",
     );
-    // The original catch includes validCache/hashJson as well as jsonFile.
-    // A later Windows EPERM on replacing the existing directory still applies.
-    compare("retain", &fixture, &vec![], "source", "cache").await;
+    let root = fixture.root();
+    let original_metadata = fs::read(root.join("cache/cache.json")).unwrap();
+    let result = operation("retain", &fixture, &vec![], "source", "cache").await;
+    // Validation failure is ignored initially: the source move and temporary
+    // publication happen. Replacing the existing cache still obeys native IO.
+    refuses(&result, "invalid_arguments");
+    assert!(!root.join("source/node_modules").exists());
+    assert_eq!(
+        fs::read(root.join("cache/cache.json")).unwrap(),
+        original_metadata
+    );
+    assert!(!fs::read_dir(&root).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")
+    }));
 }
