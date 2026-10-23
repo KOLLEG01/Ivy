@@ -760,6 +760,238 @@
       ],
       "additionalProperties": false
     },
+    "OutgoingFile": {
+      "type": "object",
+      "properties": {
+        "filename": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\\\/\\x00-\\x1f\\x7f]+$"
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$"
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8388608
+        },
+        "contentHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        }
+      },
+      "required": [
+        "filename",
+        "mediaType",
+        "byteLength",
+        "contentHash"
+      ],
+      "additionalProperties": false
+    },
+    "SendFileRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "sendFile"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedBridge": {
+          "$ref": "#/$defs/ExpectedBridge"
+        },
+        "expectedBinding": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "file": {
+          "type": "object",
+          "properties": {
+            "filename": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": "^[^\\\\/\\x00-\\x1f\\x7f]+$"
+            },
+            "mediaType": {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 128,
+              "pattern": "^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$"
+            },
+            "byteLength": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8388608
+            },
+            "contentHash": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+            },
+            "bytesBase64": {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 11184812
+            }
+          },
+          "required": [
+            "filename",
+            "mediaType",
+            "byteLength",
+            "contentHash",
+            "bytesBase64"
+          ],
+          "additionalProperties": false
+        },
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 1024
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "expectedBridge",
+        "expectedBinding",
+        "file",
+        "caption"
+      ],
+      "additionalProperties": false
+    },
+    "FileTarget": {
+      "type": "object",
+      "properties": {
+        "expectedBridge": {
+          "$ref": "#/$defs/ExpectedBridge"
+        },
+        "expectedBinding": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "channel": {
+          "$ref": "#/$defs/Channel"
+        }
+      },
+      "required": [
+        "expectedBridge",
+        "expectedBinding",
+        "channel"
+      ],
+      "additionalProperties": false
+    },
+    "FileQuery": {
+      "type": "object",
+      "properties": {
+        "fileTarget": {
+          "const": true
+        },
+        "fileOperationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "fileTarget"
+          ]
+        },
+        {
+          "required": [
+            "fileOperationId"
+          ]
+        }
+      ]
+    },
+    "FileDelivery": {
+      "type": "object",
+      "properties": {
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "binding": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "channel": {
+          "$ref": "#/$defs/Channel"
+        },
+        "file": {
+          "$ref": "#/$defs/OutgoingFile"
+        },
+        "kind": {
+          "enum": [
+            "image",
+            "document"
+          ]
+        },
+        "messageId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "sending",
+            "sent",
+            "outcome_unknown",
+            "failed"
+          ]
+        },
+        "errorCode": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "createdAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "operationId",
+        "binding",
+        "channel",
+        "file",
+        "kind",
+        "messageId",
+        "state",
+        "errorCode",
+        "createdAt",
+        "updatedAt"
+      ],
+      "additionalProperties": false
+    },
+    "FileReadResult": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/FileTarget"
+        },
+        {
+          "$ref": "#/$defs/FileDelivery"
+        }
+      ]
+    },
     "ActionRequest": {
       "oneOf": [
         {

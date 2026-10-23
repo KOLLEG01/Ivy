@@ -25,6 +25,7 @@ import { scopedOperationId } from "../../../../packages/sdk/src/client.js";
 import { WhatsAppAuthStore } from "./auth.js";
 import { translator } from "./messages.js";
 import type { Translator, WhatsAppLanguage } from "./messages.js";
+import { ChatFiles } from '../files.js';
 type Attached = {
   bridge: ChatBridge;
   native: WhatsAppNative;
@@ -50,6 +51,7 @@ export class WhatsAppRuntime {
   readonly journal: WhatsAppJournal;
   readonly authStore: WhatsAppAuthStore;
   readonly transport: WhatsAppSocket;
+  readonly files: ChatFiles;
   private readonly lock: ExecutorLock;
   private attached: Attached | null = null;
   private timers: NodeJS.Timeout[] = [];
@@ -88,6 +90,8 @@ export class WhatsAppRuntime {
       () => this.wake(),
       () => this.attached ? automaticNotificationsAllowed(this.attached.bridge.main.store.client, new Date()) : Promise.resolve(false),
     );
+    this.files = new ChatFiles(this.journal, config, () => this.attached?.bridge ?? null);
+    this.transport.files = this.files;
   }
   private wake(): void {
     this.run("control", () => this.control());
@@ -139,6 +143,7 @@ export class WhatsAppRuntime {
       return;
     }
     const native = new WhatsAppNative(bridge, this.journal, this.t);
+    bridge.files = this.files;
     this.attached = {
       bridge,
       native,
@@ -179,6 +184,7 @@ export class WhatsAppRuntime {
     every("read-receipts", 1000, () => this.transport.flushReadReceipts());
     every("activity", 1000, () => this.activity());
     every("retention", 3600000, async () => {
+      this.files.prune();
       this.journal.prune();
       if (!this.nativeBusy) await pruneMedia(this.dataRoot, this.journal);
     });

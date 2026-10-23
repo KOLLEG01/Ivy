@@ -71,6 +71,7 @@ test("ChatBridge contracts fit unchanged Hive validation limits and retain stric
     "acknowledge",
     "cancel",
     "createMain",
+    "file",
     "history",
     "input",
     "notice",
@@ -79,6 +80,7 @@ test("ChatBridge contracts fit unchanged Hive validation limits and retain stric
     "receive",
     "retryResult",
     "send",
+    "sendFile",
     "workspace",
   ]);
   for (const item of examples.cases) {

@@ -119,6 +119,17 @@ export class WhatsAppJournal {
     const id = identity('out', key, 0).slice(0,32).toUpperCase();
     return !!this.db.prepare('SELECT 1 FROM outgoing WHERE id=? UNION ALL SELECT 1 FROM retired_outgoing WHERE id=? LIMIT 1').get(id,id);
   }
+  enqueueAttachment(id: string, jid: string, caption: string): void {
+    requireThat(!this.db.prepare('SELECT 1 FROM outgoing WHERE id=? UNION ALL SELECT 1 FROM retired_outgoing WHERE id=?').get(id, id),
+      'whatsui_identity_conflict', 'A file must retain its original transport identity.');
+    this.write('INSERT INTO outgoing(id,jid,text) VALUES(?,?,?)', id, jid, caption);
+    this.set('out-created:' + id, Date.now());
+  }
+  retireAttachment(id: string, requestHash: string): void {
+    this.write('INSERT OR IGNORE INTO retired_outgoing VALUES(?,?)', id, 'file:' + requestHash);
+    this.write("UPDATE outgoing SET text='',state=CASE WHEN state='sent' THEN 'sent' ELSE 'failed' END WHERE id=?", id);
+    this.set('out-created:' + id, null);
+  }
   /** Retain the original wording of a single-part notice across service updates. */
   noticeText(key: string): string | null {
     const id = identity('out', key, 0).slice(0,32).toUpperCase();
@@ -126,7 +137,7 @@ export class WhatsAppJournal {
     return this.db.prepare('SELECT text FROM outgoing WHERE id=?').get(id)?.['text'] as string ?? null;
   }
   outgoing(): Outgoing[] { return this.db.prepare("SELECT * FROM outgoing WHERE state<>'sent' ORDER BY sequence LIMIT 16").all() as unknown as Outgoing[]; }
-  mark(id: string, state: 'sending'|'sent'|'unknown'): void { this.write("UPDATE outgoing SET state=? WHERE id=? AND state<>'sent'",state,id); }
+  mark(id: string, state: 'sending'|'sent'|'unknown'|'failed'): void { this.write("UPDATE outgoing SET state=? WHERE id=? AND state<>'sent'",state,id); }
   sent(ids: string[]): boolean { return ids.every(id=>this.db.prepare("SELECT 1 FROM outgoing WHERE id=? AND state='sent' UNION ALL SELECT 1 FROM retired_outgoing WHERE id=? LIMIT 1").get(id,id)); }
   prune(_now=Date.now()):void {
     const protectedMessages:string[]=[],protectedOutputs=new Set<string>();
@@ -150,7 +161,7 @@ export class WhatsAppJournal {
       for (const row of this.db.prepare("SELECT id,received,length(CAST(message AS BLOB)) AS bytes FROM inbox WHERE state='done' AND id NOT IN (SELECT id FROM retired_inbox WHERE retired=1)").all())
         candidates.push({ kind:'inbox', id:String(row['id']), at:Number(row['received']), bytes:Number(row['bytes']) });
       for (const row of this.db.prepare("SELECT o.id,COALESCE(CAST(k.value AS INTEGER),0) AS at,length(CAST(o.text AS BLOB)) AS bytes FROM outgoing o LEFT JOIN kv k ON k.key='out-created:'||o.id WHERE o.state='sent' AND o.id NOT IN (SELECT id FROM retired_outgoing)").all())
-        if (!protectedOutputs.has(String(row['id']))) candidates.push({ kind:'outgoing', id:String(row['id']), at:Number(row['at']), bytes:Number(row['bytes']) });
+        if (!protectedOutputs.has(String(row['id'])) && !this.get('out-file:' + row['id'])) candidates.push({ kind:'outgoing', id:String(row['id']), at:Number(row['at']), bytes:Number(row['bytes']) });
       for (const row of this.db.prepare("SELECT key,value,length(CAST(value AS BLOB)) AS bytes FROM kv WHERE key LIKE 'message:%'").all()) {
         const key=String(row['key']), value=JSON.parse(String(row['value'])) as { ids:string[]; at:number };
         if (!protectedMessages.some(prefix=>key.startsWith(prefix)) && this.sent(value.ids))

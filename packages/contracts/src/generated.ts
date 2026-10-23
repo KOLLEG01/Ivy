@@ -578,6 +578,12 @@ export namespace Chat {
   export type NotifyRequest = { "action": "notify"; "operationId": Wire.Identifier; "source": Chat.ObjectPin; "text": string; };
   export type NoticeQuery = { "operationId": Wire.Identifier; };
   export type AdmittedNotifyRequest = { "action": "notify"; "operationId": Wire.Identifier; "expectedBridge": Chat.ExpectedBridge; "channel": Chat.Channel; "source": Chat.ObjectPin; "text": string; };
+  export type OutgoingFile = { "filename": string; "mediaType": string; "byteLength": number; "contentHash": Wire.Hash; };
+  export type SendFileRequest = { "action": "sendFile"; "operationId": Wire.Identifier; "expectedBridge": Chat.ExpectedBridge; "expectedBinding": Chat.ObjectPin; "file": { "filename": string; "mediaType": string; "byteLength": number; "contentHash": Wire.Hash; "bytesBase64": string; }; "caption": (string) | (null); };
+  export type FileTarget = { "expectedBridge": Chat.ExpectedBridge; "expectedBinding": Chat.ObjectPin; "channel": Chat.Channel; };
+  export type FileQuery = ({ "fileTarget": true; "fileOperationId"?: Wire.Identifier; }) | ({ "fileTarget"?: true; "fileOperationId": Wire.Identifier; });
+  export type FileDelivery = { "operationId": Wire.Identifier; "binding": Chat.ObjectPin; "channel": Chat.Channel; "file": Chat.OutgoingFile; "kind": "image" | "document"; "messageId": Wire.Identifier; "state": "queued" | "sending" | "sent" | "outcome_unknown" | "failed"; "errorCode": (Wire.Identifier) | (null); "createdAt": string; "updatedAt": string; };
+  export type FileReadResult = (Chat.FileTarget) | (Chat.FileDelivery);
   export type ActionRequest = (Chat.CreateMainRequest) | (Chat.SendRequest) | (Chat.CancelRequest) | (Chat.ReceiveRequest) | (Chat.AcknowledgeRequest) | (Chat.NotifyRequest);
   export type AdmittedActionRequest = (Chat.CreateMainRequest) | (Chat.SendRequest) | (Chat.CancelRequest) | (Chat.ReceiveRequest) | (Chat.AcknowledgeRequest) | (Chat.AdmittedNotifyRequest);
   export type Binding = { "schemaVersion": 1; "workspaceId": Wire.Identifier; "definitionHash": Wire.Hash; "project": Wire.ResourceRef; "primary": Wire.ResourceRef; "nativePlan": Chat.NativePlan; "createdAt": string; "operationId": Wire.Identifier; "predecessor": (Chat.ObjectPin) | (null); };

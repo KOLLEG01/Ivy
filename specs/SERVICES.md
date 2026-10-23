@@ -71,6 +71,21 @@ the original transport result or stays unknown. Transport retention and recovery
 `de` for ChatBridge-authored WhatsApp copy; omission uses English. It is a presentation setting,
 not part of the workspace `Definition` or the separate transcription-language setting.
 
+Explicit file delivery uses `chat_bridge_send_file` and the existing WhatsApp connection.
+Read `chat_bridge_read` with `{fileTarget:true}`, then submit its exact bridge/binding,
+one selected file's canonical base64 bytes, filename, MIME, byte length and SHA-256,
+an optional caption and a stable operation ID. Local paths and arbitrary download URLs
+are not accepted. PNG/JPEG use native image messages; other admitted formats retain their
+original bytes as named documents. MIME signatures and UTF-8 text are checked; unknown
+binary formats require `application/octet-stream`. Limits and request shapes are in the
+[Chat schema](schemas/chat.schema.json). Read `{fileOperationId:operationId}` for the
+original delivery: queued/sending does not prove delivery; sent requires WhatsApp server
+acknowledgement. Uncertain media sends are never repeated automatically. File intent and
+bytes share the ordered durable transport journal. A changed Main, account or recipient
+blocks dispatch. The file queue admits 32 unresolved deliveries and 64 MiB, expires files
+after seven days and retains at most 256 completed receipts with compact replay fences.
+Checks: [file delivery](../tests/chat-files.test.ts).
+
 ChatBridge observes unresolved Hive warning/error diagnostics. A problem lasting five minutes
 enters Main once; resolution must remain stable for five minutes before one recovery notice.
 Diagnostics with the same visible service, error code and dependent service form one incident,

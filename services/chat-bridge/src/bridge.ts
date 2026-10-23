@@ -13,9 +13,11 @@ import { ChatWorker } from './worker.js';
 import { ChatNotices } from './notices.js';
 import { ChatCollector } from './collector.js';
 import type { CollectionRetry } from './collector.js';
+import type { ChatFiles } from './files.js';
 
 /** One Hive connection generation; caller identity comes exclusively from provider invocation. */
 export class ChatBridge {
+  files: ChatFiles | null = null;
   readonly outbox: ChatOutbox;
   readonly queries: ChatQueries;
   readonly cancellation: ChatCancellation;
@@ -52,11 +54,22 @@ export class ChatBridge {
     validateChat(catalog.operations[name].input.slice(8), args);
     if (catalog.operations[name].mutation) {
       requireThat(typeof args['operationId'] === 'string' && context.operationId === args['operationId'], 'invalid_arguments', 'The transport and Chat action must use one operation identity.');
-      const retained = await this.main.operations.find(caller, args['operationId']);
-      await this.main.store.validateOperationId(args['operationId'], Date.now(), retained?.value.request.action === name);
+      const existing = await this.main.operations.find(caller, args['operationId']);
+      requireThat(name === 'sendFile' ? !existing : !this.files?.has(caller, args['operationId']),
+        'chat_identity_conflict', 'One ChatBridge operation identity cannot be reused for file and conversation actions.');
+      const retained = name === 'sendFile' ? this.files?.has(caller, args['operationId'])
+        : existing?.value.request.action === name;
+      await this.main.store.validateOperationId(args['operationId'], Date.now(), !!retained);
     }
     let result: unknown;
     switch (name) {
+      case 'sendFile':
+      case 'file': {
+        requireThat(this.files, 'service_not_ready', 'The WhatsApp file transport is unavailable.');
+        result = name === 'sendFile' ? await this.files.send(caller, args as unknown as Chat.SendFileRequest)
+          : await this.files.read(caller, args as unknown as Chat.FileQuery);
+        break;
+      }
       case 'retryResult': result = await new ChatCollector(this.main).retry(caller, args as unknown as CollectionRetry); break;
       case 'workspace': result = await this.workspace(caller); break;
       case 'operation': {

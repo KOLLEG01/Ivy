@@ -1,5 +1,5 @@
 import makeWASocket, { DisconnectReason, fetchLatestWaWebVersion, jidNormalizedUser } from 'baileys';
-import type { WAMessage, WASocket } from 'baileys';
+import type { BinaryNode, WAMessage, WASocket } from 'baileys';
 import { join } from 'node:path';
 import { atomicJson } from '../../../../packages/host-runtime/src/config.js';
 import { encode, decode, whatsappAuth } from './auth.js';
@@ -7,10 +7,13 @@ import type { WhatsAppAuthStore } from './auth.js';
 import { identity, WhatsAppJournal } from './journal.js';
 import { jidPhone, phone } from './config.js';
 import type { WhatsAppConfig, WhatsAppSender } from './config.js';
+import { IvyError, requireThat } from '../../../../packages/sdk/src/node.js';
+import type { ChatFiles } from '../files.js';
 
 // Never forward protocol logs: they may include session keys, QR codes or message bodies.
 const quiet = { level:'silent', child:()=>quiet, trace:()=>{}, debug:()=>{}, info:()=>{}, warn:()=>{}, error:()=>{}, fatal:()=>{} };
 export class WhatsAppSocket {
+  files: ChatFiles | null = null;
   socket: WASocket|null=null;
   connected=false;
   lastOnlinePresenceAt:string|null=null;
@@ -34,6 +37,20 @@ export class WhatsAppSocket {
   private events:Promise<void>=Promise.resolve();
   constructor(readonly config:WhatsAppConfig,readonly journal:WhatsAppJournal,readonly authStore:WhatsAppAuthStore,readonly dataRoot:string,readonly wake:()=>void,
     readonly automaticContactAllowed:()=>Promise<boolean> = async()=>false){}
+  private async sameRecipient(expected:string, actual:string, socket:WASocket):Promise<boolean>{
+    if(jidNormalizedUser(expected)===jidNormalizedUser(actual))return true;
+    if(!actual.endsWith('@lid'))return false;
+    const mapped=await socket.signalRepository.lidMapping.getPNForLID(actual);
+    return !!mapped && jidNormalizedUser(expected)===jidNormalizedUser(mapped);
+  }
+  async confirmDelivery(key:WAMessage['key'], status:number, socket:WASocket):Promise<void>{
+    if(!key.fromMe||!key.id||!key.remoteJid||status<2)return;
+    const row=this.journal.db.prepare('SELECT jid FROM outgoing WHERE id=?').get(key.id);
+    if(!row||!await this.sameRecipient(String(row['jid']),key.remoteJid,socket))return;
+    if(this.socket!==socket)return;
+    if(this.files?.isFile(key.id))this.files.mark(key.id,'sent');else this.journal.mark(key.id,'sent');
+    await this.journal.flush();this.wake();
+  }
   start():void { this.stopped=false; void this.connect().catch(()=>this.reconnect()); }
   private reconnect():void {
     this.connected=false; this.busy.clear();this.composing.clear();this.composingAt=0; if(this.heartbeat)clearInterval(this.heartbeat);this.heartbeat=null;
@@ -52,7 +69,12 @@ export class WhatsAppSocket {
       getMessage:async key=>{
         if(!key.id||!key.remoteJid)return undefined;
         const row=this.journal.db.prepare('SELECT jid,text FROM outgoing WHERE id=?').get(key.id);
-        return row&&jidNormalizedUser(String(row['jid']))===jidNormalizedUser(key.remoteJid)?{conversation:String(row['text'])}:undefined;
+        if(!row || !await this.sameRecipient(String(row['jid']),key.remoteJid,socket))return undefined;
+        if(this.journal.get('out-file:'+key.id)){
+          const saved=this.journal.get<string>('out-file-message:'+key.id);
+          return saved?decode<NonNullable<WAMessage['message']>>(saved):undefined;
+        }
+        return {conversation:String(row['text'])};
       }});
     this.socket=socket;
     socket.ev.on('creds.update',()=>{if(generation===this.generation)auth.save();});
@@ -80,10 +102,13 @@ export class WhatsAppSocket {
     });
     socket.ev.on('messages.update',updates=>{
       if(generation!==this.generation || this.stopped)return;
-      for(const {key,update} of updates)if(key.fromMe && key.id && key.remoteJid && typeof update.status==='number' && update.status>=2){
-        const row=this.journal.db.prepare('SELECT jid FROM outgoing WHERE id=?').get(key.id);
-        if(row && jidNormalizedUser(String(row['jid']))===jidNormalizedUser(key.remoteJid)){this.journal.mark(key.id,'sent');this.wake();}
-      }
+      for(const {key,update} of updates)if(typeof update.status==='number')
+        this.events=this.events.then(()=>this.confirmDelivery(key,update.status!,socket)).catch(()=>{this.errorCode='whatsapp_receipt_failed';});
+    });
+    socket.ws.on('CB:ack,class:message',(node:BinaryNode)=>{
+      if(generation!==this.generation||this.stopped||node.attrs['error']||!node.attrs['from']||!node.attrs['id'])return;
+      this.events=this.events.then(()=>this.confirmDelivery({id:node.attrs['id']!,remoteJid:node.attrs['from']!,fromMe:true},2,socket))
+        .catch(()=>{this.errorCode='whatsapp_receipt_failed';});
     });
   }
   async admitted(message:WAMessage,socket:WASocket):Promise<WhatsAppSender|null>{
@@ -159,6 +184,45 @@ export class WhatsAppSocket {
         rows=this.journal.db.prepare("SELECT * FROM outgoing WHERE state IN ('pending','sending') AND NOT EXISTS (SELECT 1 FROM kv WHERE key='out-automatic:'||outgoing.id) ORDER BY sequence LIMIT 64").all() as unknown as ReturnType<WhatsAppJournal['outgoing']>;
       for(const item of rows){
         if(blocked.has(item.jid)||this.socket!==socket||!this.connected)continue;
+        if(this.journal.get('out-file:'+item.id)){
+          const files=this.files;
+          if(!files){blocked.add(item.jid);continue;}
+          // Once dispatch started, only an actual WhatsApp acknowledgement can resolve it.
+          // Never repeat an uncertain media upload, including after process restart.
+          if(item.state==='sending'){
+            const submitted=this.journal.get<number>('file-submitted:'+item.id);
+            if(!submitted || Date.now()-submitted>=60000)files.mark(item.id,'unknown','whatsapp_delivery_unknown');
+            else blocked.add(item.jid);
+            continue;
+          }
+          let payload:Awaited<ReturnType<ChatFiles['payload']>>;
+          try{
+            if(!await files.admitted(item.id)){blocked.add(item.jid);continue;}
+            payload=await files.payload(item.id);
+            if(!await files.admitted(item.id)){blocked.add(item.jid);continue;}
+          }catch(error){
+            const code=IvyError.from(error).code;
+            if(['chat_file_target_changed','chat_file_integrity','chat_file_type','limit_exceeded'].includes(code))files.mark(item.id,'failed',code);
+            else blocked.add(item.jid);
+            continue;
+          }
+          if(this.socket!==socket||!this.connected){blocked.add(item.jid);continue;}
+          files.mark(item.id,'sending');await this.journal.flush();
+          try{
+            const started=performance.now(),sent=await socket.sendMessage(item.jid,payload,{messageId:item.id});
+            this.lastSendMs=Math.round(performance.now()-started);
+            requireThat(sent?.key.id===item.id && sent.key.fromMe===true && jidNormalizedUser(sent.key.remoteJid??'')===jidNormalizedUser(item.jid) && sent.message,
+              'whatsapp_delivery_unknown','The media send did not return its original WhatsApp message identity.');
+            this.journal.set('out-file-message:'+item.id,encode(sent.message));
+            this.journal.set('file-submitted:'+item.id,Date.now());
+            if(typeof sent.status==='number'&&sent.status>=2)files.mark(item.id,'sent');
+            else if(!this.journal.sent([item.id]))blocked.add(item.jid);
+          }catch{
+            if(!this.journal.sent([item.id]))files.mark(item.id,'unknown','whatsapp_delivery_unknown');
+            blocked.add(item.jid);this.errorCode='whatsapp_delivery_unknown';
+          }
+          await this.journal.flush();continue;
+        }
         if(this.journal.get<boolean>('out-automatic:'+item.id)&&!await this.contactAllowed())continue;
         const key='send-attempt:'+item.id,attempt=this.journal.get<{count:number;at:number}>(key)??{count:0,at:0};
         if(attempt.count>=3){this.journal.mark(item.id,'unknown');this.errorCode='whatsapp_delivery_unknown';continue;}
