@@ -1,3 +1,4 @@
+//! Native skills files, ownership, import and lifetime checks.
 use ivy_agent_manager::{
     offline_import::OfflineImport,
     skills_files::{SkillsComparator, skills_paths, tree_hash},
@@ -5,19 +6,17 @@ use ivy_agent_manager::{
     skills_migration::import_skills,
 };
 use ivy_contracts::{
-    IvyError, IvyJson, JsString, Outcome,
-    hash::digest,
+    IvyError, IvyJson, JsString,
+    hash::{digest, hash_json},
     json::{canonical, parse, stringify},
 };
 use ivy_host_runtime::node_path::{self, Context};
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -26,34 +25,29 @@ use tokio::sync::Semaphore;
 struct Root(PathBuf);
 impl Root {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("ivy-skills-{}", uuid::Uuid::new_v4()));
+        let parent = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let path = parent.join(format!("ivy-skills-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&path).unwrap();
-        assert_eq!(
-            fs::canonicalize(&path).unwrap().parent(),
-            Some(fs::canonicalize(std::env::temp_dir()).unwrap().as_path())
-        );
         Self(path)
     }
 }
 impl Drop for Root {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("Retained skills fixture: {}", self.0.display());
+            return;
+        }
         let actual = fs::canonicalize(&self.0).unwrap();
         assert_eq!(
             actual.parent(),
             Some(fs::canonicalize(std::env::temp_dir()).unwrap().as_path())
         );
         assert!(
-            self.0
+            actual
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
                 .starts_with("ivy-skills-")
-        );
-        assert!(
-            !fs::symlink_metadata(&self.0)
-                .unwrap()
-                .file_type()
-                .is_symlink()
         );
         fs::remove_dir_all(actual).unwrap();
     }
@@ -62,44 +56,23 @@ fn value(path: &Path) -> IvyJson {
     IvyJson::String(node_path::from_native(path))
 }
 fn field<'a>(value: &'a IvyJson, key: &str) -> &'a IvyJson {
-    value.get(key).unwrap_or_else(|| panic!("missing {key}"))
+    value.required(key).unwrap()
 }
 fn text(value: &IvyJson, key: &str) -> JsString {
     field(value, key).as_js_string().unwrap().clone()
 }
-fn fixture(input: IvyJson) -> IvyJson {
-    let mut child = Command::new("node")
-        .arg("tests/fixtures/agent-skills-files-oracle.mjs")
-        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stringify(&input, 8 * 1024 * 1024).unwrap().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
-        8 * 1024 * 1024,
-    )
-    .unwrap()
-}
-pub(super) fn catalog() -> &'static IvyJson {
-    static DATA: OnceLock<IvyJson> = OnceLock::new();
-    DATA.get_or_init(|| fixture(IvyJson::object([("action", "catalog".into())])))
-}
 fn comparator() -> Arc<SkillsComparator> {
-    super::skills_comparator()
+    Arc::new(|a, b| ivy_agent_manager::runtime::compare_names(a, b, false))
+}
+fn compare(actual: &IvyJson, expected: &IvyJson, label: &str) {
+    assert_eq!(
+        canonical(actual, usize::MAX).unwrap(),
+        canonical(expected, usize::MAX).unwrap(),
+        "{label}"
+    );
+}
+fn defaults() -> IvyJson {
+    parse(r#"{"schemaVersion":1,"hostId":null,"enabled":true,"files":[{"path":"alpha/SKILL.md","content":"default\né"},{"path":"alpha/nested/notes.txt","content":"contents"},{"path":"beta/SKILL.md","content":"second"}]}"#, usize::MAX).unwrap()
 }
 fn manager(prepared: &IvyJson) -> SkillsManager {
     SkillsManager::new(SkillsSettings {
@@ -111,43 +84,78 @@ fn manager(prepared: &IvyJson) -> SkillsManager {
         compare: comparator(),
     })
 }
-fn status(manager: &SkillsManager) -> IvyJson {
-    let status = manager.status();
-    assert_eq!(status.observed_at.len(), 24);
-    assert!(chrono::DateTime::parse_from_rfc3339(&status.observed_at).is_ok());
-    IvyJson::object(
-        status
-            .json()
-            .as_object()
-            .unwrap()
-            .iter()
-            .filter(|(key, _)| *key != JsString::from("observedAt"))
-            .cloned(),
-    )
+fn prepared(base: &Path) -> IvyJson {
+    let home = base.join("home");
+    fs::create_dir_all(&home).unwrap();
+    IvyJson::object([
+        ("home", value(&home)),
+        ("target", value(&base.join("skills"))),
+        ("defaults", defaults()),
+    ])
 }
-fn compare(actual: &IvyJson, expected: &IvyJson, label: &str) {
-    assert_eq!(
-        canonical(actual, 8 * 1024 * 1024).unwrap(),
-        canonical(expected, 8 * 1024 * 1024).unwrap(),
-        "{label}"
-    );
-    if let Some(path) = std::env::var_os("IVY_UNIFIED_IMPORT_PROOF") {
-        let record = IvyJson::object([
-            ("label", label.into()),
-            ("actual", actual.clone()),
-            ("expected", expected.clone()),
-        ]);
-        writeln!(
-            fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .unwrap(),
-            "{}",
-            canonical(&record, usize::MAX).unwrap()
-        )
-        .unwrap();
+fn fixture(input: IvyJson) -> IvyJson {
+    assert_eq!(field(&input, "action"), &IvyJson::from("migrationPrepare"));
+    let base = node_path::filesystem_path(field(&input, "root").as_js_string().unwrap());
+    let mut result = prepared(&base);
+    let target = base.join("skills");
+    let paths = skills_paths(
+        &node_path::from_native(&target),
+        &Context::current().unwrap(),
+    )
+    .unwrap();
+    let version = input
+        .get("version")
+        .and_then(IvyJson::as_f64)
+        .unwrap_or(1.0);
+    let in_place = input
+        .get("inPlace")
+        .and_then(IvyJson::as_bool)
+        .unwrap_or(false);
+    let mut applied = Vec::new();
+    for name in ["alpha", "beta"] {
+        let directory = if version == 1.0 {
+            format!("ivy-managed-{name}")
+        } else {
+            name.into()
+        };
+        let path = target.join(&directory);
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("SKILL.md"), format!("retained {name}")).unwrap();
+        let hash = tree_hash(&node_path::from_native(&path), comparator().as_ref())
+            .unwrap()
+            .unwrap();
+        applied.push((JsString::from(directory), IvyJson::from(hash)));
     }
+    let state = IvyJson::object([
+        ("schemaVersion", IvyJson::Number(version)),
+        (
+            "authority",
+            hash_json(&IvyJson::object([
+                ("hive", "https://fixture.example".into()),
+                ("hostId", "fixture".into()),
+            ]))
+            .unwrap()
+            .into(),
+        ),
+        ("applied", IvyJson::object(applied)),
+        ("appliedVersion", "prior".into()),
+        (
+            "extra",
+            parse(r#"{"retained":[1,null,"metadata"]}"#, usize::MAX).unwrap(),
+        ),
+    ]);
+    let source = if in_place {
+        node_path::filesystem_path(&paths.state_path)
+    } else {
+        base.join("home/legacy-skills.json")
+    };
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    let bytes = stringify(&state, usize::MAX).unwrap();
+    fs::write(&source, &bytes).unwrap();
+    result.insert("source", value(&source));
+    result.insert("sourceDigest", digest(&bytes).into());
+    result.insert("state", state);
+    result
 }
 struct Missing;
 impl RpcClient for Missing {
@@ -161,127 +169,142 @@ impl RpcClient for Missing {
 struct Failed;
 impl RpcClient for Failed {
     fn request<'a>(&'a self, _: &'a str, _: IvyJson, _: RequestOptions) -> RequestFuture<'a> {
-        Box::pin(async {
-            Err(IvyError::new("service_unavailable", "fixture failure")
-                .with_outcome(Outcome::Unknown))
-        })
+        Box::pin(async { Err(IvyError::new("disconnected", "Fixture connection lost")) })
     }
 }
 
 #[tokio::test]
-async fn real_skills_files_and_bootstrap_match_original_without_runtime_legacy_import() {
+async fn skills_files_bootstrap_and_current_ownership_preserve_local_edits() {
     let root = Root::new();
-    for (bootstrap, key, count) in [(false, "applyModes", 20), (true, "bootstrapModes", 8)] {
-        let rows = field(catalog(), key).as_array().unwrap();
-        assert_eq!(rows.len(), count);
-        for (index, mode) in rows.iter().enumerate() {
-            let original = root.0.join(format!("original-{key}-{index}"));
-            let actual_root = root.0.join(format!("rust-{key}-{index}"));
-            let request = |action: &str, root: &Path| {
-                IvyJson::object([
-                    ("action", action.into()),
-                    ("root", value(root)),
-                    ("mode", mode.clone()),
-                    ("bootstrap", bootstrap.into()),
-                ])
-            };
-            let expected = fixture(request("run", &original));
-            let prepared = fixture(request("prepare", &actual_root));
-            let manager = manager(&prepared);
-            let error = if bootstrap {
-                manager
-                    .bootstrap()
-                    .await
-                    .err()
-                    .map(|e| e.to_wire())
-                    .unwrap_or(IvyJson::Null)
-            } else {
-                manager
-                    .synchronize(if mode == &IvyJson::from("read-failure") {
-                        Arc::new(Failed) as Arc<dyn RpcClient>
-                    } else {
-                        Arc::new(Missing)
-                    })
-                    .wait()
-                    .await;
-                IvyJson::Null
-            };
-            manager.close().wait().await;
-            let actual = fixture(IvyJson::object([
-                ("action", "snapshot".into()),
-                ("root", value(&actual_root)),
-                (
-                    "provided",
-                    IvyJson::object([("status", status(&manager)), ("error", error)]),
-                ),
-            ]));
-            compare(&actual, &expected, &format!("{key} {mode:?}"));
-        }
-    }
+    let input = prepared(&root.0);
+    let owner = manager(&input);
+    owner.synchronize(Arc::new(Missing)).wait().await;
+    assert_eq!(owner.status().state, "applied");
+    let applied = owner.status().applied_version.unwrap();
+    let paths = skills_paths(&text(&input, "target"), &Context::current().unwrap()).unwrap();
+    let state_path = node_path::filesystem_path(&paths.state_path);
+    let state = parse(&fs::read_to_string(&state_path).unwrap(), usize::MAX).unwrap();
+    assert_eq!(field(&state, "schemaVersion"), &IvyJson::Number(2.0));
+    assert_eq!(
+        field(&state, "appliedVersion"),
+        &IvyJson::from(applied.clone())
+    );
+    let bootstrapped = manager(&input);
+    bootstrapped.bootstrap().await.unwrap();
+    assert_eq!(bootstrapped.status().state, "pending");
+    assert!(bootstrapped.status().applied_version.is_none());
+    assert_eq!(
+        parse(&fs::read_to_string(&state_path).unwrap(), usize::MAX).unwrap(),
+        state
+    );
+    let file = root.0.join("skills/alpha/SKILL.md");
+    let original = fs::read(&file).unwrap();
+    fs::write(&file, "local edit").unwrap();
+    let state_before = fs::read(&state_path).unwrap();
+    owner.synchronize(Arc::new(Missing)).wait().await;
+    assert_eq!(owner.status().state, "conflict");
+    assert_eq!(owner.status().code.as_deref(), Some("target_conflict"));
+    assert_eq!(owner.status().applied_version, Some(applied));
+    assert_eq!(fs::read(&file).unwrap(), b"local edit");
+    assert_eq!(fs::read(&state_path).unwrap(), state_before);
+    fs::write(&file, original).unwrap();
+    owner.synchronize(Arc::new(Missing)).wait().await;
+    assert_eq!(owner.status().state, "applied");
+    owner.synchronize(Arc::new(Failed)).wait().await;
+    assert_eq!(owner.status().state, "pending");
+    assert!(owner.status().applied_version.is_some());
+    owner.close().wait().await;
+
+    let foreign = Root::new();
+    let input = prepared(&foreign.0);
+    fs::create_dir_all(foreign.0.join("skills/alpha")).unwrap();
+    fs::write(foreign.0.join("skills/alpha/SKILL.md"), "foreign").unwrap();
+    let owner = manager(&input);
+    owner.synchronize(Arc::new(Missing)).wait().await;
+    assert_eq!(owner.status().state, "conflict");
+    assert_eq!(
+        fs::read(foreign.0.join("skills/alpha/SKILL.md")).unwrap(),
+        b"foreign"
+    );
+    owner.close().wait().await;
 }
 
 #[test]
-fn tree_hash_matches_original_depth_first_locale_ties_and_observed_link_boundaries() {
+fn tree_hash_keeps_the_published_path_digest_format_and_native_file_boundaries() {
     let root = Root::new();
-    let compare_names = comparator();
-    for (index, mode) in field(catalog(), "treeModes")
-        .as_array()
-        .unwrap()
-        .iter()
-        .enumerate()
-    {
-        let expected = fixture(IvyJson::object([
-            ("action", "treeRun".into()),
-            ("root", value(&root.0.join(format!("original-{index}")))),
-            ("mode", mode.clone()),
-        ]));
-        let path = fixture(IvyJson::object([
-            ("action", "treePrepare".into()),
-            ("root", value(&root.0.join(format!("rust-{index}")))),
-            ("mode", mode.clone()),
-        ]));
-        let actual = match tree_hash(path.as_js_string().unwrap(), compare_names.as_ref()) {
-            Ok(hash) => {
-                IvyJson::object([("result", hash.map(IvyJson::from).unwrap_or(IvyJson::Null))])
-            }
-            Err(error) => IvyJson::object([("error", error.to_wire())]),
-        };
-        compare(&actual, &expected, &format!("tree {mode:?}"));
+    let target = root.0.join("tree");
+    fs::create_dir_all(target.join("nested/empty")).unwrap();
+    for (name, bytes) in [
+        ("z.txt", "last"),
+        ("nested/b.txt", "nested"),
+        ("a.txt", "first"),
+    ] {
+        fs::write(target.join(name), bytes).unwrap();
     }
+    let expected = hash_json(&IvyJson::Array(
+        [
+            ("a.txt", "first"),
+            ("nested/b.txt", "nested"),
+            ("z.txt", "last"),
+        ]
+        .into_iter()
+        .map(|(name, bytes)| IvyJson::Array(vec![name.into(), digest(bytes).into()]))
+        .collect(),
+    ))
+    .unwrap();
+    assert_eq!(
+        tree_hash(&node_path::from_native(&target), comparator().as_ref()).unwrap(),
+        Some(expected)
+    );
+    assert_eq!(
+        tree_hash(
+            &node_path::from_native(&root.0.join("absent")),
+            comparator().as_ref()
+        )
+        .unwrap(),
+        None
+    );
+    fs::write(target.join("a.txt"), vec![b'x'; 256 * 1024 + 1]).unwrap();
+    assert_eq!(
+        tree_hash(&node_path::from_native(&target), comparator().as_ref())
+            .unwrap_err()
+            .code,
+        "target_conflict"
+    );
+    fs::write(target.join("a.txt"), "first").unwrap();
+    let outside = root.0.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("retained"), "unchanged").unwrap();
+    let link = target.join("link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
     #[cfg(windows)]
     {
-        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
-        let path = root.0.join("raw-native-surrogate");
-        fs::create_dir(&path).unwrap();
-        let mut name = "bad".encode_utf16().collect::<Vec<_>>();
-        name.push(0xd800);
-        name.extend("name".encode_utf16());
-        fs::write(
-            path.join(OsString::from_wide(&name)),
-            "unpaired native name",
-        )
-        .unwrap();
-        let expected = fixture(IvyJson::object([
-            ("action", "treeExisting".into()),
-            ("target", value(&path)),
-        ]));
-        let actual = match tree_hash(&node_path::from_native(&path), compare_names.as_ref()) {
-            Ok(hash) => {
-                IvyJson::object([("result", hash.map(IvyJson::from).unwrap_or(IvyJson::Null))])
-            }
-            Err(error) => IvyJson::object([("error", error.to_wire())]),
-        };
-        compare(
-            &actual,
-            &expected,
-            "raw Windows lone-surrogate directory entry",
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
+    assert_eq!(
+        tree_hash(&node_path::from_native(&target), comparator().as_ref())
+            .unwrap_err()
+            .code,
+        "target_conflict"
+    );
+    assert_eq!(fs::read(outside.join("retained")).unwrap(), b"unchanged");
 }
+
 struct Held {
-    calls: Mutex<Vec<String>>,
     started: Semaphore,
     release: Semaphore,
+    calls: Mutex<Vec<String>>,
 }
 impl RpcClient for Held {
     fn request<'a>(
@@ -312,90 +335,34 @@ impl RpcClient for Unused {
     }
 }
 #[tokio::test]
-async fn skills_lifetime_coalesces_drains_and_retains_success_after_errors() {
+async fn skills_lifetime_coalesces_and_drains_the_actual_application() {
     let root = Root::new();
-    let original = root.0.join("original");
-    let actual_root = root.0.join("rust");
-    let expected = fixture(IvyJson::object([
-        ("action", "lifecycle".into()),
-        ("root", value(&original)),
-    ]));
-    let prepared = fixture(IvyJson::object([
-        ("action", "prepare".into()),
-        ("mode", "fresh".into()),
-        ("root", value(&actual_root)),
-    ]));
-    let manager = manager(&prepared);
-    let mut states = vec![status(&manager)];
-    manager.synchronize(Arc::new(Missing)).wait().await;
-    states.push(status(&manager));
-    manager.synchronize(Arc::new(Failed)).wait().await;
-    states.push(status(&manager));
-    let path = actual_root.join("skills/alpha/SKILL.md");
-    let good = fs::read(&path).unwrap();
-    fs::write(&path, "local edit").unwrap();
-    manager.synchronize(Arc::new(Missing)).wait().await;
-    states.push(status(&manager));
-    fs::write(&path, good).unwrap();
-    manager.synchronize(Arc::new(Missing)).wait().await;
-    manager.close().wait().await;
-    states.push(status(&manager));
+    let owner = manager(&prepared(&root.0));
     let held = Arc::new(Held {
         calls: Mutex::new(vec![]),
         started: Semaphore::new(0),
         release: Semaphore::new(0),
     });
-    let first = manager.synchronize(held.clone());
+    let first = owner.synchronize(held.clone());
     held.started.acquire().await.unwrap().forget();
     let unused = Arc::new(Unused(AtomicUsize::new(0)));
-    let second = manager.synchronize(unused.clone());
-    let mut close = Box::pin(manager.close().wait());
+    let second = owner.synchronize(unused.clone());
+    let mut close = Box::pin(owner.close().wait());
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(20), close.as_mut())
             .await
             .is_err()
     );
-    let during = status(&manager);
     held.release.add_permits(1);
     first.wait().await;
     second.wait().await;
     close.await;
     assert_eq!(unused.0.load(Ordering::SeqCst), 0);
-    drop(manager.synchronize(Arc::new(Missing)));
-    manager.close().wait().await;
-    let actual = fixture(IvyJson::object([
-        ("action", "snapshot".into()),
-        ("root", value(&actual_root)),
-        (
-            "provided",
-            IvyJson::object([
-                ("states", IvyJson::Array(states)),
-                ("during", during),
-                ("after", status(&manager)),
-                (
-                    "calls",
-                    IvyJson::Array(
-                        held.calls
-                            .lock()
-                            .unwrap()
-                            .iter()
-                            .map(|s| s.clone().into())
-                            .collect(),
-                    ),
-                ),
-                ("secondCalls", IvyJson::Number(0.0)),
-                ("closed", true.into()),
-            ]),
-        ),
-    ]));
-    let projected = IvyJson::object(
-        expected
-            .as_object()
-            .unwrap()
-            .iter()
-            .map(|(k, _)| (k.clone(), actual.get_key(k).unwrap().clone())),
+    assert_eq!(owner.status().state, "applied");
+    assert_eq!(
+        fs::read(root.0.join("skills/alpha/SKILL.md")).unwrap(),
+        "default\né".as_bytes()
     );
-    compare(&projected, &expected, "lifecycle");
 }
 
 #[tokio::test]

@@ -3,6 +3,7 @@ use ivy_contracts::{json::canonical, limits::MANAGEMENT_FRAME_BYTES};
 
 pub(super) struct Scenario {
     row: Json,
+    fail_response: bool,
     pub(super) inputs_ready: Gate,
 }
 fn f<'a>(v: &'a Json, key: &str) -> &'a Json {
@@ -168,15 +169,15 @@ impl Scenario {
         task: &Json,
         operation: &JsString,
     ) -> IvyResult<Option<Json>> {
-        if generation == 1.0
-            && f(task, "comments")
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|c| f(c, "operationId").as_js_string() == Some(operation))
-        {
+        if f(task, "comments").as_array().unwrap().iter().any(|c| {
+            f(c, "operationId").as_js_string() == Some(operation)
+                && (generation == 1.0
+                    || (generation == 2.0
+                        && self.fail_response
+                        && f(c, "purpose") == &"update".into()))
+        }) {
             return Err(
-                IvyError::new("fixture_notice", "Uncertain native question observation.")
+                IvyError::new("fixture_notice", "Uncertain native comment observation.")
                     .with_outcome(Outcome::Unknown),
             );
         }
@@ -203,10 +204,16 @@ fn operations(fixture: &Fixture, purpose: &str) -> Vec<(String, u64, Json)> {
 #[tokio::test(flavor = "current_thread")]
 async fn native_mirroring_uses_factory_recovery_original_identity_and_current_confidential_schema_gate()
  {
-    for name in ["answered choices", "secret answer"] {
-        // Reuse unmodified original input rows, including their exact identity,
-        // thread/turn/epoch, state, answer and secret marker.
-        let row = crate::native_comments::data()
+    for (name, fail_response) in [
+        ("answered choices", true),
+        ("expired request", false),
+        ("pending question", false),
+        ("pending secret", false),
+        ("secret answer", false),
+    ] {
+        // Retain the finite native identity and protocol material. Give the
+        // secret response a unique value to detect any persisted leakage.
+        let mut row = crate::native_comments::data()
             .required("rows")
             .unwrap()
             .as_array()
@@ -216,10 +223,38 @@ async fn native_mirroring_uses_factory_recovery_original_identity_and_current_co
             .unwrap()
             .clone();
         let secret = name == "secret answer";
+        let pending = name == "pending question" || name == "pending secret";
+        let response_expected = !secret && !pending;
+        const SECRET: &str = "native-owner-only-fixture-secret";
+        if secret {
+            let mut input = row.required("input").unwrap().clone();
+            let mut items = input
+                .required("items")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .to_vec();
+            items[0].insert(
+                "reply",
+                Json::object([(
+                    "result",
+                    Json::object([(
+                        "answers",
+                        Json::object([(
+                            "question",
+                            Json::object([("answers", Json::Array(vec![SECRET.into()]))]),
+                        )]),
+                    )]),
+                )]),
+            );
+            input.insert("items", Json::Array(items));
+            row.insert("input", input);
+        }
         let peer = Peer::start_mode(Some("--factory")).await;
         let mut fixture = Fixture::new(false);
         fixture.native = Some(Scenario {
             row,
+            fail_response,
             inputs_ready: Gate::default(),
         });
         let scenario = fixture.native.as_ref().unwrap();
@@ -292,10 +327,10 @@ async fn native_mirroring_uses_factory_recovery_original_identity_and_current_co
                 operations(&fixture, "question")[0].2.get("phase") == Some(&"succeeded".into())
             })
             .await;
-            if secret {
-                // The current PendingInput schema requires a reply for answered
-                // inputs; source mirroring deliberately redacts a secret reply.
-                // The current contract must still refuse that invalid record.
+            if secret || pending {
+                // Pending inputs remain publishable. An answered secret loses
+                // its reply at the mirror boundary and must retain the current
+                // PendingInput schema refusal without storing the secret.
                 until(|| {
                     peer.frames
                         .lock()
@@ -312,18 +347,22 @@ async fn native_mirroring_uses_factory_recovery_original_identity_and_current_co
                 .await;
                 let diagnostics = service.control.readiness(&second).await.unwrap();
                 let ds = f(&diagnostics, "diagnostics").as_array().unwrap();
-                assert!(
-                    ds.iter()
-                        .any(|d| f(d, "code") == &"invalid_arguments".into()),
-                    "Secret response must retain its exact current-schema refusal: {diagnostics:?}"
-                );
+                if secret {
+                    assert!(
+                        ds.iter()
+                            .any(|d| f(d, "code") == &"invalid_arguments".into()
+                                && f(d, "message")
+                                    == &"Value does not match its TaskBoard contract.".into()),
+                        "Secret response must retain its exact current-schema refusal: {diagnostics:?}"
+                    );
+                } else {
+                    assert!(
+                        !ds.iter()
+                            .any(|d| f(d, "code") == &"invalid_arguments".into()),
+                        "A pending native input remains publishable: {diagnostics:?}"
+                    );
+                }
                 assert!(operations(&fixture, "update").is_empty());
-                assert!(
-                    ds.iter()
-                        .any(|d| f(d, "code") == &"invalid_arguments".into()
-                            && f(d, "message")
-                                == &"Value does not match its TaskBoard contract.".into())
-                );
                 assert_eq!(comments(&fixture).len(), 1);
                 assert_eq!(fixture.rows("task-board/task")[0].1, 3);
             } else {
@@ -331,13 +370,27 @@ async fn native_mirroring_uses_factory_recovery_original_identity_and_current_co
                 until(|| {
                     operations(&fixture, "update")
                         .first()
-                        .is_some_and(|(_, _, o)| f(o, "phase") == &"succeeded".into())
+                        .is_some_and(|(_, _, o)| {
+                            f(o, "phase")
+                                == &Json::from(if fail_response {
+                                    "needs_attention"
+                                } else {
+                                    "succeeded"
+                                })
+                        })
                 })
                 .await;
                 let current = comments(&fixture);
                 assert_eq!(f(&current[1], "commentId"), &Json::from(response.clone()));
                 assert_eq!(f(&current[1], "replyTo"), &Json::from(question.clone()));
-                assert_eq!(f(&current[1], "body"), &"First\n\nSecond".into());
+                assert_eq!(
+                    f(&current[1], "body"),
+                    &Json::from(if name == "expired request" {
+                        "This request has expired."
+                    } else {
+                        "First\n\nSecond"
+                    })
+                );
                 assert_eq!(f(&current[1], "authorKind"), &"system".into());
                 assert_eq!(
                     hash_json(f(f(&current[1], "nativeInput"), "identity")).unwrap(),
@@ -381,7 +434,7 @@ async fn native_mirroring_uses_factory_recovery_original_identity_and_current_co
             assert_eq!(f(&task, "publication"), &Json::Null);
             assert_eq!(
                 fixture.rows("task-board/history").len(),
-                if secret { 1 } else { 2 }
+                if response_expected { 2 } else { 1 }
             );
             assert_eq!(fixture.rows("task-board/run").len(), 1);
             assert_eq!(fixture.rows("task-board/run")[0].1, 1);
@@ -391,6 +444,22 @@ async fn native_mirroring_uses_factory_recovery_original_identity_and_current_co
                 .query_row("SELECT count(*) FROM revisions", [], |r| r.get(0))
                 .unwrap();
             let callbacks = fixture.notices.get();
+            let response_before = operations(&fixture, "update").first().cloned();
+            let task_before = fixture.rows("task-board/task");
+            let run_before = fixture.rows("task-board/run");
+            let history_before = fixture.rows("task-board/history");
+            let protected_revisions = if fail_response {
+                fixture
+                    .database()
+                    .query_row(
+                        "SELECT count(*) FROM revisions WHERE id<>?",
+                        [response_before.as_ref().unwrap().0.as_str()],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap()
+            } else {
+                0
+            };
             // Retained internal operation lookup uses the public
             // owner with the original native caller, rather than a new action.
             let mut caller = c(2, "native-replay");
@@ -430,15 +499,58 @@ async fn native_mirroring_uses_factory_recovery_original_identity_and_current_co
                 })
             })
             .await;
-            assert_eq!(comments(&fixture).len(), if secret { 1 } else { 2 });
             assert_eq!(
-                fixture
-                    .database()
-                    .query_row("SELECT count(*) FROM revisions", [], |r| r.get::<_, i64>(0))
-                    .unwrap(),
-                count
+                comments(&fixture).len(),
+                if response_expected { 2 } else { 1 }
             );
-            assert_eq!(fixture.notices.get(), callbacks);
+            if fail_response {
+                until(|| {
+                    operations(&fixture, "update")
+                        .first()
+                        .is_some_and(|(_, _, o)| f(o, "phase") == &"succeeded".into())
+                })
+                .await;
+                let original = response_before.as_ref().unwrap();
+                let recovered = operations(&fixture, "update")[0].clone();
+                assert_eq!(recovered.0, original.0);
+                for key in ["actor", "request", "requestHash", "writes"] {
+                    assert_eq!(
+                        hash_json(f(&recovered.2, key)).unwrap(),
+                        hash_json(f(&original.2, key)).unwrap()
+                    );
+                }
+                assert_eq!(fixture.rows("task-board/task"), task_before);
+                assert_eq!(fixture.rows("task-board/run"), run_before);
+                assert_eq!(fixture.rows("task-board/history"), history_before);
+                assert_eq!(
+                    fixture
+                        .database()
+                        .query_row(
+                            "SELECT count(*) FROM revisions WHERE id<>?",
+                            [original.0.as_str()],
+                            |r| r.get::<_, i64>(0)
+                        )
+                        .unwrap(),
+                    protected_revisions
+                );
+                assert!(
+                    fixture
+                        .database()
+                        .query_row("SELECT count(*) FROM revisions", [], |r| r.get::<_, i64>(0))
+                        .unwrap()
+                        > count
+                );
+                assert!(fixture.notices.get() > callbacks);
+            } else {
+                assert_eq!(
+                    fixture
+                        .database()
+                        .query_row("SELECT count(*) FROM revisions", [], |r| r.get::<_, i64>(0))
+                        .unwrap(),
+                    count
+                );
+                assert_eq!(fixture.notices.get(), callbacks);
+            }
             let text = canonical(
                 &Json::Array(
                     fixture
@@ -451,8 +563,19 @@ async fn native_mirroring_uses_factory_recovery_original_identity_and_current_co
             )
             .unwrap();
             if secret {
-                assert!(!text.contains("First"));
-                assert!(!text.contains("Second"));
+                assert!(!text.contains(SECRET));
+                assert_eq!(
+                    fixture
+                        .database()
+                        .query_row(
+                            "SELECT count(*) FROM revisions WHERE instr(value_json,?)>0",
+                            [SECRET],
+                            |r| r.get::<_, i64>(0)
+                        )
+                        .unwrap(),
+                    0,
+                    "No retained task, operation, history or prior revision may contain the confidential reply"
+                );
             }
             bounded(service.close()).await.unwrap();
         };

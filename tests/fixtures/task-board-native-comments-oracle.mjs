@@ -22,6 +22,7 @@ add('answers numeric key order',{items:[answered({result:{answers:{2:{answers:['
 add('string answer flatMap',{items:[answered({result:{answers:[{answers:'text'}]}})]});
 add('empty answer',{items:[answered({result:{answers:{q:{answers:[]}}}})]});add('empty decision',{items:[answered({result:{decision:''}})]});
 add('secret answer',{items:[answered(undefined,{params:{questions:[{question:'Secret value?',isSecret:true}]}})]});
+add('pending secret',{items:[input({params:{questions:[{question:'Secret value?',isSecret:true}]}})]});
 add('nested secret',{items:[answered(undefined,{params:{questions:[{question:'Secret value?'}],nested:{isSecret:true}}})]});
 add('false secret',{items:[answered(undefined,{params:{questions:[{question:'Visible?',isSecret:false}]}})]});
 add('secret-looking literal is not marker',{items:[answered(undefined,{params:{reason:'Text "isSecret":true'}})]});

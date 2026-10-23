@@ -6,7 +6,6 @@ use ivy_contracts::{
     json::{parse, stringify},
     limits::MANAGEMENT_FRAME_BYTES,
 };
-use ivy_sdk::collation::LocaleRuntime;
 use std::{
     io::{Read, Write},
     sync::Arc,
@@ -48,9 +47,9 @@ fn run() -> IvyResult<IvyJson> {
     match prepared {
         OfflineImport::Mcp(import) => runtime.block_on(import.run()),
         OfflineImport::Skills(import) => {
-            let locale = LocaleRuntime::from_current_executable()?.executing_default()?;
-            let compare: Arc<SkillsComparator> =
-                Arc::new(move |left, right| locale.compare(left, right));
+            let compare: Arc<SkillsComparator> = Arc::new(|left, right| {
+                ivy_agent_manager::runtime::compare_names(left, right, false)
+            });
             runtime.block_on(import.run(compare))
         }
     }

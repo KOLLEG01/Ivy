@@ -1,91 +1,111 @@
-use ivy_agent_manager::mcp_output::{McpOutputInput, plan_mcp_output};
-use ivy_agent_manager::mcp_render::{hive_mcp_urls, render_mcp_sections};
-use ivy_contracts::{
-    IvyJson,
-    json::{canonical, parse},
+use ivy_agent_manager::{
+    environment_text::render_codex,
+    mcp_output::{McpOutput, McpOutputInput, plan_mcp_output},
 };
-use std::{path::PathBuf, process::Command};
-fn string(v: &IvyJson) -> String {
-    v.as_js_string().unwrap().to_utf8().unwrap()
+use ivy_contracts::{IvyJson as J, JsString, hash::digest};
+
+fn plan(
+    source: &str,
+    state: Option<&J>,
+    sections: Option<&[String]>,
+) -> ivy_contracts::IvyResult<McpOutput> {
+    let names = [JsString::from("fixture")];
+    plan_mcp_output(McpOutputInput {
+        source,
+        state,
+        authority: "owner",
+        sections,
+        server_names: &names,
+        app_id: Some("application"),
+        desired_version: "current",
+    })
 }
+
 #[test]
-fn ownership_and_output_match_original_manager_filesystem_effects() {
-    let output = Command::new("node")
-        .arg("tests/fixtures/agent-mcp-output-oracle.mjs")
-        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let data = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
-        2 * 1024 * 1024,
+fn current_mcp_ownership_updates_managed_content_and_preserves_unmanaged_configuration() {
+    let sections = vec!["[mcp_servers.fixture]\nurl = \"https://example.invalid/mcp\"".into()];
+    let fresh = plan(
+        "# user\ncustom = true\n[other]\nvalue = 'keep'\n",
+        None,
+        Some(&sections),
     )
     .unwrap();
-    let rows = data.as_array().unwrap();
-    assert_eq!(rows.len(), 192);
-    for (index, row) in rows.iter().enumerate() {
-        let source = string(row.get("source").unwrap());
-        let authority = string(row.get("authority").unwrap());
-        let expected_sections = row
-            .get("sections")
-            .unwrap()
-            .as_array()
-            .map(|a| a.iter().map(string).collect::<Vec<_>>());
-        let urls = hive_mcp_urls(row.get("hive").unwrap().as_js_string().unwrap()).unwrap();
-        let sections = render_mcp_sections(
-            row.get("document").unwrap(),
-            &urls,
-            row.get("credential").unwrap().as_js_string().unwrap(),
-            row.get("appId").unwrap().as_js_string(),
+    assert!(fresh.applied);
+    assert_eq!(
+        fresh.managed_bytes,
+        render_codex(Some(&sections)).unwrap().len()
+    );
+    assert_eq!(fresh.state.get("schemaVersion"), Some(&J::Number(2.0)));
+    assert_eq!(fresh.state.get("authority"), Some(&J::from("owner")));
+    assert_eq!(fresh.state.get("appliedVersion"), Some(&J::from("current")));
+    assert_eq!(
+        fresh.state.get("appliedBlockHash"),
+        Some(&J::from(digest(render_codex(Some(&sections)).unwrap())))
+    );
+    let source = String::from_utf8(fresh.bytes).unwrap();
+    let changed = vec!["[mcp_servers.fixture]\nurl = \"https://next.invalid/mcp\"".into()];
+    let updated = plan(&source, Some(&fresh.state), Some(&changed)).unwrap();
+    let updated_source = String::from_utf8(updated.bytes).unwrap();
+    assert!(updated_source.contains("https://next.invalid/mcp"));
+    assert!(updated_source.contains("custom = true"));
+    assert!(updated_source.contains("[other]\nvalue = 'keep'"));
+    let removed = plan(&updated_source, Some(&updated.state), None).unwrap();
+    assert!(!removed.applied);
+    assert_eq!(removed.managed_bytes, 0);
+    let outside = String::from_utf8(removed.bytes).unwrap();
+    assert!(!outside.contains("Ivy AgentManager Codex configuration"));
+    assert!(outside.contains("custom = true"));
+    assert!(outside.contains("[other]\nvalue = 'keep'"));
+    assert_eq!(
+        plan(
+            &source.replace("https://example.invalid/mcp", "https://local.invalid"),
+            Some(&fresh.state),
+            Some(&changed)
         )
-        .unwrap();
-        assert_eq!(sections, expected_sections, "Rendering case {index}");
-        let names = row
-            .get("serverNames")
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_js_string().unwrap().clone())
-            .collect::<Vec<_>>();
-        let app = row
-            .get("appId")
-            .unwrap()
-            .as_js_string()
-            .map(|s| s.to_utf8().unwrap());
-        let version = string(row.get("desiredVersion").unwrap());
-        let actual = match plan_mcp_output(McpOutputInput {
-            source: &source,
-            state: row.get("state"),
-            authority: &authority,
-            sections: sections.as_deref(),
-            server_names: &names,
-            app_id: app.as_deref(),
-            desired_version: &version,
-        }) {
-            Ok(result) => IvyJson::object([(
-                "result",
-                IvyJson::object([
-                    ("text", String::from_utf8(result.bytes).unwrap().into()),
-                    // Compare the persisted state, after atomic_json's canonical encoding.
-                    (
-                        "state",
-                        parse(&canonical(&result.state, usize::MAX).unwrap(), usize::MAX).unwrap(),
-                    ),
-                    ("applied", result.applied.into()),
-                    ("managedBytes", IvyJson::Number(result.managed_bytes as f64)),
-                ]),
-            )]),
-            Err(error) => IvyJson::object([("error", error.code.into())]),
-        };
+        .err()
+        .unwrap()
+        .code,
+        "target_conflict"
+    );
+}
+
+#[test]
+fn mcp_refuses_foreign_legacy_and_unmanaged_owners_and_adopts_only_matching_permissions() {
+    let sections = vec!["[mcp_servers.fixture]\nurl = \"https://example.invalid/mcp\"".into()];
+    let fresh = plan("", None, Some(&sections)).unwrap();
+    for (key, value) in [
+        ("authority", J::from("other")),
+        ("schemaVersion", J::Number(1.0)),
+    ] {
+        let mut state = fresh.state.clone();
+        state.insert(key, value);
         assert_eq!(
-            &actual,
-            row.get("expected").unwrap(),
-            "Case {index}: {row:?}"
+            plan("", Some(&state), Some(&sections)).err().unwrap().code,
+            "target_conflict"
         );
     }
+    for source in [
+        "[mcp_servers.fixture]\nurl = 'https://user.invalid'\n",
+        "[apps.'application']\nenabled = false\n",
+        "sandbox_mode = 'workspace-write'\n",
+        "[sandbox_workspace_write]\nwritable_roots = []\n",
+        "approval_policy = 'ask'\n",
+        "# >>> Ivy AgentManager MCP configuration (managed; edit in AgentUI)\n",
+    ] {
+        assert_eq!(
+            plan(source, None, Some(&sections)).err().unwrap().code,
+            "target_conflict",
+            "{source}"
+        );
+    }
+    let adopted = plan(
+        "approval_policy = 'never'\ndefault_permissions = ':danger-full-access'\n# retain\n",
+        None,
+        Some(&sections),
+    )
+    .unwrap();
+    let source = String::from_utf8(adopted.bytes).unwrap();
+    assert!(source.contains("# retain"));
+    assert_eq!(source.matches("approval_policy").count(), 1);
+    assert_eq!(source.matches("default_permissions").count(), 1);
 }

@@ -117,7 +117,7 @@ pub(crate) fn read_state(path: &JsString) -> IvyResult<Option<IvyJson>> {
         })
         .transpose()
 }
-/// Hash paths in the original depth-first, per-directory stable locale order.
+/// Hash relative paths and content digests in depth-first display order.
 pub fn tree_hash(path: &JsString, compare: &SkillsComparator) -> IvyResult<Option<String>> {
     let path = fs_path(path);
     let info = match fs::symlink_metadata(&path) {
@@ -139,15 +139,6 @@ pub fn tree_hash(path: &JsString, compare: &SkillsComparator) -> IvyResult<Optio
                 internal(entry).map(|entry| (node_path::node_utf8(&entry.file_name()), entry))
             })
             .collect::<IvyResult<Vec<_>>>()?;
-        // Unix libuv scandir sorts names by bytes before JS's stable locale
-        // sort. Windows scandir retains native directory enumeration order.
-        #[cfg(not(windows))]
-        children.sort_by(|left, right| {
-            left.1
-                .file_name()
-                .as_encoded_bytes()
-                .cmp(right.1.file_name().as_encoded_bytes())
-        });
         children.sort_by(|left, right| compare(&left.0, &right.0));
         for (name, entry) in children {
             let kind = internal(entry.file_type())?;

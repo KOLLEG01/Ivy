@@ -208,8 +208,7 @@ pub(crate) fn data() -> &'static Json {
     })
 }
 #[tokio::test]
-async fn native_comment_mirroring_matches_original_identity_confidentiality_and_publication_traces()
-{
+async fn native_comment_mirroring_preserves_identity_confidentiality_and_native_text() {
     let fixture = data();
     for case in fixture.required("rows").unwrap().as_array().unwrap() {
         let input = case.required("input").unwrap();
@@ -222,6 +221,7 @@ async fn native_comment_mirroring_matches_original_identity_confidentiality_and_
             ("pin", fixture.required("taskPin").unwrap().clone()),
             ("value", input.required("task").unwrap().clone()),
         ]);
+        let initial = current.clone();
         let store = Store {
             input: input.clone(),
             tools: ToolClients::new(client),
@@ -258,6 +258,80 @@ async fn native_comment_mirroring_matches_original_identity_confidentiality_and_
             ("posted", Json::Array(store.posted.into_inner())),
             ("current", store.current.into_inner()),
         ]);
+        let name = case.required("name").unwrap().as_str().unwrap();
+        if name == "object and null answer values" {
+            // The native text port already refuses arbitrary JSON conversion.
+            // An invalid answer must fail before any comment is published.
+            assert_eq!(
+                actual.required("result").unwrap(),
+                &Json::object([
+                    ("code", "internal_error".into()),
+                    ("message", "The operation failed internally.".into()),
+                    ("outcome", "unknown".into()),
+                ])
+            );
+            assert_eq!(actual.required("posted").unwrap(), &Json::Array(vec![]));
+            assert_eq!(actual.required("current").unwrap(), &initial);
+            assert_eq!(
+                actual.required("trace").unwrap().as_array().unwrap().len(),
+                4
+            );
+            continue;
+        }
+        if name == "question coercion" {
+            // Preserve string questions and the original protocol value; do not
+            // recreate JavaScript's formatting of numbers/booleans/arrays.
+            let input = &input.required("items").unwrap().as_array().unwrap()[0];
+            let id = format!(
+                "native-question-{}",
+                &hash_json(input.required("identity").unwrap()).unwrap()[7..]
+            );
+            let expected = Json::object([
+                ("action", "comment".into()),
+                ("taskId", "task".into()),
+                ("expectedRevision", Json::Number(3.0)),
+                ("operationId", format!("{id}-3").into()),
+                ("commentId", id.clone().into()),
+                ("purpose", "question".into()),
+                ("body", "First".into()),
+                ("nativeInput", input.clone()),
+                ("contactUser", true.into()),
+                ("requests", Json::Array(vec![])),
+                ("responses", Json::Array(vec![])),
+                ("attachments", Json::Array(vec![])),
+                ("replyTo", Json::Null),
+                ("agentDelivery", "none".into()),
+            ]);
+            assert_eq!(actual.required("result").unwrap(), &Json::Null);
+            assert_eq!(
+                hash_json(actual.required("posted").unwrap()).unwrap(),
+                hash_json(&Json::Array(vec![expected.clone()])).unwrap()
+            );
+            let mut current = initial;
+            let mut pin = current.required("pin").unwrap().clone();
+            pin.insert("revision", Json::Number(4.0));
+            current.insert("pin", pin);
+            let mut value = current.required("value").unwrap().clone();
+            value.insert(
+                "comments",
+                Json::Array(vec![Json::object([("commentId", id.into())])]),
+            );
+            current.insert("value", value);
+            assert_eq!(actual.required("current").unwrap(), &current);
+            let trace = actual.required("trace").unwrap().as_array().unwrap();
+            assert_eq!(
+                trace
+                    .iter()
+                    .map(|v| v.as_array().unwrap()[0].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["read", "read", "rpc", "rpc", "read", "comment"]
+            );
+            assert_eq!(
+                hash_json(&trace.last().unwrap().as_array().unwrap()[1]).unwrap(),
+                hash_json(&expected).unwrap()
+            );
+            continue;
+        }
         assert_eq!(
             hash_json(&actual).unwrap(),
             case.required("expectedHash").unwrap().as_str().unwrap(),

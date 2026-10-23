@@ -55,15 +55,8 @@ pub fn managed_block(
     }
 }
 
-// Match ECMAScript String.trim and multiline anchors, including their different
-// treatment of U+0085 versus U+FEFF. TOML's own whitespace grammar is not used here.
-fn whitespace(c: char) -> bool {
-    matches!(c,'\u{9}'..='\u{d}'|'\u{20}'|'\u{a0}'|'\u{1680}'|'\u{2000}'..='\u{200a}'|'\u{2028}'|'\u{2029}'|'\u{202f}'|'\u{205f}'|'\u{3000}'|'\u{feff}')
-}
 fn line_starts(source: &str) -> impl Iterator<Item = usize> + '_ {
-    std::iter::once(0).chain(source.char_indices().filter_map(|(i, c)| {
-        matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}').then_some(i + c.len_utf8())
-    }))
+    std::iter::once(0).chain(source.match_indices('\n').map(|(i, _)| i + 1))
 }
 fn table_positions(source: &str) -> Vec<usize> {
     line_starts(source)
@@ -75,8 +68,6 @@ fn table_positions(source: &str) -> Vec<usize> {
         .collect()
 }
 
-// The original permission regex permits non-CR/LF characters (including Unicode
-// line separators) in its value and ends before a bare CR via the multiline `$`.
 fn permission_lines(source: &str, key: &str) -> Vec<Range<usize>> {
     let mut result = Vec::new();
     let mut consumed = 0;
@@ -157,8 +148,8 @@ pub fn codex_block(source: &str, accepted_hashes: &HashSet<String>) -> IvyResult
     let permissions = permission_lines(root, "default_permissions");
     if approval.len() != 1
         || permissions.len() != 1
-        || root[approval[0].clone()].trim_matches(whitespace) != APPROVAL
-        || root[permissions[0].clone()].trim_matches(whitespace) != PERMISSIONS
+        || root[approval[0].clone()].trim() != APPROVAL
+        || root[permissions[0].clone()].trim() != PERMISSIONS
     {
         return Err(conflict(
             "The Ivy-managed Codex permissions have local changes.",
@@ -174,7 +165,7 @@ pub fn codex_block(source: &str, accepted_hashes: &HashSet<String>) -> IvyResult
     for count in 0..=raw.len() {
         let mut sections = Vec::new();
         for table in &raw[..count] {
-            let table = table.trim_matches(whitespace);
+            let table = table.trim();
             sections.push(table.into());
             if table.starts_with("[apps.") {
                 sections.push(String::new());
@@ -232,13 +223,13 @@ pub fn with_block(source: &str, block: Option<&str>) -> String {
         .strip_prefix('\u{feff}')
         .map_or(("", source), |tail| ("\u{feff}", tail));
     let collapsed = collapse_blank_lines(source);
-    let outside = collapsed.trim_matches(whitespace);
+    let outside = collapsed.trim();
     let first = table_positions(outside)
         .first()
         .copied()
         .unwrap_or(outside.len());
-    let root = outside[..first].trim_end_matches(whitespace);
-    let tables = outside[first..].trim_start_matches(whitespace);
+    let root = outside[..first].trim_end();
+    let tables = outside[first..].trim_start();
     let parts: Vec<_> = [Some(root), block, Some(tables)]
         .into_iter()
         .flatten()
@@ -255,7 +246,7 @@ fn section_boundary(tail: &str) -> bool {
     tail.starts_with('.') || tail.starts_with(']')
 }
 
-/// Original case-insensitive section regex preserves captured name case.
+/// Inspect section names without changing the source text or captured case.
 pub fn server_sections(source: &str) -> Vec<String> {
     const PREFIX: &str = "[mcp_servers.";
     let mut names = Vec::new();
@@ -264,7 +255,7 @@ pub fn server_sections(source: &str) -> Vec<String> {
         if start < consumed {
             continue;
         }
-        let tail = source[start..].trim_start_matches(whitespace);
+        let tail = source[start..].trim_start_matches([' ', '\t']);
         if !tail
             .get(..PREFIX.len())
             .is_some_and(|s| s.eq_ignore_ascii_case(PREFIX))
@@ -312,7 +303,7 @@ pub fn has_app_section(source: &str, app_id: &str) -> bool {
     ];
     line_starts(source).any(|start| {
         source[start..]
-            .trim_start_matches(whitespace)
+            .trim_start_matches([' ', '\t'])
             .strip_prefix("[apps.")
             .is_some_and(|tail| {
                 alternatives.iter().any(|name| {
@@ -353,12 +344,12 @@ pub fn root_configuration_keys(source: &str) -> Vec<String> {
         if start < consumed {
             continue;
         }
-        let tail = root[start..].trim_start_matches(whitespace);
+        let tail = root[start..].trim_start_matches([' ', '\t']);
         for key in ROOT_KEYS {
             let Some(rest) = key_tail(tail, key) else {
                 continue;
             };
-            let Some(rest) = rest.trim_start_matches(whitespace).strip_prefix('=') else {
+            let Some(rest) = rest.trim_start_matches([' ', '\t']).strip_prefix('=') else {
                 continue;
             };
             consumed = root.len() - rest.len();
@@ -374,7 +365,7 @@ pub fn root_configuration_keys(source: &str) -> Vec<String> {
 pub fn has_legacy_sandbox_table(source: &str) -> bool {
     line_starts(source).any(|start| {
         source[start..]
-            .trim_start_matches(whitespace)
+            .trim_start_matches([' ', '\t'])
             .strip_prefix("[sandbox_workspace_write")
             .is_some_and(section_boundary)
     })
@@ -414,7 +405,7 @@ pub fn adopt_matching_permissions(source: &str) -> IvyResult<String> {
             } else if root[end..].starts_with('\n') {
                 end += 1;
             }
-            let value = root[value_start..value_end].trim_matches(whitespace);
+            let value = root[value_start..value_end].trim();
             if !seen.insert(key)
                 || (value != format!("\"{expected}\"") && value != format!("'{expected}'"))
             {

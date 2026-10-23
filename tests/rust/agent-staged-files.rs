@@ -42,6 +42,7 @@ async fn staged_file_storage_preserves_bytes_expiry_limits_and_native_names() {
         (" \t...", b"x".as_slice(), "_"),
         (" ...", b"x".as_slice(), "file"),
         ("one/x<bad?.txt", b"x".as_slice(), "x_bad_.txt"),
+        ("\u{85} .report. \u{85}", b"x".as_slice(), "report"),
     ] {
         let request = IvyJson::object([
             ("name", name.into()),

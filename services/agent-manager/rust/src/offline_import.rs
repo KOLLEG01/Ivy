@@ -177,7 +177,7 @@ impl OfflineImport {
             _ => Err(invalid("Offline import kind must be mcp or skills.")),
         }
     }
-    /// The production entry supplies Shared's executing-locale comparator. There
+    /// The production entry supplies the native display comparator. There
     /// is no optional/default ordering, service launch, network read or retry.
     pub async fn run(self, compare: Arc<SkillsComparator>) -> IvyResult<IvyJson> {
         match self {

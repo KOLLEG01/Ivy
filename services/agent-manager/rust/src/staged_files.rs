@@ -137,9 +137,9 @@ pub fn staged_name(name: &JsString) -> JsString {
             }
         })
         .collect();
-    // The source class is the union of '.' and ECMAScript whitespace. Retain
-    // the shared trim boundary, including BOM and excluding NEL.
-    let edge = |unit: &u16| *unit == 46 || JsString(vec![*unit]).trim().0.is_empty();
+    let edge = |unit: &u16| {
+        *unit == 46 || char::from_u32(u32::from(*unit)).is_some_and(char::is_whitespace)
+    };
     let start = safe
         .iter()
         .position(|unit| !edge(unit))
