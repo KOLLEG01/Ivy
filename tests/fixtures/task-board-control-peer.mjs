@@ -6,7 +6,7 @@ import {toolDefinitionHash} from '../../packages/contracts/src/tool-definition.t
 // Finite provider for retained cancellation and steering source cases. It
 // advertises only the management/read methods this control boundary consumes.
 export function controlBoundary(){
- let catalog=null,replacement=false,steering=false,race=false,raceEpoch=false,reads=0;
+ let catalog=null,replacement=false,steering=false,race=false,raceEpoch=false,reads=0,steerPrompt='advance prompt';
  const operations=new Map();
  return ({method,params,id,selected,send,reply,emit})=>{
   const epoch=raceEpoch||selected>1&&replacement?'replacement-epoch':'epoch';
@@ -16,6 +16,7 @@ export function controlBoundary(){
    catalog=checkedNativeContract(params.plan.nativeVersion,{sourceHash:params.plan.catalogSourceHash});
    replacement=params.replacement;
    steering=params.steering===true;
+   if(params.steerPrompt!==undefined){assert.equal(typeof params.steerPrompt,'string');steerPrompt=params.steerPrompt;}
    race=params.interruptRace===true;
    assert.ok(!race||!steering);
    reply(id,{});return true;
@@ -67,7 +68,7 @@ export function controlBoundary(){
    assert.equal(a.nativeVersion,catalog.catalog.version);
    assert.equal(a.method,steering?'turn/steer':'turn/interrupt');
    assert.equal(a.expectedDefinitionHash,toolDefinitionHash(catalog.definitions.get(a.method)));
-   assert.deepEqual(a.params,steering?{threadId:'thread',expectedTurnId:'turn',input:[{type:'text',text:'advance prompt',text_elements:[]}]}:{threadId:'thread',turnId:'turn'});
+   assert.deepEqual(a.params,steering?{threadId:'thread',expectedTurnId:'turn',input:[{type:'text',text:steerPrompt,text_elements:[]}]}:{threadId:'thread',turnId:'turn'});
    assert.equal(operations.size,0,'A retained interruption may be dispatched once');
    const operation={schemaVersion:1,operationId:a.operationId,callerPrincipalId:'fixture-principal',serviceNodeId:'native-agent',nativeVersion:a.nativeVersion,nativeExecutableHash:catalog.catalog.nativeExecutableHash,method:a.method,params:a.params,requestHash:hashJson({method:a.method,params:a.params}),phase:'succeeded',createdAt:'2026-01-02T03:04:05.006Z',updatedAt:'2026-01-02T03:04:05.007Z',epoch,requestId:1,reply:{result:steering?{turnId:'turn'}:{}},code:null};
    emit({kind:'native-invoke',operationId:a.operationId});
@@ -78,7 +79,7 @@ export function controlBoundary(){
    assert.equal(a.operationId,params.operationId);assert.equal(operations.size,0);
    assert.equal(a.nativeVersion,catalog.catalog.version);assert.equal(a.method,'turn/steer');
    assert.equal(a.expectedDefinitionHash,toolDefinitionHash(catalog.definitions.get(a.method)));
-   assert.deepEqual(a.params,{threadId:'thread',expectedTurnId:'turn',input:[{type:'text',text:'advance prompt',text_elements:[]}]});
+   assert.deepEqual(a.params,{threadId:'thread',expectedTurnId:'turn',input:[{type:'text',text:steerPrompt,text_elements:[]}]});
    const operation={schemaVersion:1,operationId:a.operationId,callerPrincipalId:'fixture-principal',serviceNodeId:'native-agent',nativeVersion:a.nativeVersion,nativeExecutableHash:catalog.catalog.nativeExecutableHash,method:a.method,params:a.params,requestHash:hashJson({method:a.method,params:a.params}),phase:'failed',createdAt:'2026-01-02T03:04:05.006Z',updatedAt:'2026-01-02T03:04:05.007Z',epoch:null,requestId:null,reply:null,code:'request_prevented'};
    operations.set(a.operationId,operation);emit({kind:'prevented-operation',operation});emit({kind:'committed-operation',operation});reply(id,operation);
   }else if(name==='agent.read'){
@@ -86,7 +87,9 @@ export function controlBoundary(){
    let result;
    if(a.method==='thread/read'){
     assert.deepEqual(a.params,{threadId:'thread',includeTurns:false});
-    result={thread:{id:'thread',ephemeral:false,status:{type:'active',activeFlags:[]}}};
+    // The replacement exposes retained history before this connection resumes
+    // the thread. A historical in-progress turn does not imply attachment.
+    result={thread:{id:'thread',ephemeral:false,status:epoch==='epoch'?{type:'active',activeFlags:[]}:{type:'notLoaded'}}};
    }else{
     assert.equal(a.method,'thread/turns/list');
     assert.deepEqual(a.params,{threadId:'thread',cursor:null,limit:100,itemsView:'notLoaded',sortDirection:'desc'});

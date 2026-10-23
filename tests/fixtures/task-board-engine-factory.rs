@@ -72,6 +72,7 @@ struct Fixture {
     driver: Option<driver::Scenario>,
     control: Option<control::Scenario>,
     steering: Option<steering::Scenario>,
+    attachment: RefCell<Option<Json>>,
     scheduler: Option<scheduler::Scenario>,
     delivery: Option<delivery::Scenario>,
     lifecycle: Option<lifecycle::Scenario>,
@@ -102,6 +103,7 @@ impl Fixture {
             driver: None,
             control: None,
             steering: None,
+            attachment: RefCell::default(),
             scheduler: None,
             delivery: None,
             lifecycle: None,
@@ -190,6 +192,11 @@ impl PolicyFactory<ContractsBinding, fn() -> String, fn() -> JsString, retention
         }
         if let Some(steering) = &self.steering {
             steering.bind(&policy.context)?;
+        }
+        if policy.context.owner.generation == 1.0
+            && (self.control.is_some() || self.steering.is_some())
+        {
+            *self.attachment.borrow_mut() = Some(driver::seed_attachment(&policy.context)?);
         }
         if let Some(scheduler) = &self.scheduler {
             scheduler.bind(&policy.context)?;
@@ -444,6 +451,11 @@ impl<V: Contracts> LifecyclePages for Policies<'_, V> {
         }
         let mut items = vec![];
         for (id, revision, value) in self.fixture.rows(key) {
+            if self.fixture.steering.is_some() && id == "watched-task" {
+                // The finite dependency header is read by ID; it is outside
+                // this scenario's admitted task/run scheduling page.
+                continue;
+            }
             if let Some(filter) = options.get("where") {
                 if filter.get("op") == Some(&"and".into()) {
                     assert_eq!(key, "task-board/task");

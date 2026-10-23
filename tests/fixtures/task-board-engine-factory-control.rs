@@ -1,5 +1,5 @@
 use super::*;
-use driver::{count, evidence, exact_evidence, frames, reached};
+use driver::{count, evidence as all_evidence, exact_evidence, frames, reached};
 use ivy_task_board::engine_invocations::InvocationRequest;
 
 pub(super) struct Scenario {
@@ -7,6 +7,20 @@ pub(super) struct Scenario {
     pub(super) ready: Gate,
     replay: RefCell<Option<Json>>,
     response: RefCell<Option<InvocationRequest>>,
+}
+
+fn control_calls(fixture: &Fixture) -> Vec<(String, u64, Json)> {
+    fixture
+        .rows("task-board/native-call")
+        .into_iter()
+        .filter(|row| row.0 != driver::ATTACHMENT)
+        .collect()
+}
+fn evidence(fixture: &Fixture) -> Vec<(String, String, Json)> {
+    all_evidence(fixture)
+        .into_iter()
+        .filter(|row| row.1 != driver::ATTACHMENT)
+        .collect()
 }
 fn f<'a>(v: &'a Json, key: &str) -> &'a Json {
     static NULL: Json = Json::Null;
@@ -32,6 +46,15 @@ impl Scenario {
             run.insert(key, f(&original, key).clone());
         }
         run.insert("plan", self.plan.clone());
+        let mut calls = f(&run, "calls").clone();
+        calls.insert(
+            "thread",
+            Json::object([
+                ("objectId", driver::ATTACHMENT.into()),
+                ("revision", Json::Number(2.0)),
+            ]),
+        );
+        run.insert("calls", calls);
         run.insert("phase", "cancel_requested".into());
         run.insert(
             "cancellation",
@@ -93,6 +116,20 @@ fn assert_review(fixture: &Fixture, scenario: &Scenario) {
     assert_review_records(fixture, &records);
 }
 pub(super) fn assert_review_records(fixture: &Fixture, records: &[(&str, Json, &str)]) {
+    if fixture.attachment.borrow().is_some() {
+        let attachment = fixture
+            .rows("task-board/native-call")
+            .into_iter()
+            .find(|row| row.0 == driver::ATTACHMENT)
+            .unwrap();
+        assert_eq!(attachment.1, 2);
+        assert_eq!(f(&attachment.2, "ownerPhase"), &"succeeded".into());
+        assert_eq!(f(&attachment.2, "epoch"), &"epoch".into());
+        assert_eq!(
+            f(f(&run(fixture).2, "calls"), "thread"),
+            &pin(driver::ATTACHMENT, 2)
+        );
+    }
     let expected = &records[3].1;
     let task = &fixture.rows("task-board/task")[0].2;
     for key in [
@@ -268,7 +305,7 @@ async fn interrupt_rechecks_the_owner_epoch_after_inspection_without_replacing_c
             },
         )
         .await;
-        let calls = fixture.rows("task-board/native-call");
+        let calls = control_calls(&fixture);
         assert_eq!(calls.len(), 1);
         let prepared = calls[0].clone();
         assert_eq!(prepared.1, 1);
@@ -357,7 +394,7 @@ async fn interrupt_rechecks_the_owner_epoch_after_inspection_without_replacing_c
             },
         )
         .await;
-        let current = fixture.rows("task-board/native-call");
+        let current = control_calls(&fixture);
         assert_eq!(current.len(), 1);
         assert_eq!(current[0].0, prepared.0);
         assert_eq!(current[0].1, 1);
@@ -464,7 +501,7 @@ async fn retained_interrupt_recovers_only_the_original_epoch_and_preserves_curre
                 || !frames(&peer, "receipt-unavailable").is_empty(),
             )
             .await;
-            let prepared = fixture.rows("task-board/native-call");
+            let prepared = control_calls(&fixture);
             assert_eq!(prepared.len(), 1);
             let prepared = &prepared[0];
             assert_eq!(prepared.1, 1);
@@ -500,7 +537,7 @@ async fn retained_interrupt_recovers_only_the_original_epoch_and_preserves_curre
             let second = bounded(service.client.wait_ready(None)).await.unwrap();
             assert_eq!(second.generation(), 2);
             reached(&fixture, &peer, "replacement epoch decision", || {
-                let rows = fixture.rows("task-board/native-call");
+                let rows = control_calls(&fixture);
                 let outcome = run(&fixture).2;
                 rows[0].1 == (if replacement { 1 } else { 2 })
                     && (!replacement
@@ -510,12 +547,24 @@ async fn retained_interrupt_recovers_only_the_original_epoch_and_preserves_curre
                         .rows("task-board/operation")
                         .iter()
                         .all(|r| f(&r.2, "phase") == &"succeeded".into())
+                    && fixture.rows("task-board/operation").iter().any(|row| {
+                        f(f(f(&row.2, "request"), "change"), "kind")
+                            == &Json::from(if replacement {
+                                "attachCall"
+                            } else {
+                                "observeCall"
+                            })
+                            && f(&row.2, "phase") == &"succeeded".into()
+                    })
+                    && (replacement
+                        || f(f(&outcome, "calls"), "interrupt").get("revision")
+                            == Some(&Json::Number(2.0)))
                     && frames(&peer, "control-observation")
                         .iter()
                         .any(|v| f(v, "generation") == &Json::Number(2.0))
             })
             .await;
-            let calls = fixture.rows("task-board/native-call");
+            let calls = control_calls(&fixture);
             assert_eq!(calls.len(), 1);
             for key in [
                 "request",

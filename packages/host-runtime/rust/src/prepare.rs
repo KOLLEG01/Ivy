@@ -19,12 +19,7 @@ use crate::{
     storage_space,
 };
 use ivy_contracts::{JsString, core_schema::validate_host};
-use std::{
-    collections::BTreeMap,
-    ffi::OsString,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, ffi::OsString, fs, path::PathBuf};
 
 /// Explicit preparation capabilities. Native candidates need no Node or JS parser.
 #[derive(Clone)]
@@ -46,9 +41,6 @@ fn require(value: bool, code: &str, message: &str) -> IvyResult<()> {
 fn field(value: &IvyJson, key: &str) -> IvyResult<PathBuf> {
     config::path_value(value.required(key)?)
 }
-fn fs_path(path: &Path) -> PathBuf {
-    node_path::filesystem_path(&node_path::from_native(path))
-}
 fn now() -> IvyJson {
     chrono::Utc::now()
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -60,7 +52,7 @@ async fn blocking<T: Send + 'static>(
     internal(tokio::task::spawn_blocking(work).await)?
 }
 async fn mkdir(path: PathBuf) -> IvyResult<()> {
-    blocking(move || internal(fs::create_dir_all(fs_path(&path)))).await
+    blocking(move || internal(fs::create_dir_all(path))).await
 }
 async fn actual(path: PathBuf) -> IvyResult<PathBuf> {
     blocking(move || internal(paths::realpath(&path))).await
@@ -119,9 +111,10 @@ fn command(value: &IvyJson) -> IvyResult<process::Command> {
             .ok_or_else(IvyError::internal)?
             .iter()
             .map(|value| {
-                Ok(OsString::from(String::from_utf16_lossy(
-                    &value.as_js_string().ok_or_else(IvyError::internal)?.0,
-                )))
+                Ok(
+                    node_path::to_native(value.as_js_string().ok_or_else(IvyError::internal)?)
+                        .into_os_string(),
+                )
             })
             .collect::<IvyResult<_>>()?,
         cwd: value.get("cwd").map(config::path_value).transpose()?,
@@ -363,7 +356,7 @@ async fn prepare(
         environment.insert("IVY_BUILD_ID".into(), build_id.clone().into());
         environment.insert(
             "IVY_BUILD_CACHE_ROOT".into(),
-            fs_path(&staging.join("build-cache")).into_os_string(),
+            staging.join("build-cache").into_os_string(),
         );
         progress
             .step("copying-source".into(), StepOptions::default())

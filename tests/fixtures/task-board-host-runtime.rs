@@ -165,8 +165,8 @@ impl GenerationRuntime for Runtime<'_> {
     fn recovered(&self) -> bool {
         true
     }
-    fn diagnostics(&self) -> Vec<Json> {
-        vec![]
+    fn diagnostics(&self) -> IvyResult<Vec<Json>> {
+        Ok(vec![])
     }
     fn task_changed(&self) {}
     fn notification(&self, _: &Json) -> bool {

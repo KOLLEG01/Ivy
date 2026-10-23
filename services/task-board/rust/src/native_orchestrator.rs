@@ -1,16 +1,19 @@
 //! One bounded reconciliation pass over retained native calls and observations.
 //! Current engine admission, prompts and handoff policy remain explicit.
 use crate::{
+    coordination::recovery_retry_delay_ms,
     engine_read::peer_state,
     journal_store::ReadScopes,
     native_driver::{NativeDriver, NativeDriverConnection, NativeDriverRuntime, NativeDriverStore},
     native_inspector::{Inspection, InspectionContext, InspectionStore, NativeInspector, PageSize},
     native_intent::{NativeSlot, TaskPrompts},
     native_lifecycle::LifecycleStore,
+    native_progress::NativeProgress,
     native_state::{finished_run, project_native_state},
     native_turn_evidence::{TurnEvidence, TurnEvidenceStore},
     operations::{Document, Store, mutation},
     turn_output::{final_output_text, output_params, page_cursor},
+    wake::{WakeStore, dependencies_changed, dependency_snapshot},
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
@@ -29,6 +32,12 @@ pub trait OrchestrationEngine: NativeDriverRuntime {
     fn run_handoff(&self, task: &Json, run: &JsString) -> IvyResult<bool>;
     fn claimed_workflow_state(&self, waiting: &Json) -> IvyResult<JsString>;
     async fn peer_state(&self, task: &Json, task_id: &JsString) -> IvyResult<JsString>;
+    async fn dependency_snapshot(&self, task: &Json) -> IvyResult<Json>;
+    async fn recover_pending_native_operation(
+        &self,
+        task: &JsString,
+        run: &JsString,
+    ) -> IvyResult<bool>;
     async fn sync_native_comments(&self, run: &JsString) -> IvyResult<()>;
     async fn with_read_cache<T, F: Future<Output = IvyResult<T>>>(&self, work: F) -> IvyResult<T>;
 }
@@ -36,6 +45,11 @@ pub trait OrchestrationEngine: NativeDriverRuntime {
 /// mirroring must use its accepted current question/answer admission path.
 #[allow(async_fn_in_trait)]
 pub trait OrchestrationPolicies {
+    async fn recover_pending_native_operation(
+        &self,
+        task: &JsString,
+        run: &JsString,
+    ) -> IvyResult<bool>;
     async fn sync_native_comments(&self, run: &JsString) -> IvyResult<()>;
 }
 /// Borrow the authenticated driver and the owner's lifecycle journal. Bind the
@@ -71,8 +85,12 @@ impl<D: NativeDriverConnection, S, P, C> NativeDriverConnection
         self.driver.principal_id()
     }
 }
-impl<D: NativeDriverRuntime, S: LifecycleStore, P: OrchestrationPolicies, C: Fn() -> f64>
-    OrchestrationEngine for OrchestrationRuntime<'_, D, S, P, C>
+impl<
+    D: NativeDriverRuntime,
+    S: LifecycleStore + WakeStore,
+    P: OrchestrationPolicies,
+    C: Fn() -> f64,
+> OrchestrationEngine for OrchestrationRuntime<'_, D, S, P, C>
 {
     fn now_millis(&self) -> f64 {
         (self.now_millis)()
@@ -85,6 +103,18 @@ impl<D: NativeDriverRuntime, S: LifecycleStore, P: OrchestrationPolicies, C: Fn(
     }
     async fn peer_state(&self, task: &Json, task_id: &JsString) -> IvyResult<JsString> {
         peer_state(self.store, task, task_id).await
+    }
+    async fn dependency_snapshot(&self, task: &Json) -> IvyResult<Json> {
+        dependency_snapshot(self.store, task).await
+    }
+    async fn recover_pending_native_operation(
+        &self,
+        task: &JsString,
+        run: &JsString,
+    ) -> IvyResult<bool> {
+        self.policies
+            .recover_pending_native_operation(task, run)
+            .await
     }
     async fn sync_native_comments(&self, run: &JsString) -> IvyResult<()> {
         self.policies.sync_native_comments(run).await
@@ -180,33 +210,19 @@ pub struct NativeOrchestrator<'a, S, E, V> {
     pub engine: &'a E,
     pub services: &'a V,
     pub catalogs: &'a CheckedNativeContracts,
+    progress: NativeProgress,
     threads: RefCell<Vec<(JsString, JsString, JsString)>>,
-    retries: RefCell<Vec<(JsString, u8, f64)>>,
+    retries: RefCell<Vec<(JsString, f64)>>,
 }
 fn field<'a>(v: &'a Json, k: &str) -> &'a Json {
     static NULL: Json = Json::Null;
     v.get(k).unwrap_or(&NULL)
 }
-fn truthy(v: &Json) -> bool {
-    match v {
-        Json::Null => false,
-        Json::Bool(v) => *v,
-        Json::String(v) => !v.0.is_empty(),
-        Json::Number(v) => *v != 0.0 && !v.is_nan(),
-        _ => true,
-    }
-}
 fn equal(v: &Json, k: &str, s: &str) -> bool {
     v.get(k) == Some(&Json::from(s))
 }
-fn string(v: &Json) -> JsString {
-    v.as_js_string().cloned().unwrap_or_default()
-}
 fn s<'a>(v: &'a Json, k: &str) -> IvyResult<&'a JsString> {
     v.required(k)?.as_js_string().ok_or_else(IvyError::internal)
-}
-fn number(v: &Json, k: &str) -> f64 {
-    v.get(k).and_then(Json::as_f64).unwrap_or(f64::NAN)
 }
 fn array(v: &Json) -> &[Json] {
     v.as_array().unwrap_or(&[])
@@ -229,12 +245,14 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
         engine: &'a E,
         services: &'a V,
         catalogs: &'a CheckedNativeContracts,
+        progress: NativeProgress,
     ) -> Self {
         Self {
             store,
             engine,
             services,
             catalogs,
+            progress,
             threads: RefCell::default(),
             retries: RefCell::default(),
         }
@@ -243,14 +261,25 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
         let params = field(value, "params");
         let event = field(params, "payload");
         let body = field(event, "params");
-        if ![
+        let relevant = [
             "turn/completed",
             "thread/status/changed",
             "serverRequest/resolved",
         ]
         .iter()
-        .any(|v| equal(event, "method", v))
-        {
+        .any(|v| equal(event, "method", v));
+        let activity = field(event, "method").as_js_string().is_some_and(|method| {
+            method.0.starts_with(&[
+                b'i' as u16,
+                b't' as u16,
+                b'e' as u16,
+                b'm' as u16,
+                b'/' as u16,
+            ])
+        }) || ["turn/started", "turn/completed", "serverRequest/resolved"]
+            .iter()
+            .any(|method| equal(event, "method", method));
+        if !relevant && !activity {
             return false;
         }
         let mut matched = false;
@@ -258,25 +287,31 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             if params.get("serviceNodeId").and_then(Json::as_js_string) == Some(node)
                 && body.get("threadId").and_then(Json::as_js_string) == Some(thread)
             {
-                self.retries.borrow_mut().retain(|r| &r.0 != run);
-                matched = true;
+                if activity {
+                    self.progress.activity(run, self.engine.now_millis());
+                }
+                if relevant {
+                    self.retries.borrow_mut().retain(|r| &r.0 != run);
+                    matched = true;
+                }
             }
         }
         matched
     }
-    fn postpone(&self, run: &JsString) {
+    pub fn diagnostics(&self) -> IvyResult<Vec<Json>> {
+        self.progress.diagnostics(self.engine.now_millis())
+    }
+    fn postpone(&self, run: &JsString, code: Option<&str>) {
         let mut retries = self.retries.borrow_mut();
         let prior = retries.iter().find(|v| &v.0 == run);
-        let count = (prior.map(|v| v.1).unwrap_or(0) + 1).min(5);
         if retries.len() >= 1024 && prior.is_none() {
             retries.remove(0);
         }
-        let after =
-            self.engine.now_millis() + (30000.0 * 2_f64.powi(count as i32 - 1)).min(300000.0);
+        let after = self.engine.now_millis() + recovery_retry_delay_ms(code) as f64;
         if let Some(entry) = retries.iter_mut().find(|v| &v.0 == run) {
-            *entry = (run.clone(), count, after);
+            *entry = (run.clone(), after);
         } else {
-            retries.push((run.clone(), count, after));
+            retries.push((run.clone(), after));
         }
     }
     pub async fn drain(&self, run: &JsString) -> IvyResult<bool> {
@@ -285,7 +320,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             .borrow()
             .iter()
             .find(|v| &v.0 == run)
-            .map(|v| v.2)
+            .map(|v| v.1)
             .unwrap_or(0.0)
             > self.engine.now_millis()
         {
@@ -302,7 +337,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
                 .read("task-board/run", &Json::String(run.clone()), true)
                 .await?;
             if let Err(error) = self.step(run).await {
-                self.postpone(run);
+                self.postpone(run, Some(error.code.as_str()));
                 return Err(error);
             }
             let after = self
@@ -313,7 +348,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             if finished_run(value) {
                 self.threads.borrow_mut().retain(|v| &v.0 != run);
                 self.retries.borrow_mut().retain(|v| &v.0 != run);
-            } else if truthy(field(value, "primaryResourceRef")) {
+            } else if field(value, "primaryResourceRef").as_object().is_some() {
                 let node = s(value.required("target")?, "serviceNodeId")?.clone();
                 let thread = s(value.required("primaryResourceRef")?, "nativeId")?.clone();
                 let mut threads = self.threads.borrow_mut();
@@ -338,13 +373,19 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
                 Json::Null
             };
             if equal(value, "phase", "outcome_unknown") || equal(&waiting, "reason", "host") {
-                self.postpone(run);
+                let code = field(field(value, "externalOutcome"), "code")
+                    .as_js_string()
+                    .map(JsString::to_utf8)
+                    .transpose()?;
+                self.postpone(run, code.as_deref());
             } else {
                 self.retries.borrow_mut().retain(|v| &v.0 != run);
             }
             if !["starting", "publishing_result", "cancel_requested"]
                 .iter()
                 .any(|v| equal(value, "phase", v))
+                && !self.unresolved(&after, NativeSlot::Steer).await?
+                && !self.unresolved(&after, NativeSlot::Thread).await?
                 || same(&before.pin, &after.pin)?
             {
                 break;
@@ -435,14 +476,19 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
     }
     async fn unresolved(&self, run: &Document, slot: NativeSlot) -> IvyResult<bool> {
         let pin = field(field(&run.value, "calls"), slot.as_str());
-        if !truthy(pin) {
+        if pin.is_null() {
             return Ok(false);
         }
         let latest = self
             .store
             .read("task-board/native-call", pin.required("objectId")?, true)
             .await?;
-        Ok(number(&latest.pin, "revision") > number(pin, "revision")
+        let revision = |pin: &Json| {
+            pin.required("revision")?
+                .as_f64()
+                .ok_or_else(IvyError::internal)
+        };
+        Ok(revision(&latest.pin)? > revision(pin)?
             || !["succeeded", "failed"]
                 .iter()
                 .any(|v| equal(&latest.value, "ownerPhase", v)))
@@ -454,6 +500,16 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             .read("task-board/run", &Json::String(run_id.clone()), true)
             .await?;
         if finished_run(&run.value) {
+            self.progress.forget(run_id);
+            return Ok(());
+        }
+        // A partially published native update owns its original Task/Run pins.
+        // Recover it before reading the Task or preparing another update.
+        if self
+            .engine
+            .recover_pending_native_operation(s(&run.value, "taskId")?, run_id)
+            .await?
+        {
             return Ok(());
         }
         let task = self
@@ -465,7 +521,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             .and_then(Json::as_js_string)
             == Some(run_id);
         require(
-            !truthy(field(&task.value, "publication"))
+            field(&task.value, "publication").is_null()
                 && (!active || same(field(field(&task.value, "claim"), "run"), &run.pin)?),
             "revision_conflict",
             "Reconciliation requires current Task/Run publication state.",
@@ -556,7 +612,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
     ) -> IvyResult<()> {
         let value = &run.value;
         let calls = field(value, "calls");
-        if !truthy(field(value, "turnId")) {
+        if field(value, "turnId").is_null() {
             for slot in [NativeSlot::Thread, NativeSlot::Turn] {
                 if self.unresolved(run, slot).await? {
                     let result: IvyResult<()> = async {
@@ -573,8 +629,8 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
                         if error.code != "task_board_reattach_required"
                             || slot != NativeSlot::Turn
                             || !active
-                            || truthy(field(value, "cancellation"))
-                            || !truthy(field(calls, "thread"))
+                            || !field(value, "cancellation").is_null()
+                            || field(calls, "thread").is_null()
                         {
                             return Err(error);
                         }
@@ -598,14 +654,14 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
                     return Ok(());
                 }
             }
-            if truthy(field(value, "cancellation")) || !active {
-                if !truthy(field(calls, "turn")) {
+            if !field(value, "cancellation").is_null() || !active {
+                if field(calls, "turn").is_null() {
                     self.update(
                         run,
                         task,
                         Json::object([(
                             "kind",
-                            if truthy(field(value, "cancellation")) {
+                            if !field(value, "cancellation").is_null() {
                                 "cancelUnstarted"
                             } else {
                                 "retireUnstarted"
@@ -620,7 +676,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             self.services
                 .prepare(
                     id,
-                    if truthy(field(calls, "thread")) {
+                    if !field(calls, "thread").is_null() {
                         NativeSlot::Turn
                     } else {
                         NativeSlot::Thread
@@ -632,6 +688,12 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
         }
         if self.unresolved(run, NativeSlot::Steer).await? {
             self.services.advance(id, NativeSlot::Steer).await?;
+            return Ok(());
+        }
+        if self.unresolved(run, NativeSlot::Thread).await? {
+            if !self.services.recover_uncertain_resume(id).await? {
+                self.services.advance(id, NativeSlot::Thread).await?;
+            }
             return Ok(());
         }
         let (metadata, turns) = match self.services.find(&run.pin).await? {
@@ -654,26 +716,68 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             .iter()
             .find(|v| v.get("id") == value.get("turnId"))
             .ok_or_else(IvyError::internal)?;
-        let status = string(field(turn, "status"));
+        let status = s(turn, "status")?.clone();
         let thread = field(field(field(&metadata, "reply"), "result"), "thread");
         let in_progress = status == JsString::from("inProgress");
+        if !in_progress {
+            self.progress.forget(id);
+        }
         let same_epoch = turns.get("epoch") == value.get("nativeEpoch");
         if in_progress && !same_epoch && self.services.owner_stopped(value).await? {
             return self.update(run, task, Json::object([("kind", "unavailable".into()), ("reason", "external_outcome".into()), ("code", "native_process_lost".into()), ("detail", "The original native process tree stopped; the saved unfinished turn cannot continue in the replacement owner.".into())])).await;
         }
+        // History is not an attachment to the live thread. Reuse the retained
+        // resume path before adopting an epoch or controlling its saved turn.
         if in_progress
-            && truthy(field(value, "cancellation"))
+            && equal(field(thread, "status"), "type", "active")
+            && (active || !field(value, "cancellation").is_null())
+        {
+            let attachment = if field(calls, "thread").is_null() {
+                None
+            } else {
+                Some(
+                    self.store
+                        .read("task-board/native-call", calls.required("thread")?, true)
+                        .await?,
+                )
+            };
+            if attachment.as_ref().is_none_or(|call| {
+                call.value.get("epoch") != turns.get("epoch")
+                    || equal(&call.value, "ownerPhase", "failed")
+            }) {
+                let origin = attachment
+                    .map(|call| {
+                        Json::object([
+                            ("kind", "reattach".into()),
+                            ("predecessor", call.pin),
+                            ("preparedEpoch", field(&turns, "epoch").clone()),
+                        ])
+                    })
+                    .unwrap_or_else(|| Json::object([("kind", "initial".into())]));
+                self.services
+                    .prepare(id, NativeSlot::Thread, Some(&origin))
+                    .await?;
+                return Ok(());
+            }
+        }
+        if in_progress
+            && !field(value, "cancellation").is_null()
             && same_epoch
             && equal(field(thread, "status"), "type", "active")
         {
-            if !truthy(field(calls, "interrupt")) {
+            if field(calls, "interrupt").is_null() {
                 self.services
                     .prepare(id, NativeSlot::Interrupt, None)
                     .await?;
                 return Ok(());
             }
             if self.unresolved(run, NativeSlot::Interrupt).await?
-                && truthy(&self.services.advance(id, NativeSlot::Interrupt).await?)
+                && self
+                    .services
+                    .advance(id, NativeSlot::Interrupt)
+                    .await?
+                    .as_object()
+                    .is_some()
             {
                 return Ok(());
             }
@@ -681,30 +785,39 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
         let prior = field(field(value, "externalOutcome"), "evidence");
         let mut snapshot = None;
         if !in_progress
-            && truthy(prior)
+            && prior.as_object().is_some()
             && self
                 .store
                 .local_key(s(prior.required("object")?, "objectId")?)?
                 .as_deref()
                 == Some("task-board/native-turn-snapshot")
         {
-            let saved = self.services.snapshot(&run.pin, prior).await?;
-            if saved.get("status").and_then(Json::as_js_string) == Some(&status)
-                && saved.get("epoch") == turns.get("epoch")
-            {
-                snapshot = Some(prior.clone());
+            match self.services.snapshot(&run.pin, prior).await {
+                Ok(saved) => {
+                    if saved.get("status").and_then(Json::as_js_string) == Some(&status)
+                        && saved.get("epoch") == turns.get("epoch")
+                    {
+                        snapshot = Some(prior.clone());
+                    }
+                }
+                // A retained observation can outlive its original Run revision.
+                // Only pruning permits replacement by fresh verified evidence.
+                Err(error) if error.code == "revision_pruned" => {}
+                Err(error) => return Err(error),
             }
         }
         if in_progress {
-            if active && !truthy(field(value, "cancellation")) && same_epoch {
-                let previous = if truthy(field(calls, "steer")) {
-                    self.store
+            if active && field(value, "cancellation").is_null() && same_epoch {
+                let previous = if !field(calls, "steer").is_null() {
+                    let call = self
+                        .store
                         .read("task-board/native-call", calls.required("steer")?, true)
-                        .await?
-                        .value
-                        .get("origin")
-                        .cloned()
-                        .unwrap_or(Json::Null)
+                        .await?;
+                    if equal(&call.value, "ownerPhase", "succeeded") {
+                        call.value.required("origin")?.clone()
+                    } else {
+                        Json::Null
+                    }
                 } else {
                     Json::Null
                 };
@@ -725,10 +838,6 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
                         true,
                     )
                     .await?;
-                let peers = self
-                    .engine
-                    .peer_state(&task.value, s(&task.pin, "objectId")?)
-                    .await?;
                 let original_comments = array(field(field(value, "originalRequest"), "commentIds"));
                 let comments: Vec<Json> = array(field(&task.value, "commentDeliveries"))
                     .iter()
@@ -746,33 +855,47 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
                             "workRevision",
                             initial.value.required("workRevision")?.clone(),
                         ),
-                        ("peersHash", hash_json(&Json::Array(vec![]))?.into()),
                         ("commentIds", Json::Array(vec![])),
                     ])
                 };
+                let observed_dependencies = self.engine.dependency_snapshot(&task.value).await?;
+                let at = self.engine.now();
+                let wake_at = field(&task.value, "wakeAt")
+                    .as_js_string()
+                    .filter(|wake| *wake <= &at)
+                    .cloned()
+                    .map(Json::String)
+                    .unwrap_or(Json::Null);
+                let execution_change =
+                    field(&task.value, "executionChangeRequested").as_bool() == Some(true);
                 if task.value.get("workRevision") != baseline.get("workRevision")
-                    || baseline.get("peersHash").and_then(Json::as_js_string) != Some(&peers)
                     || comments
                         .iter()
                         .any(|v| !array(field(&baseline, "commentIds")).contains(v))
+                    || dependencies_changed(&task.value, &observed_dependencies)?
+                    || !wake_at.is_null()
+                    || execution_change
+                        && field(&baseline, "executionChangeRequested").as_bool() != Some(true)
                 {
+                    let mut origin = Json::object([
+                        ("kind", "steer".into()),
+                        ("commentIds", Json::Array(comments)),
+                        ("observedDependencies", observed_dependencies),
+                        ("wakeAt", wake_at),
+                        ("workRevision", task.value.required("workRevision")?.clone()),
+                        ("peersHash", hash_json(&Json::Array(vec![]))?.into()),
+                        ("predecessor", field(calls, "steer").clone()),
+                    ]);
+                    if execution_change {
+                        origin.insert("executionChangeRequested", true.into());
+                    }
                     self.services
-                        .prepare(
-                            id,
-                            NativeSlot::Steer,
-                            Some(&Json::object([
-                                ("kind", "steer".into()),
-                                ("commentIds", Json::Array(comments)),
-                                ("workRevision", task.value.required("workRevision")?.clone()),
-                                ("peersHash", Json::String(peers)),
-                                ("predecessor", field(calls, "steer").clone()),
-                            ])),
-                        )
+                        .prepare(id, NativeSlot::Steer, Some(&origin))
                         .await?;
                     return Ok(());
                 }
             }
-            let evidence = if truthy(prior) {
+            let evidence = if prior.as_object().is_some() {
                 prior.clone()
             } else {
                 Json::object([
@@ -790,6 +913,17 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
                 s(&turns, "observedAt")?,
                 &evidence,
             )?;
+            self.progress.observe(
+                id,
+                s(value, "taskId")?,
+                equal(&projected, "phase", "running") && field(value, "cancellation").is_null(),
+                hash_json(&Json::object([
+                    ("turn", turn.clone()),
+                    ("status", field(thread, "status").clone()),
+                ]))?
+                .into(),
+                self.engine.now_millis(),
+            );
             let waiting = if active {
                 field(&task.value, "runtimeWait")
             } else {
@@ -801,7 +935,8 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             } else {
                 self.engine.claimed_workflow_state(projected_waiting)?
             };
-            if projected.get("phase") == value.get("phase")
+            if (!equal(field(&projected, "externalOutcome"), "state", "active") || same_epoch)
+                && projected.get("phase") == value.get("phase")
                 && field(&projected, "externalOutcome").get("state")
                     == field(value, "externalOutcome").get("state")
                 && field(&projected, "externalOutcome").get("code")

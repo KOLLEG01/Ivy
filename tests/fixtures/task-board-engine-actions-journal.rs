@@ -64,8 +64,8 @@ impl GenerationRuntime for DispatchRuntime {
     fn recovered(&self) -> bool {
         true
     }
-    fn diagnostics(&self) -> Vec<Json> {
-        vec![]
+    fn diagnostics(&self) -> IvyResult<Vec<Json>> {
+        Ok(vec![])
     }
     fn task_changed(&self) {
         self.changes.set(self.changes.get() + 1);

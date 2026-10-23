@@ -47,6 +47,7 @@ use crate::{
     native_orchestrator::{
         NativeOrchestrator, NativeServices, OrchestrationPolicies, OrchestrationRuntime,
     },
+    native_progress::NativeProgress,
     native_publication::{
         NativePublicationPolicies, NativePublicationRuntime, NativePublisher, PublicationEvidence,
     },
@@ -232,6 +233,7 @@ impl<P: DeliveryPolicies> DeliveryPolicies for PolicyRef<'_, P> {
 }
 
 struct SchedulerBindings<'a, P, S, M, D, C, K> {
+    local_journal: &'a LocalJournal<'a>,
     principal_id: &'a JsString,
     current: &'a P,
     checks: &'a EngineChecks<'a, S, P>,
@@ -347,6 +349,20 @@ impl<
 impl<P: CurrentPolicies, S, M: NativeCommentStore, D, C, K> OrchestrationPolicies
     for SchedulerBindings<'_, P, S, M, D, C, K>
 {
+    async fn recover_pending_native_operation(
+        &self,
+        task: &JsString,
+        run: &JsString,
+    ) -> IvyResult<bool> {
+        let Some(operation) = self
+            .local_journal
+            .pending_operation(task, "native", Some(run))?
+        else {
+            return Ok(false);
+        };
+        self.calls.recover_operation(&operation)?.await?;
+        Ok(true)
+    }
     async fn sync_native_comments(&self, id: &JsString) -> IvyResult<()> {
         sync_native_comments(self.comments, id).await
     }
@@ -639,6 +655,7 @@ impl<
             principal.clone(),
             owner.service_node_id.clone(),
             SchedulerBindings {
+                local_journal: &journal.journal,
                 principal_id: principal,
                 current: &policies,
                 checks: &checks,
@@ -852,7 +869,17 @@ impl<
                 principal_id: principal,
             },
         };
-        native = NativeOrchestrator::new(store, &orchestration, &native_services, self.catalogs);
+        let warning_ms = match settings.required("scheduler")?.get("stallWarningMs") {
+            None | Some(Json::Null) => 300_000.0,
+            Some(value) => value.as_f64().ok_or_else(IvyError::internal)?,
+        };
+        native = NativeOrchestrator::new(
+            store,
+            &orchestration,
+            &native_services,
+            self.catalogs,
+            NativeProgress::new(owner.service_node_id.clone(), warning_ms),
+        );
         adoption = NativeAdoption::new(store, &driver, journal.client.as_ref(), || {
             self.clock.now_millis()
         });

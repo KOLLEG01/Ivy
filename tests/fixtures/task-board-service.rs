@@ -266,8 +266,8 @@ impl GenerationRuntime for Runtime<'_> {
     fn recovered(&self) -> bool {
         true
     }
-    fn diagnostics(&self) -> Vec<Json> {
-        vec!["fixture diagnostic".into()]
+    fn diagnostics(&self) -> IvyResult<Vec<Json>> {
+        Ok(vec!["fixture diagnostic".into()])
     }
     fn task_changed(&self) {
         self.event("changed");

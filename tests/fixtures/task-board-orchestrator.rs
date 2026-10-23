@@ -23,6 +23,13 @@ use std::{
 };
 #[path = "task-board-orchestration-journal.rs"]
 mod journal;
+#[path = "task-board-native-progress.rs"]
+mod progress;
+#[path = "task-board-orchestration-recovery.rs"]
+mod recovery;
+fn progress_tracker() -> ivy_task_board::native_progress::NativeProgress {
+    ivy_task_board::native_progress::NativeProgress::new("fixture-task-board".into(), 300_000.0)
+}
 fn s<'a>(v: &'a Json, k: &str) -> &'a JsString {
     v.required(k).unwrap().as_js_string().unwrap()
 }
@@ -430,6 +437,22 @@ impl NativeDriverRuntime for World<'_> {
     }
 }
 impl OrchestrationEngine for World<'_> {
+    async fn recover_pending_native_operation(
+        &self,
+        task: &JsString,
+        run: &JsString,
+    ) -> IvyResult<bool> {
+        if flag(self.input(), "pendingNative") {
+            self.event([
+                "recover-pending".into(),
+                Json::String(task.clone()),
+                Json::String(run.clone()),
+            ]);
+            self.fail("pending")?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
     fn now_millis(&self) -> f64 {
         self.now.get()
     }
@@ -464,6 +487,15 @@ impl OrchestrationEngine for World<'_> {
             .and_then(Json::as_js_string)
             .cloned()
             .unwrap_or_else(|| hash_json(&Json::Array(vec![])).unwrap().into()))
+    }
+    async fn dependency_snapshot(&self, task: &Json) -> IvyResult<Json> {
+        self.event(["dependencies".into(), task.clone()]);
+        self.fail("dependencies")?;
+        Ok(self
+            .input()
+            .get("observedDependencies")
+            .cloned()
+            .unwrap_or_else(|| Json::object(Vec::<(&str, Json)>::new())))
     }
     async fn sync_native_comments(&self, id: &JsString) -> IvyResult<()> {
         self.event(["sync".into(), Json::String(id.clone())]);
@@ -689,7 +721,8 @@ async fn bounded_orchestration_matches_original_component_order_error_fences_ret
     let rows = data().required("rows").unwrap().as_array().unwrap();
     for row in rows {
         let world = World::new(row);
-        let subject = NativeOrchestrator::new(&world, &world, &world, &catalogs);
+        let subject =
+            NativeOrchestrator::new(&world, &world, &world, &catalogs, progress_tracker());
         let mut results = vec![];
         for a in row.required("actions").unwrap().as_array().unwrap() {
             let a = a.as_array().unwrap();

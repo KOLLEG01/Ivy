@@ -5,6 +5,8 @@ use ivy_task_board::{
     native_intent::NativeIntent,
 };
 use std::sync::OnceLock;
+#[path = "task-board-native-retained-resume.rs"]
+mod retained_resume;
 
 fn data() -> &'static Json {
     static DATA: OnceLock<Json> = OnceLock::new();

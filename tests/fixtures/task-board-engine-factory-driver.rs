@@ -23,6 +23,178 @@ fn pin(id: &str, revision: f64) -> Json {
 fn prompt() -> JsString {
     JsString("driver prompt".encode_utf16().chain([0xd800]).collect())
 }
+pub(super) const ATTACHMENT: &str = "initial-attachment";
+// An already running turn has its original confirmed thread receipt. Retain it
+// through the real parameter/evidence writers so control fixtures exercise
+// current attachment rules rather than a history-only, incomplete Run seed.
+pub(super) fn seed_attachment(context: &Context<'_>) -> IvyResult<Json> {
+    use futures_util::FutureExt;
+    use ivy_task_board::{
+        native_evidence::NativeEvidence,
+        native_intent::{NativeIntent, NativeSlot},
+        operations::Store,
+    };
+    async {
+        let journal = context.journal;
+        let run = Store::read(journal, "task-board/run", &"run".into(), true).await?;
+        let intent = NativeIntent {
+            store: journal,
+            catalogs: context.catalogs,
+        };
+        let mut call = intent
+            .intended_call(
+                &run.value,
+                NativeSlot::Thread,
+                None,
+                &ivy_task_board::prompts::CurrentTaskPrompts,
+            )
+            .await?;
+        let operation_id = JsString::from("initial-attachment-operation");
+        let request = intent.retain_native_request(call.required("request")?, &operation_id)?;
+        let resolved = intent.resolve_native_request(&request)?;
+        assert_eq!(request.get("method"), Some(&"thread/resume".into()));
+        assert_eq!(
+            resolved.required("params")?.get("threadId"),
+            Some(&"thread".into())
+        );
+        for (key, value) in [
+            ("request", request),
+            ("origin", Json::object([("kind", "initial".into())])),
+            ("operationId", Json::String(operation_id.clone())),
+            ("state", "prepared".into()),
+            ("preparedAt", clock().into()),
+            ("observedAt", Json::Null),
+            ("ownerPhase", Json::Null),
+            ("epoch", Json::Null),
+            ("evidence", Json::Null),
+            ("code", Json::Null),
+        ] {
+            call.insert(key, value);
+        }
+        let version = journal.contracts.version("task-board/native-call")?;
+        journal.contracts.validate_record(
+            "task-board/native-call",
+            &version.clone().into(),
+            &call,
+        )?;
+        let pin = journal.journal.create(
+            "task-board/native-call",
+            &ATTACHMENT.into(),
+            None,
+            &call,
+            &clock().into(),
+            &ATTACHMENT.into(),
+        )?;
+        let source = context.catalogs.checked_native_contract(
+            run.value
+                .required("plan")?
+                .required("nativeVersion")?
+                .as_js_string()
+                .unwrap(),
+            Some(&Json::object([(
+                "sourceHash",
+                run.value
+                    .required("plan")?
+                    .required("catalogSourceHash")?
+                    .clone(),
+            )])),
+        )?;
+        let params = resolved.required("params")?.clone();
+        let operation = Json::object([
+            ("schemaVersion", Json::Number(1.0)),
+            ("operationId", Json::String(operation_id)),
+            (
+                "callerPrincipalId",
+                context.settings.required("principalId")?.clone(),
+            ),
+            (
+                "serviceNodeId",
+                run.value
+                    .required("target")?
+                    .required("serviceNodeId")?
+                    .clone(),
+            ),
+            (
+                "nativeVersion",
+                call.required("request")?.required("nativeVersion")?.clone(),
+            ),
+            (
+                "nativeExecutableHash",
+                source.catalog().required("nativeExecutableHash")?.clone(),
+            ),
+            ("method", "thread/resume".into()),
+            ("params", params.clone()),
+            (
+                "requestHash",
+                hash_json(&Json::object([
+                    ("method", "thread/resume".into()),
+                    ("params", params),
+                ]))?
+                .into(),
+            ),
+            ("phase", "succeeded".into()),
+            ("createdAt", clock().into()),
+            ("updatedAt", clock().into()),
+            ("epoch", "epoch".into()),
+            ("requestId", Json::Number(1.0)),
+            (
+                "reply",
+                Json::object([(
+                    "result",
+                    Json::object([(
+                        "thread",
+                        Json::object([("id", "thread".into()), ("ephemeral", false.into())]),
+                    )]),
+                )]),
+            ),
+            ("code", Json::Null),
+        ]);
+        let identity = intent.evidence_identity(
+            &run.value,
+            &call,
+            context
+                .settings
+                .required("principalId")?
+                .as_js_string()
+                .unwrap(),
+        )?;
+        let proof = NativeEvidence {
+            store: journal,
+            catalogs: context.catalogs,
+        }
+        .save(&pin, &operation, &identity)
+        .await?;
+        for (key, value) in [
+            ("state", "observed".into()),
+            ("ownerPhase", "succeeded".into()),
+            ("observedAt", clock().into()),
+            ("epoch", "epoch".into()),
+            ("evidence", proof),
+        ] {
+            call.insert(key, value);
+        }
+        journal
+            .contracts
+            .validate_record("task-board/native-call", &version.into(), &call)?;
+        let saved = journal.journal.update(
+            "task-board/native-call",
+            &ATTACHMENT.into(),
+            1.0,
+            &call,
+            &clock().into(),
+        )?;
+        assert_eq!(
+            saved,
+            Json::object([
+                ("objectId", ATTACHMENT.into()),
+                ("revision", Json::Number(2.0))
+            ])
+        );
+        Ok(operation)
+    }
+    .now_or_never()
+    .expect("Local attachment seeding must not perform remote work")
+}
 impl Scenario {
     fn records(&self) -> (Json, Json) {
         let (mut task, mut run) = native::baseline();
@@ -91,7 +263,7 @@ impl Scenario {
             "The prompt lost the immutable original Task"
         );
         assert_eq!(owner, &JsString::from("fixture-task-board"));
-        assert_eq!(coordination, Some(&Json::Bool(false)));
+        assert_eq!(coordination, None);
         self.prompts.set(self.prompts.get() + 1);
         Ok(prompt())
     }
@@ -184,9 +356,14 @@ pub(super) fn evidence(fixture: &Fixture) -> Vec<(String, String, Json)> {
 }
 pub(super) fn exact_evidence(fixture: &Fixture, peer: &Peer, expected: usize, phase: &str) {
     let manifests = evidence(fixture);
+    let attachment = fixture.attachment.borrow().clone();
+    let expected = expected + usize::from(attachment.is_some());
     assert_eq!(manifests.len(), expected);
     let calls = fixture.rows("task-board/native-call");
-    let originals = frames(peer, "committed-operation");
+    let mut originals = frames(peer, "committed-operation");
+    if let Some(operation) = attachment {
+        originals.push(Json::object([("operation", operation)]));
+    }
     assert_eq!(originals.len(), expected);
     for (id, parent, manifest) in manifests {
         let call = &calls.iter().find(|r| r.0 == parent).unwrap().2;
@@ -248,7 +425,14 @@ pub(super) fn exact_evidence(fixture: &Fixture, peer: &Peer, expected: usize, ph
             hash_json(f(&observed, "params")).unwrap(),
             hash_json(f(f(f(call, "request"), "params"), "params")).unwrap()
         );
-        assert_eq!(f(&observed, "phase"), &Json::from(phase));
+        assert_eq!(
+            f(&observed, "phase"),
+            &Json::from(if parent == ATTACHMENT {
+                "succeeded"
+            } else {
+                phase
+            })
+        );
         assert_eq!(
             f(&observed, "requestHash"),
             &Json::from(

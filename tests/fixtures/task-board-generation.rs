@@ -115,8 +115,15 @@ impl GenerationClock for ManualClock {
     }
 }
 #[derive(Default)]
-struct Native(Cell<usize>);
+struct Native(Cell<usize>, Cell<bool>);
 impl NativeNotifications for Native {
+    fn diagnostics(&self) -> IvyResult<Vec<Json>> {
+        if self.1.get() {
+            Err(IvyError::new("invalid_arguments", "Invalid time value"))
+        } else {
+            Ok(vec![])
+        }
+    }
     fn notification(&self, value: &Json) -> bool {
         self.0.set(self.0.get() + 1);
         value
@@ -203,6 +210,14 @@ async fn generation_retires_pending_page_public_call_and_reconciler_before_final
         Ok(())
     })));
     // Readiness is a retained local request even before autonomous tick start.
+    native.1.set(true);
+    let refused_readiness = control.readiness(context());
+    pump_pending(work.as_mut()).await;
+    assert_eq!(
+        refused_readiness.await.unwrap_err().code,
+        "invalid_arguments"
+    );
+    native.1.set(false);
     let readiness = control.readiness(context());
     pump_pending(work.as_mut()).await;
     assert_eq!(

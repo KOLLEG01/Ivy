@@ -4,7 +4,7 @@
 #[allow(dead_code)]
 mod fixture;
 use fixture::{ServiceFixture, host_configuration};
-use ivy_contracts::{IvyJson as J, core_schema::validate_host};
+use ivy_contracts::{IvyJson as J, JsString, core_schema::validate_host};
 use ivy_host_runtime::{
     artifact, config,
     executor_lock::ExecutorLock,
@@ -53,7 +53,18 @@ async fn build(marker: PathBuf) {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0)
         + 1;
-    fs::write(marker, count.to_string()).unwrap();
+    fs::write(&marker, count.to_string()).unwrap();
+    config::atomic_json(
+        marker.with_extension("args.json"),
+        J::Array(
+            std::env::args_os()
+                .skip(2)
+                .map(|arg| value(Path::new(&arg)))
+                .collect(),
+        ),
+    )
+    .await
+    .unwrap();
     let root = std::env::current_dir().unwrap();
     let dir = root.join("dist/native").join(platform());
     fs::create_dir_all(&dir).unwrap();
@@ -233,6 +244,25 @@ async fn stop(run: &mut Running, health_path: &Path) {
 async fn lifecycle() {
     let f = ServiceFixture::new();
     let mut host = host_configuration(&f);
+    let marker_name = JsString(
+        "build-"
+            .encode_utf16()
+            .chain([0xd800])
+            .chain("-count".encode_utf16())
+            .collect(),
+    );
+    let build_marker = f.0.join(node_path::to_native(&marker_name));
+    let replacement_marker = f.0.join("build-\u{fffd}-count");
+    fs::write(&replacement_marker, b"unrelated").unwrap();
+    let build_args = vec![
+        "--build".into(),
+        value(&build_marker),
+        "".into(),
+        "space and \"quotes\"".into(),
+        "trailing\\".into(),
+        "Grüße-🙂".into(),
+        "literal-\u{fffd}".into(),
+    ];
     let own_root = f.0.join("artifact");
     let own_path = f.0.join("own.json");
     let host_path = f.0.join("host.json");
@@ -377,10 +407,7 @@ async fn lifecycle() {
         ),
         (
             "prepare",
-            J::Array(vec![command(
-                "fixture-builder",
-                vec!["--build".into(), value(&f.0.join("build-count"))],
-            )]),
+            J::Array(vec![command("fixture-builder", build_args.clone())]),
         ),
         ("checks", J::Array(vec![])),
         (
@@ -433,7 +460,14 @@ async fn lifecycle() {
         ivy_contracts::hash::hash_json(&candidate).unwrap(),
         ivy_contracts::hash::hash_json(&reused).unwrap()
     );
-    assert_eq!(fs::read_to_string(f.0.join("build-count")).unwrap(), "1");
+    assert_eq!(fs::read_to_string(&build_marker).unwrap(), "1");
+    assert_eq!(fs::read(&replacement_marker).unwrap(), b"unrelated");
+    assert_eq!(
+        config::json_file(build_marker.with_extension("args.json"), 65536)
+            .await
+            .unwrap(),
+        J::Array(build_args[1..].to_vec()),
+    );
     artifact::verify_native_candidate(
         candidate.clone(),
         native(host.required("artifactRoot").unwrap()),

@@ -35,7 +35,7 @@ impl FactoryClock {
     pub(super) fn manual() -> Self {
         Self(Some(Rc::new(ManualClock::default())))
     }
-    fn advance(&self, millis: f64) {
+    pub(super) fn advance(&self, millis: f64) {
         let manual = self.0.as_ref().unwrap();
         manual.now.set(manual.now.get() + millis);
         manual.sleeps.borrow_mut().retain(|(at, gate)| {
@@ -514,10 +514,7 @@ pub(super) async fn pending(
         f(expected_error, "message"),
         &Json::from(expired.message.clone())
     );
-    assert_eq!(
-        f(expected_error, "outcome"),
-        &expired.outcome.to_json()
-    );
+    assert_eq!(f(expected_error, "outcome"), &expired.outcome.to_json());
     assert_eq!(count(fixture, "SELECT count(*) FROM retired_operations"), 1);
     assert_eq!(
         count(

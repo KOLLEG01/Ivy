@@ -391,6 +391,19 @@ impl NativeDriverRuntime for Engine<'_, '_> {
     }
 }
 impl OrchestrationPolicies for Engine<'_, '_> {
+    async fn recover_pending_native_operation(
+        &self,
+        task: &JsString,
+        run: &JsString,
+    ) -> IvyResult<bool> {
+        assert!(
+            self.store
+                .journal
+                .pending_operation(task, "native", Some(run))?
+                .is_none()
+        );
+        Ok(false)
+    }
     async fn sync_native_comments(&self, r: &JsString) -> IvyResult<()> {
         sync_native_comments(
             &NativeCommentJournal {
@@ -586,7 +599,8 @@ async fn concrete_orchestration_persists_verified_terminal_evidence_reopens_and_
                     principal_id: &"caller".into(),
                 },
             };
-            let coordinator = NativeOrchestrator::new(&store, &runtime, &services, &catalogs);
+            let coordinator =
+                NativeOrchestrator::new(&store, &runtime, &services, &catalogs, progress_tracker());
             if round == 0 {
                 coordinator.drain(&id(200)).await.unwrap();
                 assert_eq!(

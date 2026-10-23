@@ -83,7 +83,7 @@ impl GenerationRuntime for EngineRuntime<'_> {
     fn recovered(&self) -> bool {
         self.base.recovered()
     }
-    fn diagnostics(&self) -> Vec<Json> {
+    fn diagnostics(&self) -> IvyResult<Vec<Json>> {
         self.base.diagnostics()
     }
     fn task_changed(&self) {

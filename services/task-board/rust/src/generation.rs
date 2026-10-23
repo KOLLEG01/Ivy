@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 #[allow(async_fn_in_trait)]
 pub trait GenerationRuntime {
     fn recovered(&self) -> bool;
-    fn diagnostics(&self) -> Vec<Json>;
+    fn diagnostics(&self) -> IvyResult<Vec<Json>>;
     fn task_changed(&self);
     fn notification(&self, value: &Json) -> bool;
     async fn verify_owner(&self) -> IvyResult<()>;
@@ -38,11 +38,15 @@ pub trait GenerationRuntime {
     async fn stop(&self);
 }
 pub trait NativeNotifications {
+    fn diagnostics(&self) -> IvyResult<Vec<Json>>;
     fn notification(&self, value: &Json) -> bool;
 }
 impl<S: Store, E: OrchestrationEngine, V: OrchestrationServices> NativeNotifications
     for NativeOrchestrator<'_, S, E, V>
 {
+    fn diagnostics(&self) -> IvyResult<Vec<Json>> {
+        NativeOrchestrator::diagnostics(self)
+    }
     fn notification(&self, value: &Json) -> bool {
         NativeOrchestrator::notification(self, value)
     }
@@ -62,8 +66,10 @@ impl<
     fn recovered(&self) -> bool {
         self.reconciler.recovered()
     }
-    fn diagnostics(&self) -> Vec<Json> {
-        self.reconciler.diagnostics()
+    fn diagnostics(&self) -> IvyResult<Vec<Json>> {
+        let mut diagnostics = self.reconciler.diagnostics();
+        diagnostics.extend(self.native.diagnostics()?);
+        Ok(diagnostics)
     }
     fn task_changed(&self) {
         self.reconciler.task_changed();
@@ -208,7 +214,7 @@ impl<H: LocalHandler, R: GenerationRuntime> LocalHandler for Handler<'_, H, R> {
         self.runtime.verify_owner().await?;
         Ok(Json::object([
             ("ready", true.into()),
-            ("diagnostics", Json::Array(self.runtime.diagnostics())),
+            ("diagnostics", Json::Array(self.runtime.diagnostics()?)),
         ]))
     }
 }

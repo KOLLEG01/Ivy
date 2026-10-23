@@ -177,16 +177,16 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
         let run = &current.run.value;
         let pin = field(field(run, "calls"), "thread");
         let primary = field(run, "primaryResourceRef");
-        if !current.active
-            || truthy(field(run, "cancellation"))
-            || truthy(field(run, "turnId"))
-            || !truthy(pin)
-            || !truthy(primary)
+        let attaching_turn = !field(run, "turnId").is_null()
+            && (current.active || !field(run, "cancellation").is_null());
+        if ((!current.active || !field(run, "cancellation").is_null()) && !attaching_turn)
+            || pin.is_null()
+            || primary.is_null()
         {
             return Ok(false);
         }
         let turn_pin = field(field(run, "calls"), "turn");
-        if truthy(turn_pin) {
+        if field(run, "turnId").is_null() && !turn_pin.is_null() {
             let turn = Store::read(
                 self.store,
                 "task-board/native-call",
@@ -205,8 +205,8 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
         let call = Store::read(self.store, "task-board/native-call", pin, true).await?;
         if field(field(&call.value, "request"), "method") != &Json::from("thread/resume")
             || field(&call.value, "ownerPhase") != &Json::from("outcome_unknown")
-            || !truthy(field(&call.value, "evidence"))
-            || !truthy(field(&call.value, "epoch"))
+            || field(&call.value, "evidence").is_null()
+            || field(&call.value, "epoch").is_null()
             || call.pin.get("revision") != pin.get("revision")
         {
             return Ok(false);
@@ -277,7 +277,7 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
         let run = &current.run.value;
         let pin = field(field(run, "calls"), slot.as_str());
         require(
-            truthy(pin),
+            !pin.is_null(),
             "task_board_native_order",
             "Dispatch requires an attached retained NativeCall.",
         )?;
@@ -330,7 +330,7 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
         };
         let expected = intent.evidence_identity(run, &call.value, self.runtime.principal_id())?;
         let owner = self.native_owner(run, &call.value)?;
-        let previous = if truthy(field(&call.value, "evidence")) {
+        let previous = if !field(&call.value, "evidence").is_null() {
             Some(
                 evidence
                     .read(&call.pin, call.value.required("evidence")?, &expected)
@@ -390,13 +390,15 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
                 require(absence.get("epoch")==status.get("epoch"),
                     "task_board_native_epoch_changed", "Absence and current native status must come from the same epoch.")?;
                 let thread_pin = field(field(run,"calls"),"thread");
-                let primary_failed = if slot==NativeSlot::Turn && truthy(thread_pin) {
+                let primary_failed = if slot==NativeSlot::Turn && !thread_pin.is_null() {
                     let thread = Store::read(self.store,"task-board/native-call",thread_pin,true).await?;
                     field(&thread.value,"ownerPhase")==&Json::from("failed")
                 } else { false };
-                if (!current.active || truthy(field(run,"cancellation")) || primary_failed
+                let attaching_turn = slot==NativeSlot::Thread && !field(run,"turnId").is_null()
+                    && (current.active || !field(run,"cancellation").is_null());
+                if (!current.active || !field(run,"cancellation").is_null() || primary_failed
                     || slot==NativeSlot::Steer && status.get("epoch")!=run.get("nativeEpoch"))
-                    && slot!=NativeSlot::Interrupt
+                    && slot!=NativeSlot::Interrupt && !attaching_turn
                 {
                     let prevented = owner.management("prevent",Json::object([
                         ("operationId",call.value.required("operationId")?.clone()),
@@ -411,7 +413,7 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
                 if slot==NativeSlot::Turn {
                     require(status.get("epoch")==run.get("nativeEpoch"),
                         "task_board_reattach_required", "The saved primary must be confirmed in the current native epoch before turn dispatch.")?;
-                    require(truthy(thread_pin),"task_board_native_order","A turn needs its retained thread receipt.")?;
+                    require(!thread_pin.is_null(),"task_board_native_order","A turn needs its retained thread receipt.")?;
                     let thread = Store::read(self.store,"task-board/native-call",thread_pin,true).await?;
                     require(field(&thread.value,"ownerPhase")==&Json::from("succeeded")
                         && thread.value.get("epoch")==status.get("epoch"),
@@ -473,15 +475,6 @@ fn field<'a>(v: &'a Json, key: &str) -> &'a Json {
     static NULL: Json = Json::Null;
     v.get(key).unwrap_or(&NULL)
 }
-fn truthy(v: &Json) -> bool {
-    match v {
-        Json::Null => false,
-        Json::Bool(v) => *v,
-        Json::Number(v) => *v != 0.0 && !v.is_nan(),
-        Json::String(v) => !v.0.is_empty(),
-        _ => true,
-    }
-}
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
         Ok(())
@@ -515,7 +508,7 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
             !["completed", "failed", "cancelled"]
                 .iter()
                 .any(|s| field(&run.value, "phase") == &Json::from(*s))
-                && !truthy(field(&task.value, "publication")),
+                && field(&task.value, "publication").is_null(),
             "task_board_native_order",
             "Native execution requires an unfinished Run and no pending task publication.",
         )?;
@@ -563,14 +556,18 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
         let initial = Json::object([("kind", "initial".into())]);
         let origin = origin.unwrap_or(&initial);
         let current = self.current(run_id).await?;
+        let attaching_turn = slot == NativeSlot::Thread
+            && !field(&current.run.value, "turnId").is_null()
+            && (current.active || !field(&current.run.value, "cancellation").is_null());
         require(
             if slot == NativeSlot::Interrupt {
-                truthy(field(&current.run.value, "cancellation"))
+                !field(&current.run.value, "cancellation").is_null()
             } else {
-                current.active && !truthy(field(&current.run.value, "cancellation"))
+                attaching_turn
+                    || current.active && field(&current.run.value, "cancellation").is_null()
             },
             "task_board_claim_inactive",
-            "Only an active uncancelled claim may prepare execution; interruption requires cancellation.",
+            "Only an active claim may prepare execution; retained turns may reattach for observation or cancellation.",
         )?;
         let operation_id = self
             .runtime

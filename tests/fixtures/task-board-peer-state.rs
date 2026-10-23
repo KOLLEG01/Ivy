@@ -6,7 +6,28 @@ use ivy_task_board::{
 };
 
 struct UnusedPolicies;
+impl ivy_task_board::wake::WakeStore for World {
+    async fn watched_task(&self, id: &JsString) -> IvyResult<Json> {
+        let document = self
+            .lifecycle_read("task-board/task", &Json::String(id.clone()), true, true)
+            .await?;
+        Ok(Json::object([
+            ("value", document.document.value),
+            ("metadata", document.metadata),
+        ]))
+    }
+    fn deleted(&self, error: &IvyError) -> bool {
+        ivy_task_board::wake::WakeFailure::deleted(error)
+    }
+}
 impl OrchestrationPolicies for UnusedPolicies {
+    async fn recover_pending_native_operation(
+        &self,
+        _: &JsString,
+        _: &JsString,
+    ) -> IvyResult<bool> {
+        panic!("Peer observation must not recover native operations")
+    }
     async fn sync_native_comments(&self, _: &JsString) -> IvyResult<()> {
         panic!("Peer observation must not admit native comments")
     }
@@ -294,6 +315,13 @@ struct CurrentPolicies {
     calls: RefCell<Vec<Json>>,
 }
 impl OrchestrationPolicies for CurrentPolicies {
+    async fn recover_pending_native_operation(
+        &self,
+        _: &JsString,
+        _: &JsString,
+    ) -> IvyResult<bool> {
+        panic!("Comment synchronization must not recover native operations")
+    }
     async fn sync_native_comments(&self, run: &JsString) -> IvyResult<()> {
         self.calls.borrow_mut().push(Json::String(run.clone()));
         if let Some(error) = self.refusal.borrow().clone() {
