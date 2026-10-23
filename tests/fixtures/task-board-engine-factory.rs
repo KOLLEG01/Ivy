@@ -461,8 +461,12 @@ impl<V: Contracts> LifecyclePages for Policies<'_, V> {
                     assert_eq!(key, "task-board/task");
                     if let Some(steering) = &self.fixture.steering {
                         assert_eq!(value.get("workflowState"), Some(&steering.workflow_state()));
+                    } else if let Some(observations) = &self.fixture.observations {
+                        assert_eq!(
+                            value.get("workflowState"),
+                            Some(&observations.workflow_state(&value))
+                        );
                     } else if self.fixture.retirement.is_some()
-                        || self.fixture.observations.is_some()
                         || self.fixture.control.is_some()
                         || self.fixture.lifecycle.is_some()
                     {

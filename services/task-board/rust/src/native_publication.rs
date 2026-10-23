@@ -838,7 +838,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                     }
                     if slot_text == "thread" {
                         require(
-                            f(run, "cancellation").is_null(),
+                            f(run, "cancellation").is_null() || !f(run, "turnId").is_null(),
                             "task_board_cancellation_pending",
                             "Cancellation prevents preparation of a new native context.",
                         )?;

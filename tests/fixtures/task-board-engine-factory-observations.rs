@@ -1,6 +1,8 @@
 use super::*;
 use ivy_contracts::hash::digest;
 use ivy_task_board::{engine_invocations::InvocationRequest, evidence_bytes::ChunkKey};
+#[path = "task-board-engine-factory-attachment.rs"]
+mod attachment;
 
 pub(super) struct Scenario {
     row: Json,
@@ -19,6 +21,15 @@ fn pin(id: &str, revision: f64) -> Json {
     ])
 }
 impl Scenario {
+    pub(super) fn workflow_state(&self, task: &Json) -> Json {
+        if f(f(&self.row, "input"), "liveAttachment").as_bool() == Some(true)
+            && !f(task, "claim").is_null()
+        {
+            "in_progress".into()
+        } else {
+            "review".into()
+        }
+    }
     fn cancelling(&self) -> bool {
         !f(f(f(&self.row, "run"), "value"), "cancellation").is_null()
     }
@@ -102,6 +113,11 @@ impl Scenario {
             ]),
         );
         run.insert("plan", plan);
+        if attachment::stale(&self.row) {
+            let mut calls = f(run, "calls").clone();
+            calls.insert("thread", pin(driver::ATTACHMENT, 2.0));
+            run.insert("calls", calls);
+        }
         if self.cancelling() {
             run.insert(
                 "cancellation",
@@ -113,6 +129,17 @@ impl Scenario {
                 ]),
             );
             records[3].1.insert("lastRun", pin("newer-run", 1.0));
+        }
+        if f(f(&self.row, "input"), "liveAttachment").as_bool() == Some(true)
+            && !attachment::stale(&self.row)
+        {
+            let task = &mut records[3].1;
+            let mut claim = f(&native::baseline().0, "claim").clone();
+            claim.insert("phase", "running".into());
+            task.insert("claim", claim);
+            task.insert("lastRun", pin("run", 1.0));
+            task.insert("workflowState", "in_progress".into());
+            task.insert("attemptCount", Json::Number(1.0));
         }
         for (key, value, id) in &records {
             let definition = match *key {
@@ -155,6 +182,9 @@ impl Scenario {
         context.journal.journal.connection.execute(
             "INSERT INTO workspace_reservations VALUES('fixture-native-host','/fixture','task','current-workspace')", [],
         ).unwrap();
+        if attachment::stale(&self.row) {
+            driver::seed_attachment(context)?;
+        }
         Ok(())
     }
     pub(super) fn notice(
@@ -164,6 +194,7 @@ impl Scenario {
         operation: &JsString,
     ) -> IvyResult<Option<Json>> {
         if generation == 1.0
+            && f(f(&self.row, "input"), "liveAttachment").as_bool() != Some(true)
             && f(task, "publication").is_null()
             && (f(task, "lastRun") == &pin("run", 2.0)
                 || self.cancelling() && !f(task, "lastHistory").is_null())
@@ -592,21 +623,11 @@ async fn terminal_observation_case(row: Json, unsupported: bool) {
         assert_eq!(results.len(), 2);
         let result = &results.iter().find(|r| r.0 != "current-result").unwrap().2;
         let content = f(result, "content");
-        if cancelling {
-            let check = &f(content, "checks").as_array().unwrap()[0];
-            assert_eq!(f(check, "name"), &"Native execution outcome".into());
-            assert_eq!(f(check, "status"), &"failed".into());
-            assert_eq!(f(check, "detail"), &"native_interrupted".into());
-        }
-        assert_eq!(
-            f(content, "summary"),
-            &Json::from(if unsupported {
-                "Native turn completed."
-            } else {
-                "answer"
-            })
-        );
-        assert_eq!(f(content, "artifacts"), &Json::Array(vec![]));
+        assert_eq!(hash_json(content).unwrap(), hash_json(&Json::object([
+            ("summary", Json::from(if unsupported { "Native turn completed." } else { "answer" })),
+            ("artifacts", Json::Array(vec![])), ("codeReferences", Json::Array(vec![])), ("repositoryResult", Json::Null),
+            ("limitations", Json::Array(vec!["Native completion does not automatically accept the task. Native conversation history remains available from its AgentManager owner while retained there.".into()])),
+        ])).unwrap());
         assert_eq!(f(result, "actor"), f(&completed.2, "actor"));
         assert_eq!(f(result, "run"), &pin("run", 2.0));
         assert_eq!(

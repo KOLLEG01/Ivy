@@ -340,6 +340,197 @@ async fn exec_file_searches_selected_cwd_path_and_ignores_windows_pathext() {
                 );
                 assert_eq!(actual, expected, "directory={index}, mode={mode}");
             }
+            let executing = std::env::current_dir().unwrap();
+            fs::create_dir(directory.join("child")).unwrap();
+            let mut cwd_cases = vec![
+                ("inherited", None, executing.clone()),
+                ("empty", Some(PathBuf::new()), executing.clone()),
+                ("absolute", Some(directory.clone()), directory.clone()),
+                ("dot", Some(directory.join(".")), directory.clone()),
+                (
+                    "parent",
+                    Some(directory.join("child").join("..")),
+                    directory.clone(),
+                ),
+                (
+                    "verbatim",
+                    Some(fs::canonicalize(&directory).unwrap()),
+                    directory.clone(),
+                ),
+                (
+                    "ignored-absolute",
+                    Some(directory.clone()),
+                    directory.clone(),
+                ),
+            ];
+            if let Some(common) = executing
+                .ancestors()
+                .find(|path| directory.starts_with(path))
+            {
+                let mut relative = PathBuf::new();
+                for _ in executing.strip_prefix(common).unwrap().components() {
+                    relative.push("..");
+                }
+                relative.push(directory.strip_prefix(common).unwrap());
+                let drive: PathBuf = executing.components().take(1).collect();
+                let drive_root: PathBuf = directory.components().take(2).collect();
+                cwd_cases.extend([
+                    ("relative", Some(relative.clone()), directory.clone()),
+                    (
+                        "drive-relative",
+                        Some(drive.join(&relative)),
+                        directory.clone(),
+                    ),
+                    (
+                        "root-relative",
+                        Some(PathBuf::from("\\").join(directory.strip_prefix(drive_root).unwrap())),
+                        directory.clone(),
+                    ),
+                    ("ignored-relative", Some(relative), directory.clone()),
+                ]);
+            }
+            for (mode, cwd, expected_cwd) in cwd_cases {
+                let args_file = root.0.join(format!("cwd-args-{index}-{mode}.json"));
+                let cwd_file = root.0.join(format!("cwd-{index}-{mode}.json"));
+                let mut env = environment.clone();
+                env.insert(
+                    "IVY_EXEC_FILE_ARGUMENTS".into(),
+                    args_file.as_os_str().to_owned(),
+                );
+                env.insert("IVY_EXEC_FILE_CWD".into(), cwd_file.as_os_str().to_owned());
+                let executable = directory.join("fixture-exec.exe").into_os_string();
+                if mode.starts_with("ignored-") {
+                    let child = exec_file::spawn_ignored(
+                        exec_file::SpawnCommand {
+                            executable: executable.clone(),
+                            args: tail.clone(),
+                            cwd,
+                        },
+                        root.0.clone(),
+                        exec_file::SpawnOptions {
+                            environment: Some(env),
+                            job_launcher: options().job_launcher,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    assert!(
+                        child.stdin.is_none() && child.stdout.is_none() && child.stderr.is_none()
+                    );
+                    let result =
+                        tokio::time::timeout(Duration::from_secs(10), child.completion.wait())
+                            .await
+                            .unwrap();
+                    assert_eq!(
+                        (result.exit_code, result.signal.as_deref()),
+                        (Some(0), None),
+                        "{index}/{mode}: {result:?}"
+                    );
+                    assert!(result.error_code.is_none());
+                    assert!(
+                        ivy_host_runtime::process::owned_process_tree_stopped(&child)
+                            .await
+                            .unwrap()
+                    );
+                } else {
+                    let mut launch = options();
+                    launch.environment = Some(env);
+                    let result = run(
+                        FileCommand {
+                            executable: executable.clone(),
+                            args: tail.clone(),
+                            cwd,
+                            timeout_ms: 10000,
+                            maximum_buffer_bytes: 65536,
+                        },
+                        launch,
+                    )
+                    .await;
+                    assert_eq!(result.failure, None, "{index}/{mode}: {result:?}");
+                    assert_eq!((result.exit_code, result.signal), (Some(0), None));
+                    assert!(result.stdout.0.is_empty() && result.stderr.0.is_empty());
+                }
+                let args =
+                    json::parse(&fs::read_to_string(args_file).unwrap(), usize::MAX).unwrap();
+                let expected_args = IvyJson::Array(
+                    std::iter::once(units(&executable))
+                        .chain(tail.iter().map(|arg| units(arg)))
+                        .collect(),
+                );
+                assert_eq!(args, expected_args, "{index}/{mode}");
+                let cwd = json::parse(&fs::read_to_string(cwd_file).unwrap(), usize::MAX).unwrap();
+                let cwd: Vec<u16> = cwd
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|unit| {
+                        let IvyJson::Number(unit) = unit else {
+                            panic!("native cwd unit")
+                        };
+                        *unit as u16
+                    })
+                    .collect();
+                let actual_cwd = PathBuf::from(OsString::from_wide(&cwd));
+                assert_eq!(
+                    fs::canonicalize(actual_cwd).unwrap(),
+                    fs::canonicalize(expected_cwd).unwrap(),
+                    "{index}/{mode}"
+                );
+            }
+            for (failure_index, cwd) in [
+                directory.join("missing"),
+                directory.join("fixture-exec.exe"),
+                directory.join(OsString::from_wide(&[0])),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                for ignored in [false, true] {
+                    let receipt = root.0.join(format!(
+                        "cwd-unlaunched-{index}-{failure_index}-{ignored}.json"
+                    ));
+                    let mut env = environment.clone();
+                    env.insert(
+                        "IVY_EXEC_FILE_ARGUMENTS".into(),
+                        receipt.as_os_str().to_owned(),
+                    );
+                    let executable = directory.join("fixture-exec.exe").into_os_string();
+                    if ignored {
+                        let failure = exec_file::spawn_ignored(
+                            exec_file::SpawnCommand {
+                                executable,
+                                args: tail.clone(),
+                                cwd: Some(cwd.clone()),
+                            },
+                            root.0.clone(),
+                            exec_file::SpawnOptions {
+                                environment: Some(env),
+                                job_launcher: options().job_launcher,
+                            },
+                        )
+                        .await
+                        .err()
+                        .expect("invalid cwd must not launch");
+                        assert_eq!(failure.error.code, "spawn_failed");
+                    } else {
+                        let mut launch = options();
+                        launch.environment = Some(env);
+                        let result = run(
+                            FileCommand {
+                                executable,
+                                args: tail.clone(),
+                                cwd: Some(cwd.clone()),
+                                timeout_ms: 10000,
+                                maximum_buffer_bytes: 65536,
+                            },
+                            launch,
+                        )
+                        .await;
+                        assert_eq!(result.failure, Some(FileFailure::Spawn));
+                    }
+                    assert!(!receipt.exists());
+                }
+            }
             for (failure_index, executable) in [
                 OsString::from("path-only"),
                 root.0

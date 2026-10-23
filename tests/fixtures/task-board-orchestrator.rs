@@ -23,6 +23,8 @@ use std::{
 };
 #[path = "task-board-orchestration-journal.rs"]
 mod journal;
+#[path = "task-board-orchestration-policy.rs"]
+mod policy;
 #[path = "task-board-native-progress.rs"]
 mod progress;
 #[path = "task-board-orchestration-recovery.rs"]
@@ -712,59 +714,4 @@ impl OrchestrationServices for World<'_> {
         self.fail("save-output")?;
         Ok(data().required("output").unwrap().clone())
     }
-}
-#[tokio::test(flavor = "current_thread")]
-async fn bounded_orchestration_matches_original_component_order_error_fences_retry_and_map_behavior()
- {
-    let catalogs =
-        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-    let rows = data().required("rows").unwrap().as_array().unwrap();
-    for row in rows {
-        let world = World::new(row);
-        let subject =
-            NativeOrchestrator::new(&world, &world, &world, &catalogs, progress_tracker());
-        let mut results = vec![];
-        for a in row.required("actions").unwrap().as_array().unwrap() {
-            let a = a.as_array().unwrap();
-            let method = a[0].as_str().unwrap();
-            let r = id(a.get(1).and_then(Json::as_f64).unwrap_or(200.0) as u64);
-            let result: IvyResult<Json> = match method.as_str() {
-                "step" => subject.step(&r).await.map(|_| Json::Null),
-                "drain" => subject.drain(&r).await.map(Json::Bool),
-                "notification" => Ok(subject.notification(&a[1]).into()),
-                "clock" => {
-                    world.now.set(a[1].as_f64().unwrap());
-                    Ok(Json::Null)
-                }
-                "fault" => {
-                    world.fault.replace(a[1].clone());
-                    Ok(Json::Null)
-                }
-                "many" => {
-                    let mut result = Ok(Json::Null);
-                    for n in 201..201 + a[1].as_f64().unwrap() as u64 {
-                        if let Err(e) = subject.drain(&id(n)).await {
-                            result = Err(e);
-                            break;
-                        }
-                    }
-                    result
-                }
-                _ => panic!("Unknown action"),
-            };
-            results.push(outcome(result));
-        }
-        let actual = Json::object([
-            ("results", Json::Array(results)),
-            ("trace", Json::Array(world.log.into_inner())),
-        ]);
-        assert_eq!(
-            hash_json(&actual).unwrap(),
-            s(row, "expectedHash").to_utf8().unwrap(),
-            "{}: {}",
-            s(row, "name").to_utf8().unwrap(),
-            canonical(&actual, MANAGEMENT_FRAME_BYTES).unwrap()
-        );
-    }
-    assert_eq!(rows.len(), 87);
 }

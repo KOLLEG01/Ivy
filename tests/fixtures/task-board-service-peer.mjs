@@ -20,6 +20,7 @@ const definition={namespace:'task-board',name:readHandler?'read':'workspace',des
 const actionDefinition={...definition,name:'update',description:'Isolated retained action invocation.'};
 const retirement=process.argv.includes('--factory-retirement');
 const observations=process.argv.includes('--factory-observations');
+const attachmentBoundary=observations?(await import('./task-board-attachment-peer.mjs')).attachmentBoundary():null;
 const driver=process.argv.includes('--factory-driver');
 const driverBoundary=driver?(await import('./task-board-driver-peer.mjs')).driverBoundary():null;
 const control=process.argv.includes('--factory-control');
@@ -65,6 +66,7 @@ wss.on('connection',(socket,request)=>{
     }
     const {method,params,id}=frame;emit({kind:'rpc',method,params});
     if(currentReadBoundary?.({method,params,id,selected,send,reply,emit}))return;
+    if(attachmentBoundary?.({method,params,id,selected,send,reply,emit}))return;
     if(driverBoundary?.({method,params,id,selected,send,reply,emit}))return;
     if(controlBoundary?.({method,params,id,selected,send,reply,emit}))return;
     if(deliveryBoundary?.({method,params,id,selected,send,reply,emit}))return;

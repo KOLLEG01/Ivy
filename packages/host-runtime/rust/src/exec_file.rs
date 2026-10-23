@@ -1,6 +1,6 @@
 //! Bounded UTF-8 execFile behavior for host preflight and source tools. Artifact
 //! command restrictions remain in process::spawn; both share the same tree owner.
-use crate::{IvyError, IvyResult, node_path, process::{self, LaunchContext, OutputStream, ResolvedCommand}, process_output::Utf8Decoder};
+use crate::{IvyError, IvyResult, process::{self, LaunchContext, OutputStream, ResolvedCommand}, process_output::Utf8Decoder};
 use ivy_contracts::JsString;
 use std::{collections::BTreeMap, ffi::OsString, path::{Path, PathBuf}, sync::{Arc,Mutex}, time::Duration};
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, sync::mpsc};
@@ -233,13 +233,25 @@ fn resolve(command: &FileCommand, environment: &BTreeMap<OsString, OsString>) ->
     resolve_parts(&command.executable, &command.args, command.cwd.as_deref(), environment)
 }
 
-fn resolve_parts(file: &std::ffi::OsStr, args: &[OsString], cwd: Option<&Path>, environment: &BTreeMap<OsString, OsString>) -> std::io::Result<ResolvedCommand> {
-    let paths = node_path::Context::current()?;
-    let cwd = cwd.unwrap_or(Path::new("."));
-    let cwd = node_path::to_native(&paths.resolve(&[node_path::from_native(cwd)]));
-    if !cwd.is_dir() { return Err(std::io::Error::from(std::io::ErrorKind::NotFound)) }
+fn resolve_parts(
+    file: &std::ffi::OsStr,
+    args: &[OsString],
+    cwd: Option<&Path>,
+    environment: &BTreeMap<OsString, OsString>,
+) -> std::io::Result<ResolvedCommand> {
+    let cwd = std::path::absolute(
+        cwd.filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    )?;
+    if !cwd.is_dir() {
+        return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+    }
     let executable = resolve_executable(file, &cwd, environment)?;
-    Ok(ResolvedCommand { executable, cwd, args: args.to_vec() })
+    Ok(ResolvedCommand {
+        executable,
+        cwd,
+        args: args.to_vec(),
+    })
 }
 
 #[cfg(test)]

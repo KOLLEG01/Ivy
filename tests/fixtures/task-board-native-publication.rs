@@ -941,6 +941,65 @@ fn owner(phase: &str, result: Json) -> Json {
 }
 
 #[tokio::test]
+async fn initial_cancelled_attachment_requires_the_active_claim_and_a_known_turn() {
+    for (active, known_turn, expected) in [
+        (true, true, None),
+        (true, false, Some("task_board_cancellation_pending")),
+        (false, true, Some("task_board_claim_inactive")),
+    ] {
+        let mut task = base_task();
+        if !active {
+            task.insert("claim", Json::Null);
+        }
+        let mut run = base_run();
+        run.insert("phase", "cancel_requested".into());
+        run.insert(
+            "cancellation",
+            Json::object([("reason", "saved cancellation".into())]),
+        );
+        if !known_turn {
+            run.insert("turnId", Json::Null);
+        }
+        let w = World::new(task, run.clone());
+        w.put(
+            "task-board/native-call",
+            pin(10),
+            native_call(
+                10,
+                "thread/resume",
+                Json::object([("kind", "initial".into())]),
+                None,
+            ),
+        );
+        let result = w
+            .publish(Json::object([
+                ("kind", "attachCall".into()),
+                ("slot", "thread".into()),
+                ("call", pin(10)),
+            ]))
+            .await;
+        if let Some(code) = expected {
+            assert_eq!(result.unwrap_err().code, code);
+            assert!(w.writes.borrow().is_empty());
+            assert!(w.creates.borrow().is_empty());
+        } else {
+            result.unwrap();
+            assert_eq!(f(f(&w.saved_run(), "calls"), "thread"), &pin(10));
+            for key in [
+                "turnId",
+                "nativeEpoch",
+                "primaryResourceRef",
+                "cancellation",
+                "phase",
+            ] {
+                assert_eq!(f(&w.saved_run(), key), f(&run, key));
+            }
+            assert!(w.creates.borrow().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
 async fn reattachment_preserves_the_running_turn_and_failed_resume_never_finishes_it() {
     let mut run = base_run();
     set(&mut run, "calls", "thread", pin(10));
