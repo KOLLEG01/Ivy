@@ -1,4 +1,4 @@
-use super::{Root, compare, insert, json, result, seed, sql};
+use super::{Root, compare, insert, json, native, result, seed, sql};
 use serde_json::Value;
 
 fn navigation_seed() -> String {
@@ -117,7 +117,7 @@ fn sibling_pages_preserve_position_ties_scope_errors_and_changes_between_pages()
 }
 
 #[test]
-fn history_pages_preserve_number_coercion_pinned_references_and_retention_gaps() {
+fn history_pages_preserve_numeric_cursors_pinned_references_and_retention_gaps() {
     let root = Root::new();
     let mut steps = vec![sql(navigation_seed())];
     steps.push(sql("BEGIN IMMEDIATE; INSERT INTO revisions SELECT object_id,4,contract_key,'2.0.0',encoding,'{}',content_hash,2,created_at,'{\"pinned\":{\"objectId\":\"id01\",\"revision\":1}}' FROM revisions WHERE object_id='history' AND revision=3; INSERT INTO revisions SELECT object_id,5,contract_key,'2.0.0',encoding,'{}',content_hash,2,created_at,'{}' FROM revisions WHERE object_id='history' AND revision=3; INSERT INTO revision_references VALUES('history',4,'pinned','id01',1); UPDATE objects SET current_revision=5 WHERE id='history'; COMMIT;"));
@@ -132,26 +132,7 @@ fn history_pages_preserve_number_coercion_pinned_references_and_retention_gaps()
         "history",
         json!({"objectId":"missing","cursor":"bad"}),
     ));
-    for boundary in [
-        json!(0),
-        json!(null),
-        json!(false),
-        json!(true),
-        json!(""),
-        json!(" 0x4 "),
-        json!("3.5"),
-        json!("Infinity"),
-        json!("-Infinity"),
-        json!("NaN"),
-        json!("not a number"),
-        json!([]),
-        json!([4]),
-        json!([null]),
-        json!([4, 3]),
-        json!({}),
-        json!({"valueOf":2}),
-        json!({"toString":1}),
-    ] {
+    for boundary in [json!(1), json!(4), json!(5), json!(9_007_199_254_740_991_u64)] {
         let index = token(&mut steps, "objects.history", &params, boundary);
         steps.push(json!({"op":"history","params":params,"tokenFrom":index}));
     }
@@ -181,6 +162,21 @@ fn history_pages_preserve_number_coercion_pinned_references_and_retention_gaps()
             .len(),
         4
     );
+    let mut malformed = vec![];
+    for boundary in [
+        json!(0), json!(null), json!(false), json!(true), json!(""),
+        json!(" 0x4 "), json!("3.5"), json!("Infinity"), json!("-Infinity"),
+        json!("NaN"), json!("not a number"), json!([]), json!([4]),
+        json!([null]), json!([4,3]), json!({}), json!({"valueOf":2}),
+        json!({"toString":1}),
+    ] {
+        let index = token(&mut malformed, "objects.history", &params, boundary);
+        malformed.push(json!({"op":"history","params":params,"tokenFrom":index}));
+    }
+    let rows = native(&root.0.join("native.sqlite"), &malformed, false);
+    for index in (1..malformed.len()).step_by(2) {
+        assert_eq!(rows[index]["error"]["data"]["code"], "invalid_cursor");
+    }
 }
 
 #[test]

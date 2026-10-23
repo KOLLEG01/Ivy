@@ -1,10 +1,14 @@
-import {registerHooks} from 'node:module';
+import {registerHooks,createRequire} from 'node:module';
 import {existsSync, readFileSync} from 'node:fs';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath,pathToFileURL} from 'node:url';
 import {createServer} from 'node:net';
 import {once} from 'node:events';
 import {validateHeaderValue} from 'node:http';
+const require=createRequire(import.meta.url);
+const external=new Map(['ajv/dist/2020.js','re2js'].map(name=>[name,pathToFileURL(require.resolve(name)).href]));
+external.set('ws',new URL('./wrapper.mjs',pathToFileURL(require.resolve('ws'))).href);
 registerHooks({resolve(specifier, context, next) {
+  if(external.has(specifier))return next(external.get(specifier),context);
   if (specifier.startsWith('.') && specifier.endsWith('.js') && context.parentURL) {
     const source = new URL(specifier.slice(0, -3) + '.ts', context.parentURL);
     if (existsSync(fileURLToPath(source))) return next(source.href, context);

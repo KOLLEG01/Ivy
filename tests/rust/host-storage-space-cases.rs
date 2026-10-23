@@ -112,6 +112,14 @@ async fn measured_storage_supports_files_missing_host_roots_and_pressure_gate() 
     fs::write(&file, b"fixture").unwrap();
     storage_space::available_bytes(&fixture.0).unwrap();
     storage_space::available_bytes(&file).unwrap();
+    for path in [&fixture.0, &file] {
+        let (available, total) = storage_space::measure_bytes(path).unwrap();
+        assert!(total > 0);
+        assert!(available <= total);
+    }
+    let missing_measurement = storage_space::measure_bytes(&fixture.0.join("missing")).unwrap_err();
+    assert_eq!(missing_measurement.kind(), std::io::ErrorKind::NotFound);
+    assert!(missing_measurement.raw_os_error().is_some());
     let missing = storage_space::available_bytes(&fixture.0.join("missing")).unwrap_err();
     assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
     assert!(missing.raw_os_error().is_some());

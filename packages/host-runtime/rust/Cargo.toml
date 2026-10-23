@@ -30,6 +30,14 @@ name = "host-native-paths"
 path = "../../../tests/rust/host-native-paths.rs"
 
 [[test]]
+name = "host-regular-text"
+path = "../../../tests/rust/host-regular-text-public-cases.rs"
+
+[[test]]
+name = "host-filesystem-remove"
+path = "../../../tests/rust/host-filesystem-remove-cases.rs"
+
+[[test]]
 name = "host-native-plan"
 path = "../../../tests/rust/host-native-plan.rs"
 

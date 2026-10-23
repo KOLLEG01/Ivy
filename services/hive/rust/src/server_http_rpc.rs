@@ -35,7 +35,7 @@ pub async fn handle(
             .batch(
                 context.clone(),
                 frame.into_array().unwrap(),
-                received_bytes as f64,
+                received_bytes,
             )
             .await?;
         response.write_head(
@@ -48,7 +48,7 @@ pub async fn handle(
     single(&frame)?;
     *rpc_id = valid_request_id(frame.get("id"));
     let result = request
-        .invoke(context.clone(), frame, received_bytes as f64)
+        .invoke(context.clone(), frame, received_bytes)
         .await?;
     http_response::json(
         response,

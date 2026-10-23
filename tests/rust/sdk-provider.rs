@@ -310,6 +310,14 @@ async fn malformed_frames_close_but_retired_requests_do_not_poison_other_observe
         assert!(connection.signal().is_cancelled());
     }
     let connection = peer.open(options()).await;
+    let payload = json(r#"{"kept":"\ud800","nested":[1,null,false]}"#);
+    assert_eq!(
+        call(&connection, "test.untrustedIds", payload.clone())
+            .await
+            .unwrap(),
+        payload
+    );
+    assert!(!connection.signal().is_cancelled());
     let mut requests = vec![];
     for _ in 0..64 {
         let c = connection.clone();

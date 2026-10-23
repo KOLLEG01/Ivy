@@ -1,14 +1,12 @@
-//! Node string-path text reads with an opened-handle identity fence.
-use crate::{
-    filesystem_error,
-    node_path::{self, Context},
-};
+//! Bounded native text reads with containment and opened-file identity checks.
+use crate::native_path::{self, Context};
 use ivy_contracts::JsString;
+#[cfg(test)]
+use std::sync::Arc;
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read},
-    path::PathBuf,
-    sync::Arc,
+    path::Path,
 };
 
 #[derive(Debug)]
@@ -36,66 +34,58 @@ fn invalid(message: &'static str) -> TextFileError {
         source: None,
     }
 }
-fn worker(error: impl std::fmt::Display) -> TextFileError {
+fn native(error: io::Error) -> TextFileError {
     TextFileError {
         name: "Error",
         message: error.to_string().into(),
-        code: None,
-        source: None,
-    }
-}
-fn native(
-    error: io::Error,
-    syscall: &'static str,
-    path: Option<&JsString>,
-    context: &Context,
-) -> TextFileError {
-    let formatted = filesystem_error::operation_message(&error, syscall, path, context);
-    TextFileError {
-        name: "Error",
-        message: formatted
-            .as_ref()
-            .map(|(_, message)| message.clone())
-            .unwrap_or_else(|| error.to_string().into()),
-        code: formatted.map(|(code, _)| code),
+        code: super::node_error_code(&error),
         source: Some(error),
     }
 }
 fn optional<T>(result: Result<T, TextFileError>) -> Result<Option<T>, TextFileError> {
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(error) if matches!(error.code, Some("ENOENT" | "ENOTDIR")) => Ok(None),
+        Err(error)
+            if error.source.as_ref().is_some_and(|source| {
+                matches!(
+                    source.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                )
+            }) =>
+        {
+            Ok(None)
+        }
         Err(error) => Err(error),
     }
 }
-async fn blocking<T: Send + 'static>(
-    work: impl FnOnce() -> Result<T, TextFileError> + Send + 'static,
-) -> Result<T, TextFileError> {
-    tokio::task::spawn_blocking(work).await.map_err(worker)?
-}
-fn physical(path: &JsString, context: &Context) -> Result<PathBuf, TextFileError> {
+fn physical(path: &JsString, context: &Context) -> Result<std::path::PathBuf, TextFileError> {
     if path.0.contains(&0) {
-        return Err(null_path(path));
+        return Err(TextFileError {
+            name: "TypeError",
+            message: "Filesystem path contains NUL.".into(),
+            code: Some("ERR_INVALID_ARG_VALUE"),
+            source: Some(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Filesystem path contains NUL.",
+            )),
+        });
     }
     Ok(context.filesystem_path(path))
 }
-fn context() -> Result<Arc<Context>, TextFileError> {
-    Context::current().map(Arc::new).map_err(worker)
-}
-async fn canonical(path: JsString, context: Arc<Context>) -> Result<JsString, TextFileError> {
-    blocking(move || {
-        let physical = physical(&path, &context)?;
-        fs::canonicalize(physical)
-            .map(|p| node_path::from_native(&p))
-            .map_err(|error| native(error, "realpath", Some(&path), &context))
+
+/// Missing paths and non-directory ancestors return None. Other errors retain
+/// the operating system's diagnostic and cause.
+pub async fn realpath(path: JsString) -> Result<Option<JsString>, TextFileError> {
+    let context = Context::current().map_err(native)?;
+    tokio::task::spawn_blocking(move || {
+        optional(
+            fs::canonicalize(physical(&path, &context)?)
+                .map(|p| native_path::from_native(&p))
+                .map_err(native),
+        )
     })
     .await
-}
-
-/// Native realpath. Only ENOENT/ENOTDIR become None; other failures retain
-/// their diagnostics and native cause. No filesystem or account fallback.
-pub async fn realpath(path: JsString) -> Result<Option<JsString>, TextFileError> {
-    optional(canonical(path, context()?).await)
+    .map_err(|error| native(io::Error::other(error)))?
 }
 
 #[derive(Default)]
@@ -107,126 +97,94 @@ impl Stages {
     fn at(&self, stage: &str) -> Result<(), TextFileError> {
         #[cfg(test)]
         if let Some(callback) = &self.callback {
-            callback(stage).map_err(worker)?;
+            callback(stage).map_err(native)?;
         }
         let _ = stage;
         Ok(())
     }
 }
 
-/// Read through the opened file after canonical-before, regular-file/size and
-/// concurrent canonical-after/lstat identity checks. The supplied directory is
-/// already verified by the caller. The original bound applies at opened stat;
-/// this does not invent a second bound or lock against later content writes.
+/// Read a regular file beneath an already verified canonical directory. A single
+/// blocking operation owns the handle through validation and the bounded read.
 pub async fn read_regular(
     verified_directory: JsString,
     path: JsString,
     maximum_bytes: usize,
 ) -> Result<Option<JsString>, TextFileError> {
-    tokio::spawn(read(
-        verified_directory,
-        path,
-        maximum_bytes,
-        Stages::default(),
-    ))
+    let context = Context::current().map_err(native)?;
+    tokio::task::spawn_blocking(move || {
+        optional(read(
+            &context,
+            &verified_directory,
+            &path,
+            maximum_bytes,
+            Stages::default(),
+        ))
+    })
     .await
-    .map_err(worker)?
+    .map_err(|error| native(io::Error::other(error)))?
 }
-async fn read(
-    directory: JsString,
-    path: JsString,
+fn read(
+    context: &Context,
+    directory: &JsString,
+    path: &JsString,
     maximum_bytes: usize,
     stages: Stages,
-) -> Result<Option<JsString>, TextFileError> {
-    let context = context()?;
-    let Some(before) = optional(canonical(path.clone(), context.clone()).await)? else {
-        return Ok(None);
-    };
-    if !inside(&context, &directory, &before) {
+) -> Result<JsString, TextFileError> {
+    let physical = physical(path, context)?;
+    let before = fs::canonicalize(&physical).map_err(native)?;
+    if !inside(context, directory, &before) {
         return Err(invalid(
             "Workflow transcript file is outside the verified transcript directory",
         ));
     }
     stages.at("before-open")?;
-    let selected = path.clone();
-    let ctx = context.clone();
-    let Some(file) = optional(
-        blocking(move || {
-            open(&physical(&selected, &ctx)?).map_err(|e| native(e, "open", Some(&selected), &ctx))
-        })
-        .await,
-    )?
-    else {
-        return Ok(None);
-    };
-    let file = Arc::new(file);
-    let result = async {
-        let handle = file.clone();
-        let ctx = context.clone();
-        let opened =
-            blocking(move || observation(&handle).map_err(|e| native(e, "fstat", None, &ctx)))
-                .await?;
-        if !opened.regular {
-            return Err(invalid("Workflow transcript entry is not a regular file"));
-        }
-        if opened.bytes > maximum_bytes as u64 {
-            return Err(invalid(
-                "Workflow transcript entry exceeds the configured size limit",
-            ));
-        }
-        stages.at("after-stat")?;
-        let selected = path.clone();
-        let ctx = context.clone();
-        let after = canonical(path.clone(), context.clone());
-        let current = blocking(move || {
-            let physical = physical(&selected, &ctx)?;
-            lstat(&physical).map_err(|e| native(e, "lstat", Some(&selected), &ctx))
-        });
-        let (after, current) = tokio::try_join!(after, current)?;
-        if after != before
-            || !inside(&context, &directory, &after)
-            || !current.regular
-            || current.symlink
-            || current.dev != opened.dev
-            || current.ino != opened.ino
-        {
-            return Err(invalid(
-                "Workflow transcript entry changed during validation",
-            ));
-        }
-        stages.at("before-read")?;
-        let handle = file.clone();
-        let ctx = context.clone();
-        let bytes = blocking(move || {
-            let mut bytes = Vec::new();
-            let mut handle = &*handle;
-            handle
-                .read_to_end(&mut bytes)
-                .map_err(|e| native(e, "read", None, &ctx))?;
-            Ok(bytes)
-        })
-        .await?;
-        Ok(JsString::from(String::from_utf8_lossy(&bytes).as_ref()))
+    let file = open(&physical).map_err(native)?;
+    let opened = observation(&file).map_err(native)?;
+    if !opened.regular || opened.symlink {
+        return Err(invalid("Workflow transcript entry is not a regular file"));
     }
-    .await;
-    // Match finally: a close failure supersedes the result, including a missing
-    // path observed after open. Dropping an observer leaves this owned read alive.
-    let file =
-        Arc::try_unwrap(file).map_err(|_| invalid("Filesystem read still owns its file handle"))?;
-    let ctx = context.clone();
-    blocking(move || close(file).map_err(|e| native(e, "close", None, &ctx))).await?;
-    optional(result)
+    if opened.bytes > maximum_bytes as u64 {
+        return Err(invalid(
+            "Workflow transcript entry exceeds the configured size limit",
+        ));
+    }
+    stages.at("after-stat")?;
+    let after = fs::canonicalize(&physical).map_err(native)?;
+    let current = lstat(&physical).map_err(native)?;
+    if after != before
+        || !inside(context, directory, &after)
+        || !current.regular
+        || current.symlink
+        || current.dev != opened.dev
+        || current.ino != opened.ino
+    {
+        return Err(invalid(
+            "Workflow transcript entry changed during validation",
+        ));
+    }
+    stages.at("before-read")?;
+    let mut bytes = Vec::new();
+    file.take((maximum_bytes as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(native)?;
+    if bytes.len() > maximum_bytes {
+        return Err(invalid(
+            "Workflow transcript entry exceeds the configured size limit",
+        ));
+    }
+    Ok(String::from_utf8_lossy(&bytes).as_ref().into())
 }
-fn inside(context: &Context, directory: &JsString, path: &JsString) -> bool {
-    let child = context.relative(directory, path);
+fn inside(context: &Context, directory: &JsString, path: &Path) -> bool {
+    let child = context.relative(directory, &native_path::from_native(path));
     !child.0.is_empty()
         && child.0 != [46, 46]
         && !child
             .0
             .starts_with(&[46, 46, if cfg!(windows) { 92 } else { 47 }])
-        && !node_path::is_absolute(context.style, &child)
+        && !native_path::is_absolute(context.style, &child)
 }
-fn open(path: &PathBuf) -> io::Result<File> {
+fn open(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -237,10 +195,10 @@ fn open(path: &PathBuf) -> io::Result<File> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        // Node's O_NOFOLLOW is undefined on Windows (bitwise flags become zero).
-        // Open normally, with libuv's directory/backup semantics; lstat below
-        // refuses a link and compares the actual opened handle's identity.
-        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS);
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
     }
     options.open(path)
 }
@@ -248,8 +206,8 @@ struct Observation {
     regular: bool,
     symlink: bool,
     bytes: u64,
-    dev: f64,
-    ino: f64,
+    dev: u64,
+    ino: u64,
 }
 fn observation(file: &File) -> io::Result<Observation> {
     let metadata = file.metadata()?;
@@ -260,8 +218,8 @@ fn observation(file: &File) -> io::Result<Observation> {
             regular: metadata.is_file(),
             symlink: metadata.file_type().is_symlink(),
             bytes: metadata.len(),
-            dev: metadata.dev() as f64,
-            ino: metadata.ino() as f64,
+            dev: metadata.dev(),
+            ino: metadata.ino(),
         })
     }
     #[cfg(windows)]
@@ -271,12 +229,12 @@ fn observation(file: &File) -> io::Result<Observation> {
             regular: metadata.is_file(),
             symlink: metadata.file_type().is_symlink(),
             bytes: metadata.len(),
-            dev: info.dwVolumeSerialNumber as f64,
-            ino: (((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64) as f64,
+            dev: u64::from(info.dwVolumeSerialNumber),
+            ino: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
         })
     }
 }
-fn lstat(path: &PathBuf) -> io::Result<Observation> {
+fn lstat(path: &Path) -> io::Result<Observation> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -285,8 +243,8 @@ fn lstat(path: &PathBuf) -> io::Result<Observation> {
             regular: metadata.is_file(),
             symlink: metadata.file_type().is_symlink(),
             bytes: metadata.len(),
-            dev: metadata.dev() as f64,
-            ino: metadata.ino() as f64,
+            dev: metadata.dev(),
+            ino: metadata.ino(),
         })
     }
     #[cfg(windows)]
@@ -302,124 +260,6 @@ fn lstat(path: &PathBuf) -> io::Result<Observation> {
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
             .open(path)?;
         observation(&file)
-    }
-}
-fn close(file: File) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::fd::IntoRawFd;
-        if unsafe { libc::close(file.into_raw_fd()) } == 0 {
-            return Ok(());
-        }
-        let error = io::Error::last_os_error();
-        if matches!(error.raw_os_error(), Some(libc::EINTR | libc::EINPROGRESS)) {
-            Ok(())
-        } else {
-            Err(error)
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::IntoRawHandle;
-        if unsafe { windows_sys::Win32::Foundation::CloseHandle(file.into_raw_handle()) } != 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
-}
-
-fn null_path(path: &JsString) -> TextFileError {
-    let mut inspected = inspect_path(&path.0[..path.0.len().min(10_000)]);
-    if inspected.len() > 128 {
-        inspected.truncate(128);
-        inspected.extend("...".encode_utf16());
-    }
-    let mut message: Vec<_> =
-        "The argument 'path' must be a string, Uint8Array, or URL without null bytes. Received "
-            .encode_utf16()
-            .collect();
-    message.extend(inspected);
-    TextFileError {
-        name: "TypeError",
-        message: JsString(message),
-        code: Some("ERR_INVALID_ARG_VALUE"),
-        source: None,
-    }
-}
-fn inspect_path(units: &[u16]) -> Vec<u16> {
-    fn quoted(units: &[u16]) -> Vec<u16> {
-        let quote = if units.contains(&39) && !units.contains(&34) {
-            34
-        } else if units.contains(&39)
-            && units.contains(&34)
-            && !units.contains(&96)
-            && !units.windows(2).any(|v| v == [36, 123])
-        {
-            96
-        } else {
-            39
-        };
-        let mut output = vec![quote];
-        let mut i = 0;
-        while i < units.len() {
-            let c = units[i];
-            let escape = match c {
-                8 => Some("\\b".to_owned()),
-                9 => Some("\\t".to_owned()),
-                10 => Some("\\n".to_owned()),
-                12 => Some("\\f".to_owned()),
-                13 => Some("\\r".to_owned()),
-                92 => Some("\\\\".to_owned()),
-                c if c == quote => Some(format!("\\{}", char::from_u32(c as u32).unwrap())),
-                c if c < 32 || (127..160).contains(&c) => Some(format!("\\x{c:02X}")),
-                c if (0xd800..=0xdfff).contains(&c) => {
-                    if c <= 0xdbff
-                        && units
-                            .get(i + 1)
-                            .is_some_and(|c| (0xdc00..=0xdfff).contains(c))
-                    {
-                        output.extend_from_slice(&units[i..i + 2]);
-                        i += 2;
-                        continue;
-                    } else {
-                        Some(format!("\\u{c:04x}"))
-                    }
-                }
-                _ => None,
-            };
-            if let Some(escape) = escape {
-                output.extend(escape.encode_utf16())
-            } else {
-                output.push(c)
-            }
-            i += 1;
-        }
-        output.push(quote);
-        output
-    }
-    if units.len() > 76 {
-        let mut output = Vec::new();
-        let mut start = 0;
-        for end in units
-            .iter()
-            .enumerate()
-            .filter_map(|(i, c)| (*c == 10).then_some(i + 1))
-            .chain(std::iter::once(units.len()))
-            .filter(|end| *end > 0)
-        {
-            if end == start {
-                continue;
-            }
-            if start > 0 {
-                output.extend(" +\n  ".encode_utf16())
-            }
-            output.extend(quoted(&units[start..end]));
-            start = end;
-        }
-        output
-    } else {
-        quoted(units)
     }
 }
 

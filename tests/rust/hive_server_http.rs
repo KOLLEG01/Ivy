@@ -98,8 +98,7 @@ impl StorageLifecycle for HttpWorker {
 }
 fn probe(budget: &RequestBudget, spec: &Value) -> Value {
     match budget.acquire(
-        &spec["key"].as_str().unwrap_or("probe").into(),
-        Some(spec["bytes"].as_f64().unwrap_or(0.0)),
+        &spec["key"].as_str().unwrap_or("probe").into(),(Some(spec["bytes"].as_f64().unwrap_or(0.0))).map(|bytes| bytes as usize),
     ) {
         Ok(mut lease) => {
             lease.release();
@@ -395,8 +394,7 @@ async fn request(
                     scope
                         .invoke(
                             context,
-                            IvyJson::from_serde(&step["frame"]).unwrap(),
-                            step["bytes"].as_f64().unwrap_or(0.0),
+                            IvyJson::from_serde(&step["frame"]).unwrap(),(step["bytes"].as_f64().unwrap_or(0.0)) as usize,
                         )
                         .await?
                 }
@@ -475,10 +473,10 @@ async fn native(trace: &Value) -> Value {
             .unwrap_or(default)
     };
     let budget = RequestBudget::new(RequestBudgetOptions {
-        maximum: number(0, 2048.0),
-        maximum_bytes: number(1, 128.0 * 1024.0 * 1024.0),
-        per_consumer: number(2, ivy_contracts::limits::CONSUMER_IN_FLIGHT_REQUESTS as f64),
-        per_consumer_bytes: number(3, 64.0 * 1024.0 * 1024.0),
+        maximum: (number(0, 2048.0)) as usize,
+        maximum_bytes: (number(1, 128.0 * 1024.0 * 1024.0)) as usize,
+        per_consumer: (number(2, ivy_contracts::limits::CONSUMER_IN_FLIGHT_REQUESTS as f64)) as usize,
+        per_consumer_bytes: (number(3, 64.0 * 1024.0 * 1024.0)) as usize,
         name: "request".into(),
     });
     let mut effects = dependencies(Events::default());
@@ -587,8 +585,7 @@ async fn native(trace: &Value) -> Value {
             "invoke" => {
                 let work = server.network.invocation.invoke(
                     IvyJson::from_serde(&step["context"]).unwrap(),
-                    IvyJson::from_serde(&step["frame"]).unwrap(),
-                    step["bytes"].as_f64().unwrap_or(0.0),
+                    IvyJson::from_serde(&step["frame"]).unwrap(),(step["bytes"].as_f64().unwrap_or(0.0)) as usize,
                 );
                 if step["discard"] == true {
                     drop(work);

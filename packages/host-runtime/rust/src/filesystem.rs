@@ -156,17 +156,25 @@ fn remove_windows(path:&Path,force:bool)->std::io::Result<()>{
     let metadata=match fs::symlink_metadata(path){Ok(value)=>value,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(()),Err(e)=>return Err(e)};
     if metadata.is_dir()&&!metadata.file_type().is_symlink(){
         for entry in fs::read_dir(path)?{remove_windows(&entry?.path(),force)?;}
-        if force && metadata.permissions().readonly(){let mut permissions=metadata.permissions();permissions.set_readonly(false);fs::set_permissions(path,permissions)?;}
-        fs::remove_dir(path)
+        if force {remove_readonly(path,metadata.permissions(),||fs::remove_dir(path))} else {fs::remove_dir(path)}
     }else{
         use std::os::windows::fs::MetadataExt;
         if metadata.file_type().is_symlink()&&metadata.file_attributes()&0x10!=0{return fs::remove_dir(path)}
-        match fs::remove_file(path){Err(e) if e.kind()==std::io::ErrorKind::PermissionDenied=>{let mut permissions=metadata.permissions();permissions.set_readonly(false);fs::set_permissions(path,permissions)?;fs::remove_file(path)},result=>result}
+        match fs::remove_file(path){Err(e) if e.kind()==std::io::ErrorKind::PermissionDenied&&!metadata.file_type().is_symlink()=>remove_readonly(path,metadata.permissions(),||fs::remove_file(path)),result=>result}
     }
 }
-/// Node rm(path,{recursive:true,force:true}) with its default zero retries.
-/// Missing entries are accepted before and during removal; links are removed
-/// themselves. Keep an admitted removal alive if its caller stops waiting.
+#[cfg(windows)]
+fn remove_readonly(path:&Path,permissions:fs::Permissions,remove:impl FnOnce()->std::io::Result<()>)->std::io::Result<()>{
+    let changed=permissions.readonly();
+    if changed {let mut writable=permissions.clone();writable.set_readonly(false);fs::set_permissions(path,writable)?;}
+    let result=remove();
+    if changed&&result.is_err(){fs::set_permissions(path,permissions)?;}
+    result
+}
+/// Remove an owned path recursively, accepting missing entries and removing
+/// links themselves. Windows readonly entries use the existing native fallback.
+pub fn remove_force_sync(path:&Path)->std::io::Result<()>{remove_native(path.to_path_buf(),None,0,true)}
+/// Keep an admitted removal alive if its async caller stops waiting.
 pub async fn remove_force(path:impl Into<PathBuf>)->IvyResult<()>{remove(path.into(),None,0,true).await}
 /// Ordinary libuv reads retain the caller account's Windows backup semantics.
 pub(crate) fn read_file_bytes(path:&Path)->std::io::Result<Vec<u8>>{
@@ -206,7 +214,7 @@ async fn remove(path:PathBuf,directory:Option<bool>,retries:u64,force:bool)->Ivy
     blocking(move||remove_native(path,directory,retries,force).map_err(|_|IvyError::internal())).await
 }
 pub(crate) async fn remove_force_raw(path:PathBuf)->std::io::Result<()>{
-    tokio::task::spawn_blocking(move||remove_native(path,None,0,true)).await.map_err(std::io::Error::other)?
+    tokio::task::spawn_blocking(move||remove_force_sync(&path)).await.map_err(std::io::Error::other)?
 }
 fn remove_native(path:PathBuf,directory:Option<bool>,retries:u64,force:bool)->std::io::Result<()>{
         let metadata=match fs::symlink_metadata(&path){Ok(metadata)=>metadata,Err(error) if force&&error.kind()==std::io::ErrorKind::NotFound=>return Ok(()),Err(error)=>return Err(error)};

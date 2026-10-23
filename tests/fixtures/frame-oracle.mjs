@@ -27,7 +27,8 @@ for(const [kind,validate,base] of [
 ]){
   const variants=[base,null,[],true,{}, {...base,extra:true}];
   for(const key of Object.keys(base)){const missing={...base};delete missing[key];variants.push(missing);for(const value of [null,false,0,-1,9007199254740992,'','\ud800',[],{},'x'.repeat(2049)])variants.push({...base,[key]:value});}
-  if(base.error) for(const outcome of ['unknown','completed','not_executed',['completed'],['unknown'],null,{},false])variants.push({...base,error:{...base.error,data:{...base.error.data,outcome}}});
+  // Malformed outcome types have native admission checks in sdk-error-outcome.rs.
+  if(base.error) for(const outcome of ['unknown','completed','not_executed'])variants.push({...base,error:{...base.error,data:{...base.error.data,outcome}}});
   if(base.params&&kind!=='request'){
     variants.push({...base,params:{...base.params,unexpected:true}});
     for(const key of Object.keys(base.params)){

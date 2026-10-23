@@ -106,10 +106,15 @@ fn probe(mut path: PathBuf) -> io::Result<Space> {
         }
     }
 }
+/// Caller-available and total bytes on an existing file or directory's volume,
+/// in that order. Preserves OS errors without probing a missing path's parents.
+pub fn measure_bytes(path: &Path) -> io::Result<(u64, u64)> {
+    measured_space(path).map(|value| (value.available, value.total))
+}
 /// Available bytes for the caller on an existing file or directory's volume.
 /// Preserves OS errors; missing paths are not replaced by an ancestor probe.
 pub fn available_bytes(path: &Path) -> io::Result<u64> {
-    measured_space(path).map(|value| value.available)
+    measure_bytes(path).map(|(available, _)| available)
 }
 pub async fn available_storage_bytes(path: impl Into<PathBuf>) -> IvyResult<f64> {
     let path = path.into();

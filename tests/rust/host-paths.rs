@@ -29,10 +29,6 @@ mod native_helper_cases;
 mod executor_cases;
 #[path = "host-executor-runtime-cases.rs"]
 mod executor_runtime_cases;
-#[path = "host-filesystem-error-cases.rs"]
-mod filesystem_error_cases;
-#[path = "host-filesystem-remove-cases.rs"]
-mod filesystem_remove_cases;
 #[path = "host-package-archive-cases.rs"]
 mod package_archive_cases;
 #[path = "host-filesystem-cases.rs"]

@@ -414,8 +414,21 @@ async fn native_oauth(input: &Value) -> Value {
                                     .unwrap();
                                 *signature.0.last_mut().unwrap() = alphabet[last ^ 1] as u16;
                             }
-                            "payload-low-bytes" => {
-                                encoded.0.iter_mut().for_each(|u| *u += 256);
+                            "payload-low-bytes" | "payload-invalid-utf8" => {
+                                if field(&step, "mode") == &JsString::from("payload-low-bytes") {
+                                    encoded.0.iter_mut().for_each(|u| *u += 256);
+                                } else {
+                                    let mut bytes =
+                                        URL_SAFE_NO_PAD.decode(encoded.to_utf8().unwrap()).unwrap();
+                                    let marker = b"\"nonce\":\"";
+                                    let at = bytes
+                                        .windows(marker.len())
+                                        .position(|part| part == marker)
+                                        .unwrap()
+                                        + marker.len();
+                                    bytes[at] = 255;
+                                    encoded = URL_SAFE_NO_PAD.encode(bytes).into();
+                                }
                                 let keys = raw(
                                     &provider.actor,
                                     IvyJson::object([("action", "oauth.initialize".into())]),
@@ -793,18 +806,6 @@ async fn oauth_native_async_family_failures_credentials_and_abandoned_exchange_m
 async fn oauth_native_signed_payload_validation_and_reference_rebinding_match_original() {
     let mut steps = flow();
     steps.push(json!({"op":"payload","id":"claims","token":r("tokens.access_token")}));
-    for (i, mode) in [
-        "signature-padding",
-        "signature-noise",
-        "signature-low-bytes",
-        "signature-unused-bits",
-        "payload-low-bytes",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        steps.extend([json!({"op":"mutate","id":format!("mutation-{i}"),"mode":mode,"token":r("tokens.access_token")}),json!({"op":"auth","id":format!("mutated-{i}"),"token":r(&format!("mutation-{i}"))})]);
-    }
     let patches = vec![
         json!({"version":1}),
         json!({"type":"refresh"}),
@@ -900,8 +901,7 @@ async fn oauth_native_form_duplicate_state_scope_and_self_asserted_client_guards
         ("resource", json!("https://example.test/ivy/mcp/")),
         ("scope", json!("hive hive")),
         ("scope", json!(" ")),
-        ("scope", json!("hive\u{85}")),
-        ("scope", json!("\u{feff}\t hive\u{a0}")),
+        // Scope policy stays independent of JavaScript's Unicode whitespace table.
         ("scope", json!("")),
         ("client_id", json!("ivyc1.not-json")),
         (
@@ -952,7 +952,7 @@ async fn oauth_native_form_duplicate_state_scope_and_self_asserted_client_guards
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn oauth_native_initialization_and_loose_base64_object_parsing_match_original() {
+async fn oauth_native_initialization_and_base64_object_syntax() {
     let mut steps = vec![
         registration(),
         begin("transaction"),
@@ -1011,11 +1011,102 @@ async fn oauth_native_initialization_and_loose_base64_object_parsing_match_origi
     {
         steps.push(json!({"op":"auth","id":format!("syntax-{i}"),"token":token}));
     }
-    compare_oauth(
-        "signed-loose-base64-objects-and-token-syntax",
-        json!({"steps":steps}),
-    )
-    .await;
+    let input = json!({"steps":steps});
+    let value = tokio::task::LocalSet::new()
+        .run_until(native_oauth(&input))
+        .await;
+    for index in 0..9 {
+        assert_eq!(
+            result(&value, &format!("auth-{index}"))["error"]["data"]["code"],
+            "unauthenticated"
+        );
+    }
+    for index in 0..7 {
+        let syntax = result(&value, &format!("syntax-{index}"));
+        if matches!(index, 0 | 4) {
+            assert_eq!(syntax["encoded"], "null");
+        } else {
+            assert_eq!(syntax["error"]["data"]["code"], "unauthenticated");
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn oauth_native_token_encodings_reject_noncanonical_base64() {
+    let mut steps = flow();
+    steps.push(json!({"op":"auth","id":"before","token":r("tokens.access_token")}));
+    for (index, mode) in [
+        "signature-padding",
+        "signature-noise",
+        "signature-low-bytes",
+        "signature-unused-bits",
+        "payload-low-bytes",
+        "payload-invalid-utf8",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        steps.extend([
+            json!({"op":"mutate","id":format!("mutation-{index}"),"mode":mode,"token":r("tokens.access_token")}),
+            json!({"op":"auth","id":format!("rejected-{index}"),"token":r(&format!("mutation-{index}"))}),
+        ]);
+    }
+    steps.extend([
+        json!({"op":"auth","id":"after","token":r("tokens.access_token")}),
+        refresh("rotated", "tokens.refresh_token"),
+        json!({"op":"restart"}),
+        json!({"op":"auth","id":"restarted","token":r("rotated.access_token")}),
+        refresh("reused", "tokens.refresh_token"),
+        refresh("revoked", "rotated.refresh_token"),
+    ]);
+    let client = json!({"version":1,"redirectUris":["http://127.0.0.1/callback?a=%20&state=old&code=old&iss=old"],"clientName":"Native client"});
+    let encoded = URL_SAFE_NO_PAD.encode(client.to_string());
+    for (name, encoded) in [
+        ("canonical-client", encoded.clone()),
+        ("padded-client", format!("{encoded}=")),
+        ("noisy-client", format!("!{encoded}")),
+        (
+            "low-byte-client",
+            encoded
+                .chars()
+                .map(|c| char::from_u32(c as u32 + 256).unwrap())
+                .collect(),
+        ),
+    ] {
+        let mut step = begin(name);
+        step["form"][1][1] = format!("ivyc1.{encoded}").into();
+        steps.push(step);
+    }
+    let input = json!({"steps":steps});
+    let value = tokio::task::LocalSet::new()
+        .run_until(native_oauth(&input))
+        .await;
+    for name in ["before", "after", "restarted", "canonical-client"] {
+        assert!(
+            result(&value, name)["encoded"].is_string(),
+            "{name}: {}",
+            result(&value, name)
+        );
+    }
+    for index in 0..6 {
+        assert_eq!(
+            result(&value, &format!("rejected-{index}"))["error"]["data"]["code"],
+            "unauthenticated"
+        );
+    }
+    for name in [
+        "reused",
+        "revoked",
+        "padded-client",
+        "noisy-client",
+        "low-byte-client",
+    ] {
+        assert_eq!(
+            result(&value, name)["error"]["data"]["code"],
+            "unauthenticated",
+            "{name}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

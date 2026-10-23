@@ -155,7 +155,7 @@ impl mcp_request::Invocation for Calls<'_> {
             .invoke(
                 self.0.context.clone(),
                 envelope,
-                self.0.received_bytes as f64,
+                self.0.received_bytes,
             )
             .await
             .map_err(Into::into)

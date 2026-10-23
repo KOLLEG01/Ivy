@@ -15,7 +15,7 @@ use crate::{
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, Outcome,
     core_schema::{validate_input, validate_output},
-    json::{js_string, stringify},
+    json::stringify,
     limits::{CONNECTION_IN_FLIGHT_REQUESTS, MANAGEMENT_SOCKET_BUFFER_BYTES},
     validation::{validate_response_frame, validate_service_notification_frame},
 };
@@ -90,8 +90,7 @@ pub type Ids = Arc<dyn Fn() -> JsString + Send + Sync>;
 pub fn native_ids() -> Ids {
     Arc::new(|| uuid::Uuid::new_v4().to_string().into())
 }
-/// The source validator accepts String(outcome), but the error retains the raw
-/// value. Its canonical owner must preserve arrays as well as ordinary strings.
+/// A validated provider failure passed to the public error constructor.
 pub struct ProviderError {
     pub code: JsString,
     pub message: JsString,
@@ -475,10 +474,14 @@ impl Peers {
         Ok(receive(receiver))
     }
     pub fn provider_result(&self, peer: &Peer, frame: &IvyJson) {
-        let id = frame
-            .get("id")
-            .map(js_string)
-            .unwrap_or_else(|| "undefined".into());
+        let Some(id) = frame.get("id").and_then(IvyJson::as_js_string) else {
+            self.protocol_diagnostic(
+                peer,
+                "stale_generation",
+                "Unmatched provider response was ignored.",
+            );
+            return;
+        };
         let pending = self
             .0
             .state
@@ -486,7 +489,7 @@ impl Peers {
             .unwrap()
             .forwarded
             .iter()
-            .find(|(key, _)| key == &id)
+            .find(|(key, _)| key == id)
             .map(|(_, p)| p.clone());
         let Some(pending) = pending.filter(|p| {
             p.peer.same(peer)
@@ -525,7 +528,7 @@ impl Peers {
             .lock()
             .unwrap()
             .forwarded
-            .retain(|(key, _)| key != &id);
+            .retain(|(key, _)| key != id);
     }
     pub fn reject_all(&self, error: IvyError) {
         let pending = std::mem::take(&mut self.0.state.lock().unwrap().forwarded);
@@ -663,7 +666,7 @@ impl Peers {
         }
         let mut lease = match self.0.owners.requests.acquire(
             &text(&context, "credentialDigest")?,
-            Some(1024.0 + bytes.len() as f64),
+            Some(1024 + bytes.len()),
         ) {
             Ok(lease) => lease,
             Err(error) => return peer.send(&rpc::failure(&error, id), None),

@@ -244,8 +244,8 @@ fn actual_close_releases_connection_but_retains_accepted_peer_work() {
         .unwrap();
     runtime.block_on(async {
         let worker=Arc::new(Worker{control:Mutex::new(None),complete:Arc::new(AtomicBool::new(false)),cancelled:Arc::new(AtomicBool::new(false))});
-        let requests=RequestBudget::new(RequestBudgetOptions{maximum:1.0,per_consumer:1.0,..Default::default()});
-        let connections=RequestBudget::new(RequestBudgetOptions{maximum:1.0,per_consumer:1.0,..Default::default()});
+        let requests=RequestBudget::new(RequestBudgetOptions{maximum:1,per_consumer:1,..Default::default()});
+        let connections=RequestBudget::new(RequestBudgetOptions{maximum:1,per_consumer:1,..Default::default()});
         let mut connection=connections.acquire(&"client".into(),None).unwrap();
         let unhandled=Arc::new(Mutex::new(Vec::new()));
         let peers = Peers::new(server_peers::Owners {

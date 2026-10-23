@@ -5,7 +5,7 @@ use crate::{
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use ivy_contracts::{
     hash::tool_definition_hash,
-    json::{js_string, parse, stringify},
+    json::{parse, stringify},
     limits::*,
     validation::*,
     wire_schema::validate_shared,
@@ -540,11 +540,11 @@ impl ServiceConnection {
                 let _ = std::panic::catch_unwind(AssertUnwindSafe(|| observer(&frame)));
             }
         } else {
-            let id = frame
+            if let Some(id) = frame
                 .get("id")
-                .map(js_string)
-                .unwrap_or_else(|| "undefined".into());
-            if let Ok(id) = id.to_utf8() {
+                .and_then(IvyJson::as_js_string)
+                .and_then(|id| id.to_utf8().ok())
+            {
                 let reply = self.0.state.lock().unwrap().pending.remove(&id);
                 if let Some(reply) = reply {
                     let _ = reply.send(response_value(&frame, &id));

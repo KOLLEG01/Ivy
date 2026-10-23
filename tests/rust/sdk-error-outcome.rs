@@ -173,6 +173,11 @@ fn the_actual_rpc_boundary_keeps_its_distinct_string_only_admission() {
         json(r#"["unknown"]"#),
         json(r#"["completed"]"#),
         json(r#"[["not_executed"]]"#),
+        json(r#"["not_executed"]"#),
+        json("null"),
+        json("false"),
+        json("0"),
+        json("{}"),
         "not_executed".into(),
         "unknown".into(),
         "completed".into(),
@@ -186,6 +191,11 @@ fn the_actual_rpc_boundary_keeps_its_distinct_string_only_admission() {
             ("id", "r".into()),
             ("error", raw),
         ]);
+        assert_eq!(
+            ivy_contracts::validation::validate_response_frame(&frame).is_ok(),
+            value.as_js_string().is_some(),
+            "{value:?}"
+        );
         let error = response_value(&frame, "r").unwrap_err();
         if value.as_js_string().is_some() {
             assert_eq!(error.code, "remote");

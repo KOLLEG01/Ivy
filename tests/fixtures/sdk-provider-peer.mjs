@@ -1,13 +1,17 @@
-import {registerHooks} from 'node:module';
+import {registerHooks,createRequire} from 'node:module';
 import {existsSync} from 'node:fs';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath,pathToFileURL} from 'node:url';
 import {once} from 'node:events';
 import {setTimeout as delay} from 'node:timers/promises';
-import {WebSocketServer} from 'ws';
+const require=createRequire(import.meta.url);
+const external=new Map(['ajv/dist/2020.js','re2js'].map(name=>[name,pathToFileURL(require.resolve(name)).href]));
+external.set('ws',new URL('./wrapper.mjs',pathToFileURL(require.resolve('ws'))).href);
 registerHooks({resolve(specifier,context,next){
+  if(external.has(specifier))return next(external.get(specifier),context);
   if(specifier.startsWith('.')&&specifier.endsWith('.js')&&context.parentURL){const source=new URL(specifier.slice(0,-3)+'.ts',context.parentURL);if(existsSync(fileURLToPath(source)))return next(source.href,context);}
   return next(specifier,context);
 }});
+const {WebSocketServer}=await import('ws');
 const {toolDefinitionHash}=await import('../../packages/contracts/src/tool-definition.ts');
 const definition={namespace:'fixture',name:'echo',description:'Echo an isolated payload.',interfaceVersion:'1.0.0',inputSchema:{},outputSchema:{}};
 const identity={serviceNodeId:'fixture-node',serviceName:'fixture',hostId:'fixture-host',version:'1.0.0',buildId:'sha256:'+'a'.repeat(64),hiveProtocol:1};
@@ -40,6 +44,10 @@ wss.on('connection',(socket,request)=>{
     }
     else if(method==='service.notification')notifications.push(params);
     else if(method==='test.echo')reply(id,params);
+    else if(method==='test.untrustedIds'){
+      for(const untrusted of [[id],[[id]],null,false,0,{},undefined])send({jsonrpc:'2.0',id:untrusted,result:'must-not-consume-correlation'});
+      reply(id,params);
+    }
     else if(method==='test.ping'){socket.once('pong',bytes=>reply(id,bytes.toString()));socket.ping('fixture-ping');}
     else if(method==='test.ownerState'){ownerConnected=params.connected;reply(id,{});}
     else if(method==='serviceNodes.get')reply(id,{serviceNodeId:params.serviceNodeId,connected:ownerConnected,synced:true,ready:false,reads:++ownerReads});

@@ -686,27 +686,30 @@ impl HiveOAuth {
         Ok(format!("ivyoa2.{encoded}.{}", URL_SAFE_NO_PAD.encode(signature)).into())
     }
     fn verify(&self, state: &State, token: &JsString, kind: &str) -> IvyResult<IvyJson> {
-        let parts = token.0.split(|u| *u == 46).collect::<Vec<_>>();
+        let token = token.to_utf8().map_err(|_| invalid_credential())?;
+        let parts = token.split('.').collect::<Vec<_>>();
         require(
             parts.len() == 3
-                && parts[0] == JsString::from("ivyoa2").0
-                && token.0.len() <= 8192
+                && parts[0] == "ivyoa2"
+                && token.len() <= 8192
                 && state.signing_key.is_some(),
             "unauthenticated",
             "Invalid OAuth credential.",
         )?;
-        let encoded = JsString(parts[1].to_vec());
-        let actual = decode_base64(&JsString(parts[2].to_vec()));
+        let encoded = parts[1];
+        let actual = URL_SAFE_NO_PAD
+            .decode(parts[2])
+            .map_err(|_| invalid_credential())?;
         require(
             verify_hmac_sha256(
                 state.signing_key.as_ref().unwrap(),
-                text(&encoded).as_bytes(),
+                encoded.as_bytes(),
                 &actual,
             ),
             "unauthenticated",
             "Invalid OAuth credential.",
         )?;
-        let value = parse_object(&encoded)?;
+        let value = parse_object(encoded)?;
         let reference = value
             .get("credentialReference")
             .and_then(IvyJson::as_js_string);
@@ -846,12 +849,13 @@ fn scope(value: Option<&JsString>) -> IvyResult<JsString> {
     Ok(value)
 }
 fn client(id: &JsString) -> IvyResult<IvyJson> {
+    let id = id.to_utf8().map_err(|_| invalid_credential())?;
     require(
-        id.0.starts_with(&JsString::from("ivyc1.").0) && id.0.len() <= 4096,
+        id.starts_with("ivyc1.") && id.len() <= 4096,
         "invalid_arguments",
         "Unknown OAuth client.",
     )?;
-    let value = parse_object(&JsString(id.0[6..].to_vec()))?;
+    let value = parse_object(&id[6..])?;
     let mut valid = value.get("version") == Some(&IvyJson::Number(1.0));
     if valid {
         if let Some(redirects) = value.get("redirectUris").and_then(IvyJson::as_array) {
@@ -926,44 +930,19 @@ fn token_base(
         ("scope", IvyJson::String(scope.clone())),
     ])
 }
-fn parse_object(encoded: &JsString) -> IvyResult<IvyJson> {
-    let value = parse(
-        &String::from_utf8_lossy(&decode_base64(encoded)),
-        usize::MAX,
-    )
-    .map_err(|_| IvyError::new("unauthenticated", "Invalid OAuth credential."))?;
+fn invalid_credential() -> IvyError {
+    IvyError::new("unauthenticated", "Invalid OAuth credential.")
+}
+fn parse_object(encoded: &str) -> IvyResult<IvyJson> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| invalid_credential())?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| invalid_credential())?;
+    let value = parse(text, usize::MAX).map_err(|_| invalid_credential())?;
     require(
         value.as_object().is_some(),
         "unauthenticated",
         "Invalid OAuth credential.",
     )?;
     Ok(value)
-}
-// Buffer.from(base64url) accepts both alphabets, ignores non-alphabet low bytes,
-// stops at padding and ignores an incomplete final sextet and unused bits.
-fn decode_base64(value: &JsString) -> Vec<u8> {
-    let mut encoded = Vec::new();
-    for unit in &value.0 {
-        let byte = *unit as u8;
-        if byte == b'=' {
-            break;
-        }
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' => encoded.push(byte),
-            b'+' => encoded.push(b'-'),
-            b'/' => encoded.push(b'_'),
-            _ => {}
-        }
-    }
-    if encoded.len() % 4 == 1 {
-        encoded.pop();
-    }
-    base64::engine::GeneralPurpose::new(
-        &base64::alphabet::URL_SAFE,
-        base64::engine::GeneralPurposeConfig::new()
-            .with_decode_allow_trailing_bits(true)
-            .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
-    )
-    .decode(encoded)
-    .expect("Filtered base64 has valid complete sextets")
 }

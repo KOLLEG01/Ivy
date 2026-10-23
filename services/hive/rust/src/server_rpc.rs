@@ -113,14 +113,14 @@ impl Invocation {
         validate_direct_tool_request(request)?;
         (self.0.direct)(context, request)
     }
-    pub fn invoke(&self, context: IvyJson, request: IvyJson, received_bytes: f64) -> Reply {
+    pub fn invoke(&self, context: IvyJson, request: IvyJson, received_bytes: usize) -> Reply {
         if let Err(error) = require_fresh(&context, &*self.0.now) {
             return ready(Err(error));
         }
-        let request_bytes = if received_bytes > 0.0 {
+        let request_bytes = if received_bytes > 0 {
             received_bytes
         } else {
-            4096.0
+            4096
         };
         let digest = match context
             .get("credentialDigest")
@@ -129,11 +129,13 @@ impl Invocation {
             Some(value) => value,
             None => return ready(Err(IvyError::internal())),
         };
-        let mut lease = match self
-            .0
-            .requests
-            .acquire(digest, Some(1024.0 + request_bytes))
-        {
+        let Some(reserved_bytes) = request_bytes.checked_add(1024) else {
+            return ready(Err(IvyError::new(
+                "limit_exceeded",
+                "Hive retained request bytes are full.",
+            )));
+        };
+        let mut lease = match self.0.requests.acquire(digest, Some(reserved_bytes)) {
             Ok(lease) => lease,
             Err(error) => return ready(Err(error)),
         };
@@ -200,7 +202,7 @@ impl Invocation {
         &self,
         context: IvyJson,
         frames: Vec<IvyJson>,
-        received_bytes: f64,
+        received_bytes: usize,
     ) -> Reply<String> {
         let ids = (|| -> IvyResult<Vec<IvyJson>> {
             require(
@@ -209,8 +211,7 @@ impl Invocation {
                 "Expected a nonempty RPC batch.",
             )?;
             require(
-                frames.len() <= RPC_BATCH_REQUESTS
-                    && received_bytes <= RPC_BATCH_REQUEST_BYTES as f64,
+                frames.len() <= RPC_BATCH_REQUESTS && received_bytes <= RPC_BATCH_REQUEST_BYTES,
                 "limit_exceeded",
                 "RPC batch exceeds its request count or byte limit.",
             )?;
@@ -246,7 +247,7 @@ impl Invocation {
                     &remaining,
                 )),
                 Ok(bytes) => {
-                    let work = self.invoke(context.clone(), frame, bytes as f64);
+                    let work = self.invoke(context.clone(), frame, bytes);
                     let remaining = remaining.clone();
                     let (result, reply) = oneshot::channel();
                     tokio::spawn(async move {

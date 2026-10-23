@@ -1,8 +1,10 @@
 //! Native process composition. Public requests stay in the existing Hive owners.
+mod backup;
 mod http;
+mod maintenance;
 mod websocket;
 
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::digest, json::parse};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
 use ivy_hive::{
     native_runtime::{self, NativeRuntime},
     server_constructor::{Constructed, Dependencies, Options, Prepared},
@@ -15,7 +17,7 @@ use ivy_host_runtime::{
     health::HealthFile,
 };
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, Weak},
     time::Duration,
@@ -194,26 +196,6 @@ impl ListenerPort for Listener {
     }
 }
 
-struct Https(reqwest::Client);
-impl ivy_hive::browser_push_native::Https for Https {
-    fn post(
-        &self,
-        request: ivy_hive::browser_push_native::Request,
-    ) -> ivy_hive::browser_push_native::PostFuture {
-        let client = self.0.clone();
-        Box::pin(async move {
-            let mut builder = client.post(request.endpoint);
-            for (name, value) in request.headers {
-                builder = builder.header(name, value);
-            }
-            let mut response = builder.body(request.body).send().await.map_err(failure)?;
-            let status = response.status().as_u16();
-            while response.chunk().await.map_err(failure)?.is_some() {}
-            Ok(status)
-        })
-    }
-}
-
 fn read_optional(path: &Path) -> IvyResult<Option<IvyJson>> {
     match std::fs::read_to_string(path) {
         Ok(text) => parse(&text, 1024 * 1024).map(Some),
@@ -240,44 +222,20 @@ pub async fn run() -> IvyResult<()> {
         &std::env::args_os().skip(1).collect::<Vec<_>>(),
         std::env::var_os("IVY_INSTANCE_CONFIG"),
     )?;
-    let loaded = native_instance_config(config_path).await?;
+    let loaded = native_instance_config(config_path.clone()).await?;
     let config = loaded.json().clone();
-    require(
-        string(&config, "componentId")? == "hive",
-        "Hive requires its own instance configuration.",
-    )?;
     let data = loaded.data_root().to_path_buf();
     let artifact = loaded.artifact_root().to_path_buf();
-    let settings = config.required("settings")?;
-    ivy_contracts::core_schema::validate_host("HiveSettings", settings)?;
-    let backup_directory = PathBuf::from(string(settings.required("backup")?, "directory")?);
-    require(
-        backup_directory.is_absolute()
-            && !ivy_host_runtime::paths::inside(&artifact, &backup_directory).map_err(failure)?,
-        "Backup storage must be outside immutable artifacts.",
-    )?;
-    let mut tokens = HashSet::new();
-    let credentials = settings
-        .required("credentials")?
-        .as_array()
-        .ok_or_else(IvyError::internal)?
-        .iter()
-        .map(|c| {
-            let token = string(c, "token")?;
-            require(
-                !token.is_empty() && tokens.insert(token.clone()),
-                "Hive needs distinct configured credentials.",
-            )?;
-            Ok(IvyJson::object([
-                ("principalId", c.required("principalId")?.clone()),
-                ("digest", digest(&token).into()),
-            ]))
+    let settings = maintenance::settings(&config)?;
+    let credentials = maintenance::credentials(settings)?
+        .into_iter()
+        .map(|credential| {
+            IvyJson::object([
+                ("principalId", IvyJson::String(credential.principal_id)),
+                ("digest", IvyJson::String(credential.digest)),
+            ])
         })
-        .collect::<IvyResult<Vec<_>>>()?;
-    require(
-        !credentials.is_empty(),
-        "Hive needs configured credentials.",
-    )?;
+        .collect();
     let mut options = IvyJson::object([
         (
             "filename",
@@ -338,21 +296,15 @@ pub async fn run() -> IvyResult<()> {
         )?;
         options.insert("resetBootstrapCredentialDigest", publisher.into());
     }
-    let health = HealthFile::new(loaded);
+    let health = Arc::new(HealthFile::new(loaded));
     health
         .write(false, "Starting storage and HTTP listener.".into(), None)
         .await?;
     let holder = Arc::new(OnceLock::new());
     let listener = Listener::new(holder.clone());
-    let client = reqwest::Client::builder()
-        .https_only(true)
-        .http1_only()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(failure)?;
-    let sender = ivy_hive::browser_push_native::NativeSender::with_numeric_expiration(
-        Arc::new(Https(client)),
+    let client = ivy_hive::browser_push_https::NativeHttps::new()?;
+    let sender = ivy_hive::browser_push_native::NativeSender::new(
+        Arc::new(client),
         ivy_hive::browser_push_native::system_expiration(),
     );
     let executable = std::env::current_exe().map_err(failure)?;
@@ -422,6 +374,7 @@ pub async fn run() -> IvyResult<()> {
     holder
         .set(Arc::downgrade(&app))
         .map_err(|_| IvyError::internal())?;
+    let mut maintenance = maintenance::Maintenance::new(config_path, config).await?;
     if let Err(error) = app.server.network.lifecycle.start().await {
         let _ = health
             .write(false, "Hive startup failed.".into(), None)
@@ -431,30 +384,36 @@ pub async fn run() -> IvyResult<()> {
     health.write(!app.reset_bootstrap, "".into(), None).await?;
     eprintln!("Hive listener and storage started.");
     let mut tick = tokio::time::interval(Duration::from_millis(500));
-    let mut next_health = tokio::time::Instant::now();
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let interrupt = shutdown_signal();
     tokio::pin!(interrupt);
-    loop {
-        tokio::select! {
-            _ = &mut interrupt => break,
-            _ = tick.tick() => {
-                if health.control().await?.is_some_and(|control| matches!(control.get("action").and_then(|v| v.as_str().ok()).as_deref(), Some("shutdown" | "drain"))) { break; }
-                if tokio::time::Instant::now() >= next_health {
-                    next_health = tokio::time::Instant::now() + Duration::from_secs(2);
-                    let ready = app.storage_ready(2000).await;
-                    health.write(ready && !app.reset_bootstrap, if ready { "" } else { "Storage is recovering." }.into(), None).await?;
-                }
+    let observed = {
+        let background = maintenance.run(app.clone(), health.clone());
+        tokio::pin!(background);
+        loop {
+            tokio::select! {
+                result = &mut interrupt => break result.map_err(failure),
+                _ = &mut background => break Err(IvyError::new("internal_error", "Hive maintenance stopped unexpectedly.")),
+                _ = tick.tick() => match health.control().await {
+                    Ok(Some(control)) if matches!(control.get("action").and_then(|v| v.as_str().ok()).as_deref(), Some("shutdown" | "drain")) => break Ok(()),
+                    Ok(_) => {},
+                    Err(error) => break Err(error),
+                },
             }
         }
-    }
-    health
-        .write(false, "Hive is shutting down.".into(), None)
-        .await?;
-    tokio::time::timeout(
-        Duration::from_secs(15),
-        app.server.network.lifecycle.close(),
-    )
+    };
+    let incomplete = maintenance.stop();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let reported = health
+            .write(false, "Hive is shutting down.".into(), None)
+            .await;
+        app.server.network.lifecycle.close().await?;
+        if let Some(plan) = incomplete {
+            plan.discard_incomplete().await?;
+        }
+        reported
+    })
     .await
     .map_err(failure)??;
-    Ok(())
+    observed
 }

@@ -221,10 +221,10 @@ fn compare(group: &str, traces: Vec<Value>) {
             };
             let o = &trace["requests"];
             let requests = RequestBudget::new(RequestBudgetOptions {
-                maximum: number(o.get("maximum"), 2048.0),
-                maximum_bytes: number(o.get("maximumBytes"), 134_217_728.0),
-                per_consumer: number(o.get("perConsumer"), 256.0),
-                per_consumer_bytes: number(o.get("perConsumerBytes"), 67_108_864.0),
+                maximum: (number(o.get("maximum"), 2048.0)) as usize,
+                maximum_bytes: (number(o.get("maximumBytes"), 134_217_728.0)) as usize,
+                per_consumer: (number(o.get("perConsumer"), 256.0)) as usize,
+                per_consumer_bytes: (number(o.get("perConsumerBytes"), 67_108_864.0)) as usize,
                 name: o["name"].as_str().unwrap_or("request").into(),
             });
             let direct_events = events.clone();
@@ -313,8 +313,7 @@ fn compare(group: &str, traces: Vec<Value>) {
                     "invoke" => {
                         let work = owner.invoke(
                             wire(&step["context"]),
-                            wire(&step["request"]),
-                            number(step.get("bytes"), 0.0),
+                            wire(&step["request"]),(number(step.get("bytes"), 0.0)) as usize,
                         );
                         let (events, name) =
                             (events.clone(), step["name"].as_str().unwrap().to_owned());
@@ -334,8 +333,7 @@ fn compare(group: &str, traces: Vec<Value>) {
                                 .unwrap()
                                 .iter()
                                 .map(wire)
-                                .collect(),
-                            number(step.get("bytes"), 0.0),
+                                .collect(),(number(step.get("bytes"), 0.0)) as usize,
                         );
                         let (events, name) =
                             (events.clone(), step["name"].as_str().unwrap().to_owned());
@@ -375,8 +373,7 @@ fn compare(group: &str, traces: Vec<Value>) {
                     "drop" => watchers[step["name"].as_str().unwrap()].abort(),
                     "probe" => {
                         let probe = requests.acquire(
-                            &step["key"].as_str().unwrap().into(),
-                            step.get("bytes").map(|v| number(Some(v), 1024.0)),
+                            &step["key"].as_str().unwrap().into(),(step.get("bytes").map(|v| number(Some(v), 1024.0))).map(|bytes| bytes as usize),
                         );
                         events.lock().unwrap().push(match probe {
                             Ok(mut lease) => {

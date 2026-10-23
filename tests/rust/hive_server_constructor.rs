@@ -1,6 +1,6 @@
 use super::*;
 use ivy_hive::{
-    browser_push::{self, SendOutcome, Sender, Worker},
+    browser_push::{self, Sender, VapidDetails, Worker},
     oauth::{self, Parameters},
     packages::{PackageRequest, PackageStorage},
     server_constructor::{Dependencies, Options, Prepared},
@@ -84,15 +84,24 @@ impl Sender for Effects {
         &self,
         subscription: IvyJson,
         payload: String,
-        options: IvyJson,
+        details: VapidDetails,
     ) -> browser_push::SendFuture {
+        let options = obj([
+            ("vapidDetails", obj([
+                ("publicKey", details.public_key.into()),
+                ("privateKey", details.private_key.into()),
+                ("subject", details.subject.into()),
+            ])),
+            ("TTL", IvyJson::Number(3600.0)),
+            ("timeout", IvyJson::Number(10000.0)),
+        ]);
         self.0.lock().unwrap().push(obj([
             ("kind", "send".into()),
             ("subscription", subscription),
             ("payload", payload.into()),
             ("options", options),
         ]));
-        Box::pin(async { SendOutcome::Response(Some(IvyJson::Number(201.0))) })
+        Box::pin(async { Ok(201) })
     }
 }
 impl Listener for Effects {

@@ -1,44 +1,17 @@
-//! UI collection observes local causes only at the storage owner's boundary.
+//! UI collection records native filesystem failures at the storage owner's boundary.
 use super::*;
-use ivy_host_runtime::{
-    filesystem_error::{self, Syscall},
-    filesystem_remove,
-    node_path::{Context, from_native},
-};
+use ivy_host_runtime::filesystem;
 
 struct Collector<'a> {
     files: &'a UiFiles,
     store: Option<&'a Store>,
 }
 impl Collector<'_> {
-    fn io<T>(
-        &self,
-        path: &Path,
-        syscall: Syscall,
-        work: impl FnOnce(&Path) -> io::Result<T>,
-    ) -> IvyResult<T> {
-        let logical = from_native(path);
-        // The failed I/O and formatter use the same cwd/drive-cwd snapshot.
-        // An unavailable cwd must not prevent already absolute paths from working.
-        let context = Context::current().ok();
-        let physical = match &context {
-            Some(context) => context.filesystem_path(&logical),
-            None => fs_path(path)?,
-        };
-        work(&physical).map_err(|error| {
-            if let Some(store) = self.store {
-                store.observe_failure(|| {
-                    context.as_ref().and_then(|context| {
-                        filesystem_error::format_at(&error, syscall, &logical, context)
-                            .map(|cause| cause.message)
-                    })
-                });
-            }
-            sql_error(error)
-        })
+    fn io<T>(&self, path: &Path, work: impl FnOnce(&Path) -> io::Result<T>) -> IvyResult<T> {
+        work(&fs_path(path)?).map_err(|error| self.failure(error))
     }
     fn entries(&self, path: &Path) -> IvyResult<Vec<fs::DirEntry>> {
-        let mut values = self.io(path, Syscall::Scandir, |path| {
+        let mut values = self.io(path, |path| {
             fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()
         })?;
         values.sort_by(|a, b| {
@@ -49,11 +22,11 @@ impl Collector<'_> {
         Ok(values)
     }
     fn kind(&self, entry: &fs::DirEntry) -> IvyResult<fs::FileType> {
-        entry.file_type().map_err(|error| self.unmapped(error))
+        entry.file_type().map_err(|error| self.failure(error))
     }
     fn modified_ms(&self, path: &Path) -> IvyResult<f64> {
-        let time = self.io(path, Syscall::Stat, |path| fs::metadata(path))?;
-        let time = time.modified().map_err(|error| self.unmapped(error))?;
+        let time = self.io(path, |path| fs::metadata(path))?;
+        let time = time.modified().map_err(|error| self.failure(error))?;
         Ok(match time.duration_since(UNIX_EPOCH) {
             Ok(d) => d.as_secs() as f64 * 1000.0 + d.subsec_nanos() as f64 / 1_000_000.0,
             Err(e) => {
@@ -62,21 +35,14 @@ impl Collector<'_> {
             }
         })
     }
-    fn unmapped(&self, error: impl Sized) -> IvyError {
+    fn failure(&self, error: io::Error) -> IvyError {
         if let Some(store) = self.store {
-            // Never reuse a handled SQL cause or invent an unqualified I/O message.
-            store.observe_failure(|| None);
+            store.observe_failure(|| Some(error.to_string().into()));
         }
         sql_error(error)
     }
     fn remove(&self, path: &Path) -> IvyResult<()> {
-        let context = Context::current().map_err(|error| self.unmapped(error))?;
-        filesystem_remove::remove_sync_force_at(&from_native(path), &context).map_err(|failure| {
-            if let Some(store) = self.store {
-                store.observe_failure(|| failure.node.map(|cause| cause.message));
-            }
-            sql_error(failure.source)
-        })
+        filesystem::remove_force_sync(&fs_path(path)?).map_err(|error| self.failure(error))
     }
     fn collect(&self, ui: &JsString, retained: &HashSet<JsString>, now_ms: f64) -> IvyResult<()> {
         let directory = absolute(&self.files.root.join(component_id(ui)?)).map_err(sql_error)?;
@@ -100,7 +66,7 @@ impl Collector<'_> {
             }
         }
         if retained.is_empty() && self.entries(&directory)?.is_empty() {
-            self.io(&directory, Syscall::Rmdir, |path| fs::remove_dir(path))?;
+            self.io(&directory, |path| fs::remove_dir(path))?;
         }
         Ok(())
     }
@@ -143,7 +109,7 @@ impl Collector<'_> {
             if depth > 0 {
                 self.sweep(&target, depth - 1, cutoff)?;
                 if self.entries(&target)?.is_empty() {
-                    self.io(&target, Syscall::Rmdir, |path| fs::remove_dir(path))?;
+                    self.io(&target, |path| fs::remove_dir(path))?;
                 }
             } else if self.modified_ms(&target)? < cutoff {
                 self.remove(&target)?;

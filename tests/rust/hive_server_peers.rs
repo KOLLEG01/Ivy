@@ -157,7 +157,10 @@ impl Storage for Worker {
                 IvyJson::object([
                     ("timeoutMs", IvyJson::Number(options.timeout_ms as f64)),
                     ("terminateOnTimeout", options.terminate_on_timeout.into()),
-                    ("reservedBytes", IvyJson::Number(options.reserved_bytes as f64)),
+                    (
+                        "reservedBytes",
+                        IvyJson::Number(options.reserved_bytes as f64),
+                    ),
                     ("backup", options.backup.into()),
                 ]),
             ),
@@ -429,10 +432,10 @@ async fn run_trace(trace: &Value, source: &IvyJson) -> IvyJson {
     };
     let o = &trace["requests"];
     let requests = RequestBudget::new(RequestBudgetOptions {
-        maximum: number(o.get("maximum"), 2048.0),
-        maximum_bytes: number(o.get("maximumBytes"), 134_217_728.0),
-        per_consumer: number(o.get("perConsumer"), 256.0),
-        per_consumer_bytes: number(o.get("perConsumerBytes"), 67_108_864.0),
+        maximum: (number(o.get("maximum"), 2048.0)) as usize,
+        maximum_bytes: (number(o.get("maximumBytes"), 134_217_728.0)) as usize,
+        per_consumer: (number(o.get("perConsumer"), 256.0)) as usize,
+        per_consumer_bytes: (number(o.get("perConsumerBytes"), 67_108_864.0)) as usize,
         name: o["name"].as_str().unwrap_or("request").into(),
     });
     let ids_seen = Arc::new(Mutex::new(Vec::<JsString>::new()));
@@ -801,7 +804,7 @@ async fn run_trace(trace: &Value, source: &IvyJson) -> IvyJson {
                     let work = invocation.invoke(
                         expanded(&step["context"]),
                         expanded(&step["frame"]),
-                        number(step.get("receivedBytes"), 0.0),
+                        (number(step.get("receivedBytes"), 0.0)) as usize,
                     );
                     let (events, name) = (events.clone(), name.to_owned());
                     watchers.insert(
@@ -975,7 +978,8 @@ async fn run_trace(trace: &Value, source: &IvyJson) -> IvyJson {
                 "probe" => {
                     let result = requests.acquire(
                         &step["key"].as_str().unwrap().into(),
-                        step.get("bytes").map(|v| number(Some(v), 1024.0)),
+                        (step.get("bytes").map(|v| number(Some(v), 1024.0)))
+                            .map(|bytes| bytes as usize),
                     );
                     events.lock().unwrap().push(match result {
                         Ok(mut lease) => {
@@ -1396,50 +1400,117 @@ fn original_peer_notifications_health_publication_and_close_effects() {
     compare("peer-effects", traces);
 }
 
+fn native_trace(mut trace: Value) -> Value {
+    trace["packages"] = false.into();
+    let source = wire(&json!({"profile":{"iso":[[10000,"1970-01-01T00:00:10.000Z"]],"dates":[]}}));
+    let runtime = Builder::new_current_thread()
+        .enable_time()
+        .start_paused(true)
+        .build()
+        .unwrap();
+    serde_json::from_str(&encode(&runtime.block_on(run_trace(&trace, &source)))).unwrap()
+}
+
 #[test]
-fn original_raw_provider_outcomes_and_lossless_constructor_delegation() {
-    let mut captures = vec![];
-    let mut original_only = vec![];
+fn native_provider_ids_retain_pending_work_until_the_exact_peer_reply() {
+    for id in [
+        None,
+        Some(json!(null)),
+        Some(json!(false)),
+        Some(json!(7)),
+        Some(json!(["7"])),
+        Some(json!([["7"]])),
+        Some(json!({})),
+    ] {
+        let mut frame = json!({"jsonrpc":"2.0","result":"malformed"});
+        if let Some(id) = id {
+            frame["id"] = id;
+        }
+        let value = native_trace(json!({"name":"typed-correlation","ids":["7"],"steps":[
+            connect("p",Some(("node",1.0))), connect("other",Some(("node",1.0))),
+            update("node",1.0), forward("a","node",1.0),
+            {"op":"result","peer":"p","frame":frame},
+            result("other","a",json!("wrong peer")), result("p","a",json!("done")),
+            result("p","a",json!("duplicate")), {"op":"advance","ms":30000}
+        ]}));
+        let rows = value["rows"].as_array().unwrap();
+        for index in [4, 5] {
+            assert!(
+                !rows[index]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|event| event["kind"] == "forward-ok" || event["kind"] == "forward-error")
+            );
+        }
+        let settled = rows
+            .iter()
+            .flat_map(|row| row.as_array().unwrap())
+            .filter(|event| event["kind"] == "forward-ok" || event["kind"] == "forward-error")
+            .collect::<Vec<_>>();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0]["kind"], "forward-ok");
+        assert_eq!(settled[0]["value"], "done");
+    }
+}
+
+#[test]
+fn native_provider_outcomes_use_the_typed_contract_and_preserve_error_fields() {
     for outcome in [
+        json!("not_executed"),
+        json!("unknown"),
+        json!("completed"),
         json!(["unknown"]),
         json!(["completed"]),
         json!([["not_executed"]]),
+        json!(null),
+        json!(false),
+        json!(1),
+        json!("invalid"),
     ] {
-        let trace = json!({"name":format!("raw-outcome-{outcome}"),"steps":[connect("p",Some(("node",1.0))),forward("a","node",1.0),{"op":"result","peer":"p","call":"a","frame":{"jsonrpc":"2.0","id":"assigned","error":{"code":4,"message":"Retained.","data":{"code":"remote","outcome":outcome,"details":null}}}}]});
-        original_only.push(trace.clone());
-        let mut capture = trace;
-        capture["captureErrorFactory"] = json!(true);
-        captures.push(capture);
-    }
-    let original = oracle(&original_only);
-    for (input, result) in original_only.iter().zip(original.as_array().unwrap()) {
-        let raw = result
-            .get("value")
-            .unwrap()
-            .get("rows")
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .last()
-            .unwrap()
+        let value = native_trace(
+            json!({"name":"typed-outcome","steps":[connect("p",Some(("node",1.0))), update("node",1.0), forward("a","node",1.0),
+                {"op":"result","peer":"p","call":"a","frame":{"jsonrpc":"2.0","error":{"code":4,"message":"Retained é 🙂.","data":{"code":"remote","outcome":outcome,"details":null}}}},
+                {"op":"advance","ms":30000}
+            ]}),
+        );
+        let events = value["rows"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|v| v.get("kind") == Some(&"forward-error".into()))
-            .unwrap()
-            .get("error")
-            .unwrap()
-            .get("data")
-            .unwrap()
-            .get("outcome")
-            .unwrap();
-        assert_eq!(
-            raw,
-            &wire(&input["steps"][2]["frame"]["error"]["data"]["outcome"])
-        );
+            .flat_map(|row| row.as_array().unwrap())
+            .collect::<Vec<_>>();
+        let failed = events
+            .iter()
+            .filter(|event| event["kind"] == "forward-error")
+            .collect::<Vec<_>>();
+        assert_eq!(failed.len(), 1);
+        if matches!(
+            outcome.as_str(),
+            Some("not_executed" | "unknown" | "completed")
+        ) {
+            assert_eq!(failed[0]["error"]["message"], "Retained é 🙂.");
+            assert_eq!(failed[0]["error"]["data"]["code"], "remote");
+            assert_eq!(failed[0]["error"]["data"]["outcome"], outcome);
+            let input = events
+                .iter()
+                .find(|event| event["kind"] == "provider-error-input")
+                .unwrap();
+            assert!(input.as_object().unwrap().contains_key("details"));
+            assert_eq!(input["details"], Value::Null);
+        } else {
+            assert_eq!(
+                failed[0]["error"]["data"]["code"],
+                "provider_contract_error"
+            );
+            assert_eq!(failed[0]["error"]["data"]["outcome"], "unknown");
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| event["kind"] == "provider-error-input")
+            );
+        }
     }
-    compare_sources("raw-outcome-wire-owner", &original_only, &original);
-    compare("constructor-delegation-only", captures);
 }
 
 #[test]

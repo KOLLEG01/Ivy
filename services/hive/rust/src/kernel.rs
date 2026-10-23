@@ -114,14 +114,12 @@ fn location(params: &IvyJson) -> IvyResult<objects::Location<'_>> {
     }
 }
 impl Kernel {
-    /// The original closes SQLite before removing a temporary UI root.
+    /// Close storage before removing its temporary UI root.
     pub fn close(self) -> IvyResult<()> {
         self.parts.store.close()?;
         if self.temporary_ui_root {
-            ivy_host_runtime::filesystem_remove::remove_sync_force(
-                &ivy_host_runtime::node_path::from_native(&self.parts.ui_files.root),
-            )
-            .map_err(crate::store::sql_error)?;
+            ivy_host_runtime::filesystem::remove_force_sync(&self.parts.ui_files.root)
+                .map_err(crate::store::sql_error)?;
         }
         Ok(())
     }

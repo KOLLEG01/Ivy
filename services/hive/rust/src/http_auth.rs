@@ -77,10 +77,10 @@ impl Authentication {
             oauth,
             clock,
             authentication: RequestBudget::new(RequestBudgetOptions {
-                maximum: 512.0,
-                maximum_bytes: 512.0 * 1024.0,
-                per_consumer: 64.0,
-                per_consumer_bytes: 64.0 * 1024.0,
+                maximum: 512,
+                maximum_bytes: 512 * 1024,
+                per_consumer: 64,
+                per_consumer_bytes: 64 * 1024,
                 name: "authentication".into(),
             }),
             state: Mutex::new(State {
@@ -285,7 +285,7 @@ impl Inner {
             .lock()
             .unwrap()
             .arrivals
-            .admit(key, (self.clock)())?;
+            .admit(key, std::time::Instant::now())?;
         self.authentication.acquire(key, None)
     }
     fn same_origin(&self, headers: &Headers) -> IvyResult<()> {

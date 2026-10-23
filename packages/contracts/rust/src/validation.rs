@@ -1,4 +1,4 @@
-use crate::{IvyError,IvyJson,IvyResult,JsString,json::js_string};
+use crate::{IvyError,IvyJson,IvyResult,JsString};
 
 fn require(condition:bool,message:&str)->IvyResult<()> {if condition{Ok(())}else{Err(IvyError::new("invalid_frame",message))}}
 fn object(value:&IvyJson,message:&str)->IvyResult<()>{require(value.as_object().is_some(),message)}
@@ -25,7 +25,7 @@ pub fn validate_response_frame(value:&IvyJson)->IvyResult<()> {
         object(error,"Provider error must be an object.")?;
         require(exact_keys(error,&["code","message","data"])&&safe_integer(error.get("code"),-9_007_199_254_740_991.0)&&text(error.get("message"),2048)&&error.get("data").and_then(IvyJson::as_object).is_some(),"Provider error envelope is incomplete.")?;
         let data=error.get("data").unwrap();
-        require(exact_keys(data,&["code","outcome","details"])&&text(data.get("code"),128)&&data.get("outcome").is_some_and(|v|["not_executed","unknown","completed"].iter().any(|s|js_string(v)==JsString::from(*s))),"Provider error outcome is invalid.")?;
+        require(exact_keys(data,&["code","outcome","details"])&&text(data.get("code"),128)&&["not_executed","unknown","completed"].iter().any(|s|equal(data.get("outcome"),s)),"Provider error outcome is invalid.")?;
     }Ok(())
 }
 pub fn validate_provider_call_frame(value:&IvyJson)->IvyResult<()> {

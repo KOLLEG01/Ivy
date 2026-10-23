@@ -261,14 +261,13 @@ fn admissions(input: &IvyJson) -> IvyJson {
         .unwrap_or(&[]);
     let n = |at: usize, default: f64| b.get(at).and_then(IvyJson::as_f64).unwrap_or(default);
     let owner = Requests::new(RequestBudget::new(RequestBudgetOptions {
-        maximum: n(0, 2048.0),
-        maximum_bytes: n(1, 128.0 * 1024.0 * 1024.0),
-        per_consumer: n(2, 256.0),
-        per_consumer_bytes: n(3, 64.0 * 1024.0 * 1024.0),
+        maximum: (n(0, 2048.0)) as usize,
+        maximum_bytes: (n(1, 128.0 * 1024.0 * 1024.0)) as usize,
+        per_consumer: (n(2, 256.0)) as usize,
+        per_consumer_bytes: (n(3, 64.0 * 1024.0 * 1024.0)) as usize,
         name: b
             .get(4)
-            .and_then(IvyJson::as_js_string)
-            .cloned()
+            .map(|value| value.as_str().unwrap())
             .unwrap_or_else(|| "request".into()),
     }));
     let mut sockets = vec![];
@@ -326,7 +325,7 @@ fn admissions(input: &IvyJson) -> IvyJson {
                     .unwrap()
                     .body_lease()
                     .unwrap()
-                    .grow(step.required("bytes").unwrap().as_f64().unwrap())
+                    .grow((step.required("bytes").unwrap().as_f64().unwrap()) as usize)
                 {
                     replies.get_mut(&id).unwrap().events.push(obj([
                         ("kind", "growError".into()),

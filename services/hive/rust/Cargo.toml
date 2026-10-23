@@ -13,14 +13,10 @@ chrono-tz.workspace = true
 regex.workspace = true
 ivy-cli.workspace = true
 ivy-sdk.workspace = true
-p256 = { version = "=0.13.2", default-features = false, features = ["arithmetic"] }
-ecdsa = { version = "=0.16.9", default-features = false, features = ["arithmetic", "hazmat"] }
 http-body-util = { version = "=0.1.5", default-features = false }
 hyper-util = { version = "=0.1.21", default-features = false, features = ["tokio"] }
 hyper.workspace = true
 tokio-tungstenite.workspace = true
-rustls = { version = "=0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
-tokio-rustls = { version = "=0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
 futures-util.workspace = true
 reqwest.workspace = true
 aws-lc-rs.workspace = true
@@ -37,6 +33,7 @@ tokio-util = { workspace = true, features = ["io"] }
 [dev-dependencies]
 serde_json.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Globalization"] }
@@ -75,6 +72,10 @@ path = "../../../tests/rust/hive_push_native.rs"
 [[test]]
 name = "hive-push-profile"
 path = "../../../tests/rust/hive_push_profile.rs"
+
+[[test]]
+name = "hive-ui-collection-causes"
+path = "../../../tests/rust/hive_ui_collection_causes.rs"
 
 [[test]]
 name = "hive-package-ui"

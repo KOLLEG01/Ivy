@@ -25,6 +25,147 @@ fn expected(value: &serde_json::Value) -> IvyJson {
     parse(&serde_json::to_string(value).unwrap(), usize::MAX).unwrap()
 }
 #[test]
+fn native_projection_requires_typed_names_and_keeps_utf16() {
+    let catalog = IvyJson::object([("version", "1.2.3".into())]);
+    let method = IvyJson::object([("method", "thread/read".into())]);
+    for invalid in [
+        None,
+        Some(IvyJson::Null),
+        Some(false.into()),
+        Some(IvyJson::Number(123.0)),
+        Some(IvyJson::Array(vec!["thread/read".into()])),
+        Some(IvyJson::Object(vec![])),
+    ] {
+        for is_version in [true, false] {
+            let mut changed = IvyJson::Object(vec![]);
+            if let Some(value) = &invalid {
+                changed.insert(if is_version { "version" } else { "method" }, value.clone());
+            }
+            for hash in [None, Some(JsString::from("known-identity"))] {
+                let error = if is_version {
+                    native_tool_definition(&changed, &method, hash.as_ref())
+                } else {
+                    native_tool_definition(&catalog, &changed, hash.as_ref())
+                }
+                .unwrap_err();
+                assert_eq!(error.code, "invalid_arguments");
+            }
+        }
+    }
+    let catalog = parse(r#"{"version":"1.2.3\ud800"}"#, 100).unwrap();
+    let method = parse(r#"{"method":"read/\udfff😀"}"#, 100).unwrap();
+    let identity = JsString::from(hash_json(&catalog).unwrap());
+    let value = native_tool_definition(&catalog, &method, None).unwrap();
+    assert_eq!(
+        value,
+        native_tool_definition(&catalog, &method, Some(&identity)).unwrap()
+    );
+    assert_eq!(value.get("interfaceVersion"), catalog.get("version"));
+    assert_eq!(value.get("name"), method.get("method"));
+    assert_eq!(value.get("nativeMethod"), method.get("method"));
+    assert_eq!(
+        value.get("description").unwrap(),
+        &parse(r#""Installed public Codex 1.2.3\ud800 method read/\udfff😀. Supply its unchanged native arguments. Supply an outer stable operationId.""#, 1000).unwrap()
+    );
+}
+#[test]
+fn native_schema_projection_requires_typed_dictionaries() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut catalog = parse(
+        &std::fs::read_to_string(root.join("specs/native/codex-0.159.2/catalog.json")).unwrap(),
+        usize::MAX,
+    )
+    .unwrap();
+    let mut method = catalog.get("clientRequests").unwrap().as_array().unwrap()[0].clone();
+    method.insert("method", "thread/read".into());
+    for defs in ["{}", "false"] {
+        method.insert(
+            "inputSchema",
+            parse(
+                &format!(r##"{{"$ref":"#/$defs/constructor","$defs":{defs}}}"##),
+                100,
+            )
+            .unwrap(),
+        );
+        catalog.insert("clientRequests", IvyJson::Array(vec![method.clone()]));
+        let contract = NativeContract::new(&catalog).unwrap();
+        assert_eq!(
+            contract
+                .input_schema(&"thread/read".into(), &[])
+                .unwrap_err()
+                .code,
+            "native_catalog_invalid"
+        );
+    }
+    for input in [
+        r#"{"type":"object","properties":[],"required":null}"#,
+        r#"{"type":"object","properties":null}"#,
+        r#"{"type":"object","properties":"x"}"#,
+        r#"{"type":"object","properties":{},"required":true}"#,
+        r#"{"type":"object","properties":{},"required":null}"#,
+        r#"{"type":"object","properties":{},"required":[1]}"#,
+        r#"{"type":"object","properties":{},"required":["keep",null]}"#,
+        r#"{"anyOf":[null]}"#,
+        r#"{"anyOf":[true,false,1,"x",[]]}"#,
+        r#"{"anyOf":[{"type":"object","properties":[]}]}"#,
+        r#"{"oneOf":[[]]}"#,
+        r##"{"$ref":"#/$defs/0","$defs":[{"type":"object","properties":{"x":{}}}]}"##,
+        r##"{"$ref":"#/$defs/Root","$defs":{"Root":null}}"##,
+    ] {
+        method.insert("inputSchema", parse(input, 1000).unwrap());
+        catalog.insert("clientRequests", IvyJson::Array(vec![method.clone()]));
+        let contract = NativeContract::new(&catalog).unwrap();
+        let original = contract.catalog().clone();
+        assert_eq!(
+            contract
+                .input_schema(&"thread/read".into(), &[])
+                .unwrap_err()
+                .code,
+            "native_catalog_invalid",
+            "{input}"
+        );
+        assert_eq!(contract.catalog(), &original);
+    }
+    method.insert(
+        "inputSchema",
+        parse(r##"{"$ref":"#/$defs/constructor","$defs":{"constructor":{"type":"object","properties":{"0":{},"length":{},"\ud800":{},"keep":{"type":"string"}},"required":["0","length","\ud800","keep"]}}}"##, 1000).unwrap(),
+    );
+    catalog.insert("clientRequests", IvyJson::Array(vec![method]));
+    let contract = NativeContract::new(&catalog).unwrap();
+    let original = contract.catalog().clone();
+    let schema = contract
+        .input_schema(
+            &"thread/read".into(),
+            &["0".into(), "length".into(), JsString(vec![0xd800])],
+        )
+        .unwrap();
+    let definition = schema.get("$defs").unwrap().get("constructor").unwrap();
+    assert_eq!(
+        definition.get("required"),
+        Some(&IvyJson::Array(vec!["keep".into()]))
+    );
+    assert_eq!(definition.get("additionalProperties"), Some(&false.into()));
+    assert_eq!(
+        definition
+            .get("properties")
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        definition
+            .get("properties")
+            .unwrap()
+            .get("keep")
+            .unwrap()
+            .get("type"),
+        Some(&"string".into())
+    );
+    assert_eq!(contract.catalog(), &original);
+}
+#[test]
 fn retained_catalogs_and_projections_match_typescript() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = std::process::Command::new("node")
@@ -42,7 +183,7 @@ fn retained_catalogs_and_projections_match_typescript() {
         String::from_utf8_lossy(&output.stderr)
     );
     let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(rows.len() > 40);
+    assert!(rows.iter().filter(|row| row["path"].is_string()).count() >= 5);
     let mut count = 0;
     for row in rows {
         let source = if let Some(path) = row["path"].as_str() {

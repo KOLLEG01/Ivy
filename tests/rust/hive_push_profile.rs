@@ -1,314 +1,212 @@
-use ivy_contracts::IvyJson;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_hive::{
-    browser_push::{SendOutcome, Sender},
-    browser_push_https::{Lookup, LookupFuture, NativeHttps, NetworkProfile},
-    browser_push_native::NativeSender,
+    browser_push_https::NativeHttps,
+    browser_push_native::{Https, Request},
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
-    io::Write,
-    net::{IpAddr, SocketAddr},
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
     time::Duration,
 };
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::TcpListener,
+    task::{JoinHandle, JoinSet},
+    time::Instant,
+};
+use tokio_rustls::{
+    TlsAcceptor,
+    rustls::{
+        self, ServerConfig,
+        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    },
+};
 
-#[path = "hive_push_peer.rs"]
-mod peer;
-use peer::*;
-#[path = "hive_push_https.rs"]
-mod existing_https;
-
-struct Addresses {
-    values: Vec<String>,
-    delay: Duration,
-    calls: AtomicUsize,
+#[derive(Debug)]
+struct Received {
+    method: String,
+    path: String,
+    headers: HashMap<String, String>,
+    body: Vec<u8>,
 }
-impl Lookup for Addresses {
-    fn addresses(&self, _: String, port: u16) -> LookupFuture {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        let values = self.values.clone();
-        let delay = self.delay;
-        Box::pin(async move {
-            tokio::time::sleep(delay).await;
-            Ok(values
-                .iter()
-                .map(|v| SocketAddr::new(v.parse::<IpAddr>().unwrap(), port))
-                .collect())
-        })
+struct Peer {
+    address: SocketAddr,
+    records: Arc<Mutex<Vec<Received>>>,
+    task: JoinHandle<()>,
+}
+impl Drop for Peer {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }
-fn sender(peer: &Oracle, lookup: Arc<dyn Lookup>, profile: NetworkProfile) -> NativeSender {
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    use tokio_rustls::rustls::{
-        ClientConfig, RootCertStore, crypto::aws_lc_rs, pki_types::CertificateDer,
-    };
-    let mut roots = RootCertStore::empty();
-    roots
-        .add(CertificateDer::from(
-            STANDARD
-                .decode(peer.profile["caDer"].as_str().unwrap())
-                .unwrap(),
-        ))
-        .unwrap();
-    let tls = ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
-        .with_safe_default_protocol_versions()
+fn pem(value: &str) -> Vec<u8> {
+    STANDARD
+        .decode(
+            value
+                .lines()
+                .filter(|line| !line.starts_with('-'))
+                .collect::<String>(),
+        )
         .unwrap()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    NativeSender::new(
-        Arc::new(
-            NativeHttps::with_network_profile(
-                tokio::runtime::Handle::current(),
-                Arc::new(tls),
-                lookup,
-                profile,
+}
+impl Peer {
+    async fn start() -> Self {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../fixtures/hive-push-tls.json")).unwrap();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(pem(fixture["cert"].as_str().unwrap()))],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(pem(fixture["key"]
+                    .as_str()
+                    .unwrap()))),
             )
-            .unwrap(),
-        ),
-        Arc::new(|| Ok(1700043200)),
+            .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let received = records.clone();
+        let task = tokio::spawn(async move {
+            let mut connections = JoinSet::new();
+            loop {
+                tokio::select! {
+                    incoming = listener.accept() => {
+                        let (stream, _) = incoming.unwrap();
+                        let acceptor = acceptor.clone(); let records = received.clone();
+                        connections.spawn(async move {
+                            let Ok(stream) = acceptor.accept(stream).await else { return; };
+                            let mut stream = BufReader::new(stream);
+                            let mut first = String::new();
+                            stream.read_line(&mut first).await.unwrap();
+                            let mut parts = first.split_whitespace();
+                            let method = parts.next().unwrap().to_owned();
+                            let path = parts.next().unwrap().to_owned();
+                            let mut headers = HashMap::new();
+                            loop {
+                                let mut line = String::new(); stream.read_line(&mut line).await.unwrap();
+                                if line == "\r\n" { break; }
+                                let (name, value) = line.split_once(':').unwrap();
+                                headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
+                            }
+                            let length = headers.get("content-length").unwrap().parse().unwrap();
+                            let mut body = vec![0; length]; stream.read_exact(&mut body).await.unwrap();
+                            records.lock().unwrap().push(Received { method, path: path.clone(), headers, body });
+                            let response = match path.as_str() {
+                                "/redirect" => "HTTP/1.1 307 Temporary Redirect\r\nLocation: /status/201\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                                "/status/410" => "HTTP/1.1 410 Gone\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                                "/partial" => "HTTP/1.1 201 Created\r\nContent-Length: 4\r\nConnection: close\r\n\r\nab",
+                                "/compressed" => "HTTP/1.1 201 Created\r\nContent-Length: 2\r\nContent-Encoding: gzip\r\nConnection: close\r\n\r\na",
+                                _ => "HTTP/1.1 201 Created\r\nContent-Length: 2\r\nConnection: close\r\n\r\na",
+                            };
+                            stream.get_mut().write_all(response.as_bytes()).await.unwrap();
+                            stream.get_mut().flush().await.unwrap();
+                            if path == "/delay" {
+                                tokio::time::sleep(Duration::from_millis(150)).await;
+                                stream.get_mut().write_all(b"b").await.unwrap();
+                            } else if path == "/stall" {
+                                tokio::time::sleep(Duration::from_secs(20)).await;
+                            } else if path != "/partial" && path != "/redirect" && path != "/status/410" {
+                                stream.get_mut().write_all(b"b").await.unwrap();
+                            }
+                            let _ = stream.get_mut().shutdown().await;
+                        });
+                    },
+                    _ = connections.join_next(), if !connections.is_empty() => {},
+                }
+            }
+        });
+        Self {
+            address,
+            records,
+            task,
+        }
+    }
+    fn client(&self) -> NativeHttps {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../fixtures/hive-push-tls.json")).unwrap();
+        NativeHttps::from_builder(
+            reqwest::Client::builder()
+                .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+                .add_root_certificate(
+                    reqwest::Certificate::from_pem(fixture["ca"].as_str().unwrap().as_bytes())
+                        .unwrap(),
+                )
+                .resolve("localhost", self.address),
+        )
+        .unwrap()
+    }
+    fn request(&self, path: &str) -> Request {
+        Request {
+            endpoint: format!("https://localhost:{}{path}", self.address.port()),
+            headers: vec![
+                ("TTL".into(), "3600".into()),
+                ("Content-Encoding".into(), "aes128gcm".into()),
+                ("Authorization".into(), "vapid test-token".into()),
+            ],
+            body: b"encrypted-notification".to_vec(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_https_checks_trust_preserves_delivery_and_waits_for_body_end() {
+    let peer = Peer::start().await;
+    let client = peer.client();
+    let start = Instant::now();
+    assert_eq!(client.post(peer.request("/delay")).await.unwrap(), 201);
+    assert!(start.elapsed() >= Duration::from_millis(150));
+    assert_eq!(client.post(peer.request("/status/410")).await.unwrap(), 410);
+    assert_eq!(client.post(peer.request("/redirect")).await.unwrap(), 307);
+    assert_eq!(client.post(peer.request("/compressed")).await.unwrap(), 201);
+    assert!(client.post(peer.request("/partial")).await.is_err());
+    let untrusted =
+        NativeHttps::from_builder(reqwest::Client::builder().resolve("localhost", peer.address))
+            .unwrap();
+    assert!(untrusted.post(peer.request("/status/201")).await.is_err());
+    let mut insecure = peer.request("/status/201");
+    insecure.endpoint = insecure.endpoint.replacen("https:", "http:", 1);
+    assert!(client.post(insecure).await.is_err());
+    let records = peer.records.lock().unwrap();
+    assert_eq!(
+        records.len(),
+        5,
+        "No redirect, retry, untrusted or plaintext delivery."
+    );
+    assert_eq!(
+        records.iter().map(|v| v.path.as_str()).collect::<Vec<_>>(),
+        [
+            "/delay",
+            "/status/410",
+            "/redirect",
+            "/compressed",
+            "/partial"
+        ]
+    );
+    for record in records.iter() {
+        assert_eq!(record.method, "POST");
+        assert_eq!(record.body, b"encrypted-notification");
+        assert_eq!(record.headers["ttl"], "3600");
+        assert_eq!(record.headers["content-encoding"], "aes128gcm");
+        assert_eq!(record.headers["authorization"], "vapid test-token");
+    }
+}
+
+#[tokio::test]
+async fn native_https_deadline_bounds_an_unfinished_response() {
+    let peer = Peer::start().await;
+    let result = tokio::time::timeout(
+        Duration::from_secs(12),
+        peer.client().post(peer.request("/stall")),
     )
-}
-fn lookup(values: &[&str], delay: u64) -> Arc<Addresses> {
-    Arc::new(Addresses {
-        values: values.iter().map(|s| s.to_string()).collect(),
-        delay: Duration::from_millis(delay),
-        calls: 0.into(),
-    })
-}
-async fn compare(
-    peer: &mut Oracle,
-    sender: &NativeSender,
-    path: &str,
-    host: Option<&str>,
-) -> Value {
-    let original = peer
-        .call(json!({"op":"original","path":path,"hostname":host}))
-        .await;
-    let before = peer.call(json!({"op":"stats"})).await["requests"]
-        .as_array()
-        .unwrap()
-        .len();
-    let (status, millis) = send(sender, &peer.profile, path, host).await;
-    let all = peer.call(json!({"op":"stats"})).await;
-    let requests = &all["requests"].as_array().unwrap()[before..];
-    let record = json!({"profile":peer.profile["profile"],"path":path,"host":host,"original":original,"native":{"status":status,"millis":millis,"requests":requests}});
-    save(&record);
-    record
-}
-fn signatures(record: &Value) {
-    for r in record["original"]["requests"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .chain(record["native"]["requests"].as_array().unwrap())
-    {
-        assert_eq!(r["signatureValid"], true);
-        assert_eq!(r["plaintext"], "notification");
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn connection_families_order_duplicates_and_dns_deadline_match_original() {
-    let cases = [
-        (vec!["::1", "127.0.0.1"], true, 0, false, 201),
-        (
-            vec!["::1", "::1", "127.0.0.2", "127.0.0.1"],
-            true,
-            0,
-            false,
-            201,
-        ),
-        (vec!["::1", "127.0.0.1"], false, 0, false, 0),
-        (vec!["127.0.0.1", "::1"], true, 0, true, 201),
-        (vec!["::1", "127.0.0.1"], true, 0, true, 201),
-        (vec!["127.0.0.1"], true, 11000, false, 0),
-    ];
-    for (values, auto, delay, dual, status) in cases {
-        let spec = json!({"certificate":"valid","addresses":values,"autoSelectFamily":auto,"lookupDelay":delay,"dualStack":dual});
-        let mut peer = Oracle::start_profile(Some(&spec)).await;
-        let resolver = lookup(&values, delay);
-        let sender = sender(
-            &peer,
-            resolver.clone(),
-            NetworkProfile {
-                auto_select_family: auto,
-                ..NetworkProfile::default()
-            },
-        );
-        let record = compare(&mut peer, &sender, "/status/201", None).await;
-        assert_eq!(record["original"]["status"], status, "{record}");
-        assert_eq!(record["native"]["status"], status, "{record}");
-        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
-        signatures(&record);
-        if dual {
-            assert_eq!(
-                record["original"]["requests"][0]["remoteAddress"],
-                record["native"]["requests"][0]["remoteAddress"]
-            );
-        }
-        if auto && values.len() > 1 && !dual {
-            assert!(
-                record["native"]["millis"].as_f64().unwrap() < 1600.0,
-                "{record}"
-            );
-        }
-        if delay > 10000 {
-            for side in ["original", "native"] {
-                assert!((9000.0..12000.0).contains(&record[side]["millis"].as_f64().unwrap()));
-            }
-        }
-        drop(sender);
-        peer.close().await;
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn certificate_profiles_preserve_checked_outcomes_and_record_common_name_gap() {
-    for (kind, host, old, new) in [
-        ("valid", None, 201, 201),
-        ("expired", None, 0, 0),
-        ("future", None, 0, 0),
-        ("client-eku", None, 0, 0),
-        ("common-name-only", None, 201, 0),
-        ("wildcard", Some("a.example.test"), 201, 201),
-        ("wildcard", Some("a.b.example.test"), 0, 0),
-        ("ip", Some("127.0.0.1"), 201, 201),
-    ] {
-        let spec = json!({"certificate":kind,"addresses":["127.0.0.1"]});
-        let mut peer = Oracle::start_profile(Some(&spec)).await;
-        let resolver = lookup(&["127.0.0.1"], 0);
-        let sender = sender(&peer, resolver.clone(), NetworkProfile::default());
-        let record = compare(&mut peer, &sender, "/status/201", host).await;
-        assert_eq!(record["original"]["status"], old, "{record}");
-        assert_eq!(record["native"]["status"], new, "{record}");
-        signatures(&record);
-        if kind == "ip" {
-            assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
-            for side in ["original", "native"] {
-                assert_eq!(record[side]["requests"][0]["servername"], false);
-            }
-        }
-        // This explicit negative comparison is not a verifier parity pass.
-        if kind == "common-name-only" {
-            save(&json!({"finding":"open-common-name-fallback-gap","record":record}));
-        }
-        drop(sender);
-        peer.close().await;
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tls12_tls13_and_session_resumption_match_original() {
-    for version in ["TLSv1.2", "TLSv1.3"] {
-        let spec = json!({"certificate":"valid","addresses":["127.0.0.1"],"minVersion":version,"maxVersion":version});
-        let mut peer = Oracle::start_profile(Some(&spec)).await;
-        let sender = sender(&peer, lookup(&["127.0.0.1"], 0), NetworkProfile::default());
-        for repeated in [false, true] {
-            let record = compare(&mut peer, &sender, "/close", None).await;
-            for side in ["original", "native"] {
-                assert_eq!(record[side]["status"], 200, "{record}");
-                assert_eq!(record[side]["requests"][0]["tls"], version);
-                assert_eq!(
-                    record[side]["requests"][0]["sessionReused"], repeated,
-                    "{record}"
-                );
-            }
-            signatures(&record);
-        }
-        drop(sender);
-        peer.close().await;
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn session_cache_capacity_difference_is_an_open_profile_gap() {
-    let spec = json!({"certificate":"wildcard","addresses":["127.0.0.1"],"minVersion":"TLSv1.2","maxVersion":"TLSv1.2"});
-    let mut peer = Oracle::start_profile(Some(&spec)).await;
-    let sender = sender(&peer, lookup(&["127.0.0.1"], 0), NetworkProfile::default());
-    for index in 0..33 {
-        let host = format!("s{index}.example.test");
-        let record = compare(&mut peer, &sender, "/close", Some(&host)).await;
-        for side in ["original", "native"] {
-            assert_eq!(record[side]["status"], 200, "{record}");
-            assert_eq!(record[side]["requests"][0]["sessionReused"], false);
-        }
-    }
-    let record = compare(&mut peer, &sender, "/close", Some("s0.example.test")).await;
-    save(&json!({"finding":"open-session-cache-capacity-gap","record":record}));
-    assert_eq!(
-        record["original"]["requests"][0]["sessionReused"], true,
-        "{record}"
-    );
-    assert_eq!(
-        record["native"]["requests"][0]["sessionReused"], false,
-        "{record}"
-    );
-    // Node retains this entry in its100-origin cache. The supplied rustls default
-    // has already evicted it; this explicit negative is not a parity pass.
-    drop(sender);
-    peer.close().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_response_admission_matches_original() {
-    let spec = json!({"certificate":"valid","addresses":["127.0.0.1"]});
-    let mut peer = Oracle::start_profile(Some(&spec)).await;
-    let sender = sender(&peer, lookup(&["127.0.0.1"], 0), NetworkProfile::default());
-    let mut mismatches = Vec::new();
-    for kind in [
-        "normal",
-        "folded",
-        "space",
-        "lf",
-        "duplicate",
-        "conflict",
-        "chunked",
-        "interim",
-        "old",
-        "many",
-        "large",
-    ] {
-        let record = compare(&mut peer, &sender, &format!("/raw/{kind}"), None).await;
-        signatures(&record);
-        if record["original"]["status"] != record["native"]["status"] {
-            mismatches.push(record);
-        }
-    }
-    drop(sender);
-    peer.close().await;
+    .await;
     assert!(
-        mismatches.is_empty(),
-        "Response admission findings: {}",
-        json!(mismatches)
+        result
+            .expect("The configured ten-second deadline must end the request.")
+            .is_err()
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn original_startup_roots_and_proxy_flags_have_explicit_profile_requirements() {
-    let spec = json!({"certificate":"valid","addresses":["127.0.0.1"]});
-    let mut peer = Oracle::start_profile(Some(&spec)).await;
-    let trusted = sender(&peer, lookup(&["127.0.0.1"], 0), NetworkProfile::default());
-    for (extra, system, insecure, proxy, ambient, status, hops) in [
-        (false, false, false, false, false, 0, 0),
-        (true, false, false, false, false, 201, 0),
-        (false, true, false, false, false, 0, 0),
-        (false, false, true, false, false, 201, 0),
-        (true, false, false, false, true, 201, 0),
-        (true, false, false, true, false, 201, 1),
-    ] {
-        let original=peer.call(json!({"op":"environment","extraCA":extra,"systemCA":system,"insecure":insecure,"envProxy":proxy,"ambientProxy":ambient})).await;
-        assert_eq!(original["code"], 0, "{original}");
-        assert_eq!(original["result"]["status"], status, "{original}");
-        assert_eq!(original["proxyRequests"], hops, "{original}");
-        let (native, _) = send(&trusted, &peer.profile, "/status/201", None).await;
-        save(
-            &json!({"environmentProfile":{"extraCA":extra,"systemCA":system,"insecure":insecure,"envProxy":proxy,"ambientProxy":ambient},"original":original,"native":{"status":native,"route":"explicit-direct","roots":"explicit-synthetic-CA"},"finding":"Startup root/verification/proxy inputs require a canonical production profile; explicit test trust is not an ambient profile implementation."}),
-        );
-        assert_eq!(native, 201);
-    }
-    drop(trusted);
-    peer.close().await;
+    assert_eq!(peer.records.lock().unwrap().len(), 1);
 }

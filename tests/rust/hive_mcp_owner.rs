@@ -345,7 +345,7 @@ impl server_mcp::Handler for Handler<'_> {
 }
 fn available(budget: &RequestBudget) -> usize {
     let mut leases = vec![];
-    while let Ok(lease) = budget.acquire(&"probe".into(), Some(0.0)) {
+    while let Ok(lease) = budget.acquire(&"probe".into(),Some(0)) {
         leases.push(lease);
     }
     let count = leases.len();
@@ -419,10 +419,10 @@ async fn exchange(
         });
     }
     let budget = RequestBudget::new(RequestBudgetOptions {
-        maximum: 2.0,
-        per_consumer: 2.0,
-        maximum_bytes: 1_000_000.0,
-        per_consumer_bytes: 1_000_000.0,
+        maximum: 2,
+        per_consumer: 2,
+        maximum_bytes: 1_000_000,
+        per_consumer_bytes: 1_000_000,
         name: "request".into(),
     });
     let server = Prepared::new(super::options(&options))

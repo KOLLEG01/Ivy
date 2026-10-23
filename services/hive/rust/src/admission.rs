@@ -6,177 +6,154 @@ use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, limits::CONSUMER_IN_
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 pub struct AuthenticationRateOptions {
-    pub window_ms: f64,
-    pub maximum: f64,
-    pub per_client: f64,
-    pub client_maximum: f64,
+    pub window: Duration,
+    pub maximum: usize,
+    pub per_client: usize,
+    pub client_maximum: usize,
 }
 impl Default for AuthenticationRateOptions {
     fn default() -> Self {
         Self {
-            window_ms: 1000.0,
-            maximum: 512.0,
-            per_client: 256.0,
-            client_maximum: 4096.0,
+            window: Duration::from_secs(1),
+            maximum: 512,
+            per_client: 256,
+            client_maximum: 4096,
         }
     }
 }
-#[derive(Default)]
 struct Arrivals {
-    at: f64,
-    count: f64,
+    at: Instant,
+    count: usize,
 }
 #[derive(Default)]
 pub struct AuthenticationRate {
     options: AuthenticationRateOptions,
-    global: Arrivals,
+    global: Option<Arrivals>,
     clients: HashMap<JsString, Arrivals>,
 }
 impl AuthenticationRate {
     pub fn new(options: AuthenticationRateOptions) -> Self {
         Self {
             options,
-            global: Arrivals::default(),
+            global: None,
             clients: HashMap::new(),
         }
     }
-    /// The request owner supplies its captured wall clock in milliseconds.
-    pub fn admit(&mut self, key: &JsString, now: f64) -> IvyResult<()> {
-        if now - self.global.at >= self.options.window_ms {
-            self.global = Arrivals {
-                at: now,
-                count: 0.0,
-            };
+    pub fn admit(&mut self, key: &JsString, now: Instant) -> IvyResult<()> {
+        let elapsed =
+            |entry: &Arrivals| now.saturating_duration_since(entry.at) >= self.options.window;
+        if self.global.as_ref().is_none_or(elapsed) {
+            self.global = Some(Arrivals { at: now, count: 0 });
         }
-        if self
-            .clients
-            .get(key)
-            .is_none_or(|entry| now - entry.at >= self.options.window_ms)
-        {
-            self.clients
-                .retain(|_, entry| !(now - entry.at >= self.options.window_ms));
-            if !((self.clients.len() as f64) < self.options.client_maximum) {
+        if self.clients.get(key).is_none_or(elapsed) {
+            self.clients.retain(|_, entry| !elapsed(entry));
+            if self.clients.len() >= self.options.client_maximum {
                 return Err(IvyError::new(
                     "limit_exceeded",
                     "Authentication client budget is full.",
                 ));
             }
-            self.clients.insert(
-                key.clone(),
-                Arrivals {
-                    at: now,
-                    count: 0.0,
-                },
-            );
+            self.clients
+                .insert(key.clone(), Arrivals { at: now, count: 0 });
         }
+        let global = self.global.as_mut().unwrap();
         let client = self.clients.get_mut(key).unwrap();
-        let global = self.global.count >= self.options.maximum;
-        if global || client.count >= self.options.per_client {
+        let full = global.count >= self.options.maximum;
+        if full || client.count >= self.options.per_client {
             return Err(
                 IvyError::new("limit_exceeded", "Authentication arrival budget is full.")
                     .with_details(IvyJson::object([
                         ("budget", "authentication_arrivals".into()),
-                        ("scope", if global { "global" } else { "client" }.into()),
+                        ("scope", if full { "global" } else { "client" }.into()),
                         (
                             "active",
-                            IvyJson::Number(if global {
-                                self.global.count
-                            } else {
-                                client.count
-                            }),
+                            IvyJson::Number(if full { global.count } else { client.count } as f64),
                         ),
                         (
                             "limit",
-                            IvyJson::Number(if global {
+                            IvyJson::Number(if full {
                                 self.options.maximum
                             } else {
                                 self.options.per_client
-                            }),
+                            } as f64),
                         ),
-                        ("windowMs", IvyJson::Number(self.options.window_ms)),
+                        (
+                            "windowMs",
+                            IvyJson::Number(self.options.window.as_secs_f64() * 1000.0),
+                        ),
                     ])),
             );
         }
-        self.global.count += 1.0;
-        client.count += 1.0;
+        global.count += 1;
+        client.count += 1;
         Ok(())
     }
 }
 
 pub struct RequestBudgetOptions {
-    pub maximum: f64,
-    pub maximum_bytes: f64,
-    pub per_consumer: f64,
-    pub per_consumer_bytes: f64,
-    pub name: JsString,
+    pub maximum: usize,
+    pub maximum_bytes: usize,
+    pub per_consumer: usize,
+    pub per_consumer_bytes: usize,
+    pub name: String,
 }
 impl Default for RequestBudgetOptions {
     fn default() -> Self {
         Self {
-            maximum: 2048.0,
-            maximum_bytes: 128.0 * 1024.0 * 1024.0,
-            per_consumer: CONSUMER_IN_FLIGHT_REQUESTS as f64,
-            per_consumer_bytes: 64.0 * 1024.0 * 1024.0,
+            maximum: 2048,
+            maximum_bytes: 128 * 1024 * 1024,
+            per_consumer: CONSUMER_IN_FLIGHT_REQUESTS,
+            per_consumer_bytes: 64 * 1024 * 1024,
             name: "request".into(),
         }
     }
 }
 #[derive(Default)]
 struct Usage {
-    count: f64,
-    bytes: f64,
+    count: usize,
+    bytes: usize,
 }
 struct RequestState {
     options: RequestBudgetOptions,
     usage: Usage,
     consumers: HashMap<JsString, Usage>,
 }
-fn named_message(prefix: &str, name: &JsString, suffix: &str) -> JsString {
-    let mut units: Vec<_> = prefix.encode_utf16().collect();
-    units.extend_from_slice(&name.0);
-    units.extend(suffix.encode_utf16());
-    JsString(units)
-}
-fn invalid_reservation() -> IvyError {
-    IvyError::new("invalid_arguments", "Invalid request reservation.")
-}
 impl RequestState {
-    fn reserve(&mut self, key: &JsString, amount: f64) -> IvyResult<()> {
-        // Each reservation is a JS safe integer; aggregate accounting retains
-        // the original IEEE-754 arithmetic, including its rounding behavior.
-        if !amount.is_finite()
-            || amount.fract() != 0.0
-            || !(0.0..=9_007_199_254_740_991.0).contains(&amount)
+    fn reserve(&mut self, key: &JsString, amount: usize) -> IvyResult<()> {
+        let consumer = self.consumers.get(key).map_or(0, |entry| entry.bytes);
+        let global = self
+            .usage
+            .bytes
+            .checked_add(amount)
+            .is_none_or(|n| n > self.options.maximum_bytes);
+        if global
+            || consumer
+                .checked_add(amount)
+                .is_none_or(|n| n > self.options.per_consumer_bytes)
         {
-            return Err(invalid_reservation());
-        }
-        let consumer = self.consumers.get(key).map_or(0.0, |entry| entry.bytes);
-        let global = self.usage.bytes + amount > self.options.maximum_bytes;
-        if global || consumer + amount > self.options.per_consumer_bytes {
-            let mut budget = self.options.name.clone();
-            budget.0.extend("_bytes".encode_utf16());
-            return Err(IvyError::new_js(
-                "limit_exceeded".into(),
-                named_message("Hive retained ", &self.options.name, " bytes are full."),
+            return Err(IvyError::new(
+                "limit_exceeded",
+                format!("Hive retained {} bytes are full.", self.options.name),
             )
             .with_details(IvyJson::object([
-                ("budget", IvyJson::String(budget)),
+                ("budget", format!("{}_bytes", self.options.name).into()),
                 ("scope", if global { "global" } else { "consumer" }.into()),
                 (
                     "active",
-                    IvyJson::Number(if global { self.usage.bytes } else { consumer }),
+                    IvyJson::Number(if global { self.usage.bytes } else { consumer } as f64),
                 ),
-                ("requested", IvyJson::Number(amount)),
+                ("requested", IvyJson::Number(amount as f64)),
                 (
                     "limit",
                     IvyJson::Number(if global {
                         self.options.maximum_bytes
                     } else {
                         self.options.per_consumer_bytes
-                    }),
+                    } as f64),
                 ),
             ])));
         }
@@ -185,7 +162,8 @@ impl RequestState {
         Ok(())
     }
 }
-/// Shared reservations remain charged through queueing and provider completion.
+/// Reservations stay charged until accepted work completes, including when a
+/// caller abandons its reply. The work owner explicitly releases its lease.
 #[derive(Clone)]
 pub struct RequestBudget(Arc<Mutex<RequestState>>);
 impl Default for RequestBudget {
@@ -201,22 +179,22 @@ impl RequestBudget {
             consumers: HashMap::new(),
         })))
     }
-    /// None selects the original 1024-byte initial reservation.
-    pub fn acquire(&self, key: &JsString, bytes: Option<f64>) -> IvyResult<RequestLease> {
+    /// None selects the 1024-byte initial reservation.
+    pub fn acquire(&self, key: &JsString, bytes: Option<usize>) -> IvyResult<RequestLease> {
         let mut state = self.0.lock().unwrap();
-        let count = state.consumers.get(key).map_or(0.0, |entry| entry.count);
+        let count = state.consumers.get(key).map_or(0, |entry| entry.count);
         let global = state.usage.count >= state.options.maximum;
         if global || count >= state.options.per_consumer {
-            return Err(IvyError::new_js(
-                "limit_exceeded".into(),
-                named_message("Hive ", &state.options.name, " slots are full."),
+            return Err(IvyError::new(
+                "limit_exceeded",
+                format!("Hive {} slots are full.", state.options.name),
             )
             .with_details(IvyJson::object([
-                ("budget", IvyJson::String(state.options.name.clone())),
+                ("budget", state.options.name.clone().into()),
                 ("scope", if global { "global" } else { "consumer" }.into()),
                 (
                     "active",
-                    IvyJson::Number(if global { state.usage.count } else { count }),
+                    IvyJson::Number(if global { state.usage.count } else { count } as f64),
                 ),
                 (
                     "limit",
@@ -224,34 +202,35 @@ impl RequestBudget {
                         state.options.maximum
                     } else {
                         state.options.per_consumer
-                    }),
+                    } as f64),
                 ),
             ])));
         }
-        let amount = bytes.unwrap_or(1024.0);
+        let amount = bytes.unwrap_or(1024);
         state.reserve(key, amount)?;
-        state.usage.count += 1.0;
-        state.consumers.get_mut(key).unwrap().count += 1.0;
+        state.usage.count += 1;
+        state.consumers.get_mut(key).unwrap().count += 1;
         Ok(RequestLease {
             state: self.0.clone(),
             key: key.clone(),
-            held: 0.0 + amount,
+            held: amount,
             released: false,
         })
     }
 }
-/// Release is explicit and idempotent, as in the original request owner. Dropping
-/// a handle does not silently refund work that may still be running elsewhere.
 pub struct RequestLease {
     state: Arc<Mutex<RequestState>>,
     key: JsString,
-    held: f64,
+    held: usize,
     released: bool,
 }
 impl RequestLease {
-    pub fn grow(&mut self, amount: f64) -> IvyResult<()> {
+    pub fn grow(&mut self, amount: usize) -> IvyResult<()> {
         if self.released {
-            return Err(invalid_reservation());
+            return Err(IvyError::new(
+                "invalid_arguments",
+                "Invalid request reservation.",
+            ));
         }
         self.state.lock().unwrap().reserve(&self.key, amount)?;
         self.held += amount;
@@ -263,12 +242,12 @@ impl RequestLease {
         }
         self.released = true;
         let mut state = self.state.lock().unwrap();
-        state.usage.count -= 1.0;
+        state.usage.count -= 1;
         state.usage.bytes -= self.held;
         let consumer = state.consumers.get_mut(&self.key).unwrap();
-        consumer.count -= 1.0;
+        consumer.count -= 1;
         consumer.bytes -= self.held;
-        if consumer.count == 0.0 {
+        if consumer.count == 0 {
             state.consumers.remove(&self.key);
         }
     }

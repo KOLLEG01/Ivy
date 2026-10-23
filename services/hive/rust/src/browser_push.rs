@@ -15,7 +15,7 @@ use tokio::{
 
 pub const POLL_INTERVAL_MS: u64 = 15_000;
 pub type RequestFuture = Pin<Box<dyn Future<Output = IvyResult<IvyJson>> + Send>>;
-pub type SendFuture = Pin<Box<dyn Future<Output = SendOutcome> + Send>>;
+pub type SendFuture = Pin<Box<dyn Future<Output = IvyResult<u16>> + Send>>;
 pub type CloseFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Issue the request when called; its future observes that posted operation.
@@ -28,17 +28,27 @@ impl Worker for StorageClient {
         Box::pin(async move { receiver.await.map_err(|_| IvyError::internal())? })
     }
 }
-/// `None` preserves an absent statusCode. Rejected nullish status codes become
-/// zero; a nullish thrown value itself cannot be inspected by the source catch.
-pub enum SendOutcome {
-    Response(Option<IvyJson>),
-    Rejected(Option<IvyJson>),
-    UninspectableFailure,
+#[derive(Clone)]
+pub struct VapidDetails {
+    pub public_key: String,
+    pub private_key: String,
+    pub subject: String,
+}
+impl VapidDetails {
+    /// Read the persisted key object at the worker boundary. The configured
+    /// subject belongs to the sender, independently of stored extra fields.
+    pub fn from_keys(keys: &IvyJson, subject: &JsString) -> IvyResult<Self> {
+        keys.as_object().ok_or_else(IvyError::internal)?;
+        Ok(Self {
+            public_key: field(keys, "publicKey")?.as_str()?,
+            private_key: field(keys, "privateKey")?.as_str()?,
+            subject: subject.to_utf8()?,
+        })
+    }
 }
 pub trait Sender: Send + Sync {
-    /// Supply the actual web-push encryption/HTTPS operation, including its
-    /// timeout. No transport, plaintext delivery or generated-key fallback exists.
-    fn send(&self, subscription: IvyJson, payload: String, options: IvyJson) -> SendFuture;
+    /// Return the HTTP status after delivery, or a transport/encryption error.
+    fn send(&self, subscription: IvyJson, payload: String, details: VapidDetails) -> SendFuture;
 }
 
 #[derive(Default)]
@@ -54,38 +64,12 @@ struct Inner {
     subject: JsString,
     state: Mutex<State>,
 }
-/// Call lifecycle methods within the owning Tokio runtime. Background interval
-/// tasks do not keep that runtime alive, like the original unref'ed timer.
+/// Call lifecycle methods within the owning Tokio runtime.
 #[derive(Clone)]
 pub struct BrowserPush(Arc<Inner>);
 
 fn field<'a>(value: &'a IvyJson, key: &str) -> IvyResult<&'a IvyJson> {
     value.get(key).ok_or_else(IvyError::internal)
-}
-fn options(keys: &IvyJson, subject: &JsString) -> IvyJson {
-    let mut details = match keys {
-        IvyJson::Object(_) => keys.clone(),
-        IvyJson::Array(values) => IvyJson::object(
-            values
-                .iter()
-                .enumerate()
-                .map(|(i, v)| (i.to_string(), v.clone())),
-        ),
-        IvyJson::String(value) => IvyJson::object(
-            value
-                .0
-                .iter()
-                .enumerate()
-                .map(|(i, v)| (i.to_string(), IvyJson::String(JsString(vec![*v])))),
-        ),
-        _ => IvyJson::object(std::iter::empty::<(&str, IvyJson)>()),
-    };
-    details.insert("subject", IvyJson::String(subject.clone()));
-    IvyJson::object([
-        ("vapidDetails", details),
-        ("TTL", IvyJson::Number(3600.0)),
-        ("timeout", IvyJson::Number(10_000.0)),
-    ])
 }
 impl BrowserPush {
     pub fn new(worker: Arc<dyn Worker>, subject: JsString, sender: Arc<dyn Sender>) -> Self {
@@ -97,6 +81,10 @@ impl BrowserPush {
         }))
     }
     pub fn start(&self) {
+        let mut state = self.0.state.lock().unwrap();
+        if state.stopped || state.timer.is_some() {
+            return;
+        }
         let owner = self.clone();
         let first = Instant::now() + Duration::from_millis(POLL_INTERVAL_MS);
         let timer = tokio::spawn(async move {
@@ -108,23 +96,25 @@ impl BrowserPush {
                 owner.wake();
             }
         });
-        // The source retains only its latest interval handle, also on repeated
-        // start. Dropping an older Tokio handle detaches rather than cancels it.
-        self.0.state.lock().unwrap().timer = Some(timer.abort_handle());
+        state.timer = Some(timer.abort_handle());
+        drop(state);
         self.wake();
     }
     pub fn wake(&self) {
         let mut state = self.0.state.lock().unwrap();
+        if state.stopped {
+            return;
+        }
         state.requested = true;
-        if state.running.is_some() || state.stopped {
+        if state.running.is_some() {
             return;
         }
         let (done, waiting) = watch::channel(false);
         state.running = Some(waiting);
         state.requested = false;
         drop(state);
-        // Post before returning, so a second synchronous wake remains pending
-        // while the first request is outstanding, as at the source's first await.
+        // Own the admitted storage request before returning. Further wakes
+        // coalesce while the current drain is running.
         let first = self.next();
         let owner = self.clone();
         tokio::spawn(async move {
@@ -148,9 +138,9 @@ impl BrowserPush {
     async fn drain(&self, mut next: RequestFuture) -> IvyResult<()> {
         loop {
             let batch = next.await?;
-            if batch.get("hasMore").and_then(IvyJson::as_bool) == Some(true) {
-                self.0.state.lock().unwrap().requested = true;
-            }
+            let has_more = field(&batch, "hasMore")?
+                .as_bool()
+                .ok_or_else(IvyError::internal)?;
             let jobs = field(&batch, "deliveries")?
                 .as_array()
                 .ok_or_else(IvyError::internal)?;
@@ -160,46 +150,42 @@ impl BrowserPush {
                     .worker
                     .request(IvyJson::object([("action", "browserPush.keys".into())]))
                     .await?;
-                // Invoke every sender before observing any result. An early
-                // completion failure must not cancel the other mapped jobs.
-                let pending = jobs
+                let details = VapidDetails::from_keys(&keys, &self.0.subject)?;
+                // Validate the batch before starting deliveries. Invalid worker
+                // data leaves the queue intact for repair and a later wake.
+                let jobs = jobs
                     .iter()
                     .map(|job| {
-                        let sent = (|| {
-                            Ok(self.0.sender.send(
-                                field(job, "subscription")?.clone(),
-                                stringify(field(job, "notice")?, usize::MAX)?,
-                                options(&keys, &self.0.subject),
-                            ))
-                        })();
-                        (job.get("id").cloned(), sent)
+                        Ok((
+                            field(job, "id")?.clone(),
+                            field(job, "subscription")?.clone(),
+                            stringify(field(job, "notice")?, usize::MAX)?,
+                        ))
                     })
-                    .collect::<Vec<(Option<IvyJson>, IvyResult<SendFuture>)>>();
+                    .collect::<IvyResult<Vec<_>>>()?;
+                let pending = jobs
+                    .into_iter()
+                    .map(|(id, subscription, payload)| {
+                        (
+                            id,
+                            self.0.sender.send(subscription, payload, details.clone()),
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 let (completed, mut replies) = mpsc::unbounded_channel();
                 for (id, sent) in pending {
                     let worker = self.0.worker.clone();
                     let completed = completed.clone();
                     tokio::spawn(async move {
                         let result = async {
-                            let status = match sent?.await {
-                                SendOutcome::Response(status) => status,
-                                SendOutcome::Rejected(status) => Some(
-                                    status
-                                        .filter(|v| !v.is_null())
-                                        .unwrap_or_else(|| IvyJson::Number(0.0)),
-                                ),
-                                SendOutcome::UninspectableFailure => {
-                                    return Err(IvyError::internal());
-                                }
-                            };
-                            let mut request =
-                                IvyJson::object([("action", "browserPush.complete".into())]);
-                            if let Some(id) = id {
-                                request.insert("id", id);
-                            }
-                            if let Some(status) = status {
-                                request.insert("status", status);
-                            }
+                            // Zero is the existing persisted retry outcome when
+                            // no HTTP response is available.
+                            let status = sent.await.unwrap_or(0);
+                            let request = IvyJson::object([
+                                ("action", "browserPush.complete".into()),
+                                ("id", id),
+                                ("status", IvyJson::Number(status as f64)),
+                            ]);
                             worker.request(request).await.map(|_| ())
                         }
                         .await;
@@ -207,14 +193,19 @@ impl BrowserPush {
                     });
                 }
                 drop(completed);
+                let mut failure = None;
                 while let Some(result) = replies.recv().await {
-                    result?;
+                    if let Err(error) = result {
+                        failure.get_or_insert(error);
+                    }
                 }
-                self.0.state.lock().unwrap().requested = true;
+                if let Some(error) = failure {
+                    return Err(error);
+                }
             }
             {
                 let mut state = self.0.state.lock().unwrap();
-                if !state.requested || state.stopped {
+                if state.stopped || !(state.requested || has_more || !jobs.is_empty()) {
                     return Ok(());
                 }
                 state.requested = false;

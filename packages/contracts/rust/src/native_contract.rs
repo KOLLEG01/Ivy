@@ -5,7 +5,7 @@ use crate::{
     agent_schema::validate_agent,
     core_schema::validate_shared,
     hash::{hash_json, tool_definition_hash},
-    json::{canonical, js_string},
+    json::canonical,
     limits::MANAGEMENT_FRAME_BYTES,
     schema::SchemaValidators,
 };
@@ -41,33 +41,30 @@ pub fn native_tool_definition(
     method: &IvyJson,
     catalog_hash: Option<&JsString>,
 ) -> IvyResult<IvyJson> {
+    let version = catalog
+        .get("version")
+        .and_then(IvyJson::as_js_string)
+        .ok_or_else(|| {
+            IvyError::new(
+                "invalid_arguments",
+                "Native catalog version must be a string.",
+            )
+        })?;
+    let name = method
+        .get("method")
+        .and_then(IvyJson::as_js_string)
+        .ok_or_else(|| {
+            IvyError::new("invalid_arguments", "Native method name must be a string.")
+        })?;
     let hash = catalog_hash
         .cloned()
         .map(Ok)
         .unwrap_or_else(|| hash_json(catalog).map(JsString::from))?;
-    if catalog.is_null() || method.is_null() {
-        return Err(IvyError::internal());
-    }
-    let read_only = method
-        .get("method")
-        .and_then(IvyJson::as_js_string)
-        .is_some_and(is_read_only_native_method);
+    let read_only = is_read_only_native_method(name);
     let mut description = JsString::from("Installed public Codex ");
-    description.0.extend(
-        catalog
-            .get("version")
-            .map(js_string)
-            .unwrap_or_else(|| "undefined".into())
-            .0,
-    );
+    description.0.extend_from_slice(&version.0);
     description.0.extend(" method ".encode_utf16());
-    description.0.extend(
-        method
-            .get("method")
-            .map(js_string)
-            .unwrap_or_else(|| "undefined".into())
-            .0,
-    );
+    description.0.extend_from_slice(&name.0);
     description
         .0
         .extend(". Supply its unchanged native arguments.".encode_utf16());
@@ -80,12 +77,8 @@ pub fn native_tool_definition(
         .encode_utf16(),
     );
     let mut value = IvyJson::object([("namespace", "codex".into())]);
-    if let Some(name) = method.get("method") {
-        value.insert("name", name.clone());
-    }
-    if let Some(version) = catalog.get("version") {
-        value.insert("interfaceVersion", version.clone());
-    }
+    value.insert("name", IvyJson::String(name.clone()));
+    value.insert("interfaceVersion", IvyJson::String(version.clone()));
     value.insert("description", IvyJson::String(description));
     for key in ["inputSchema", "outputSchema"] {
         if let Some(schema) = method.get(key) {
@@ -101,9 +94,7 @@ pub fn native_tool_definition(
             ]),
         );
     }
-    if let Some(name) = method.get("method") {
-        value.insert("nativeMethod", name.clone());
-    }
+    value.insert("nativeMethod", IvyJson::String(name.clone()));
     value.insert("nativeSchemaIdentity", IvyJson::String(hash));
     Ok(value)
 }
@@ -245,40 +236,31 @@ impl NativeContract {
                 "Native arguments must use their exact finite local root definition.",
             )?
         } else {
-            Some(vec![])
+            vec![]
         };
-        let object = match root.as_ref().and_then(|p| at(&input, p)) {
-            Some(IvyJson::Null) => return Err(IvyError::internal()),
-            Some(value) => object_arguments(value),
-            None => false,
-        };
+        let object = object_arguments(at(&input, &root).ok_or_else(IvyError::internal)?)?;
         if object {
-            let value = at_mut(&mut input, root.as_ref().unwrap()).unwrap();
-            let properties = child_mut(value, &"properties".into()).unwrap();
-            for name in &names {
-                match properties {
-                    IvyJson::Object(fields) => fields.retain(|(key, _)| key != name),
-                    IvyJson::Array(items) => {
-                        if name == &JsString::from("length") {
-                            return Err(IvyError::internal());
-                        }
-                        if let Some(i) = array_index(name) {
-                            if let Some(item) = items.get_mut(i) {
-                                *item = IvyJson::Null;
-                            }
-                        }
-                    }
-                    _ => unreachable!(),
-                }
-            }
+            let value = at_mut(&mut input, &root).unwrap();
+            let IvyJson::Object(properties) = child_mut(value, &"properties".into()).unwrap()
+            else {
+                unreachable!()
+            };
+            properties.retain(|(key, _)| !names.contains(key));
             let required = match value.get("required") {
-                None | Some(IvyJson::Null) => vec![],
-                Some(IvyJson::Array(items)) => items
-                    .iter()
-                    .filter(|v| !v.as_js_string().is_some_and(|n| names.contains(n)))
-                    .cloned()
-                    .collect(),
-                _ => return Err(IvyError::internal()),
+                None => vec![],
+                Some(IvyJson::Array(items)) if items.iter().all(|v| v.as_js_string().is_some()) => {
+                    items
+                        .iter()
+                        .filter(|v| !names.contains(v.as_js_string().unwrap()))
+                        .cloned()
+                        .collect()
+                }
+                _ => {
+                    return Err(IvyError::new(
+                        "native_catalog_invalid",
+                        "Native required fields must be an array of strings.",
+                    ));
+                }
             };
             value.insert("required", IvyJson::Array(required));
             value.insert("additionalProperties", false.into());
@@ -289,9 +271,7 @@ impl NativeContract {
                     "Only native object arguments can reserve workflow fields.",
                 ));
             }
-            if let Some(root) = root {
-                close_alternatives(&mut input, root)?;
-            }
+            close_alternatives(&mut input, root)?;
         }
         strip(&mut input);
         let value = Arc::new(input);
@@ -361,7 +341,7 @@ fn at_mut<'a>(mut value: &'a mut IvyJson, path: &[JsString]) -> Option<&'a mut I
     }
     Some(value)
 }
-fn reference_path(input: &IvyJson, reference: &IvyJson, message: &str) -> IvyResult<Option<Path>> {
+fn reference_path(input: &IvyJson, reference: &IvyJson, message: &str) -> IvyResult<Path> {
     let invalid = || IvyError::new("native_catalog_invalid", message);
     let text = reference.as_str().map_err(|_| invalid())?;
     let name = text
@@ -370,30 +350,48 @@ fn reference_path(input: &IvyJson, reference: &IvyJson, message: &str) -> IvyRes
         .ok_or_else(invalid)?;
     let defs = input
         .get("$defs")
-        .filter(|v| !v.is_null())
+        .and_then(IvyJson::as_object)
         .ok_or_else(invalid)?;
-    if child(defs, &name.into()).is_some() {
-        return Ok(Some(vec!["$defs".into(), name.into()]));
+    if defs.iter().any(|(key, _)| key == &JsString::from(name)) {
+        return Ok(vec!["$defs".into(), name.into()]);
     }
     Err(invalid())
 }
-fn object_arguments(value: &IvyJson) -> bool {
-    value.get("type").and_then(IvyJson::as_js_string) == Some(&"object".into())
-        && matches!(
-            value.get("properties"),
-            Some(IvyJson::Object(_) | IvyJson::Array(_))
-        )
+fn object_arguments(value: &IvyJson) -> IvyResult<bool> {
+    match value {
+        IvyJson::Bool(_) => Ok(false),
+        IvyJson::Object(_) => {
+            if value.get("type").and_then(IvyJson::as_js_string) != Some(&"object".into()) {
+                return Ok(false);
+            }
+            match value.get("properties") {
+                None => Ok(false),
+                Some(IvyJson::Object(_)) => Ok(true),
+                _ => Err(IvyError::new(
+                    "native_catalog_invalid",
+                    "Native argument properties must be an object.",
+                )),
+            }
+        }
+        _ => Err(IvyError::new(
+            "native_catalog_invalid",
+            "Native argument schemas must be objects or booleans.",
+        )),
+    }
 }
 fn close_alternatives(input: &mut IvyJson, root: Path) -> IvyResult<()> {
     let mut work = vec![(root, false)];
     let mut visited = HashSet::new();
     while let Some((path, finish)) = work.pop() {
         let node = at(input, &path).ok_or_else(IvyError::internal)?;
-        if node.is_null() {
-            return Err(IvyError::internal());
-        }
-        if !matches!(node, IvyJson::Object(_) | IvyJson::Array(_)) {
+        if matches!(node, IvyJson::Bool(_)) {
             continue;
+        }
+        if !matches!(node, IvyJson::Object(_)) {
+            return Err(IvyError::new(
+                "native_catalog_invalid",
+                "Native argument schemas must be objects or booleans.",
+            ));
         }
         if !finish {
             if !visited.insert(path.clone()) {
@@ -408,15 +406,14 @@ fn close_alternatives(input: &mut IvyJson, root: Path) -> IvyResult<()> {
                         "Native argument alternatives must use finite local definitions.",
                     )
                 })
-                .transpose()?
-                .flatten();
+                .transpose()?;
             work.push((path, true));
             if let Some(reference) = reference {
                 work.push((reference, false));
             }
         } else {
             let node = at_mut(input, &path).unwrap();
-            if object_arguments(node) {
+            if object_arguments(node)? {
                 node.insert("additionalProperties", false.into());
             }
             for key in ["oneOf", "anyOf"] {
@@ -435,26 +432,16 @@ fn close_alternatives(input: &mut IvyJson, root: Path) -> IvyResult<()> {
 }
 // Catalog hashing has already bounded ordinary JSON depth before projection.
 fn strip(value: &mut IvyJson) {
-    if !matches!(value, IvyJson::Object(_) | IvyJson::Array(_)) {
+    if !matches!(value, IvyJson::Object(_)) {
         return;
     }
     for key in ["description", "title", "$id", "$schema"] {
         value.remove(key);
     }
     for key in ["properties", "$defs"] {
-        if let Some(child) = child_mut(value, &key.into()) {
-            match child {
-                IvyJson::Object(fields) => {
-                    for (_, v) in fields {
-                        strip(v);
-                    }
-                }
-                IvyJson::Array(items) => {
-                    for v in items {
-                        strip(v);
-                    }
-                }
-                _ => {}
+        if let Some(IvyJson::Object(fields)) = child_mut(value, &key.into()) {
+            for (_, v) in fields {
+                strip(v);
             }
         }
     }

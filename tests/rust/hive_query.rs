@@ -1,6 +1,8 @@
 use super::Root;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ivy_contracts::{
     IvyJson, IvyResult,
+    hash::{hash_json, hmac_sha256},
     json::{canonical, parse, stringify},
 };
 use ivy_hive::{
@@ -445,11 +447,140 @@ pub(super) fn insert(
 }
 
 #[test]
-fn signed_cursor_bytes_errors_scope_and_restart_match_original_without_added_expiry() {
+fn native_cursor_round_trips_preserved_format_scope_and_restart() {
     let root = Root::new();
-    let vectors = fixture(json!({"path":root.0.join("vectors.sqlite"),"mode":"vectors"}));
-    assert!(vectors.as_array().unwrap().len() > 180);
-    compare(&root, vectors.as_array().unwrap(), false);
+    let path = root.0.join("native.sqlite");
+    let store = Store::open(&path).unwrap();
+    let secret = "0123456789abcdef".repeat(4);
+    store.set_metadata("cursor_secret", &secret).unwrap();
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    let identity = field(
+        &json!({"identity":{"method":"fixture","filter":{"b":2,"a":1}}}),
+        "identity",
+    );
+    let boundaries = [
+        "null",
+        "false",
+        "0",
+        "\"\"",
+        "1",
+        "\"é 🙂\"",
+        "[]",
+        "{}",
+        "[1,null]",
+        r#"{"sort":[{"type":2,"value":0}],"id":"retained"}"#,
+        r#"{"\ud800":"\udfff"}"#,
+    ];
+    let mut tokens = vec![];
+    for text in boundaries {
+        let boundary = parse(text, usize::MAX).unwrap();
+        let token = store.cursor(&identity, &boundary).unwrap();
+        assert_eq!(
+            canonical(
+                &store
+                    .read_cursor(&identity, &token.clone().into())
+                    .unwrap()
+                    .unwrap(),
+                usize::MAX
+            )
+            .unwrap(),
+            canonical(&boundary, usize::MAX).unwrap()
+        );
+        tokens.push((token, boundary));
+    }
+    // Captured from the unchanged TypeScript Store.cursor with this identity,
+    // boundary and persisted key. Keep the public signed format stable.
+    assert_eq!(
+        tokens[9].0,
+        "eyJib3VuZGFyeSI6eyJpZCI6InJldGFpbmVkIiwic29ydCI6W3sidHlwZSI6MiwidmFsdWUiOjB9XX0sInF1ZXJ5Ijoic2hhMjU2OjRmY2JkMGQyMDcwM2YxMGYxMDcwYzdmNWJkYjIyNDVjNTk0MmRkYzViZjc5NzA0ZjFhZWQxOWY2NWYxYWZiYjEifQ.pyLOPzYM5lDKp92TXrypovExHgtfSE5_m3Y5S-_kBYA"
+    );
+    let mut other = identity.clone();
+    other.insert("limit", IvyJson::Number(50.0));
+    let error = store
+        .read_cursor(&other, &tokens[0].0.clone().into())
+        .unwrap_err();
+    assert_eq!(error.code, "invalid_cursor");
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.metadata("cursor_secret").unwrap(), Some(secret));
+    for (token, boundary) in tokens {
+        assert_eq!(
+            canonical(
+                &store
+                    .read_cursor(&identity, &token.into())
+                    .unwrap()
+                    .unwrap(),
+                usize::MAX
+            )
+            .unwrap(),
+            canonical(&boundary, usize::MAX).unwrap()
+        );
+    }
+}
+
+#[test]
+fn native_cursor_rejects_noncanonical_encoding_and_utf8() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    let identity = IvyJson::object([("method", "fixture".into())]);
+    let token = store.cursor(&identity, &"value".into()).unwrap();
+    let (body, signature) = token.split_once('.').unwrap();
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let last = alphabet
+        .iter()
+        .position(|byte| *byte == *signature.as_bytes().last().unwrap())
+        .unwrap();
+    let unused_bits = format!(
+        "{body}.{}{}",
+        &signature[..signature.len() - 1],
+        alphabet[last ^ 1] as char
+    );
+    let secret = store.metadata("cursor_secret").unwrap().unwrap();
+    let sign = |body: &str| {
+        format!(
+            "{body}.{}",
+            URL_SAFE_NO_PAD.encode(hmac_sha256(secret.as_bytes(), body.as_bytes()))
+        )
+    };
+    let data = IvyJson::object([
+        ("query", hash_json(&identity).unwrap().into()),
+        ("boundary", "value".into()),
+    ]);
+    let mut json = canonical(&data, usize::MAX).unwrap();
+    while json.len() % 3 != 0 {
+        json.push(' ');
+    }
+    let incomplete = sign(&format!("{}A", URL_SAFE_NO_PAD.encode(&json)));
+    let mut bytes = json.into_bytes();
+    let at = bytes
+        .windows(b"value".len())
+        .position(|part| part == b"value")
+        .unwrap();
+    bytes[at] = 255;
+    let invalid_utf8 = sign(&URL_SAFE_NO_PAD.encode(bytes));
+    for invalid in [
+        "".to_owned(),
+        ".".to_owned(),
+        "a.a".to_owned(),
+        format!("{token}."),
+        format!("{token}.."),
+        format!("{token}="),
+        format!("{token}\n"),
+        format!("{body}.!{signature}"),
+        format!("{body}.Ā{signature}"),
+        unused_bits,
+        incomplete,
+        invalid_utf8,
+    ] {
+        let error = store
+            .read_cursor(&identity, &invalid.clone().into())
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_cursor", "{invalid}");
+    }
+    assert_eq!(
+        store.read_cursor(&identity, &token.into()).unwrap(),
+        Some("value".into())
+    );
 }
 
 #[test]
@@ -466,17 +597,6 @@ fn registry_catalog_pages_keep_utf8_keysets_and_actual_response_byte_limits() {
         json!({"op":"catalog","records":records,"identity":identity,"params":{"limit":2},"from":1}),
     );
     steps.push(json!({"op":"catalog","records":records,"identity":identity,"params":{"limit":0}}));
-    for boundary in [
-        json!(null),
-        json!(12),
-        json!([]),
-        json!({}),
-        json!({"toString":1}),
-    ] {
-        let index = steps.len();
-        steps.push(json!({"op":"cursor","identity":identity,"boundary":boundary}));
-        steps.push(json!({"op":"catalog","records":records,"identity":identity,"params":{},"tokenFrom":index}));
-    }
     steps.push(json!({"op":"catalog","recordsJson":"[{\"key\":\"\\ud800\"},{\"key\":\"�\"},{\"key\":\"🙂\"}]","identity":identity,"params":{}}));
     let big =
         json!([{"key":"a","data":"🙂".repeat(280_000)},{"key":"b","data":"é".repeat(550_000)}]);
@@ -492,6 +612,22 @@ fn registry_catalog_pages_keep_utf8_keysets_and_actual_response_byte_limits() {
         rows[steps.len() - 1]["error"]["data"]["code"],
         "result_too_large"
     );
+    let mut malformed = vec![];
+    for boundary in [
+        json!(null),
+        json!(12),
+        json!([]),
+        json!({}),
+        json!({"toString":1}),
+    ] {
+        let index = malformed.len();
+        malformed.push(json!({"op":"cursor","identity":identity,"boundary":boundary}));
+        malformed.push(json!({"op":"catalog","records":records,"identity":identity,"params":{},"tokenFrom":index}));
+    }
+    let rows = native(&root.0.join("malformed.sqlite"), &malformed, false);
+    for index in (1..malformed.len()).step_by(2) {
+        assert_eq!(rows[index]["error"]["data"]["code"], "invalid_cursor");
+    }
 }
 
 #[test]
@@ -612,8 +748,6 @@ fn typed_query_keysets_predicates_scalar_pointer_and_work_budget_match_original(
     let params = json!({"contractKey":"fixture/value","orderBy":[{"field":"data:/score","direction":"asc"}],"limit":2});
     let identity = json!({"method":"objects.query","contractKey":"fixture/value","orderBy":[{"field":"data:/score","direction":"asc"}],"limit":2});
     for boundary in [
-        json!(null),
-        json!(false),
         json!({"sort":[],"id":"id00"}),
         json!({"sort":[{"type":9,"value":null}],"id":12}),
         json!({"sort":[null],"id":"id00"}),
@@ -644,6 +778,16 @@ fn typed_query_keysets_predicates_scalar_pointer_and_work_budget_match_original(
             .len(),
         3
     );
+    let mut malformed = vec![];
+    for boundary in [json!(null), json!(false)] {
+        let index = malformed.len();
+        malformed.push(json!({"op":"cursor","identity":identity,"boundary":boundary}));
+        malformed.push(json!({"op":"query","params":params,"tokenFrom":index}));
+    }
+    let rows = native(&root.0.join("native.sqlite"), &malformed, false);
+    for index in (1..malformed.len()).step_by(2) {
+        assert_eq!(rows[index]["error"]["data"]["code"], "invalid_cursor");
+    }
 }
 
 #[test]

@@ -377,10 +377,10 @@ async fn native(input: &Value) -> Value {
     let mut held = Vec::new();
     let buffers = BodyBuffers::default();
     let bodies = RequestBudget::new(RequestBudgetOptions {
-        maximum: 2048.0,
-        maximum_bytes: 128.0 * 1024.0 * 1024.0,
-        per_consumer: 128.0,
-        per_consumer_bytes: 64.0 * 1024.0 * 1024.0,
+        maximum: 2048,
+        maximum_bytes: 128 * 1024 * 1024,
+        per_consumer: 128,
+        per_consumer_bytes: 64 * 1024 * 1024,
         name: "request".into(),
     });
     for raw in data.get("steps").unwrap().as_array().unwrap() {
@@ -421,7 +421,7 @@ async fn native(input: &Value) -> Value {
                     http_response::security_headers(&mut reply)?;
                     if op.ends_with("Wire") {
                         let mut stream=PageStream{chunks:wire_chunks(&step),index:0,spec:step.clone(),events:events.clone(),buffers:buffers.clone()};
-                        let mut lease=bodies.acquire(&"http:peer".into(),Some(0.0))?;
+                        let mut lease=bodies.acquire(&"http:peer".into(),Some(0))?;
                         let content_type=step.get("headers").and_then(|h|h.get("content-type"));
                         let content_length=step.get("headers").and_then(|h|h.get("content-length"));
                         let result=if op=="loginWire" {

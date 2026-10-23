@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-const MAXIMUM_BUFFERED_BYTES: f64 = 64.0 * 1024.0 * 1024.0;
+const MAXIMUM_BUFFERED_BYTES: usize = 64 * 1024 * 1024;
 
 pub fn require_form(value: Option<&IvyJson>, message: &str) -> IvyResult<()> {
     let valid = match value {
@@ -38,9 +38,9 @@ pub trait BodyStream {
 }
 
 #[derive(Clone, Default)]
-pub struct BodyBuffers(Arc<Mutex<f64>>);
+pub struct BodyBuffers(Arc<Mutex<usize>>);
 impl BodyBuffers {
-    pub fn buffered_bytes(&self) -> f64 {
+    pub fn buffered_bytes(&self) -> usize {
         *self.0.lock().unwrap()
     }
     pub async fn read(
@@ -68,12 +68,12 @@ impl BodyBuffers {
         while let Some(chunk) = stream.next_chunk().await? {
             let admitted = (|| {
                 if let Some(lease) = &mut lease {
-                    lease.grow(chunk.len() as f64)?;
+                    lease.grow(chunk.len())?;
                 }
                 held.size += chunk.len();
                 let buffered = {
                     let mut buffered = self.0.lock().unwrap();
-                    *buffered += chunk.len() as f64;
+                    *buffered += chunk.len();
                     *buffered
                 };
                 if held.size > limit {
@@ -88,7 +88,7 @@ impl BodyBuffers {
                 Ok(())
             })();
             if let Err(error) = admitted {
-                // AsyncIteratorClose preserves the original thrown completion.
+                // Cancel transport reads while retaining the admission error.
                 let _ = stream.cancel().await;
                 return Err(error);
             }
@@ -107,7 +107,7 @@ struct Buffered<'a> {
 }
 impl Drop for Buffered<'_> {
     fn drop(&mut self) {
-        *self.owner.0.lock().unwrap() -= self.size as f64;
+        *self.owner.0.lock().unwrap() -= self.size;
     }
 }
 fn too_large() -> IvyError {

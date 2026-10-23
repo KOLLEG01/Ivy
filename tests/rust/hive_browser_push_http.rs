@@ -169,9 +169,10 @@ impl Worker for Bridge {
 }
 struct Deliver(Trace);
 impl Sender for Deliver {
-    fn send(&self, subscription: IvyJson, payload: String, options: IvyJson) -> SendFuture {
+    fn send(&self, subscription: IvyJson, payload: String, details: VapidDetails) -> SendFuture {
+        let options = send_options(details);
         self.0.lock().unwrap().push(json!({"kind":"send","subscription":carrier(&subscription),"payload":payload,"options":carrier(&options)}));
-        Box::pin(async { SendOutcome::Response(Some(IvyJson::Number(201.0))) })
+        Box::pin(async { Ok(201) })
     }
 }
 struct WakePush {
@@ -206,8 +207,7 @@ impl Owner {
         let mut lease = self
             .budget
             .acquire(
-                &"http:peer".into(),
-                Some(input["reserve"].as_f64().unwrap_or(0.0)),
+                &"http:peer".into(),(Some(input["reserve"].as_f64().unwrap_or(0.0))).map(|bytes| bytes as usize),
             )
             .unwrap();
         let origin = input["headers"]
@@ -267,7 +267,7 @@ impl Owner {
             }
         });
         for amount in input["probes"].as_array().into_iter().flatten() {
-            let entry = match lease.grow(amount.as_f64().unwrap()) {
+            let entry = match lease.grow((amount.as_f64().unwrap()) as usize) {
                 Ok(()) => json!({"kind":"probe","id":input["id"],"amount":amount,"value":null}),
                 Err(error) => {
                     json!({"kind":"probe","id":input["id"],"amount":amount,"error":carrier(&error.to_wire())})
@@ -301,10 +301,10 @@ async fn native_http(input: &Value) -> Value {
         buffers: BodyBuffers::default(),
         gates: Arc::default(),
         budget: RequestBudget::new(RequestBudgetOptions {
-            maximum: number("maximum", 2048.0),
-            maximum_bytes: number("maximumBytes", 128.0 * 1024.0 * 1024.0),
-            per_consumer: number("perConsumer", 64.0),
-            per_consumer_bytes: number("perConsumerBytes", 64.0 * 1024.0 * 1024.0),
+            maximum: (number("maximum", 2048.0)) as usize,
+            maximum_bytes: (number("maximumBytes", 128.0 * 1024.0 * 1024.0)) as usize,
+            per_consumer: (number("perConsumer", 64.0)) as usize,
+            per_consumer_bytes: (number("perConsumerBytes", 64.0 * 1024.0 * 1024.0)) as usize,
             name: "request".into(),
         }),
         bridge,
@@ -349,8 +349,7 @@ async fn native_http(input: &Value) -> Value {
     let mut final_lease = owner
         .budget
         .acquire(
-            &"http:peer".into(),
-            Some(number("perConsumerBytes", 64.0 * 1024.0 * 1024.0)),
+            &"http:peer".into(),(Some(number("perConsumerBytes", 64.0 * 1024.0 * 1024.0))).map(|bytes| bytes as usize),
         )
         .unwrap();
     final_lease.release();

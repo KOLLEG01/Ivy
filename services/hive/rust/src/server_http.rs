@@ -50,7 +50,7 @@ impl Http {
             authentication: self.0.authentication.connection(remote_address),
         }))
     }
-    pub fn buffered_bytes(&self) -> f64 {
+    pub fn buffered_bytes(&self) -> usize {
         self.0.buffers.buffered_bytes()
     }
 }
@@ -196,7 +196,7 @@ impl Request<'_> {
             .read(stream, declared, limit, self.scope.body_lease())
             .await
     }
-    pub fn invoke(&self, context: IvyJson, request: IvyJson, received_bytes: f64) -> Reply {
+    pub fn invoke(&self, context: IvyJson, request: IvyJson, received_bytes: usize) -> Reply {
         self.connection
             .0
             .http
@@ -208,7 +208,7 @@ impl Request<'_> {
         &self,
         context: IvyJson,
         requests: Vec<IvyJson>,
-        received_bytes: f64,
+        received_bytes: usize,
     ) -> Reply<String> {
         self.connection
             .0

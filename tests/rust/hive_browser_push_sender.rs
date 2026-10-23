@@ -1,6 +1,6 @@
 use super::*;
 use ivy_hive::{
-    browser_push::{BrowserPush, RequestFuture, SendFuture, SendOutcome, Sender, Worker},
+    browser_push::{BrowserPush, RequestFuture, SendFuture, Sender, VapidDetails, Worker},
     browser_push_store::{BrowserPushStore, Crypto},
 };
 use std::{
@@ -22,6 +22,20 @@ type Posted = (IvyJson, oneshot::Sender<IvyResult<IvyJson>>);
 static CORPUS: Mutex<()> = Mutex::new(());
 fn carrier(value: &IvyJson) -> Value {
     serde_json::from_str(&stringify(value, usize::MAX).unwrap()).unwrap()
+}
+fn send_options(details: VapidDetails) -> IvyJson {
+    IvyJson::object([
+        (
+            "vapidDetails",
+            IvyJson::object([
+                ("publicKey", details.public_key.into()),
+                ("privateKey", details.private_key.into()),
+                ("subject", details.subject.into()),
+            ]),
+        ),
+        ("TTL", IvyJson::Number(3600.0)),
+        ("timeout", IvyJson::Number(10000.0)),
+    ])
 }
 struct Fixture {
     trace: Arc<Mutex<Vec<Value>>>,
@@ -94,7 +108,8 @@ impl Worker for Fixture {
     }
 }
 impl Sender for Fixture {
-    fn send(&self, subscription: IvyJson, payload: String, options: IvyJson) -> SendFuture {
+    fn send(&self, subscription: IvyJson, payload: String, details: VapidDetails) -> SendFuture {
+        let options = send_options(details);
         self.trace.lock().unwrap().push(json!({"kind":"send","subscription":carrier(&subscription),"payload":payload,"options":carrier(&options)}));
         let spec = self
             .sends
@@ -107,11 +122,10 @@ impl Sender for Fixture {
             if let Some(waiting) = waiting {
                 waiting.await.unwrap();
             }
-            let status = spec.get("status").map(|v| IvyJson::from_serde(v).unwrap());
-            match spec["kind"].as_str() {
-                Some("nullish") => SendOutcome::UninspectableFailure,
-                Some("error") => SendOutcome::Rejected(status),
-                _ => SendOutcome::Response(status),
+            if spec["error"] == true {
+                Err(IvyError::internal())
+            } else {
+                Ok(u16::try_from(spec["status"].as_u64().unwrap()).unwrap())
             }
         })
     }
@@ -324,29 +338,10 @@ async fn native_sender(input: &Value) -> Value {
     let result = json!({"trace":*trace.lock().unwrap()});
     result
 }
-fn original_sender(input: &Value) -> Value {
-    original_output("tests/fixtures/hive-browser-push-sender-oracle.mjs", input)
-}
-async fn compare_sender(name: &str, input: Value) -> Value {
-    let native = tokio::task::LocalSet::new()
+async fn run_sender(input: Value) -> Value {
+    tokio::task::LocalSet::new()
         .run_until(native_sender(&input))
-        .await;
-    let original = original_sender(&input);
-    if let Some(file) = std::env::var_os("IVY_HIVE_PUSH_SENDER_CORPUS") {
-        let _guard = CORPUS.lock().unwrap();
-        writeln!(
-            fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(file)
-                .unwrap(),
-            "{}",
-            json!({"case":name,"input":input,"original":original,"native":native})
-        )
-        .unwrap();
-    }
-    assert_eq!(native["trace"], original["trace"], "{name}");
-    native
+        .await
 }
 fn job(id: u64) -> Value {
     json!({"id":id,"attempts":0,"subscription":{"endpoint":format!("https://fcm.googleapis.com/fcm/send/fixture-{id}"),"keys":{"auth":"fixture","p256dh":"fixture"}},"notice":{"10":"ten","2":"two","title":"O'Case é 🙂","body":"Body","tag":format!("tag-{id}"),"url":"https://example.test/ivy/ui/"}})
@@ -355,99 +350,190 @@ fn batch(jobs: &[u64], more: bool) -> Value {
     json!({"value":{"deliveries":jobs.iter().map(|id|job(*id)).collect::<Vec<_>>(),"hasMore":more}})
 }
 fn script(next: Vec<Value>, sends: Vec<Value>, steps: Value) -> Value {
-    json!({"keys":{"publicKey":"fixture-public","subject":"overridden","privateKey":"fixture-private","extra":"preserved"},"subject":"mailto:operator@example.invalid","next":next,"sends":sends,"steps":steps})
+    json!({"keys":{"publicKey":"fixture-public","subject":"overridden","privateKey":"fixture-private","extra":"ignored"},"subject":"mailto:operator@example.invalid","next":next,"sends":sends,"steps":steps})
 }
+fn trace(result: &Value) -> &[Value] {
+    result["trace"].as_array().unwrap()
+}
+fn requests<'a>(events: &'a [Value], action: &str) -> Vec<&'a Value> {
+    events
+        .iter()
+        .filter(|event| event["kind"] == "request" && event["payload"]["action"] == action)
+        .collect()
+}
+fn marked<'a>(result: &'a Value, name: &str) -> &'a [Value] {
+    let events = trace(result);
+    &events[..events
+        .iter()
+        .position(|event| event["kind"] == "mark" && event["name"] == name)
+        .unwrap()]
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn browser_push_sender_payload_options_status_and_empty_batches_match_original() {
-    compare_sender(
-        "four-statuses",
-        script(
-            vec![batch(&[1, 2, 3, 4], false)],
-            vec![
-                json!({"status":201}),
-                json!({"kind":"error","status":503}),
-                json!({"kind":"error"}),
-                json!({"kind":"error","status":null}),
-            ],
-            json!([{"op":"wake"},{"op":"close"}]),
-        ),
-    )
-    .await;
-    compare_sender(
-        "empty-has-more",
-        script(
-            vec![batch(&[], true), batch(&[], false)],
-            vec![],
-            json!([{"op":"wake"},{"op":"close"}]),
-        ),
-    )
-    .await;
-    let mut value = script(
-        vec![batch(&[1, 2], false)],
-        vec![json!({}), json!({"status":null})],
+async fn browser_push_sender_preserves_payload_status_and_empty_batches() {
+    let result = run_sender(script(
+        vec![batch(&[1, 2, 3, 4], false)],
+        vec![
+            json!({"status":201}),
+            json!({"status":503}),
+            json!({"error":true}),
+            json!({"status":410}),
+        ],
         json!([{"op":"wake"},{"op":"close"}]),
+    ))
+    .await;
+    let events = trace(&result);
+    let sends = events
+        .iter()
+        .filter(|event| event["kind"] == "send")
+        .collect::<Vec<_>>();
+    assert_eq!(sends.len(), 4);
+    for (index, sent) in sends.iter().enumerate() {
+        assert_eq!(sent["subscription"], job(index as u64 + 1)["subscription"]);
+        assert_eq!(
+            serde_json::from_str::<Value>(sent["payload"].as_str().unwrap()).unwrap(),
+            job(index as u64 + 1)["notice"]
+        );
+        assert_eq!(
+            sent["options"],
+            json!({"TTL":3600,"timeout":10000,"vapidDetails":{
+            "publicKey":"fixture-public","privateKey":"fixture-private","subject":"mailto:operator@example.invalid"}})
+        );
+    }
+    let complete = requests(events, "browserPush.complete");
+    assert_eq!(
+        complete
+            .iter()
+            .map(|event| event["payload"]["status"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![201, 503, 0, 410]
     );
-    value["keys"] = json!(["public", "private"]);
-    compare_sender("missing-and-null-success-status", value).await;
-}
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn browser_push_sender_coalesces_wakes_and_retries_storage_through_requested_or_timer() {
-    compare_sender("coalesced-wake",script(vec![json!({"gate":"first","value":{"deliveries":[],"hasMore":false}})],vec![],json!([{"op":"wake","count":3},{"op":"mark","name":"one pending next"},{"op":"release","gate":"first"},{"op":"close"}]))).await;
-    let mut value = script(
-        vec![batch(&[1], true)],
+    assert_eq!(requests(events, "browserPush.keys").len(), 1);
+    assert_eq!(requests(events, "browserPush.next").len(), 2);
+    assert_eq!(events.last().unwrap()["kind"], "closed");
+    let empty = run_sender(script(
+        vec![batch(&[], true), batch(&[], false)],
         vec![],
         json!([{"op":"wake"},{"op":"close"}]),
-    );
-    value["keyReplies"] = json!([{"error":true}]);
-    compare_sender("has-more-retries-key-failure", value).await;
-    compare_sender("timer-storage-recovery",script(vec![json!({"error":true})],vec![],json!([{"op":"start"},{"op":"mark","name":"failed storage"},{"op":"advance","ms":14999},{"op":"mark","name":"before timer"},{"op":"advance","ms":1},{"op":"close"},{"op":"advance","ms":15000}]))).await;
-    compare_sender(
-        "repeated-start-retains-only-latest-timer",
-        script(
-            vec![],
-            vec![],
-            json!([{"op":"start"},{"op":"start"},{"op":"close"},{"op":"advance","ms":15000}]),
-        ),
-    )
+    ))
     .await;
+    assert_eq!(requests(trace(&empty), "browserPush.next").len(), 2);
+    assert!(requests(trace(&empty), "browserPush.keys").is_empty());
 }
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn browser_push_sender_close_and_early_completion_failures_keep_other_jobs_alive() {
-    compare_sender("abandoned-close-still-stops-admission",script(vec![json!({"gate":"next","value":{"deliveries":[job(1)],"hasMore":false}})],vec![json!({"status":201})],json!([{"op":"wake"},{"op":"abandonClose"},{"op":"release","gate":"next"},{"op":"mark","name":"finished without another next"},{"op":"wake"}]))).await;
-    compare_sender("close-waits-current-batch",script(vec![json!({"gate":"next","value":{"deliveries":[job(1),job(2)],"hasMore":false}})],vec![json!({"status":201}),json!({"status":201,"gate":"send"})],json!([{"op":"wake"},{"op":"close"},{"op":"release","gate":"next"},{"op":"mark","name":"sending after stop"},{"op":"release","gate":"send"},{"op":"wake"}]))).await;
+async fn browser_push_sender_coalesces_wakes_and_owns_one_retry_timer() {
+    let coalesced = run_sender(script(vec![json!({"gate":"first","value":{"deliveries":[],"hasMore":false}})],vec![],
+        json!([{"op":"wake","count":3},{"op":"mark","name":"pending"},{"op":"release","gate":"first"},{"op":"close"}]))).await;
+    assert_eq!(
+        requests(marked(&coalesced, "pending"), "browserPush.next").len(),
+        1
+    );
+    assert_eq!(requests(trace(&coalesced), "browserPush.next").len(), 2);
+    let timed = run_sender(script(
+        vec![json!({"error":true})],
+        vec![],
+        json!([
+        {"op":"start"},{"op":"start"},{"op":"mark","name":"initial"},
+        {"op":"advance","ms":14999},{"op":"mark","name":"before timer"},
+        {"op":"advance","ms":1},{"op":"mark","name":"after timer"},
+        {"op":"close"},{"op":"advance","ms":15000},{"op":"start"},{"op":"wake"}]),
+    ))
+    .await;
+    for (mark, count) in [("initial", 1), ("before timer", 1), ("after timer", 2)] {
+        assert_eq!(
+            requests(marked(&timed, mark), "browserPush.next").len(),
+            count,
+            "{mark}"
+        );
+    }
+    assert_eq!(requests(trace(&timed), "browserPush.next").len(), 2);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn browser_push_sender_rejects_invalid_keys_and_batches_until_next_poll() {
+    for invalid in [
+        Value::Null,
+        json!(false),
+        json!(12),
+        json!(["public", "private"]),
+        json!("keys"),
+        json!({}),
+        json!({"publicKey":1,"privateKey":"private"}),
+        json!({"publicKey":"public"}),
+    ] {
+        let mut input = script(
+            vec![batch(&[1], true), batch(&[1], false)],
+            vec![json!({"status":201})],
+            json!([{"op":"start"},{"op":"mark","name":"invalid"},{"op":"advance","ms":15000},{"op":"close"}]),
+        );
+        input["keyReplies"] = json!([{"value":invalid},{"value":input["keys"]}]);
+        let result = run_sender(input).await;
+        let before = marked(&result, "invalid");
+        assert_eq!(requests(before, "browserPush.next").len(), 1);
+        assert_eq!(requests(before, "browserPush.keys").len(), 1);
+        assert!(!before.iter().any(|event| event["kind"] == "send"));
+        assert!(requests(before, "browserPush.complete").is_empty());
+        assert_eq!(requests(trace(&result), "browserPush.complete").len(), 1);
+        assert_eq!(requests(trace(&result), "browserPush.next").len(), 3);
+    }
+    let mut invalid = job(2);
+    invalid.as_object_mut().unwrap().remove("notice");
+    let result = run_sender(script(
+        vec![json!({"value":{"deliveries":[job(1),invalid],"hasMore":false}})],
+        vec![],
+        json!([{"op":"wake"},{"op":"close"}]),
+    ))
+    .await;
+    assert!(!trace(&result).iter().any(|event| event["kind"] == "send"));
+    assert!(requests(trace(&result), "browserPush.complete").is_empty());
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn browser_push_sender_close_drains_started_jobs_despite_completion_failure() {
+    let abandoned = run_sender(script(vec![json!({"gate":"next","value":{"deliveries":[job(1)],"hasMore":false}})],
+        vec![json!({"status":201})],json!([{"op":"wake"},{"op":"abandonClose"},{"op":"release","gate":"next"},{"op":"wake"},{"op":"start"}]))).await;
+    assert_eq!(requests(trace(&abandoned), "browserPush.next").len(), 1);
+    assert_eq!(requests(trace(&abandoned), "browserPush.complete").len(), 1);
     for requested in [false, true] {
-        let steps = if requested {
-            json!([{"op":"wake"},{"op":"wake"},{"op":"release","gate":"ack"},{"op":"close"},{"op":"mark","name":"closed before late completion"},{"op":"release","gate":"late"}])
-        } else {
-            json!([{"op":"wake"},{"op":"release","gate":"ack"},{"op":"close"},{"op":"mark","name":"closed before late completion"},{"op":"release","gate":"late"}])
-        };
-        let mut value = script(
+        let mut steps = vec![json!({"op":"wake"})];
+        if requested {
+            steps.push(json!({"op":"wake"}));
+        }
+        steps.extend([
+            json!({"op":"close"}),
+            json!({"op":"release","gate":"ack"}),
+            json!({"op":"mark","name":"draining"}),
+            json!({"op":"release","gate":"late"}),
+            json!({"op":"wake"}),
+        ]);
+        let mut input = script(
             vec![batch(&[1, 2], false)],
             vec![json!({"status":201}), json!({"status":201,"gate":"late"})],
-            steps,
+            json!(steps),
         );
-        value["completions"] = json!({"1":{"gate":"ack","error":true}});
-        compare_sender(
-            if requested {
-                "early-completion-failure-with-pending-wake"
-            } else {
-                "early-completion-failure-without-wake"
-            },
-            value,
-        )
-        .await;
+        input["completions"] = json!({"1":{"gate":"ack","error":true}});
+        let result = run_sender(input).await;
+        assert!(
+            !marked(&result, "draining")
+                .iter()
+                .any(|event| event["kind"] == "closed")
+        );
+        assert_eq!(requests(trace(&result), "browserPush.complete").len(), 2);
+        assert_eq!(trace(&result).last().unwrap()["kind"], "closed");
+        assert_eq!(requests(trace(&result), "browserPush.next").len(), 1);
     }
-    compare_sender("nullish-throw-does-not-cancel-other-job",script(vec![batch(&[1,2],false)],vec![json!({"kind":"nullish"}),json!({"status":201,"gate":"late"})],json!([{"op":"wake"},{"op":"close"},{"op":"mark","name":"no first completion"},{"op":"release","gate":"late"}]))).await;
 }
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn browser_push_sender_integrates_actual_sql_queue_completions_and_backoff() {
     let mut value = script(
         vec![],
         vec![
             json!({"status":201}),
-            json!({"kind":"error","status":503}),
-            json!({"kind":"error","status":404}),
-            json!({"kind":"error","status":410}),
+            json!({"status":503}),
+            json!({"status":404}),
+            json!({"status":410}),
         ],
         json!([{"op":"wake"},{"op":"close"}]),
     );
@@ -463,9 +549,10 @@ async fn browser_push_sender_integrates_actual_sql_queue_completions_and_backoff
     }
     value["realStore"] = true.into();
     value["seedSql"] = seed.into();
-    let result = compare_sender("actual-store-queue-and-completion", value).await;
-    let last = result["trace"].as_array().unwrap().last().unwrap();
+    let result = run_sender(value).await;
+    let last = trace(&result).last().unwrap();
     assert_eq!(last["subscriptions"].as_array().unwrap().len(), 2);
+    assert_eq!(last["outbox"].as_array().unwrap().len(), 1);
     assert_eq!(last["outbox"][0]["id"], 2);
     assert_eq!(last["outbox"][0]["attempts"], 1);
     assert_eq!(last["outbox"][0]["next_attempt"], 130000);
