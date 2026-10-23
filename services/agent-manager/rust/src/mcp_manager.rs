@@ -26,6 +26,40 @@ pub struct McpStatus {
     pub code: Option<String>,
     pub bytes: usize,
 }
+impl McpStatus {
+    pub fn json(&self) -> IvyJson {
+        IvyJson::object([
+            ("state", self.state.into()),
+            (
+                "target",
+                IvyJson::String(ivy_host_runtime::node_path::from_native(&self.target)),
+            ),
+            (
+                "desiredVersion",
+                self.desired_version
+                    .clone()
+                    .map(IvyJson::from)
+                    .unwrap_or(IvyJson::Null),
+            ),
+            (
+                "appliedVersion",
+                self.applied_version
+                    .clone()
+                    .map(IvyJson::from)
+                    .unwrap_or(IvyJson::Null),
+            ),
+            ("observedAt", self.observed_at.clone().into()),
+            (
+                "code",
+                self.code
+                    .clone()
+                    .map(IvyJson::from)
+                    .unwrap_or(IvyJson::Null),
+            ),
+            ("bytes", IvyJson::Number(self.bytes as f64)),
+        ])
+    }
+}
 struct State {
     status: McpStatus,
     running: Option<watch::Receiver<bool>>,

@@ -1,9 +1,37 @@
 //! Transient native events. Native turn history owns recovery after a gap.
 
+use crate::native_journal::NativeJournal;
 use ivy_contracts::{
-    IvyError, IvyJson, IvyResult, json::stringify, limits::MANAGEMENT_FRAME_BYTES,
+    IvyError, IvyJson, IvyResult, JsString, agent_schema::validate_agent, json::stringify,
+    limits::MANAGEMENT_FRAME_BYTES,
 };
-use std::collections::VecDeque;
+use ivy_sdk::service::ToolHandler;
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
+
+pub fn notification_handler(
+    events: Arc<Mutex<NativeNotifications>>,
+    journal: Arc<Mutex<NativeJournal>>,
+) -> ToolHandler {
+    Arc::new(move |args, _| {
+        let events = events.clone();
+        let journal = journal.clone();
+        Box::pin(async move {
+            let epoch = journal
+                .lock()
+                .map_err(|_| IvyError::internal())?
+                .epoch()
+                .cloned();
+            let result = events
+                .lock()
+                .map_err(|_| IvyError::internal())?
+                .page_json(&args, epoch.as_ref());
+            result
+        })
+    })
+}
 
 struct Event {
     sequence: u64,
@@ -13,8 +41,8 @@ struct Event {
 }
 
 pub struct NativeNotifications {
-    service_node_id: String,
-    native_version: String,
+    service_node_id: JsString,
+    native_version: JsString,
     sequence: u64,
     end: u64,
     maximum_bytes: usize,
@@ -26,6 +54,22 @@ impl NativeNotifications {
     pub fn new(
         service_node_id: String,
         native_version: String,
+        start: u64,
+        end: u64,
+        maximum_bytes: usize,
+    ) -> Self {
+        Self::new_js(
+            service_node_id.into(),
+            native_version.into(),
+            start,
+            end,
+            maximum_bytes,
+        )
+    }
+
+    pub fn new_js(
+        service_node_id: JsString,
+        native_version: JsString,
         start: u64,
         end: u64,
         maximum_bytes: usize,
@@ -48,6 +92,16 @@ impl NativeNotifications {
         params: IvyJson,
         observed_at: &str,
     ) -> IvyResult<IvyJson> {
+        self.observe_js(&epoch.into(), &method.into(), params, &observed_at.into())
+    }
+
+    pub fn observe_js(
+        &mut self,
+        epoch: &JsString,
+        method: &JsString,
+        params: IvyJson,
+        observed_at: &JsString,
+    ) -> IvyResult<IvyJson> {
         if self.sequence >= self.end {
             return Err(IvyError::new(
                 "native_notification_capacity",
@@ -57,12 +111,18 @@ impl NativeNotifications {
         self.sequence += 1;
         let value = IvyJson::object([
             ("sequence", IvyJson::Number(self.sequence as f64)),
-            ("serviceNodeId", self.service_node_id.clone().into()),
-            ("nativeVersion", self.native_version.clone().into()),
-            ("epoch", epoch.into()),
-            ("method", method.into()),
+            (
+                "serviceNodeId",
+                IvyJson::String(self.service_node_id.clone()),
+            ),
+            (
+                "nativeVersion",
+                IvyJson::String(self.native_version.clone()),
+            ),
+            ("epoch", IvyJson::String(epoch.clone())),
+            ("method", IvyJson::String(method.clone())),
             ("params", params),
-            ("observedAt", observed_at.into()),
+            ("observedAt", IvyJson::String(observed_at.clone())),
         ]);
         let encoded = stringify(&value, usize::MAX)?;
         let bytes = encoded.len();
@@ -94,6 +154,26 @@ impl NativeNotifications {
         limit: usize,
         epoch: Option<&str>,
     ) -> IvyResult<IvyJson> {
+        self.page_value(
+            after_sequence,
+            limit,
+            epoch.map_or(IvyJson::Null, IvyJson::from),
+        )
+    }
+
+    pub fn page_json(&self, query: &IvyJson, epoch: Option<&JsString>) -> IvyResult<IvyJson> {
+        validate_agent("NotificationQuery", query)?;
+        self.page_value(
+            query.get("afterSequence").unwrap().as_f64().unwrap() as u64,
+            query
+                .get("limit")
+                .and_then(IvyJson::as_f64)
+                .unwrap_or(100.0) as usize,
+            epoch.cloned().map(IvyJson::String).unwrap_or(IvyJson::Null),
+        )
+    }
+
+    fn page_value(&self, after_sequence: u64, limit: usize, epoch: IvyJson) -> IvyResult<IvyJson> {
         let first = self
             .events
             .front()
@@ -133,7 +213,7 @@ impl NativeNotifications {
             gap = true;
         }
         Ok(IvyJson::object([
-            ("epoch", epoch.map_or(IvyJson::Null, IvyJson::from)),
+            ("epoch", epoch),
             ("firstAvailableSequence", IvyJson::Number(first as f64)),
             (
                 "throughSequence",

@@ -16,10 +16,10 @@ pub struct AppliedMcp {
     pub applied: bool,
     pub managed_bytes: usize,
 }
-fn internal<T>(result: Result<T, impl std::fmt::Debug>) -> IvyResult<T> {
+pub(crate) fn internal<T>(result: Result<T, impl std::fmt::Debug>) -> IvyResult<T> {
     result.map_err(|_| IvyError::internal())
 }
-fn conflict(message: &str) -> IvyError {
+pub(crate) fn conflict(message: &str) -> IvyError {
     IvyError::new("target_conflict", message)
 }
 
@@ -40,12 +40,12 @@ pub(crate) fn regular_bytes(path: &Path) -> IvyResult<Option<Vec<u8>>> {
         Err(_) => Err(IvyError::internal()),
     }
 }
-fn text(bytes: Option<&[u8]>) -> IvyResult<&str> {
+pub(crate) fn text(bytes: Option<&[u8]>) -> IvyResult<&str> {
     let source = std::str::from_utf8(bytes.unwrap_or_default())
         .map_err(|_| conflict("Managed Codex configuration is not valid UTF-8."))?;
     Ok(source.strip_prefix('\u{feff}').unwrap_or(source))
 }
-fn state_root(root: &Path) -> IvyResult<()> {
+pub(crate) fn state_root(root: &Path) -> IvyResult<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -60,7 +60,7 @@ fn state_root(root: &Path) -> IvyResult<()> {
     }
     Ok(())
 }
-fn replace_config(path: &Path, before: Option<&[u8]>, after: &[u8]) -> IvyResult<()> {
+pub(crate) fn replace_config(path: &Path, before: Option<&[u8]>, after: &[u8]) -> IvyResult<()> {
     let temporary = path
         .parent()
         .ok_or_else(IvyError::internal)?

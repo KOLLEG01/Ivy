@@ -60,7 +60,7 @@ pub struct Limits {
 }
 
 pub struct LocalAgentState {
-    db: Connection,
+    db: Option<Connection>,
     pub service_node_id: String,
     limits: Limits,
     runtime_epoch: Option<JsString>,
@@ -105,7 +105,7 @@ impl LocalAgentState {
             .map_err(storage_error)?;
         db.execute_batch(SCHEMA).map_err(storage_error)?;
         Ok(Self {
-            db,
+            db: Some(db),
             service_node_id,
             limits,
             runtime_epoch: None,
@@ -120,8 +120,22 @@ impl LocalAgentState {
         Ok(())
     }
 
-    pub fn close(self) -> IvyResult<()> {
-        self.db.close().map_err(|(_, error)| storage_error(error))
+    pub fn close(mut self) -> IvyResult<()> {
+        self.close_shared()
+    }
+
+    /// The service's drained coordinators may still retain the shared state
+    /// handle. Retire the SQLite connection without requiring their Arc drops.
+    /// Calls after closure fail as they do against a closed Node DatabaseSync.
+    pub fn close_shared(&mut self) -> IvyResult<()> {
+        let db = self.db.take().ok_or_else(IvyError::internal)?;
+        match db.close() {
+            Ok(()) => Ok(()),
+            Err((db, error)) => {
+                self.db = Some(db);
+                Err(storage_error(error))
+            }
+        }
     }
 
     fn id(&self, kind: &str, key: &str) -> IvyResult<String> {
@@ -136,6 +150,8 @@ impl LocalAgentState {
     pub fn read(&self, kind: &str, key: &str) -> IvyResult<Option<SavedState>> {
         let row: Option<(i64, String)> = self
             .db
+            .as_ref()
+            .ok_or_else(IvyError::internal)?
             .query_row(
                 "SELECT revision,value_json FROM state WHERE kind=? AND key=?",
                 params![kind, key],
@@ -196,6 +212,8 @@ impl LocalAgentState {
         let object_id = self.id(kind, key)?;
         let tx = self
             .db
+            .as_mut()
+            .ok_or_else(IvyError::internal)?
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let row: Option<(i64, i64, String)> = tx
@@ -293,7 +311,7 @@ impl LocalAgentState {
     }
 
     pub fn completion_caller(&self, thread_id: &str, turn_id: &str) -> IvyResult<Option<String>> {
-        let mut statement = self.db.prepare("SELECT DISTINCT json_extract(value_json,'$.callerPrincipalId') AS caller FROM state
+        let mut statement = self.db.as_ref().ok_or_else(IvyError::internal)?.prepare("SELECT DISTINCT json_extract(value_json,'$.callerPrincipalId') AS caller FROM state
             WHERE kind='operation' AND json_extract(value_json,'$.method')='turn/start'
               AND json_extract(value_json,'$.phase')='succeeded'
               AND json_extract(value_json,'$.params.threadId')=?
@@ -313,7 +331,7 @@ impl LocalAgentState {
     }
 
     pub fn release_completion(&self, thread_id: &str, turn_id: &str) -> IvyResult<()> {
-        self.db.execute("UPDATE completion_receipts SET released=1 WHERE operation_key IN
+        self.db.as_ref().ok_or_else(IvyError::internal)?.execute("UPDATE completion_receipts SET released=1 WHERE operation_key IN
             (SELECT key FROM state WHERE kind='operation' AND json_extract(value_json,'$.params.threadId')=?
               AND json_extract(value_json,'$.reply.result.turn.id')=?)", params![thread_id, turn_id]).map_err(storage_error)?;
         Ok(())

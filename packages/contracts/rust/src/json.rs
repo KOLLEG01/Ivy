@@ -8,6 +8,22 @@ mod value_traits;
 /// ECMAScript string code units, including unpaired surrogates. Ord is UTF-16 order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct JsString(pub Vec<u16>);
+pub fn lowercase_utf16(value: &[u16]) -> JsString {
+    let mut output = Vec::new();
+    let mut segment = String::new();
+    for c in char::decode_utf16(value.iter().copied()) {
+        match c {
+            Ok(c) => segment.push(c),
+            Err(e) => {
+                output.extend(segment.to_lowercase().encode_utf16());
+                segment.clear();
+                output.push(e.unpaired_surrogate());
+            }
+        }
+    }
+    output.extend(segment.to_lowercase().encode_utf16());
+    JsString(output)
+}
 impl From<&str> for JsString {
     fn from(s: &str) -> Self {
         Self(s.encode_utf16().collect())
@@ -19,6 +35,10 @@ impl From<String> for JsString {
     }
 }
 impl JsString {
+    /// Native Unicode lowercase retains unpaired UTF-16 units as boundaries.
+    pub fn to_english_lowercase(&self) -> Self {
+        lowercase_utf16(&self.0)
+    }
     pub fn contains_ascii(&self, needle: &str) -> bool {
         debug_assert!(needle.is_ascii());
         needle.is_empty()

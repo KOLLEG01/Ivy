@@ -45,14 +45,6 @@ fn require(condition: bool, message: &str) -> IvyResult<()> {
         Err(IvyError::new("target_conflict", message))
     }
 }
-fn truthy(value: &IvyJson) -> bool {
-    match value {
-        IvyJson::Null | IvyJson::Bool(false) => false,
-        IvyJson::Number(value) => *value != 0.0 && !value.is_nan(),
-        IvyJson::String(value) => !value.0.is_empty(),
-        _ => true,
-    }
-}
 /// This is the original one-MiB lstat/read guard, including ENOENT on either
 /// operation. Local instruction bytes are decoded only by composition.
 pub fn regular_bytes(path: &Path) -> IvyResult<Option<Vec<u8>>> {
@@ -226,14 +218,13 @@ fn apply_locked(
     let state_path = root.join("state.json");
     let raw = regular_bytes(&state_path)?;
     let mut state = match raw {
-        // An empty Buffer is truthy in JS, so empty JSON is still a parse error.
         Some(bytes) => Some(internal(parse(
             &String::from_utf8_lossy(&bytes),
             usize::MAX,
         ))?),
         None => None,
     };
-    state = state.filter(truthy);
+    state = state.filter(|value| !value.is_null());
     require(
         state.as_ref().is_none_or(|state| {
             state.get("schemaVersion") == Some(&IvyJson::Number(1.0))
@@ -244,8 +235,16 @@ fn apply_locked(
     if state
         .as_ref()
         .and_then(|s| s.get("pending"))
-        .is_some_and(truthy)
+        .is_some_and(|value| !value.is_null())
     {
+        require(
+            state
+                .as_ref()
+                .and_then(|value| value.get("pending"))
+                .and_then(IvyJson::as_object)
+                .is_some(),
+            "Pending instruction state must be an object.",
+        )?;
         finish_pending(&home, &root, state.as_mut().unwrap())?;
     }
     let current = regular_bytes(&target)?;

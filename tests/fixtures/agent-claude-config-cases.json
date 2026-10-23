@@ -1,0 +1,202 @@
+[
+  {},
+  {
+    "environment": {
+      "CLAUDE_CODEX_PROVIDER": "codex"
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_AGENT_LOOP": "codex-jsonl-proxy"
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_PROVIDER": "claude-code",
+      "CLAUDE_CODEX_AGENT_LOOP": "codex-jsonl-proxy"
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_PROVIDER": "codex",
+      "CLAUDE_CODEX_AGENT_LOOP": "native-claude-code-sdk"
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_PROVIDER": "unknown\ud800",
+      "CLAUDE_CODEX_AGENT_LOOP": "unknown\udfff"
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_PROVIDER": "API_KEY=syntheticFixture123 secret: Bearer SyntheticValue123 ghp_syntheticFixture123 AKIA1234567890ABCDEF"
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_AGENT_LOOP": "sk-ant-syntheticFixture123 -----BEGIN RSA PRIVATE KEY-----\ud800\nfixture-----END RSA PRIVATE KEY-----"
+    }
+  },
+  {
+    "config": {
+      "overrides": {
+        "provider_loop_provider": "codex",
+        "provider_loop_agent_loop": "codex-jsonl-proxy"
+      }
+    }
+  },
+  {
+    "config": {
+      "overrides": {
+        "providerLoopProvider": "codex",
+        "providerLoopAgentLoop": "codex-jsonl-proxy"
+      }
+    }
+  },
+  {
+    "config": {
+      "overrides": {
+        "provider_loop_config.providerId": "codex",
+        "provider_loop_config.loopId": "native-claude-code-sdk"
+      }
+    }
+  },
+  {
+    "config": {
+      "overrides": {
+        "provider_loop_provider": 7,
+        "providerLoopProvider": "codex"
+      }
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_PROVIDER": "  "
+    },
+    "config": {
+      "overrides": {
+        "providerLoopProvider": "codex"
+      }
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_PROVIDER": "claude-code"
+    },
+    "config": {
+      "overrides": {
+        "providerLoopProvider": "codex"
+      }
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_MOCK": "1",
+      "CLAUDE_CODEX_RUNTIME_TYPE": "codex-exec",
+      "CLAUDE_CODEX_PROVIDER": "codex"
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": " sdk "
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": " agent-sdk "
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": " sidecar "
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": " cloud-agent-sdk "
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": " agent-sdk-socket "
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": " socket "
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": " runtime-socket "
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": " channels "
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": " channel "
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": " http-channel "
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": " agent-api "
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": " claudep "
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": " pty-transcript "
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": " codex-exec "
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": " mock "
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": " unknown\ud800 "
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": "  "
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME": "agentapi",
+      "CLAUDE_CODEX_BACKEND": "claude-p"
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_RUNTIME_TYPE": "",
+      "CLAUDE_CODEX_BACKEND": "claude-p"
+    }
+  },
+  {
+    "environment": {
+      "CLAUDE_CODEX_BACKEND": "claude-p"
+    }
+  }
+]

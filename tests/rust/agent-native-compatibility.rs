@@ -1,5 +1,6 @@
 #[path = "../../packages/host-runtime/rust/src/native_catalog_compatibility.rs"]
 mod compatibility;
+use ivy_host_runtime::native_path;
 #[path = "../../packages/host-runtime/rust/src/concurrency.rs"]
 mod concurrency;
 use ivy_contracts::{
@@ -17,56 +18,69 @@ fn json(s: &str) -> IvyJson {
     parse(s, usize::MAX).unwrap()
 }
 
-#[test]
-fn launch_catalog_checks_match_original_preflight_without_starting_native() {
+#[tokio::test]
+async fn configured_catalog_checks_the_actual_retained_identity_without_starting_native() {
     let fixture = Fixture::new();
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut child = Command::new("node")
-        .arg(root.join("tests/fixtures/native-launch-catalog-oracle.mjs"))
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let source = repository.join("specs/native/codex-0.154.0/catalog.json");
+    let bytes = std::fs::read(source).unwrap();
+    let catalog = json(std::str::from_utf8(&bytes).unwrap());
+    let artifact_root = {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            fixture.0.join(std::ffi::OsString::from_wide(&[
+                110, 97, 116, 105, 118, 101, 0xd800,
+            ]))
+        }
+        #[cfg(not(windows))]
+        {
+            fixture.0.join("native")
+        }
+    };
+    let directory = artifact_root.join("dist/specs/native/codex-0.154.0");
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("catalog.json");
+    std::fs::write(&path, &bytes).unwrap();
+    let settings = IvyJson::object([
+        ("nativeVersion", "0.154.0".into()),
+        (
+            "nativeExecutableHash",
+            catalog.required("nativeExecutableHash").unwrap().clone(),
+        ),
+    ]);
+    compatibility::verify_configured_native_catalog(&artifact_root, &"fixture".into(), &settings)
+        .await
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(
-            stringify(
-                &IvyJson::object([("root", fixture.0.to_str().unwrap().into())]),
-                65536,
-            )
-            .unwrap()
-            .as_bytes(),
-        )
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    let mut mismatch = settings.clone();
+    mismatch.insert(
+        "nativeExecutableHash",
+        format!("sha256:{}", "0".repeat(64)).into(),
     );
-    let rows = json(std::str::from_utf8(&output.stdout).unwrap());
-    assert_eq!(rows.as_array().unwrap().len(), 17);
-    for row in rows.as_array().unwrap() {
-        let input = row.get("input").unwrap();
-        let actual = match compatibility::verify_launch_catalog(
-            input.get("catalog").unwrap(),
-            input.get("version").unwrap().as_js_string().unwrap(),
-            input.get("hash").unwrap().as_js_string().unwrap(),
-        ) {
-            Ok(()) => IvyJson::object([("ok", true.into())]),
-            Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
-        };
-        assert_eq!(
-            &actual,
-            row.get("expected").unwrap(),
-            "{:?}",
-            row.get("label")
-        );
-    }
+    assert_eq!(
+        compatibility::verify_configured_native_catalog(
+            &artifact_root,
+            &"fixture".into(),
+            &mismatch
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "incompatible_native_catalog"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    std::fs::write(&path, b"invalid catalog").unwrap();
+    assert!(
+        compatibility::verify_configured_native_catalog(
+            &artifact_root,
+            &"fixture".into(),
+            &settings
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(std::fs::read(path).unwrap(), b"invalid catalog");
 }
 struct Fixture(PathBuf);
 impl Fixture {

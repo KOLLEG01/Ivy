@@ -367,6 +367,7 @@ export const rustTests = {
   'tests/rust/chat-result-text.rs': { package: 'ivy-chat-bridge', test: 'chat-result-text' },
   'tests/rust/chat-collection-reads.rs': { package: 'ivy-chat-bridge', test: 'chat-collection-reads' },
   'tests/rust/chat-evidence-bytes.rs': { package: 'ivy-chat-bridge', test: 'chat-evidence-bytes' },
+  'tests/rust/contracts-native-urls.rs': { package: 'ivy-contracts', test: 'contracts', filter: 'native_urls::' },
   'tests/rust/contracts.rs': { package: 'ivy-contracts', test: 'contracts' },
   'tests/rust/hash.rs': { package: 'ivy-contracts', test: 'hash' },
   'tests/rust/json-depth.rs': { package: 'ivy-contracts', test: 'json-depth' },
@@ -489,6 +490,9 @@ export const rustTests = {
   'tests/rust/agent-native-backup-paths.rs': { package: 'ivy-agent-manager', test: 'agent-native-backup-paths' },
   'tests/rust/agent-skills-files.rs': { package: 'ivy-agent-manager', test: 'agent-skills-files', originalBackend: 'agent-manager' },
   'tests/rust/agent-offline-import.rs': { package: 'ivy-agent-manager', test: 'agent-offline-import', originalBackend: 'agent-manager' },
+  'tests/rust/agent-runtime-entry.rs': { package: 'ivy-agent-manager', test: 'agent-runtime-entry', prerequisites: [{ package: 'ivy-host-runtime', bin: 'ivy-health' }, { platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-job' }, { platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-host-job' }], },
+  'tests/rust/agent-claude-events.rs': { package: 'ivy-agent-manager', test: 'agent-claude-events',  },
+  'tests/rust/agent-skills-locale.rs': { package: 'ivy-agent-manager', test: 'agent-skills-files',  },
   'tests/rust/agent-state.rs': { package: 'ivy-agent-manager', test: 'agent-state' },
   'tests/rust/agent-notifications.rs': { package: 'ivy-agent-manager', test: 'agent-notifications' },
   'tests/rust/agent-interactions.rs': {

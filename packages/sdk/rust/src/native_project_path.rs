@@ -33,20 +33,7 @@ fn ascii_upper(c: u16) -> u16 {
 }
 /// Lowercase Unicode text, retaining unpaired UTF-16 units as boundaries.
 pub fn lowercase(value: &[u16]) -> JsString {
-    let mut output = Vec::new();
-    let mut segment = String::new();
-    for c in char::decode_utf16(value.iter().copied()) {
-        match c {
-            Ok(c) => segment.push(c),
-            Err(e) => {
-                output.extend(segment.to_lowercase().encode_utf16());
-                segment.clear();
-                output.push(e.unpaired_surrogate());
-            }
-        }
-    }
-    output.extend(segment.to_lowercase().encode_utf16());
-    JsString(output)
+    ivy_contracts::json::lowercase_utf16(value)
 }
 fn reserved_device(value: &[u16]) -> bool {
     let value: Vec<_> = value.iter().copied().map(ascii_upper).collect();

@@ -1,0 +1,794 @@
+{
+  "registry": {
+    "discoveryHint": "AgentManager provides host readiness, capabilities and fallback access to Codex. Use a direct native Codex function first when it reaches the owning host.",
+    "namespaces": [
+      {
+        "namespace": "codex",
+        "description": "Codex tasks, projects, tools and integrations on this host",
+        "guideMarkdown": "Use a direct native Codex function first when it reaches the host that owns the task or project; its typed arguments need no AgentManager discovery step. Use AgentManager for host capabilities and as fallback when a direct function cannot reach that owner. Discover the needed fallback method and use the exact returned native arguments and definition hash; available methods depend on the installed Codex version. Use thread/list and thread/read to inspect tasks, thread/start to create one and turn/start to send it work. Read-only methods need no outer operationId. For mutations, keep one outer operationId and inspect agent.operation after a lost reply. Pending inputs and approvals are handled through the agent namespace.",
+        "tools": [],
+        "discoveryGroups": [
+          {
+            "group": "codex",
+            "description": "Native Codex operations using the selected host version."
+          },
+          {
+            "group": "codex/tasks",
+            "description": "Codex task lifecycle, content, settings and voice."
+          },
+          {
+            "group": "codex/tasks/lifecycle",
+            "description": "Create, find, resume, fork and archive Codex tasks."
+          },
+          {
+            "group": "codex/tasks/content",
+            "description": "Read task history, items and output."
+          },
+          {
+            "group": "codex/tasks/settings",
+            "description": "Task names, metadata, goals and configuration."
+          },
+          {
+            "group": "codex/tasks/voice",
+            "description": "Task realtime voice sessions and audio."
+          },
+          {
+            "group": "codex/projects",
+            "description": "Projects, workspaces and task organization."
+          },
+          {
+            "group": "codex/turns",
+            "description": "Start, steer and interrupt task turns and messages."
+          },
+          {
+            "group": "codex/models-account",
+            "description": "Models, account login and usage limits."
+          },
+          {
+            "group": "codex/configuration",
+            "description": "Settings, environments and permission profiles."
+          },
+          {
+            "group": "codex/extensions",
+            "description": "Plugins, MCP connections, marketplaces and skills."
+          },
+          {
+            "group": "codex/files-commands",
+            "description": "Native files, commands and processes."
+          }
+        ],
+        "notifications": [],
+        "topics": [],
+        "inventoryKinds": [
+          {
+            "kind": "thread",
+            "version": "1.1.0",
+            "summarySchema": {
+              "$agentSchema": "ThreadSummary"
+            },
+            "searchPointers": [
+              "/name",
+              "/preview",
+              "/cwd"
+            ],
+            "archivedPointer": "/archived",
+            "recencyPointer": "/recencyAt"
+          },
+          {
+            "kind": "project",
+            "version": "2.0.0",
+            "summarySchema": {
+              "$agentSchema": "ProjectSummary"
+            },
+            "searchPointers": [
+              "/name"
+            ],
+            "recencyPointer": "/recencyAt"
+          }
+        ]
+      },
+      {
+        "namespace": "agent",
+        "description": "Codex host readiness, work capabilities, outcomes and pending inputs",
+        "discoveryGroups": [
+          {
+            "group": "agent",
+            "description": "Check the Codex host, configure work capabilities and answer pending inputs."
+          }
+        ],
+        "guideMarkdown": "Use a direct native Codex function first when it reaches the owning host; its typed arguments need no AgentManager discovery step. AgentManager supplies host capabilities and fallback access. Select a service node from the public tool schema, use agent_manager_status to read that node’s host, readiness and work capabilities, then use agent_manager_projects to read that host’s projects. Use agent_manager_discover to load an exact version-dependent native method. Pass its nativeVersion, method, expectedDefinitionHash and unchanged native params to agent_manager_invoke with a stable operationId. For pending input, use agent_manager_inputs for requests and their reply definitions, then submit agent_manager_answer to the same service node, connection epoch and request ID. Only the current owner can answer. Use agent_manager_read for fresh task state and original operation outcomes. Development-only direct interactions and notifications live on ivy_dev.",
+        "tools": [
+          {
+            "namespace": "agent",
+            "name": "status",
+            "interfaceVersion": "1.0.0",
+            "description": "Check this host’s Codex version, connection identity and operation capacity.",
+            "discovery": {
+              "mcp": {
+                "name": "agent_manager_status",
+                "surface": "ivy"
+              },
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "StatusInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "Status"
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "catalog",
+            "interfaceVersion": "1.0.0",
+            "description": "Read the full installed Codex protocol catalog. Prefer agent_manager_discover for selected native methods; match this catalog’s hash to agent_manager_status.",
+            "discovery": {
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "StatusInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "Catalog"
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "discover",
+            "interfaceVersion": "1.0.0",
+            "description": "Discover version-dependent native Codex methods on this host when native Codex tools cannot reach it. Omit query to list methods, search by query, or pass an exact method to load its input/output schemas and expectedDefinitionHash for agent_manager_invoke or agent_manager_interact.",
+            "discovery": {
+              "mcp": {
+                "name": "agent_manager_discover",
+                "surface": "ivy"
+              },
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "NativeDiscoveryInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "NativeDiscovery"
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "frameLimits",
+            "interfaceVersion": "1.0.0",
+            "description": "Read request and response size limits for this Codex connection.",
+            "discovery": {
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "FrameLimitsInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "FrameLimits"
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "operation",
+            "interfaceVersion": "1.0.0",
+            "description": "Check the original outcome of this caller’s Codex action by operationId.",
+            "discovery": {
+              "mcp": {
+                "name": "agent_manager_read",
+                "surface": "ivy"
+              },
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "OperationInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "Operation"
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "invoke",
+            "interfaceVersion": "1.0.0",
+            "description": "Dispatch one idempotent native request and return its committed operation receipt.",
+            "discovery": {
+              "mcp": {
+                "name": "agent_manager_invoke",
+                "surface": "ivy"
+              },
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "PreventInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "Operation"
+            },
+            "annotations": {
+              "readOnlyHint": false,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "interact",
+            "interfaceVersion": "1.0.0",
+            "description": "Send a direct native interaction without Hive persistence. Replies are cached briefly in this connection; use interaction lookup after uncertain delivery, never blindly replay mutations.",
+            "discovery": {
+              "mcp": {
+                "name": "agent_manager_interact",
+                "surface": "ivy_dev"
+              },
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "PreventInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "Interaction"
+            },
+            "annotations": {
+              "readOnlyHint": false,
+              "idempotentHint": false
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "interaction",
+            "interfaceVersion": "1.0.0",
+            "description": "Read a caller-scoped recent interaction reply. Expiry requires reconciliation against native thread state.",
+            "discovery": {
+              "mcp": {
+                "name": "agent_manager_interaction",
+                "surface": "ivy_dev"
+              },
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "OperationInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "Interaction"
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "read",
+            "interfaceVersion": "1.0.0",
+            "description": "Read fresh Codex task metadata, turns or items at the installed version without a durable operation.",
+            "discovery": {
+              "mcp": {
+                "name": "agent_manager_read",
+                "surface": "ivy"
+              },
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "ReadInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "ReadObservation"
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "prevent",
+            "interfaceVersion": "1.0.0",
+            "description": "Retain an unexecuted failure for an absent original native request, or return its existing outcome unchanged.",
+            "discovery": {
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "PreventInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "Operation"
+            },
+            "annotations": {
+              "readOnlyHint": false,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "inputs",
+            "interfaceVersion": "1.0.0",
+            "description": "Find Codex requests waiting for input or approval, or read an exact historical request.",
+            "discovery": {
+              "mcp": {
+                "name": "agent_manager_inputs",
+                "surface": "ivy"
+              },
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "PendingInputQuery"
+            },
+            "outputSchema": {
+              "$agentSchema": "PendingInputPage"
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "inputDefinition",
+            "interfaceVersion": "1.0.0",
+            "description": "Get the reply schema for a pending Codex input or approval request.",
+            "discovery": {
+              "mcp": {
+                "name": "agent_manager_inputs",
+                "surface": "ivy"
+              },
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "InputDefinitionQuery"
+            },
+            "outputSchema": {
+              "$agentSchema": "InputDefinition"
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "answer",
+            "interfaceVersion": "1.0.0",
+            "description": "Answer a pending Codex request using its reply schema and a stable operationId.",
+            "discovery": {
+              "mcp": {
+                "name": "agent_manager_answer",
+                "surface": "ivy"
+              },
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "AnswerInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "Operation"
+            },
+            "annotations": {
+              "readOnlyHint": false,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "notifications",
+            "interfaceVersion": "1.0.0",
+            "description": "Read Codex event history, including any gaps in the retained sequence.",
+            "discovery": {
+              "mcp": {
+                "name": "agent_manager_notifications",
+                "surface": "ivy_dev"
+              },
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "NotificationQuery"
+            },
+            "outputSchema": {
+              "$agentSchema": "NotificationPage"
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "projects",
+            "interfaceVersion": "1.0.0",
+            "description": "Read the current projects of the connected Codex instance. Codex is the sole project authority.",
+            "discovery": {
+              "mcp": {
+                "name": "agent_manager_projects",
+                "surface": "ivy"
+              },
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "ProjectsInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "ProjectsResult"
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "listDirectories",
+            "interfaceVersion": "1.0.0",
+            "description": "Browse directories on this host under the AgentManager account.",
+            "discovery": {
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "DirectoryListInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "DirectoryListResult"
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "resolveProject",
+            "interfaceVersion": "1.0.0",
+            "description": "Resolve a native project or allocate a persistent projectless task directory without registering a project. Normal/existing selections may register with Codex; internal and task selections require their registered native project.",
+            "discovery": {
+              "mcp": {
+                "name": "agent_manager_resolve_project",
+                "surface": "ivy"
+              },
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "ProjectResolveInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "ProjectLocation"
+            },
+            "annotations": {
+              "readOnlyHint": false,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "capabilities",
+            "interfaceVersion": "1.0.0",
+            "description": "Read which kinds of agent work this host is configured to accept.",
+            "discovery": {
+              "mcp": {
+                "name": "agent_manager_status",
+                "surface": "ivy"
+              },
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "CapabilityProfileInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "CapabilityProfile"
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "configureCapabilities",
+            "interfaceVersion": "1.0.0",
+            "description": "Configure which kinds of agent work this host accepts, using the current profile revision.",
+            "discovery": {
+              "mcp": {
+                "name": "agent_manager_configure_capabilities",
+                "surface": "ivy_dev"
+              },
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "ConfigureCapabilitiesInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "CapabilityProfile"
+            },
+            "annotations": {
+              "readOnlyHint": false,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "environmentDefaults",
+            "interfaceVersion": "1.0.0",
+            "description": "Read the project-owned MCP and skill defaults used when no Hive-wide override exists.",
+            "discovery": {
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "EnvironmentDefaultsInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "EnvironmentDefaults"
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "stageFile",
+            "interfaceVersion": "1.0.0",
+            "description": "Store an image or file of up to 8 MiB on this host so a Codex message can reference it by path.",
+            "discovery": {
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "StageFileInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "StagedFile"
+            },
+            "annotations": {
+              "readOnlyHint": false,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
+            "name": "resolveWorkspace",
+            "interfaceVersion": "1.0.0",
+            "description": "Inspect or prepare the deterministic Task workspace and resolve its intended project path without performing Git lifecycle actions.",
+            "discovery": {
+              "keywords": [
+                "Codex"
+              ]
+            },
+            "inputSchema": {
+              "$agentSchema": "WorkspaceResolveInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "WorkspaceResolution"
+            },
+            "annotations": {
+              "readOnlyHint": false,
+              "idempotentHint": true
+            }
+          }
+        ],
+        "notifications": [
+          {
+            "name": "notification",
+            "version": "1.0.0",
+            "description": "Transient hint for a new native notification; history remains authoritative.",
+            "payloadSchema": {
+              "$agentSchema": "Notification"
+            }
+          },
+          {
+            "name": "inputs",
+            "version": "1.0.0",
+            "description": "Transient hint that a native request is waiting for input; reread current pending inputs.",
+            "payloadSchema": {
+              "$agentSchema": "InputNotification"
+            }
+          },
+          {
+            "name": "capabilities",
+            "version": "1.0.0",
+            "description": "Transient hint that this node capability profile changed.",
+            "payloadSchema": {
+              "$agentSchema": "CapabilityProfile"
+            }
+          }
+        ],
+        "topics": [
+          {
+            "$browserNoticeTopic": "agent"
+          },
+          {
+            "topic": "agent.notification",
+            "version": "1.0.0",
+            "title": "Agent notification",
+            "description": "A durable native AgentManager notification was retained.",
+            "payloadSchema": {
+              "$agentSchema": "Notification"
+            },
+            "eventKinds": []
+          },
+          {
+            "topic": "agent.capabilities",
+            "version": "1.0.0",
+            "title": "Agent capabilities changed",
+            "description": "The AgentManager capability profile changed.",
+            "payloadSchema": {
+              "$agentSchema": "CapabilityProfile"
+            },
+            "eventKinds": []
+          }
+        ],
+        "inventoryKinds": []
+      }
+    ],
+    "contracts": [
+      {
+        "key": "agent/execution-defaults",
+        "version": "1.0.0",
+        "owner": {
+          "kind": "service",
+          "serviceName": "agent-manager"
+        },
+        "mediaType": "application/json",
+        "retention": {
+          "objects": {
+            "mode": "retain"
+          },
+          "revisions": {
+            "mode": "bounded",
+            "maximumCount": 100
+          }
+        },
+        "jsonSchema": {
+          "$agentSchema": "ExecutionDefaultsDocument"
+        },
+        "specMarkdown": "Composer defaults for new tasks, stored at /ivy-agent-execution-defaults. Codex and Claude profiles are independent. Null fields inherit the connected native server configuration. Existing tasks retain their native settings. AgentUI writes with user permissions and object CAS."
+      },
+      {
+        "key": "agent/instructions",
+        "version": "1.0.0",
+        "owner": {
+          "kind": "service",
+          "serviceName": "agent-manager"
+        },
+        "mediaType": "application/json",
+        "retention": {
+          "objects": {
+            "mode": "retain"
+          },
+          "revisions": {
+            "mode": "bounded",
+            "maximumCount": 100
+          }
+        },
+        "jsonSchema": {
+          "$agentSchema": "InstructionsDocument"
+        },
+        "specMarkdown": "Versioned user-authored instruction documents, not runtime configuration or credentials. Hive-wide hostId=null; host documents bind an exact hostId. AgentUI writes with the user permissions and object CAS. Enabled host instructions follow enabled Hive instructions and take precedence. A disabled host document suppresses central instructions on that host; removing it inherits Hive again. See specs/AGENT-INSTRUCTIONS.md."
+      },
+      {
+        "key": "agent/mcp-configuration",
+        "version": "1.0.0",
+        "owner": {
+          "kind": "service",
+          "serviceName": "agent-manager"
+        },
+        "mediaType": "application/json",
+        "retention": {
+          "objects": {
+            "mode": "retain"
+          },
+          "revisions": {
+            "mode": "bounded",
+            "maximumCount": 100
+          }
+        },
+        "jsonSchema": {
+          "$agentSchema": "McpDocument"
+        },
+        "specMarkdown": "Versioned secret-free MCP intent. AgentManager injects only its own host credential and only for its exact Hive MCP resource."
+      },
+      {
+        "key": "agent/skills",
+        "version": "1.0.0",
+        "owner": {
+          "kind": "service",
+          "serviceName": "agent-manager"
+        },
+        "mediaType": "application/json",
+        "retention": {
+          "objects": {
+            "mode": "retain"
+          },
+          "revisions": {
+            "mode": "bounded",
+            "maximumCount": 100
+          }
+        },
+        "jsonSchema": {
+          "$agentSchema": "SkillsDocument"
+        },
+        "specMarkdown": "Versioned UTF-8 skill files installed into Ivy-owned user skill directories. Other user skills remain outside AgentManager ownership."
+      }
+    ],
+    "requiredContracts": []
+  },
+  "nativeSummaries": {
+    "thread/start": "Create a new Codex task.",
+    "thread/list": "Find Codex tasks.",
+    "thread/read": "Read a Codex task and its turns.",
+    "thread/resume": "Resume an existing Codex task.",
+    "thread/fork": "Fork a Codex task.",
+    "thread/archive": "Archive a Codex task.",
+    "thread/unarchive": "Restore an archived Codex task.",
+    "thread/realtime/start": "Start a realtime voice session for a task.",
+    "thread/realtime/stop": "Stop a task voice session.",
+    "turn/start": "Send input and start a task turn.",
+    "turn/steer": "Send steering input to a running turn.",
+    "turn/interrupt": "Interrupt a running task turn.",
+    "account/rateLimits/read": "Read account usage and remaining rate limits.",
+    "model/list": "List available models and reasoning levels.",
+    "project/list": "List Codex projects.",
+    "project/create": "Create a Codex project.",
+    "thread/name/set": "Rename a Codex task.",
+    "thread/loaded/list": "List tasks loaded in the native Codex process.",
+    "mcpServerStatus/list": "List MCP connections and their tools.",
+    "skills/list": "List available Codex skills.",
+    "plugin/list": "List Codex plugins.",
+    "config/read": "Read Codex configuration."
+  }
+}

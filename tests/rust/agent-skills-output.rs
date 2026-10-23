@@ -190,7 +190,7 @@ fn skills_ownership_migration_collisions_and_retention_match_original_effects() 
                 for replacement in planned.replacements {
                     if !replacement.unchanged {
                         if replacement.owned {
-                            trees.insert(replacement.source_name, IvyJson::Null);
+                            trees.insert(replacement.name.clone(), IvyJson::Null);
                         }
                         let hash = after
                             .iter()

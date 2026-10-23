@@ -1,12 +1,12 @@
 //! Read-only catalog checks before the host drains an existing service.
-use super::concurrency::map_concurrent;
+use super::{concurrency::map_concurrent, native_path};
 use futures_util::{
     FutureExt,
     future::{BoxFuture, Shared},
 };
 use ivy_contracts::{
-    IvyError, IvyJson, IvyResult, JsString, agent_schema::validate_agent, hash::hash_json,
-    json::parse, checked_native_contract::native_catalog_path,
+    IvyError, IvyJson, IvyResult, JsString, agent_schema::validate_agent,
+    checked_native_contract::native_catalog_path, hash::hash_json, json::parse,
 };
 use ivy_sdk::{
     rpc::{RequestOptions, RpcClient},
@@ -50,8 +50,7 @@ fn path_text(path: &Path) -> JsString {
     }
 }
 fn path(value: &JsString) -> PathBuf {
-    // Node encodes a JS filesystem path to UTF-8, replacing lone surrogates.
-    PathBuf::from(String::from_utf16_lossy(&value.0))
+    native_path::filesystem_path(value)
 }
 async fn catalog(path: &Path) -> IvyResult<IvyJson> {
     let bytes = tokio::fs::read(path)

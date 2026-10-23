@@ -1134,6 +1134,10 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 name = "ivy-agent-manager"
 version = "0.2.40"
 dependencies = [
+ "windows-sys 0.61.2",
+ "url",
+ "regex",
+ "base64 0.23.1",
  "chrono",
  "futures-util",
  "ivy-contracts",

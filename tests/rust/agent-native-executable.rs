@@ -1,25 +1,12 @@
-use ivy_host_runtime::{codex_rpc, process};
-#[path = "../../packages/host-runtime/rust/src/codex_daemon.rs"]
-mod codex_daemon;
-#[path = "../../packages/host-runtime/rust/src/codex_handshake.rs"]
-mod codex_handshake;
-#[path = "../../packages/host-runtime/rust/src/codex_process.rs"]
-mod native_process;
-use ivy_contracts::{
-    IvyJson,
-    json::{parse, stringify},
-};
-use std::{
-    io::Write,
-    path::PathBuf,
-    process::{Command, Stdio},
-};
+use ivy_contracts::{JsString, hash::digest};
+use ivy_host_runtime::codex_process::{verify_cli_version, verify_executable};
+use std::{collections::BTreeMap, path::PathBuf, process::Command};
 
 struct Root(PathBuf);
 impl Root {
     fn new() -> Self {
         let root =
-            std::env::temp_dir().join(format!("ivy-native-executable-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("ivy-agent-executable-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         Self(root)
     }
@@ -31,105 +18,96 @@ impl Drop for Root {
 }
 
 #[tokio::test]
-async fn executable_and_cli_version_match_original_boundaries_without_native_launch() {
-    let fixture = Root::new();
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut child = Command::new("node")
-        .arg(repo.join("tests/fixtures/native-executable-oracle.mjs"))
-        .current_dir(repo)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+async fn native_executable_admission_checks_exact_bytes_and_rejects_scripts_without_execution() {
+    let root = Root::new();
+    let bytes = b"fixture file identity only; never executable";
+    let executable = root.0.join("native.exe");
+    std::fs::write(&executable, bytes).unwrap();
+    let hash = JsString::from(digest(bytes));
+    assert_eq!(
+        verify_executable(&executable, &hash).await.unwrap(),
+        std::fs::canonicalize(&executable).unwrap()
+    );
+    assert_eq!(
+        verify_executable(&executable, &format!("sha256:{}", "0".repeat(64)).into())
+            .await
+            .unwrap_err()
+            .code,
+        "native_build_mismatch"
+    );
+    for name in ["native.cmd", "native.bat", "native.ps1", ".CMD"] {
+        let script = root.0.join(name);
+        std::fs::write(&script, bytes).unwrap();
+        assert_eq!(
+            verify_executable(&script, &hash).await.unwrap_err().code,
+            "native_build_mismatch"
+        );
+    }
+    assert_eq!(
+        verify_executable(&root.0, &hash).await.unwrap_err().code,
+        "native_build_mismatch"
+    );
+    assert_eq!(std::fs::read(executable).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn native_cli_version_uses_the_owned_process_and_refuses_another_pinned_version() {
+    let root = Root::new();
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let executable = root.0.join(if cfg!(windows) {
+        "native.exe"
+    } else {
+        "native"
+    });
+    let output = Command::new(std::env::var_os("IVY_TEST_RUSTC").unwrap_or_else(|| "rustc".into()))
+        .args(["--edition=2024", "-C", "debuginfo=0"])
+        .arg(repository.join("tests/fixtures/native-launch-child.rs"))
+        .arg("-o")
+        .arg(&executable)
+        .output()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(
-            stringify(
-                &IvyJson::object([("root", fixture.0.to_str().unwrap().into())]),
-                65536,
-            )
-            .unwrap()
-            .as_bytes(),
-        )
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let data = parse(std::str::from_utf8(&output.stdout).unwrap(), 1024 * 1024).unwrap();
-    let rows = data.get("rows").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), 9);
-    for row in rows {
-        let configured = PathBuf::from(
-            row.get("executable")
-                .unwrap()
-                .as_js_string()
-                .unwrap()
-                .to_utf8()
-                .unwrap(),
-        );
-        let actual = match native_process::verify_executable(
-            &configured,
-            row.get("expectedHash").unwrap().as_js_string().unwrap(),
+    let marker = root.0.join("cli");
+    std::fs::write(
+        root.0.join("launch-fixture.txt"),
+        format!("\n\n\n\n{}\n{{}}\n0.154.0\n", marker.display()),
+    )
+    .unwrap();
+    let artifact = std::env::var_os("IVY_TEST_AGENT_ARTIFACT")
+        .map(PathBuf::from)
+        .unwrap_or(repository);
+    let launcher = artifact.join("dist/native/win32-x64/ivy-job.exe");
+    verify_cli_version(
+        &executable,
+        &root.0,
+        &"0.154.0".into(),
+        BTreeMap::new(),
+        &launcher,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        verify_cli_version(
+            &executable,
+            &root.0,
+            &"0.999.0".into(),
+            BTreeMap::new(),
+            &launcher
         )
         .await
-        {
-            Ok(path) => {
-                assert_eq!(path, std::fs::canonicalize(&configured).unwrap());
-                IvyJson::object([("ok", true.into())])
-            }
-            Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
-        };
-        assert_eq!(
-            &actual,
-            row.get("expected").unwrap(),
-            "{:?}",
-            row.get("mode")
-        );
-    }
-    let versions = data.get("versions").unwrap().as_array().unwrap();
-    assert_eq!(versions.len(), 40);
-    for row in versions {
-        let result = process::ProcessResult {
-            exit_code: match row.get("exitCode").unwrap() {
-                IvyJson::Number(n) => Some(*n as i32),
-                _ => None,
-            },
-            signal: None,
-            error_code: None,
-            stdout: row
-                .get("stdout")
-                .unwrap()
-                .as_js_string()
-                .unwrap()
-                .to_utf8()
-                .unwrap(),
-            stderr: String::new(),
-            truncated: false,
-        };
-        let actual = native_process::verify_version_result(&result, &"0.154.0".into());
-        assert_eq!(
-            actual.is_ok(),
-            row.get("expected") == Some(&IvyJson::Bool(true)),
-            "{:?}",
-            row.get("stdout")
-        );
-        if let Err(error) = actual {
-            assert_eq!(error.code, "native_build_mismatch");
-            assert_eq!(
-                error.message,
-                "Codex CLI version differs from the selected catalog."
-            );
-        }
-    }
-    let command = native_process::version_command();
-    assert_eq!(command.executable, "codex");
-    assert_eq!(command.args, vec![std::ffi::OsString::from("--version")]);
-    assert_eq!(command.timeout_ms, 15000);
-    assert!(command.cwd.is_none());
+        .unwrap_err()
+        .code,
+        "native_build_mismatch"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.0.join("cli.launches"))
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
 }

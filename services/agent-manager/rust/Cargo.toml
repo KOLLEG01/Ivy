@@ -14,6 +14,16 @@ ivy-host-runtime.workspace = true
 chrono.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+base64.workspace = true
+regex.workspace = true
+url.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Globalization"] }
+
+[[bin]]
+name = "ivy-agent-manager"
+path = "src/main.rs"
 
 [dev-dependencies]
 sha2.workspace = true
@@ -28,6 +38,14 @@ name = "agent-state"
 path = "../../../tests/rust/agent-state.rs"
 
 [[test]]
+name = "agent-runtime-entry"
+path = "../../../tests/rust/agent-runtime-entry.rs"
+
+[[test]]
+name = "agent-claude-events"
+path = "../../../tests/rust/agent-claude-events.rs"
+
+[[test]]
 name = "agent-notifications"
 path = "../../../tests/rust/agent-notifications.rs"
 
@@ -38,3 +56,31 @@ path = "../../../tests/rust/agent-interactions.rs"
 [[test]]
 name = "agent-instructions"
 path = "../../../tests/rust/agent-instructions.rs"
+
+[[test]]
+name = "agent-projects"
+path = "../../../tests/rust/agent-projects.rs"
+
+[[test]]
+name = "agent-claude"
+path = "../../../tests/rust/agent-claude.rs"
+
+[[test]]
+name = "agent-native-backup-paths"
+path = "../../../tests/rust/agent-native-backup-paths.rs"
+
+[[test]]
+name = "agent-skills-files"
+path = "../../../tests/rust/agent-skills-locale.rs"
+
+[[test]]
+name = "agent-offline-import"
+path = "../../../tests/rust/agent-offline-import.rs"
+
+[[test]]
+name = "agent-claude-adapter"
+path = "../../../tests/rust/agent-claude-adapter.rs"
+
+[[test]]
+name = "agent-native-restore"
+path = "../../../tests/rust/agent-native-restore.rs"

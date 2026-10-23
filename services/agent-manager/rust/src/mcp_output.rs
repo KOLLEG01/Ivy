@@ -19,108 +19,67 @@ pub struct McpOutput {
     pub applied: bool,
     pub managed_bytes: usize,
 }
-fn require(ok: bool, message: &str) -> IvyResult<()> {
+pub(crate) fn require(ok: bool, message: &str) -> IvyResult<()> {
     if ok {
         Ok(())
     } else {
         Err(IvyError::new("target_conflict", message))
     }
 }
-fn hash(block: Option<&str>) -> IvyJson {
+pub(crate) fn hash(block: Option<&str>) -> IvyJson {
     block
         .map(|v| IvyJson::from(digest(v)))
         .unwrap_or(IvyJson::Null)
 }
-fn state_present(value: Option<&IvyJson>) -> bool {
-    match value {
-        None | Some(IvyJson::Null) | Some(IvyJson::Bool(false)) => false,
-        Some(IvyJson::Number(n)) => *n != 0.0 && !n.is_nan(),
-        Some(IvyJson::String(s)) => !s.0.is_empty(),
-        _ => true,
-    }
+pub(crate) fn state_present(value: Option<&IvyJson>) -> bool {
+    value.is_some_and(|value| !value.is_null())
 }
-fn legacy_block(begin: &str, sections: Option<&[String]>, end: &str) -> Option<String> {
-    sections.map(|sections| {
-        let mut parts = vec![begin];
-        parts.extend(sections.iter().map(String::as_str));
-        parts.push(end);
-        parts.join("\n")
-    })
-}
-
 pub(crate) fn validate_authority(state: Option<&IvyJson>, authority: &str) -> IvyResult<()> {
     let version = state.and_then(|s| s.get("schemaVersion"));
     require(
         !state_present(state)
-            || ((version == Some(&IvyJson::Number(1.0)) || version == Some(&IvyJson::Number(2.0)))
+            || ((version == Some(&IvyJson::Number(2.0)))
                 && state.and_then(|s| s.get("authority")) == Some(&IvyJson::from(authority))),
         "Another Hive or host owns this Codex MCP output.",
     )
 }
 
-/// Retain the version-1/version-2 state meanings and existing recovery-by-hash
-/// checks. The caller owns filesystem locking, compare/replace and state commit.
+/// Current version-2 ownership and the existing hash-based file checks only.
 pub fn plan_mcp_output(input: McpOutputInput<'_>) -> IvyResult<McpOutput> {
+    validate_authority(input.state, input.authority)?;
     let block = render_codex(input.sections);
     let block_hash = hash(block.as_deref());
-    let old_mcp_expected = legacy_block(BEGIN_MCP, input.sections, END_MCP);
-    let old_permissions_expected = input.sections.map(|_| {
-        format!("{BEGIN_PERMISSIONS}\napproval_policy = \"never\"\ndefault_permissions = \":danger-full-access\"\n{END_PERMISSIONS}")
-    });
-    let state_version = input.state.and_then(|s| s.get("schemaVersion"));
-    let v1 = state_version == Some(&IvyJson::Number(1.0));
-    let v2 = state_version == Some(&IvyJson::Number(2.0));
-    validate_authority(input.state, input.authority)?;
     let applied_hash = input.state.and_then(|s| s.get("appliedBlockHash"));
     let accepted: HashSet<String> = [applied_hash, Some(&block_hash)]
         .into_iter()
         .flatten()
-        .filter_map(|v| v.as_js_string())
+        .filter_map(IvyJson::as_js_string)
         .filter(|s| !s.0.is_empty())
         .filter_map(|s| s.to_utf8().ok())
         .collect();
     let current = codex_block(input.source, &accepted)?;
-    let old_mcp = managed_block(&current.outside, BEGIN_MCP, END_MCP)?;
-    let old_permissions = managed_block(&old_mcp.outside, BEGIN_PERMISSIONS, END_PERMISSIONS)?;
     require(
-        current.block.is_none() || (old_mcp.block.is_none() && old_permissions.block.is_none()),
-        "Codex configuration contains both current and legacy Ivy blocks.",
+        ![BEGIN_MCP, END_MCP, BEGIN_PERMISSIONS, END_PERMISSIONS]
+            .iter()
+            .any(|marker| current.outside.contains(marker)),
+        "Codex configuration requires explicit environment import.",
     )?;
-    require(
-        !v2 || (old_mcp.block.is_none() && old_permissions.block.is_none()),
-        "Codex configuration has unexpected legacy Ivy blocks.",
-    )?;
-    if v1 && current.block.is_some() {
-        require(
-            hash(current.block.as_deref()) == block_hash,
-            "The Ivy-managed Codex block has local changes.",
-        )?;
-    } else if v1 {
-        let mcp_hash = hash(old_mcp.block.as_deref());
-        require(
-            Some(&mcp_hash) == applied_hash || mcp_hash == hash(old_mcp_expected.as_deref()),
-            "The Ivy-managed MCP block has local changes.",
-        )?;
-        let permissions_hash = hash(old_permissions.block.as_deref());
-        let absent_permissions = IvyJson::Null;
-        let applied_permissions = input
-            .state
-            .and_then(|s| s.get("appliedPermissionsBlockHash"))
-            .filter(|v| !v.is_null())
-            .unwrap_or(&absent_permissions);
-        require(
-            &permissions_hash == applied_permissions
-                || permissions_hash == hash(old_permissions_expected.as_deref()),
-            "The Ivy-managed permission block has local changes.",
-        )?;
-    } else if v2 {
+    if input.state.and_then(|s| s.get("schemaVersion")) == Some(&IvyJson::Number(2.0)) {
         let current_hash = hash(current.block.as_deref());
         require(
             Some(&current_hash) == applied_hash || current_hash == block_hash,
             "The Ivy-managed Codex block has local changes.",
         )?;
     }
-    let mut unmanaged = old_permissions.outside;
+    finish_mcp_output(input, block, current.outside)
+}
+
+pub(crate) fn finish_mcp_output(
+    input: McpOutputInput<'_>,
+    block: Option<String>,
+    mut unmanaged: String,
+) -> IvyResult<McpOutput> {
+    let block_hash = hash(block.as_deref());
     if block.is_some() {
         let conflicts = server_sections(&unmanaged);
         for name in input.server_names {

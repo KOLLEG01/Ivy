@@ -8,43 +8,32 @@
   "requirements": {
     "node": ">=24.18.0 <25.0.0",
     "hiveProtocol": 1,
-    "contracts": []
+    "contracts": [],
+    "os": ["win32", "linux"],
+    "arch": ["x64", "arm64"]
   },
   "entrypoint": {
-    "executable": "node",
-    "args": [
-      "dist/services/agent-manager/src/main.js"
-    ],
+    "executable": "dist/native/ivy-agent-manager",
+    "args": [],
     "timeoutMs": 30000
   },
   "prepare": [
     {
       "executable": "node",
       "args": [
-        "tools/build/run-npm.mjs",
-        "ci"
-      ],
-      "timeoutMs": 600000
-    },
-    {
-      "executable": "node",
-      "args": [
-        "--max-old-space-size=448",
-        "tools/build/build-deployment.mjs",
+        "tools/build/build-native-deployment.mjs",
         "--component",
         "agent-manager"
       ],
-      "timeoutMs": 300000
+      "timeoutMs": 3600000
     }
   ],
   "checks": [],
   "readiness": {
     "timeoutMs": 180000,
     "command": {
-      "executable": "node",
-      "args": [
-        "dist/packages/host-runtime/src/health.js"
-      ],
+      "executable": "dist/native/ivy-health",
+      "args": [],
       "timeoutMs": 5000
     }
   },
