@@ -394,8 +394,17 @@ impl Registry {
                 )
                 .optional(),
         )?
-        .map(|v| decode(&v))
+        .map(|v| {
+            let value = parse(&v, usize::MAX)?;
+            if value.is_null() {
+                Ok(None)
+            } else {
+                require_object(&value)?;
+                Ok(Some(value))
+            }
+        })
         .transpose()
+        .map(Option::flatten)
     }
     pub fn namespace(
         &self,

@@ -880,6 +880,18 @@ export class Registry {
       this.commitDiagnostics(updates);
       if (node.ready !== params.ready)
         this.save({ ...node, ready: params.ready, lastContactAt: now });
+      if (params.ready) {
+        for (const required of this.getRegistry(context.serviceNodeId)?.requiredContracts ?? []) {
+          for (const version of required.writeVersions) {
+            const contract = this.store.contract(required.key, version);
+            if (contract.owner.kind !== 'service' || contract.owner.serviceName !== node.serviceName ||
+                !contract.retention.awaitOwnerReadiness) continue;
+            const key = 'retention_owner_ready:' + contract.key + ':' + contract.version;
+            const acknowledgement = hashJson({ version: contract.version, policy: contract.retention });
+            if (this.store.metadata(key) !== acknowledgement) this.store.setMetadata(key, acknowledgement);
+          }
+        }
+      }
       return {
         generation: context.generation,
         ready: params.ready,

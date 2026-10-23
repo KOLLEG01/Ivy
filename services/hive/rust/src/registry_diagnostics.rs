@@ -316,6 +316,42 @@ impl Registry {
                 node.insert("lastContactAt", IvyJson::String(at.clone()));
                 self.save(store, &node, true)?;
             }
+            if parameters.get("ready").and_then(IvyJson::as_bool) == Some(true) {
+                if let Some(registry) = self.get_registry(store, id)? {
+                    for required in array(&registry, "requiredContracts")? {
+                        for version in array(required, "writeVersions")? {
+                            let contract = store.contract(
+                                string(required, "key")?,
+                                version.as_js_string().ok_or_else(IvyError::internal)?,
+                            )?;
+                            if contract.get("owner").and_then(|v| v.get("kind"))
+                                != Some(&"service".into())
+                                || contract.get("owner").and_then(|v| v.get("serviceName"))
+                                    != node.get("serviceName")
+                                || contract
+                                    .get("retention")
+                                    .and_then(|v| v.get("awaitOwnerReadiness"))
+                                    .and_then(IvyJson::as_bool)
+                                    != Some(true)
+                            {
+                                continue;
+                            }
+                            let key = format!(
+                                "retention_owner_ready:{}:{}",
+                                string(&contract, "key")?.to_utf8()?,
+                                string(&contract, "version")?.to_utf8()?
+                            );
+                            let acknowledgement = hash_json(&IvyJson::object([
+                                ("version", field(&contract, "version")?.clone()),
+                                ("policy", field(&contract, "retention")?.clone()),
+                            ]))?;
+                            if store.metadata(&key)?.as_deref() != Some(acknowledgement.as_str()) {
+                                store.set_metadata(&key, &acknowledgement)?;
+                            }
+                        }
+                    }
+                }
+            }
             Ok(generation_result(
                 generation,
                 [

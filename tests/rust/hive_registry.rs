@@ -1491,7 +1491,7 @@ fn registry_sql_and_deferred_commit_faults_preserve_the_original_memory_boundari
 }
 
 #[test]
-fn registry_raw_utf16_identity_and_legacy_cache_lifetimes_match_original() {
+fn registry_raw_utf16_identity_and_optional_catalog_boundaries() {
     let raw = vec![0xd800];
     let replacement = vec![0xfffd];
     let mut steps = setup();
@@ -1604,6 +1604,7 @@ fn registry_raw_utf16_identity_and_legacy_cache_lifetimes_match_original() {
         "1970-01-01T00:01:40Z",
     );
     let identity=ivy_contracts::hash::hash_json(&IvyJson::from_serde(&json!({"code":repaired["code"],"resource":repaired["resource"],"source":repaired["source"]})).unwrap()).unwrap();
+    let expected = json!([{"identity":identity,"diagnostic_json":"null"}]);
     push(&mut steps, seed_diagnostics([(identity, Value::Null)]));
     let unfiltered = push(&mut steps, action("diagnostics", None, json!({})));
     let filtered = push(
@@ -1611,8 +1612,19 @@ fn registry_raw_utf16_identity_and_legacy_cache_lifetimes_match_original() {
         action("diagnostics", None, json!({"status":"unresolved"})),
     );
     let repaired_at = push(&mut steps, action("diagnostic", None, repaired));
-    let rows = compare(&steps);
-    assert_eq!(value(&rows, unfiltered), &json!([null]));
+    // A null Diagnostic is outside the published schema. Keep native refusal,
+    // rather than reproducing JavaScript's property access or healing coercion.
+    let root = Root::new();
+    let observed = oracle(&root.0.join("reference.sqlite"), &steps);
+    let rows = native_with_runtime(
+        &root.0.join("native.sqlite"),
+        &steps,
+        Some(&observed["registryRuntime"]),
+    );
+    assert_eq!(code(&rows, unfiltered), "internal_error");
     assert_eq!(code(&rows, filtered), "internal_error");
-    success(&rows, repaired_at);
+    assert_eq!(code(&rows, repaired_at), "internal_error");
+    for index in [unfiltered, filtered, repaired_at] {
+        assert_eq!(state(&rows, index)["diagnostics"], expected);
+    }
 }

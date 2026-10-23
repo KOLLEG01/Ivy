@@ -464,6 +464,7 @@ export const rustTests = {
   'tests/rust/hive_ledger.rs': { package: 'ivy-hive', test: 'hive-storage-worker', filter: 'store::ledger::', testThreads: 1 },
   'tests/rust/hive_events.rs': { package: 'ivy-hive', test: 'hive-storage-worker', filter: 'store::events::', testThreads: 1 },
   'tests/rust/hive_retention.rs': { package: 'ivy-hive', test: 'hive-storage-worker', filter: 'store::retention::', testThreads: 1 },
+  'tests/rust/hive_registry.rs': { package: 'ivy-hive', test: 'hive-storage-worker', filter: 'store::registry::registry_', testThreads: 1 },
   'tests/rust/hive_worker_actions.rs': { package: 'ivy-hive', test: 'hive-storage-worker', filter: 'store::kernel::worker_actions::', testThreads: 1 },
   'tests/rust/hive_worker_startup.rs': { package: 'ivy-hive', test: 'hive-storage-worker', filter: 'store::kernel::worker_startup::', testThreads: 1 },
   'tests/rust/hive_browser_push_sender.rs': { package: 'ivy-hive', test: 'hive-storage-worker', filter: '::push_sender::browser_push_sender_', testThreads: 1 },

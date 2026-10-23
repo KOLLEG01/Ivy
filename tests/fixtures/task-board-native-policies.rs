@@ -6,6 +6,8 @@ use ivy_task_board::{
     native_policies::{NativePolicies, NativePolicyFactory},
     schema::RuntimeContracts,
 };
+#[path = "task-board-registry.rs"]
+mod registry;
 
 struct PromptBoundary;
 impl TaskPrompts for PromptBoundary {
@@ -252,6 +254,9 @@ async fn native_policy_factory_runs_the_empty_graph_with_actual_journal_and_loca
             service_node_id: "fixture-task-board".into(),
         };
         let mut setup = configured(&peer);
+        let advertisement = registry::fixture(&contracts);
+        setup.registry = advertisement.dependency();
+        setup.tools = advertisement.tool_names().to_vec();
         setup.settings = json(
             r#"{"principalId":"fixture-principal","rootObjectId":null,"scheduler":{"enabled":false,"intervalMs":4321,"pageSize":37},"phoneTarget":null}"#,
         );
@@ -275,6 +280,17 @@ async fn native_policy_factory_runs_the_empty_graph_with_actual_journal_and_loca
         };
         let (result, ()) = tokio::join!(owner.run(&factory), script);
         result.unwrap();
+        let sync = peer
+            .frames
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|frame| frame.get("method") == Some(&"registry.sync".into()))
+            .unwrap()
+            .required("params")
+            .unwrap()
+            .clone();
+        assert_eq!(sync, *registry::fixture(&contracts).value());
         assert_eq!(probe.bound.get(), 1);
         let queries = peer
             .frames

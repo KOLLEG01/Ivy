@@ -11,7 +11,7 @@ export namespace Wire {
   export type Failure = { "jsonrpc": "2.0"; "id": (string) | (number) | (null); "error": Wire.Error; };
   export type Content = ({ "encoding": "json"; "value": Wire.Json; }) | ({ "encoding": "text"; "value": string; }) | ({ "encoding": "base64"; "value": string; });
   export type Owner = ({ "kind": "hive"; }) | ({ "kind": "agent"; }) | ({ "kind": "service"; "serviceName": string; });
-  export type RetentionPolicy = { "objects": ({ "mode": "retain" | "owned"; }) | ({ "mode": "expire"; "maximumAgeDays": number; }); "revisions": ({ "mode": "all" | "current"; }) | (({ "mode": "bounded"; "maximumCount": number; "maximumAgeDays"?: number; }) | ({ "mode": "bounded"; "maximumCount"?: number; "maximumAgeDays": number; })); };
+  export type RetentionPolicy = { "awaitOwnerReadiness"?: boolean; "objects": ({ "mode": "retain" | "owned"; }) | ({ "mode": "expire"; "maximumAgeDays": number; }); "revisions": ({ "mode": "all" | "current"; }) | (({ "mode": "bounded"; "maximumCount": number; "maximumAgeDays"?: number; }) | ({ "mode": "bounded"; "maximumCount"?: number; "maximumAgeDays": number; })); };
   export type RevisionReference = { "objectId": Wire.Identifier; "revision": number; };
   export type RevisionReferences = { [key: string]: Wire.RevisionReference; };
   export type DataContract = ({ "key": string; "version": Wire.ContractVersion; "owner": Wire.Owner; "mediaType": string; "retention": Wire.RetentionPolicy; "specMarkdown": string; "jsonSchema"?: ({ [key: string]: unknown; }) | (boolean); }) & (unknown);
@@ -62,7 +62,7 @@ export namespace Operation {
   export type EventPublication = { "sequence": number; "topic": string; "publishedAt": string; };
   export type EventGap = { "prunedThroughSequence": number; "resumeAfterSequence": number; };
   export type EventBatch = { "items": Array<Operation.Event>; "throughSequence": number; "hasMore": boolean; "gap": (Operation.EventGap) | (null); };
-  export type FamilyRetentionStatus = { "contractKey": string; "policy": Wire.RetentionPolicy; "policyHash": Wire.Hash; "previewRequired": boolean; "objectCount": number; "revisionCount": number; "byteLength": number; "eligibleObjectCount": number; "eligibleRevisionCount": number; "protectedRevisionCount": number; };
+  export type FamilyRetentionStatus = { "contractKey": string; "policy": Wire.RetentionPolicy; "policyHash": Wire.Hash; "previewRequired": boolean; "waitingForOwner": boolean; "objectCount": number; "revisionCount": number; "byteLength": number; "eligibleObjectCount": number; "eligibleRevisionCount": number; "protectedRevisionCount": number; };
   export type RetentionStatus = { "checkedAt": string; "nextPassAt": string; "lastSuccessAt": (string) | (null); "lastFailure": ({ "at": string; "message": string; }) | (null); "families": Array<Operation.FamilyRetentionStatus>; "events": { "count": number; "byteLength": number; "prunedThroughSequence": number; }; "mutations": { "count": number; "byteLength": number; "expiredBefore": number; }; };
   export type UiMetadata = { "uiId": string; "slug"?: string; "priority"?: number; "displayName": string; "description": string; "iconKey": "ui" | "bot" | "book-open" | "notebook-text" | "list-checks" | "message-circle" | "phone" | "camera" | "newspaper" | "settings" | "layout-dashboard" | "chart-no-axes-combined" | "presentation" | "database" | "funnel" | "user-round" | "clipboard-clock"; };
   export type UiAsset = { "path": string; "mediaType": string; "contentHash": Wire.Hash; "byteLength": number; };

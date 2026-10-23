@@ -1071,3 +1071,284 @@ fn native_retention_metrics_preserve_large_cached_counts_and_revision_pins() {
         2
     );
 }
+
+#[test]
+fn native_owner_readiness_fences_collection_and_survives_storage_restart() {
+    use ivy_hive::{
+        native_runtime::NativeRuntime,
+        registry::{ConnectionContext, Registry},
+        store::Credential,
+    };
+    let root = Root::new();
+    let path = root.0.join("owner-readiness.sqlite");
+    let now = 1_800_000_000_000.0;
+    let mut store = Store::open(&path).unwrap();
+    store
+        .configure_credentials(&[Credential {
+            principal_id: "alpha".into(),
+            digest: digest(true).into(),
+        }])
+        .unwrap();
+    let principal = AuthenticatedContext {
+        principal_id: "alpha".into(),
+        credential_digest: digest(true).into(),
+    };
+    let mut registry = Registry::new(&mut store, &NativeRuntime, now).unwrap();
+    let json = |value: Value| IvyJson::from_serde(&value).unwrap();
+    let connect = |registry: &mut Registry, store: &mut Store, id: &str, service: &str| {
+        registry.connect(store, &ConnectionContext {principal:&principal, session_digest:None, generation:Some(1.0)},
+            &json(json!({"serviceNodeId":id,"hostId":"fixture-host","serviceName":service,"version":"1.0.0","buildId":format!("sha256:{}","c".repeat(64)),"hiveProtocol":1})), &NativeRuntime, now).unwrap();
+    };
+    let definition = |version: &str| {
+        json(
+            json!({"key":"fixture/readiness","version":version,"owner":{"kind":"service","serviceName":"fixture-service"},"mediaType":"text/plain","specMarkdown":"Retention owner readiness.","retention":{"objects":{"mode":"retain"},"revisions":{"mode":"bounded","maximumCount":1},"awaitOwnerReadiness":true}}),
+        )
+    };
+    let catalog = |contracts: Vec<IvyJson>, writable: &str| {
+        IvyJson::object([
+            ("namespaces", IvyJson::Array(vec![])),
+            ("contracts", IvyJson::Array(contracts)),
+            (
+                "requiredContracts",
+                json(
+                    json!([{"key":"fixture/readiness","readVersions":["1.0.0","2.0.0"],"writeVersions":[writable]}]),
+                ),
+            ),
+        ])
+    };
+    let waiting = |store: &Store| {
+        retention::status(store, &NativeRuntime, now)
+            .unwrap()
+            .get("families")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row.get("contractKey") == Some(&"fixture/readiness".into()))
+            .unwrap()
+            .get("waitingForOwner")
+            .unwrap()
+            .as_bool()
+            .unwrap()
+    };
+    let heartbeat = |registry: &mut Registry, store: &mut Store, id: &str, ready: bool| {
+        registry
+            .heartbeat(
+                store,
+                &id.into(),
+                Some(1.0),
+                &json(json!({"ready":ready,"diagnostics":[]})),
+                &NativeRuntime,
+                now,
+            )
+            .unwrap();
+    };
+    connect(&mut registry, &mut store, "owner", "fixture-service");
+    assert_eq!(
+        registry
+            .heartbeat(
+                &mut store,
+                &"owner".into(),
+                Some(1.0),
+                &json(json!({"ready":true,"diagnostics":[]})),
+                &NativeRuntime,
+                now
+            )
+            .unwrap_err()
+            .code,
+        "service_not_ready"
+    );
+    registry
+        .sync(
+            &mut store,
+            &"owner".into(),
+            Some(1.0),
+            &catalog(vec![definition("1.0.0"), definition("2.0.0")], "1.0.0"),
+            &NativeRuntime,
+            now,
+        )
+        .unwrap();
+    store
+        .transaction(|store| {
+            store
+                .connection()
+                .execute_batch(&history("subject", "fixture/readiness", 3))
+                .map_err(|error| store.query_error(error))
+        })
+        .unwrap();
+    let count = |store: &Store| {
+        store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM revisions WHERE object_id='subject'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    heartbeat(&mut registry, &mut store, "owner", false);
+    for _ in 0..2 {
+        retention::collect(&mut store, &NativeRuntime, now, None).unwrap();
+    }
+    assert!(waiting(&store));
+    assert_eq!(count(&store), 3);
+    // Read access and another service's write requirement cannot acknowledge the owner.
+    connect(&mut registry, &mut store, "reader", "fixture-reader");
+    registry
+        .sync(
+            &mut store,
+            &"reader".into(),
+            Some(1.0),
+            &catalog(vec![], "2.0.0"),
+            &NativeRuntime,
+            now,
+        )
+        .unwrap();
+    heartbeat(&mut registry, &mut store, "reader", true);
+    heartbeat(&mut registry, &mut store, "owner", true);
+    assert!(waiting(&store));
+    assert!(
+        store
+            .metadata("retention_owner_ready:fixture/readiness:1.0.0")
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .metadata("retention_owner_ready:fixture/readiness:2.0.0")
+            .unwrap()
+            .is_none()
+    );
+    registry
+        .sync(
+            &mut store,
+            &"owner".into(),
+            Some(1.0),
+            &catalog(vec![], "2.0.0"),
+            &NativeRuntime,
+            now,
+        )
+        .unwrap();
+    // The service is already ready; the new exact write declaration still needs acknowledgement.
+    assert!(waiting(&store));
+    heartbeat(&mut registry, &mut store, "owner", true);
+    assert!(!waiting(&store));
+    retention::collect(&mut store, &NativeRuntime, now, None).unwrap();
+    assert_eq!(count(&store), 3); // First admitted collection previews the policy.
+    retention::collect(&mut store, &NativeRuntime, now, None).unwrap();
+    assert_eq!(count(&store), 1);
+    let acknowledgement = store
+        .metadata("retention_owner_ready:fixture/readiness:2.0.0")
+        .unwrap()
+        .unwrap();
+    // Admit the actual unchanged TaskBoard contract set through the native Hive owner.
+    connect(&mut registry, &mut store, "task-owner", "task-board");
+    let published = ivy_contracts::json::parse(
+        include_str!("../../services/task-board/rust/src/contracts.json"),
+        32 * 1024 * 1024,
+    )
+    .unwrap();
+    let published = published.as_array().unwrap();
+    assert_eq!(published.len(), 47);
+    let mut writes = std::collections::BTreeMap::new();
+    for contract in published {
+        let key = contract.get("key").unwrap().as_str().unwrap();
+        let version = contract.get("version").unwrap().as_str().unwrap();
+        if writes.get(&key).is_none_or(|old: &String| {
+            ivy_contracts::json::compare_versions(&version, old)
+                .unwrap()
+                .is_gt()
+        }) {
+            writes.insert(key, version);
+        }
+    }
+    let requirements = writes
+        .into_iter()
+        .map(|(key, version)| {
+            let readable: Vec<_> = published
+                .iter()
+                .filter(|contract| contract.get("key").unwrap().as_str().unwrap() == key)
+                .map(|contract| contract.get("version").unwrap().clone())
+                .collect();
+            IvyJson::object([
+                ("key", key.into()),
+                ("writeVersions", json(json!([version]))),
+                ("readVersions", IvyJson::Array(readable)),
+            ])
+        })
+        .collect();
+    let task_catalog = IvyJson::object([
+        ("namespaces", IvyJson::Array(vec![])),
+        ("contracts", IvyJson::Array(published.to_vec())),
+        ("requiredContracts", IvyJson::Array(requirements)),
+    ]);
+    registry
+        .sync(
+            &mut store,
+            &"task-owner".into(),
+            Some(1.0),
+            &task_catalog,
+            &NativeRuntime,
+            now,
+        )
+        .unwrap();
+    assert!(
+        store
+            .metadata("retention_owner_ready:task-board/task:2.3.0")
+            .unwrap()
+            .is_none()
+    );
+    heartbeat(&mut registry, &mut store, "task-owner", true);
+    assert!(
+        store
+            .metadata("retention_owner_ready:task-board/task:2.3.0")
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .metadata("retention_owner_ready:task-board/task:2.2.0")
+            .unwrap()
+            .is_none()
+    );
+    let mut invalid = definition("3.0.0");
+    invalid.insert("owner", json(json!({"kind":"agent"})));
+    assert_eq!(
+        ivy_hive::objects::register(&mut store, &invalid, &json(json!({"kind":"agent"})))
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+    drop(registry);
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    let _registry = Registry::new(&mut store, &NativeRuntime, now).unwrap();
+    assert!(!waiting(&store));
+    assert_eq!(
+        store
+            .metadata("retention_owner_ready:fixture/readiness:2.0.0")
+            .unwrap()
+            .as_deref(),
+        Some(acknowledgement.as_str())
+    );
+    ivy_hive::objects::register(
+        &mut store,
+        &definition("3.0.0"),
+        &json(json!({"kind":"service","serviceName":"fixture-service"})),
+    )
+    .unwrap();
+    assert!(waiting(&store));
+    // A prior version's acknowledgement or a different policy hash cannot unlock collection.
+    store
+        .set_metadata(
+            "retention_owner_ready:fixture/readiness:3.0.0",
+            &acknowledgement,
+        )
+        .unwrap();
+    assert!(waiting(&store));
+    let different = ivy_contracts::hash::hash_json(&json(json!({"version":"3.0.0","policy":{"objects":{"mode":"retain"},"revisions":{"mode":"all"},"awaitOwnerReadiness":true}}))).unwrap();
+    store
+        .set_metadata("retention_owner_ready:fixture/readiness:3.0.0", &different)
+        .unwrap();
+    assert!(waiting(&store));
+}

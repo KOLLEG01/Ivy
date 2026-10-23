@@ -63,7 +63,28 @@ fn iso(runtime: &dyn Runtime, now: f64) -> IvyResult<String> {
 
 struct Contract {
     key: JsString,
+    version: IvyJson,
     policy: IvyJson,
+}
+fn waiting_for_owner(store: &Store, contract: &Contract) -> IvyResult<bool> {
+    if contract
+        .policy
+        .get("awaitOwnerReadiness")
+        .and_then(IvyJson::as_bool)
+        != Some(true)
+    {
+        return Ok(false);
+    }
+    let key = format!(
+        "retention_owner_ready:{}:{}",
+        text(&contract.key),
+        contract.version.as_str()?
+    );
+    let acknowledgement = hash_json(&IvyJson::object([
+        ("version", contract.version.clone()),
+        ("policy", contract.policy.clone()),
+    ]))?;
+    Ok(store.metadata(&key)?.as_deref() != Some(acknowledgement.as_str()))
 }
 fn contracts(store: &Store, runtime: &dyn Runtime) -> IvyResult<Vec<Contract>> {
     let mut latest: Vec<(JsString, String, IvyJson)> = vec![];
@@ -98,6 +119,7 @@ fn contracts(store: &Store, runtime: &dyn Runtime) -> IvyResult<Vec<Contract>> {
         .map(|(key, _, value)| {
             Ok(Contract {
                 key,
+                version: field(&value, "version")?.clone(),
                 policy: field(&value, "retention")?.clone(),
             })
         })
@@ -469,11 +491,13 @@ fn build_status(store: &Store, runtime: &dyn Runtime, now: f64, scan: bool) -> I
             (summary.objects, summary.revisions, summary.bytes) = totals(store, &contract.key)?;
         }
         let eligibility = selected.as_ref().unwrap_or(&summary);
+        let waiting = waiting_for_owner(store, &contract)?;
         families.push(IvyJson::object([
             ("contractKey", IvyJson::String(contract.key)),
             ("policy", contract.policy),
             ("policyHash", hash.into()),
             ("previewRequired", (!same).into()),
+            ("waitingForOwner", waiting.into()),
             ("objectCount", IvyJson::Number(summary.objects as f64)),
             ("revisionCount", IvyJson::Number(summary.revisions as f64)),
             ("byteLength", IvyJson::Number(summary.bytes as f64)),
@@ -582,6 +606,9 @@ pub fn collect(
         .collect();
     let mut enabled = HashSet::new();
     for contract in &contracts {
+        if waiting_for_owner(store, contract)? {
+            continue;
+        }
         let active=store.transaction(|store|{
             let hash=hash_json(&contract.policy)?;
             let saved=saved(store,&contract.key)?;

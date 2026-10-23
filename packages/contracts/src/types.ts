@@ -5,7 +5,7 @@ export type Schema = boolean | { [keyword: string]: unknown };
 export type ObjectRetention = { mode: 'retain' } | { mode: 'expire'; maximumAgeDays: number } | { mode: 'owned' };
 export type RevisionRetention = { mode: 'all' } | { mode: 'current' } |
   ({ mode: 'bounded' } & ({ maximumCount: number; maximumAgeDays?: number } | { maximumCount?: number; maximumAgeDays: number }));
-export interface RetentionPolicy { objects: ObjectRetention; revisions: RevisionRetention }
+export interface RetentionPolicy { objects: ObjectRetention; revisions: RevisionRetention; awaitOwnerReadiness?: boolean }
 export interface RevisionReference { objectId: string; revision: number }
 export type RevisionReferences = Record<string, RevisionReference>;
 export interface DataContract {

@@ -339,6 +339,10 @@
     "RetentionPolicy": {
       "type": "object",
       "properties": {
+        "awaitOwnerReadiness": {
+          "type": "boolean",
+          "description": "Before collecting this policy, wait for the owning service to acknowledge readiness while declaring this exact contract version writable. The acknowledgement survives restarts and is bound to the contract version and policy."
+        },
         "objects": {
           "oneOf": [
             {

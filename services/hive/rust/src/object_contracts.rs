@@ -40,6 +40,16 @@ fn owner_mode(definition: &IvyJson) -> &'static str {
 /// Keep direct registration's SQL boundaries; the caller owns its transaction.
 pub fn register(store: &mut Store, definition: &IvyJson, owner: &IvyJson) -> IvyResult<IvyJson> {
     validate_shared("DataContract", definition)?;
+    require(
+        definition
+            .get("retention")
+            .and_then(|v| v.get("awaitOwnerReadiness"))
+            .and_then(IvyJson::as_bool)
+            != Some(true)
+            || definition.get("owner").and_then(|v| v.get("kind")) == Some(&"service".into()),
+        "invalid_arguments",
+        "Owner-readiness retention requires a service-owned contract.",
+    )?;
     let version = text(definition, "version")?;
     compare_versions(&version, &version)?;
     let definition_owner = canonical(

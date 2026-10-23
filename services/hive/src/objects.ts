@@ -140,6 +140,8 @@ export class Objects {
     owner: DataContract["owner"],
   ): DataContract {
     validateShared("DataContract", definition);
+    requireThat(!definition.retention.awaitOwnerReadiness || definition.owner.kind === 'service',
+      'invalid_arguments', 'Owner-readiness retention requires a service-owned contract.');
     compareVersions(definition.version, definition.version);
     requireThat(
       canonical(definition.owner) === canonical(owner),
