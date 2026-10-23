@@ -16,7 +16,7 @@ import type { Chat, Wire } from '../packages/contracts/src/generated.js';
 import { digest } from '../packages/contracts/src/canonical.js';
 import { IvyError } from '../packages/contracts/src/errors.js';
 import { mainInstructions, mainThreadOptions, mainTurnContext } from '../services/chat-bridge/src/main-context.js';
-import { serviceTools } from '../packages/sdk/src/client.js';
+import { callBound, serviceTools } from '../packages/sdk/src/client.js';
 import { WhatsAppRuntime } from '../services/chat-bridge/src/whatsapp/runtime.js';
 import { encode } from '../services/chat-bridge/src/whatsapp/auth.js';
 import { translator } from '../services/chat-bridge/src/whatsapp/messages.js';
@@ -180,13 +180,16 @@ test('Main survives Agent registry updates and recovers a lost WhatsApp reply wi
   const readParams = { threadId: binding.data.primary.nativeId, includeTurns: false };
   await native.read('thread/read', readParams);
   await assert.rejects(native.owner.interaction('not-sent'), { code: 'interaction_expired' });
+  const tools = serviceTools(f.first.store.client, 'native-agent', [{ namespace: 'agent', interfaceVersion: '1.0.0' }]);
+  const stale = await tools.binding('agent.read');
   const registry = f.kernel.registry.getRegistry('native-agent')!;
   for (const tool of registry.namespaces.find(ns => ns.namespace === 'agent')!.tools)
     tool.description += ' Updated service documentation.';
   await f.clients.agent.client.request('registry.sync', registry);
-  const tools = serviceTools(f.first.store.client, 'native-agent', [{ namespace: 'agent', interfaceVersion: '1.0.0' }]);
-  await assert.rejects(tools.call('agent.read', { nativeVersion: f.admission.definition.nativePlan.nativeVersion, method: 'thread/read', params: readParams }),
+  const read = { nativeVersion: f.admission.definition.nativePlan.nativeVersion, method: 'thread/read', params: readParams };
+  await assert.rejects(callBound(f.first.store.client, stale, read),
     { code: 'tool_definition_changed', outcome: 'not_executed' });
+  assert.ok(await tools.call('agent.read', read), 'A rejected read refreshes its exact provider/interface once.');
   native.invalidate(true);
   await native.prepare();
   assert.ok(await native.read('thread/read', readParams));

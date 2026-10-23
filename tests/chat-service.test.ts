@@ -99,7 +99,10 @@ test('actual ChatBridge and AgentManager services retain late replies, caller ou
       typeof actionId === 'string' ? actionId : await newOperationId(client));
   };
   const workspace = () => invoke('workspace', {}) as Promise<Chat.WorkspaceInfo>;
-  assert.equal((await alice.request('tools.list', { namespace: 'chat', serviceNodeId: 'chat' })).items.length, 12);
+  const exposed = (await alice.request('tools.list', { namespace: 'chat', serviceNodeId: 'chat' })).items;
+  assert.ok(exposed.some(tool => tool.qualifiedName === 'chat.sendFile'));
+  assert.ok(exposed.some(tool => tool.qualifiedName === 'chat.file'));
+  await assert.rejects(invoke('file', { fileTarget: true }), { code: 'service_not_ready' }, 'A file target requires a configured WhatsApp transport.');
   assert.equal((await invoke('workspace', {}, outsider) as Chat.WorkspaceInfo).expectedBridge.callerPrincipalId, 'outsider');
   const initial = await workspace(); assert.equal(initial.main, null); assert.equal(initial.nativeOwnerReady, true);
   const oldRuntime = chat.runtime!, oldGeneration = chat.service.connection.generation;
