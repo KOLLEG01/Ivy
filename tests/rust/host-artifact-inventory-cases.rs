@@ -1,109 +1,23 @@
-use ivy_contracts::{JsString, json};
+use ivy_contracts::{JsString, hash};
 use ivy_host_runtime::{
-    IvyJson, IvyResult,
-    artifact::{ArtifactFile, FileCompare, artifact_files, artifact_source_identity},
+    IvyJson,
+    artifact::{
+        ArtifactFile, FileCompare, artifact_files, artifact_source_identity, native_file_compare,
+    },
     candidate_identity::candidate_build_id,
-    filesystem, node_path,
+    filesystem,
 };
 use std::{
-    cmp::Ordering,
     fs,
-    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::Arc,
 };
-static CORPUS: Mutex<()> = Mutex::new(());
-
-#[test]
-fn native_file_compare_missing_runtime_is_not_executed() {
-    const CHILD: &str = "IVY_TEST_FILE_COMPARE_MISSING_CHILD";
-    if std::env::var_os(CHILD).is_some() {
-        let error = match ivy_host_runtime::artifact::native_file_compare() {
-            Ok(_) => panic!("An absent package locale runtime must be refused."),
-            Err(error) => error,
-        };
-        assert_eq!(error.code, "locale_unavailable");
-        assert_eq!(error.outcome, ivy_host_runtime::Outcome::NotExecuted);
-        return;
-    }
-    let fixture = Fixture::new();
-    let image = fixture.0.join(std::env::current_exe().unwrap().file_name().unwrap());
-    fs::copy(std::env::current_exe().unwrap(), &image).unwrap();
-    let module = module_path!().split_once("::").unwrap().1;
-    let selected = format!("{module}::native_file_compare_missing_runtime_is_not_executed");
-    let output = Command::new(image)
-        .args(["--exact", &selected, "--nocapture"])
-        .env(CHILD, "1")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
-}
-
-#[cfg(windows)]
-#[tokio::test]
-#[ignore = "requires the pinned ICU payload beside the test executable"]
-async fn native_file_compare_retains_packaged_locale_across_thread_and_inventory() {
-    let corpus = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../tests/fixtures/host-file-compare.json");
-    let expected = json::parse(
-        &fs::read_to_string(corpus).expect("Provide the qualified file-compare corpus for this manual test."),
-        usize::MAX,
-    ).unwrap();
-    let paths: Vec<JsString> = expected.required("paths").unwrap().as_array().unwrap()
-        .iter().map(|p| p.as_js_string().unwrap().clone()).collect();
-    let compare = ivy_host_runtime::artifact::native_file_compare().unwrap();
-    let retained = compare.clone();
-    drop(compare);
-    let (compare, matrix) = std::thread::spawn(move || {
-        let mut matrix = Vec::new();
-        for left in &paths {
-            for right in &paths {
-                matrix.push(match retained(left, right) {
-                    Ordering::Less => -1,
-                    Ordering::Equal => 0,
-                    Ordering::Greater => 1,
-                });
-            }
-        }
-        (retained, matrix)
-    }).join().unwrap();
-    let original: Vec<i32> = expected.required("matrix").unwrap().as_array().unwrap()
-        .iter().flat_map(|row| row.as_array().unwrap())
-        .map(|v| v.as_f64().unwrap() as i32).collect();
-    assert_eq!(matrix.len(), 169);
-    assert_eq!(matrix, original);
-    let fixture = Fixture::new();
-    let rows = expected.required("files").unwrap().as_array().unwrap();
-    for row in rows {
-        fixture.write(&row.required("path").unwrap().as_str().unwrap(),
-            row.required("text").unwrap().as_str().unwrap().as_bytes());
-    }
-    let files = artifact_files(fixture.0.clone(), compare).await.unwrap();
-    let original = IvyJson::Array(rows.iter().map(|row| IvyJson::object(
-        ["path", "hash", "bytes", "mode"].map(|key| (key, row.required(key).unwrap().clone()))
-    )).collect());
-    let actual = IvyJson::Array(files.iter().map(ArtifactFile::json).collect());
-    assert_eq!(files.len(), 9);
-    assert_eq!(json::canonical(&actual, usize::MAX).unwrap(),
-        json::canonical(&original, usize::MAX).unwrap());
-}
 
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
-        let temporary = std::env::temp_dir();
-        let root = temporary.join(format!(
-            "ivy-artifact-inventory-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        assert_eq!(root.parent(), Some(temporary.as_path()));
+        let root =
+            std::env::temp_dir().join(format!("ivy-artifact-inventory-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         Self(root)
     }
@@ -111,6 +25,11 @@ impl Fixture {
         let file = self.0.join(name);
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(&file, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+        }
         file
     }
 }
@@ -141,156 +60,115 @@ impl Drop for Fixture {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-fn source_root() -> PathBuf {
-    std::env::var_os("IVY_HOST_SOURCE_ROOT").map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."),
-        PathBuf::from,
-    )
-}
-fn append(row: IvyJson) {
-    if let Some(file) = std::env::var_os("IVY_HOST_ARTIFACT_INVENTORY_CORPUS") {
-        let _guard = CORPUS.lock().unwrap();
-        writeln!(
-            fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(file)
-                .unwrap(),
-            "{}",
-            json::stringify(&row, usize::MAX).unwrap()
-        )
-        .unwrap();
+fn expected_file(path: &str, bytes: &[u8], mode: u32) -> ArtifactFile {
+    ArtifactFile {
+        path: path.into(),
+        hash: hash::digest(bytes),
+        bytes: bytes.len() as u64,
+        mode,
     }
 }
-fn oracle(input: &IvyJson) -> IvyJson {
-    let mut child = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/host-artifact-inventory-oracle.mjs",
-        ])
-        .current_dir(source_root())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(json::stringify(input, usize::MAX).unwrap().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    json::parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
+fn ordinary_mode() -> u32 {
+    if cfg!(windows) { 0o666 } else { 0o640 }
 }
-fn wire(result: IvyResult<Vec<ArtifactFile>>) -> IvyJson {
-    match result {
-        Ok(files) => IvyJson::object([
-            ("ok", true.into()),
-            (
-                "value",
-                IvyJson::Array(files.iter().map(ArtifactFile::json).collect()),
-            ),
-        ]),
-        Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
+
+#[test]
+fn native_file_compare_orders_retained_text_without_locale_runtime() {
+    let compare = native_file_compare().unwrap();
+    // Explicit retained UTF-16 order, including values that are not UTF-8 text.
+    let ordered = [
+        JsString(vec![]),
+        "A".into(),
+        "a".into(),
+        JsString(vec![97, 0]),
+        JsString(vec![0xd800]),
+        "🙂".into(),
+        JsString(vec![0xdfff]),
+        "\u{e000}".into(),
+        "�".into(),
+    ];
+    for (left, a) in ordered.iter().enumerate() {
+        for (right, b) in ordered.iter().enumerate() {
+            assert_eq!(compare(a, b), left.cmp(&right));
+        }
     }
-}
-fn input(root: &Path, operation: &str) -> IvyJson {
-    IvyJson::object([
-        ("operation", operation.into()),
-        ("root", IvyJson::String(node_path::from_native(root))),
-    ])
-}
-fn compare_paths(paths: &[String]) -> FileCompare {
-    let input = IvyJson::object([
-        ("operation", "order".into()),
-        (
-            "paths",
-            IvyJson::Array(paths.iter().cloned().map(Into::into).collect()),
-        ),
-    ]);
-    let expected = oracle(&input);
-    append(IvyJson::object([
-        ("input", input),
-        ("expected", expected.clone()),
-    ]));
-    let value = expected
-        .required("operation")
-        .unwrap()
-        .required("value")
-        .unwrap();
-    let paths: Vec<_> = paths
-        .iter()
-        .map(|path| JsString::from(path.as_str()))
-        .collect();
-    let matrix: Vec<Vec<_>> = value
-        .required("matrix")
-        .unwrap()
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|row| {
-            row.as_array()
-                .unwrap()
-                .iter()
-                .map(|value| match value.as_f64().unwrap() as i32 {
-                    -1 => Ordering::Less,
-                    0 => Ordering::Equal,
-                    1 => Ordering::Greater,
-                    _ => unreachable!(),
-                })
-                .collect()
-        })
-        .collect();
-    // A matrix qualifies only these fixture keys; unknown keys cannot fall back.
-    Arc::new(move |left, right| {
-        matrix[paths
-            .iter()
-            .position(|path| path == left)
-            .expect("unqualified comparison key")][paths
-            .iter()
-            .position(|path| path == right)
-            .expect("unqualified comparison key")]
-    })
-}
-async fn compare(root: &Path, compare: FileCompare) -> IvyJson {
-    let input = input(root, "inventory");
-    let actual = wire(artifact_files(root.to_owned(), compare).await);
-    let expected = oracle(&input);
-    append(IvyJson::object([
-        ("input", input),
-        ("actual", actual.clone()),
-        ("expected", expected.clone()),
-    ]));
-    assert_eq!(&actual, expected.required("operation").unwrap());
-    actual
-}
-fn succeeds(result: &IvyJson) {
-    assert_eq!(result.get("ok"), Some(&true.into()));
-}
-fn refuses(result: &IvyJson, code: &str) {
-    assert_eq!(
-        result
-            .required("error")
-            .unwrap()
-            .required("data")
-            .unwrap()
-            .get("code"),
-        Some(&code.into())
-    );
 }
 
 #[tokio::test]
-async fn inventory_preserves_all_ordinary_bytes_modes_paths_and_supplied_locale_order() {
+async fn native_file_compare_retains_order_across_thread_and_inventory() {
+    let compare = native_file_compare().unwrap();
+    let compare = std::thread::spawn(move || {
+        assert!(compare(&"🙂".into(), &"\u{e000}".into()).is_lt());
+        compare
+    })
+    .join()
+    .unwrap();
+    let fixture = Fixture::new();
+    let mut root_name = std::ffi::OsString::from("native root ü 空 😀; '");
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        root_name.push(std::ffi::OsString::from_wide(&[0xd800]));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        root_name.push(std::ffi::OsString::from_vec(vec![0xff]));
+    }
+    let root = fixture.0.join(root_name);
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(root.join("empty")).unwrap();
+    let mut names = vec![
+        std::ffi::OsString::from("é"),
+        std::ffi::OsString::from("🙂"),
+    ];
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        names.push(std::ffi::OsString::from_wide(&[114, 97, 119, 45, 0xd800]));
+        names.push(std::ffi::OsString::from("raw-�"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        names.push(std::ffi::OsString::from("raw-�"));
+        // Equal public spellings retain native Unix byte traversal order.
+        names.push(std::ffi::OsString::from_vec(b"raw-\xff".to_vec()));
+    }
+    let mut expected = Vec::new();
+    for (at, name) in names.into_iter().enumerate() {
+        let path = root.join(&name);
+        fs::write(&path, [at as u8]).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        expected.push(ArtifactFile {
+            path: ivy_host_runtime::native_path::from_native(Path::new(&name)),
+            hash: hash::digest(&[at as u8]),
+            bytes: 1,
+            mode: ordinary_mode(),
+        });
+    }
+    expected.sort_by(|a, b| a.path.0.cmp(&b.path.0));
+    for selected in [
+        root.clone(),
+        root.join("."),
+        fs::canonicalize(&root).unwrap(),
+    ] {
+        assert_eq!(
+            artifact_files(selected, compare.clone()).await.unwrap(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn inventory_preserves_all_ordinary_bytes_modes_paths_and_supplied_order() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.0.join("empty/nested")).unwrap();
-    let mut paths = Vec::new();
+    let mut expected = Vec::new();
     for name in [
         "z",
         "é",
@@ -303,15 +181,14 @@ async fn inventory_preserves_all_ordinary_bytes_modes_paths_and_supplied_locale_
         "ü 空 😀/payload",
     ] {
         fixture.write(name, name.as_bytes());
-        paths.push(name.to_owned());
+        expected.push(expected_file(name, name.as_bytes(), ordinary_mode()));
     }
-    for index in 0..18 {
+    for index in 0..18u8 {
         let name = format!("branch-{index}/file");
         fixture.write(&name, &[index]);
-        paths.push(name);
+        expected.push(expected_file(&name, &[index], ordinary_mode()));
     }
     let executable = fixture.write("executable", b"mode bytes");
-    paths.push("executable".into());
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -323,13 +200,29 @@ async fn inventory_preserves_all_ordinary_bytes_modes_paths_and_supplied_locale_
         mode.set_readonly(true);
         fs::set_permissions(&executable, mode).unwrap();
     }
-    fixture.write("large", &vec![0xa7; 4 * 1024 * 1024 + 17]);
-    paths.push("large".into());
+    expected.push(expected_file(
+        "executable",
+        b"mode bytes",
+        if cfg!(windows) { 0o444 } else { 0o751 },
+    ));
+    let large = vec![0xa7; 4 * 1024 * 1024 + 17];
+    fixture.write("large", &large);
+    expected.push(expected_file("large", &large, ordinary_mode()));
     fixture.write("empty-file", b"");
-    paths.push("empty-file".into());
+    expected.push(expected_file("empty-file", b"", ordinary_mode()));
     fs::hard_link(fixture.0.join("large"), fixture.0.join("same-bytes")).unwrap();
-    paths.push("same-bytes".into());
-    succeeds(&compare(&fixture.0, compare_paths(&paths)).await);
+    expected.push(expected_file("same-bytes", &large, ordinary_mode()));
+    expected.reverse();
+    let order: Vec<_> = expected.iter().map(|file| file.path.clone()).collect();
+    let compare: FileCompare = Arc::new(move |a, b| {
+        order
+            .iter()
+            .position(|key| key == a)
+            .expect("known path")
+            .cmp(&order.iter().position(|key| key == b).expect("known path"))
+    });
+    let actual = artifact_files(fixture.0.clone(), compare).await.unwrap();
+    assert_eq!(actual, expected);
     assert_eq!(fs::read(fixture.0.join("z")).unwrap(), b"z");
 }
 
@@ -339,8 +232,9 @@ async fn source_identity_excludes_modes_empty_directories_and_capture_location_b
     let fixture = Fixture::new();
     let root = fixture.0.join("source");
     fixture.write("source/value", b"fixed source bytes");
-    let compare = compare_paths(&["value".into()]);
+    let compare = native_file_compare().unwrap();
     let mut identities = Vec::new();
+    let mut builds = Vec::new();
     for phase in 0..3 {
         if phase == 1 {
             fs::create_dir(root.join("empty")).unwrap();
@@ -365,41 +259,31 @@ async fn source_identity_excludes_modes_empty_directories_and_capture_location_b
             }
             fs::write(root.join("value"), b"changed source bytes").unwrap();
         }
+        let bytes = if phase == 2 {
+            b"changed source bytes".as_slice()
+        } else {
+            b"fixed source bytes".as_slice()
+        };
         let files = artifact_files(root.clone(), compare.clone()).await.unwrap();
         let identity = artifact_source_identity(&files).unwrap();
-        let actual = IvyJson::object([
-            ("ok", true.into()),
-            (
-                "value",
-                IvyJson::object([
-                    ("sourceIdentity", identity.clone().into()),
-                    (
-                        "buildId",
-                        candidate_build_id(
-                            &"sample".into(),
-                            &"1.2.3".into(),
-                            &identity.clone().into(),
-                        )
-                        .unwrap()
-                        .into(),
-                    ),
-                ]),
-            ),
-        ]);
-        let mut input = input(&root, "identity");
-        input.insert("componentId", "sample".into());
-        input.insert("version", "1.2.3".into());
-        let expected = oracle(&input);
-        append(IvyJson::object([
-            ("input", input),
-            ("actual", actual.clone()),
-            ("expected", expected.clone()),
-        ]));
-        assert_eq!(&actual, expected.required("operation").unwrap());
+        // The public identity is a canonical array of path/hash/byte records;
+        // permissions are inventory data but do not identify source bytes.
+        let rows = IvyJson::Array(vec![IvyJson::object([
+            ("path", "value".into()),
+            ("hash", hash::digest(bytes).into()),
+            ("bytes", IvyJson::Number(bytes.len() as f64)),
+        ])]);
+        assert_eq!(identity, hash::hash_json(&rows).unwrap());
+        builds.push(
+            candidate_build_id(&"sample".into(), &"1.2.3".into(), &identity.clone().into())
+                .unwrap(),
+        );
         identities.push(identity);
     }
     assert_eq!(identities[0], identities[1]);
     assert_ne!(identities[1], identities[2]);
+    assert_eq!(builds[0], builds[1]);
+    assert_ne!(builds[1], builds[2]);
     let other = fixture.0.join("other");
     fs::create_dir(&other).unwrap();
     fs::copy(root.join("value"), other.join("value")).unwrap();
@@ -423,17 +307,17 @@ async fn inventory_refuses_observed_links_and_missing_or_file_roots_without_touc
             fixture.write("outside/retained", b"outside bytes");
             filesystem::directory_link(&fixture.0.join("outside"), &root.join("observed")).unwrap();
         }
-        let value = compare(&root, compare_paths(&[])).await;
+        let result = artifact_files(root, native_file_compare().unwrap()).await;
         if kind == "empty" {
-            succeeds(&value);
+            assert!(result.unwrap().is_empty());
         } else {
-            refuses(
-                &value,
+            assert_eq!(
+                result.unwrap_err().code,
                 if kind == "link" {
                     "artifact_changed"
                 } else {
                     "internal_error"
-                },
+                }
             );
         }
         if kind == "link" {
@@ -449,16 +333,14 @@ async fn inventory_refuses_observed_links_and_missing_or_file_roots_without_touc
         let fixture = Fixture::new();
         let fifo = CString::new(fixture.0.join("fifo").as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
-        refuses(
-            &compare(&fixture.0, compare_paths(&[])).await,
-            "artifact_changed",
+        assert_eq!(
+            artifact_files(fixture.0.clone(), native_file_compare().unwrap())
+                .await
+                .unwrap_err()
+                .code,
+            "artifact_changed"
         );
     }
-    #[cfg(windows)]
-    append(IvyJson::object([(
-        "unavailable",
-        "native Unix special-entry rejection requires a Unix account".into(),
-    )]));
 }
 
 #[tokio::test]
@@ -467,31 +349,52 @@ async fn inventory_checks_the_actual_file_limit_before_hashing() {
     for index in 0..50_001 {
         fs::File::create(fixture.0.join(format!("{index:05}"))).unwrap();
     }
-    refuses(
-        &compare(&fixture.0, compare_paths(&[])).await,
-        "limit_exceeded",
+    assert_eq!(
+        artifact_files(fixture.0.clone(), native_file_compare().unwrap())
+            .await
+            .unwrap_err()
+            .code,
+        "limit_exceeded"
     );
 }
 
 #[cfg(windows)]
 #[tokio::test]
-async fn inventory_preserves_the_original_account_file_sharing_outcome() {
+async fn inventory_preserves_native_file_sharing_refusal_and_recovers_after_release() {
     use std::os::windows::fs::OpenOptionsExt;
     let fixture = Fixture::new();
-    let file = fixture.write("held", b"shared byte identity");
-    let _held = fs::OpenOptions::new()
+    let path = fixture.write("held", b"shared byte identity");
+    let held = fs::OpenOptions::new()
         .read(true)
         .share_mode(0)
-        .open(file)
+        .open(path)
         .unwrap();
-    compare(&fixture.0, compare_paths(&["held".into()])).await;
+    assert_eq!(
+        artifact_files(fixture.0.clone(), native_file_compare().unwrap())
+            .await
+            .unwrap_err()
+            .code,
+        "internal_error"
+    );
+    drop(held);
+    let rows = artifact_files(fixture.0.clone(), native_file_compare().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![expected_file(
+            "held",
+            b"shared byte identity",
+            ordinary_mode()
+        )]
+    );
 }
 
 #[test]
 fn inventory_admission_survives_a_dropped_waiter() {
     use std::{
         future::Future,
-        sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
+        sync::atomic::{AtomicBool, Ordering},
         task::Poll,
         time::Duration,
     };
@@ -500,9 +403,9 @@ fn inventory_admission_survives_a_dropped_waiter() {
     fixture.write("b", b"second");
     let finished = Arc::new(AtomicBool::new(false));
     let signal = finished.clone();
-    let compare: FileCompare = Arc::new(move |left, right| {
-        signal.store(true, AtomicOrdering::Release);
-        left.0.cmp(&right.0)
+    let compare: FileCompare = Arc::new(move |a, b| {
+        signal.store(true, Ordering::Release);
+        a.0.cmp(&b.0)
     });
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -527,7 +430,7 @@ fn inventory_admission_survives_a_dropped_waiter() {
         release.send(()).unwrap();
         gate.await.unwrap();
         tokio::time::timeout(Duration::from_secs(10), async {
-            while !finished.load(AtomicOrdering::Acquire) {
+            while !finished.load(Ordering::Acquire) {
                 tokio::task::yield_now().await;
             }
         })
@@ -535,5 +438,4 @@ fn inventory_admission_survives_a_dropped_waiter() {
         .unwrap();
     });
     assert_eq!(fs::read(fixture.0.join("a")).unwrap(), b"first");
-    append(IvyJson::object([("scope","actual admitted inventory completes through final comparison after its caller drops the waiter".into())]));
 }

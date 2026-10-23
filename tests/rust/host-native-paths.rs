@@ -1,4 +1,4 @@
-use ivy_contracts::JsString;
+use ivy_contracts::{IvyJson, JsString};
 use ivy_host_runtime::{
     filesystem,
     native_path::{self, Context, Style},
@@ -322,4 +322,223 @@ fn posix_paths_preserve_case_and_follow_parent_components_after_links() {
         paths::resolved_future_path(&fixture.0.join("alias/../new/leaf")).unwrap(),
         fixture.0.join("target/new/leaf")
     );
+}
+
+#[allow(dead_code)]
+#[path = "host-service-fixture.rs"]
+mod service_fixture;
+#[path = "host-target-storage-cases.rs"]
+mod target_storage_cases;
+
+#[test]
+fn accepted_configuration_files_remain_private_immutable_and_direct() {
+    use ivy_host_runtime::accepted_configuration::*;
+    use service_fixture::{ServiceFixture, host_configuration};
+    fn assert_json_eq(actual: &IvyJson, expected: &IvyJson) {
+        assert_eq!(
+            ivy_contracts::json::canonical(actual, usize::MAX).unwrap(),
+            ivy_contracts::json::canonical(expected, usize::MAX).unwrap()
+        );
+    }
+    let fixture = ServiceFixture::new();
+    let anchor = host_configuration(&fixture);
+    let saved = save_accepted_configuration(&anchor).unwrap();
+    let expected = format!(
+        "{}\n",
+        ivy_contracts::json::canonical(&anchor, usize::MAX).unwrap()
+    );
+    assert_eq!(fs::read_to_string(&saved).unwrap(), expected);
+    assert_json_eq(
+        &read_accepted_configuration(&anchor, &saved).unwrap(),
+        &anchor,
+    );
+    let source = fixture.0.join("state/launch.json");
+    fs::write(
+        &source,
+        ivy_contracts::json::stringify(&fixture.value(), usize::MAX).unwrap(),
+    )
+    .unwrap();
+    let target = save_accepted_instance_configuration(&anchor, &source, "launch-1").unwrap();
+    let retained = fs::read(&target).unwrap();
+    assert!(save_accepted_instance_configuration(&anchor, &source, "launch-1").is_err());
+    assert_eq!(fs::read(&target).unwrap(), retained);
+    fs::write(&source, "null").unwrap();
+    assert_json_eq(
+        &read_accepted_instance_configuration(&anchor, &target).unwrap(),
+        &fixture.value(),
+    );
+    for (mode, code) in [
+        ("missing", "internal_error"),
+        ("directory", "configuration_changed"),
+        ("oversize", "configuration_changed"),
+        ("invalid", "configuration_changed"),
+        ("outside", "target_conflict"),
+        ("nested", "configuration_changed"),
+        ("changed", "target_conflict"),
+    ] {
+        let file = match mode {
+            "outside" => fixture.0.join("outside.json"),
+            "nested" => saved.parent().unwrap().join("nested/test.json"),
+            _ => saved.parent().unwrap().join(format!("{mode}.json")),
+        };
+        if mode == "directory" {
+            fs::create_dir(&file).unwrap();
+        } else if mode != "missing" {
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            let content = if mode == "oversize" {
+                " ".repeat(1024 * 1024 + 1)
+            } else if mode == "invalid" {
+                "{".into()
+            } else if mode == "changed" {
+                let mut value = anchor.clone();
+                value.insert("hostId", "other".into());
+                ivy_contracts::json::canonical(&value, usize::MAX).unwrap()
+            } else {
+                expected.clone()
+            };
+            fs::write(&file, content).unwrap();
+        }
+        assert_eq!(
+            read_accepted_configuration(&anchor, &file)
+                .unwrap_err()
+                .code,
+            code,
+            "{mode}"
+        );
+    }
+    let exact = saved.parent().unwrap().join("exact-limit.json");
+    let mut bytes = expected.as_bytes().to_vec();
+    bytes.resize(1024 * 1024, b' ');
+    fs::write(&exact, &bytes).unwrap();
+    assert_json_eq(
+        &read_accepted_configuration(&anchor, &exact).unwrap(),
+        &anchor,
+    );
+    bytes.push(b' ');
+    fs::write(&exact, &bytes).unwrap();
+    assert_eq!(
+        read_accepted_configuration(&anchor, &exact)
+            .unwrap_err()
+            .code,
+        "configuration_changed"
+    );
+
+    // Native callers retain their OS filename representation through all I/O.
+    let mut names = vec![std::ffi::OsString::from(
+        "native ü 空 😀; ' configuration.json",
+    )];
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        names.push(std::ffi::OsString::from_wide(&[
+            110, 97, 116, 105, 118, 101, 45, 0xd800, 46, 106, 115, 111, 110,
+        ]));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        names.push(std::ffi::OsString::from_vec(b"native-\xff.json".to_vec()));
+    }
+    let original = ivy_contracts::json::canonical(&fixture.value(), usize::MAX).unwrap();
+    for (at, name) in names.into_iter().enumerate() {
+        let native = source.parent().unwrap().join(name);
+        fs::write(&native, &original).unwrap();
+        let snapshot =
+            save_accepted_instance_configuration(&anchor, &native, &format!("native-{at}"))
+                .unwrap();
+        assert_json_eq(
+            &read_accepted_instance_configuration(&anchor, &snapshot).unwrap(),
+            &fixture.value(),
+        );
+        assert_eq!(fs::read(&native).unwrap(), original.as_bytes());
+    }
+
+    // This reader retains replacement decoding; the diagnostic-secret policy
+    // does not change configuration text or escaped public UTF-16 values.
+    let mut value = fixture.value();
+    value.insert(
+        "settings",
+        IvyJson::object([("text", "before-sentinel-after".into())]),
+    );
+    let mut bytes = ivy_contracts::json::canonical(&value, usize::MAX)
+        .unwrap()
+        .into_bytes();
+    let at = bytes
+        .windows(b"sentinel".len())
+        .position(|part| part == b"sentinel")
+        .unwrap();
+    bytes.splice(at..at + b"sentinel".len(), [0xff]);
+    fs::write(&source, bytes).unwrap();
+    let snapshot = save_accepted_instance_configuration(&anchor, &source, "replacement").unwrap();
+    value.insert(
+        "settings",
+        IvyJson::object([("text", "before-�-after".into())]),
+    );
+    assert_json_eq(
+        &read_accepted_instance_configuration(&anchor, &snapshot).unwrap(),
+        &value,
+    );
+
+    for (bad, code) in [
+        (fixture.0.join("outside-launch.json"), "target_conflict"),
+        (
+            fixture.0.join("state-sibling/launch.json"),
+            "target_conflict",
+        ),
+        (fixture.0.join("state"), "configuration_changed"),
+        (PathBuf::new(), "target_conflict"),
+        (fixture.0.join("state/bad\0name"), "internal_error"),
+    ] {
+        assert_eq!(
+            save_accepted_instance_configuration(&anchor, &bad, "refused")
+                .unwrap_err()
+                .code,
+            code
+        );
+        assert!(
+            !accepted_instance_configuration_path(&anchor, "refused")
+                .unwrap()
+                .exists()
+        );
+    }
+    let state = fixture.0.join("state-order");
+    fs::create_dir(&state).unwrap();
+    let mut ordered = anchor.clone();
+    ordered.insert(
+        "runtimeRoot",
+        IvyJson::String(ivy_host_runtime::native_path::from_native(&state)),
+    );
+    let source = state.join("launch.json");
+    fs::write(&source, original).unwrap();
+    assert_eq!(
+        save_accepted_instance_configuration(&ordered, &source, "../refused")
+            .unwrap_err()
+            .code,
+        "target_conflict"
+    );
+    assert!(state.join("accepted-configurations").is_dir());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        assert_eq!(
+            fs::metadata(&saved).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(saved.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let link = saved.parent().unwrap().join("link.json");
+        symlink(&saved, &link).unwrap();
+        assert_eq!(
+            read_accepted_configuration(&anchor, &link)
+                .unwrap_err()
+                .code,
+            "configuration_changed"
+        );
+    }
 }

@@ -1,17 +1,14 @@
 //! Contained-file inventory for package comparison and immutable source identity.
-use crate::{
-    IvyError, IvyResult, concurrency::map_concurrent, node_path, paths, streaming_hash,
-};
+use crate::{IvyError, IvyResult, concurrency::map_concurrent, native_path, paths, streaming_hash};
 use ivy_contracts::JsString;
 use std::{
     cmp::Ordering,
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
-/// The executing Node default locale is supplied by the shared runtime binding.
-/// Callers can supply a comparator without changing retained path spelling.
+/// Callers can supply ordering without changing retained path spelling.
 pub type FileCompare = Arc<dyn Fn(&JsString, &JsString) -> Ordering + Send + Sync>;
 
 /// Stable native path ordering; the retained UTF-16 spelling is never replaced.
@@ -29,9 +26,6 @@ fn require(value: bool, code: &str, message: &str) -> IvyResult<()> {
     } else {
         Err(IvyError::new(code, message))
     }
-}
-fn fs_path(path: &Path) -> PathBuf {
-    node_path::filesystem_path(&node_path::from_native(path))
 }
 async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> IvyResult<T> + Send + 'static,
@@ -72,10 +66,10 @@ async fn inventory(root: PathBuf, compare: FileCompare) -> IvyResult<Vec<Artifac
             let root = root.clone();
             let files = files.clone();
             blocking(move || {
-                let mut entries = internal(fs::read_dir(fs_path(&directory)))?
+                let mut entries = internal(fs::read_dir(&directory))?
                     .map(|entry| internal(entry))
                     .collect::<IvyResult<Vec<_>>>()?;
-                // libuv scandir sorts native Unix filename bytes before decoding.
+                // Traverse native Unix filename bytes before public text conversion.
                 #[cfg(unix)]
                 entries.sort_by(|left, right| {
                     use std::os::unix::ffi::OsStrExt;
@@ -86,12 +80,8 @@ async fn inventory(root: PathBuf, compare: FileCompare) -> IvyResult<Vec<Artifac
                 let mut nested = Vec::new();
                 let mut found = Vec::new();
                 for entry in entries {
-                    let name = std::path::PathBuf::from(entry.file_name());
-                    let path = directory.join(name);
-                    let local = internal(node_path::Context::current())?.relative(
-                        &node_path::from_native(&root),
-                        &node_path::from_native(&path),
-                    );
+                    let path = entry.path();
+                    let local = native_path::from_native(internal(path.strip_prefix(&root))?);
                     let local = JsString(
                         local
                             .0
@@ -116,8 +106,8 @@ async fn inventory(root: PathBuf, compare: FileCompare) -> IvyResult<Vec<Artifac
                         found.push((path, local));
                     }
                 }
-                // Preserve the completion order of directory callbacks before the
-                // final stable locale sort, including equal comparison keys.
+                // Preserve callback completion order before the final stable
+                // caller-supplied sort, including equal comparison keys.
                 internal(files.lock())?.extend(found);
                 Ok(nested)
             })
@@ -135,10 +125,10 @@ async fn inventory(root: PathBuf, compare: FileCompare) -> IvyResult<Vec<Artifac
     )?;
     let mut result = map_concurrent(files, 4, |(path, local), _| {
         blocking(move || {
-            let metadata = internal(fs::symlink_metadata(fs_path(&path)))?;
+            let metadata = internal(fs::symlink_metadata(&path))?;
             Ok(ArtifactFile {
                 path: local,
-                hash: streaming_hash::hash_file(&fs_path(&path))?,
+                hash: streaming_hash::hash_file(&path)?,
                 bytes: metadata.len(),
                 mode: mode(&metadata),
             })
