@@ -6,7 +6,6 @@ import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { TaskRunner } from "../services/data-collector/src/runner.js";
 import { CollectorEngine } from "../services/data-collector/src/engine.js";
@@ -269,39 +268,6 @@ test(
   },
 );
 
-test(
-  "Tesla session expiry retains its actionable code across the real worker boundary",
-  processOptions,
-  async (t) => {
-    const root = await tempRoot(t),
-      runner = new TaskRunner(root, resolve("."), settings);
-    const source = pathToFileURL(
-      resolve("docs/examples/data-collector/home/tesla-delivery.mjs"),
-    ).href;
-    const value = task(
-      `import collect from ${JSON.stringify(source)};
-globalThis.fetch = async () => new Response('private-provider-body', {status:401});
-export default collect;`,
-    );
-    value.config = {
-      orderUrl: "https://www.tesla.com/teslaaccount/order/RN123456789",
-      cookieSecret: "SELECTED",
-    };
-    value.secretNames = ["SELECTED"];
-    await assert.rejects(
-      runner.run(value, null, null, new AbortController().signal),
-      (error: unknown) => {
-        assert.ok(error instanceof IvyError);
-        assert.equal(error.code, "authentication_required");
-        assert.doesNotMatch(
-          error.message,
-          /private-provider-body|selected-fixture/,
-        );
-        return true;
-      },
-    );
-  },
-);
 
 test(
   "collector workers identify oversized returned JSON as an explicit size failure",

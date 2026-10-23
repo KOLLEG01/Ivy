@@ -14,7 +14,6 @@ assignments.
 | Outlook / Teams / Gmail      | Public MCP plugins connected on the selected native owner               | [MCP accounts](m365/README.md)               |
 | Fröling                      | Existing bearer token, or Connect username/password                     | [Heating](home/README.md#froling-setup)      |
 | Washer / dryer               | Direct, unauthenticated JSON push to DataCollector's configured port    | [Appliances](home/README.md#appliance-setup) |
-| Tesla delivery               | Explicitly provisioned account session cookie; experimental             | [Tesla](home/README.md#tesla-setup)          |
 | Blink                        | OAuth token/refresh token, or email/password with provider verification | [Cameras](cameras/README.md)                 |
 | RTSP                         | Camera stream URL with camera credentials                               | [Cameras](cameras/README.md#rtsp)            |
 | Instagram / TikTok / YouTube | Account-authorized API tokens; supported refresh flows                  | [Social accounts](social/README.md)          |
@@ -96,5 +95,5 @@ Instagram/TikTok/YouTube examples report unavailable inbox counts explicitly whe
 the selected API has no supported unread-message metric. Their post counts are
 lifetime counters for posts within the configured publication-date window.
 Fixture tests verify the implementation; they do not establish access to a real
-account. KDP CAPTCHA challenges and Tesla client-rendered order pages can still
-prevent browserless collection after configuration.
+account. KDP CAPTCHA challenges can still prevent browserless collection after
+configuration.

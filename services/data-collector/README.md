@@ -163,7 +163,7 @@ tasks disabled and verify credentials, package identity, Hive registration and
 the actual provider interaction before enabling schedules.
 
 The [examples](../../docs/examples/data-collector/README.md) include heating, laundry,
-Tesla delivery, cameras, social metrics and KDP earnings with their provider requirements.
+cameras, social metrics and KDP earnings with their provider requirements.
 Materialize a template with:
 
 ```sh

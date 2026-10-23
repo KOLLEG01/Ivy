@@ -464,7 +464,7 @@ export async function parseReport(buffer, period) {
   const sheets = [];
   for (const sheet of workbook.worksheets) {
     if (
-      /^(?:(?:report\s+)?definitions?|(?:grand\s+)?totals?|summary|orders?)$/i.test(
+      /^(?:(?:report\s+)?definitions?|(?:grand\s+)?totals?|summary|orders?(?: processed)?|ebook orders placed)$/i.test(
         sheet.name,
       )
     )
@@ -484,7 +484,7 @@ export async function parseReport(buffer, period) {
         -1;
       const columns = {
         title: find("title", "book title"),
-        asin: find("asin", "asin/isbn", "isbn"),
+        asin: find("asin", "asin/isbn", "isbn", "ebook asin"),
         currency: find("currency", "royalty currency"),
         royalty: find(
           "royalty",
@@ -497,6 +497,8 @@ export async function parseReport(buffer, period) {
           "kindle edition normalized pages (kenp) read",
           "kindle edition normalized page (kenp) read",
           "kenp pages read",
+          "total kindle+ pages read and listened",
+          "kindle+ pages read",
         ),
         type: find("transaction type", "royalty type"),
         net: find("net units sold", "net units"),

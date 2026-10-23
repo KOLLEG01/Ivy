@@ -27,7 +27,7 @@ test("Collector accepts the namespaced events emitted by home collectors", () =>
     "heating.threshold.crossed",
     "laundry.finished",
     "laundry.status.changed",
-    "tesla.delivery.changed",
+    "sensor.reading.changed",
   ].map((name) => ({ name, payload: { value: 1 } }));
   assert.deepEqual(outputSchema.parse({ data: {}, events }).events, events);
 });

@@ -10,7 +10,6 @@ persistent transition state and optional events; no adapter sends notifications.
 | `froeling.task.json`       | Fröling Connect HTTP            | Bearer token or account secrets, user/facility IDs, installed component IDs |
 | `washer.task.json`         | Appliance JSON push             | DataCollector's standalone HTTP port; no token required                     |
 | `dryer.task.json`          | Appliance JSON push             | DataCollector's standalone HTTP port; no token required                     |
-| `tesla-delivery.task.json` | Experimental Tesla account HTML | Order-page URL and assigned account session-cookie secret                   |
 
 Fröling uses the web login and component-read protocol, which has no public API
 contract. Verify the account, facility, component IDs and returned fields against
@@ -31,23 +30,6 @@ a positive value to zero emit `laundry.finished`; duration changes emit
 `laundry.status.changed`. The sentinel 65535 means unknown remaining time and cannot
 produce a dryer completion. Older timestamps do not replace the latest reading.
 Persisted task state carries the last appliance payload between pushes and restarts.
-
-The Tesla HTML adapter is experimental and does not implement a verified backend
-order API. Normal [Tesla account login](https://www.tesla.com/teslaaccount) requires
-a browser-generated CAPTCHA token; password/TOTP credentials alone cannot establish
-a Node HTTP session. Assign a pre-provisioned authenticated session-cookie secret.
-The adapter performs no login or page JavaScript execution.
-
-It extracts English or German delivery windows from server HTML and emits
-`tesla.delivery.changed` when a previously observed window changes. Redirects may
-change the locale but must retain the configured RN order on the same origin;
-dashboard and other-order redirects fail without collecting their contents. Auth
-redirects require session renewal; a client-rendered shell without a delivery
-window fails explicitly and needs a verified order API. This undocumented account
-surface must be checked with an authenticated response before enablement; HTML
-fixtures do not establish backend API parity or live availability.
-Tesla's documented [Fleet API endpoints](https://developer.tesla.com/docs/fleet-api/endpoints/vehicle-endpoints)
-cover vehicles and provide no equivalent order-delivery endpoint.
 
 ## Froling setup
 
@@ -117,23 +99,3 @@ The JSON fields and completion transitions are described above. For other input
 tasks that need authentication, use `inputSecretName` instead of
 `allowUnauthenticatedInput` as described in the
 [service guide](../../../../services/data-collector/README.md#execution-and-installation).
-
-## Tesla setup
-
-The accepted exception is a manually provisioned account session. The collector
-itself uses Node HTTP and does not open a browser.
-
-1. Sign into your [Tesla account](https://www.tesla.com/teslaaccount), complete its
-   verification, and open the order detail page containing your `RN...` number.
-   Copy that exact HTTPS URL to `config.orderUrl`.
-2. In your browser's Network developer tools, reload that order page and select
-   its document request to `www.tesla.com`. Copy only the request's **Cookie header
-   value** into the private `tesla_session_cookie` secret. Do not copy headers into
-   chat or export unrelated browser cookies. The task references the secret name
-   with `config.cookieSecret`.
-3. Run manually. A login redirect requires renewing this secret; an HTML shell
-   without delivery details means this account page cannot be read by the current
-   adapter. A successful fixture test does not prove your live page is server-rendered.
-
-There is no automatic password/CAPTCHA fallback in this adapter. A Tesla Fleet
-API token for vehicle telemetry cannot be used as an order-delivery token.
