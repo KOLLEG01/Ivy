@@ -1,5 +1,5 @@
 //! Shared build leases protect cache links without serializing independent builds.
-use crate::{IvyError, IvyResult, executor_lock::ExecutorLock, node_path::{self,Style}};
+use crate::{IvyError, IvyResult, executor_lock::ExecutorLock, native_path};
 use ivy_sdk::clock::{Clock,SystemClock};
 use std::{path::PathBuf,time::Duration};
 use std::{fs,path::Path,sync::Arc,time::{SystemTime,UNIX_EPOCH}};
@@ -7,8 +7,7 @@ use crate::{config::{read_json,FileError},paths,storage_space::RetentionProgress
 
 fn internal<T,E>(result:Result<T,E>)->IvyResult<T>{result.map_err(|_|IvyError::internal())}
 async fn blocking<T:Send+'static>(work:impl FnOnce()->IvyResult<T>+Send+'static)->IvyResult<T>{internal(tokio::task::spawn_blocking(work).await)?}
-fn joined(root:&Path,name:&str)->PathBuf{node_path::filesystem_path(&node_path::join(Style::native(),&[node_path::from_native(root),name.into()]))}
-fn same_path(left:&Path,right:&Path)->IvyResult<bool>{Ok(internal(node_path::Context::current())?.relative(&node_path::from_native(left),&node_path::from_native(right)).0.is_empty())}
+fn same_path(left:&Path,right:&Path)->IvyResult<bool>{Ok(native_path::relative(&internal(paths::absolute(left))?,&internal(paths::absolute(right))?).as_os_str().is_empty())}
 fn owned_root(staging:&Path,root:&Path)->IvyResult<PathBuf>{
     let metadata=internal(fs::symlink_metadata(root))?;let actual=internal(paths::realpath(root))?;let expected=internal(paths::realpath(staging))?.join("dependency-cache");
     if !metadata.is_dir()||metadata.file_type().is_symlink()||!same_path(&expected,&actual)?{return Err(IvyError::new("target_conflict","Dependency cache root must remain a directly owned directory."));}Ok(actual)
@@ -25,7 +24,7 @@ pub async fn collect_dependency_caches(staging:PathBuf,progress:Arc<dyn Retentio
     internal(tokio::spawn(collect(staging,progress)).await)?
 }
 async fn collect(staging:PathBuf,progress:Arc<dyn RetentionProgress>)->IvyResult<()>{
-    let staging=node_path::filesystem_path(&node_path::from_native(&staging));let root=joined(&staging,"dependency-cache");let initial_staging=staging.clone();let initial=root.clone();
+    let root=staging.join("dependency-cache");let initial_staging=staging.clone();let initial=root.clone();
     let boundary=blocking(move||{
         // Inspect an existing link before mkdir can follow it, including a
         // dangling junction. Ordinary absent roots keep their creation path.
@@ -38,7 +37,7 @@ async fn collect(staging:PathBuf,progress:Arc<dyn RetentionProgress>)->IvyResult
     }).await?;
     let mut caches=Vec::new();
     for name in names{
-        let target=joined(&root,&name);let checked=target.clone();let check_root=root.clone();let check_staging=staging.clone();let check_boundary=boundary.clone();
+        let target=root.join(&name);let checked=target.clone();let check_root=root.clone();let check_staging=staging.clone();let check_boundary=boundary.clone();
         blocking(move||{guard(&check_staging,&check_root,&check_boundary)?;if !internal(paths::inside(&check_boundary,&internal(paths::realpath(&checked))?))?{return Err(IvyError::new("target_conflict","Dependency cache leaves its storage root."));}Ok(())}).await?;
         if name.starts_with(".retiring-"){crate::filesystem::remove_payload(target,true,0).await?;progress.removed("payloads");continue}
         let check=target.clone();let key=format!("sha256:{name}");let used=blocking(move||{
@@ -51,22 +50,22 @@ async fn collect(staging:PathBuf,progress:Arc<dyn RetentionProgress>)->IvyResult
     // Admitted names use only fixed-width lower-case hexadecimal digits.
     caches.sort_by(|left,right|right.1.total_cmp(&left.1).then_with(||left.0.cmp(&right.0)));
     for(name,used_at)in caches.into_iter().skip(1){
-        let lock=match ExecutorLock::acquire(joined(&joined(&staging,"dependency-cache-locks"),&name),false).await{
+        let lock=match ExecutorLock::acquire(staging.join("dependency-cache-locks").join(&name),false).await{
             Ok(lock)=>lock,Err(error) if error.code=="executor_already_running"=>{progress.skipped("dependency-cache","active_build",false);continue},Err(error)=>return Err(error),
         };
         let checked_root=root.clone();let checked_staging=staging.clone();let checked_boundary=boundary.clone();
         let retired=blocking(move||{
             let root=checked_root;let staging=checked_staging;let boundary=checked_boundary;
-            guard(&staging,&root,&boundary)?;let target=joined(&root,&name);
+            guard(&staging,&root,&boundary)?;let target=root.join(&name);
             let metadata=match fs::symlink_metadata(&target){Ok(value)=>value,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok(None),Err(_)=>return Err(IvyError::internal())};
             if milliseconds(internal(metadata.modified())?)!=used_at{return Ok(None)}
             let actual=match paths::realpath(&target){Ok(value)=>value,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok(None),Err(_)=>return Err(IvyError::internal())};
             if !internal(paths::inside(&boundary,&actual))?{return Err(IvyError::new("target_conflict","Dependency cache leaves its storage root."));}
-            let retired=joined(&root,&format!(".retiring-{name}"));match fs::rename(target,&retired){Ok(())=>Ok(Some(retired)),Err(error) if error.kind()==std::io::ErrorKind::NotFound=>Ok(None),Err(_)=>Err(IvyError::internal())}
+            let retired=root.join(format!(".retiring-{name}"));match fs::rename(target,&retired){Ok(())=>Ok(Some(retired)),Err(error) if error.kind()==std::io::ErrorKind::NotFound=>Ok(None),Err(_)=>Err(IvyError::internal())}
         }).await;
         lock.close().await?;
         if let Some(retired)=retired?{
-            let checked_root=joined(&staging,"dependency-cache");let check_staging=staging.clone();let check_boundary=boundary.clone();blocking(move||guard(&check_staging,&checked_root,&check_boundary)).await?;
+            let checked_root=staging.join("dependency-cache");let check_staging=staging.clone();let check_boundary=boundary.clone();blocking(move||guard(&check_staging,&checked_root,&check_boundary)).await?;
             crate::filesystem::remove_payload(retired,true,0).await?;progress.removed("payloads");
         }
     }
@@ -74,7 +73,7 @@ async fn collect(staging:PathBuf,progress:Arc<dyn RetentionProgress>)->IvyResult
 }
 
 pub async fn use_dependency_cache(staging_root:PathBuf,key:&str)->IvyResult<ExecutorLock>{
-    let root=node_path::filesystem_path(&node_path::join(Style::native(),&[node_path::from_native(&staging_root),"dependency-cache-locks".into(),key.into()]));
+    let root=staging_root.join("dependency-cache-locks").join(key);
     let deadline=SystemClock.utc_millis()+5000;
     loop{
         match ExecutorLock::acquire(root.clone(),true).await{
@@ -85,7 +84,7 @@ pub async fn use_dependency_cache(staging_root:PathBuf,key:&str)->IvyResult<Exec
 }
 pub async fn touch_dependency_cache(root:PathBuf)->IvyResult<()>{touch_dependency_cache_at(root,SystemClock.utc_millis()).await}
 pub async fn touch_dependency_cache_at(root:PathBuf,milliseconds:i64)->IvyResult<()>{
-    tokio::task::spawn_blocking(move||match touch(&node_path::filesystem_path(&node_path::from_native(&root)),milliseconds){
+    tokio::task::spawn_blocking(move||match touch(&root,milliseconds){
         Ok(())=>Ok(()),Err(error) if error.kind()==std::io::ErrorKind::NotFound=>Ok(()),Err(_)=>Err(IvyError::internal()),
     }).await.map_err(|_|IvyError::internal())?
 }

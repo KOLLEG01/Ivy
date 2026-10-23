@@ -2,22 +2,13 @@ use super::{ServiceFixture,host_configuration,assert_json_eq};
 use ivy_contracts::{IvyJson,IvyResult,JsString,json,hash::hash_json};
 use ivy_host_runtime::{config,preparations,preparation_progress::{self,PreparationProgress,StepOptions},dependency_cache,executor_lock::ExecutorLock,journal::HostJournal,native_path};
 use ivy_sdk::clock::Clock;
-use std::{fs,io::Write,path::{Path,PathBuf},process::{Command,Stdio},sync::{Arc,Mutex,atomic::{AtomicI64,Ordering}},time::{Duration,Instant}};
+use std::{collections::BTreeMap,ffi::OsString,fs,path::{Path,PathBuf},sync::{Arc,Mutex,atomic::{AtomicI64,Ordering}},time::{Duration,Instant}};
 const AT:i64=1_767_225_600_000;
-static CORPUS:Mutex<()>=Mutex::new(());
 struct Fixed(AtomicI64);
 impl Clock for Fixed{fn utc_millis(&self)->i64{self.0.load(Ordering::SeqCst)}fn monotonic(&self)->Instant{Instant::now()}}
 fn text(path:&Path)->IvyJson{IvyJson::String(native_path::from_native(path))}
 fn path(value:&IvyJson)->PathBuf{native_path::to_native(value.as_js_string().unwrap())}
 fn outcome(result:IvyResult<IvyJson>)->IvyJson{match result{Ok(value)=>IvyJson::object([("ok",true.into()),("value",value)]),Err(error)=>IvyJson::object([("ok",false.into()),("error",error.to_wire())])}}
-fn oracle(input:&IvyJson)->IvyJson{
- let mut child=Command::new("node").args(["--experimental-transform-types","--disable-warning=ExperimentalWarning","tests/fixtures/host-preparation-oracle.mjs"]).current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
- .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();child.stdin.take().unwrap().write_all(json::stringify(input,usize::MAX).unwrap().as_bytes()).unwrap();let output=child.wait_with_output().unwrap();assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));json::parse(std::str::from_utf8(&output.stdout).unwrap(),usize::MAX).unwrap()
-}
-fn compare(input:IvyJson,actual:IvyJson,expected:IvyJson){
- if let Some(file)=std::env::var_os("IVY_HOST_PREPARATION_CORPUS"){let _guard=CORPUS.lock().unwrap();writeln!(fs::OpenOptions::new().create(true).append(true).open(file).unwrap(),"{}",json::stringify(&IvyJson::object([("input",input.clone()),("actual",actual.clone()),("expected",expected.clone())]),usize::MAX).unwrap()).unwrap();}
- assert_json_eq(&actual,&expected);
-}
 fn write(path:&Path,bytes:&[u8]){fs::create_dir_all(path.parent().unwrap()).unwrap();fs::write(path,bytes).unwrap();}
 fn load(path:&Path)->Option<IvyJson>{fs::read_to_string(path).ok().and_then(|s|json::parse(&s,usize::MAX).ok())}
 fn opaque_name() -> std::ffi::OsString {
@@ -1076,90 +1067,432 @@ async fn automatic_recovery_uses_only_the_requested_build_and_preserves_unknown_
 }
 
 #[tokio::test]
-async fn cache_leases_share_builds_exclude_retirement_and_wait_for_original_owner(){
- let f=ServiceFixture::new();let staging=f.0.join("staging");let key="a".repeat(64);let root=staging.join("dependency-cache-locks").join(&key);
- let first=dependency_cache::use_dependency_cache(staging.clone(),&key).await.unwrap();let second=dependency_cache::use_dependency_cache(staging.clone(),&key).await.unwrap();
- let result=ExecutorLock::acquire(root.clone(),false).await.map(|lock|{drop(lock);IvyJson::Null});assert_eq!(result.as_ref().unwrap_err().code,"executor_already_running");let input=IvyJson::object([("kind","lock".into()),("path",text(&root)),("shared",false.into())]);compare(input.clone(),outcome(result),oracle(&input));
- first.close().await.unwrap();assert!(ExecutorLock::acquire(root.clone(),false).await.is_err());second.close().await.unwrap();
- let exclusive=ExecutorLock::acquire(root.clone(),false).await.unwrap();let requested=staging.clone();let requested_key=key.clone();let mut waiter=tokio::spawn(async move{dependency_cache::use_dependency_cache(requested,&requested_key).await});assert!(tokio::time::timeout(Duration::from_millis(200),&mut waiter).await.is_err());exclusive.close().await.unwrap();let shared=waiter.await.unwrap().unwrap();shared.close().await.unwrap();
- let exclusive=ExecutorLock::acquire(root,false).await.unwrap();let started=Instant::now();assert_eq!(dependency_cache::use_dependency_cache(staging.clone(),&key).await.err().unwrap().code,"executor_already_running");assert!(started.elapsed()>=Duration::from_secs(5)&&started.elapsed()<Duration::from_secs(8));exclusive.close().await.unwrap();
- for mode in ["existing","missing","not-directory"]{
-  let target=staging.join(mode);if mode=="existing"{fs::create_dir_all(&target).unwrap();}if mode=="not-directory"{write(&target,b"file");}
-  let result=dependency_cache::touch_dependency_cache_at(target.clone(),AT+123).await.map(|_|fs::symlink_metadata(&target).ok().map(|m|{let at=m.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap();IvyJson::Number(at.as_secs() as f64*1000.0+at.subsec_nanos() as f64/1_000_000.0)}).unwrap_or(IvyJson::Null));
-  let input=IvyJson::object([("kind","touch".into()),("path",text(&target)),("now",IvyJson::Number((AT+123) as f64))]);compare(input.clone(),outcome(result),oracle(&input));
- }
+async fn cache_leases_share_builds_exclude_retirement_and_wait_for_original_owner() {
+    let f = ServiceFixture::new();
+    let staging = cache_base(&f, "leases").join("staging");
+    let key = "a".repeat(64);
+    let root = staging.join("dependency-cache-locks").join(&key);
+    let first = dependency_cache::use_dependency_cache(staging.clone(), &key)
+        .await
+        .unwrap();
+    let second = dependency_cache::use_dependency_cache(staging.clone(), &key)
+        .await
+        .unwrap();
+    assert_eq!(
+        ExecutorLock::acquire(root.clone(), false)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "executor_already_running"
+    );
+    first.close().await.unwrap();
+    assert_eq!(
+        ExecutorLock::acquire(root.clone(), false)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "executor_already_running"
+    );
+    second.close().await.unwrap();
+    let exclusive = ExecutorLock::acquire(root.clone(), false).await.unwrap();
+    let requested = staging.clone();
+    let requested_key = key.clone();
+    let mut waiter = tokio::spawn(async move {
+        dependency_cache::use_dependency_cache(requested, &requested_key).await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut waiter)
+            .await
+            .is_err()
+    );
+    exclusive.close().await.unwrap();
+    let shared = waiter.await.unwrap().unwrap();
+    shared.close().await.unwrap();
+    let exclusive = ExecutorLock::acquire(root, false).await.unwrap();
+    let started = Instant::now();
+    assert_eq!(
+        dependency_cache::use_dependency_cache(staging, &key)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "executor_already_running"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(5) && started.elapsed() < Duration::from_secs(8)
+    );
+    exclusive.close().await.unwrap();
+    // Native timestamp I/O has no SQLite boundary and keeps opaque OS names.
+    for milliseconds in [AT + 123, 0, -123] {
+        for mode in ["existing", "missing", "not-directory"] {
+            let target =
+                f.0.join(cache_opaque_name())
+                    .join(milliseconds.to_string())
+                    .join(mode);
+            if mode == "existing" {
+                fs::create_dir_all(&target).unwrap();
+            }
+            if mode == "not-directory" {
+                write(&target, b"file");
+            }
+            dependency_cache::touch_dependency_cache_at(target.clone(), milliseconds)
+                .await
+                .unwrap();
+            if mode == "missing" {
+                assert!(!target.exists());
+                continue;
+            }
+            let at = fs::symlink_metadata(&target).unwrap().modified().unwrap();
+            let actual = match at.duration_since(std::time::UNIX_EPOCH) {
+                Ok(duration) => {
+                    duration.as_secs() as f64 * 1000.0
+                        + duration.subsec_nanos() as f64 / 1_000_000.0
+                }
+                Err(error) => {
+                    let duration = error.duration();
+                    -(duration.as_secs() as f64 * 1000.0
+                        + duration.subsec_nanos() as f64 / 1_000_000.0)
+                }
+            };
+            assert_eq!(actual, milliseconds as f64, "{mode}");
+            if mode == "not-directory" {
+                assert_eq!(fs::read(&target).unwrap(), b"file");
+            }
+        }
+    }
 }
-
 #[derive(Default)]
 struct CacheProgress(Mutex<Vec<IvyJson>>);
-impl ivy_host_runtime::storage_space::RetentionProgress for CacheProgress{
- fn removed(&self,area:&str){self.0.lock().unwrap().push(IvyJson::object([("kind","removed".into()),("area",area.into())]));}
- fn skipped(&self,area:&str,reason:&str,attention:bool){self.0.lock().unwrap().push(IvyJson::object([("kind","skipped".into()),("area",area.into()),("reason",reason.into()),("requiresAttention",attention.into())]));}
+impl ivy_host_runtime::storage_space::RetentionProgress for CacheProgress {
+    fn removed(&self, area: &str) {
+        self.0.lock().unwrap().push(IvyJson::object([
+            ("kind", "removed".into()),
+            ("area", area.into()),
+        ]));
+    }
+    fn skipped(&self, area: &str, reason: &str, attention: bool) {
+        self.0.lock().unwrap().push(IvyJson::object([
+            ("kind", "skipped".into()),
+            ("area", area.into()),
+            ("reason", reason.into()),
+            ("requiresAttention", attention.into()),
+        ]));
+    }
 }
-fn directory_link(target:&Path,link:&Path){
- #[cfg(windows)]{let status=Command::new("node").args(["-e","require('node:fs').symlinkSync(process.argv[1],process.argv[2],'junction')"]).arg(target).arg(link).status().unwrap();assert!(status.success());}
- #[cfg(unix)]std::os::unix::fs::symlink(target,link).unwrap();
+fn directory_link(target: &Path, link: &Path) {
+    ivy_host_runtime::filesystem::directory_link(target, link).unwrap();
 }
-async fn cache_fixture(f:&ServiceFixture,name:&str,mode:&str)->PathBuf{
- let staging=f.0.join(name).join("staging");let root=staging.join("dependency-cache");
- if mode=="empty"{return staging}
- if mode=="root-file"{write(&root,b"root is a file");return staging}
- if mode=="staging-alias"{let actual=f.0.join(name).join("real-staging");fs::create_dir_all(&actual).unwrap();directory_link(&actual,&staging);}
- #[cfg(windows)]if mode=="root-case"{fs::create_dir_all(staging.join("DEPENDENCY-CACHE")).unwrap();}
- for (index,digit) in ['a','b','c'].into_iter().enumerate(){
-  if mode=="single"&&index!=0{continue}
-  let directory=root.join(digit.to_string().repeat(64));write(&directory.join("cache.json"),format!("{{\"key\":\"sha256:{}\"}}\n",digit.to_string().repeat(64)).as_bytes());write(&directory.join("payload"),digit.to_string().as_bytes());
-  if mode=="read-only"&&digit=='a'{let file=directory.join("payload");let mut permissions=fs::metadata(&file).unwrap().permissions();permissions.set_readonly(true);fs::set_permissions(file,permissions).unwrap();}
-  dependency_cache::touch_dependency_cache_at(directory,AT+if mode=="same-time"{0}else{index as i64*1000}).await.unwrap();
- }
- let a=root.join("a".repeat(64));let b=root.join("b".repeat(64));
- match mode{
-  "missing-manifest"=>fs::remove_file(a.join("cache.json")).unwrap(),"wrong-key"=>write(&a.join("cache.json"),b"{\"key\":\"other\"}"),
-  "malformed"=>write(&b.join("cache.json"),b"{"),"oversize"=>write(&b.join("cache.json"),&vec![b' ';65537]),
-  "retired"=>write(&root.join(format!(".retiring-{}","d".repeat(64))).join("payload"),b"interrupted deletion"),
-  "unrecognized"=>{for name in ["not-a-cache","Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",".retiring-bad"]{write(&root.join(name).join("payload"),b"keep unknown");}write(&root.join(format!(".retiring-{}","e".repeat(64))),b"keep regular file");let outside=staging.join("linked-target");write(&outside.join("keep"),b"linked child survives");directory_link(&outside,&root.join("d".repeat(64)));},_=>{},
- }
- staging
+fn cache_base(f: &ServiceFixture, name: &str) -> PathBuf {
+    // SQLite accepts Unicode paths; canonicalization retains the native long-path prefix.
+    let base = f.0.join(name).join("native ü 空 😀; '");
+    fs::create_dir_all(&base).unwrap();
+    fs::canonicalize(base).unwrap()
 }
-fn cache_observation(staging:&Path,result:IvyResult<()>,progress:&CacheProgress)->IvyJson{
- fn walk(root:&Path,directory:&Path,files:&mut Vec<IvyJson>)->std::io::Result<()>{
-  let mut entries=fs::read_dir(directory)?.collect::<Result<Vec<_>,_>>()?;entries.sort_by_key(|entry|entry.file_name());
-  for entry in entries{let path=entry.path();let metadata=fs::symlink_metadata(&path)?;let local=path.strip_prefix(root).unwrap().to_str().unwrap().replace('\\',"/");if metadata.file_type().is_symlink(){files.push(IvyJson::object([("path",local.into()),("type","link".into())]));}else if metadata.is_dir(){walk(root,&path,files)?;}else{files.push(IvyJson::object([("path",local.into()),("hex",fs::read(&path)?.iter().map(|b|format!("{b:02x}")).collect::<String>().into())]));}}
-  Ok(())
- }
- let root=staging.join("dependency-cache");let entries=fs::read_dir(&root).ok().map(|values|{let mut names=values.map(|entry|entry.unwrap().file_name().to_str().unwrap().to_owned()).collect::<Vec<_>>();names.sort();IvyJson::Array(names.into_iter().map(IvyJson::from).collect())}).unwrap_or(IvyJson::Null);
- let mut files=Vec::new();let files=if walk(&root,&root,&mut files).is_ok(){IvyJson::Array(files)}else{IvyJson::Null};
- IvyJson::object([("operation",outcome(result.map(|_|IvyJson::Null))),("events",IvyJson::Array(progress.0.lock().unwrap().clone())),("entries",entries),("files",files)])
+fn cache_opaque_name() -> OsString {
+    let mut name = opaque_name();
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        name.push(OsString::from_vec(vec![0xff]));
+    }
+    name
 }
-
+async fn cache_fixture(f: &ServiceFixture, name: &str, mode: &str) -> PathBuf {
+    let base = cache_base(f, name);
+    // A single cache needs no SQLite lease: also exercise raw OS staging paths.
+    let staging = if mode == "opaque-root" {
+        base.join(cache_opaque_name()).join("staging")
+    } else {
+        base.join("staging")
+    };
+    let root = staging.join("dependency-cache");
+    if mode == "empty" {
+        return staging;
+    }
+    if mode == "root-file" {
+        write(&root, b"root is a file");
+        return staging;
+    }
+    if mode == "staging-alias" {
+        let actual = base.join("real-staging");
+        fs::create_dir_all(&actual).unwrap();
+        directory_link(&actual, &staging);
+    }
+    #[cfg(windows)]
+    if mode == "root-case" {
+        fs::create_dir_all(staging.join("DEPENDENCY-CACHE")).unwrap();
+    }
+    for (index, digit) in ['a', 'b', 'c'].into_iter().enumerate() {
+        if ["single", "opaque-root"].contains(&mode) && index != 0 {
+            continue;
+        }
+        let directory = root.join(digit.to_string().repeat(64));
+        write(
+            &directory.join("cache.json"),
+            format!("{{\"key\":\"sha256:{}\"}}\n", digit.to_string().repeat(64)).as_bytes(),
+        );
+        write(&directory.join("payload"), digit.to_string().as_bytes());
+        if mode == "read-only" && digit == 'a' {
+            let file = directory.join("payload");
+            let mut permissions = fs::metadata(&file).unwrap().permissions();
+            permissions.set_readonly(true);
+            fs::set_permissions(file, permissions).unwrap();
+        }
+        dependency_cache::touch_dependency_cache_at(
+            directory,
+            AT + if mode == "same-time" {
+                0
+            } else {
+                index as i64 * 1000
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let a = root.join("a".repeat(64));
+    let b = root.join("b".repeat(64));
+    match mode {
+        "missing-manifest" => fs::remove_file(a.join("cache.json")).unwrap(),
+        "wrong-key" => write(&a.join("cache.json"), b"{\"key\":\"other\"}"),
+        "malformed" => write(&b.join("cache.json"), b"{"),
+        "oversize" => write(&b.join("cache.json"), &vec![b' '; 65537]),
+        "retired" => write(
+            &root
+                .join(format!(".retiring-{}", "d".repeat(64)))
+                .join("payload"),
+            b"interrupted deletion",
+        ),
+        "unrecognized" => {
+            for name in [
+                OsString::from("not-a-cache"),
+                OsString::from(format!("A{}", "9".repeat(63))),
+                OsString::from(".retiring-bad"),
+                cache_opaque_name(),
+            ] {
+                write(&root.join(name).join("payload"), b"keep unknown");
+            }
+            write(
+                &root.join(format!(".retiring-{}", "e".repeat(64))),
+                b"keep regular file",
+            );
+            let outside = staging.join("linked-target");
+            write(&outside.join("keep"), b"linked child survives");
+            directory_link(&outside, &root.join("d".repeat(64)));
+        }
+        _ => {}
+    }
+    staging
+}
+type CacheTree = BTreeMap<PathBuf, Option<Vec<u8>>>;
+fn cache_tree(root: &Path) -> Option<CacheTree> {
+    fn walk(root: &Path, directory: &Path, files: &mut CacheTree) -> std::io::Result<()> {
+        for entry in fs::read_dir(directory)? {
+            let path = entry?.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            let local = path.strip_prefix(root).unwrap().to_owned();
+            if metadata.file_type().is_symlink() {
+                files.insert(local, None);
+            } else if metadata.is_dir() {
+                walk(root, &path, files)?;
+            } else {
+                files.insert(local, Some(fs::read(path)?));
+            }
+        }
+        Ok(())
+    }
+    let mut files = CacheTree::new();
+    walk(root, root, &mut files).ok()?;
+    Some(files)
+}
+fn cache_names(root: &Path) -> Option<Vec<OsString>> {
+    let mut names = fs::read_dir(root)
+        .ok()?
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    names.sort();
+    Some(names)
+}
 #[tokio::test]
-async fn cache_collection_preserves_regular_roots_leases_retired_entries_and_diagnostics(){
- let mut modes=vec!["empty","single","regular","same-time","active-lease","active-newest","missing-manifest","wrong-key","malformed","oversize","retired","read-only","root-file","unrecognized","staging-alias"];
- #[cfg(windows)]modes.push("root-case");
- for mode in modes{
-  let f=ServiceFixture::new();let native=cache_fixture(&f,"native",mode).await;let original=cache_fixture(&f,"oracle",mode).await;let mut owners=Vec::new();
-  if mode=="active-lease"||mode=="active-newest"{let key=if mode=="active-lease"{"a"}else{"c"}.repeat(64);for staging in [&native,&original]{owners.push(dependency_cache::use_dependency_cache(staging.clone(),&key).await.unwrap());}}
-  let progress=Arc::new(CacheProgress::default());let result=dependency_cache::collect_dependency_caches(native.clone(),progress.clone()).await;
-  let expected_success=!["malformed","oversize","root-file"].contains(&mode);assert_eq!(result.is_ok(),expected_success,"{mode}: {result:?}");
-  if expected_success&&!["empty","missing-manifest","wrong-key","unrecognized"].contains(&mode){let retained=if mode=="single"||mode=="same-time"{"a"}else{"c"}.repeat(64);assert!(native.join("dependency-cache").join(retained).join("payload").exists(),"{mode}");}
-  if mode=="active-lease"{assert!(native.join("dependency-cache").join("a".repeat(64)).exists());assert!(!native.join("dependency-cache").join("b".repeat(64)).exists());}
-  let actual=cache_observation(&native,result,&progress);let input=IvyJson::object([("kind","cache-collect".into()),("case",mode.into()),("staging",text(&original))]);compare(input.clone(),actual,oracle(&input));
-  for owner in owners{owner.close().await.unwrap();}
- }
+async fn cache_collection_preserves_regular_roots_leases_retired_entries_and_diagnostics() {
+    let mut modes = vec![
+        "empty",
+        "single",
+        "opaque-root",
+        "regular",
+        "same-time",
+        "active-lease",
+        "active-newest",
+        "missing-manifest",
+        "wrong-key",
+        "malformed",
+        "oversize",
+        "retired",
+        "read-only",
+        "root-file",
+        "unrecognized",
+        "staging-alias",
+    ];
+    #[cfg(windows)]
+    modes.push("root-case");
+    for mode in modes {
+        let f = ServiceFixture::new();
+        let staging = cache_fixture(&f, "collection", mode).await;
+        let root = staging.join("dependency-cache");
+        let before = cache_tree(&root);
+        let names_before = cache_names(&root);
+        let owner = if ["active-lease", "active-newest"].contains(&mode) {
+            let key = if mode == "active-lease" { "a" } else { "c" }.repeat(64);
+            Some(
+                dependency_cache::use_dependency_cache(staging.clone(), &key)
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let progress = Arc::new(CacheProgress::default());
+        let result =
+            dependency_cache::collect_dependency_caches(staging.clone(), progress.clone()).await;
+        let code = match mode {
+            "malformed" | "root-file" => Some("internal_error"),
+            "oversize" => Some("invalid_arguments"),
+            _ => None,
+        };
+        match code {
+            Some(code) => assert_eq!(result.err().unwrap().code, code, "{mode}"),
+            None => result.unwrap(),
+        }
+        let removed = match mode {
+            "regular" | "active-newest" | "read-only" | "unrecognized" | "staging-alias"
+            | "root-case" => vec!["a".repeat(64), "b".repeat(64)],
+            "same-time" => vec!["b".repeat(64), "c".repeat(64)],
+            "active-lease" | "missing-manifest" | "wrong-key" => vec!["b".repeat(64)],
+            "retired" => vec![
+                format!(".retiring-{}", "d".repeat(64)),
+                "a".repeat(64),
+                "b".repeat(64),
+            ],
+            _ => vec![],
+        };
+        let mut expected_files = before;
+        let mut expected_names = names_before;
+        if mode == "empty" {
+            expected_files = Some(CacheTree::new());
+            expected_names = Some(vec![]);
+        }
+        if let Some(files) = expected_files.as_mut() {
+            files.retain(|path, _| !removed.iter().any(|name| path.starts_with(Path::new(name))));
+        }
+        if let Some(names) = expected_names.as_mut() {
+            names.retain(|name| {
+                !removed
+                    .iter()
+                    .any(|removed| name == std::ffi::OsStr::new(removed))
+            });
+        }
+        assert_eq!(cache_tree(&root), expected_files, "{mode}");
+        assert_eq!(cache_names(&root), expected_names, "{mode}");
+        let mut events = removed
+            .iter()
+            .map(|_| IvyJson::object([("kind", "removed".into()), ("area", "payloads".into())]))
+            .collect::<Vec<_>>();
+        if ["missing-manifest", "wrong-key", "active-lease"].contains(&mode) {
+            let skipped = IvyJson::object([
+                ("kind", "skipped".into()),
+                ("area", "dependency-cache".into()),
+                (
+                    "reason",
+                    if mode == "active-lease" {
+                        "active_build"
+                    } else {
+                        "unrecognized_manifest"
+                    }
+                    .into(),
+                ),
+                ("requiresAttention", (mode != "active-lease").into()),
+            ]);
+            if mode == "active-lease" {
+                // Collection visits b before the leased, older a cache.
+                events.push(skipped);
+            } else {
+                events.insert(0, skipped);
+            }
+        }
+        assert_eq!(*progress.0.lock().unwrap(), events, "{mode}");
+        if mode == "unrecognized" {
+            assert_eq!(
+                fs::read(staging.join("linked-target/keep")).unwrap(),
+                b"linked child survives"
+            );
+        }
+        if mode == "staging-alias" {
+            assert!(
+                fs::symlink_metadata(&staging)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+        if ["single", "opaque-root", "same-time"].contains(&mode) {
+            assert!(root.join("a".repeat(64)).join("payload").exists(), "{mode}");
+        } else if code.is_none() && mode != "empty" {
+            assert!(root.join("c".repeat(64)).join("payload").exists(), "{mode}");
+        }
+        if let Some(owner) = owner {
+            owner.close().await.unwrap();
+        }
+    }
 }
-
 #[tokio::test]
-async fn cache_collection_rejects_linked_roots_without_changing_any_target_bytes(){
- for mode in ["outside","inside","dangling"]{
-  let f=ServiceFixture::new();let staging=f.0.join("staging");fs::create_dir_all(&staging).unwrap();let target=if mode=="inside"{staging.join("other")}else{f.0.join("outside-staging")};
-  if mode!="dangling"{for digit in ["a","b"]{let cache=target.join(digit.repeat(64));write(&cache.join("cache.json"),format!("{{\"key\":\"sha256:{}\"}}",digit.repeat(64)).as_bytes());write(&cache.join("payload"),format!("preserved {digit}").as_bytes());dependency_cache::touch_dependency_cache_at(cache,AT+if digit=="a"{0}else{1000}).await.unwrap();}}
-  directory_link(&target,&staging.join("dependency-cache"));let progress=Arc::new(CacheProgress::default());let result=dependency_cache::collect_dependency_caches(staging.clone(),progress.clone()).await;
-  let error=result.unwrap_err();assert_eq!(error.code,"target_conflict","{mode}");assert!(fs::symlink_metadata(staging.join("dependency-cache")).unwrap().file_type().is_symlink());assert!(progress.0.lock().unwrap().is_empty());assert!(!staging.join("dependency-cache-locks").exists());
-  if mode=="dangling"{assert!(!target.exists());}else{for digit in ["a","b"]{assert_eq!(fs::read(target.join(digit.repeat(64)).join("payload")).unwrap(),format!("preserved {digit}").as_bytes());assert_eq!(fs::read(target.join(digit.repeat(64)).join("cache.json")).unwrap(),format!("{{\"key\":\"sha256:{}\"}}",digit.repeat(64)).as_bytes());}assert_eq!(fs::read_dir(&target).unwrap().count(),2);}
-  let payloads=if mode=="dangling"{IvyJson::Array(vec![])}else{IvyJson::Array(["a","b"].into_iter().map(|digit|{let directory=target.join(digit.repeat(64));IvyJson::object([("name",digit.repeat(64).into()),("manifest",fs::read_to_string(directory.join("cache.json")).unwrap().into()),("payload",fs::read_to_string(directory.join("payload")).unwrap().into())])}).collect())};
-  let expected_payloads=if mode=="dangling"{IvyJson::Array(vec![])}else{IvyJson::Array(["a","b"].into_iter().map(|digit|IvyJson::object([("name",digit.repeat(64).into()),("manifest",format!("{{\"key\":\"sha256:{}\"}}",digit.repeat(64)).into()),("payload",format!("preserved {digit}").into())])).collect())};
-  let actual=IvyJson::object([("code",error.code.into()),("linkPreserved",fs::symlink_metadata(staging.join("dependency-cache")).unwrap().file_type().is_symlink().into()),("targetExists",target.exists().into()),("payloads",payloads),("events",IvyJson::Array(progress.0.lock().unwrap().clone()))]);
-  let expected=IvyJson::object([("code","target_conflict".into()),("linkPreserved",true.into()),("targetExists",(mode!="dangling").into()),("payloads",expected_payloads),("events",IvyJson::Array(vec![]))]);
-  compare(IvyJson::object([("kind","cache-root-guard".into()),("case",mode.into()),("basis","task0072-cache-root-policy-agreement-138-v1; intentional correction, not original parity".into())]),actual,expected);
- }
+async fn cache_collection_rejects_linked_roots_without_changing_any_target_bytes() {
+    for mode in ["outside", "inside", "dangling"] {
+        let f = ServiceFixture::new();
+        let base = cache_base(&f, "guard");
+        let staging = base.join(cache_opaque_name()).join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        let target = if mode == "inside" {
+            staging.join("other")
+        } else {
+            base.join("outside-staging")
+        };
+        if mode != "dangling" {
+            for digit in ["a", "b"] {
+                let cache = target.join(digit.repeat(64));
+                write(
+                    &cache.join("cache.json"),
+                    format!("{{\"key\":\"sha256:{}\"}}", digit.repeat(64)).as_bytes(),
+                );
+                write(
+                    &cache.join("payload"),
+                    format!("preserved {digit}").as_bytes(),
+                );
+                dependency_cache::touch_dependency_cache_at(
+                    cache,
+                    AT + if digit == "a" { 0 } else { 1000 },
+                )
+                .await
+                .unwrap();
+            }
+        }
+        let before = cache_tree(&target);
+        let names_before = cache_names(&target);
+        directory_link(&target, &staging.join("dependency-cache"));
+        let progress = Arc::new(CacheProgress::default());
+        let result =
+            dependency_cache::collect_dependency_caches(staging.clone(), progress.clone()).await;
+        assert_eq!(result.unwrap_err().code, "target_conflict", "{mode}");
+        assert!(
+            fs::symlink_metadata(staging.join("dependency-cache"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(cache_tree(&target), before, "{mode}");
+        assert_eq!(cache_names(&target), names_before, "{mode}");
+        assert!(progress.0.lock().unwrap().is_empty());
+        assert!(!staging.join("dependency-cache-locks").exists());
+        assert_eq!(target.exists(), mode != "dangling", "{mode}");
+    }
 }
