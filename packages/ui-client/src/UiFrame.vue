@@ -12,6 +12,7 @@ import type { ShellNavigationItem } from "@ivy/ui";
 import type { HiveClient } from "../../sdk/src/client.js";
 import { uiPath } from "../../contracts/src/ui-route.js";
 import { useBrowserApp } from "./browser-app";
+import HostUsagePills from "./HostUsagePills.vue";
 const props = defineProps<{
   uiName: string;
   base: URL;
@@ -20,6 +21,9 @@ const props = defineProps<{
   settingsHref?: string;
   settingsLabel?: string;
   navigation: ShellNavigationItem[];
+  showUsage?: boolean;
+  usageHost?: string | null | undefined;
+  usageNode?: string | undefined;
 }>();
 const status = useRemote(
   (signal) => props.client.request("system.status", {}, { signal }),
@@ -97,6 +101,7 @@ const embedded = new URLSearchParams(location.search).has("embed");
       ><slot name="sidebar-footer"
     /></template>
     <template v-if="$slots.context" #context><slot name="context" /></template>
+    <template v-if="showUsage && !embedded" #status><HostUsagePills :client="client" :host="usageHost" :node="usageNode" /></template>
     <Alert v-if="status.error.value" variant="destructive" class="mb-4"
       ><AlertDescription
         class="flex flex-wrap items-center justify-between gap-3"

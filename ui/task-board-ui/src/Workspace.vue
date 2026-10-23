@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import {
   Button,
   DropdownMenu,
@@ -50,6 +50,9 @@ const identity = computed(() =>
     : "",
 );
 const showCrossAgent = provideCommentVisibility(() => workspace.value.value);
+const usageHost = ref<string | null | undefined>();
+const usageNode = ref<string>();
+watch(() => [props.section, props.query.get('id')], () => { usageHost.value = props.query.get('id') ? null : undefined; usageNode.value = undefined; }, { immediate: true });
 const switchHref = (node: string) =>
   route(props.section === "settings" ? "settings" : "tasks", { node });
 </script>
@@ -61,6 +64,9 @@ const switchHref = (node: string) =>
     :client="client"
     :navigation="[]"
     :settings-href="route('settings', { node })"
+    show-usage
+    :usage-host="usageHost"
+    :usage-node="usageNode"
   >
     <template #context>
       <Toggle v-model="showCrossAgent" size="sm" :aria-label="tr('Cross-Agent-Kommunikation', 'Cross-agent communication')"
@@ -140,6 +146,8 @@ const switchHref = (node: string) =>
         :workspace="workspace.value.value"
         :available="!workspace.error.value"
         :query="query"
+        @host="usageHost = $event"
+        @agent-node="usageNode = $event"
       />
     </template>
   </UiFrame>

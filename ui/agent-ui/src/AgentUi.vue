@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { useMediaQuery } from '@vueuse/core';
 import {
   Button,
   Collapsible,
@@ -58,7 +59,7 @@ import {
   usePage,
 } from "../../../packages/ui-client/src/runtime";
 import { base, client, notifications } from "./runtime";
-import HostUsage from "./HostUsage.vue";
+import HostUsage from "../../../packages/ui-client/src/HostUsage.vue";
 import TaskRow from "./TaskRow.vue";
 import AgentHosts from "./AgentHosts.vue";
 import AgentHost from "./AgentHost.vue";
@@ -78,6 +79,7 @@ import {
 import type { LiveTaskState, SeenTasks } from "./task-activity";
 
 const hash = useHashRoute();
+const mobile = useMediaQuery('(max-width: 767px)');
 const section = computed(() => hash.value.slice(2).split("?")[0] || "home");
 const query = computed(
   () => new URLSearchParams(hash.value.split("?")[1] ?? ""),
@@ -219,7 +221,7 @@ const fallbackNode = computed(() => {
 watch(
   [section, fallbackNode],
   ([current, value]) => {
-    if (current === "home" && value)
+    if (current === "home" && value && !mobile.value)
       window.location.hash = route("host", { node: value });
   },
   { immediate: true },
@@ -412,6 +414,8 @@ const toggleGroup = (id: string) => {
     :base="base"
     :client="client"
     :navigation="[]"
+    show-usage
+    :usage-node="section === 'task' ? node : undefined"
   >
     <template #sidebar-actions>
       <SidebarGroup class="pb-0">
@@ -524,6 +528,8 @@ const toggleGroup = (id: string) => {
             <SidebarGroup>
               <SidebarGroupLabel class="gap-1.5 pr-8">
                 <HostUsage
+                  :client="client"
+                  passive
                   :node="host.serviceNodeId"
                   :label="hostName(host.serviceNodeId)"
                   :ready="hostReady(host.serviceNodeId)"
@@ -708,7 +714,7 @@ const toggleGroup = (id: string) => {
       :project-id="query.get('projectId') ?? ''"
     />
     <AgentHost
-      v-else-if="section === 'home' && fallbackNode"
+      v-else-if="section === 'home' && fallbackNode && !mobile"
       :key="fallbackNode"
       :node="fallbackNode"
       project=""

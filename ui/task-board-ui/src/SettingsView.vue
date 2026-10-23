@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, toRaw, watch } from "vue";
+import { computed, nextTick, ref, toRaw, watch } from "vue";
+import { X } from "@lucide/vue";
 import {
   Alert,
   AlertDescription,
@@ -15,6 +16,7 @@ import {
   useRemote,
 } from "@ivy/ui";
 import { nativeRead } from "../../../packages/ui-client/src/native";
+import { route } from "../../../packages/ui-client/src/runtime";
 import { base, client, tr } from "./runtime";
 import type { TaskBoard } from "./runtime";
 import {
@@ -31,7 +33,14 @@ const props = defineProps<{
   workspace: TaskBoard.WorkspaceInfo;
   available: boolean;
 }>();
-const { preferences: commentPreferences, storageError: preferenceStorageError } = useCommentPreferences(() => props.workspace);
+const { preferences: savedPreferences, storageError: preferenceStorageError, save: savePreferences } = useCommentPreferences(() => props.workspace);
+const commentPreferences = ref({ ...savedPreferences.value });
+const preferenceBaseline = ref(JSON.stringify(savedPreferences.value));
+const preferencesDirty = computed(() => JSON.stringify(commentPreferences.value) !== preferenceBaseline.value);
+watch(savedPreferences, value => {
+  if (!preferencesDirty.value) commentPreferences.value = { ...value };
+  preferenceBaseline.value = JSON.stringify(value);
+}, { deep: true });
 const draft = ref<TaskBoard.Configuration | null>(null),
   baseline = ref(""),
   pin = ref<TaskBoard.ObjectPin | null>(null);
@@ -159,11 +168,14 @@ watch(
       draft.value.defaults.nativeOptions.reasoningEffort = null;
   },
 );
-const dirty = computed(
+const executionDirty = computed(
   () => !!draft.value && JSON.stringify(draft.value) !== baseline.value,
 );
+const dirty = computed(() => executionDirty.value || preferencesDirty.value);
 const reload = async () => {
   draft.value = null;
+  commentPreferences.value = { ...savedPreferences.value };
+  preferenceBaseline.value = JSON.stringify(savedPreferences.value);
   message.value = "";
   await current.refresh();
 };
@@ -177,9 +189,10 @@ const recovered = async () => {
   await current.refresh();
 };
 const save = async () => {
-  if (!draft.value || invalid.value || !dirty.value) return;
-  const submitted = structuredClone(toRaw(draft.value));
+  if (!draft.value || (executionDirty.value && invalid.value) || !dirty.value) return;
   message.value = "";
+  if (executionDirty.value) {
+  const submitted = structuredClone(toRaw(draft.value));
   const result = await action.start(
     tr("TaskBoard-Einstellungen speichern", "Save TaskBoard settings"),
     { action: "configure", configuration: pin.value, value: submitted },
@@ -193,6 +206,14 @@ const save = async () => {
     );
     await current.refresh();
   }
+  if (!result?.configuration) return;
+  }
+  const saved = savePreferences({ ...commentPreferences.value });
+  await nextTick();
+  if (saved) {
+    preferenceBaseline.value = JSON.stringify(savedPreferences.value);
+    message.value = tr("Einstellungen gespeichert.", "Settings saved.");
+  }
 };
 </script>
 
@@ -200,13 +221,22 @@ const save = async () => {
   <PageHeader
     :title="tr('TaskBoard-Einstellungen', 'TaskBoard settings')"
     :loading="current.loading.value"
-  />
+  ><Button variant="ghost" size="icon-sm" as-child>
+    <a :href="route('tasks', { node: workspace.serviceNodeId })" :aria-label="tr('Schließen', 'Close')"><X aria-hidden="true" /></a>
+  </Button></PageHeader>
   <section class="mx-auto w-full max-w-4xl">
     <SettingsSection
-      :title="tr('Kommentare', 'Comments')"
-      :description="tr('Diese Anzeigeeinstellungen gelten für diesen Browser und werden sofort gespeichert.', 'These display settings apply to this browser and are saved immediately.')"
+      :title="tr('Anzeige', 'Display')"
+      :description="tr('Diese Einstellungen gelten für deinen Browser. Übernimm Änderungen mit Speichern.', 'These settings apply to your browser. Choose Save to apply changes.')"
     >
       <div class="grid gap-4 sm:grid-cols-2">
+        <Field>
+          <Label for="ticket-layout">{{ tr('Tickets auf dem Desktop öffnen', 'Open tickets on desktop') }}</Label>
+          <OptionSelect id="ticket-layout" v-model="commentPreferences.ticketLayout" class="w-full">
+            <option value="side">{{ tr('An der Seite', 'At the side') }}</option>
+            <option value="fullscreen">{{ tr('Vollbild', 'Full screen') }}</option>
+          </OptionSelect>
+        </Field>
         <Field>
           <Label for="comment-order">{{ tr('Kommentarreihenfolge', 'Comment order') }}</Label>
           <OptionSelect id="comment-order" v-model="commentPreferences.order" class="w-full">
@@ -466,7 +496,7 @@ const save = async () => {
             !!storageError ||
             !!current.error.value ||
             !dirty ||
-            invalid
+            (executionDirty && invalid)
           "
           @click="save"
           >{{ tr("Speichern", "Save") }}</Button

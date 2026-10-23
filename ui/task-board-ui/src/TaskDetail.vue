@@ -23,6 +23,7 @@ import {
   PropertyItem,
   PropertyList,
   RemoteState,
+  ReplyContext,
   StatusBadge,
   ScrollLoader,
   preserveScrollAnchor,
@@ -97,6 +98,7 @@ import {
   newOperationId,
 } from "../../../packages/sdk/src/client.js";
 import { hostProject } from "../../../packages/sdk/src/project-inventory.js";
+import { readTask } from './task-read';
 
 const props = defineProps<{
   taskId: string;
@@ -104,7 +106,7 @@ const props = defineProps<{
   available: boolean;
   query: URLSearchParams;
 }>();
-const emit = defineEmits<{ changed: []; deleted: []; close: [] }>();
+const emit = defineEmits<{ changed: []; deleted: []; close: []; host: [host: string | null]; agentNode: [node: string | undefined] }>();
 // A ticket shows Details, Chat and the agent task as tabs; the conversation opens by default.
 type TaskTab = "details" | "chat" | "agent";
 const tab = ref<TaskTab>(
@@ -122,8 +124,7 @@ const detailRoute = (id: string, values: Record<string, string> = {}) => taskRou
   { ...Object.fromEntries(['q', 'status', 'control', 'host', 'category', 'project'].flatMap(key => props.query.has(key) ? [[key, props.query.get(key)!]] : [])), ...values });
 const olderComments = ref<TaskBoard.Comment[]>([]);
 const olderLoading = ref(false), olderError = ref<string | null>(null);
-const taskRemote = useRemote((signal) => nativeRead(client, props.workspace.serviceNodeId, 'task-board.read',
-  { task: props.taskId }, signal) as Promise<TaskBoard.TaskView>, 15000, ["objects/task-board/task"]);
+const taskRemote = useRemote((signal) => readTask(props.workspace.serviceNodeId, props.taskId, signal), 15000, ["objects/task-board/task"]);
 const task = { ...taskRemote, value: computed(() => {
   const view = taskRemote.value.value;
   if (!view) return null;
@@ -166,7 +167,19 @@ const pendingQuestions = computed(() => taskView.value.value?.openQuestions ??
   openQuestions({ comments: task.value.value?.value.comments ?? [] }).filter(question => question.recipient?.kind !== 'task'));
 const replyTarget = ref<string | null>(null), commentComposer = ref<HTMLElement[]>([]);
 const replyingTo = computed(() => [...(task.value.value?.value.comments ?? []), ...pendingQuestions.value].find(comment => comment.commentId === replyTarget.value));
-const answerQuestion = async (id: string) => { tab.value = 'chat'; replyTarget.value = id; await nextTick(); commentComposer.value[0]?.scrollIntoView({ block: 'center' }); };
+const answerQuestion = async (id: string) => {
+  tab.value = 'chat'; replyTarget.value = id; await nextTick();
+  commentComposer.value[0]?.scrollIntoView({ block: 'nearest' });
+  commentComposer.value[0]?.querySelector<HTMLElement>('[contenteditable="true"]')?.focus({ preventScroll: true });
+};
+const jumpToReply = async () => {
+  while (replyTarget.value && !commentElement(replyTarget.value) && nextOlder.value && !olderLoading.value) {
+    const before = nextOlder.value;
+    await loadOlder(); await nextTick();
+    if (olderError.value || before === nextOlder.value) break;
+  }
+  commentElement(replyTarget.value ?? undefined)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+};
 const newestCommentId = computed(() => displayComments.value
   .reduce<TaskBoard.Comment | undefined>((latest, comment) =>
     comment.authorKind === "system" && comment.body === "Ticket edited" ? latest :
@@ -184,6 +197,8 @@ const projectHost = computed(() => {
     executionDefaults.defaults.value?.executionRequirement;
   return target?.kind === "host" ? target.hostId : undefined;
 });
+watch(projectHost, value => emit('host', value ?? null), { immediate: true });
+watch(() => task.value.value?.value.primaryResourceRef?.serviceNodeId, value => emit('agentNode', value), { immediate: true });
 const project = useRemote(
   async (signal) => {
     const requirement = task.value.value?.value.fields.workspaceRequirement;
@@ -621,6 +636,11 @@ const nativeInput = (comment: TaskBoard.Comment) => task.value.value?.value.comm
 const copyId = () => void navigator.clipboard?.writeText(props.taskId);
 const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspace.serviceNodeId, props.taskId));
 const commentElement = (id: string | undefined) => id ? document.getElementById("comment-" + id) : null;
+watch(() => optimistic.pending.value?.request.commentId, async id => {
+  if (!id || tab.value !== 'chat') return;
+  await nextTick();
+  commentElement(id)?.scrollIntoView({ block: 'end' });
+});
 // The conversation opens at the newest message so the latest answer is read first.
 let openedAtNewest = false;
 watch([tab, () => task.value.value?.value.comments.length], async () => {
@@ -645,8 +665,9 @@ watch(() => task.value.value?.value.comments, async (comments) => {
   knownSequence = Math.max(knownSequence, newest.sequence);
   if (!isNew || newest.authorKind === "user" || tab.value !== "chat" || commentPreferences.value.order === "newest-first") return;
   await nextTick();
-  const top = commentElement(newest.commentId)?.getBoundingClientRect().top;
-  if (top !== undefined && top > innerHeight) arrived.value = newest;
+  const message = commentElement(newest.commentId), bounds = message?.getBoundingClientRect();
+  const bottom = message?.closest('[data-slot=task-comment-messages]')?.getBoundingClientRect().bottom ?? innerHeight;
+  if (bounds && bounds.bottom > bottom + 1) arrived.value = newest;
 });
 watch(showCrossAgent, visible => { if (!visible && arrived.value && crossAgentComment(arrived.value, props.taskId)) arrived.value = null; });
 const showArrived = () => {
@@ -656,7 +677,7 @@ const showArrived = () => {
 </script>
 
 <template>
-  <Tabs v-model="tab" class="mx-auto w-full max-w-6xl pb-8">
+  <Tabs v-model="tab" class="task-detail flex h-full min-h-0 w-full flex-col gap-0">
     <ToolbarContent>
       <div class="flex min-w-0 flex-1 items-center gap-2">
         <template v-if="task.value.value">
@@ -667,7 +688,7 @@ const showArrived = () => {
             :aria-label="stateLabel(task.value.value.value.workflowState)"
             role="img"
           />
-          <h1 v-if="wide" class="min-w-0 truncate text-sm font-semibold">
+          <h1 class="min-w-0 truncate text-sm font-semibold">
             <span class="sr-only">{{ task.value.value.value.taskKey }} · </span>{{ task.value.value.value.fields.title }}
           </h1>
           <StatusBadge
@@ -767,12 +788,10 @@ const showArrived = () => {
         >
       </div>
     </ToolbarContent>
-    <h1 v-if="!wide && task.value.value" class="mt-3 text-lg font-semibold leading-snug break-words">
-      <span class="sr-only">{{ task.value.value.value.taskKey }} · </span>{{ task.value.value.value.fields.title }}
-    </h1>
     <div
       v-if="!wide && task.value.value"
-      class="sticky top-0 z-10 -mx-4 border-b bg-background px-4 py-2"
+      class="shrink-0 border-b bg-background px-3 py-2"
+      data-slot="task-tabs"
     >
       <TabsList class="grid w-full grid-cols-3">
         <TabsTrigger value="details"><Info aria-hidden="true" />Details</TabsTrigger>
@@ -780,6 +799,10 @@ const showArrived = () => {
         <TabsTrigger value="agent"><Bot aria-hidden="true" />Agent</TabsTrigger>
       </TabsList>
     </div>
+    <div class="task-detail-scroll min-h-0 flex-1 overscroll-contain" :class="tab === 'details' ? 'overflow-y-auto px-4 pb-5 md:px-6' : 'flex flex-col overflow-hidden'">
+    <h1 v-if="!wide && task.value.value && tab === 'details'" class="mt-3 text-lg font-semibold leading-snug break-words">
+      <span class="sr-only">{{ task.value.value.value.taskKey }} · </span>{{ task.value.value.value.fields.title }}
+    </h1>
     <RemoteState
       :loading="task.loading.value"
       :error="task.error.value"
@@ -1135,12 +1158,12 @@ const showArrived = () => {
 
       <TabsContent
         value="chat"
-        class="ivy-chat-surface ivy-conversation mt-4 min-h-[60dvh] rounded-xl px-3 pt-2 pb-4 sm:px-6"
+        class="ivy-chat-surface ivy-conversation m-0 min-h-0 flex-1 overflow-hidden"
         aria-label="Conversation"
       >
-        <div class="mx-auto flex max-w-3xl flex-col gap-1">
+        <div class="mx-auto flex h-full min-h-0 w-full max-w-3xl flex-col gap-1">
           <template v-for="section in commentSections" :key="section">
-            <template v-if="section === 'comments'">
+            <div v-if="section === 'comments'" data-slot="task-comment-messages" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pt-2 sm:px-6">
               <ScrollLoader v-if="nextOlder && commentPreferences.order === 'oldest-first'"
                 :loading="olderLoading" :error="olderError" :enabled="tab === 'chat'"
                 :label="tr('Ältere Nachrichten laden', 'Load older messages')" @load="loadOlder" />
@@ -1199,7 +1222,7 @@ const showArrived = () => {
                       </div>
                       <ExpandableContent
                         v-if="!entry.comment.nativeInput || entry.comment.replyTo || nativeInput(entry.comment)?.state === 'answered' || nativeInput(entry.comment)?.state === 'expired'"
-                        :enabled="entry.kind === 'event' || (commentPreferences.collapseOlder && entry.kind !== 'user' && entry.comment.commentId !== newestCommentId)"
+                        :enabled="commentPreferences.collapseOlder && entry.kind !== 'user' && entry.comment.commentId !== newestCommentId"
                         :show-more-label="tr('Mehr anzeigen', 'Show more')"
                         :show-less-label="tr('Weniger anzeigen', 'Show less')"
                       >
@@ -1286,7 +1309,7 @@ const showArrived = () => {
               <ScrollLoader v-if="nextOlder && commentPreferences.order === 'newest-first'"
                 :loading="olderLoading" :error="olderError" :enabled="tab === 'chat'"
                 :label="tr('Ältere Nachrichten laden', 'Load older messages')" @load="loadOlder" />
-            </template>
+            </div>
             <template v-else>
               <p v-if="task.value.value.archived" role="status" class="my-3 rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
                 This task is archived. Restore it from the task actions to comment or change it.
@@ -1295,7 +1318,7 @@ const showArrived = () => {
                 v-else
                 ref="commentComposer"
                 data-slot="task-comment-composer"
-                class="ivy-chat-surface sticky bottom-0 z-10 max-h-[60dvh] space-y-1.5 overflow-y-auto py-3"
+                class="ivy-chat-surface max-h-[60dvh] shrink-0 space-y-1.5 overflow-y-auto px-3 py-3 sm:px-6"
               >
                 <ActionState v-if="!uploading && !optimistic.isComment.value && (action.saved.value?.phase !== 'succeeded' || action.error.value)" :action="action" @changed="refresh" />
                 <Alert v-if="optimistic.pending.value && optimistic.issue(optimistic.pending.value.request.commentId)" role="status">
@@ -1310,10 +1333,6 @@ const showArrived = () => {
                   <AlertDescription>{{ tr('Ein vorheriger Vorgang wird noch abgeschlossen. Dein Text bleibt erhalten.', 'A previous action is still being completed. Your draft is retained.') }}</AlertDescription>
                 </Alert>
                 <p v-if="error || archive.error.value" role="alert" class="text-sm text-destructive">{{ error || archive.error.value }}</p>
-                <div v-if="replyingTo" role="status" class="flex items-center gap-2 rounded-lg border bg-background p-2 text-sm">
-                  <span class="min-w-0 flex-1 truncate">{{ tr('Antwort auf:', 'Answering:') }} {{ replyingTo.body }}</span>
-                  <Button variant="ghost" size="icon-sm" :aria-label="tr('Antwort abbrechen', 'Cancel reply')" @click="replyTarget = null"><X aria-hidden="true" /></Button>
-                </div>
                 <div v-if="(task.value.value.value.workflowState === 'done' && writable) || uploading" class="flex flex-wrap items-center gap-3 px-2 text-sm">
                   <Label v-if="task.value.value.value.workflowState === 'done' && writable" class="flex items-center gap-2">
                     <Checkbox v-model="moveToTodo" :disabled="!writable" />
@@ -1334,6 +1353,11 @@ const showArrived = () => {
                   :upload-file="uploadFile"
                   @submit="submitComment"
                 >
+                  <template v-if="replyingTo" #context>
+                    <ReplyContext :text="replyingTo.body.replace(/\s+/g, ' ')" :label="tr('Antwort auf', 'Reply to')"
+                      :jump-label="tr('Zur Frage springen', 'Jump to question')" :cancel-label="tr('Antwort abbrechen', 'Cancel reply')"
+                      @jump="jumpToReply" @cancel="replyTarget = null" />
+                  </template>
                   <template #add>
                     <DropdownMenuItem :disabled="!writable" @select="wikiPickerOpen = true"><Link2 aria-hidden="true" />Insert Wiki page</DropdownMenuItem>
                   </template>
@@ -1360,9 +1384,9 @@ const showArrived = () => {
         >{{ tr("Neue Nachricht von ", "New message from ") + senderName(arrived) }}<ArrowDown aria-hidden="true" /></Button>
       </TabsContent>
 
-      <TabsContent value="agent" class="mt-4">
+      <TabsContent value="agent" class="task-agent-tab m-0 flex h-full min-h-0 flex-col">
         <template v-if="agentEmbedLink">
-          <p class="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
+          <p class="flex shrink-0 items-center gap-2 px-3 py-1.5 text-xs text-muted-foreground">
             <Bot class="size-3.5" aria-hidden="true" />{{ hostPill }}
             <a :href="agentTaskLink!" target="_top" class="ml-auto inline-flex items-center gap-1 underline-offset-4 hover:underline"
               >{{ tr("In AgentManager öffnen", "Open in AgentManager") }}<ExternalLink class="size-3" aria-hidden="true"
@@ -1371,7 +1395,7 @@ const showArrived = () => {
           <iframe
             :src="agentEmbedLink"
             :title="tr('Agent-Task', 'Agent task')"
-            class="h-[calc(100dvh-10rem)] min-h-[28rem] w-full rounded-xl border bg-background"
+            class="min-h-0 w-full flex-1 border-0 bg-background"
           />
         </template>
         <p v-else class="rounded-lg bg-muted px-3 py-6 text-center text-sm text-muted-foreground">
@@ -1396,6 +1420,7 @@ const showArrived = () => {
       @retry="imagePreviewAttempt++"
     />
     <ObjectDeleteDialog v-model:open="deleteOpen" :client="client" :object-id="taskId" :expected-revision="task.value.value?.pin.revision ?? null" :label="'the ticket “' + (task.value.value?.value.taskKey ?? taskId) + '”'" consequence="This also deletes its attachments and related workflow records." :storage-key="'ivy.task-board.delete:' + base.href + ':' + taskId" @deleted="emit('deleted')" />
+    </div>
   </Tabs>
 </template>
 <style scoped>

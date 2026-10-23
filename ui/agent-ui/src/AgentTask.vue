@@ -1812,7 +1812,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .agent-task {
-  height: calc(var(--conversation-height, calc(100dvh - 3rem)) - var(--ivy-install-banner-height, 0px));
+  height: calc(var(--conversation-height, calc(100dvh - var(--ivy-content-top, 3rem))) - var(--ivy-install-banner-height, 0px));
   display: flex;
   min-height: 0;
   flex-direction: column;

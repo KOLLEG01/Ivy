@@ -5,6 +5,7 @@ import type { TaskBoard } from "./runtime";
 export interface CommentPreferences {
   order: "newest-first" | "oldest-first";
   collapseOlder: boolean;
+  ticketLayout: "side" | "fullscreen";
 }
 
 export function useCommentPreferences(
@@ -26,7 +27,8 @@ export function useCommentPreferences(
   // The conversation reads like a chat by default: oldest first, newest answer next to the input.
   const preferences = ref<CommentPreferences>({
     order: "oldest-first",
-    collapseOlder: true,
+    collapseOlder: false,
+    ticketLayout: "side",
   });
   const storageError = ref("");
   watch(
@@ -40,7 +42,8 @@ export function useCommentPreferences(
           collapseOlder:
             typeof stored?.collapseOlder === "boolean"
               ? stored.collapseOlder
-              : true,
+              : false,
+          ticketLayout: stored?.ticketLayout === "fullscreen" ? "fullscreen" : "side",
         };
       } catch {
         storageError.value = tr(
@@ -51,20 +54,19 @@ export function useCommentPreferences(
     },
     { immediate: true },
   );
-  watch(
-    preferences,
-    (value) => {
+  const save = (value: CommentPreferences) => {
       try {
         localStorage.setItem(key.value, JSON.stringify(value));
+        preferences.value = { ...value };
         storageError.value = "";
+        return true;
       } catch {
         storageError.value = tr(
           "Die Anzeigeeinstellungen konnten nicht gespeichert werden.",
           "Display settings could not be saved.",
         );
+        return false;
       }
-    },
-    { deep: true },
-  );
-  return { preferences, storageError };
+  };
+  return { preferences, storageError, save };
 }

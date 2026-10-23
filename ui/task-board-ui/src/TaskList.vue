@@ -7,6 +7,7 @@ import {
   Disclosure,
   Field,
   Input,
+  HorizontalScrollIndicator,
   Label,
   OptionSelect,
   PageHeader,
@@ -19,7 +20,7 @@ import {
   DialogTitle,
   useRemote,
 } from "@ivy/ui";
-import { ListFilter, Plus, Search, SlidersHorizontal, X } from "@lucide/vue";
+import { ChevronRight, ListFilter, Plus, Search, SlidersHorizontal, X } from "@lucide/vue";
 import { route } from "../../../packages/ui-client/src/runtime";
 import { newOperationId } from "../../../packages/sdk/src/client.js";
 import {
@@ -46,11 +47,18 @@ import {
 import type { BoardTransition, Placement, TransitionContext } from "./board";
 import BoardColumn from "./BoardColumn.vue";
 import TaskDetail from "./TaskDetail.vue";
+import { useCommentPreferences } from './comment-preferences';
 const props = defineProps<{
   workspace: TaskBoard.WorkspaceInfo;
   query: URLSearchParams;
   available: boolean;
 }>();
+const emit = defineEmits<{ host: [host: string | null | undefined]; agentNode: [node: string | undefined] }>();
+const { preferences } = useCommentPreferences(() => props.workspace);
+const boardElement = ref<HTMLElement | null>(null);
+const categories = ref<string[]>([]);
+const boardLanes = computed(() => swimlane.value === 'category' ? categories.value.length ? categories.value : ['Uncategorized'] : ['']);
+const collapsedLanes = ref<string[]>([]), backlogOpen = ref(true);
 const search = ref(props.query.get("q") ?? ""),
   status = ref(props.query.get("status") ?? ""),
   control = ref(props.query.get("control") ?? ""),
@@ -68,6 +76,14 @@ const storedLane = (key: string) =>
   localStorage.getItem(key) === "category" ? "category" : "none";
 const swimlane = ref(storedLane(swimlaneKey)),
   backlogSwimlane = ref(storedLane(swimlaneKey + ":backlog"));
+try {
+  const retained = JSON.parse(localStorage.getItem(swimlaneKey + ':collapsed') ?? '[]');
+  if (Array.isArray(retained)) collapsedLanes.value = retained.filter(value => typeof value === 'string');
+  backlogOpen.value = localStorage.getItem(swimlaneKey + ':backlog-open') !== 'false';
+} catch { /* Optional view state. */ }
+watch(collapsedLanes, value => { try { localStorage.setItem(swimlaneKey + ':collapsed', JSON.stringify(value)); } catch { /* Optional view state. */ } });
+watch(backlogOpen, value => { try { localStorage.setItem(swimlaneKey + ':backlog-open', String(value)); } catch { /* Optional view state. */ } });
+const toggleLane = (lane: string) => { collapsedLanes.value = collapsedLanes.value.includes(lane) ? collapsedLanes.value.filter(value => value !== lane) : [...collapsedLanes.value, lane]; };
 watch(swimlane, (value) => localStorage.setItem(swimlaneKey, value));
 watch(backlogSwimlane, (value) =>
   localStorage.setItem(swimlaneKey + ":backlog", value),
@@ -125,6 +141,7 @@ const link = (values: Record<string, string> = {}) => {
 };
 const counts = useRemote(async (signal) => {
   const seen = new Map<string, string>(),
+    lanes = new Set<string>(),
     cursors = new Set<string>();
   let cursor: string | null = null;
   do {
@@ -134,20 +151,23 @@ const counts = useRemote(async (signal) => {
         contractKey: "task-board/task",
         contractVersions: taskContractVersions,
         where: taskFilter(props.workspace.rootObjectId, props.query),
-        select: ["data:/workflowState"],
+        select: ["data:/workflowState", "data:/fields/category"],
         orderBy: [{ field: "object.id", direction: "asc" }],
         limit: 200,
         ...(cursor ? { cursor } : {}),
       },
       { signal },
     );
-    for (const item of page.items)
+    for (const item of page.items) {
       seen.set(item.objectId, String(item.values["data:/workflowState"]));
+      if (item.values['data:/workflowState'] !== 'backlog') lanes.add(String(item.values['data:/fields/category'] || 'Uncategorized'));
+    }
     cursor = page.nextCursor;
     if (cursor && cursors.has(cursor))
       throw new Error("Task counts could not finish. Refresh the board.");
     if (cursor) cursors.add(cursor);
   } while (cursor);
+  categories.value = [...lanes].sort((a, b) => a.localeCompare(b));
   return Object.fromEntries(
     [...boardColumns, backlogColumn].map((column) => [
       column.id,
@@ -237,6 +257,8 @@ const selected = computed({
 let returnFocus: HTMLElement | null = null;
 const originalOverflow = document.documentElement.style.overflow;
 watch(selected, async (open, previous) => {
+  if (!open) emit('host', undefined);
+  if (!open) emit('agentNode', undefined);
   if (open && !previous) returnFocus = document.activeElement as HTMLElement | null;
   document.documentElement.style.overflow = open ? 'hidden' : originalOverflow;
   if (!open) {
@@ -560,15 +582,26 @@ const drop = (column: string) => {
   >
     No matching tasks
   </p>
+  <HorizontalScrollIndicator :target="boardElement" attention-selector="[data-needs-user=true]" class="sticky top-[var(--ivy-content-top,3rem)] z-10 bg-background"
+    :label="tr('Spalten scrollen', 'Scroll columns')" :left-attention-label="tr('Ein Ticket links benötigt dich', 'A ticket to the left needs you')" :right-attention-label="tr('Ein Ticket rechts benötigt dich', 'A ticket to the right needs you')" />
   <div
     v-if="columns.length"
     role="region"
     aria-label="Task board"
     tabindex="0"
     class="task-board"
+    ref="boardElement"
   >
+    <div class="task-board-grid" :style="{ gridTemplateColumns: 'repeat(' + columns.length + ', minmax(16rem, 1fr))' }">
+    <template v-if="swimlane === 'category'">
+      <div v-for="(lane, index) in boardLanes" :key="lane" class="board-swimlane-heading" :style="{ gridRow: 2 + index * 2 }">
+        <Button variant="ghost" size="sm" class="sticky left-0 h-8 max-w-[80vw] justify-start" :aria-expanded="!collapsedLanes.includes(lane)" @click="toggleLane(lane)">
+          <ChevronRight class="size-4 transition-transform" :class="{ 'rotate-90': !collapsedLanes.includes(lane) }" aria-hidden="true" /><span class="truncate">{{ lane === 'Uncategorized' ? tr('Ohne Kategorie', 'Uncategorized') : lane }}</span>
+        </Button>
+      </div>
+    </template>
     <div
-      v-for="column in columns"
+      v-for="(column, columnIndex) in columns"
       :key="column.id + filterKey"
       class="board-lane"
       :class="{ 'drop-target': dropAction(column.id) }"
@@ -588,6 +621,9 @@ const drop = (column: string) => {
         :pending-task-id="pendingArchiveTaskId"
         :archive-disabled="archivePending || archive.busy.value || action.busy.value"
         :swimlane="swimlane"
+        :lanes="boardLanes"
+        :collapsed-lanes="collapsedLanes"
+        :grid-column="columnIndex + 1"
         @transition="transition"
         @reorder="reorder"
         @drag="dragged = $event"
@@ -609,14 +645,18 @@ const drop = (column: string) => {
         </template>
       </BoardColumn>
     </div>
+    </div>
   </div>
-  <div
+  <Disclosure
     v-if="showBacklog"
+    v-model:open="backlogOpen"
     class="mt-8 rounded-lg"
     :class="{ 'drop-target': dropAction('backlog') }"
     aria-label="Backlog tasks"
     @dragover="dropAction('backlog') && $event.preventDefault()"
     @drop.prevent="drop('backlog')"
+    :title="'Backlog · ' + (counts.value.value?.backlog ?? '…')"
+    trigger-class="font-medium text-foreground"
   >
     <BoardColumn
       ref="backlogRef"
@@ -633,7 +673,7 @@ const drop = (column: string) => {
       @reorder="reorder"
       @drag="dragged = $event"
     />
-  </div>
+  </Disclosure>
   <Disclosure
     v-model:open="archiveOpen"
     class="mt-6"
@@ -655,7 +695,7 @@ const drop = (column: string) => {
   </Disclosure>
   </div>
   <Dialog v-model:open="selected" :modal="false"
-    ><DialogContent variant="workspace" class="pb-0" :show-close-button="false"
+    ><DialogContent :variant="preferences.ticketLayout === 'fullscreen' ? 'workspace' : 'panel'" :show-close-button="false"
       @interact-outside.prevent @close-auto-focus.prevent
       ><DialogTitle class="sr-only">Task details</DialogTitle
       ><DialogDescription class="sr-only"
@@ -668,38 +708,31 @@ const drop = (column: string) => {
         :workspace="workspace"
         :available="available"
         :query="query"
+        @host="emit('host', $event)"
+        @agent-node="emit('agentNode', $event)"
         @close="selected = false"
         @changed="refresh" @deleted="selected = false; refresh()" /></DialogContent
   ></Dialog>
 </template>
 <style scoped>
 .task-board {
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  padding-bottom: .5rem;
+}
+.task-board-grid {
   display: grid;
-  gap: 1.5rem;
+  gap: .5rem .75rem;
   min-width: 0;
+  align-items: stretch;
 }
-.board-lane {
-  min-width: 0;
-}
+.board-lane { display: contents; }
+.board-swimlane-heading { grid-column: 1 / -1; min-width: 0; border-block: 1px solid var(--border); background: var(--muted); }
 .drop-target {
   outline: 2px dashed var(--ring);
   outline-offset: 2px;
   border-radius: 0.75rem;
-}
-@media (min-width: 1024px) {
-  .task-board {
-    display: flex;
-    gap: 0.75rem;
-    overflow-x: auto;
-    align-items: stretch;
-    padding-bottom: 0.5rem;
-  }
-  .task-board .board-lane {
-    flex: 1 0 220px;
-  }
-  .board-lane :deep(.board-column) {
-    height: 100%;
-    min-height: min(32rem, calc(100dvh - 260px));
-  }
 }
 </style>

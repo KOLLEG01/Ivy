@@ -5,12 +5,99 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect } from '@playwright/test';
 import { taskBoardFixture } from './fixtures/task-board-fixture.mjs';
+import { choose } from './fixtures/select.mjs';
 
 const fields = title => ({ title, description: '', acceptanceCriteria: [], category: null, control: 'user', priority: 2,
   executionRequirement: null, workspaceRequirement: { kind: 'task_workspace' },  userContact: 'ticket',  dueAt: null });
 const gate = () => { let release; return { promise: new Promise(resolve => { release = resolve; }), release: () => release() }; };
 const routeTo = id => '#/tasks?node=browser-task-board&id=' + id;
 const isComment = body => body.method === 'tools.call' && body.params.qualifiedName === 'task-board.comment';
+
+for (const width of [1440, 390]) test(`ticket composer preserves Markdown lines and uses modifier Enter at ${width}px`, { timeout: 180000 }, async t => {
+  const f = await taskBoardFixture(t, { viewport: { width, height: 900 } });
+  const created = await f.invoke({ action: 'create', fields: fields('Multiline ticket') }), id = created.task.objectId;
+  await f.invoke({ action: 'comment', taskId: id, expectedRevision: created.task.revision, authorKind: 'agent', purpose: 'question',
+    recipient: { kind: 'user' }, commentId: 'reply-question', body: 'Which list should we use?', requests: [], responses: [], attachments: [], replyTo: null });
+  await f.open(routeTo(id));
+  const dialog = f.page.getByRole('dialog', { name: 'Task details' });
+  const editor = f.page.getByRole('textbox', { name: 'Comment', exact: true });
+  await f.page.locator('[data-slot=task-pending-questions]').getByRole('button', { name: 'Answer question', exact: true }).click();
+  const reply = f.page.locator('.markdown-composer [data-slot=reply-context]');
+  await expect(reply).toContainText('Which list should we use?');
+  await reply.getByRole('button', { name: 'Jump to question', exact: true }).click();
+  await expect(f.page.locator('#comment-reply-question')).toBeInViewport();
+  await editor.pressSequentially('- First');
+  await editor.press('Enter');
+  await editor.pressSequentially('Second');
+  assert.equal((await f.task(id)).comments.length, 1, 'Enter must not post a partial Markdown list.');
+  await expect(editor.locator('li')).toHaveCount(2);
+  await editor.press('Control+Enter');
+  await expect.poll(async () => (await f.task(id)).comments.length).toBe(2);
+  const answer = (await f.task(id)).comments[1];
+  assert.equal(answer.replyTo, 'reply-question');
+  assert.match(answer.body, /[-*+] First\s+[-*+] Second/);
+  await expect(reply).toHaveCount(0);
+  await editor.fill('Command shortcut');
+  await editor.press('Meta+Enter');
+  await expect.poll(async () => (await f.task(id)).comments.length).toBe(3);
+  if (width >= 768) {
+    const rail = f.page.locator('.ivy-rail');
+    await expect(rail).toBeVisible();
+    const [railBox, ticketBox] = await Promise.all([rail.boundingBox(), dialog.boundingBox()]);
+    assert.ok(ticketBox.x > railBox.x + railBox.width + 50, 'The default side panel leaves the app rail and part of the board visible.');
+  } else {
+    await expect(f.page.locator('.ivy-mobile-apps')).toBeVisible();
+    const tabs = await f.page.locator('[data-slot=task-tabs]').boundingBox();
+    const scroller = await f.page.locator('.task-detail-scroll').boundingBox();
+    assert.ok(scroller.y >= tabs.y + tabs.height - 1, 'Conversation scrolling starts below the tabs.');
+    const messages = await f.page.locator('[data-slot=task-comment-messages]').boundingBox();
+    const composer = await f.page.locator('[data-slot=task-comment-composer]').boundingBox();
+    const ticketBox = await dialog.boundingBox();
+    assert.ok(messages.y + messages.height <= composer.y + 1, 'The message viewport ends above the composer.');
+    assert.ok(Math.abs(composer.y + composer.height - ticketBox.y - ticketBox.height) < 2, 'The composer reaches the bottom of the ticket.');
+  }
+  assert.deepEqual(f.pageErrors, []);
+});
+
+for (const width of [1440, 390]) test(`board swimlanes align across columns and collapse at ${width}px`, { timeout: 180000 }, async t => {
+  const f = await taskBoardFixture(t, { viewport: { width, height: 900 } });
+  const create = async (title, category, rest = {}) => (await f.invoke({ action: 'create', fields: { ...fields(title), category }, ...rest })).task;
+  await create('Alpha first', 'Alpha');
+  await create('Alpha second', 'Alpha');
+  const working = await create('Alpha working', 'Alpha');
+  await f.invoke({ action: 'transition', taskId: working.objectId, expectedRevision: working.revision, workflowState: 'in_progress', detail: null });
+  await create('Beta waiting', 'Beta');
+  await create('Backlog idea', 'Alpha', { workflowState: 'backlog' });
+  await f.open('#/tasks?node=browser-task-board');
+  await f.page.getByRole('button', { name: 'Display options', exact: true }).click();
+  await choose(f.page.getByLabel('Board swimlanes', { exact: true }), 'category');
+  await f.page.keyboard.press('Escape');
+  const alpha = f.page.locator('[data-board-cell=Alpha]');
+  await expect(alpha).toHaveCount(4);
+  await expect(f.page.getByRole('link', { name: 'Alpha working', exact: true })).toBeVisible();
+  const boxes = await alpha.evaluateAll(elements => elements.map(element => { const box = element.getBoundingClientRect(); return { top: box.top, bottom: box.bottom }; }));
+  assert.ok(boxes.every(box => Math.abs(box.top - boxes[0].top) < 1 && Math.abs(box.bottom - boxes[0].bottom) < 1));
+  const beta = await f.page.locator('[data-board-cell=Beta]').first().boundingBox();
+  assert.ok(beta.y >= boxes[0].bottom);
+  if (width < 768) {
+    const indicator = f.page.locator('[data-slot=horizontal-scroll-indicator]');
+    await expect(indicator).toBeVisible();
+    await expect(indicator.getByRole('button', { name: 'A ticket to the right needs you' })).toBeVisible();
+    await indicator.getByRole('button', { name: 'A ticket to the right needs you' }).click();
+    await expect.poll(() => f.page.locator('.task-board').evaluate(element => element.scrollLeft)).toBeGreaterThan(0);
+    await expect(indicator.getByRole('button', { name: 'A ticket to the left needs you' })).toBeVisible();
+  }
+  await f.page.locator('.board-swimlane-heading').getByRole('button', { name: 'Alpha', exact: true }).click();
+  for (const cell of await alpha.all()) await expect(cell).toBeHidden();
+  await expect(f.page.getByRole('link', { name: 'Beta waiting', exact: true })).toBeVisible();
+  const backlog = f.page.getByRole('button', { name: 'Backlog · 1', exact: true });
+  await backlog.click();
+  await expect(f.page.getByRole('link', { name: 'Backlog idea', exact: true })).toHaveCount(0);
+  await backlog.click();
+  await expect(f.page.getByRole('link', { name: 'Backlog idea', exact: true })).toBeVisible();
+  assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  assert.deepEqual(f.pageErrors, []);
+});
 
 test('optimistic comments render once before dispatch and acknowledgement, retaining a new draft', { timeout: 180000 }, async t => {
   const f = await taskBoardFixture(t);
@@ -104,6 +191,14 @@ for (const width of [1440, 390]) test(`posting with an open question stays writa
   await expect(send).toBeEnabled();
   await send.click();
   await expect.poll(async () => (await f.task(id)).comments.some(comment => comment.body === 'A new message after reopening')).toBe(true);
+  await expect(f.page.locator('[data-slot=conversation-message]').filter({ hasText: 'A new message after reopening' })).toBeInViewport();
+  const beforeFollowUp = await store.read('task-board/task', id);
+  await f.invoke({ action: 'comment', taskId: id, expectedRevision: beforeFollowUp.pin.revision, authorKind: 'agent',
+    commentId: 'agent-follow-up', body: 'One short follow-up below the composer', requests: [], responses: [], attachments: [], replyTo: null });
+  const arrived = f.page.getByRole('button', { name: /^New message from / });
+  await expect(arrived).toBeVisible();
+  await arrived.click();
+  await expect(f.page.locator('#comment-agent-follow-up')).toBeInViewport();
   assert.equal((await f.task(id)).comments.filter(comment => comment.body === 'An ordinary comment while the question stays open').length, 1);
   assert.deepEqual(f.pageErrors, []);
 });

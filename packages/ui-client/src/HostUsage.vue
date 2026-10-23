@@ -8,29 +8,23 @@ import {
   PopoverContent,
   PopoverTrigger,
   Progress,
+  UsagePill,
+  useRemote,
 } from "@ivy/ui";
-import { nativeRead, record, text } from "../../../packages/ui-client/src/native";
-import { client } from "./runtime";
+import type { HiveClient } from "../../sdk/src/client.js";
+import { nativeRead, record, text } from "./native";
 
 // Account usage and limits of one host, read from its native owner whenever the popover opens.
-const props = defineProps<{ node: string; label: string; ready: boolean }>();
-const open = ref(false), loading = ref(false), error = ref(""), result = ref<Record<string, unknown> | null>(null);
-let controller: AbortController | null = null;
-const load = async () => {
-  controller?.abort();
-  const current = controller = new AbortController();
-  loading.value = true;
-  error.value = "";
-  try {
-    const value = record(await nativeRead(client, props.node, "codex.account/rateLimits/read", null, current.signal));
-    if (current === controller) result.value = value;
-  } catch (cause) {
-    if (current === controller) error.value = cause instanceof Error ? cause.message : String(cause);
-  } finally {
-    if (current === controller) loading.value = false;
-  }
-};
-watch(open, value => { if (value) void load(); else controller?.abort(); });
+const props = defineProps<{ client: HiveClient; node: string; label: string; ready: boolean; compact?: boolean; passive?: boolean }>();
+const open = ref(false);
+const usage = useRemote(async signal => {
+  if (!props.ready) return null;
+  if (props.passive && !open.value) return null;
+  return record(await nativeRead(props.client, props.node, "codex.account/rateLimits/read", null, signal));
+}, 60000);
+const { value: result, loading, error, refresh: load } = usage;
+watch(open, value => { if (value) void load(); });
+watch(() => [props.node, props.ready], () => void load());
 
 interface Window { label: string; used: number; resets: string }
 interface Bucket { id: string; name: string; plan: string; windows: Window[]; notes: string[] }
@@ -77,10 +71,19 @@ const reported = computed(() => !!result.value && (Object.keys(record(result.val
   !!text(record(result.value.rateLimits).limitId)));
 const resetCredits = computed(() => Number(record(result.value?.rateLimitResetCredits).availableCount) || 0);
 const blocked = computed(() => result.value?.ordinaryUsageAllowed === false);
+// The core account's tightest window determines availability; separate model buckets
+// still appear in the popover. Missing readings remain unknown instead of showing 100%.
+const remaining = computed(() => {
+  if (blocked.value) return 0;
+  const byId = record(result.value?.rateLimitsByLimitId);
+  const core = buckets.value.find(bucket => bucket.id === 'codex') ??
+    (Object.keys(byId).length ? buckets.value[0] : buckets.value.find(bucket => bucket.windows.length));
+  return core?.windows.length ? Math.min(...core.windows.map(window => 100 - window.used)) : null;
+});
 </script>
 <template>
   <Popover v-model:open="open">
-    <PopoverTrigger as-child><slot /></PopoverTrigger>
+    <PopoverTrigger as-child><slot><UsagePill :label="label" :seed="node" :remaining="error ? null : remaining" :compact="compact" :unavailable="!ready" /></slot></PopoverTrigger>
     <PopoverContent align="start" class="w-80 space-y-4 p-4">
       <div class="flex items-center gap-2">
         <div class="min-w-0 flex-1">

@@ -16,7 +16,7 @@ defineOptions({
   inheritAttrs: false,
 })
 
-const props = withDefaults(defineProps<DialogContentProps & { class?: HTMLAttributes["class"], showCloseButton?: boolean, variant?: 'default' | 'workspace' }>(), {
+const props = withDefaults(defineProps<DialogContentProps & { class?: HTMLAttributes["class"], showCloseButton?: boolean, variant?: 'default' | 'workspace' | 'panel' }>(), {
   showCloseButton: true,
   variant: 'default',
 })
@@ -28,15 +28,16 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits)
 </script>
 
 <template>
-  <DialogPortal>
-    <DialogOverlay v-if="variant !== 'workspace'" />
+  <DialogPortal defer :to="variant !== 'default' ? '#main-content' : 'body'">
+    <DialogOverlay v-if="variant === 'default'" />
     <DialogContent
       data-slot="dialog-content"
       v-bind="definedProps({ ...$attrs, ...forwarded })"
       :class="
         cn(
           'bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border p-6 shadow-lg duration-200 sm:max-w-lg',
-          variant === 'workspace' && 'top-12! right-0 bottom-0 left-0! block w-auto max-w-none translate-none! overflow-y-auto overscroll-contain rounded-none border-0 px-4 py-5 shadow-none sm:max-w-none md:px-8',
+          variant !== 'default' && 'ivy-workspace-dialog top-[var(--ivy-content-top,3rem)]! right-0 bottom-0 left-0! block w-auto max-w-none translate-none! overflow-hidden overscroll-contain rounded-none border-0 p-0 shadow-none sm:max-w-none md:left-[var(--ivy-sidebar-offset,3rem)]!',
+          variant === 'panel' && 'md:left-auto! md:w-[min(60rem,calc(100vw-var(--ivy-sidebar-offset,3rem)-8rem))] md:border-l md:shadow-xl',
           props.class,
         )"
     >

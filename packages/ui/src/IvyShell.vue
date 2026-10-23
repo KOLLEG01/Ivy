@@ -189,6 +189,8 @@ onMounted(() => {
     v-model:open="sidebarOpen"
     :style="{
       '--ivy-install-banner-height': installBannerHeight + 'px',
+      '--ivy-content-top': 'calc(var(--ivy-mobile-app-bar-height, 0px) + 3rem)',
+      '--ivy-sidebar-offset': sidebarOpen && panel ? 'calc(16rem + var(--sidebar-width-icon) + 1px)' : 'calc(var(--sidebar-width-icon) + 1px)',
       '--sidebar-width': panel
         ? 'calc(16rem + var(--sidebar-width-icon) + 1px)'
         : 'calc(var(--sidebar-width-icon) + 1px)',
@@ -346,8 +348,16 @@ onMounted(() => {
       </div>
     </Sidebar>
     <SidebarInset class="min-w-0">
+      <nav aria-label="Apps" class="ivy-mobile-apps md:hidden">
+        <a :href="homeUrl" aria-label="Ivy home" class="flex h-10 min-w-8 flex-1 items-center justify-center rounded-md"><IvyMark class="size-5" /></a>
+        <a v-for="item in rail" :key="item.id" :href="item.href" :aria-label="item.name" :title="item.name"
+          :aria-current="item.active ? 'page' : undefined"
+          class="flex h-10 min-w-8 flex-1 items-center justify-center rounded-md text-muted-foreground hover:bg-accent"
+          :class="{ 'bg-accent text-accent-foreground': item.active }"><component :is="item.icon" class="size-5" aria-hidden="true" /></a>
+        <Button variant="ghost" size="icon-sm" class="ml-auto shrink-0" aria-label="Account and navigation" @click="setOpenMobile(true)"><CircleUser aria-hidden="true" /></Button>
+      </nav>
       <header class="ivy-toolbar">
-        <ShellTrigger :class="{ 'md:hidden': !panel }">
+        <ShellTrigger v-if="panel">
           <PanelLeft aria-hidden="true" />
         </ShellTrigger>
         <a
@@ -363,6 +373,7 @@ onMounted(() => {
         >
           <slot name="context" />
         </div>
+        <slot name="status" />
         <div id="ivy-toolbar-end" class="flex shrink-0 items-center gap-1">
           <StatusBadge
             v-if="connectionTone === 'bad' || connectionTone === 'warning'"

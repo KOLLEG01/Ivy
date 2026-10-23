@@ -212,9 +212,9 @@ onMounted(async () => {
   root.value.addEventListener('click', followInternalLink, true);
   if (props.variant === 'composer') root.value.addEventListener('keydown', submitOnEnter, true);
 });
-// In the composer Enter sends and Shift+Enter starts a new line, like other messengers.
+// Leave Enter to the Markdown keymap (paragraphs, lists and code blocks).
 const submitOnEnter = (event: KeyboardEvent) => {
-  if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.altKey) return;
+  if (props.disabled || event.key !== 'Enter' || !(event.metaKey || event.ctrlKey) || event.shiftKey || event.isComposing || event.altKey) return;
   event.preventDefault(); event.stopPropagation();
   publishCurrentMarkdown(); queueMicrotask(() => emit('submit'));
 };
@@ -270,6 +270,7 @@ onBeforeUnmount(() => {
     </div>
   </div>
   <div v-else-if="variant === 'composer'" class="markdown-composer" :class="{ 'is-readonly': disabled }">
+    <div v-if="$slots.context" class="markdown-composer-context"><slot name="context" /></div>
     <ComposerAddMenu v-if="uploadFile || $slots['add']" :files="!!uploadFile" :disabled="disabled || uploading" class="self-end" @files="uploadFiles"><slot name="add" /></ComposerAddMenu>
     <div ref="root" class="markdown-editor is-composer" :class="{ 'is-readonly': disabled }" />
     <slot name="send" />
@@ -333,7 +334,8 @@ onBeforeUnmount(() => {
 .markdown-editor.is-field :deep(.milkdown-block-handle) { display: none; }
 /* Composer geometry follows desktop assistants: a 3.25rem pill whose 2.25rem round controls and
    first text line share one centre line; it grows upward and the controls stay at the bottom. */
-.markdown-composer { box-sizing: border-box; display: flex; min-width: 0; min-height: 3.25rem; align-items: flex-end; gap: .25rem; border: 1px solid var(--input); border-radius: 1.625rem; background: var(--card); padding: calc(.5rem - 1px); box-shadow: 0 2px 10px color-mix(in srgb, var(--foreground) 6%, transparent); transition: border-color .15s, box-shadow .15s; }
+.markdown-composer { box-sizing: border-box; display: flex; flex-wrap: wrap; min-width: 0; min-height: 3.25rem; align-items: flex-end; gap: .25rem; border: 1px solid var(--input); border-radius: 1.625rem; background: var(--card); padding: calc(.5rem - 1px); box-shadow: 0 2px 10px color-mix(in srgb, var(--foreground) 6%, transparent); transition: border-color .15s, box-shadow .15s; }
+.markdown-composer-context { flex: 1 0 100%; min-width: 0; padding: .25rem .5rem .375rem; }
 .markdown-composer:focus-within { border-color: color-mix(in srgb, var(--foreground) 25%, var(--input)); }
 .markdown-composer.is-readonly { opacity: .6; }
 .markdown-composer > :deep(button) { display: grid; place-items: center; flex-shrink: 0; width: 2.25rem; height: 2.25rem; padding: 0; border-radius: 9999px; }

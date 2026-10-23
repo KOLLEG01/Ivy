@@ -34,6 +34,7 @@ import { useCommentVisibility } from './comment-visibility';
 import { and, base, client, notifications, taskContractVersions, tr } from "./runtime";
 import type { TaskBoard } from "./runtime";
 import { taskFilter } from "./task-filter";
+import { prefetchTask } from './task-read';
 import {
   conditionLabel,
   conditionTone,
@@ -58,6 +59,9 @@ const props = defineProps<{
   pendingTaskId?: string | null;
   archiveDisabled?: boolean;
   swimlane: string;
+  lanes?: string[];
+  collapsedLanes?: string[];
+  gridColumn?: number;
   layout?: "column" | "list";
   /** Lists archived Tasks of every state instead of one workflow column. */
   archived?: boolean;
@@ -97,6 +101,7 @@ watch(() => props.workspace.serviceNodeId, (node, _previous, cleanup) => {
 }, { immediate: true });
 const pages = usePage(async (signal, cursor) => {
   const waiting = props.column.id === 'waiting' && !props.archived;
+  const complete = waiting || props.swimlane === 'category';
   const load = (cursor: string | null) => client.request('objects.query', {
     contractKey: 'task-board/task', contractVersions: taskContractVersions,
     where: and(taskFilter(props.workspace.rootObjectId, props.query), props.archived
@@ -109,12 +114,12 @@ const pages = usePage(async (signal, cursor) => {
         ...(manual.value ? [{ field: 'object.position', direction: 'asc' as const }]
           : [{ field: 'data:/fields/priority', direction: 'desc' as const }, { field: 'object.createdAt', direction: 'desc' as const }])],
     // Hive always breaks sort ties by object ID; an explicit fourth field exceeds the query contract.
-    limit: waiting ? 200 : 20, ...(cursor ? { cursor } : {}),
+    limit: complete ? 200 : 20, ...(cursor ? { cursor } : {}),
   }, { signal });
   const result = await load(cursor ?? null);
   // Fetch the entire Waiting lane so a lower-priority User wait never hides behind another group's page.
   const cursors = new Set<string>();
-  while (waiting && result.nextCursor) {
+  while (complete && result.nextCursor) {
     if (cursors.has(result.nextCursor)) throw new Error('Waiting groups could not finish. Refresh the board.');
     cursors.add(result.nextCursor);
     const page = await load(result.nextCursor);
@@ -165,9 +170,14 @@ const lane = (category: string) => category || "Uncategorized";
 const items = computed(() => (pages.value.value?.items ?? []).map(item => ({ ...item,
   commentCount: showCrossAgent.value ? item.commentCount : item.directCommentCount,
 })));
-const groups = computed(() => props.column.id === 'waiting' && !props.archived
-  ? waitingGroups.map(group => ({ ...group, items: items.value.filter(item => item.group === group.id) })).filter(group => group.items.length > 0)
-  : [{ id: '', title: '', items: items.value }]);
+const sections = computed(() => (props.lanes ?? (props.swimlane === 'category' && !props.archived
+  ? [...new Set(items.value.map(item => lane(item.category)))] : [''])).map(id => {
+  const values = props.swimlane === 'category' && !props.archived ? items.value.filter(item => lane(item.category) === id) : items.value;
+  const groups = props.column.id === 'waiting' && !props.archived
+    ? waitingGroups.map(group => ({ ...group, items: values.filter(item => item.group === group.id) })).filter(group => group.items.length > 0)
+    : [{ id: '', title: '', items: values }];
+  return { id, groups, count: values.length };
+}));
 // Neighbours within the same swimlane, so ranking never jumps across categories.
 const sameLane = (a: Item, b: Item | undefined) =>
   !!b && a.group === b.group && (props.swimlane !== "category" || lane(a.category) === lane(b.category));
@@ -211,8 +221,9 @@ defineExpose({ refresh: pages.refresh });
   <section
     :aria-label="column.title"
     class="board-column min-w-0"
-    :class="layout === 'list' ? '' : 'flex flex-col rounded-xl bg-muted/50 p-2'"
+    :class="lanes ? 'board-column-grid' : layout === 'list' ? '' : 'flex flex-col rounded-xl bg-muted/50 p-2'"
   >
+    <div class="board-column-header" :style="lanes ? { gridColumn, gridRow: 1 } : undefined">
     <h2
       v-if="!archived"
       class="flex items-center gap-2 px-1.5 text-sm font-medium"
@@ -254,48 +265,46 @@ defineExpose({ refresh: pages.refresh });
     </h2>
     <slot name="feedback" />
     <RemoteState
+      v-if="!lanes"
       :loading="pages.loading.value"
       :error="pages.error.value"
       :has-data="!!pages.value.value"
       @retry="pages.refresh"
     />
     <Button
-      v-if="pages.error.value && pages.page.value > 1"
+      v-if="!lanes && pages.error.value && pages.page.value > 1"
       variant="ghost"
       size="sm"
       @click="pages.reset"
       >Restart from first page</Button
     >
+    </div>
     <div
+      v-for="(section, sectionIndex) in sections" :key="section.id"
+      v-show="!collapsedLanes?.includes(section.id)"
+      :data-board-cell="lanes ? section.id : undefined"
+      :style="lanes ? { gridColumn, gridRow: 3 + sectionIndex * 2 } : undefined"
       :class="
         layout === 'list'
-          ? 'overflow-hidden rounded-lg border bg-card'
-          : 'flex flex-col gap-2'
+          ? 'overflow-hidden rounded-lg border bg-card mb-3'
+          : 'board-cell flex min-w-0 flex-col gap-2 rounded-lg bg-muted/50 p-2'
       "
     >
-      <section v-for="group in groups" :key="group.id" :aria-label="group.title || undefined"
+      <RemoteState v-if="lanes && sectionIndex === 0" :loading="pages.loading.value" :error="pages.error.value" :has-data="!!pages.value.value" @retry="pages.refresh" />
+      <Button v-if="lanes && sectionIndex === 0 && pages.error.value && pages.page.value > 1" variant="ghost" size="sm" @click="pages.reset">Restart from first page</Button>
+      <h3 v-if="swimlane === 'category' && !lanes && !archived" class="border-b bg-muted/40 px-3 py-1.5 text-xs font-medium text-muted-foreground">{{ section.id }}</h3>
+      <section v-for="group in section.groups" :key="group.id" :aria-label="group.title || undefined"
         :data-waiting-group="group.id || undefined" class="flex flex-col gap-2"
         >
       <h3 v-if="group.title" class="px-1.5 pt-2 text-xs font-semibold text-muted-foreground">{{ group.title }} <span class="font-normal">{{ group.items.length }}</span></h3>
       <template
         v-for="task in group.items"
         :key="task.id"
-        ><h3
-          v-if="
-            swimlane === 'category' &&
-            !archived &&
-            (group.items.indexOf(task) === 0 ||
-              lane(task.category) !==
-                lane(pages.value.value!.items[items.indexOf(task) - 1]!.category))
-          "
-          class="px-1.5 pt-2 text-xs font-medium text-muted-foreground"
-          :class="{ 'border-b bg-muted/40 px-3 py-1.5': layout === 'list' }"
         >
-          {{ lane(task.category) }}
-        </h3>
         <article
           class="task-item group relative min-w-0"
           :data-attention="task.condition === 'failed' ? 'error' : task.openQuestionCount ? 'question' : undefined"
+          :data-needs-user="task.openQuestionCount > 0 || task.condition === 'needs_user' || task.condition === 'failed' || task.context.workflowState === 'review' || (task.control === 'user' && ['todo', 'waiting', 'in_progress'].includes(task.context.workflowState)) || undefined"
           :class="[
             layout === 'list'
               ? 'flex items-center gap-3 border-b px-3 py-2 last:border-b-0 hover:bg-muted/50'
@@ -316,6 +325,9 @@ defineExpose({ refresh: pages.refresh });
           >
           <a
             :href="href(task.id)"
+            @pointerenter="prefetchTask(workspace.serviceNodeId, task.id)"
+            @focus="prefetchTask(workspace.serviceNodeId, task.id)"
+            @pointerdown="prefetchTask(workspace.serviceNodeId, task.id)"
             class="min-w-0 flex-1 rounded-sm outline-none after:absolute after:inset-0 focus-visible:after:rounded-lg focus-visible:after:ring-3 focus-visible:after:ring-ring/50"
             ><h3
               class="text-sm font-medium leading-snug"
@@ -465,7 +477,7 @@ defineExpose({ refresh: pages.refresh });
       >
       </section>
       <p
-        v-if="pages.value.value?.items.length === 0"
+        v-if="pages.value.value && section.count === 0"
         class="px-3 py-6 text-center text-xs text-muted-foreground"
       >
         No tasks
@@ -477,12 +489,16 @@ defineExpose({ refresh: pages.refresh });
       :page="pages.page.value"
       :has-next="!!pages.value.value?.nextCursor"
       :loading="pages.loading.value"
+      :style="lanes ? { gridColumn, gridRow: 2 + lanes.length * 2 } : undefined"
       @next="pages.next"
       @previous="pages.previous"
     />
   </section>
 </template>
 <style scoped>
+.board-column-grid { display: contents; }
+.board-column-header { min-width: 0; }
+.board-cell { min-height: 5rem; }
 .task-actions {
   opacity: 0;
 }
