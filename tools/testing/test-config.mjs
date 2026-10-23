@@ -480,7 +480,7 @@ export const rustTests = {
   'tests/rust/host-startup-cases.rs': { package: 'ivy-host-runtime', test: 'host-paths', filter: 'host_startup_cases::', testThreads: 1 },
   'tests/rust/host-windows-arguments.rs': { package: 'ivy-host-runtime', test: 'host-windows-arguments' },
   'tests/rust/host-process-output.rs': { package: 'ivy-host-runtime', test: 'host-process-output' },
-  'tests/rust/host-process-output-node.rs': { package: 'ivy-host-runtime', test: 'host-process-output-node' },
+  'tests/rust/host-process-output-streaming.rs': { package: 'ivy-host-runtime', test: 'host-process-output-streaming' },
   'tests/rust/host-process.rs': { package: 'ivy-host-runtime', test: 'host-process' },
   'tests/rust/host-exec-file-deadline.rs': {
     package: 'ivy-host-runtime', lib: true, filter: 'exec_file::deadline_cases::',

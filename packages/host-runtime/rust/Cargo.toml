@@ -50,8 +50,8 @@ name = "host-process-output"
 path = "../../../tests/rust/host-process-output.rs"
 
 [[test]]
-name = "host-process-output-node"
-path = "../../../tests/rust/host-process-output-node.rs"
+name = "host-process-output-streaming"
+path = "../../../tests/rust/host-process-output-streaming.rs"
 
 [[test]]
 name = "host-process"

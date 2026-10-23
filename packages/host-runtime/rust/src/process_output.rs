@@ -5,7 +5,7 @@
 #[path = "process_output/windows_code_page.rs"]
 mod windows_code_page;
 #[cfg(windows)]
-pub use windows_code_page::{console_output_code_page, WindowsCodePageDecoder};
+pub use windows_code_page::{WindowsCodePageDecoder, console_output_code_page};
 
 pub struct Utf8Decoder {
     incomplete: Vec<u8>,
@@ -78,22 +78,23 @@ impl Utf8Decoder {
     }
 }
 
-const REPLACEMENT: &[u16] = &[91, 114, 101, 100, 97, 99, 116, 101, 100, 93];
+const REPLACEMENT: &[char] = &['[', 'r', 'e', 'd', 'a', 'c', 't', 'e', 'd', ']'];
 const EMISSION_BYTES: usize = 4096;
 
-/// One literal replaceAll pass. A retained prefix is represented by its length;
+/// One ordered literal replacement pass. A retained prefix is represented by its length;
 /// neither an overlapping match nor replacement expansion accumulates input.
 struct ReplacementStage {
-    secret: Vec<u16>,
+    secret: Vec<char>,
     failure: Vec<usize>,
     matched: usize,
-    input: Option<u16>,
+    input: Option<char>,
     emission: std::ops::Range<usize>,
     replacement: bool,
 }
 
 impl ReplacementStage {
-    fn new(secret: Vec<u16>) -> Self {
+    fn new(secret: String) -> Self {
+        let secret: Vec<_> = secret.chars().collect();
         let mut failure = vec![0; secret.len()];
         for at in 1..secret.len() {
             let mut prefix = failure[at - 1];
@@ -115,9 +116,9 @@ impl ReplacementStage {
         }
     }
 
-    fn feed(&mut self, unit: u16) {
+    fn feed(&mut self, value: char) {
         debug_assert!(self.input.is_none() && self.emission.is_empty());
-        self.input = Some(unit);
+        self.input = Some(value);
     }
 
     fn finish(&mut self) {
@@ -127,7 +128,7 @@ impl ReplacementStage {
         self.matched = 0;
     }
 
-    fn next(&mut self) -> Option<u16> {
+    fn next(&mut self) -> Option<char> {
         loop {
             if let Some(at) = self.emission.next() {
                 return Some(if self.replacement {
@@ -136,8 +137,8 @@ impl ReplacementStage {
                     self.secret[at]
                 });
             }
-            let unit = self.input?;
-            if self.matched > 0 && self.secret[self.matched] != unit {
+            let value = self.input?;
+            if self.matched > 0 && self.secret[self.matched] != value {
                 let fallback = self.failure[self.matched - 1];
                 self.emission = 0..self.matched - fallback;
                 self.replacement = false;
@@ -145,7 +146,7 @@ impl ReplacementStage {
                 continue;
             }
             self.input = None;
-            if self.secret[self.matched] == unit {
+            if self.secret[self.matched] == value {
                 self.matched += 1;
                 if self.matched == self.secret.len() {
                     self.matched = 0;
@@ -155,13 +156,12 @@ impl ReplacementStage {
                 }
                 return None;
             }
-            return Some(unit);
+            return Some(value);
         }
     }
 }
 
 struct DiagnosticOutput {
-    high_surrogate: Option<u16>,
     emission: String,
     tail: std::collections::VecDeque<u8>,
     maximum_bytes: usize,
@@ -192,30 +192,6 @@ impl DiagnosticOutput {
         }
         self.emission.push(value);
     }
-
-    fn unit(&mut self, unit: u16, sink: &mut impl FnMut(&str)) {
-        if let Some(high) = self.high_surrogate.take() {
-            if (0xdc00..=0xdfff).contains(&unit) {
-                self.character(
-                    char::from_u32(
-                        0x10000 + ((u32::from(high) - 0xd800) << 10) + u32::from(unit) - 0xdc00,
-                    )
-                    .unwrap(),
-                    sink,
-                );
-                return;
-            }
-            self.character(char::REPLACEMENT_CHARACTER, sink);
-        }
-        if (0xd800..=0xdbff).contains(&unit) {
-            self.high_surrogate = Some(unit);
-        } else {
-            self.character(
-                char::from_u32(u32::from(unit)).unwrap_or(char::REPLACEMENT_CHARACTER),
-                sink,
-            );
-        }
-    }
 }
 
 pub struct DiagnosticCapture {
@@ -226,7 +202,7 @@ pub struct DiagnosticCapture {
 
 impl DiagnosticCapture {
     /// Public process admission checks limits before constructing a capture.
-    pub fn new(secrets: Vec<Vec<u16>>, maximum_bytes: usize) -> Self {
+    pub fn new(secrets: Vec<String>, maximum_bytes: usize) -> Self {
         Self {
             decoder: Utf8Decoder::default(),
             stages: secrets
@@ -235,7 +211,6 @@ impl DiagnosticCapture {
                 .map(ReplacementStage::new)
                 .collect(),
             output: DiagnosticOutput {
-                high_surrogate: None,
                 emission: String::with_capacity(EMISSION_BYTES),
                 tail: std::collections::VecDeque::new(),
                 maximum_bytes,
@@ -249,12 +224,12 @@ impl DiagnosticCapture {
     fn pump(&mut self, start: usize, sink: &mut impl FnMut(&str)) {
         let mut at = start;
         loop {
-            if let Some(unit) = self.stages[at].next() {
+            if let Some(value) = self.stages[at].next() {
                 if at + 1 == self.stages.len() {
-                    self.output.unit(unit, sink);
+                    self.output.character(value, sink);
                 } else {
                     at += 1;
-                    self.stages[at].feed(unit);
+                    self.stages[at].feed(value);
                 }
             } else if at == start {
                 break;
@@ -264,38 +239,34 @@ impl DiagnosticCapture {
         }
     }
 
-    fn decoded(&mut self, units: Vec<u16>, sink: &mut impl FnMut(&str)) {
-        for unit in units {
+    fn decoded(&mut self, text: &str, sink: &mut impl FnMut(&str)) {
+        for value in text.chars() {
             if self.stages.is_empty() {
-                self.output.unit(unit, sink);
+                self.output.character(value, sink);
             } else {
-                self.stages[0].feed(unit);
+                self.stages[0].feed(value);
                 self.pump(0, sink);
             }
         }
     }
 
     /// Emits redacted UTF-8 in chunks of at most 4096 bytes with intact scalar
-    /// boundaries. Active matcher prefixes total at most sum(secret.len()-1),
-    /// plus up to three decoder bytes and one output high surrogate. Immutable
-    /// secrets/failure tables are O(sum(secret.len())); each decode consumes at
-    /// most 1027 bytes and produces at most 1027 UTF-16 units. No replacement
+    /// boundaries. Active matcher prefixes total at most the sum of secret
+    /// character counts minus one per nonempty secret, plus up to three decoder
+    /// bytes. Immutable secrets/failure tables are linear in those counts; each
+    /// decode consumes at most 1027 bytes. No replacement
     /// expansion buffer is allocated between stages.
     pub fn push_to(&mut self, bytes: &[u8], final_chunk: bool, mut sink: impl FnMut(&str)) {
         for chunk in bytes.chunks(1024) {
-            let units = self.decoder.decode(chunk, false);
-            self.decoded(units, &mut sink);
+            let text = self.decoder.decode_text(chunk, false);
+            self.decoded(&text, &mut sink);
         }
         if final_chunk {
-            let units = self.decoder.decode(&[], true);
-            self.decoded(units, &mut sink);
+            let text = self.decoder.decode_text(&[], true);
+            self.decoded(&text, &mut sink);
             for at in 0..self.stages.len() {
                 self.stages[at].finish();
                 self.pump(at, &mut sink);
-            }
-            if self.output.high_surrogate.take().is_some() {
-                self.output
-                    .character(char::REPLACEMENT_CHARACTER, &mut sink);
             }
         }
         self.output.flush(&mut sink);
@@ -311,9 +282,8 @@ impl DiagnosticCapture {
     }
 
     #[cfg(test)]
-    pub fn retained_units(&self) -> usize {
+    pub fn retained_characters(&self) -> usize {
         self.stages.iter().map(|s| s.matched).sum::<usize>()
-            + usize::from(self.output.high_surrogate.is_some())
     }
 
     pub fn text(&self) -> String {

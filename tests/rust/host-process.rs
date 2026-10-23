@@ -50,6 +50,9 @@ fn child_fixture() {
     let Ok(fixture) = std::env::var("IVY_PROCESS_FIXTURE") else {
         return;
     };
+    if let Some(marker) = std::env::var_os("IVY_PROCESS_STARTED_FILE") {
+        std::fs::write(marker, b"started").unwrap();
+    }
     match fixture.as_str() {
         "redact" => {
             print!("prefix-secr");
@@ -57,6 +60,7 @@ fn child_fixture() {
             std::thread::sleep(Duration::from_millis(20));
             println!("et-token-suffix");
             eprintln!("error-secret-token-diagnostic");
+            println!("é🙂unicode-secret🦀");
         }
         "sleep" => {
             println!("ready");
@@ -139,13 +143,82 @@ async fn diagnostic_streams_are_redacted_and_bounded() {
     let root = Root::new();
     let (command, executables) = fixture_command();
     let mut launch = context("redact");
-    launch.redact = vec!["secret-token".into()];
+    launch.redact = vec!["".into(), "secret-token".into(), "🙂unicode-secret".into()];
+    let valid_marker = root.0.join("valid-started");
+    launch.environment.insert(
+        "IVY_PROCESS_STARTED_FILE".into(),
+        valid_marker.as_os_str().to_owned(),
+    );
+    let output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let observed = output.clone();
+    launch.on_output = Some(std::sync::Arc::new(move |_, text| {
+        observed.lock().unwrap().push_str(text)
+    }));
     let result = process::run_command(&command, &root.0, &executables, launch, None)
         .await
         .unwrap();
     assert!(result.stdout.contains("prefix-[redacted]-suffix"));
     assert!(result.stderr.contains("error-[redacted]-diagnostic"));
+    assert!(result.stdout.contains("é[redacted]🦀"));
     assert!(!result.stdout.contains("secret-token"));
+    assert!(!result.stdout.contains("unicode-secret"));
+    assert!(valid_marker.is_file());
+    let emitted = std::mem::take(&mut *output.lock().unwrap());
+    assert!(emitted.contains("é[redacted]🦀"));
+    assert!(!emitted.contains("secret-token") && !emitted.contains("unicode-secret"));
+
+    // Malformed literals formerly matched surrogate halves. Refuse the entire
+    // collected list, including a later bad value, before any child or callback.
+    for (at, secrets) in [
+        vec![ivy_contracts::JsString(vec![0xd83d])],
+        vec![ivy_contracts::JsString(vec![0xde42])],
+        vec![
+            "valid-first".into(),
+            ivy_contracts::JsString(vec![115, 0xd83d]),
+        ],
+        vec![
+            "".into(),
+            "valid".into(),
+            ivy_contracts::JsString(vec![0xdc00, 115]),
+        ],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for exact in [false, true] {
+            let marker = root.0.join(format!("invalid-{at}-{exact}"));
+            let mut launch = context("redact");
+            launch.redact = secrets.clone();
+            launch.environment.insert(
+                "IVY_PROCESS_STARTED_FILE".into(),
+                marker.as_os_str().to_owned(),
+            );
+            let observed = output.clone();
+            launch.on_output = Some(std::sync::Arc::new(move |_, text| {
+                observed.lock().unwrap().push_str(text)
+            }));
+            let result = if exact {
+                process::spawn_exact_environment(&command, &root.0, &executables, launch).await
+            } else {
+                process::spawn(&command, &root.0, &executables, launch).await
+            };
+            let error = match result {
+                Err(error) => error,
+                Ok(process) => {
+                    process.stop(Duration::ZERO).await.unwrap();
+                    panic!("Malformed redaction literal allowed a child");
+                }
+            };
+            assert_eq!(error.code, "invalid_arguments");
+            assert_eq!(error.outcome, ivy_contracts::Outcome::NotExecuted);
+            assert_eq!(
+                error.message,
+                "Redaction values must be valid Unicode text."
+            );
+            assert!(!marker.exists());
+            assert!(output.lock().unwrap().is_empty());
+        }
+    }
     let result = process::run_command(&command, &root.0, &executables, context("large"), None)
         .await
         .unwrap();

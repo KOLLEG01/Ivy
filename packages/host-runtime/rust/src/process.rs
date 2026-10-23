@@ -516,6 +516,16 @@ async fn spawn_resolved_with_stdio(
     ignored_stdio: bool,
     memory_request: Option<MemoryRequest>,
 ) -> Result<OwnedProcess, SpawnFailure> {
+    // Validate the entire collected list before creating a launch owner or child.
+    // Native OS paths remain opaque; only diagnostic literals must be Unicode.
+    let redaction_secrets = context
+        .redact
+        .iter()
+        .map(|secret| {
+            String::from_utf16(&secret.0)
+                .map_err(|_| invalid("Redaction values must be valid Unicode text."))
+        })
+        .collect::<IvyResult<Vec<_>>>()?;
     let maximum = context.maximum_output_bytes.unwrap_or(65536);
     let use_job = cfg!(windows) && !context.without_job;
     if context
@@ -644,7 +654,7 @@ async fn spawn_resolved_with_stdio(
     };
     let make_capture = || {
         Arc::new(Mutex::new(DiagnosticCapture::new(
-            context.redact.iter().map(|s| s.0.clone()).collect(),
+            redaction_secrets.clone(),
             maximum,
         )))
     };
