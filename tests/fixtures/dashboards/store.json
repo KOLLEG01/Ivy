@@ -1,0 +1,3005 @@
+[
+  {
+    "name": "current",
+    "action": "read",
+    "args": [
+      "id"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id"
+        }
+      }
+    ],
+    "expected": {
+      "value": {
+        "id": "id",
+        "revision": 7,
+        "value": {
+          "title": "A",
+          "html": "x",
+          "sources": {},
+          "refreshSeconds": 5,
+          "metadata": {},
+          "imageToken": null
+        },
+        "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id",
+        "imageUrl": null
+      }
+    }
+  },
+  {
+    "name": "old-defaults",
+    "action": "read",
+    "args": [
+      "id"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 2,
+          "contractVersion": "1.0.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": " A ",
+            "html": "x",
+            "sources": {}
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id"
+        }
+      }
+    ],
+    "expected": {
+      "value": {
+        "id": "id",
+        "revision": 2,
+        "value": {
+          "title": "A",
+          "html": "x",
+          "sources": {},
+          "refreshSeconds": 5,
+          "metadata": {},
+          "imageToken": null
+        },
+        "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id",
+        "imageUrl": null
+      }
+    }
+  },
+  {
+    "name": "missing",
+    "action": "read",
+    "args": [
+      "missing"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "missing"
+        }
+      }
+    ],
+    "expected": {
+      "error": {
+        "code": "not_found",
+        "message": "missing",
+        "outcome": "not_executed"
+      }
+    }
+  },
+  {
+    "name": "contractKey",
+    "action": "read",
+    "args": [
+      "id"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "other",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id"
+        }
+      }
+    ],
+    "expected": {
+      "error": {
+        "code": "target_conflict",
+        "message": "Object is not an active dashboard in this workspace.",
+        "outcome": "not_executed"
+      }
+    }
+  },
+  {
+    "name": "parentId",
+    "action": "read",
+    "args": [
+      "id"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": "other",
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id"
+        }
+      }
+    ],
+    "expected": {
+      "error": {
+        "code": "target_conflict",
+        "message": "Object is not an active dashboard in this workspace.",
+        "outcome": "not_executed"
+      }
+    }
+  },
+  {
+    "name": "effectivelyArchived",
+    "action": "read",
+    "args": [
+      "id"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": true
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id"
+        }
+      }
+    ],
+    "expected": {
+      "error": {
+        "code": "target_conflict",
+        "message": "Object is not an active dashboard in this workspace.",
+        "outcome": "not_executed"
+      }
+    }
+  },
+  {
+    "name": "version",
+    "action": "read",
+    "args": [
+      "id"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "2.0.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id"
+        }
+      }
+    ],
+    "expected": {
+      "error": {
+        "code": "target_conflict",
+        "message": "Object is not an active dashboard in this workspace.",
+        "outcome": "not_executed"
+      }
+    }
+  },
+  {
+    "name": "binary",
+    "action": "read",
+    "args": [
+      "id"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "base64",
+          "value": "AA=="
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id"
+        }
+      }
+    ],
+    "expected": {
+      "error": {
+        "code": "target_conflict",
+        "message": "Object is not an active dashboard in this workspace.",
+        "outcome": "not_executed"
+      }
+    }
+  },
+  {
+    "name": "malformed-definition",
+    "action": "read",
+    "args": [
+      "id"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id"
+        }
+      }
+    ],
+    "expected": {
+      "error": {
+        "code": "internal_error",
+        "message": "The operation failed internally.",
+        "outcome": "unknown"
+      }
+    }
+  },
+  {
+    "name": "image-32",
+    "action": "image",
+    "args": [
+      "id",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id"
+        }
+      }
+    ],
+    "expected": {
+      "value": {
+        "id": "id",
+        "revision": 7,
+        "value": {
+          "title": "A",
+          "html": "x",
+          "sources": {},
+          "refreshSeconds": 5,
+          "metadata": {},
+          "imageToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id",
+        "imageUrl": "https://example.test/sub/api/v1/dashboards/image.png?node=node+%2F%3F%F0%9F%98%80&id=id&token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  {
+    "name": "image-32",
+    "action": "image",
+    "args": [
+      "id",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id"
+        }
+      }
+    ],
+    "expected": {
+      "error": {
+        "code": "unauthenticated",
+        "message": "Invalid dashboard image token.",
+        "outcome": "not_executed"
+      }
+    }
+  },
+  {
+    "name": "image-31",
+    "action": "image",
+    "args": [
+      "id",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id"
+        }
+      }
+    ],
+    "expected": {
+      "error": {
+        "code": "unauthenticated",
+        "message": "Invalid dashboard image token.",
+        "outcome": "not_executed"
+      }
+    }
+  },
+  {
+    "name": "image-1",
+    "action": "image",
+    "args": [
+      "id",
+      "\ud800"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id"
+        }
+      }
+    ],
+    "expected": {
+      "error": {
+        "code": "unauthenticated",
+        "message": "Invalid dashboard image token.",
+        "outcome": "not_executed"
+      }
+    }
+  },
+  {
+    "name": "disabled-image",
+    "action": "image",
+    "args": [
+      "id",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id"
+        }
+      }
+    ],
+    "expected": {
+      "error": {
+        "code": "unauthenticated",
+        "message": "Invalid dashboard image token.",
+        "outcome": "not_executed"
+      }
+    }
+  },
+  {
+    "name": "create",
+    "action": "save",
+    "args": [
+      {
+        "title": "A",
+        "html": "x",
+        "sources": {},
+        "refreshSeconds": 5,
+        "metadata": {},
+        "imageToken": null
+      },
+      null,
+      null,
+      "epoch:12:😀/nonce"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.write",
+        "params": {
+          "mutationId": "epoch:12:😀/nonce",
+          "contractVersion": "1.1.0",
+          "references": {},
+          "content": {
+            "encoding": "json",
+            "value": {
+              "title": "A",
+              "html": "x",
+              "sources": {},
+              "refreshSeconds": 5,
+              "metadata": {},
+              "imageToken": null
+            }
+          },
+          "create": {
+            "name": "dashboard-epoch-12----nonce",
+            "contractKey": "dashboards/dashboard",
+            "parentId": null,
+            "ownerObjectId": null
+          }
+        }
+      }
+    ],
+    "expected": {
+      "value": {
+        "id": "saved",
+        "revision": 8,
+        "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=saved",
+        "imageUrl": null
+      }
+    }
+  },
+  {
+    "name": "update",
+    "action": "save",
+    "args": [
+      {
+        "title": "A",
+        "html": "x",
+        "sources": {},
+        "refreshSeconds": 5,
+        "metadata": {},
+        "imageToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "id",
+      7,
+      "epoch:12:nonce"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id"
+        }
+      },
+      {
+        "method": "objects.write",
+        "params": {
+          "mutationId": "epoch:12:nonce",
+          "contractVersion": "1.1.0",
+          "references": {},
+          "content": {
+            "encoding": "json",
+            "value": {
+              "title": "A",
+              "html": "x",
+              "sources": {},
+              "refreshSeconds": 5,
+              "metadata": {},
+              "imageToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "objectId": "id",
+          "expectedRevision": 7
+        }
+      }
+    ],
+    "expected": {
+      "value": {
+        "id": "saved",
+        "revision": 8,
+        "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=saved",
+        "imageUrl": "https://example.test/sub/api/v1/dashboards/image.png?node=node+%2F%3F%F0%9F%98%80&id=saved&token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  {
+    "name": "update-missing",
+    "action": "save",
+    "args": [
+      {
+        "title": "A",
+        "html": "x",
+        "sources": {},
+        "refreshSeconds": 5,
+        "metadata": {},
+        "imageToken": null
+      },
+      "missing",
+      7,
+      "op"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "missing"
+        }
+      }
+    ],
+    "expected": {
+      "error": {
+        "code": "not_found",
+        "message": "missing",
+        "outcome": "not_executed"
+      }
+    }
+  },
+  {
+    "name": "write-error",
+    "action": "save",
+    "args": [
+      {
+        "title": "A",
+        "html": "x",
+        "sources": {},
+        "refreshSeconds": 5,
+        "metadata": {},
+        "imageToken": null
+      },
+      "id",
+      6,
+      "op"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "writeError": {
+      "code": "revision_conflict",
+      "message": "stale",
+      "outcome": "not_executed"
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id"
+        }
+      },
+      {
+        "method": "objects.write",
+        "params": {
+          "mutationId": "op",
+          "contractVersion": "1.1.0",
+          "references": {},
+          "content": {
+            "encoding": "json",
+            "value": {
+              "title": "A",
+              "html": "x",
+              "sources": {},
+              "refreshSeconds": 5,
+              "metadata": {},
+              "imageToken": null
+            }
+          },
+          "objectId": "id",
+          "expectedRevision": 6
+        }
+      }
+    ],
+    "expected": {
+      "error": {
+        "code": "revision_conflict",
+        "message": "stale",
+        "outcome": "not_executed"
+      }
+    }
+  },
+  {
+    "name": "lost-write",
+    "action": "save",
+    "args": [
+      {
+        "title": "A",
+        "html": "x",
+        "sources": {},
+        "refreshSeconds": 5,
+        "metadata": {},
+        "imageToken": null
+      },
+      null,
+      null,
+      "op"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "writeError": {
+      "code": "deadline_exceeded",
+      "message": "lost",
+      "outcome": "unknown"
+    },
+    "calls": [
+      {
+        "method": "objects.write",
+        "params": {
+          "mutationId": "op",
+          "contractVersion": "1.1.0",
+          "references": {},
+          "content": {
+            "encoding": "json",
+            "value": {
+              "title": "A",
+              "html": "x",
+              "sources": {},
+              "refreshSeconds": 5,
+              "metadata": {},
+              "imageToken": null
+            }
+          },
+          "create": {
+            "name": "dashboard-op",
+            "contractKey": "dashboards/dashboard",
+            "parentId": null,
+            "ownerObjectId": null
+          }
+        }
+      }
+    ],
+    "expected": {
+      "error": {
+        "code": "deadline_exceeded",
+        "message": "lost",
+        "outcome": "unknown"
+      }
+    }
+  },
+  {
+    "name": "delete",
+    "action": "remove",
+    "args": [
+      "id",
+      7,
+      "op"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id"
+        }
+      },
+      {
+        "method": "objects.delete",
+        "params": {
+          "objectId": "id",
+          "expectedRevision": 7,
+          "mutationId": "op"
+        }
+      }
+    ],
+    "expected": {
+      "value": {
+        "id": "id",
+        "deleted": true
+      }
+    }
+  },
+  {
+    "name": "delete-missing-replay",
+    "action": "remove",
+    "args": [
+      "missing",
+      7,
+      "op"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "missing"
+        }
+      },
+      {
+        "method": "objects.delete",
+        "params": {
+          "objectId": "missing",
+          "expectedRevision": 7,
+          "mutationId": "op"
+        }
+      }
+    ],
+    "expected": {
+      "value": {
+        "id": "missing",
+        "deleted": true
+      }
+    }
+  },
+  {
+    "name": "delete-wrong-root",
+    "action": "remove",
+    "args": [
+      "id",
+      7,
+      "op"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": "other",
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id"
+        }
+      }
+    ],
+    "expected": {
+      "error": {
+        "code": "target_conflict",
+        "message": "Object is not an active dashboard in this workspace.",
+        "outcome": "not_executed"
+      }
+    }
+  },
+  {
+    "name": "empty-list",
+    "action": "list",
+    "args": [
+      "",
+      50
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "page": {
+      "items": [],
+      "nextCursor": null
+    },
+    "calls": [
+      {
+        "method": "objects.query",
+        "params": {
+          "contractKey": "dashboards/dashboard",
+          "contractVersions": [
+            "1.0.0",
+            "1.1.0"
+          ],
+          "where": {
+            "op": "isNull",
+            "field": "object.parentId"
+          },
+          "limit": 50
+        }
+      }
+    ],
+    "expected": {
+      "value": {
+        "items": [],
+        "nextCursor": null
+      }
+    }
+  },
+  {
+    "name": "batch-list",
+    "action": "list",
+    "args": [
+      "cursor",
+      33
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id0": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A0",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id1": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A1",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id2": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A2",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id3": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A3",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id4": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A4",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id5": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A5",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id6": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A6",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id7": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A7",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id8": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A8",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id9": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A9",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id10": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A10",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id11": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A11",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id12": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A12",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id13": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A13",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id14": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A14",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id15": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A15",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id16": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A16",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id17": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A17",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id18": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A18",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id19": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A19",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id20": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A20",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id21": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A21",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id22": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A22",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id23": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A23",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id24": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A24",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id25": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A25",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id26": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A26",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id27": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A27",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id28": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A28",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id29": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A29",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id30": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A30",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id31": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A31",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      },
+      "id32": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A32",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "page": {
+      "items": [
+        {
+          "objectId": "id0"
+        },
+        {
+          "objectId": "id1"
+        },
+        {
+          "objectId": "id2"
+        },
+        {
+          "objectId": "id3"
+        },
+        {
+          "objectId": "id4"
+        },
+        {
+          "objectId": "id5"
+        },
+        {
+          "objectId": "id6"
+        },
+        {
+          "objectId": "id7"
+        },
+        {
+          "objectId": "id8"
+        },
+        {
+          "objectId": "id9"
+        },
+        {
+          "objectId": "id10"
+        },
+        {
+          "objectId": "id11"
+        },
+        {
+          "objectId": "id12"
+        },
+        {
+          "objectId": "id13"
+        },
+        {
+          "objectId": "id14"
+        },
+        {
+          "objectId": "id15"
+        },
+        {
+          "objectId": "id16"
+        },
+        {
+          "objectId": "id17"
+        },
+        {
+          "objectId": "id18"
+        },
+        {
+          "objectId": "id19"
+        },
+        {
+          "objectId": "id20"
+        },
+        {
+          "objectId": "id21"
+        },
+        {
+          "objectId": "id22"
+        },
+        {
+          "objectId": "id23"
+        },
+        {
+          "objectId": "id24"
+        },
+        {
+          "objectId": "id25"
+        },
+        {
+          "objectId": "id26"
+        },
+        {
+          "objectId": "id27"
+        },
+        {
+          "objectId": "id28"
+        },
+        {
+          "objectId": "id29"
+        },
+        {
+          "objectId": "id30"
+        },
+        {
+          "objectId": "id31"
+        },
+        {
+          "objectId": "id32"
+        }
+      ],
+      "nextCursor": "next"
+    },
+    "calls": [
+      {
+        "method": "objects.query",
+        "params": {
+          "contractKey": "dashboards/dashboard",
+          "contractVersions": [
+            "1.0.0",
+            "1.1.0"
+          ],
+          "where": {
+            "op": "isNull",
+            "field": "object.parentId"
+          },
+          "limit": 33,
+          "cursor": "cursor"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id0"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id1"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id2"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id3"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id4"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id5"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id6"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id7"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id8"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id9"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id10"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id11"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id12"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id13"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id14"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id15"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id16"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id17"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id18"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id19"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id20"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id21"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id22"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id23"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id24"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id25"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id26"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id27"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id28"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id29"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id30"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id31"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "id32"
+        }
+      }
+    ],
+    "expected": {
+      "value": {
+        "items": [
+          {
+            "id": "id0",
+            "revision": 7,
+            "title": "A0",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id0",
+            "imageUrl": null
+          },
+          {
+            "id": "id1",
+            "revision": 7,
+            "title": "A1",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id1",
+            "imageUrl": null
+          },
+          {
+            "id": "id2",
+            "revision": 7,
+            "title": "A2",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id2",
+            "imageUrl": null
+          },
+          {
+            "id": "id3",
+            "revision": 7,
+            "title": "A3",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id3",
+            "imageUrl": null
+          },
+          {
+            "id": "id4",
+            "revision": 7,
+            "title": "A4",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id4",
+            "imageUrl": null
+          },
+          {
+            "id": "id5",
+            "revision": 7,
+            "title": "A5",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id5",
+            "imageUrl": null
+          },
+          {
+            "id": "id6",
+            "revision": 7,
+            "title": "A6",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id6",
+            "imageUrl": null
+          },
+          {
+            "id": "id7",
+            "revision": 7,
+            "title": "A7",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id7",
+            "imageUrl": null
+          },
+          {
+            "id": "id8",
+            "revision": 7,
+            "title": "A8",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id8",
+            "imageUrl": null
+          },
+          {
+            "id": "id9",
+            "revision": 7,
+            "title": "A9",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id9",
+            "imageUrl": null
+          },
+          {
+            "id": "id10",
+            "revision": 7,
+            "title": "A10",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id10",
+            "imageUrl": null
+          },
+          {
+            "id": "id11",
+            "revision": 7,
+            "title": "A11",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id11",
+            "imageUrl": null
+          },
+          {
+            "id": "id12",
+            "revision": 7,
+            "title": "A12",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id12",
+            "imageUrl": null
+          },
+          {
+            "id": "id13",
+            "revision": 7,
+            "title": "A13",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id13",
+            "imageUrl": null
+          },
+          {
+            "id": "id14",
+            "revision": 7,
+            "title": "A14",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id14",
+            "imageUrl": null
+          },
+          {
+            "id": "id15",
+            "revision": 7,
+            "title": "A15",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id15",
+            "imageUrl": null
+          },
+          {
+            "id": "id16",
+            "revision": 7,
+            "title": "A16",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id16",
+            "imageUrl": null
+          },
+          {
+            "id": "id17",
+            "revision": 7,
+            "title": "A17",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id17",
+            "imageUrl": null
+          },
+          {
+            "id": "id18",
+            "revision": 7,
+            "title": "A18",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id18",
+            "imageUrl": null
+          },
+          {
+            "id": "id19",
+            "revision": 7,
+            "title": "A19",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id19",
+            "imageUrl": null
+          },
+          {
+            "id": "id20",
+            "revision": 7,
+            "title": "A20",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id20",
+            "imageUrl": null
+          },
+          {
+            "id": "id21",
+            "revision": 7,
+            "title": "A21",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id21",
+            "imageUrl": null
+          },
+          {
+            "id": "id22",
+            "revision": 7,
+            "title": "A22",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id22",
+            "imageUrl": null
+          },
+          {
+            "id": "id23",
+            "revision": 7,
+            "title": "A23",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id23",
+            "imageUrl": null
+          },
+          {
+            "id": "id24",
+            "revision": 7,
+            "title": "A24",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id24",
+            "imageUrl": null
+          },
+          {
+            "id": "id25",
+            "revision": 7,
+            "title": "A25",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id25",
+            "imageUrl": null
+          },
+          {
+            "id": "id26",
+            "revision": 7,
+            "title": "A26",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id26",
+            "imageUrl": null
+          },
+          {
+            "id": "id27",
+            "revision": 7,
+            "title": "A27",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id27",
+            "imageUrl": null
+          },
+          {
+            "id": "id28",
+            "revision": 7,
+            "title": "A28",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id28",
+            "imageUrl": null
+          },
+          {
+            "id": "id29",
+            "revision": 7,
+            "title": "A29",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id29",
+            "imageUrl": null
+          },
+          {
+            "id": "id30",
+            "revision": 7,
+            "title": "A30",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id30",
+            "imageUrl": null
+          },
+          {
+            "id": "id31",
+            "revision": 7,
+            "title": "A31",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id31",
+            "imageUrl": null
+          },
+          {
+            "id": "id32",
+            "revision": 7,
+            "title": "A32",
+            "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id32",
+            "imageUrl": null
+          }
+        ],
+        "nextCursor": "next"
+      }
+    }
+  },
+  {
+    "name": "root-list",
+    "action": "list",
+    "args": [
+      null,
+      50
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": "root",
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "page": {
+      "items": [],
+      "nextCursor": null
+    },
+    "calls": [
+      {
+        "method": "objects.query",
+        "params": {
+          "contractKey": "dashboards/dashboard",
+          "contractVersions": [
+            "1.0.0",
+            "1.1.0"
+          ],
+          "where": {
+            "op": "eq",
+            "field": "object.parentId",
+            "value": "root"
+          },
+          "limit": 50
+        }
+      }
+    ],
+    "expected": {
+      "value": {
+        "items": [],
+        "nextCursor": null
+      }
+    }
+  },
+  {
+    "name": "url-base",
+    "action": "save",
+    "args": [
+      {
+        "title": "A",
+        "html": "x",
+        "sources": {},
+        "refreshSeconds": 5,
+        "metadata": {},
+        "imageToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      null,
+      null,
+      "op"
+    ],
+    "base": "https://example.test/sub",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "savedId": "id /?é😀",
+    "calls": [
+      {
+        "method": "objects.write",
+        "params": {
+          "mutationId": "op",
+          "contractVersion": "1.1.0",
+          "references": {},
+          "content": {
+            "encoding": "json",
+            "value": {
+              "title": "A",
+              "html": "x",
+              "sources": {},
+              "refreshSeconds": 5,
+              "metadata": {},
+              "imageToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "create": {
+            "name": "dashboard-op",
+            "contractKey": "dashboards/dashboard",
+            "parentId": null,
+            "ownerObjectId": null
+          }
+        }
+      }
+    ],
+    "expected": {
+      "value": {
+        "id": "id /?é😀",
+        "revision": 8,
+        "url": "https://example.test/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id%20%2F%3F%C3%A9%F0%9F%98%80",
+        "imageUrl": "https://example.test/api/v1/dashboards/image.png?node=node+%2F%3F%F0%9F%98%80&id=id+%2F%3F%C3%A9%F0%9F%98%80&token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  {
+    "name": "url-base",
+    "action": "save",
+    "args": [
+      {
+        "title": "A",
+        "html": "x",
+        "sources": {},
+        "refreshSeconds": 5,
+        "metadata": {},
+        "imageToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      null,
+      null,
+      "op"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "savedId": "id /?é😀",
+    "calls": [
+      {
+        "method": "objects.write",
+        "params": {
+          "mutationId": "op",
+          "contractVersion": "1.1.0",
+          "references": {},
+          "content": {
+            "encoding": "json",
+            "value": {
+              "title": "A",
+              "html": "x",
+              "sources": {},
+              "refreshSeconds": 5,
+              "metadata": {},
+              "imageToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "create": {
+            "name": "dashboard-op",
+            "contractKey": "dashboards/dashboard",
+            "parentId": null,
+            "ownerObjectId": null
+          }
+        }
+      }
+    ],
+    "expected": {
+      "value": {
+        "id": "id /?é😀",
+        "revision": 8,
+        "url": "https://example.test/sub/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id%20%2F%3F%C3%A9%F0%9F%98%80",
+        "imageUrl": "https://example.test/sub/api/v1/dashboards/image.png?node=node+%2F%3F%F0%9F%98%80&id=id+%2F%3F%C3%A9%F0%9F%98%80&token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  {
+    "name": "url-base",
+    "action": "save",
+    "args": [
+      {
+        "title": "A",
+        "html": "x",
+        "sources": {},
+        "refreshSeconds": 5,
+        "metadata": {},
+        "imageToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      null,
+      null,
+      "op"
+    ],
+    "base": "https://example.test/a%20b/?old=1#frag",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "savedId": "id /?é😀",
+    "calls": [
+      {
+        "method": "objects.write",
+        "params": {
+          "mutationId": "op",
+          "contractVersion": "1.1.0",
+          "references": {},
+          "content": {
+            "encoding": "json",
+            "value": {
+              "title": "A",
+              "html": "x",
+              "sources": {},
+              "refreshSeconds": 5,
+              "metadata": {},
+              "imageToken": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          "create": {
+            "name": "dashboard-op",
+            "contractKey": "dashboards/dashboard",
+            "parentId": null,
+            "ownerObjectId": null
+          }
+        }
+      }
+    ],
+    "expected": {
+      "value": {
+        "id": "id /?é😀",
+        "revision": 8,
+        "url": "https://example.test/a%20b/dashboards/#/view?node=node%20%2F%3F%F0%9F%98%80&id=id%20%2F%3F%C3%A9%F0%9F%98%80",
+        "imageUrl": "https://example.test/a%20b/api/v1/dashboards/image.png?node=node+%2F%3F%F0%9F%98%80&id=id+%2F%3F%C3%A9%F0%9F%98%80&token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  {
+    "name": "surrogate-id",
+    "action": "save",
+    "args": [
+      {
+        "title": "A",
+        "html": "x",
+        "sources": {},
+        "refreshSeconds": 5,
+        "metadata": {},
+        "imageToken": null
+      },
+      null,
+      null,
+      "op"
+    ],
+    "base": "https://example.test/sub/",
+    "node": "node /?😀",
+    "root": null,
+    "objects": {
+      "id": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "parentId": null,
+          "effectivelyArchived": false
+        },
+        "revision": {
+          "revision": 7,
+          "contractVersion": "1.1.0"
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "html": "x",
+            "sources": {},
+            "refreshSeconds": 5,
+            "metadata": {},
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "savedId": "\ud800",
+    "calls": [
+      {
+        "method": "objects.write",
+        "params": {
+          "mutationId": "op",
+          "contractVersion": "1.1.0",
+          "references": {},
+          "content": {
+            "encoding": "json",
+            "value": {
+              "title": "A",
+              "html": "x",
+              "sources": {},
+              "refreshSeconds": 5,
+              "metadata": {},
+              "imageToken": null
+            }
+          },
+          "create": {
+            "name": "dashboard-op",
+            "contractKey": "dashboards/dashboard",
+            "parentId": null,
+            "ownerObjectId": null
+          }
+        }
+      }
+    ],
+    "expected": {
+      "error": {
+        "code": "internal_error",
+        "message": "The operation failed internally.",
+        "outcome": "unknown"
+      }
+    }
+  }
+]

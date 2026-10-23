@@ -1,16 +1,12 @@
 use ivy_contracts::IvyResult;
-use ivy_host_runtime::{
-    config::{configuration_path, instance_config},
-    node_runtime::NodeRuntime,
-};
+use ivy_host_runtime::config::{configuration_path, native_instance_config};
 
 async fn run() -> IvyResult<()> {
     let path = configuration_path(
         &std::env::args_os().skip(1).collect::<Vec<_>>(),
         std::env::var_os("IVY_INSTANCE_CONFIG"),
     )?;
-    let node = NodeRuntime::discover(None).await?;
-    let config = instance_config(path, &node).await?;
+    let config = native_instance_config(path).await?;
     let runtime = ivy_dashboards::runtime::start(config).await?;
     #[cfg(unix)]
     {

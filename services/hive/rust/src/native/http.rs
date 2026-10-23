@@ -268,6 +268,29 @@ async fn handle(
         let route = request.route(Some(&method), Some(&uri))?;
         path = route.path.clone();
         let buffers = app.body_buffers.clone();
+        if path == JsString::from("/api/v1/dashboards/image.png") {
+            request.admit_public_route(Some(&method), &path)?;
+            return ivy_hive::dashboard_image::handle(
+                incoming.method().as_str(),
+                &incoming_search(&uri).into(),
+                headers
+                    .get("if-none-match")
+                    .and_then(|value| value.to_str().ok()),
+                |node, args| {
+                    let peers = app.server.network.peers.clone();
+                    async move {
+                        let context = IvyJson::object([
+                            ("transport", "http".into()),
+                            ("principalId", "hive.dashboard-image".into()),
+                            ("credentialDigest", "dashboard-image".into()),
+                        ]);
+                        peers.dashboard_image(&context, &node, &args)?.await
+                    }
+                },
+                &mut output,
+            )
+            .await;
+        }
         if method == JsString::from("GET")
             && path == JsString::from("/ws")
             && headers

@@ -226,3 +226,82 @@ async fn list_reads_sixteen_concurrently_before_starting_next_batch() {
     assert_eq!(client.starts.load(Ordering::SeqCst), 33);
     assert_eq!(client.peak.load(Ordering::SeqCst), 16);
 }
+
+#[tokio::test]
+async fn typed_rpc_failures_keep_their_exact_outcome_through_store_operations() {
+    struct Failing {
+        method: &'static str,
+        error: IvyError,
+        calls: Mutex<Vec<String>>,
+    }
+    impl RpcClient for Failing {
+        fn request<'a>(&'a self, method: &'a str, _: J, _: RequestOptions) -> RequestFuture<'a> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(method.into());
+                if self.method == "objects.delete" && method == "objects.read" {
+                    return Err(IvyError::new("not_found", "missing"));
+                }
+                assert_eq!(method, self.method);
+                Err(self.error.clone())
+            })
+        }
+    }
+    // This is the already typed RpcClient seam. It does not broaden the SDK
+    // response parser's separate actual-string outcome admission.
+    let outcomes = parse(
+        r#"["not_executed","unknown","completed",["unknown"],["completed"],[["not_executed"]]]"#,
+        usize::MAX,
+    )
+    .unwrap();
+    for raw in outcomes.as_array().unwrap() {
+        for (action, method) in [
+            ("read", "objects.read"),
+            ("image", "objects.read"),
+            ("list", "objects.query"),
+            ("save", "objects.write"),
+            ("remove-read", "objects.read"),
+            ("remove-delete", "objects.delete"),
+        ] {
+            let expected = IvyError::new_js(
+                "typed_provider_error".into(),
+                ivy_contracts::JsString(vec![0x65, 0xd800, 0x72]),
+            )
+            .with_provider_outcome(raw.clone())
+            .with_details(J::Null);
+            let client = Arc::new(Failing {
+                method,
+                error: expected.clone(),
+                calls: Mutex::new(vec![]),
+            });
+            let store =
+                DashboardStore::new(client.clone(), None, "https://example.test/", "node".into())
+                    .unwrap();
+            let result = match action {
+                "read" => store.read("id".into()).await,
+                "image" => store.image("id".into(), &"token".into()).await,
+                "list" => store.list(None, 50).await,
+                "save" => store.save(J::Null, None, None, "operation".into()).await,
+                _ => store.remove("id".into(), 1.0, "operation".into()).await,
+            };
+            let actual = result.expect_err(action);
+            assert_eq!(actual, expected, "{action}");
+            assert_eq!(
+                actual
+                    .to_wire()
+                    .required("data")
+                    .unwrap()
+                    .required("outcome")
+                    .unwrap(),
+                raw,
+                "{action}"
+            );
+            let calls = client.calls.lock().unwrap();
+            let expected_calls = if action == "remove-delete" {
+                vec!["objects.read", "objects.delete"]
+            } else {
+                vec![method]
+            };
+            assert_eq!(*calls, expected_calls, "{action}");
+        }
+    }
+}

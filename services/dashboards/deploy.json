@@ -7,14 +7,20 @@
   "connectsToHive": true,
   "requirements": {
     "node": ">=24.18.0 <25.0.0",
+    "os": [
+      "win32",
+      "linux"
+    ],
+    "arch": [
+      "x64",
+      "arm64"
+    ],
     "hiveProtocol": 1,
     "contracts": []
   },
   "entrypoint": {
-    "executable": "node",
-    "args": [
-      "dist/services/dashboards/src/main.js"
-    ],
+    "executable": "dist/native/ivy-dashboards",
+    "args": [],
     "timeoutMs": 30000
   },
   "prepare": [
@@ -34,17 +40,15 @@
         "--component",
         "dashboards"
       ],
-      "timeoutMs": 300000
+      "timeoutMs": 3600000
     }
   ],
   "checks": [],
   "readiness": {
     "timeoutMs": 30000,
     "command": {
-      "executable": "node",
-      "args": [
-        "dist/packages/host-runtime/src/health.js"
-      ],
+      "executable": "dist/native/ivy-health",
+      "args": [],
       "timeoutMs": 5000
     }
   },

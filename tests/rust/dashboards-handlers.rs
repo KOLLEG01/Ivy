@@ -80,12 +80,13 @@ impl RpcClient for Client {
     }
 }
 fn context(op: Option<&str>) -> InvocationContext {
-    InvocationContext {
-        caller_principal_id: "caller😀".into(),
-        operation_id: op.map(JsString::from),
-        generation: 3,
-        signal: CancellationToken::new(),
-    }
+    InvocationContext::detached(
+        "caller😀".into(),
+        op.map(JsString::from),
+        3,
+        CancellationToken::new(),
+        ivy_contracts::IvyError::new("service_stopping", "Service is stopping."),
+    )
 }
 fn fixture() -> (Handlers, Arc<Client>, Arc<Mutex<Vec<J>>>) {
     let client = Arc::new(Client {
@@ -205,4 +206,45 @@ async fn offline_precedence_and_data_envelope_do_not_render() {
         "service_not_ready"
     );
     assert_eq!(client.calls.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn invalid_arguments_fail_before_hive_calls_or_rendering() {
+    let (handlers, client, renders) = fixture();
+    let value = J::object([
+        ("title", "A".into()),
+        ("html", "x".into()),
+        ("sources", J::Object(vec![])),
+    ]);
+    for (name, input) in [
+        (
+            "read",
+            J::object([("id", J::object([("length", "1".into())]))]),
+        ),
+        (
+            "image",
+            J::object([
+                ("id", "id".into()),
+                ("token", "a".repeat(32).into()),
+                ("width", "800".into()),
+            ]),
+        ),
+        ("save", J::object([("value", value), ("id", "id".into())])),
+        (
+            "render",
+            J::object([
+                ("id", "id".into()),
+                ("width", J::Number(4096.0)),
+                ("height", J::Number(4096.0)),
+            ]),
+        ),
+    ] {
+        let error = handlers
+            .invoke(name, input, context(Some("epoch:123:invalid")))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_arguments", "{name}");
+    }
+    assert!(client.calls.lock().unwrap().is_empty());
+    assert!(renders.lock().unwrap().is_empty());
 }

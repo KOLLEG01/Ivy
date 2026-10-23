@@ -92,3 +92,7 @@ path = "../../../tests/rust/hive_offline_backup.rs"
 [[test]]
 name = "hive-network"
 path = "../../../tests/rust/hive_network.rs"
+
+[[test]]
+name = "hive-dashboard-image"
+path = "../../../tests/rust/hive_dashboard_image.rs"

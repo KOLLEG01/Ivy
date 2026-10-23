@@ -36,6 +36,12 @@ export async function buildWeb({ uis = null } = {}) {
   const project = fileURLToPath(new URL("../../", import.meta.url)),
     distribution = resolve(project, "dist");
   const requested = uis ? new Set(uis) : null;
+  const workspaceUi = {
+    alias: [
+      { find: /^@ivy\/ui$/, replacement: resolve(project, "packages/ui/src/index.ts") },
+      { find: /^@ivy\/ui\/(.+)$/, replacement: resolve(project, "packages/ui/src/$1") },
+    ],
+  };
   mkdirSync(distribution, { recursive: true });
   if (realpathSync(distribution) !== distribution)
     throw new Error("Web output must stay in the actual project distribution.");
@@ -93,6 +99,7 @@ export async function buildWeb({ uis = null } = {}) {
           configFile: false,
           root: resolve(project, "services/hive/console"),
           base: "./",
+          resolve: workspaceUi,
           plugins: [vue(), tailwindcss(), ivyIcon(project)],
           build: {
             outDir: destination,
@@ -151,6 +158,7 @@ export async function buildWeb({ uis = null } = {}) {
         configFile: false,
         root: resolve(project, "ui", uiId),
         base: "./",
+        resolve: workspaceUi,
         plugins: [vue(), tailwindcss(), ivyIcon(project)],
         build: {
           outDir: output,

@@ -105,7 +105,7 @@ impl RenderInput {
             // JSON text must be parsed, not evaluated as an object literal:
             // an authored __proto__ key is data, not a prototype setter.
             data_json: stringify(
-                &IvyJson::from(stringify(&playwright_data(data), MANAGEMENT_FRAME_BYTES)?),
+                &IvyJson::from(stringify(data, MANAGEMENT_FRAME_BYTES)?),
                 MANAGEMENT_FRAME_BYTES,
             )?,
             width,
@@ -113,28 +113,6 @@ impl RenderInput {
             color_mode,
         })
     }
-}
-
-// Playwright 1.63 reconstructs argument objects with property assignment. Its
-// __proto__ setter drops that own key before postMessage's structured clone.
-// Preserve this observed behavior until a data-preservation fix is approved.
-// Walk iteratively so a valid deep JSON value does not consume the native stack.
-fn playwright_data(data: &ivy_contracts::IvyJson) -> ivy_contracts::IvyJson {
-    use ivy_contracts::{IvyJson, JsString};
-    let mut data = data.clone();
-    let key = JsString::from("__proto__");
-    let mut pending = vec![&mut data];
-    while let Some(value) = pending.pop() {
-        match value {
-            IvyJson::Object(fields) => {
-                fields.retain(|(name, _)| name != &key);
-                pending.extend(fields.iter_mut().map(|(_, value)| value));
-            }
-            IvyJson::Array(values) => pending.extend(values.iter_mut()),
-            _ => {}
-        }
-    }
-    data
 }
 
 pub struct CdpRenderer {

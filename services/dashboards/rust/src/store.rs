@@ -76,10 +76,10 @@ impl DashboardStore {
                 "Object is not an active dashboard in this workspace.",
             ));
         }
-        // Original store's definition.parse throws a non-Ivy ZodError, which
-        // the provider maps to internal_error/unknown (unlike handler parsing).
-        let value = validation::parse_input("definition", content.required("value")?)
-            .map_err(|_| IvyError::internal())?;
+        // Invalid stored content is a provider failure, not a caller input error.
+        let value = validation::Definition::parse(content.required("value")?)
+            .map_err(|_| IvyError::internal())?
+            .into_json();
         let url = self.url(&id)?;
         let image_url = self.image_url(&id, value.required("imageToken")?)?;
         Ok(J::object([

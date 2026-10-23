@@ -29,7 +29,7 @@ test('deployment pipelines exclude tests and target only the requested component
   }
 });
 
-for (const component of ['host-executor', 'service-manager', 'hive', 'data-collector']) test(`native source support and selected host commands (${component})`, () => {
+for (const component of ['host-executor', 'service-manager', 'hive', 'data-collector', 'dashboards']) test(`native source support and selected host commands (${component})`, () => {
   const source = JSON.parse(readFileSync(`services/${component}/deploy.json`, 'utf8'));
   for (const os of ['win32', 'linux']) for (const arch of ['x64', 'arm64']) {
     const selected = materializeNativePlan(source, { os, arch });

@@ -1,654 +1,412 @@
-//! Runtime parsing for the service's pinned Zod schemas. Registry JSON Schema
-//! alone cannot express normalization, refinements or the public issue messages.
+//! Typed dashboard inputs and the constraints of the public service contract.
+use crate::{raster::ColorMode, sources::Source};
 use ivy_contracts::{IvyError, IvyJson as J, IvyResult, JsString, json};
 
-const SAFE: f64 = 9_007_199_254_740_991.0;
-const METADATA: &str =
-    "Metadata must fit in 8000 encoded bytes; refreshSeconds uses the refresh setting.";
+const MAX_REVISION: u64 = 9_007_199_254_740_991;
 
-#[derive(Clone, Copy)]
-enum Rule {
-    Text(usize, usize, bool),
-    Integer(f64, f64, bool),
-    Token,
-    Color,
-    Object(&'static str),
-    Sources,
-    Source,
-    Metadata,
+pub struct Definition {
+    pub title: JsString,
+    pub html: JsString,
+    pub sources: Vec<(JsString, Source)>,
+    pub refresh_seconds: u32,
+    pub metadata: J,
+    pub image_token: Option<JsString>,
 }
-struct Parsed {
-    value: J,
-    issues: Vec<J>,
-    aborted: bool,
-}
-impl Parsed {
-    fn new(value: J) -> Self {
-        Self {
+
+impl Definition {
+    pub fn parse(value: &J) -> IvyResult<Self> {
+        Self::parse_at(value, "dashboard")
+    }
+
+    fn parse_at(value: &J, path: &str) -> IvyResult<Self> {
+        let object = Object::new(
             value,
-            issues: vec![],
-            aborted: false,
-        }
-    }
-    fn issue(&mut self, mut issue: J, path: &[JsString], message: impl Into<JsString>) {
-        issue.insert(
-            "path",
-            J::Array(path.iter().cloned().map(J::String).collect()),
-        );
-        issue.insert("message", J::String(message.into()));
-        self.issues.push(issue);
-    }
-    fn custom(&mut self, path: &[JsString], message: &str) {
-        self.issue(J::object([("code", "custom".into())]), path, message);
-    }
-    fn invalid(&mut self, expected: &str, input: Option<&J>, path: &[JsString], int: bool) {
-        let received = match input {
-            None => "undefined",
-            Some(J::Null) => "null",
-            Some(J::Bool(_)) => "boolean",
-            Some(J::Number(_)) => "number",
-            Some(J::String(_)) => "string",
-            Some(J::Array(_)) => "array",
-            Some(J::Object(_)) => "object",
-        };
-        let mut issue = J::object([("expected", expected.into())]);
-        if int {
-            issue.insert("format", "safeint".into());
-        }
-        issue.insert("code", "invalid_type".into());
-        self.issue(
-            issue,
             path,
-            format!("Invalid input: expected {expected}, received {received}"),
-        );
-        self.aborted = true;
-    }
-    fn bound(
-        &mut self,
-        origin: &str,
-        max: bool,
-        limit: f64,
-        inclusive: bool,
-        path: &[JsString],
-        safe: bool,
-    ) {
-        let code = if max { "too_big" } else { "too_small" };
-        let key = if max { "maximum" } else { "minimum" };
-        let mut issue = if safe {
-            J::object([
-                ("code", code.into()),
-                (key, J::Number(limit)),
-                (
-                    "note",
-                    "Integers must be within the safe integer range.".into(),
-                ),
-                ("origin", origin.into()),
-                ("inclusive", J::Bool(inclusive)),
-            ])
-        } else {
-            J::object([
-                ("origin", origin.into()),
-                ("code", code.into()),
-                (key, J::Number(limit)),
-                ("inclusive", J::Bool(inclusive)),
-            ])
-        };
-        let adjective = if max { "big" } else { "small" };
-        let comparison = match (max, inclusive) {
-            (true, true) => "<=",
-            (true, false) => "<",
-            (false, true) => ">=",
-            (false, false) => ">",
-        };
-        let message = if origin == "string" {
-            format!("Too {adjective}: expected string to have {comparison}{limit} characters")
-        } else if origin == "array" {
-            format!("Too {adjective}: expected array to have {comparison}{limit} items")
-        } else {
-            format!("Too {adjective}: expected {origin} to be {comparison}{limit}")
-        };
-        // Preserve issue property insertion order: it is part of error.message.
-        issue.insert(
-            "path",
-            J::Array(path.iter().cloned().map(J::String).collect()),
-        );
-        issue.insert("message", message.into());
-        self.issues.push(issue);
-    }
-}
-
-fn trim(unit: &u16) -> bool {
-    matches!(*unit, 0x9..=0xd | 0x20 | 0xa0 | 0x1680 | 0x2000..=0x200a | 0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000 | 0xfeff)
-}
-
-fn parse(rule: Rule, input: Option<&J>, path: &[JsString]) -> IvyResult<Parsed> {
-    let mut result = Parsed::new(input.cloned().unwrap_or(J::Null));
-    match rule {
-        Rule::Text(min, max, trimming) => {
-            let Some(text) = input.and_then(J::as_js_string) else {
-                result.invalid("string", input, path, false);
-                if let Some(values) = input.and_then(J::as_array) {
-                    if values.len() < min {
-                        result.bound("array", false, min as f64, true, path, false);
-                    }
-                    if values.len() > max {
-                        result.bound("array", true, max as f64, true, path, false);
-                    }
-                }
-                if let Some(length) = input.and_then(|v| v.get("length")) {
-                    let n = numeric(length);
-                    if min > 0 && !(n >= min as f64) {
-                        result.bound("unknown", false, min as f64, true, path, false);
-                    }
-                    if max < usize::MAX && !(n <= max as f64) {
-                        result.bound("unknown", true, max as f64, true, path, false);
-                    }
-                }
-                return Ok(result);
-            };
-            let mut text = text.clone();
-            if trimming {
-                let start = text.0.iter().position(|v| !trim(v)).unwrap_or(text.0.len());
-                let end = text
-                    .0
-                    .iter()
-                    .rposition(|v| !trim(v))
-                    .map_or(start, |n| n + 1);
-                text.0 = text.0[start..end].to_vec();
-            }
-            let len = text.code_point_len();
-            if len < min {
-                result.bound("string", false, min as f64, true, path, false);
-            }
-            if len > max {
-                result.bound("string", true, max as f64, true, path, false);
-            }
-            result.value = J::String(text);
-        }
-        Rule::Integer(min, max, inclusive) => {
-            let Some(n) = input.and_then(J::as_f64) else {
-                result.invalid("number", input, path, false);
-                return Ok(result);
-            };
-            if n.fract() != 0.0 {
-                result.invalid("int", input, path, true);
-                return Ok(result);
-            }
-            if n.abs() > SAFE {
-                result.bound(
-                    "int",
-                    n > 0.0,
-                    if n > 0.0 { SAFE } else { -SAFE },
-                    true,
-                    path,
-                    true,
-                );
-            }
-            if n < min || (!inclusive && n == min) {
-                result.bound("number", false, min, inclusive, path, false);
-            }
-            if n > max {
-                result.bound("number", true, max, true, path, false);
-            }
-        }
-        Rule::Token => {
-            if input.is_some_and(J::is_null) {
-                return Ok(result);
-            }
-            let Some(text) = input.and_then(J::as_js_string) else {
-                result.invalid("string", input, path, false);
-                return Ok(result);
-            };
-            if !(32..=128).contains(&text.0.len())
-                || !text
-                    .0
-                    .iter()
-                    .all(|v| matches!(v, 65..=90 | 97..=122 | 48..=57 | 95 | 45))
-            {
-                result.issue(
-                    J::object([
-                        ("origin", "string".into()),
-                        ("code", "invalid_format".into()),
-                        ("format", "regex".into()),
-                        ("pattern", "/^[A-Za-z0-9_-]{32,128}$/".into()),
-                    ]),
-                    path,
-                    "Invalid string: must match pattern /^[A-Za-z0-9_-]{32,128}$/",
-                );
-            }
-        }
-        Rule::Color => {
-            let values = ["color", "grayscale", "monochrome"];
-            if !input
-                .and_then(J::as_js_string)
-                .is_some_and(|s| values.iter().any(|v| s == &JsString::from(*v)))
-            {
-                result.issue(
-                    J::object([
-                        ("code", "invalid_value".into()),
-                        (
-                            "values",
-                            J::Array(values.into_iter().map(J::from).collect()),
-                        ),
-                    ]),
-                    path,
-                    "Invalid option: expected one of \"color\"|\"grayscale\"|\"monochrome\"",
-                );
-                result.aborted = true;
-            }
-        }
-        Rule::Object(kind) => return object(kind, input, path),
-        Rule::Source => {
-            // Union branches carry relative issue paths, as Zod's public errors do.
-            let mut a = object("object-source", input, &[])?;
-            if a.issues.is_empty() {
-                return Ok(a);
-            }
-            let b = object("contract-source", input, &[])?;
-            if b.issues.is_empty() {
-                return Ok(b);
-            }
-            if a.aborted != b.aborted {
-                if a.aborted {
-                    a = b;
-                }
-                for issue in &mut a.issues {
-                    let mut p: Vec<J> = path.iter().cloned().map(J::String).collect();
-                    p.extend(issue.required("path")?.as_array().unwrap().iter().cloned());
-                    issue.insert("path", J::Array(p));
-                }
-                return Ok(a);
-            }
-            result.issue(
-                J::object([
-                    ("code", "invalid_union".into()),
-                    (
-                        "errors",
-                        J::Array(vec![J::Array(a.issues), J::Array(b.issues)]),
-                    ),
-                ]),
-                path,
-                "Invalid input",
-            );
-            result.aborted = true;
-        }
-        Rule::Sources | Rule::Metadata => {
-            let Some(pairs) = input.and_then(J::as_object) else {
-                result.invalid("object", input, path, false);
-                return Ok(result);
-            };
-            result.value = J::Object(vec![]);
-            for (name, value) in ordered(pairs) {
-                if name == &JsString::from("__proto__") {
-                    continue;
-                }
-                let child = if matches!(rule, Rule::Sources) {
-                    let mut p = path.to_vec();
-                    p.push(name.clone());
-                    parse(Rule::Source, Some(value), &p)?
-                } else {
-                    Parsed::new(json_object_copy(value))
-                };
-                result.aborted |= child.aborted;
-                result.issues.extend(child.issues);
-                result.value.insert(name.clone(), child.value);
-            }
-            if !result.aborted {
-                if matches!(rule, Rule::Sources) {
-                    let pairs = result.value.as_object().unwrap();
-                    if pairs.len() > 20 || pairs.iter().any(|(key, _)| !valid_source_name(key)) {
-                        result.custom(path, "Invalid input");
-                    }
-                } else {
-                    let encoded = json::encode_uri_component(
-                        &json::stringify(&result.value, usize::MAX)?.into(),
-                    )?;
-                    if result.value.get("refreshSeconds").is_some() || encoded.len() > 8000 {
-                        result.custom(path, METADATA);
-                    }
-                }
-            }
-        }
-    }
-    Ok(result)
-}
-
-// JavaScript relational checks coerce a malformed object's own length. This
-// only affects the additional Zod issues after the string type has failed.
-fn numeric(value: &J) -> f64 {
-    match value {
-        J::Null => 0.0,
-        J::Bool(v) => {
-            if *v {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        J::Number(v) => *v,
-        _ => {
-            let s = json::js_string(value);
-            let start = s.0.iter().position(|v| !trim(v)).unwrap_or(s.0.len());
-            let end = s.0.iter().rposition(|v| !trim(v)).map_or(start, |n| n + 1);
-            let Ok(s) = String::from_utf16(&s.0[start..end]) else {
-                return f64::NAN;
-            };
-            if s.is_empty() {
-                return 0.0;
-            }
-            for (prefix, radix) in [
-                ("0x", 16),
-                ("0X", 16),
-                ("0b", 2),
-                ("0B", 2),
-                ("0o", 8),
-                ("0O", 8),
-            ] {
-                if let Some(digits) = s.strip_prefix(prefix) {
-                    return if digits.is_empty() {
-                        f64::NAN
-                    } else {
-                        digits
-                            .chars()
-                            .try_fold(0.0, |n, c| {
-                                c.to_digit(radix)
-                                    .map(|v| n * f64::from(radix) + f64::from(v))
-                            })
-                            .unwrap_or(f64::NAN)
-                    };
-                }
-            }
-            if s == "Infinity" || s == "+Infinity" {
-                return f64::INFINITY;
-            }
-            if s == "-Infinity" {
-                return f64::NEG_INFINITY;
-            }
-            if s.chars()
-                .any(|c| !matches!(c, '0'..='9' | 'e' | 'E' | '+' | '-' | '.'))
-            {
-                return f64::NAN;
-            }
-            s.parse().unwrap_or(f64::NAN)
-        }
-    }
-}
-
-fn valid_source_name(key: &JsString) -> bool {
-    (1..=64).contains(&key.0.len())
-        && matches!(key.0[0], 65..=90 | 97..=122)
-        && key
+            &[
+                "title",
+                "html",
+                "sources",
+                "refreshSeconds",
+                "metadata",
+                "imageToken",
+            ],
+        )?;
+        let mut title = object.string("title")?;
+        let whitespace =
+            |unit: &u16| char::from_u32(u32::from(*unit)).is_some_and(char::is_whitespace);
+        let start = title
             .0
             .iter()
-            .all(|v| matches!(v, 65..=90 | 97..=122 | 48..=57 | 95))
-}
+            .position(|u| !whitespace(u))
+            .unwrap_or(title.0.len());
+        let end = title
+            .0
+            .iter()
+            .rposition(|u| !whitespace(u))
+            .map_or(start, |i| i + 1);
+        title.0 = title.0[start..end].to_vec();
+        text_length(&title, &object.path("title"), 1, 200)?;
+        let html = object.text("html", 1, 500_000)?;
 
-// z.object({}).catchall(jsonValue) strips __proto__ recursively. Use an
-// explicit stack so ordinary valid metadata does not inherit Rust stack limits.
-fn json_object_copy(value: &J) -> J {
-    let mut value = value.clone();
-    let mut pending = vec![&mut value];
-    while let Some(node) = pending.pop() {
-        match node {
-            J::Object(pairs) => {
-                pairs.retain(|(k, _)| k != &JsString::from("__proto__"));
-                pairs.sort_by_key(|(k, _)| index(k));
-                pending.extend(pairs.iter_mut().map(|(_, v)| v));
+        let source_path = object.path("sources");
+        let pairs = object
+            .required("sources")?
+            .as_object()
+            .ok_or_else(|| invalid(&source_path, "expected an object"))?;
+        if pairs.len() > 20 {
+            return Err(invalid(&source_path, "at most 20 sources are allowed"));
+        }
+        let mut sources = Vec::with_capacity(pairs.len());
+        for (name, value) in pairs {
+            if !valid_source_name(name) {
+                return Err(invalid(
+                    &source_path,
+                    "source names must match [A-Za-z][A-Za-z0-9_]{0,63}",
+                ));
             }
-            J::Array(values) => pending.extend(values.iter_mut()),
-            _ => {}
+            let path = format!("{source_path}.{}", String::from_utf16_lossy(&name.0));
+            let source = if value.get("objectId").is_some() {
+                let source = Object::new(value, &path, &["objectId"])?;
+                Source::Object(source.text("objectId", 1, usize::MAX)?)
+            } else {
+                let source = Object::new(value, &path, &["contractKey", "limit"])?;
+                Source::Contract {
+                    key: source.text("contractKey", 1, usize::MAX)?,
+                    limit: source.integer("limit", Some(50), 1, 100)? as u32,
+                }
+            };
+            sources.push((name.clone(), source));
         }
-    }
-    value
-}
 
-fn index(key: &JsString) -> (u8, u32) {
-    let digits = &key.0;
-    if digits.is_empty() || digits.len() > 10 || (digits.len() > 1 && digits[0] == 48) {
-        return (1, 0);
-    }
-    let n = digits.iter().try_fold(0u32, |n, c| {
-        if (48..=57).contains(c) {
-            n.checked_mul(10)?.checked_add(u32::from(*c - 48))
-        } else {
-            None
+        let refresh_seconds = object.integer("refreshSeconds", Some(5), 0, 86400)? as u32;
+        if refresh_seconds != 0 && refresh_seconds < 5 {
+            return Err(invalid(
+                &object.path("refreshSeconds"),
+                "must be 0 or at least 5 seconds",
+            ));
         }
-    });
-    n.filter(|n| *n < u32::MAX).map_or((1, 0), |n| (0, n))
-}
-fn ordered(pairs: &[(JsString, J)]) -> Vec<&(JsString, J)> {
-    let mut pairs: Vec<_> = pairs.iter().collect();
-    pairs.sort_by_key(|(k, _)| index(k));
-    pairs
-}
-
-fn object(kind: &'static str, input: Option<&J>, path: &[JsString]) -> IvyResult<Parsed> {
-    let mut result = Parsed::new(J::Object(vec![]));
-    let Some(pairs) = input.and_then(J::as_object) else {
-        result.invalid("object", input, path, false);
-        return Ok(result);
-    };
-    let text = Rule::Text(1, usize::MAX, false);
-    let revision = Rule::Integer(0.0, f64::INFINITY, false);
-    // (field, rule, optional, default); all schemas are service-local and fixed.
-    let mut fields: Vec<(&str, Rule, bool, Option<J>)> = match kind {
-        "definition" => vec![
-            ("title", Rule::Text(1, 200, true), false, None),
-            ("html", Rule::Text(1, 500_000, false), false, None),
-            ("sources", Rule::Sources, false, None),
-            (
-                "refreshSeconds",
-                Rule::Integer(0.0, 86400.0, true),
-                false,
-                Some(J::Number(5.0)),
-            ),
-            ("metadata", Rule::Metadata, false, Some(J::Object(vec![]))),
-            ("imageToken", Rule::Token, false, Some(J::Null)),
-        ],
-        "object-source" => vec![("objectId", text, false, None)],
-        "contract-source" => vec![
-            ("contractKey", text, false, None),
-            (
-                "limit",
-                Rule::Integer(1.0, 100.0, true),
-                false,
-                Some(J::Number(50.0)),
-            ),
-        ],
-        "list" => vec![
-            ("cursor", Rule::Text(0, usize::MAX, false), true, None),
-            (
-                "limit",
-                Rule::Integer(1.0, 100.0, true),
-                false,
-                Some(J::Number(50.0)),
-            ),
-        ],
-        "save" => vec![
-            ("id", text, true, None),
-            ("expectedRevision", revision, true, None),
-            ("value", Rule::Object("definition"), false, None),
-        ],
-        "delete" => vec![
-            ("id", text, false, None),
-            ("expectedRevision", revision, false, None),
-        ],
-        "read" | "data" => vec![("id", text, false, None)],
-        "output" | "render" | "image" => vec![
-            (
-                "width",
-                Rule::Integer(100.0, 4096.0, true),
-                false,
-                Some(J::Number(800.0)),
-            ),
-            (
-                "height",
-                Rule::Integer(100.0, 4096.0, true),
-                false,
-                Some(J::Number(600.0)),
-            ),
-            ("colorMode", Rule::Color, false, Some("color".into())),
-        ],
-        _ => return Err(IvyError::internal()),
-    };
-    if kind == "render" || kind == "image" {
-        fields.push(("id", text, false, None));
-    }
-    if kind == "image" {
-        fields.push(("token", Rule::Text(1, 128, false), false, None));
-    }
-    for (name, rule, optional, default) in &fields {
-        let value = input.and_then(|v| v.get(name));
-        if value.is_none() && *optional {
-            continue;
+        let metadata = value.get("metadata").cloned().unwrap_or(J::Object(vec![]));
+        if metadata.as_object().is_none() {
+            return Err(invalid(&object.path("metadata"), "expected an object"));
         }
-        let mut p = path.to_vec();
-        p.push((*name).into());
-        let mut child = parse(*rule, value.or(default.as_ref()), &p)?;
-        if *name == "refreshSeconds"
-            && !child.aborted
-            && child.value.as_f64().is_some_and(|n| n != 0.0 && n < 5.0)
-        {
-            child.custom(&p, "Invalid input");
+        let encoded = json::encode_uri_component(&json::stringify(&metadata, usize::MAX)?.into())?;
+        if metadata.get("refreshSeconds").is_some() || encoded.len() > 8000 {
+            return Err(invalid(
+                &object.path("metadata"),
+                "must fit in 8000 encoded bytes and must not contain refreshSeconds",
+            ));
         }
-        result.aborted |= child.aborted;
-        result.issues.extend(child.issues);
-        result.value.insert(*name, child.value);
-    }
-    let unknown: Vec<_> = ordered(pairs)
-        .into_iter()
-        .filter(|(key, _)| {
-            !fields
-                .iter()
-                .any(|(name, _, _, _)| key == &JsString::from(*name))
+        let image_token = match value.get("imageToken") {
+            None | Some(J::Null) => None,
+            Some(_) => {
+                let token = object.text("imageToken", 32, 128)?;
+                if !token
+                    .0
+                    .iter()
+                    .all(|u| matches!(u, 65..=90 | 97..=122 | 48..=57 | 95 | 45))
+                {
+                    return Err(invalid(
+                        &object.path("imageToken"),
+                        "expected a URL-safe token",
+                    ));
+                }
+                Some(token)
+            }
+        };
+        Ok(Self {
+            title,
+            html,
+            sources,
+            refresh_seconds,
+            metadata,
+            image_token,
         })
-        .map(|(key, _)| key.clone())
-        .collect();
-    if !unknown.is_empty() {
-        let mut message: JsString = format!(
-            "Unrecognized key{}: ",
-            if unknown.len() > 1 { "s" } else { "" }
-        )
-        .into();
-        for (i, key) in unknown.iter().enumerate() {
-            if i > 0 {
-                message.0.extend(", ".encode_utf16());
-            }
-            message.0.push(34);
-            message.0.extend(&key.0);
-            message.0.push(34);
-        }
-        result.issue(
-            J::object([
-                ("code", "unrecognized_keys".into()),
-                (
-                    "keys",
-                    J::Array(unknown.into_iter().map(J::String).collect()),
+    }
+
+    pub fn into_json(self) -> J {
+        J::object([
+            ("title", J::String(self.title)),
+            ("html", J::String(self.html)),
+            (
+                "sources",
+                J::Object(
+                    self.sources
+                        .into_iter()
+                        .map(|(name, source)| {
+                            let value = match source {
+                                Source::Object(id) => J::object([("objectId", J::String(id))]),
+                                Source::Contract { key, limit } => J::object([
+                                    ("contractKey", J::String(key)),
+                                    ("limit", J::Number(f64::from(limit))),
+                                ]),
+                            };
+                            (name, value)
+                        })
+                        .collect(),
                 ),
-            ]),
-            path,
-            message,
-        );
+            ),
+            ("refreshSeconds", J::Number(f64::from(self.refresh_seconds))),
+            ("metadata", self.metadata),
+            (
+                "imageToken",
+                self.image_token.map(J::String).unwrap_or(J::Null),
+            ),
+        ])
     }
-    if !result.aborted {
-        if kind == "save" {
-            let id = result
-                .value
-                .get("id")
-                .and_then(J::as_js_string)
-                .is_some_and(|s| !s.0.is_empty());
-            let revision = result
-                .value
-                .get("expectedRevision")
-                .and_then(J::as_f64)
-                .is_some_and(|n| n != 0.0);
-            if id != revision {
-                result.custom(path, "Invalid input");
-            }
-        }
-        if matches!(kind, "output" | "render" | "image")
-            && result.value.required("width")?.as_f64().unwrap()
-                * result.value.required("height")?.as_f64().unwrap()
-                > 8_000_000.0
-        {
-            result.custom(path, "At most 8 million pixels.");
-        }
-    }
-    Ok(result)
 }
 
-/// Returns normalized values; validation failures match the existing handler's
-/// invalid_arguments code and Zod JSON issue message, including field order.
-pub fn parse_input(name: &str, input: &J) -> IvyResult<J> {
-    let name = match name {
-        "definition" => "definition",
-        "output" => "output",
-        "list" => "list",
-        "read" => "read",
-        "save" => "save",
-        "delete" => "delete",
-        "data" => "data",
-        "render" => "render",
-        "image" => "image",
-        _ => return Err(IvyError::internal()),
-    };
-    let parsed = object(name, Some(input), &[])?;
-    if parsed.issues.is_empty() {
-        return Ok(parsed.value);
-    }
-    Err(IvyError::new(
-        "invalid_arguments",
-        pretty(&J::Array(parsed.issues))?,
-    ))
+#[derive(Clone, Copy, Debug)]
+pub struct OutputOptions {
+    pub width: u32,
+    pub height: u32,
+    pub mode: ColorMode,
 }
 
-fn pretty(value: &J) -> IvyResult<String> {
-    let compact = json::stringify(value, usize::MAX)?;
-    let mut out = String::new();
-    let mut depth = 0usize;
-    let mut quoted = false;
-    let mut escaped = false;
-    let mut chars = compact.chars().peekable();
-    while let Some(c) = chars.next() {
-        if quoted {
-            out.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                quoted = false;
-            }
-            continue;
+impl OutputOptions {
+    pub fn parse(value: &J) -> IvyResult<Self> {
+        Self::from_object(&Object::new(
+            value,
+            "output",
+            &["width", "height", "colorMode"],
+        )?)
+    }
+
+    fn from_object(object: &Object<'_>) -> IvyResult<Self> {
+        let width = object.integer("width", Some(800), 100, 4096)? as u32;
+        let height = object.integer("height", Some(600), 100, 4096)? as u32;
+        if u64::from(width) * u64::from(height) > 8_000_000 {
+            return Err(invalid(object.path, "at most 8 million pixels are allowed"));
         }
-        match c {
-            '"' => {
-                quoted = true;
-                out.push(c);
-            }
-            '[' | '{' => {
-                out.push(c);
-                if chars.peek().is_some_and(|n| *n == ']' || *n == '}') {
-                    out.push(chars.next().unwrap());
-                } else {
-                    depth += 1;
-                    out.push('\n');
-                    out.push_str(&"  ".repeat(depth));
+        let mode = match object.value.get("colorMode") {
+            None => ColorMode::Color,
+            Some(value) => match value.as_str().ok().as_deref() {
+                Some("color") => ColorMode::Color,
+                Some("grayscale") => ColorMode::Grayscale,
+                Some("monochrome") => ColorMode::Monochrome,
+                _ => {
+                    return Err(invalid(
+                        &object.path("colorMode"),
+                        "expected color, grayscale or monochrome",
+                    ));
+                }
+            },
+        };
+        Ok(Self {
+            width,
+            height,
+            mode,
+        })
+    }
+
+    pub fn color_mode(self) -> &'static str {
+        match self.mode {
+            ColorMode::Color => "color",
+            ColorMode::Grayscale => "grayscale",
+            ColorMode::Monochrome => "monochrome",
+        }
+    }
+}
+
+pub enum Input {
+    List {
+        cursor: Option<JsString>,
+        limit: u32,
+    },
+    Read {
+        id: JsString,
+    },
+    Save {
+        value: Definition,
+        target: Option<(JsString, u64)>,
+    },
+    Delete {
+        id: JsString,
+        expected_revision: u64,
+    },
+    Data {
+        id: JsString,
+    },
+    Render {
+        id: JsString,
+        output: OutputOptions,
+    },
+    Image {
+        id: JsString,
+        token: JsString,
+        output: OutputOptions,
+    },
+}
+
+impl Input {
+    pub fn parse(name: &str, value: &J) -> IvyResult<Self> {
+        Ok(match name {
+            "list" => {
+                let object = Object::new(value, name, &["cursor", "limit"])?;
+                Self::List {
+                    cursor: object.optional_text("cursor", 0, usize::MAX)?,
+                    limit: object.integer("limit", Some(50), 1, 100)? as u32,
                 }
             }
-            ']' | '}' => {
-                depth -= 1;
-                out.push('\n');
-                out.push_str(&"  ".repeat(depth));
-                out.push(c);
+            "read" | "data" => {
+                let object = Object::new(value, name, &["id"])?;
+                let id = object.text("id", 1, usize::MAX)?;
+                if name == "read" {
+                    Self::Read { id }
+                } else {
+                    Self::Data { id }
+                }
             }
-            ',' => {
-                out.push_str(",\n");
-                out.push_str(&"  ".repeat(depth));
+            "save" => {
+                let object = Object::new(value, name, &["id", "expectedRevision", "value"])?;
+                let id = object.optional_text("id", 1, usize::MAX)?;
+                let revision = value
+                    .get("expectedRevision")
+                    .map(|v| integer(v, &object.path("expectedRevision"), 1, MAX_REVISION))
+                    .transpose()?;
+                let target = match (id, revision) {
+                    (None, None) => None,
+                    (Some(id), Some(revision)) => Some((id, revision)),
+                    _ => {
+                        return Err(invalid(
+                            name,
+                            "id and expectedRevision must be supplied together",
+                        ));
+                    }
+                };
+                Self::Save {
+                    value: Definition::parse_at(object.required("value")?, "save.value")?,
+                    target,
+                }
             }
-            ':' => out.push_str(": "),
-            _ => out.push(c),
+            "delete" => {
+                let object = Object::new(value, name, &["id", "expectedRevision"])?;
+                Self::Delete {
+                    id: object.text("id", 1, usize::MAX)?,
+                    expected_revision: object.integer("expectedRevision", None, 1, MAX_REVISION)?,
+                }
+            }
+            "render" | "image" => {
+                let fields: &[&str] = if name == "image" {
+                    &["id", "token", "width", "height", "colorMode"]
+                } else {
+                    &["id", "width", "height", "colorMode"]
+                };
+                let object = Object::new(value, name, fields)?;
+                let id = object.text("id", 1, usize::MAX)?;
+                let output = OutputOptions::from_object(&object)?;
+                if name == "image" {
+                    Self::Image {
+                        id,
+                        token: object.text("token", 1, 128)?,
+                        output,
+                    }
+                } else {
+                    Self::Render { id, output }
+                }
+            }
+            _ => return Err(IvyError::internal()),
+        })
+    }
+
+    pub fn is_write(&self) -> bool {
+        matches!(self, Self::Save { .. } | Self::Delete { .. })
+    }
+}
+
+fn invalid(path: &str, message: &str) -> IvyError {
+    IvyError::new("invalid_arguments", format!("Invalid {path}: {message}."))
+}
+
+struct Object<'a> {
+    value: &'a J,
+    path: &'a str,
+}
+
+impl<'a> Object<'a> {
+    fn new(value: &'a J, path: &'a str, fields: &[&str]) -> IvyResult<Self> {
+        let pairs = value
+            .as_object()
+            .ok_or_else(|| invalid(path, "expected an object"))?;
+        for (name, _) in pairs {
+            if !fields
+                .iter()
+                .any(|field| name.0.iter().copied().eq(field.encode_utf16()))
+            {
+                return Err(invalid(
+                    path,
+                    &format!("unrecognized field {}", String::from_utf16_lossy(&name.0)),
+                ));
+            }
+        }
+        Ok(Self { value, path })
+    }
+
+    fn path(&self, name: &str) -> String {
+        format!("{}.{name}", self.path)
+    }
+
+    fn required(&self, name: &str) -> IvyResult<&'a J> {
+        self.value
+            .get(name)
+            .ok_or_else(|| invalid(&self.path(name), "field is required"))
+    }
+
+    fn string(&self, name: &str) -> IvyResult<JsString> {
+        self.required(name)?
+            .as_js_string()
+            .cloned()
+            .ok_or_else(|| invalid(&self.path(name), "expected a string"))
+    }
+
+    fn text(&self, name: &str, min: usize, max: usize) -> IvyResult<JsString> {
+        let text = self.string(name)?;
+        text_length(&text, &self.path(name), min, max)?;
+        Ok(text)
+    }
+
+    fn optional_text(&self, name: &str, min: usize, max: usize) -> IvyResult<Option<JsString>> {
+        self.value
+            .get(name)
+            .map(|_| self.text(name, min, max))
+            .transpose()
+    }
+
+    fn integer(&self, name: &str, default: Option<u64>, min: u64, max: u64) -> IvyResult<u64> {
+        match self.value.get(name) {
+            Some(value) => integer(value, &self.path(name), min, max),
+            None => default.ok_or_else(|| invalid(&self.path(name), "field is required")),
         }
     }
-    Ok(out)
+}
+
+fn integer(value: &J, path: &str, min: u64, max: u64) -> IvyResult<u64> {
+    match value.as_f64() {
+        Some(n) if n.is_finite() && n.fract() == 0.0 && n >= min as f64 && n <= max as f64 => {
+            Ok(n as u64)
+        }
+        _ => Err(invalid(
+            path,
+            &format!("expected an integer between {min} and {max}"),
+        )),
+    }
+}
+
+fn text_length(text: &JsString, path: &str, min: usize, max: usize) -> IvyResult<()> {
+    if (min..=max).contains(&text.code_point_len()) {
+        Ok(())
+    } else {
+        Err(invalid(
+            path,
+            &format!("expected {min} to {max} characters"),
+        ))
+    }
+}
+
+fn valid_source_name(name: &JsString) -> bool {
+    (1..=64).contains(&name.0.len())
+        && matches!(name.0[0], 65..=90 | 97..=122)
+        && name
+            .0
+            .iter()
+            .all(|u| matches!(u, 65..=90 | 97..=122 | 48..=57 | 95))
 }

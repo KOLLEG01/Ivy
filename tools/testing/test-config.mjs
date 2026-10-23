@@ -482,6 +482,7 @@ export const rustTests = {
   'tests/rust/hive_push_profile.rs': { package: 'ivy-hive', test: 'hive-push-profile' },
   'tests/rust/hive_package_ui.rs': { package: 'ivy-hive', test: 'hive-package-ui' },
   'tests/rust/hive_http.rs': { package: 'ivy-hive', test: 'hive-http' },
+  'tests/rust/hive_dashboard_image.rs': { package: 'ivy-hive', test: 'hive-dashboard-image' },
   'tests/rust/hive_network.rs': { package: 'ivy-hive', test: 'hive-network' },
   'tests/rust/hive_dispatch_gate.rs': { package: 'ivy-hive', test: 'hive-network', filter: 'dispatch_gate::', testThreads: 1 },
   'tests/rust/hive_offline_backup.rs': { package: 'ivy-hive', test: 'hive-offline-backup' },

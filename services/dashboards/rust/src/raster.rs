@@ -9,7 +9,7 @@ pub enum ColorMode {
 }
 
 /// Composite straight-alpha sRGB bytes onto white in the same f64 operation order
-/// as the existing browser renderer, then apply JavaScript Math.round semantics.
+/// as the browser renderer, then round half upward to the nearest byte.
 pub fn gray_pixel(rgba: [u8; 4], mode: ColorMode) -> u8 {
     let alpha = f64::from(rgba[3]) / 255.0;
     let luminance =

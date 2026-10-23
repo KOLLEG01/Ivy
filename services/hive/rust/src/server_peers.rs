@@ -335,6 +335,21 @@ impl Peers {
             Err(error) => ready(Err(error)),
         }
     }
+    pub fn dashboard_image(
+        &self,
+        context: &IvyJson,
+        node: &JsString,
+        args: &IvyJson,
+    ) -> IvyResult<Reply> {
+        let call = self
+            .0
+            .owners
+            .routing
+            .lock()
+            .unwrap()
+            .prepare_dashboard_image(context, node, args)?;
+        Ok(self.forward(context, call))
+    }
     fn start_forward(&self, context: &IvyJson, call: PreparedCall) -> IvyResult<Reply> {
         require_fresh(context, &*self.0.owners.now)?;
         let mut state = self.0.state.lock().unwrap();
@@ -563,7 +578,7 @@ impl Peers {
             .map(|v| v.as_js_string().cloned().ok_or_else(IvyError::internal))
             .collect::<IvyResult<Vec<_>>>()?;
         let mut result = IvyJson::object([("subscribed", IvyJson::Number(filters.len() as f64))]);
-        if params.get("changes").and_then(IvyJson::as_bool) == Some(true) {
+        if params.get("changes").is_some() {
             result.insert("changes", IvyJson::Number(changes.len() as f64));
         }
         {

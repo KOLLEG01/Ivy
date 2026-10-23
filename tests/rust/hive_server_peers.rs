@@ -1412,6 +1412,33 @@ fn native_trace(mut trace: Value) -> Value {
 }
 
 #[test]
+fn native_provider_subscription_acknowledges_requested_change_scopes() {
+    for changes in [
+        None,
+        Some(json!([])),
+        Some(json!(["uis", "system/runtime"])),
+    ] {
+        let value = native_trace(
+            json!({"name":"change-scope-acknowledgement","options":{"validateMessages":true},"steps":[
+                connect("c", None), subscribe("c", json!([]), changes.clone())
+            ]}),
+        );
+        let reply = value["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|row| row.as_array().unwrap())
+            .find(|event| event["kind"] == "send" && event["value"]["id"] == "subscribe")
+            .expect("The browser must receive its subscription acknowledgement");
+        let mut expected = json!({"subscribed": 0});
+        if let Some(changes) = changes {
+            expected["changes"] = changes.as_array().unwrap().len().into();
+        }
+        assert_eq!(reply["value"]["result"], expected);
+    }
+}
+
+#[test]
 fn native_provider_ids_retain_pending_work_until_the_exact_peer_reply() {
     for id in [
         None,

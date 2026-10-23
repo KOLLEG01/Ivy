@@ -8,6 +8,7 @@ pub mod browser_push_native;
 pub mod browser_push_store;
 pub mod browser_session;
 pub mod configurations;
+pub mod dashboard_image;
 pub mod discovery;
 pub mod events;
 mod filesystem;

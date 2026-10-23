@@ -73,7 +73,7 @@ impl BrowserPaths<'_> {
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| self.cwd.to_path_buf());
-            // Node path.resolve also anchors a relative INIT_CWD at process.cwd().
+            // Resolve a relative installation base against the working directory.
             let base = if base.is_absolute() {
                 base
             } else {
