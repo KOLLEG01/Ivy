@@ -106,15 +106,15 @@ pub async fn prepare_reset_hold(
             let runtime_epoch = J::String(runtime_epoch);
             let digest = J::String(publisher_credential_digest);
             let same = previous.as_ref().is_some_and(|previous| {
-                truthy(previous)
-                    && previous.get("resetId") == Some(&reset_id)
+                previous.get("resetId") == Some(&reset_id)
                     && previous.get("runtimeEpoch") == Some(&runtime_epoch)
                     && previous.get("planHash") == Some(&plan_hash)
                     && previous.get("publisherCredentialDigest") == Some(&digest)
             });
-            if let Some(previous) = previous.as_ref().filter(|v| truthy(v)) {
+            if let Some(previous) = previous.as_ref().filter(|v| !v.is_null()) {
+                require(previous.as_object().is_some(), "storage_invalid", "Runtime reset record must be an object.")?;
                 require(
-                    previous.get("deploymentComplete").is_some_and(truthy) || same,
+                    previous.get("deploymentComplete") == Some(&J::Bool(true)) || same,
                     "mutation_conflict",
                     "Another incomplete runtime reset must be resumed exactly.",
                 )?;
@@ -239,7 +239,7 @@ pub async fn confirm_reset_record(
                 "mutation_conflict",
                 "Runtime reset host is not released for this identity.",
             )?;
-            if record.get("deploymentComplete").is_some_and(truthy) {
+            if record.get("deploymentComplete") == Some(&J::Bool(true)) {
                 return Ok(record);
             }
             record.insert("deploymentComplete", true.into());
@@ -268,7 +268,7 @@ pub fn restored_bootstrap_target(
         .find(|process| {
             process.get("instanceId") == Some(&J::String(instance_id.clone()))
                 && process.get("candidateId") == Some(&J::String(candidate_id.clone()))
-                && process.get("configPath").is_some_and(truthy)
+                && process.get("configPath").and_then(J::as_js_string).is_some_and(|path| !path.0.is_empty())
         })
     else {
         return Ok(None);

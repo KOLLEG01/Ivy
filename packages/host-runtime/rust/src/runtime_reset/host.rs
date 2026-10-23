@@ -211,7 +211,7 @@ impl Inner {
                 return Ok(None);
             }
             let pid = number(health.required("pid")?)?;
-            if health.get("launchId").is_some_and(truthy) {
+            if health.get("launchId").and_then(J::as_js_string).is_some_and(|text| !text.0.is_empty()) {
                 let control = J::object([
                     ("schemaVersion", J::Number(1.0)),
                     ("instanceId", instance.required("instanceId")?.clone()),
@@ -319,7 +319,7 @@ impl Inner {
             return Err(IvyError::internal());
         }
         let value = internal(json::parse(&result.stdout.to_utf8()?, usize::MAX))?;
-        if !value.get("ok").is_some_and(truthy) {
+        if value.get("ok") != Some(&J::Bool(true)) {
             let code = value
                 .get("code")
                 .filter(|v| !v.is_null())

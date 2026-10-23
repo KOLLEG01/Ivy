@@ -7,8 +7,6 @@ mod preparation_files_cases;
 mod artifact_inventory_cases;
 #[path = "host-preparation-inputs-cases.rs"]
 mod preparation_inputs_cases;
-#[path = "host-emitted-runtime-cases.rs"]
-mod emitted_runtime_cases;
 #[path = "host-prepare-workflow-cases.rs"]
 mod prepare_workflow_cases;
 

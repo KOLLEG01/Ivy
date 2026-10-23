@@ -151,7 +151,6 @@ fn preparation() -> PreparationRuntime {
             version: "24.18.0".into(),
         }),
         compare: Arc::new(|a, b| a.0.cmp(&b.0)),
-        imports: Some(Arc::new(|_, _| panic!("compatibility must not parse source"))),
         http: PortableHttp::new(reqwest::Client::builder().no_proxy()).unwrap(),
     }
 }

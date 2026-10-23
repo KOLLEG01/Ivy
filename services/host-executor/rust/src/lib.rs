@@ -1,6 +1,7 @@
 //! Service admission and lifecycle. Production effects are mandatory inputs;
 //! no locale/parser/transport or managed-process owner is substituted here.
 mod native;
+pub mod backup;
 pub mod entry;
 pub mod reset;
 pub mod reset_storage;

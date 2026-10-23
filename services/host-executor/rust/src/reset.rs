@@ -26,13 +26,6 @@ fn native(value: &JsString) -> IvyResult<PathBuf> {
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok { Ok(()) } else { Err(IvyError::new(code, message)) }
 }
-fn truthy(value: &J) -> bool {
-    match value {
-        J::Null => false, J::Bool(v) => *v,
-        J::Number(v) => *v != 0.0 && !v.is_nan(),
-        J::String(v) => !v.0.is_empty(), _ => true,
-    }
-}
 
 /// Concrete local clear owner. Hive Store/SQL stays bound at this service layer;
 /// no HostRuntime -> Hive/CLI dependency or replacement storage adapter exists.
@@ -90,7 +83,7 @@ impl ResetClear {
         let instances = array(config.required("instances")?)?;
         let hive = instances.iter().find(|v| v.get("componentId") == Some(&"hive".into()));
         let binding = hive_reset_storage();
-        if let Some(instance) = hive.filter(|_| !record.get("instructionsCaptured").is_some_and(truthy)) {
+        if let Some(instance) = hive.filter(|_| record.get("instructionsCaptured") != Some(&J::Bool(true))) {
             let root = field(&layout::service_paths(&config, instance)?, "data")?;
             record.insert("instructions", binding.saved_instructions(native(&root)?.join("hive.sqlite")).await?);
             record.insert("instructionsCaptured", true.into());

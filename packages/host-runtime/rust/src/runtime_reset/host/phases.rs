@@ -19,7 +19,7 @@ fn enabled(record: &J) -> IvyResult<BTreeSet<JsString>> {
         if value.is_null() {
             return Err(IvyError::internal());
         }
-        if value.get("enabled").is_some_and(truthy) {
+        if value.get("enabled") == Some(&J::Bool(true)) {
             if let Some(id) = value.get("instanceId").and_then(J::as_js_string) {
                 ids.insert(id.clone());
             }
@@ -74,7 +74,7 @@ async fn running_target(journal: &HostJournal, instance: &J, message: &str) -> I
     )?;
     target.ok_or_else(IvyError::internal)
 }
-async fn runtime(target: &J, node: &NodeRuntime) -> IvyResult<J> {
+async fn runtime(target: &J, node: Option<&NodeRuntime>) -> IvyResult<J> {
     Ok(config::instance_config(
         node_path::node_filesystem_path(
             property(target, "configPath")?
@@ -90,15 +90,15 @@ async fn runtime(target: &J, node: &NodeRuntime) -> IvyResult<J> {
 }
 
 impl ResetHost {
-    /// The caller supplies its discovered pinned workload runtime, as for other
-    /// host actions. No runtime lookup or replacement admission is synthesized.
+    /// Only intentional JavaScript workloads need the caller's Node capability.
     pub async fn bootstrap(
         &self,
         config: J,
         reset_id: JsString,
         runtime_epoch: JsString,
-        node: NodeRuntime,
+        node: impl Into<Option<NodeRuntime>>,
     ) -> IvyResult<J> {
+        let node = node.into();
         let inner = self.0.clone();
         internal(
             tokio::spawn(async move {
@@ -113,8 +113,9 @@ impl ResetHost {
         config: J,
         reset_id: JsString,
         runtime_epoch: JsString,
-        node: NodeRuntime,
+        node: impl Into<Option<NodeRuntime>>,
     ) -> IvyResult<J> {
+        let node = node.into();
         let inner = self.0.clone();
         internal(
             tokio::spawn(async move {
@@ -131,10 +132,10 @@ impl Inner {
         config: J,
         reset_id: JsString,
         runtime_epoch: JsString,
-        node: NodeRuntime,
+        node: Option<NodeRuntime>,
     ) -> IvyResult<J> {
         let record = record(&config).await?;
-        // Preserve JS short-circuit order, including lstat only after identity.
+        // Admit the retained identity before reading its maintenance marker.
         require(
             record.get("resetId") == Some(&J::String(reset_id.clone()))
                 && record.get("runtimeEpoch") == Some(&J::String(runtime_epoch.clone()))
@@ -158,7 +159,7 @@ impl Inner {
             let id = field(&target, "candidateId")?.to_utf8()?;
             let candidate = journal.candidate(&id).await?;
             let manifest = journal.manifest(&id).await?;
-            let runtime = runtime(&target, &node).await?;
+            let runtime = runtime(&target, node.as_ref()).await?;
             self.docker
                 .stop_container(
                     config.clone(),
@@ -207,7 +208,7 @@ impl Inner {
         config: J,
         reset_id: JsString,
         runtime_epoch: JsString,
-        node: NodeRuntime,
+        node: Option<NodeRuntime>,
     ) -> IvyResult<J> {
         let record = record(&config).await?;
         require(
@@ -236,7 +237,7 @@ impl Inner {
                 let manifest = journal
                     .manifest(&field(&target, "candidateId")?.to_utf8()?)
                     .await?;
-                let runtime = runtime(&target, &node).await?;
+                let runtime = runtime(&target, node.as_ref()).await?;
                 let path = runtime_maintenance::hive_reset_bootstrap_marker(
                     &node_path::node_filesystem_path(
                         property(&runtime, "dataRoot")?
@@ -280,7 +281,7 @@ impl Inner {
                 let id = field(&target, "candidateId")?.to_utf8()?;
                 let candidate = journal.candidate(&id).await?;
                 let manifest = journal.manifest(&id).await?;
-                let runtime = runtime(&target, &node).await?;
+                let runtime = runtime(&target, node.as_ref()).await?;
                 let managed = self
                     .docker
                     .start_container(

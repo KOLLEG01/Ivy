@@ -4,6 +4,7 @@ import { mkdir, cp, stat, readFile, realpath, rename, copyFile, readdir, rm, sym
 import type { Dirent } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import typescript from 'typescript';
+import { emittedRuntimePackages } from './emitted-runtime.js';
 import { join, resolve, relative, dirname } from 'node:path';
 import { ExecutorLock, HostJournal } from './journal.js';
 import { sourceBuildPlan, verifySnapshotMetadata } from './source.js';
@@ -166,32 +167,6 @@ async function transferPreparedPayload(source: string, destination: string, dire
   }
 }
 
-async function emittedRuntimePackages(root: string): Promise<Set<string>> {
-  const packages = new Set<string>(), directories = [root];
-  const add = (specifier: string): void => {
-    if (specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('node:')) return;
-    const parts = specifier.split('/'), name = specifier.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]!;
-    if (/^(?:@[a-z0-9_~-][a-z0-9._~-]*\/)?[a-z0-9_~-][a-z0-9._~-]*$/i.test(name)) packages.add(name);
-  };
-  for (let index = 0; index < directories.length;) {
-    const directory = directories[index++]!;
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) { directories.push(path); continue; }
-      if (!entry.isFile() || !/\.(?:c|m)?js$/.test(entry.name)) continue;
-      const source = await readFile(path, 'utf8');
-      const parsed = typescript.createSourceFile(path, source, typescript.ScriptTarget.Latest, false, typescript.ScriptKind.JS);
-      const visit = (node: import('typescript').Node): void => {
-        if ((typescript.isImportDeclaration(node) || typescript.isExportDeclaration(node)) && node.moduleSpecifier && typescript.isStringLiteralLike(node.moduleSpecifier)) add(node.moduleSpecifier.text);
-        if (typescript.isCallExpression(node) && node.arguments.length && typescript.isStringLiteralLike(node.arguments[0]!) &&
-          (node.expression.kind === typescript.SyntaxKind.ImportKeyword || typescript.isIdentifier(node.expression) && node.expression.text === 'require')) add(node.arguments[0]!.text);
-        typescript.forEachChild(node, visit);
-      };
-      visit(parsed);
-    }
-  }
-  return packages;
-}
 const selectedDependencyPath = (path: string, selected: ReadonlySet<string>): boolean =>
   path === 'node_modules' || [...selected].some(location => path === location || path.startsWith(location + '/') || location.startsWith(path + '/'));
 
@@ -370,7 +345,7 @@ export async function prepareCandidate(snapshot: Host.SourceSnapshot, componentI
       if (!dependencyCacheHit && command.executable === 'node' && command.args[0] === 'tools/build/run-npm.mjs' && command.args[1] === 'ci')
         await retainDependencies(sourceRoot, dependencyCacheRoot, dependencyKey, workspaceLinks);
     }
-    const runtimePackages = plan.kind === 'app' ? new Set<string>() : runtimePackageLocations(packageLock, await emittedRuntimePackages(join(sourceRoot, 'dist')));
+    const runtimePackages = plan.kind === 'app' ? new Set<string>() : runtimePackageLocations(packageLock, await emittedRuntimePackages(join(sourceRoot, 'dist'), typescript));
     await mkdir(artifactRoot, { recursive: true });
     await progress.step('collecting-runtime-files');
     if (plan.kind === 'app') {

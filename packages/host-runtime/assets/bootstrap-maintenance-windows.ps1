@@ -19,8 +19,13 @@ function Get-IvyAutomaticLaunch($Plan, $Data) {
         [IO.Path]::GetFileName($ivyLauncher) -cne 'ivy-host-job.exe') { throw 'Native maintenance leaves its selected artifact.' }
     $ivyArgs = @('--parent','0',$ivyWorker,'--config',[string]$Plan.configPath,'--request',[string]$Data.requestPath,
       '--distribution',[string]$Plan.artifactRoot)
-    if ($Data.nodeRequired -isnot [bool] -or $Data.nodeRequired) { $ivyArgs += @('--node-executable',[string]$Plan.nodeExecutable) }
+    $ivyNeedsNode = @($Plan.processes | Where-Object { -not $_.entrypoint -or [string]$_.entrypoint.executable -cnotlike 'dist/native/*' }).Count -gt 0
+    if ($ivyNeedsNode) {
+      if (-not $Plan.nodeExecutable) { throw 'A JavaScript bootstrap process requires its configured Node executable.' }
+      $ivyArgs += @('--node-executable',[string]$Plan.nodeExecutable)
+    }
   } else {
+    if (-not $Plan.nodeExecutable) { throw 'The legacy JavaScript maintenance worker requires Node.' }
     $ivyLauncher = Join-Path ([string]$Plan.artifactRoot) 'dist\native\ivy-host-job.exe'
     $ivyWorker = Join-Path ([string]$Plan.artifactRoot) 'dist\packages\host-runtime\src\bootstrap-auto-worker.js'
     $ivyArgs = @('--parent','0',[string]$Plan.nodeExecutable,$ivyWorker,'--config',[string]$Plan.configPath,
@@ -60,7 +65,8 @@ function Get-IvyOwner($Instance, $Plans) {
     $ivyProcess = $ivyProcess[0]
     $ivyBreakaway = @(); if ($ivyProcess.allowWindowsBreakaway -eq $true) { $ivyBreakaway = @('--allow-breakaway') }
     $ivyArtifact = if ($ivyProcess.artifactRoot) { [string]$ivyProcess.artifactRoot } else { [string]$ivyPlan.artifactRoot }
-    $ivyExecutable = if ($ivyProcess.entrypoint -and $ivyProcess.entrypoint.executable -ne 'node') { [string]$ivyProcess.entrypoint.executable } else { [string]$ivyPlan.nodeExecutable }
+    $ivyExecutable = if ($ivyProcess.entrypoint -and $ivyProcess.entrypoint.executable -notin @('node','$node')) { [string]$ivyProcess.entrypoint.executable } else { [string]$ivyPlan.nodeExecutable }
+    if (-not $ivyExecutable) { throw 'A JavaScript bootstrap process requires its configured Node executable.' }
     $ivyArgs = if ($ivyProcess.entrypoint) { @($ivyProcess.entrypoint.args) } elseif ($ivyProcess.componentId -eq 'host-executor') { @('dist\packages\host-runtime\src\executor.js') } else { @('dist\services\' + $ivyProcess.componentId + '\src\main.js') }
     $ivyConfig = if ($ivyProcess.componentId -eq 'host-executor') { [string]$ivyPlan.configPath } elseif ($ivyProcess.configPath) { [string]$ivyProcess.configPath } else { [string]$ivyPlan.configPath }
     $ivyOwnConfig = @(); if ($ivyProcess.componentId -eq 'host-executor' -and $ivyProcess.configPath) { $ivyOwnConfig = @('--instance-config', [string]$ivyProcess.configPath) }
@@ -100,7 +106,8 @@ try {
     $ivyProcess = $ivyProcess[0]
     $ivyBreakaway = @(); if ($ivyProcess.allowWindowsBreakaway -eq $true) { $ivyBreakaway = @('--allow-breakaway') }
     $ivyArtifact = if ($ivyProcess.artifactRoot) { [string]$ivyProcess.artifactRoot } else { [string]$ivyNext.artifactRoot }
-    $ivyExecutable = if ($ivyProcess.entrypoint -and $ivyProcess.entrypoint.executable -ne 'node') { [string]$ivyProcess.entrypoint.executable } else { [string]$ivyNext.nodeExecutable }
+    $ivyExecutable = if ($ivyProcess.entrypoint -and $ivyProcess.entrypoint.executable -notin @('node','$node')) { [string]$ivyProcess.entrypoint.executable } else { [string]$ivyNext.nodeExecutable }
+    if (-not $ivyExecutable) { throw 'A JavaScript bootstrap process requires its configured Node executable.' }
     $ivyArgs = if ($ivyProcess.entrypoint) { @($ivyProcess.entrypoint.args) } elseif ($ivyProcess.componentId -eq 'host-executor') { @('dist\packages\host-runtime\src\executor.js') } else { @('dist\services\' + $ivyProcess.componentId + '\src\main.js') }
     $ivyConfig = if ($ivyProcess.componentId -eq 'host-executor') { [string]$ivyNext.configPath } elseif ($ivyProcess.configPath) { [string]$ivyProcess.configPath } else { [string]$ivyNext.configPath }
     $ivyOwnConfig = @(); if ($ivyProcess.componentId -eq 'host-executor' -and $ivyProcess.configPath) { $ivyOwnConfig = @('--instance-config', [string]$ivyProcess.configPath) }

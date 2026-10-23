@@ -1,98 +1,56 @@
-//! Emitted JavaScript dependency inventory; syntax belongs to the supplied parser.
-use crate::{IvyError, IvyResult, filesystem, node_path};
-use ivy_contracts::JsString;
-use std::{collections::BTreeSet, fs, path::PathBuf, sync::Arc};
+//! Intentional JavaScript builds use their installed compiler, not a Rust JS emulator.
+use crate::{IvyError, IvyResult, node_runtime::NodeRuntime, process};
+use ivy_contracts::{JsString, json};
+use std::{collections::BTreeMap, path::Path};
 
-/// Return literal module specifiers in the original depth-first visitor order:
-/// import/export declarations, dynamic import and identifier require calls.
-/// The production binding must preserve the accepted JavaScript parser semantics.
-pub type JavaScriptImports =
-    Arc<dyn Fn(&JsString, &JsString) -> IvyResult<Vec<JsString>> + Send + Sync>;
+const MAXIMUM_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const INVENTORY: &str = concat!(
+    include_str!("../../src/emitted-runtime.ts"),
+    r#"
+import {createRequire} from 'node:module';
+const sourceRoot = process.argv[1];
+const typescript = createRequire(join(sourceRoot, 'package.json'))(join(sourceRoot, 'node_modules/typescript'));
+process.stdout.write(JSON.stringify([...await emittedRuntimePackages(join(sourceRoot, 'dist'), typescript)]));
+"#
+);
 
-fn package(specifier: &JsString) -> Option<JsString> {
-    if specifier.0.first().is_some_and(|c| matches!(*c, 46 | 47))
-        || specifier.0.starts_with(&[110, 111, 100, 101, 58])
-    {
-        return None;
-    }
-    let mut parts = specifier.0.split(|c| *c == 47);
-    let first = parts.next()?;
-    let mut name = first.to_vec();
-    if first.first() == Some(&64) {
-        name.push(47);
-        name.extend(parts.next().unwrap_or_default());
-    }
-    let text = String::from_utf16(&name).ok()?;
-    let segment = |s: &str| {
-        !s.is_empty()
-            && s.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'~' | b'-' | b'.'))
-            && s.as_bytes()[0] != b'.'
-    };
-    let accepted = if let Some(scoped) = text.strip_prefix('@') {
-        scoped
-            .split_once('/')
-            .is_some_and(|(scope, name)| segment(scope) && segment(name))
-    } else {
-        segment(&text)
-    };
-    accepted.then_some(JsString(name))
-}
-
-/// Keep original breadth-first directory order and insertion-ordered package Set.
-/// Symlink entries and non-JavaScript files are skipped, as with Node Dirent.
+/// Run once after the declared prepare commands have installed the source's tools.
+/// The normal process owner supplies the Job/process group, deadline and output bound.
 pub async fn emitted_runtime_packages(
-    root: PathBuf,
-    parse: JavaScriptImports,
+    source_root: &Path,
+    node: &NodeRuntime,
+    mut context: process::LaunchContext,
 ) -> IvyResult<Vec<JsString>> {
-    tokio::task::spawn_blocking(move || {
-        let mut directories = vec![root];
-        let mut index = 0;
-        let mut names = Vec::new();
-        let mut seen = BTreeSet::new();
-        while index < directories.len() {
-            let directory = directories[index].clone();
-            index += 1;
-            let directory = node_path::filesystem_path(&node_path::from_native(&directory));
-            let entries = fs::read_dir(&directory)
-                .map_err(|_| IvyError::internal())?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| IvyError::internal())?;
-            #[cfg(unix)]
-            let entries = {
-                use std::os::unix::ffi::OsStrExt;
-                let mut entries = entries;
-                entries.sort_by(|a, b| a.file_name().as_bytes().cmp(b.file_name().as_bytes()));
-                entries
-            };
-            for entry in entries {
-                let kind = entry.file_type().map_err(|_| IvyError::internal())?;
-                let name = node_path::node_utf8(&entry.file_name());
-                let path = directory.join(node_path::to_native(&name));
-                if kind.is_dir() {
-                    directories.push(path);
-                    continue;
-                }
-                let units = &name.0;
-                let script = [".js", ".cjs", ".mjs"]
-                    .iter()
-                    .any(|suffix| units.ends_with(&suffix.encode_utf16().collect::<Vec<_>>()));
-                if !kind.is_file() || !script {
-                    continue;
-                }
-                let bytes = filesystem::read_file_bytes(&path).map_err(|_| IvyError::internal())?;
-                let source = JsString::from(String::from_utf8_lossy(&bytes).as_ref());
-                for specifier in parse(&node_path::from_native(&path), &source)? {
-                    if let Some(name) = package(&specifier)
-                        && seen.insert(name.clone())
-                    {
-                        names.push(name);
-                    }
-                }
-            }
-        }
-        Ok(names)
-    })
-    .await
-    .map_err(|_| IvyError::internal())?
+    context.maximum_output_bytes = Some(MAXIMUM_OUTPUT_BYTES);
+    let result = process::run_command(
+        &process::Command {
+            executable: "$node".into(),
+            args: vec![
+                "--input-type=module-typescript".into(),
+                "--eval".into(),
+                INVENTORY.into(),
+                source_root.as_os_str().into(),
+            ],
+            cwd: None,
+            timeout_ms: 300_000,
+        },
+        source_root,
+        &BTreeMap::from([("$node".into(), node.executable.clone())]),
+        context,
+        None,
+    )
+    .await?;
+    if result.truncated {
+        return Err(IvyError::new(
+            "limit_exceeded",
+            "JavaScript runtime dependency inventory exceeds its output limit.",
+        ));
+    }
+    let value = json::parse(&result.stdout, MAXIMUM_OUTPUT_BYTES)?;
+    value
+        .as_array()
+        .ok_or_else(IvyError::internal)?
+        .iter()
+        .map(|name| name.as_js_string().cloned().ok_or_else(IvyError::internal))
+        .collect()
 }

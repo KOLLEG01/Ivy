@@ -3,7 +3,7 @@ use crate::{
     IvyError, IvyJson, IvyResult, Outcome,
     artifact::{self, FileCompare},
     config, dependency_cache,
-    emitted_runtime::{JavaScriptImports, emitted_runtime_packages},
+    emitted_runtime::emitted_runtime_packages,
     executor_lock::ExecutorLock,
     filesystem,
     journal::HostJournal,
@@ -31,7 +31,6 @@ use std::{
 pub struct PreparationRuntime {
     pub node: Option<NodeRuntime>,
     pub compare: FileCompare,
-    pub imports: Option<JavaScriptImports>,
     pub http: PortableHttp,
 }
 fn internal<T, E>(value: Result<T, E>) -> IvyResult<T> {
@@ -448,16 +447,27 @@ async fn prepare(
         let packages = if app || native {
             Vec::new()
         } else {
+            progress
+                .step("scanning-runtime-imports".into(), StepOptions::default())
+                .await?;
             runtime_dependencies::runtime_package_locations(
                 &package_lock,
                 emitted_runtime_packages(
-                    source_root.join("dist"),
-                    runtime.imports.clone().ok_or_else(|| {
+                    &source_root,
+                    runtime.node.as_ref().ok_or_else(|| {
                         IvyError::new(
                             "unsupported_runtime",
-                            "JavaScript preparation requires an explicit module parser.",
+                            "JavaScript preparation requires an explicit Node runtime.",
                         )
                     })?,
+                    process::LaunchContext {
+                        environment: environment.clone(),
+                        job_launcher: Some(crate::native_plan::native_binary_path(
+                            &bootstrap, "ivy-job",
+                        )),
+                        on_output: Some(progress.output_sink()),
+                        ..Default::default()
+                    },
                 )
                 .await?,
             )?

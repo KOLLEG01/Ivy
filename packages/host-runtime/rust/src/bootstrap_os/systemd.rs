@@ -260,13 +260,13 @@ impl SystemdBootstrapOs {
         for process in array(next.required("processes")?)?.iter().filter(|p| {
             p.get("user").is_some_and(truthy) && p.get("configPath").is_some_and(truthy)
         }) {
-            let root = process.get("artifactRoot").filter(|v| !v.is_null()).unwrap_or(next.required("artifactRoot")?);
-            let entry = process.get("entrypoint").or_else(|| next.get("entrypoint"));
-            let executable = match entry.and_then(|entry| entry.get("executable")).and_then(J::as_js_string) {
-                Some(file) if file.0.starts_with(&"dist/native/".encode_utf16().collect::<Vec<_>>()) =>
-                    crate::layout::path_json(&crate::paths::direct_native_file(&config::path_value(root)?, &file.to_utf8()?)?),
-                _ => next.required("nodeExecutable")?.clone(),
-            };
+            let executable = if crate::native_plan::is_native_plan(process) {
+                let root = process.get("artifactRoot").filter(|value| !value.is_null()).unwrap_or(next.required("artifactRoot")?);
+                crate::node_path::from_native(&crate::paths::direct_native_file(
+                    &config::path_value(root)?,
+                    &process.required("entrypoint")?.required("executable")?.as_str()?,
+                )?)
+            } else { crate::bootstrap::process_executable(&next, process)? };
             let identity = J::object([
                 ("componentId", process.required("componentId")?.clone()),
                 ("user", process.required("user")?.clone()),
@@ -279,7 +279,7 @@ impl SystemdBootstrapOs {
                         .unwrap_or(next.required("artifactRoot")?)
                         .clone(),
                 ),
-                ("nodeExecutable", executable),
+                ("nodeExecutable", J::String(executable)),
             ]);
             let runtime = config::instance_config(
                 config::path_value(process.required("configPath")?)?,

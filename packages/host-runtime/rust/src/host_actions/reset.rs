@@ -51,9 +51,10 @@ impl HostActions {
         config_path: PathBuf,
         phase: ResetHostPhase,
         args: ResetPhaseArguments,
-        node: NodeRuntime,
+        node: impl Into<Option<NodeRuntime>>,
         storage: Arc<StorageContext>,
     ) -> IvyResult<J> {
+        let node = node.into();
         let this = self.clone();
         tokio::spawn(async move {
             let config = this.reset_configuration(config_path.clone()).await?;

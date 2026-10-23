@@ -1,8 +1,6 @@
 //! Current-state retention with durable retirement intent and replay evidence.
 use crate::{
-    IvyError, IvyJson as J, IvyResult,
-    artifact::FileCompare,
-    config,
+    IvyError, IvyJson as J, IvyResult, config,
     executor_lock::ExecutorLock,
     journal::HostJournal,
     node_path,
@@ -21,8 +19,7 @@ use std::{
 mod history;
 
 pub struct RetentionBindings {
-    pub node: NodeRuntime,
-    pub compare: FileCompare,
+    pub node: Option<NodeRuntime>,
     pub clock: Arc<dyn Clock>,
 }
 fn internal<T, E>(v: Result<T, E>) -> IvyResult<T> {
@@ -33,15 +30,6 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
         Ok(())
     } else {
         Err(IvyError::new(code, message))
-    }
-}
-fn truthy(v: &J) -> bool {
-    match v {
-        J::Null => false,
-        J::Bool(v) => *v,
-        J::Number(v) => *v != 0.0 && !v.is_nan(),
-        J::String(v) => !v.0.is_empty(),
-        _ => true,
     }
 }
 fn array(v: &J) -> IvyResult<&[J]> {
@@ -220,7 +208,6 @@ async fn finish_removal(
                 == Some(&crate::layout::path_json(&joined(&root, "component.json")))
             && candidate
                 .get("archivePath")
-                .filter(|v| truthy(v))
                 .is_none_or(|v| *v == crate::layout::path_json(&joined(&root, "package.tar.gz"))),
         "target_conflict",
         "Retiring candidate paths changed.",
@@ -336,7 +323,7 @@ async fn collect(
                 progress.removed("payloads");
             } else if let Some(code) = entry
                 .get("code")
-                .filter(|v| truthy(v) && **v != "already_compacted".into())
+                .filter(|v| !v.is_null() && **v != "already_compacted".into())
             {
                 progress.skipped("payloads", &code.as_str()?, true);
             }
@@ -353,18 +340,7 @@ async fn collect(
         protected.extend(journal.retention_candidate_ids().await?);
         let mut history = history::load(&config, "bootstrap-maintenance", &progress).await?;
         history.extend(history::load(&config, "bootstrap-automatic", &progress).await?);
-        // This order is the original locale comparison, not Rust string order.
-        let mut sort_error = None;
-        history.sort_by(|a, b| match (a.at.as_js_string(), b.at.as_js_string()) {
-            (Some(a), Some(b)) => (bindings.compare)(b, a),
-            _ => {
-                sort_error = Some(IvyError::internal());
-                std::cmp::Ordering::Equal
-            }
-        });
-        if let Some(error) = sort_error {
-            return Err(error);
-        }
+        history.sort_by(|a, b| b.at.cmp(&a.at));
         let retained = history::collect_plans(
             &config,
             journal,
@@ -441,12 +417,9 @@ async fn collect(
                         &directory,
                         "component.json",
                     )))
-                || candidate
-                    .get("archivePath")
-                    .filter(|v| truthy(v))
-                    .is_some_and(|v| {
-                        *v != crate::layout::path_json(&joined(&directory, "package.tar.gz"))
-                    })
+                || candidate.get("archivePath").is_some_and(|v| {
+                    *v != crate::layout::path_json(&joined(&directory, "package.tar.gz"))
+                })
             {
                 progress.skipped("candidates", "unrecognized_path", true);
                 continue;

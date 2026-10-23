@@ -4,7 +4,7 @@
 use super::{
     bootstrap_components, configuration_bootstrap_plan, field,
     publish_bootstrap_instance_configurations, require, retain_bootstrap_plan,
-    retained_bootstrap_plans, truthy,
+    retained_bootstrap_plans,
 };
 use crate::{
     IvyError, IvyJson as J, IvyResult, Outcome,
@@ -29,7 +29,7 @@ use effects::InitialInstallEffects;
 
 #[derive(Clone)]
 pub(crate) struct BootstrapInstallation {
-    node: NodeRuntime,
+    node: Option<NodeRuntime>,
     compare: FileCompare,
     distribution: PathBuf,
     job_launcher: PathBuf,
@@ -39,7 +39,7 @@ pub(crate) struct BootstrapInstallation {
 
 impl BootstrapInstallation {
     pub(crate) fn native(
-        node: NodeRuntime,
+        node: impl Into<Option<NodeRuntime>>,
         compare: FileCompare,
         distribution: PathBuf,
         job_launcher: PathBuf,
@@ -47,7 +47,7 @@ impl BootstrapInstallation {
     ) -> Self {
         Self {
             effects: InitialInstallEffects::native(distribution.clone()),
-            node,
+            node: node.into(),
             compare,
             distribution,
             job_launcher,
@@ -74,7 +74,7 @@ impl BootstrapInstallation {
             let manifest = crate::artifact::verify_candidate(
                 candidate.clone(),
                 config::path_value(config.required("artifactRoot")?)?,
-                &self.node,
+                self.node.as_ref(),
             )
             .await?;
             let selected = config::path_value(config.required("runtimeRoot")?)?
@@ -99,9 +99,19 @@ impl BootstrapInstallation {
                 ("manifest", manifest),
             ])];
             releases.extend_from_slice(preferred);
-            let components =
+            let mut components =
                 bootstrap_components(&config, &journal, &candidate, &releases, &self.compare)
                     .await?;
+            for selected in &mut components {
+                let selected_candidate = selected.required("candidate")?.clone();
+                let verified = if selected_candidate == candidate {
+                    releases[0].required("manifest")?.clone()
+                } else {
+                    crate::artifact::verify_candidate(selected_candidate,
+                        config::path_value(config.required("artifactRoot")?)?, self.node.as_ref()).await?
+                };
+                selected.insert("manifest", verified);
+            }
             configuration_bootstrap_plan(
                 &config,
                 &node_path::from_native(&path),
@@ -152,7 +162,7 @@ impl BootstrapInstallation {
             let mut preferred = Vec::new();
             for process in processes(plan)?.iter().filter(|p| {
                 p.get("componentId") != Some(&"host-executor".into())
-                    && p.get("candidateId").is_some_and(truthy)
+                    && p.get("candidateId").and_then(J::as_js_string).is_some_and(|text| !text.0.is_empty())
             }) {
                 let candidate = journal
                     .candidate(&process.required("candidateId")?.as_str()?)
@@ -185,11 +195,11 @@ impl BootstrapInstallation {
             publish_bootstrap_instance_configurations(plan, config, &journal).await?;
             if cfg!(target_os = "linux") {
                 for process in processes(plan)?.iter().filter(|p| {
-                    p.get("user").is_some_and(truthy) && p.get("configPath").is_some_and(truthy)
+                    p.get("user").and_then(J::as_js_string).is_some_and(|text| !text.0.is_empty()) && p.get("configPath").and_then(J::as_js_string).is_some_and(|text| !text.0.is_empty())
                 }) {
                     let runtime = config::instance_config(
                         config::path_value(process.required("configPath")?)?,
-                        &self.node,
+                        self.node.as_ref(),
                     )
                     .await?;
                     linux_service_identity::ensure_linux_process_identity_with_host(
@@ -205,7 +215,7 @@ impl BootstrapInstallation {
                                     .unwrap_or(plan.required("artifactRoot")?)
                                     .clone(),
                             ),
-                            ("nodeExecutable", plan.required("nodeExecutable")?.clone()),
+                            ("nodeExecutable", J::String(super::process_executable(plan, process)?)),
                         ]),
                         runtime.json().clone(),
                         self.effects.linux.clone(),
@@ -263,7 +273,7 @@ impl BootstrapInstallation {
         )?;
         self.replace_systemd_owners(plan, replace_legacy, linux)
             .await?;
-        if let Some(scope) = plan.get("linuxResources").filter(|v| truthy(v)) {
+        if let Some(scope) = plan.get("linuxResources").filter(|v| v.as_object().is_some()) {
             linux_resources::ensure_linux_slice_with_host(
                 scope.clone(),
                 self.effects.linux.clone(),
@@ -297,7 +307,7 @@ impl BootstrapInstallation {
         }
         self.sync(config, plan, false).await?;
         command(linux, vec!["daemon-reload".into()]).await?;
-        if let Some(scope) = plan.get("linuxResources").filter(|v| truthy(v)) {
+        if let Some(scope) = plan.get("linuxResources").filter(|v| v.as_object().is_some()) {
             linux_resources::inspect_linux_slice_with_host(
                 scope.clone(),
                 self.effects.linux.clone(),

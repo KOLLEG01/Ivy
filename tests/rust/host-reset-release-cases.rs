@@ -184,13 +184,13 @@ async fn compare(host: &ResetHost, node: &NodeRuntime, group: &str, case: &str, 
         ("bootstrap", false) => {
             host.0
                 .clone()
-                .bootstrap(config.clone(), id, epoch, node.clone())
+                .bootstrap(config.clone(), id, epoch, Some(node.clone()))
                 .await
         }
         ("release", false) => {
             host.0
                 .clone()
-                .release(config.clone(), id, epoch, node.clone())
+                .release(config.clone(), id, epoch, Some(node.clone()))
                 .await
         }
         ("resume", false) => {
@@ -198,7 +198,12 @@ async fn compare(host: &ResetHost, node: &NodeRuntime, group: &str, case: &str, 
                 let first = host
                     .0
                     .clone()
-                    .release(config.clone(), id.clone(), epoch.clone(), node.clone())
+                    .release(
+                        config.clone(),
+                        id.clone(),
+                        epoch.clone(),
+                        Some(node.clone()),
+                    )
                     .await?;
                 let held = prepare_reset_hold(
                     config.clone(),
@@ -220,7 +225,12 @@ async fn compare(host: &ResetHost, node: &NodeRuntime, group: &str, case: &str, 
                 let released = host
                     .0
                     .clone()
-                    .release(config.clone(), id.clone(), epoch.clone(), node.clone())
+                    .release(
+                        config.clone(),
+                        id.clone(),
+                        epoch.clone(),
+                        Some(node.clone()),
+                    )
                     .await?;
                 let confirmed =
                     confirm_reset_record(config.clone(), id, epoch, host.0.clock.clone()).await?;

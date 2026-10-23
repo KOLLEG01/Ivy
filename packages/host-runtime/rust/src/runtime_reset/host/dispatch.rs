@@ -162,7 +162,7 @@ impl ResetHost {
         config_path: JsString,
         phase: ResetHostPhase,
         args: ResetPhaseArguments,
-        node: NodeRuntime,
+        node: impl Into<Option<NodeRuntime>>,
         storage: Arc<layout::StorageContext>,
     ) -> IvyResult<J> {
         let plan = local_runtime_reset_plan(
@@ -172,7 +172,7 @@ impl ResetHost {
             storage,
         )
         .await?;
-        self.dispatch_plan(config, plan, phase, args, node).await
+        self.dispatch_plan(config, plan, phase, args, node.into()).await
     }
 
     async fn dispatch_plan(
@@ -181,7 +181,7 @@ impl ResetHost {
         plan: J,
         phase: ResetHostPhase,
         args: ResetPhaseArguments,
-        node: NodeRuntime,
+        node: Option<NodeRuntime>,
     ) -> IvyResult<J> {
         let plan = admit_plan(plan, phase, &args)?;
         let (id, epoch) = (args.reset_id.unwrap(), args.runtime_epoch.unwrap());
@@ -206,7 +206,7 @@ impl ResetHost {
         host: J,
         phase: ResetHostPhase,
         reset: CoordinatedReset,
-        node: NodeRuntime,
+        node: impl Into<Option<NodeRuntime>>,
         storage: Arc<layout::StorageContext>,
     ) -> IvyResult<Option<J>> {
         if host.get("hostId") == config.get("hostId") {

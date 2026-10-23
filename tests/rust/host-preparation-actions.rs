@@ -16,8 +16,7 @@ use std::{
 
 fn retention(clock: Arc<dyn Clock>) -> Arc<RetentionBindings> {
     Arc::new(RetentionBindings {
-        node: fixture_node("24.18.0"),
-        compare: Arc::new(|_, _| panic!("No candidate inventory admitted")),
+        node: None,
         clock,
     })
 }
@@ -66,6 +65,15 @@ async fn inventory_and_compaction_keep_unrecognized_payload_and_close_request_jo
 async fn manual_collection_returns_durable_status_and_releases_owned_locks() {
     let f = ServiceFixture::new();
     let path = save(&f).await;
+    let mut host = super::host(&f);
+    host.insert(
+        "executables",
+        J::object([(
+            "native-host",
+            J::String(node_path::from_native(&std::env::current_exe().unwrap())),
+        )]),
+    );
+    config::atomic_json(&path, host).await.unwrap();
     let actions = actions(&f);
     let result = actions
         .collect_storage(path, retention(Arc::new(SystemClock)))
@@ -182,7 +190,25 @@ async fn prepare_captures_one_snapshot_then_preserves_missing_plan_error_and_cle
     .unwrap();
     let git = std::env::var_os("IVY_TEST_GIT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("git"));
+        .unwrap_or_else(|| {
+            let mut command =
+                std::process::Command::new(if cfg!(windows) { "where.exe" } else { "which" });
+            command.arg("git");
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(0x08000000);
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success());
+            PathBuf::from(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .lines()
+                    .next()
+                    .unwrap(),
+            )
+        });
     let mut host = super::host(&f);
     let mut executables = host.required("executables").unwrap().clone();
     executables.insert("git", J::String(node_path::from_native(&git)));
@@ -213,7 +239,6 @@ async fn prepare_captures_one_snapshot_then_preserves_missing_plan_error_and_cle
             version: "24.18.0".into(),
         }),
         compare: Arc::new(|_, _| panic!("No artifact inventory admitted")),
-        imports: Some(Arc::new(|_, _| panic!("No parser work admitted"))),
         http: PortableHttp::new(Default::default()).unwrap(),
     };
     let error = actions

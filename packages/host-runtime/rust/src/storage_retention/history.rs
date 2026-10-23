@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) struct Entry {
     pub phase: J,
-    pub at: J,
+    pub at: String,
     pub request: J,
     kind: &'static str,
     pub directory: PathBuf,
@@ -25,7 +25,7 @@ pub(super) fn protect_plan(ids: &mut BTreeSet<String>, plan: &J) -> IvyResult<()
     validate_host("BootstrapPlan", plan)?;
     ids.insert(plan.required("candidateId")?.as_str()?);
     for process in array(plan.required("processes")?)? {
-        if let Some(id) = process.get("candidateId").filter(|v| truthy(v)) {
+        if let Some(id) = process.get("candidateId") {
             ids.insert(id.as_str()?);
         }
     }
@@ -69,17 +69,18 @@ pub(super) async fn load(
         let completed = ["succeeded", "rolled_back"]
             .iter()
             .any(|p| record.get("phase") == Some(&(*p).into()));
-        if !truthy(&request) && truthy(&record) && completed {
+        let request_object = request.as_object().is_some();
+        if !request_object && completed {
             progress.skipped("maintenance", "unrecognized_completed_record", true);
             continue;
         }
         require(
-            truthy(&request),
+            request_object,
             "storage_invalid",
             "Unrecognized bootstrap maintenance prevents candidate collection.",
         )?;
         if let Err(error) = validate_host("BootstrapMaintenanceRequest", &request) {
-            if truthy(&record) && completed {
+            if completed {
                 progress.skipped("maintenance", "unrecognized_completed_record", true);
                 continue;
             }
@@ -92,7 +93,12 @@ pub(super) async fn load(
         )?;
         result.push(Entry {
             phase: fallback(record.get("phase"), "unknown"),
-            at: fallback(record.get("updatedAt"), ""),
+            at: record
+                .get("updatedAt")
+                .filter(|value| !value.is_null())
+                .map(|value| value.as_str().map_err(|_| IvyError::internal()))
+                .transpose()?
+                .unwrap_or_default(),
             request,
             kind,
             directory,

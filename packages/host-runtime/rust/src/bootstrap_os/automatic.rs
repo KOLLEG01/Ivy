@@ -29,11 +29,7 @@ pub(super) fn worker(plan: &IvyJson, request: &Path, name: &str) -> IvyResult<Wo
         .as_array()
         .ok_or_else(crate::IvyError::internal)?
         .iter()
-        .any(|process| {
-            process.get("entrypoint").map_or(true, |entry| {
-                entry.get("executable") == Some(&"node".into())
-            })
-        });
+        .any(|process| !crate::native_plan::is_native_plan(process));
     if needs_node {
         args.extend(["--node-executable".into(), text(plan, "nodeExecutable")?]);
     }

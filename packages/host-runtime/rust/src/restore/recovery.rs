@@ -22,7 +22,7 @@ pub async fn reconcile_restored_journal(config: J, at: JsString) -> IvyResult<()
                 let old=field(&entry,"configurationPath")?;
                 entry.insert("configurationPath",J::String(join(&[runtime.clone(),"accepted-configurations".into(),node_path::basename(Style::native(),&old)])));
                 let mut activation=entry.required("activation")?.clone();
-                if let Some(previous)=activation.get("previousConfigurationPath").filter(|v|truthy(v)) {activation.insert("previousConfigurationPath",J::String(join(&[runtime.clone(),"accepted-configurations".into(),node_path::basename(Style::native(),&text(previous)?)])));}
+                if let Some(previous)=activation.get("previousConfigurationPath").filter(|value| value.as_js_string().is_some_and(|path| !path.0.is_empty())) {activation.insert("previousConfigurationPath",J::String(join(&[runtime.clone(),"accepted-configurations".into(),node_path::basename(Style::native(),&text(previous)?)])));}
                 entry.insert("activation",activation);
                 let deployment=field(entry.required("record")?,"deploymentId")?.to_utf8()?;
                 if ["succeeded","rolled_back","failed","needs_attention"].iter().any(|p|entry.required("record").ok().and_then(|r|r.get("phase"))==Some(&(*p).into())) {

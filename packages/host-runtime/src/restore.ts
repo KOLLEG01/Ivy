@@ -126,7 +126,8 @@ async function targetConfiguration(templatePath: string, backupRoot: string, man
 }
 export async function restoreHost(backupRoot: string, manifestHash: string, templatePath: string, distributionRoot: string): Promise<Host.RestoreResult> {
   const started = performance.now(), manifest = await verifyBackup(backupRoot, manifestHash);
-  requireThat(manifest.platform.os === process.platform && manifest.platform.arch === process.arch && manifest.platform.node === process.version,
+  requireThat(manifest.platform.os === process.platform && manifest.platform.arch === process.arch &&
+    (manifest.platform.node === 'unavailable' || manifest.platform.node === process.version),
     'unsupported_runtime', 'Restore requires its original OS/architecture/Node toolchain.');
   const restoreId = randomUUID(), config = await targetConfiguration(templatePath, backupRoot, manifest, manifestHash, restoreId);
   const areas = restoredStorageAreas(config, manifest.storageAreas ?? []);

@@ -20,7 +20,7 @@ impl HostActions {
     }
 
     /// Capture once before handing the fixed snapshot to the preparation owner.
-    /// The caller supplies the qualified parser/locale/transport runtime.
+    /// The caller supplies the build capabilities, ordering and transport.
     pub async fn prepare(
         &self,
         config_path: PathBuf,
@@ -71,8 +71,9 @@ impl HostActions {
     pub async fn compact_preparations(
         &self,
         config_path: PathBuf,
-        node: NodeRuntime,
+        node: impl Into<Option<NodeRuntime>>,
     ) -> IvyResult<J> {
+        let node = node.into();
         let this = self.clone();
         tokio::spawn(async move {
             let (config, journal) = this.preparation_journal(config_path).await?;

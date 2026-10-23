@@ -1,17 +1,12 @@
-use ivy_contracts::{IvyJson, JsString, hash, json};
+use ivy_contracts::{IvyJson, JsString, core_schema::validate_host, hash, json};
 use ivy_host_runtime::{
-    IvyResult, accepted_configuration, filesystem, journal::HostJournal, node_path,
-    target,
+    IvyResult, accepted_configuration, filesystem, journal::HostJournal, node_path, target,
 };
 use ivy_store::rusqlite::Connection;
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::Mutex,
 };
-static CORPUS: Mutex<()> = Mutex::new(());
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -31,7 +26,9 @@ impl Drop for Fixture {
     }
 }
 fn path(path: &Path) -> IvyJson {
-    IvyJson::String(node_path::from_native(path))
+    IvyJson::String(node_path::from_native(
+        &path.components().collect::<PathBuf>(),
+    ))
 }
 fn native(value: &IvyJson) -> PathBuf {
     node_path::filesystem_path(value.as_js_string().unwrap())
@@ -42,161 +39,49 @@ fn operation(result: IvyResult<IvyJson>) -> IvyJson {
         Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
     }
 }
-fn source_root() -> PathBuf {
-    std::env::var_os("IVY_HOST_SOURCE_ROOT").map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."),
-        PathBuf::from,
-    )
-}
-fn oracle(input: &IvyJson) -> IvyJson {
-    let mut child = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/host-target-storage-oracle.mjs",
-        ])
-        .current_dir(source_root())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(json::stringify(input, usize::MAX).unwrap().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    json::parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
-}
-fn append(case: &str, actual: &IvyJson, expected: &IvyJson) {
-    if let Some(file) = std::env::var_os("IVY_HOST_TARGET_STORAGE_CORPUS") {
-        let _guard = CORPUS.lock().unwrap();
-        writeln!(
-            fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(file)
-                .unwrap(),
-            "{}",
-            json::stringify(
-                &IvyJson::object([
-                    ("case", case.into()),
-                    ("actual", actual.clone()),
-                    ("expected", expected.clone())
-                ]),
-                usize::MAX
-            )
-            .unwrap()
-        )
-        .unwrap();
-    }
-}
-fn assert_pair(case: &str, actual: &IvyJson, expected: &IvyJson) {
-    append(case, actual, expected);
+fn assert_json_eq(actual: &IvyJson, expected: &IvyJson) {
     assert_eq!(
         json::canonical(actual, usize::MAX).unwrap(),
-        json::canonical(expected, usize::MAX).unwrap(),
-        "{case}"
+        json::canonical(expected, usize::MAX).unwrap()
     );
 }
-fn replace(text: &JsString, needle: &JsString, replacement: &JsString) -> JsString {
-    let mut result = Vec::new();
-    let mut at = 0;
-    while at < text.0.len() {
-        if text.0[at..].starts_with(&needle.0) {
-            result.extend(&replacement.0);
-            at += needle.0.len();
-        } else {
-            result.push(text.0[at]);
-            at += 1;
-        }
-    }
-    JsString(result)
-}
-fn normalize(value: &IvyJson, root: &Path, revisions: &[JsString], key: &str) -> IvyJson {
-    if key == "requestedAt" {
-        assert!(
-            value
-                .as_js_string()
-                .unwrap()
-                .to_utf8()
-                .unwrap()
-                .ends_with('Z')
-        );
-        return "<time>".into();
-    }
-    match value {
-        IvyJson::String(text) => {
-            let mut text = replace(text, &node_path::from_native(root), &"<root>".into());
-            for revision in revisions {
-                text = replace(&text, revision, &"<revision>".into());
-            }
-            IvyJson::String(text)
-        }
-        IvyJson::Array(values) => IvyJson::Array(
-            values
-                .iter()
-                .map(|value| normalize(value, root, revisions, ""))
-                .collect(),
-        ),
-        IvyJson::Object(values) => IvyJson::Object(
-            values
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        key.clone(),
-                        normalize(value, root, revisions, &key.to_utf8().unwrap_or_default()),
-                    )
-                })
-                .collect(),
-        ),
-        _ => value.clone(),
-    }
-}
-fn normalized(value: &IvyJson, root: &Path) -> IvyJson {
-    let mut revisions = Vec::new();
-    for row in value.required("written").unwrap().as_array().unwrap() {
-        let revision = row
-            .required("revision")
+fn revision(value: &IvyJson) {
+    assert_eq!(
+        uuid::Uuid::parse_str(&value.as_str().unwrap())
             .unwrap()
-            .as_js_string()
-            .unwrap()
-            .clone();
-        assert_eq!(
-            uuid::Uuid::parse_str(&revision.to_utf8().unwrap())
-                .unwrap()
-                .get_version_num(),
-            4
-        );
-        revisions.push(revision);
-    }
-    if let Some(result) = value.get("operation").and_then(|v| v.get("value")) {
-        if let Some(revision) = result.get("revision").and_then(IvyJson::as_js_string) {
-            assert_eq!(
-                uuid::Uuid::parse_str(&revision.to_utf8().unwrap())
-                    .unwrap()
-                    .get_version_num(),
-                4
-            );
-            revisions.push(revision.clone());
-        }
-    }
-    normalize(value, root, &revisions, "")
+            .get_version_num(),
+        4
+    );
 }
-fn observed(operation: IvyJson) -> IvyJson {
-    IvyJson::object([
-        ("operation", operation),
-        ("written", IvyJson::Array(vec![])),
-        ("accepted", IvyJson::Array(vec![])),
-        ("selected", IvyJson::Null),
-    ])
+fn timestamp(value: &IvyJson) {
+    chrono::DateTime::parse_from_rfc3339(&value.as_str().unwrap()).unwrap();
+}
+fn error_code(value: &IvyJson) -> String {
+    value
+        .required("operation")
+        .unwrap()
+        .required("error")
+        .unwrap()
+        .required("data")
+        .unwrap()
+        .required("code")
+        .unwrap()
+        .as_str()
+        .unwrap()
+}
+fn published(value: &IvyJson) -> &IvyJson {
+    assert_eq!(
+        value.required("operation").unwrap().get("ok"),
+        Some(&true.into()),
+        "{value:?}"
+    );
+    value
+        .required("operation")
+        .unwrap()
+        .required("value")
+        .unwrap()
+        .required("config")
+        .unwrap()
 }
 struct Inputs {
     root: PathBuf,
@@ -329,21 +214,6 @@ fn set_instance(host: &mut IvyJson, key: &str, value: IvyJson) {
     instance.insert(key, value);
     host.insert("instances", IvyJson::Array(vec![instance]));
 }
-fn common(fixture: &Fixture, input: &Inputs, operation: &str) -> IvyJson {
-    IvyJson::object([
-        ("fixtureRoot", path(&fixture.0)),
-        ("home", IvyJson::String(input.home.clone())),
-        ("operation", operation.into()),
-        ("host", input.host.clone()),
-        (
-            "instanceId",
-            instance(&input.host)
-                .required("instanceId")
-                .unwrap()
-                .clone(),
-        ),
-    ])
-}
 fn files(input: &Inputs, operation: IvyJson) -> IvyJson {
     let runtime = native(input.host.required("runtimeRoot").unwrap());
     let id = instance(&input.host)
@@ -407,15 +277,7 @@ fn files(input: &Inputs, operation: IvyJson) -> IvyJson {
         ("selected", IvyJson::Null),
     ])
 }
-async fn materialize(
-    fixture: &Fixture,
-    input: &Inputs,
-    original: &Inputs,
-    enabled: bool,
-    basis: Option<IvyJson>,
-    original_basis: Option<IvyJson>,
-    case: &str,
-) -> IvyJson {
+async fn materialize(input: &Inputs, enabled: bool, basis: Option<IvyJson>) -> IvyJson {
     let journal = HostJournal::open(input.host.clone()).await.unwrap();
     journal
         .save_candidate(input.candidate.clone(), input.manifest.clone())
@@ -435,7 +297,7 @@ async fn materialize(
         .unwrap();
     let result = target::materialize_target(
         journal.clone(),
-        id.clone(),
+        id,
         candidate,
         enabled,
         basis,
@@ -452,25 +314,48 @@ async fn materialize(
     assert_eq!(selected, 0);
     journal.close().await.unwrap();
     let actual = files(input, operation(result));
-    let mut expected_input = common(fixture, original, "materialize");
-    for (key, value) in [
-        ("candidate", original.candidate.clone()),
-        ("manifest", original.manifest.clone()),
-        ("enabled", enabled.into()),
-    ] {
-        expected_input.insert(key, value);
+    if actual.required("operation").unwrap().get("ok") == Some(&true.into()) {
+        let value = actual
+            .required("operation")
+            .unwrap()
+            .required("value")
+            .unwrap();
+        let target = value.required("target").unwrap();
+        let config = value.required("config").unwrap();
+        validate_host("RuntimeTarget", target).unwrap();
+        validate_host("InstanceConfig", config).unwrap();
+        revision(target.required("revision").unwrap());
+        timestamp(target.required("requestedAt").unwrap());
+        assert_eq!(
+            target.get("desired"),
+            Some(&if enabled { "running" } else { "stopped" }.into())
+        );
+        assert_eq!(
+            target.get("candidateId"),
+            input.candidate.get("candidateId")
+        );
+        assert_eq!(
+            target.get("instanceId"),
+            instance(&input.host).get("instanceId")
+        );
+        let written = actual.required("written").unwrap().as_array().unwrap();
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].get("revision"), target.get("revision"));
+        assert_json_eq(written[0].required("config").unwrap(), config);
+        assert_json_eq(
+            actual.required("written").unwrap(),
+            actual.required("accepted").unwrap(),
+        );
+        let written_path = native(target.required("configPath").unwrap());
+        assert_json_eq(
+            &json::parse(&fs::read_to_string(written_path).unwrap(), usize::MAX).unwrap(),
+            config,
+        );
     }
-    if let Some(basis) = original_basis {
-        expected_input.insert("basis", basis);
-    }
-    let expected = oracle(&expected_input);
-    let actual = normalized(&actual, &input.root);
-    let expected = normalized(&expected, &original.root);
-    assert_pair(case, &actual, &expected);
     actual
 }
 #[tokio::test]
-async fn immutable_targets_match_original_account_infrastructure_phone_settings_and_running_stopped_selection()
+async fn immutable_targets_preserve_account_infrastructure_phone_settings_and_running_stopped_selection()
  {
     for (component, enabled) in [
         ("fixture", true),
@@ -480,93 +365,124 @@ async fn immutable_targets_match_original_account_infrastructure_phone_settings_
         ("phone-bridge", true),
     ] {
         let fixture = Fixture::new();
-        let actual = inputs(&fixture, "actual", component);
-        let original = inputs(&fixture, "original", component);
-        let result =
-            materialize(&fixture, &actual, &original, enabled, None, None, component).await;
+        let input = inputs(&fixture, "actual", component);
+        let result = materialize(&input, enabled, None).await;
+        let config = published(&result);
+        for key in ["hostId", "publicBaseUrl"] {
+            assert_eq!(config.get(key), input.host.get(key));
+        }
+        for key in ["instanceId", "componentId", "serviceNodeId", "credential"] {
+            assert_eq!(config.get(key), instance(&input.host).get(key));
+        }
+        for key in ["artifactRoot", "buildId"] {
+            assert_eq!(config.get(key), input.candidate.get(key));
+        }
+        assert_eq!(config.get("version"), input.manifest.get("version"));
+        for (key, directory) in [
+            ("dataRoot", "data"),
+            ("workRoot", "work"),
+            ("logsRoot", "logs"),
+        ] {
+            assert_eq!(
+                config.get(key),
+                Some(&path(
+                    &input
+                        .root
+                        .join("runtime/instances/logical-ü-😀")
+                        .join(directory)
+                ))
+            );
+        }
+        let settings = config.required("settings").unwrap();
         assert_eq!(
-            result.required("operation").unwrap().get("ok"),
-            Some(&true.into())
-        );
-        assert_eq!(
-            result
-                .required("written")
+            settings.get("retained"),
+            instance(&input.host)
+                .required("settings")
                 .unwrap()
-                .as_array()
-                .unwrap()
-                .len(),
-            1
+                .get("retained")
         );
-        assert_eq!(
-            result.required("written").unwrap(),
-            result.required("accepted").unwrap()
-        );
+        match component {
+            "host-executor" | "service-manager" => assert_eq!(
+                settings.get("hostConfigPath"),
+                Some(&path(&input.root.join("runtime/host.json")))
+            ),
+            "agent-manager" => {
+                let home = node_path::to_native(&input.home);
+                for (key, suffix) in [
+                    ("projectRoot", "projects"),
+                    ("internalProjectRoot", ".ivy/codex-projects"),
+                    ("skillsRoot", ".codex/skills"),
+                ] {
+                    assert_eq!(settings.get(key), Some(&path(&home.join(suffix))));
+                }
+            }
+            "phone-bridge" => assert_eq!(
+                settings.required("native").unwrap().get("executableHash"),
+                Some(&hash::digest(b"selected native bytes").into())
+            ),
+            _ => assert_json_eq(
+                settings,
+                instance(&input.host).required("settings").unwrap(),
+            ),
+        }
     }
     for component in ["host-executor", "service-manager", "agent-manager"] {
         let fixture = Fixture::new();
-        let mut actual = inputs(&fixture, "actual", component);
-        let mut original = inputs(&fixture, "original", component);
-        for input in [&mut actual, &mut original] {
-            let settings = if component == "agent-manager" {
-                IvyJson::object([
-                    (
-                        "appServer",
-                        IvyJson::object([("mode", "claude-adapter".into())]),
-                    ),
-                    ("codexHome", path(&input.root.join("claude-home"))),
-                ])
-            } else {
-                IvyJson::object([(
-                    "hostConfigPath",
-                    path(&input.root.join("explicit-host.json")),
-                )])
-            };
-            set_instance(&mut input.host, "settings", settings);
+        let mut input = inputs(&fixture, "actual", component);
+        let settings = if component == "agent-manager" {
+            IvyJson::object([
+                (
+                    "appServer",
+                    IvyJson::object([("mode", "claude-adapter".into())]),
+                ),
+                ("codexHome", path(&input.root.join("claude-home"))),
+            ])
+        } else {
+            IvyJson::object([(
+                "hostConfigPath",
+                path(&input.root.join("explicit-host.json")),
+            )])
+        };
+        set_instance(&mut input.host, "settings", settings.clone());
+        let result = materialize(&input, true, None).await;
+        let actual = published(&result).required("settings").unwrap();
+        if component == "agent-manager" {
+            assert_eq!(actual.get("codexHome"), settings.get("codexHome"));
+            assert_eq!(actual.get("appServer"), settings.get("appServer"));
+            assert!(actual.get("skillsRoot").is_none());
+            let home = node_path::to_native(&input.home);
+            assert_eq!(
+                actual.get("projectRoot"),
+                Some(&path(&home.join("projects")))
+            );
+            assert_eq!(
+                actual.get("internalProjectRoot"),
+                Some(&path(&home.join(".ivy/codex-projects")))
+            );
+        } else {
+            assert_json_eq(actual, &settings);
         }
-        let result = materialize(
-            &fixture,
-            &actual,
-            &original,
-            true,
-            None,
-            None,
-            "explicit infrastructure paths / Claude defaults",
-        )
-        .await;
-        assert_eq!(
-            result.required("operation").unwrap().get("ok"),
-            Some(&true.into())
-        );
     }
     for component in ["host-executor", "service-manager"] {
         let fixture = Fixture::new();
-        let mut actual = inputs(&fixture, "actual", component);
-        let mut original = inputs(&fixture, "original", component);
-        for input in [&mut actual, &mut original] {
-            let config_path = node_path::join(
-                node_path::Style::native(),
-                &[
-                    node_path::from_native(&input.root),
-                    JsString(vec![0xd800, 46, 106, 115, 111, 110]),
-                ],
-            );
-            input
-                .host
-                .insert("configPath", IvyJson::String(config_path));
-        }
-        let result = materialize(
-            &fixture,
-            &actual,
-            &original,
-            true,
-            None,
-            None,
-            "infrastructure defaults preserve the raw UTF-16 configuration path",
-        )
-        .await;
+        let mut input = inputs(&fixture, "actual", component);
+        let config_path = node_path::join(
+            node_path::Style::native(),
+            &[
+                node_path::from_native(&input.root),
+                JsString(vec![0xd800, 46, 106, 115, 111, 110]),
+            ],
+        );
+        input
+            .host
+            .insert("configPath", IvyJson::String(config_path.clone()));
+        let result = materialize(&input, true, None).await;
         assert_eq!(
-            result.required("operation").unwrap().get("ok"),
-            Some(&true.into())
+            published(&result)
+                .required("settings")
+                .unwrap()
+                .get("hostConfigPath"),
+            Some(&IvyJson::String(config_path))
         );
     }
 }
@@ -604,42 +520,41 @@ fn basis(input: &Inputs) -> IvyJson {
     ])
 }
 #[tokio::test]
-async fn target_ids_preserve_utf16_while_sqlite_and_filesystem_use_original_utf8_boundaries() {
+async fn target_ids_preserve_utf16_and_refuse_nul_at_the_filesystem_boundary() {
     for id in [
         JsString(vec![114, 97, 119, 45, 0xd800]),
         JsString(vec![114, 97, 119, 45, 0xdfff]),
         JsString(vec![114, 97, 119, 0]),
     ] {
         let fixture = Fixture::new();
-        let mut actual = inputs(&fixture, "actual", "fixture");
-        let mut original = inputs(&fixture, "original", "fixture");
-        for input in [&mut actual, &mut original] {
-            set_instance(&mut input.host, "instanceId", IvyJson::String(id.clone()));
-        }
-        let observed = materialize(
-            &fixture,
-            &actual,
-            &original,
-            true,
-            None,
-            None,
-            "UTF-16 ID: original SQL text / filesystem boundaries",
-        )
-        .await;
-        if !id.0.contains(&0) {
+        let mut input = inputs(&fixture, "actual", "fixture");
+        set_instance(&mut input.host, "instanceId", IvyJson::String(id.clone()));
+        let result = materialize(&input, true, None).await;
+        if id.0.contains(&0) {
             assert_eq!(
-                observed.required("operation").unwrap().get("ok"),
-                Some(&true.into())
+                result.required("operation").unwrap().get("ok"),
+                Some(&false.into())
             );
-            let written = &observed.required("written").unwrap().as_array().unwrap()[0];
-            assert_eq!(
-                written.required("config").unwrap().get("instanceId"),
-                Some(&IvyJson::String(id))
+            assert!(
+                result
+                    .required("written")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                result
+                    .required("accepted")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
             );
         } else {
             assert_eq!(
-                observed.required("operation").unwrap().get("ok"),
-                Some(&false.into())
+                published(&result).get("instanceId"),
+                Some(&IvyJson::String(id))
             );
         }
     }
@@ -648,67 +563,72 @@ async fn target_ids_preserve_utf16_while_sqlite_and_filesystem_use_original_utf8
 async fn rollback_targets_retain_the_complete_accepted_basis_and_rebind_only_selected_release_identity()
  {
     for component in ["fixture", "phone-bridge"] {
-        let fixture = Fixture::new();
-        let actual = inputs(&fixture, "actual", component);
-        let original = inputs(&fixture, "original", component);
-        let b = basis(&actual);
-        let ob = basis(&original);
-        let result = materialize(
-            &fixture,
-            &actual,
-            &original,
-            false,
-            Some(b),
-            Some(ob),
-            "accepted rollback configuration",
-        )
-        .await;
-        assert_eq!(
-            result.required("operation").unwrap().get("ok"),
-            Some(&true.into())
-        );
-        let config = result
-            .required("operation")
-            .unwrap()
-            .required("value")
-            .unwrap()
-            .required("config")
-            .unwrap();
-        assert_eq!(
-            config.get("credential"),
-            Some(&"synthetic-accepted-old".into())
-        );
-        assert_eq!(
-            config.get("serviceNodeId"),
-            Some(&"accepted-old-node".into())
-        );
-        assert_eq!(config.get("version"), Some(&"1.2.3".into()));
+        for credential in [Some(IvyJson::from("synthetic-accepted-old")), None] {
+            let fixture = Fixture::new();
+            let input = inputs(&fixture, "actual", component);
+            let mut previous = basis(&input);
+            if credential.is_none() {
+                previous.remove("credential");
+            }
+            let result = materialize(&input, false, Some(previous.clone())).await;
+            let config = published(&result);
+            for key in [
+                "credential",
+                "serviceNodeId",
+                "publicBaseUrl",
+                "dataRoot",
+                "workRoot",
+                "logsRoot",
+            ] {
+                assert_eq!(config.get(key), previous.get(key), "{key}");
+            }
+            assert_eq!(config.get("version"), Some(&"1.2.3".into()));
+            assert_eq!(
+                config.get("artifactRoot"),
+                input.candidate.get("artifactRoot")
+            );
+            assert_eq!(config.get("buildId"), input.candidate.get("buildId"));
+            let mut expected = previous;
+            for key in ["version", "artifactRoot", "buildId"] {
+                expected.insert(key, config.required(key).unwrap().clone());
+            }
+            if component == "phone-bridge" {
+                let mut settings = expected.required("settings").unwrap().clone();
+                let mut native = settings.required("native").unwrap().clone();
+                native.insert(
+                    "executableHash",
+                    hash::digest(b"selected native bytes").into(),
+                );
+                settings.insert("native", native);
+                expected.insert("settings", settings);
+            }
+            assert_json_eq(config, &expected);
+        }
     }
 }
 #[tokio::test]
-async fn mismatched_basis_is_rejected_before_output_and_snapshot_failure_keeps_the_original_partial_file()
- {
+async fn mismatched_basis_is_rejected_before_output_and_snapshot_failure_keeps_the_partial_file() {
     for kind in ["hostId", "instanceId", "componentId", "snapshot-file"] {
         let fixture = Fixture::new();
-        let actual = inputs(&fixture, "actual", "fixture");
-        let original = inputs(&fixture, "original", "fixture");
-        let (mut b, mut ob) = (basis(&actual), basis(&original));
-        let (b, ob) = if kind == "snapshot-file" {
-            for input in [&actual, &original] {
-                let root = native(input.host.required("runtimeRoot").unwrap());
-                fs::create_dir_all(&root).unwrap();
-                fs::write(root.join("accepted-configurations"), b"occupied").unwrap();
-            }
-            (None, None)
+        let input = inputs(&fixture, "actual", "fixture");
+        let previous = if kind == "snapshot-file" {
+            let root = native(input.host.required("runtimeRoot").unwrap());
+            fs::create_dir_all(&root).unwrap();
+            fs::write(root.join("accepted-configurations"), b"occupied").unwrap();
+            None
         } else {
-            b.insert(kind, "wrong".into());
-            ob.insert(kind, "wrong".into());
-            (Some(b), Some(ob))
+            let mut previous = basis(&input);
+            previous.insert(kind, "wrong".into());
+            Some(previous)
         };
-        let result = materialize(&fixture, &actual, &original, true, b, ob, kind).await;
+        let result = materialize(&input, true, previous).await;
         assert_eq!(
-            result.required("operation").unwrap().get("ok"),
-            Some(&false.into())
+            error_code(&result),
+            if kind == "snapshot-file" {
+                "internal_error"
+            } else {
+                "target_conflict"
+            }
         );
         assert_eq!(
             result
@@ -719,7 +639,51 @@ async fn mismatched_basis_is_rejected_before_output_and_snapshot_failure_keeps_t
                 .len(),
             usize::from(kind == "snapshot-file")
         );
+        assert!(
+            result
+                .required("accepted")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
+    for previous in [
+        false.into(),
+        IvyJson::Number(0.0),
+        "".into(),
+        IvyJson::Array(vec![]),
+    ] {
+        let fixture = Fixture::new();
+        let input = inputs(&fixture, "actual", "fixture");
+        let result = materialize(&input, true, Some(previous)).await;
+        assert_eq!(error_code(&result), "target_conflict");
+        assert!(
+            result
+                .required("written")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            result
+                .required("accepted")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let fixture = Fixture::new();
+    let mut input = inputs(&fixture, "actual", "fixture");
+    let mut configured = instance(&input.host).clone();
+    configured.remove("credential");
+    input
+        .host
+        .insert("instances", IvyJson::Array(vec![configured]));
+    let result = materialize(&input, true, Some(IvyJson::Null)).await;
+    assert!(published(&result).get("credential").is_none());
 }
 #[tokio::test]
 async fn native_settings_resolve_and_hash_only_the_selected_artifact_and_preserve_raw_utf16() {
@@ -731,15 +695,18 @@ async fn native_settings_resolve_and_hash_only_the_selected_artifact_and_preserv
         &fixture.0.join("candidate/escape"),
     )
     .unwrap();
-    for executable in [
-        IvyJson::from("nested/runtime.exe"),
-        "escape/escape.exe".into(),
-        "../outside/escape.exe".into(),
-        "nested".into(),
-        "missing".into(),
-        "".into(),
-        path(&fixture.0.join("outside/escape.exe")),
-        IvyJson::Null,
+    for (executable, expected) in [
+        (IvyJson::from("nested/runtime.exe"), None),
+        ("escape/escape.exe".into(), Some("target_conflict")),
+        ("../outside/escape.exe".into(), Some("target_conflict")),
+        ("nested".into(), Some("target_conflict")),
+        ("missing".into(), Some("internal_error")),
+        ("".into(), Some("invalid_arguments")),
+        (
+            path(&fixture.0.join("outside/escape.exe")),
+            Some("invalid_arguments"),
+        ),
+        (IvyJson::Null, Some("invalid_arguments")),
     ] {
         let settings = IvyJson::object([
             (
@@ -752,42 +719,30 @@ async fn native_settings_resolve_and_hash_only_the_selected_artifact_and_preserv
             ),
             ("raw", IvyJson::String(JsString(vec![0xdfff]))),
         ]);
-        let mut input = IvyJson::object([
-            ("fixtureRoot", path(&fixture.0)),
-            ("home", path(&fixture.0.join("home"))),
-            ("operation", "settings".into()),
-            ("component", "phone-bridge".into()),
-            ("settings", settings.clone()),
-            ("artifactRoot", path(&fixture.0.join("candidate"))),
-        ]);
         let result = target::candidate_bound_settings(
             "phone-bridge".into(),
             settings.clone(),
             fixture.0.join("candidate"),
         )
         .await;
-        if let Ok(value) = &result {
-            assert_eq!(
-                value.required("native").unwrap().get("executableHash"),
-                Some(&hash::digest(b"native bytes").into())
-            );
+        if let Some(code) = expected {
+            assert_eq!(result.unwrap_err().code, code);
+        } else {
+            let mut expected = settings.clone();
+            let mut native = expected.required("native").unwrap().clone();
+            native.insert("executableHash", hash::digest(b"native bytes").into());
+            expected.insert("native", native);
+            assert_json_eq(&result.unwrap(), &expected);
         }
-        let actual = observed(operation(result));
-        let expected = oracle(&input);
-        assert_pair("release-owned phone native executable", &actual, &expected);
-        input.insert("component", "fixture".into());
-        let actual = observed(operation(
-            target::candidate_bound_settings(
+        assert_json_eq(
+            &target::candidate_bound_settings(
                 "fixture".into(),
                 settings.clone(),
                 fixture.0.join("absent"),
             )
-            .await,
-        ));
-        assert_pair(
-            "other component settings unchanged",
-            &actual,
-            &oracle(&input),
+            .await
+            .unwrap(),
+            &settings,
         );
     }
     assert_eq!(
@@ -797,8 +752,7 @@ async fn native_settings_resolve_and_hash_only_the_selected_artifact_and_preserv
 }
 #[tokio::test]
 async fn stopped_targets_replace_only_launch_nonce_desire_and_time() {
-    let fixture = Fixture::new();
-    let input_target = IvyJson::object([
+    let input = IvyJson::object([
         ("instanceId", "fixture".into()),
         ("candidateId", "retained candidate".into()),
         ("configPath", "retained config".into()),
@@ -807,22 +761,16 @@ async fn stopped_targets_replace_only_launch_nonce_desire_and_time() {
         ("requestedAt", "previous time".into()),
         ("retained", IvyJson::String(JsString(vec![0xd800]))),
     ]);
-    let input = IvyJson::object([
-        ("fixtureRoot", path(&fixture.0)),
-        ("home", path(&fixture.0.join("home"))),
-        ("operation", "stopped".into()),
-        ("target", input_target.clone()),
-    ]);
-    let actual = observed(operation(Ok(target::stopped_target(&input_target))));
-    assert_pair(
-        "stopped target retains selection",
-        &normalized(&actual, &fixture.0),
-        &normalized(&oracle(&input), &fixture.0),
-    );
-    assert_eq!(
-        input_target.get("revision"),
-        Some(&"previous launch".into())
-    );
+    let actual = target::stopped_target(&input);
+    revision(actual.required("revision").unwrap());
+    timestamp(actual.required("requestedAt").unwrap());
+    assert_eq!(actual.get("desired"), Some(&"stopped".into()));
+    let mut retained = actual;
+    for key in ["revision", "desired", "requestedAt"] {
+        retained.insert(key, input.required(key).unwrap().clone());
+    }
+    assert_json_eq(&retained, &input);
+    assert_eq!(input.get("revision"), Some(&"previous launch".into()));
 }
 #[tokio::test]
 async fn admitted_materialization_finishes_both_files_after_its_waiter_is_dropped() {
@@ -896,11 +844,6 @@ async fn admitted_materialization_finishes_both_files_after_its_waiter_is_droppe
                         .required("config")
                         .unwrap()
                         .clone()
-                );
-                append(
-                    "cancelled waiter retains config and accepted snapshot",
-                    &observed,
-                    &IvyJson::Null,
                 );
                 break;
             }

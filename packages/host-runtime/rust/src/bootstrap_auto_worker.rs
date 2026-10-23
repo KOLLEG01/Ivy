@@ -43,15 +43,6 @@ fn js(value: &IvyJson, key: &str) -> IvyResult<JsString> {
         .cloned()
         .ok_or_else(IvyError::internal)
 }
-fn truthy(value: &IvyJson) -> bool {
-    match value {
-        IvyJson::Null => false,
-        IvyJson::Bool(value) => *value,
-        IvyJson::Number(value) => *value != 0.0 && !value.is_nan(),
-        IvyJson::String(value) => !value.0.is_empty(),
-        _ => true,
-    }
-}
 fn chosen<'a>(plan: &'a IvyJson, instance: &IvyJson) -> IvyResult<Option<&'a IvyJson>> {
     Ok(array(plan.required("processes")?)?
         .iter()
@@ -119,7 +110,9 @@ impl BootstrapReadiness for NativeBootstrapReadiness {
                 let deadline = self.clock.utc_millis() + timeout_ms;
                 loop {
                     let mut ready = true;
-                    for state in array(states.required("owners")?)?.iter().filter(|state| state.get("running").is_some_and(truthy)) {
+                    for state in array(states.required("owners")?)? {
+                        let running = state.get("running").and_then(IvyJson::as_bool).ok_or_else(|| IvyError::new("invalid_arguments", "Bootstrap owner running state must be boolean."))?;
+                        if !running { continue; }
                         let instance = array(config.required("instances")?)?.iter().find(|instance| instance.get("instanceId") == state.get("instanceId"))
                             .ok_or_else(|| IvyError::new("not_found", "Bootstrap instance disappeared."))?;
                         let check = async {
@@ -127,7 +120,7 @@ impl BootstrapReadiness for NativeBootstrapReadiness {
                             let health = config::json_file(config::path_value(paths.required("data")?)?.join("health.json"), config::CONFIGURATION_BYTES).await?;
                             validate_host("Health", &health)?;
                             let observed = parse_date(&js(&health, "observedAt")?);
-                            Ok::<_, IvyError>(health.get("ready").is_some_and(truthy) && expected.get(&js(state, "instanceId")?) == health.get("buildId")
+                            Ok::<_, IvyError>(observed.is_finite() && health.get("ready") == Some(&IvyJson::Bool(true)) && expected.get(&js(state, "instanceId")?) == health.get("buildId")
                                 && !(observed < not_before as f64 || self.clock.utc_millis() as f64 - observed > 15000.0))
                         }.await;
                         if !check.unwrap_or(false) { ready = false; }

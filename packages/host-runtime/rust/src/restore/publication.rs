@@ -3,8 +3,11 @@ use crate::{backup_files::BackupFile, node_runtime::NodeRuntime, storage_space};
 use std::time::Instant;
 
 /// The original workload runtime is part of the immutable backup identity.
-pub fn require_restore_platform(manifest: &J, node: &NodeRuntime) -> IvyResult<()> {
+pub fn require_restore_platform<'a>(manifest: &J, node: impl Into<Option<&'a NodeRuntime>>) -> IvyResult<()> {
     let platform = manifest.required("platform")?;
+    let node = node.into();
+    let node_matches = platform.get("node") == Some(&"unavailable".into())
+        || node.is_some_and(|node| platform.get("node") == Some(&format!("v{}", node.version).into()));
     let os = if cfg!(windows) { "win32" } else { "linux" };
     let arch = match std::env::consts::ARCH {
         "x86_64" => "x64",
@@ -14,7 +17,7 @@ pub fn require_restore_platform(manifest: &J, node: &NodeRuntime) -> IvyResult<(
     require(
         platform.get("os") == Some(&os.into())
             && platform.get("arch") == Some(&arch.into())
-            && platform.get("node") == Some(&format!("v{}", node.version).into()),
+            && node_matches,
         "unsupported_runtime",
         "Restore requires its original OS/architecture/Node toolchain.",
     )

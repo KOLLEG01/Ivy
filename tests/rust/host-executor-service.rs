@@ -14,3 +14,6 @@ mod automatic_launch_cases;
 
 #[path = "host-executor-native-constructor-cases.rs"]
 mod native_constructor_cases;
+
+#[path = "host-backup-storage-cases.rs"]
+mod backup_storage_cases;

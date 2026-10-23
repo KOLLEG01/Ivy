@@ -99,7 +99,7 @@ async fn host_phases_preserve_identity_scope_and_publisher_refusals_before_os_ad
                 path.clone(),
                 phase,
                 ResetPhaseArguments::default(),
-                super::fixture_node("24.18.0"),
+                None,
                 storage(),
             )
             .await
@@ -135,13 +135,7 @@ async fn host_phases_preserve_identity_scope_and_publisher_refusals_before_os_ad
             publisher_digest: digest.map(Into::into),
         };
         let error = actions
-            .reset_host_phase(
-                path.clone(),
-                ResetHostPhase::Prepare,
-                args,
-                super::fixture_node("24.18.0"),
-                storage(),
-            )
+            .reset_host_phase(path.clone(), ResetHostPhase::Prepare, args, None, storage())
             .await
             .unwrap_err();
         assert_eq!(error.code, "invalid_arguments");
@@ -164,7 +158,7 @@ async fn invalid_plan_precedes_phase_identity_refusal_and_preserves_current_stat
             path,
             ResetHostPhase::Prepare,
             ResetPhaseArguments::default(),
-            super::fixture_node("24.18.0"),
+            None,
             storage(),
         )
         .await
@@ -215,7 +209,7 @@ async fn original_host_phase_identity_and_plan_refusals() {
                 path.clone(),
                 ResetHostPhase::Prepare,
                 ResetPhaseArguments::default(),
-                super::fixture_node("24.18.0"),
+                None,
                 storage(),
             )
             .await

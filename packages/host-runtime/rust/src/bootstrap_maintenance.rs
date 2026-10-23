@@ -32,15 +32,6 @@ fn field<'a>(value: &'a IvyJson, key: &str) -> &'a IvyJson {
     static NULL: IvyJson = IvyJson::Null;
     value.get(key).unwrap_or(&NULL)
 }
-fn truthy(value: &IvyJson) -> bool {
-    match value {
-        IvyJson::Null => false,
-        IvyJson::Bool(value) => *value,
-        IvyJson::Number(value) => *value != 0.0 && !value.is_nan(),
-        IvyJson::String(value) => !value.0.is_empty(),
-        _ => true,
-    }
-}
 fn array(value: &IvyJson) -> IvyResult<&[IvyJson]> {
     value.as_array().ok_or_else(IvyError::internal)
 }
@@ -317,8 +308,8 @@ impl Inner {
         )?;
         require(
             owners.iter().all(|owner| {
-                !truthy(field(owner, "running"))
-                    && (!cfg!(windows) || !truthy(field(owner, "enabled")))
+                owner.get("running") == Some(&IvyJson::Bool(false))
+                    && (!cfg!(windows) || owner.get("enabled") == Some(&IvyJson::Bool(false)))
             }),
             "bootstrap_busy",
             "Stop owned OS processes and disable Windows scheduler entries before bootstrap maintenance.",
@@ -495,7 +486,7 @@ impl Inner {
             .iter()
             .filter(|process| {
                 process.get("componentId") != Some(&"host-executor".into())
-                    && process.get("candidateId").is_some_and(truthy)
+                    && process.get("candidateId").is_some()
             })
             .map(|process| async {
                 let selected = journal.candidate(&text(process, "candidateId")?).await?;

@@ -1,6 +1,6 @@
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
-import { join, resolve } from "node:path";
+import { join, resolve, posix, win32 } from "node:path";
 import { readFile, writeFile, readdir, lstat, unlink } from "node:fs/promises";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
@@ -72,7 +72,7 @@ export function configurationBootstrapPlan(
     configPath: resolve(path),
     configHash: hashJson(config),
     runtimeRoot: config.runtimeRoot,
-    nodeExecutable: config.executables["node"]!,
+    ...(config.executables["node"] ? {nodeExecutable: config.executables["node"]} : {}),
     processes: owned.map((instance) => {
       const value = selected(instance),
         user = linuxProcessUser(instance.componentId, candidate.platform.os);
@@ -108,6 +108,8 @@ export function configurationBootstrapPlan(
       ? { linuxResources: linuxResourceScope(installationId, resources) }
       : {}),
   };
+  requireThat(plan.nodeExecutable || plan.processes.every(value => value.entrypoint?.executable.startsWith('dist/native/')),
+    'unsupported_runtime', 'A JavaScript bootstrap process requires its configured Node executable.');
   validateHost("BootstrapPlan", plan);
   return plan;
 }
@@ -304,15 +306,15 @@ export async function bootstrapPlan(
       const prior = (await retainedBootstrapPlans(config))[0];
       resources = prior?.linuxResources?.budget;
     }
+    const components = bootstrapComponents(config, journal, candidate, [{candidate, manifest}, ...preferred]);
+    for (const selected of components)
+      selected.manifest = selected.candidate === candidate ? manifest : await verifyCandidate(selected.candidate, config);
     return configurationBootstrapPlan(
       config,
       path,
       candidate,
       resources ?? undefined,
-      bootstrapComponents(config, journal, candidate, [
-        { candidate, manifest },
-        ...preferred,
-      ]),
+      components,
     );
   } finally {
     journal.close();
@@ -348,6 +350,13 @@ const unitArg = (value: string) => {
     '"'
   );
 };
+export function processExecutable(plan: Host.BootstrapPlan, instance: Host.BootstrapPlan['processes'][number]): string {
+  const executable = instance.entrypoint?.executable;
+  if (executable && executable !== 'node' && executable !== '$node')
+    return executable.startsWith('dist/native/') ? (plan.os === 'linux' ? posix : win32).join(instance.artifactRoot ?? plan.artifactRoot, executable) : executable;
+  requireThat(plan.nodeExecutable, 'unsupported_runtime', 'A JavaScript bootstrap process requires its configured Node executable.');
+  return plan.nodeExecutable;
+}
 export function linuxUnit(
   plan: Host.BootstrapPlan,
   instance: Host.BootstrapPlan["processes"][number],
@@ -368,10 +377,7 @@ export function linuxUnit(
       }
     : undefined;
   const artifactRoot = instance.artifactRoot ?? plan.artifactRoot;
-  const executable =
-    instance.entrypoint?.executable === "node" || !instance.entrypoint
-      ? plan.nodeExecutable
-      : instance.entrypoint.executable;
+  const executable = processExecutable(plan, instance);
   const fallback =
     instance.componentId === "host-executor"
       ? "dist/packages/host-runtime/src/executor.js"
@@ -583,7 +589,7 @@ async function installOwnedBootstrap(
             user: process.user!,
             configPath: process.configPath!,
             artifactRoot: process.artifactRoot ?? plan.artifactRoot,
-            nodeExecutable: plan.nodeExecutable,
+            nodeExecutable: processExecutable(plan, process),
           },
           runtime,
         );

@@ -10,15 +10,6 @@ pub struct PreparationStorageCollection {
 fn uuid_name(name: &str) -> bool {
     build_name(&format!("build-{name}"))
 }
-fn truthy(v: &IvyJson) -> bool {
-    match v {
-        IvyJson::Null => false,
-        IvyJson::Bool(v) => *v,
-        IvyJson::Number(v) => *v != 0.0 && !v.is_nan(),
-        IvyJson::String(v) => !v.0.is_empty(),
-        _ => true,
-    }
-}
 fn skipped(
     progress: &Option<Arc<dyn RetentionProgress>>,
     area: &str,
@@ -196,7 +187,7 @@ async fn collect(
     let mut protected_snapshots = BTreeSet::new();
     let mut unknown = false;
     for entry in journal.unfinished_preparation_operations().await? {
-        if let Some(snapshot) = entry.get("sourceSnapshot").filter(|v| truthy(v)) {
+        if let Some(snapshot) = entry.get("sourceSnapshot").filter(|v| !v.is_null()) {
             validate_host("SourceSnapshot", snapshot)?;
             protected_snapshots.insert(snapshot.required("snapshotId")?.as_str()?);
         }

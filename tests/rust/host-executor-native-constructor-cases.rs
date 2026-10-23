@@ -26,7 +26,6 @@ fn preparation() -> PreparationRuntime {
     PreparationRuntime {
         node: Some(fixture_node("24.18.0")),
         compare: Arc::new(|_, _| panic!("No artifact inventory is admitted")),
-        imports: Some(Arc::new(|_, _| panic!("No preparation/parser work is admitted"))),
         // Unused explicit test input; this does not qualify a transport profile.
         http: PortableHttp::new(Default::default()).unwrap(),
     }

@@ -1,4 +1,4 @@
-use super::{ServiceFixture, assert_json, host, journal, node};
+use super::{ServiceFixture, assert_json, journal, node};
 use ivy_contracts::{IvyJson as J, JsString, core_schema::validate_host, json};
 use ivy_host_runtime::{
     artifact::FileCompare,
@@ -46,7 +46,29 @@ fn actions(f: &ServiceFixture, clock: Arc<dyn Clock>) -> HostActions {
     .unwrap()
 }
 async fn setup(f: &ServiceFixture) -> (PathBuf, Arc<BackupBindings>) {
-    let mut input = host(f);
+    setup_with_node(f, Some(runtime_node())).await
+}
+fn configured_host(f: &ServiceFixture, node: Option<&NodeRuntime>) -> J {
+    let mut input = super::host_configuration(f);
+    input.insert(
+        "executables",
+        match node {
+            Some(node) => {
+                J::object([("node", J::String(node_path::from_native(&node.executable)))])
+            }
+            None => J::object([(
+                "native-host",
+                J::String(node_path::from_native(&std::env::current_exe().unwrap())),
+            )]),
+        },
+    );
+    input
+}
+async fn setup_with_node(
+    f: &ServiceFixture,
+    node: Option<NodeRuntime>,
+) -> (PathBuf, Arc<BackupBindings>) {
+    let mut input = configured_host(f, node.as_ref());
     input.insert("instances", J::Array(vec![]));
     let path = f.0.join("host.json");
     config::atomic_json(&path, input).await.unwrap();
@@ -69,7 +91,8 @@ async fn setup(f: &ServiceFixture) -> (PathBuf, Arc<BackupBindings>) {
         Arc::new(BackupBindings {
             compare: compare(),
             native_paths: Arc::new(policy),
-            node: runtime_node(),
+            node,
+            hive_snapshot: |_, _| panic!("This fixture has no Hive database"),
             distribution_root: f.0.join("distribution"),
             clock: Arc::new(SystemClock),
         }),
@@ -84,7 +107,10 @@ fn closed(f: &ServiceFixture) {
     );
 }
 async fn target(f: &ServiceFixture, suffix: &str) -> PathBuf {
-    let mut input = host(f);
+    target_with_node(f, suffix, Some(&runtime_node())).await
+}
+async fn target_with_node(f: &ServiceFixture, suffix: &str, node: Option<&NodeRuntime>) -> PathBuf {
+    let mut input = configured_host(f, node);
     input.insert("instances", J::Array(vec![]));
     for (key, base) in [
         ("runtimeRoot", "restored-state"),
@@ -156,8 +182,8 @@ async fn backup_refuses_overlap_and_busy_owner_then_closes_outer_journal() {
 #[tokio::test]
 async fn backup_then_restore_preserves_source_authority_and_publishes_disabled_target() {
     let f = ServiceFixture::new();
-    let (path, b) = setup(&f).await;
-    let actions = actions(&f, Arc::new(SystemClock));
+    let (path, b) = setup_with_node(&f, None).await;
+    let actions = HostActions::native(None, compare(), f.0.join("distribution"), job(&f)).unwrap();
     let journal = journal(&f).await;
     journal.close().await.unwrap();
     std::fs::write(f.0.join("state/retained.txt"), b"source authority").unwrap();
@@ -167,12 +193,47 @@ async fn backup_then_restore_preserves_source_authority_and_publishes_disabled_t
     let manifest = config::json_file(f.0.join("backup/backup.json"), 12 * 1024 * 1024)
         .await
         .unwrap();
+    assert_eq!(
+        manifest.required("platform").unwrap().get("node"),
+        Some(&"unavailable".into())
+    );
+    ivy_host_runtime::restore::require_restore_platform(&manifest, None).unwrap();
+    ivy_host_runtime::restore::require_restore_platform(&manifest, &runtime_node()).unwrap();
+    let mut legacy = manifest.clone();
+    let mut platform = legacy.required("platform").unwrap().clone();
+    platform.insert("node", "v24.18.0".into());
+    legacy.insert("platform", platform.clone());
+    assert_eq!(
+        ivy_host_runtime::restore::require_restore_platform(&legacy, None)
+            .unwrap_err()
+            .code,
+        "unsupported_runtime"
+    );
+    ivy_host_runtime::restore::require_restore_platform(&legacy, &runtime_node()).unwrap();
+    assert_eq!(
+        ivy_host_runtime::restore::require_restore_platform(
+            &legacy,
+            &super::fixture_node("24.19.0")
+        )
+        .unwrap_err()
+        .code,
+        "unsupported_runtime"
+    );
+    platform.insert("node", "unavailable".into());
+    platform.insert("os", if cfg!(windows) { "linux" } else { "win32" }.into());
+    legacy.insert("platform", platform);
+    assert_eq!(
+        ivy_host_runtime::restore::require_restore_platform(&legacy, None)
+            .unwrap_err()
+            .code,
+        "unsupported_runtime"
+    );
     let result = actions
         .restore(
-            target(&f, "complete").await,
+            target_with_node(&f, "complete", None).await,
             f.0.join("backup"),
             selected_hash(&backup),
-            restore_runtime(),
+            RestoreRuntime::native(None, compare()).unwrap(),
         )
         .await
         .unwrap();
@@ -240,6 +301,71 @@ async fn restore_checks_backup_identity_before_target_configuration_or_state() {
     assert!(!f.0.join("restored-state").exists());
     assert_eq!(std::fs::read(backup.join("backup.json")).unwrap(), b"{}");
 }
+#[tokio::test]
+async fn node_absent_backup_uses_retained_workload_manifests() {
+    for native in [true, false] {
+        let f = ServiceFixture::new();
+        let (path, bindings) = setup_with_node(&f, None).await;
+        config::atomic_json(&path, configured_host(&f, None))
+            .await
+            .unwrap();
+        super::seed(&f).await;
+        let journal = journal(&f).await;
+        let old = journal.installed("fixture").await.unwrap().unwrap();
+        let old_id = old.required("candidateId").unwrap().as_str().unwrap();
+        let mut candidate = journal.candidate(&old_id).await.unwrap();
+        let mut manifest = journal.manifest(&old_id).await.unwrap();
+        let id: J = format!("sha256:{}", "b".repeat(64)).into();
+        candidate.insert("candidateId", id.clone());
+        candidate.insert("buildId", id.clone());
+        manifest.insert("buildId", id.clone());
+        manifest.insert("kind", "service".into());
+        manifest.remove("app");
+        let command = J::object([
+            (
+                "executable",
+                if native {
+                    "dist/native/ivy-fixture"
+                } else {
+                    "node"
+                }
+                .into(),
+            ),
+            ("args", J::Array(vec![])),
+            ("timeoutMs", J::Number(5000.0)),
+        ]);
+        manifest.insert("entrypoint", command.clone());
+        manifest.insert(
+            "readiness",
+            J::object([("timeoutMs", J::Number(5000.0)), ("command", command)]),
+        );
+        manifest.insert("shutdown", J::object([("timeoutMs", J::Number(5000.0))]));
+        manifest.insert(
+            "restart",
+            J::object([
+                ("policy", "never".into()),
+                ("minimumDelayMs", J::Number(100.0)),
+                ("maximumDelayMs", J::Number(100.0)),
+            ]),
+        );
+        journal.save_candidate(candidate, manifest).await.unwrap();
+        let mut installed = old;
+        installed.insert("candidateId", id.clone());
+        installed.insert("buildId", id);
+        journal.set_installed(installed).await.unwrap();
+        journal.close().await.unwrap();
+        let actions =
+            HostActions::native(None, compare(), f.0.join("distribution"), job(&f)).unwrap();
+        let result = actions.backup(path, f.0.join("backup"), bindings).await;
+        if native {
+            validate_host("BackupResult", &result.unwrap()).unwrap();
+        } else {
+            assert_eq!(result.unwrap_err().code, "unsupported_runtime");
+            assert!(!f.0.join("backup").exists());
+        }
+        closed(&f);
+    }
+}
 struct GateClock {
     entered: Arc<AtomicBool>,
     release: Arc<AtomicBool>,
@@ -265,11 +391,15 @@ impl Drop for Release {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropped_restore_observer_keeps_admitted_copy_recovery_and_publication() {
     let f = ServiceFixture::new();
-    let (path, b) = setup(&f).await;
+    // Keep this admission/observer case independent of installed JavaScript toolchain size.
+    let (path, b) = setup_with_node(&f, None).await;
+    let native_actions = |clock: Arc<dyn Clock>| {
+        HostActions::with_clock(None, compare(), f.0.join("distribution"), job(&f), clock).unwrap()
+    };
     let journal = journal(&f).await;
     journal.close().await.unwrap();
     std::fs::write(f.0.join("state/retained.txt"), b"source authority").unwrap();
-    let backup = actions(&f, Arc::new(SystemClock))
+    let backup = native_actions(Arc::new(SystemClock))
         .backup(path, f.0.join("backup"), b)
         .await
         .unwrap();
@@ -279,27 +409,30 @@ async fn dropped_restore_observer_keeps_admitted_copy_recovery_and_publication()
     let entered = Arc::new(AtomicBool::new(false));
     let release = Arc::new(AtomicBool::new(false));
     let guard = Release(release.clone());
-    let actions = actions(
-        &f,
-        Arc::new(GateClock {
-            entered: entered.clone(),
-            release,
-        }),
-    );
-    let template = target(&f, "dropped").await;
+    let actions = native_actions(Arc::new(GateClock {
+        entered: entered.clone(),
+        release,
+    }));
+    let template = target_with_node(&f, "dropped", None).await;
     let root = f.0.join("backup");
-    let observer = tokio::spawn(async move {
+    let mut observer = tokio::spawn(async move {
         actions
-            .restore(template, root, selected_hash(&backup), restore_runtime())
+            .restore(
+                template,
+                root,
+                selected_hash(&backup),
+                RestoreRuntime::native(None, compare()).unwrap(),
+            )
             .await
     });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !entered.load(Ordering::SeqCst) {
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .unwrap();
+    tokio::select! {
+        outcome = &mut observer => panic!("Restore ended before admission: {outcome:?}"),
+        admitted = tokio::time::timeout(Duration::from_secs(5), async {
+            while !entered.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }) => admitted.expect("Restore did not reach admission"),
+    }
     assert!(!f.0.join("restored-state-dropped").exists());
     observer.abort();
     drop(guard);

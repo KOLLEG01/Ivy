@@ -27,9 +27,6 @@ fn truthy(value: &IvyJson) -> bool {
         _ => true,
     }
 }
-fn text(value: &IvyJson) -> IvyResult<String> {
-    value.as_str()
-}
 fn budget_text(value: &IvyJson) -> IvyResult<JsString> {
     value.as_f64().filter(|value| value.is_finite() && value.fract() == 0.0 && (0.0..=9_007_199_254_740_991.0).contains(value))
         .map(|value| value.to_string().into()).ok_or_else(IvyError::internal)
@@ -103,10 +100,10 @@ pub fn linux_slice(scope: &IvyJson) -> IvyResult<String> {
     let budget = scope.required("budget")?;
     Ok(format!(
         "[Unit]\nDescription=IvyNext resource boundary {}\n\n[Slice]\nMemoryAccounting=true\nMemoryHigh={}\nMemoryMax={}\nMemorySwapMax=0\nTasksAccounting=true\nTasksMax={}\n",
-        text(scope.required("slice")?)?,
-        text(budget.required("memoryHighBytes")?)?,
-        text(budget.required("memoryMaxBytes")?)?,
-        text(budget.required("tasksMax")?)?
+        scope.required("slice")?.as_str()?,
+        budget_text(budget.required("memoryHighBytes")?)?.to_utf8()?,
+        budget_text(budget.required("memoryMaxBytes")?)?.to_utf8()?,
+        budget_text(budget.required("tasksMax")?)?.to_utf8()?
     ))
 }
 fn slice_path(scope: &IvyJson) -> IvyResult<JsString> {

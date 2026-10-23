@@ -3598,7 +3598,6 @@
         "configPath",
         "configHash",
         "runtimeRoot",
-        "nodeExecutable",
         "processes"
       ],
       "additionalProperties": false

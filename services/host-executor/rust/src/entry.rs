@@ -86,7 +86,6 @@ pub async fn run_native(args: &[OsString], stop: CancellationToken) -> IvyResult
     let preparation = PreparationRuntime {
         node,
         compare: artifact::native_file_compare()?,
-        imports: None,
         http: PortableHttp::new(Default::default())?,
     };
     let bindings = crate::Bindings::native_for_startup(

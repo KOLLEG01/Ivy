@@ -16,21 +16,12 @@ pub use host::{
     CoordinatedReset, ResetHost, ResetHostPhase, ResetPhaseArguments, decode_scope_roots,
     encode_scope_roots, reset_phase_arguments, reset_process_alive, wait_reset_processes_stopped,
 };
-fn truthy(value: &J) -> bool {
-    match value {
-        J::Null => false,
-        J::Bool(value) => *value,
-        J::Number(value) => *value != 0.0 && !value.is_nan(),
-        J::String(value) => !value.0.is_empty(),
-        _ => true,
-    }
-}
 
 /// An interrupted deployment retains the same reset ID and epoch until the
 /// matching coordinator record confirms completion.
 pub fn retained_reset_identity(previous: Option<&J>, plan_hash: &JsString) -> Option<J> {
     let previous = previous.filter(|value| !value.is_null())?;
-    if previous.get("deploymentComplete").is_some_and(truthy)
+    if previous.get("deploymentComplete") == Some(&J::Bool(true))
         || previous.get("planHash") != Some(&J::String(plan_hash.clone()))
     {
         return None;

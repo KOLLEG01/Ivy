@@ -1,14 +1,22 @@
+#[path = "host-backup-actions.rs"]
+mod backup_cases;
+#[path = "host-bootstrap-actions.rs"]
+mod bootstrap_cases;
+#[path = "host-bootstrap-restart-cases.rs"]
+mod bootstrap_restart_cases;
+#[path = "host-journal-native-cases.rs"]
+mod journal_cases;
+#[path = "host-preparation-actions.rs"]
+mod preparation_cases;
+#[path = "host-reset-actions.rs"]
+mod reset_cases;
+#[path = "host-target-storage-cases.rs"]
+mod target_storage_cases;
+#[path = "host-storage-retention-cases.rs"]
+mod storage_retention_cases;
 #[allow(dead_code)]
 #[path = "host-service-fixture.rs"]
 mod service_fixture;
-#[path = "host-preparation-actions.rs"]
-mod preparation_cases;
-#[path = "host-backup-actions.rs"]
-mod backup_cases;
-#[path = "host-reset-actions.rs"]
-mod reset_cases;
-#[path = "host-bootstrap-actions.rs"]
-mod bootstrap_cases;
 use ivy_contracts::{IvyJson as J, JsString, core_schema::validate_host, json};
 use ivy_host_runtime::{
     actions::{Action, LocalAction},
@@ -52,7 +60,7 @@ fn node() -> PathBuf {
 }
 fn actions(f: &ServiceFixture) -> HostActions {
     HostActions::native(
-        fixture_node("24.18.0"),
+        None,
         Arc::new(|_, _| panic!("No artifact comparison admitted")),
         f.0.join("unused-current-package"),
         f.0.join("unused-ivy-job"),
@@ -423,10 +431,11 @@ async fn native_maintenance_binding_and_invalid_wait_refuse_before_unrelated_eff
             .await
             .is_err()
     );
+    let untouched = ServiceFixture::new();
     for wait in [f64::NAN, -1.0, 0.5, 600_001.0] {
         let result = actions
             .lifecycle(
-                f.0.join("absent-config.json"),
+                untouched.0.join("absent-config.json"),
                 action(Action::Disable, "never-admitted"),
                 wait,
                 None,
@@ -435,7 +444,7 @@ async fn native_maintenance_binding_and_invalid_wait_refuse_before_unrelated_eff
         assert_eq!(result.entry.unwrap_err().code, "invalid_arguments");
         assert!(result.deployment_id.is_none());
     }
-    assert!(!f.0.join("state/deployments.sqlite").exists());
+    assert!(!untouched.0.join("state/deployments.sqlite").exists());
 }
 
 #[tokio::test]

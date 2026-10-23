@@ -1,73 +1,135 @@
 use super::ServiceFixture;
-use ivy_contracts::{IvyJson, JsString, json};
+use ivy_contracts::{IvyJson, json};
 use ivy_host_executor::worker::WorkerPaths;
-use ivy_host_runtime::node_path::{self, Context};
-use std::{collections::BTreeMap, ffi::OsString, path::Path, process::Command};
+use std::{ffi::OsString, process::Command};
 
 #[test]
-fn worker_arguments_match_the_original_strict_node_entry() {
+fn worker_arguments_admit_native_paths_and_refuse_invalid_options() {
     let fixture = ServiceFixture::new();
-    let node = std::env::var_os("IVY_TEST_NODE").expect("Pinned Node supplied by the test runner");
-    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../tests/fixtures/host-bootstrap-worker-entry-cases.mjs");
-    let original = Command::new(node)
-        .arg(script)
-        .arg(&fixture.0)
-        .output()
-        .unwrap();
-    assert!(
-        original.status.success(),
-        "{}",
-        String::from_utf8_lossy(&original.stderr)
-    );
-    let rows = json::parse(std::str::from_utf8(&original.stdout).unwrap(), 64 * 1024).unwrap();
-    let rows = rows.as_array().unwrap();
-    assert_eq!(rows.len(), 20);
-    let context = Context {
-        style: node_path::Style::native(),
-        cwd: node_path::from_native(&fixture.0),
+    let required = vec![
+        "--config",
+        "config.json",
+        "--request",
+        "request.json",
+        "--distribution",
+        "artifact",
+    ];
+    let with = |extra: Vec<&'static str>| {
+        let mut args = required.clone();
+        args.extend(extra);
+        args
     };
-    for row in rows {
-        let args = row
-            .required("args")
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|value| node_path::to_native(value.as_js_string().unwrap()).into_os_string())
-            .collect::<Vec<_>>();
-        match WorkerPaths::parse(&args, &context) {
-            Ok(paths) => {
-                assert_eq!(row.get("code"), None, "{args:?}");
-                let actual = IvyJson::object([
-                    (
-                        "config",
-                        IvyJson::String(node_path::from_native(&paths.config)),
-                    ),
-                    (
-                        "request",
-                        IvyJson::String(node_path::from_native(&paths.request)),
-                    ),
-                    (
-                        "distribution",
-                        IvyJson::String(node_path::from_native(&paths.distribution)),
-                    ),
-                ]);
-                assert_eq!(&actual, row.required("paths").unwrap(), "{args:?}");
-                assert!(paths.node_executable.is_none());
-            }
-            Err(error) => assert_eq!(
-                Some(&IvyJson::String(error.code_js())),
-                row.get("code"),
-                "{args:?}"
-            ),
-        }
+    let defaults = [
+        fixture.0.join("config.json"),
+        fixture.0.join("request.json"),
+        fixture.0.join("artifact"),
+    ];
+    // The existing twenty argument cases now assert the worker contract directly.
+    for (args, expected) in [
+        (required.clone(), defaults.clone()),
+        (with(vec!["--"]), defaults.clone()),
+        (
+            with(vec!["--config", "later.json"]),
+            [
+                fixture.0.join("later.json"),
+                defaults[1].clone(),
+                defaults[2].clone(),
+            ],
+        ),
+        (
+            vec![
+                "--config=café/../配置.json",
+                "--request=request=file.json",
+                "--distribution=artifact",
+            ],
+            [
+                fixture.0.join("配置.json"),
+                fixture.0.join("request=file.json"),
+                defaults[2].clone(),
+            ],
+        ),
+        (
+            vec!["--config=-config.json", "--request=-", "--distribution=."],
+            [
+                fixture.0.join("-config.json"),
+                fixture.0.join("-"),
+                fixture.0.clone(),
+            ],
+        ),
+        (
+            vec![
+                "--config",
+                "-",
+                "--request",
+                "request",
+                "--distribution",
+                "../artifact",
+            ],
+            [
+                fixture.0.join("-"),
+                fixture.0.join("request"),
+                fixture.0.parent().unwrap().join("artifact"),
+            ],
+        ),
+        (
+            with(vec!["--request=a=b=c"]),
+            [
+                defaults[0].clone(),
+                fixture.0.join("a=b=c"),
+                defaults[2].clone(),
+            ],
+        ),
+    ] {
+        let args = args.into_iter().map(OsString::from).collect::<Vec<_>>();
+        let paths = WorkerPaths::parse(&args, &fixture.0).unwrap();
+        assert_eq!(
+            [paths.config, paths.request, paths.distribution],
+            expected,
+            "{args:?}"
+        );
+        assert!(paths.node_executable.is_none());
+    }
+    for (args, code) in [
+        (vec![], "invalid_arguments"),
+        (with(vec!["--config="]), "invalid_arguments"),
+        (with(vec!["--request", ""]), "invalid_arguments"),
+        (with(vec!["--distribution="]), "invalid_arguments"),
+        (with(vec!["--config"]), "internal_error"),
+        (with(vec!["--request", "--distribution"]), "internal_error"),
+        (with(vec!["--config", "-value"]), "internal_error"),
+        (with(vec!["--bad=value"]), "internal_error"),
+        (with(vec!["positional"]), "internal_error"),
+        (with(vec!["--", "--config=later"]), "internal_error"),
+        (vec!["-c", "config"], "internal_error"),
+        (
+            vec![
+                "--no-config",
+                "--config",
+                "config.json",
+                "--request",
+                "request.json",
+                "--distribution",
+                "artifact",
+            ],
+            "internal_error",
+        ),
+        (
+            vec!["--config", "--", "--request", "r", "--distribution", "d"],
+            "internal_error",
+        ),
+    ] {
+        let args = args.into_iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            WorkerPaths::parse(&args, &fixture.0).err().unwrap().code,
+            code,
+            "{args:?}"
+        );
     }
 }
 
 #[test]
 fn private_workload_input_keeps_absolute_file_admission() {
-    let context = Context::current().unwrap();
+    let cwd = std::env::current_dir().unwrap();
     let args = [
         "--config=c",
         "--request=r",
@@ -75,7 +137,7 @@ fn private_workload_input_keeps_absolute_file_admission() {
         "--node-executable=relative-node",
     ]
     .map(OsString::from);
-    let paths = WorkerPaths::parse(&args, &context).unwrap();
+    let paths = WorkerPaths::parse(&args, &cwd).unwrap();
     assert_eq!(paths.node_executable, Some("relative-node".into()));
     assert!(paths.config.is_absolute());
     assert!(paths.request.is_absolute());
@@ -127,19 +189,59 @@ fn native_worker_error_exit_precedes_node_and_os_effects() {
 #[cfg(windows)]
 #[test]
 fn native_worker_path_values_retain_utf16_units() {
-    use std::os::windows::ffi::OsStringExt;
-    let context = Context::current().unwrap();
-    let mut request = JsString::from("--request=").0;
-    request.extend([0xd800, 0x61]);
-    let args = [
-        "--config=c".into(),
-        OsString::from_wide(&request),
-        "--distribution=d".into(),
-    ];
-    let parsed = WorkerPaths::parse(&args, &context).unwrap();
-    assert!(
-        node_path::from_native(&parsed.request)
-            .0
-            .ends_with(&[0xd800, 0x61])
-    );
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    let cwd = std::env::current_dir().unwrap();
+    let request = [0xd800, 0x61];
+    let inline = "--request="
+        .encode_utf16()
+        .chain(request)
+        .collect::<Vec<_>>();
+    for args in [
+        vec![
+            "--config=c".into(),
+            OsString::from_wide(&inline),
+            "--distribution=d".into(),
+        ],
+        vec![
+            "--config=c".into(),
+            "--request".into(),
+            OsString::from_wide(&request),
+            "--distribution=d".into(),
+        ],
+    ] {
+        let parsed = WorkerPaths::parse(&args, &cwd).unwrap();
+        assert!(
+            parsed
+                .request
+                .as_os_str()
+                .encode_wide()
+                .collect::<Vec<_>>()
+                .ends_with(&request)
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_worker_path_values_retain_os_bytes() {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let cwd = std::env::current_dir().unwrap();
+    let request = [0xff, b'a'];
+    let inline = [b"--request=".as_slice(), &request].concat();
+    for args in [
+        vec![
+            "--config=c".into(),
+            OsString::from_vec(inline),
+            "--distribution=d".into(),
+        ],
+        vec![
+            "--config=c".into(),
+            "--request".into(),
+            OsString::from_vec(request.to_vec()),
+            "--distribution=d".into(),
+        ],
+    ] {
+        let parsed = WorkerPaths::parse(&args, &cwd).unwrap();
+        assert!(parsed.request.as_os_str().as_bytes().ends_with(&request));
+    }
 }

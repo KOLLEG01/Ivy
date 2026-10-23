@@ -52,7 +52,22 @@ fn plan(f: &ServiceFixture, os: &str) -> J {
         ("configHash", format!("sha256:{}", "b".repeat(64)).into()),
         ("runtimeRoot", p(&f.0.join("runtime"))),
         ("nodeExecutable", p(&f.0.join("Node Work/node.exe"))),
-        ("processes", J::Array(vec![])),
+        (
+            "processes",
+            J::Array(vec![J::object([
+                ("instanceId", "host".into()),
+                ("componentId", "host-executor".into()),
+                ("name", "ivy-next-0123456789ab-111111111111".into()),
+                (
+                    "entrypoint",
+                    J::object([
+                        ("executable", "node".into()),
+                        ("args", J::Array(vec!["dist/main.js".into()])),
+                        ("timeoutMs", J::Number(5000.0)),
+                    ]),
+                ),
+            ])]),
+        ),
     ])
 }
 fn artifact(plan: &J) -> PathBuf {
@@ -258,6 +273,7 @@ async fn systemd_native_launch_recipe_active_replay_and_admin_gate() {
         );
     }
     native_plan.insert("processes", J::Array(native_processes));
+    native_plan.remove("nodeExecutable");
     let native_host = Linux::new(0, None, false, false);
     native_host
         .os(&f)
@@ -546,10 +562,39 @@ fn scheduler_native_and_legacy_recipes_use_the_actual_powershell_function() {
         x64.join("ivy-host-job.exe"),
     );
     native_data.insert("nodeRequired", false.into());
+    let mut native_plan = plan.clone();
+    native_plan.remove("nodeExecutable");
+    let mut native_processes = native_plan
+        .required("processes")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .to_vec();
+    for process in &mut native_processes {
+        process.insert(
+            "entrypoint",
+            J::object([
+                (
+                    "executable",
+                    "dist/native/win32-x64/ivy-host-executor.exe".into(),
+                ),
+                ("args", J::Array(vec![])),
+                ("timeoutMs", J::Number(30000.0)),
+            ]),
+        );
+    }
+    native_plan.insert("processes", J::Array(native_processes));
     cases.push(J::object([
-        ("plan", plan.clone()),
-        ("data", native_data),
+        ("plan", native_plan),
+        ("data", native_data.clone()),
         ("ok", true.into()),
+    ]));
+    let mut missing_node = plan.clone();
+    missing_node.remove("nodeExecutable");
+    cases.push(J::object([
+        ("plan", missing_node),
+        ("data", native_data),
+        ("ok", false.into()),
     ]));
     let script = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../tests/fixtures/host-bootstrap-automatic-launch.ps1");
@@ -594,7 +639,7 @@ fn scheduler_native_and_legacy_recipes_use_the_actual_powershell_function() {
         ivy_contracts::json::parse(std::str::from_utf8(&output.stdout).unwrap(), 1024 * 1024)
             .unwrap();
     let rows = rows.as_array().unwrap();
-    assert_eq!(rows.len(), 8);
+    assert_eq!(rows.len(), 9);
     for (index, row) in rows.iter().enumerate() {
         assert_eq!(row.get("ok"), cases[index].get("ok"), "case {index}");
         if index == 7 {

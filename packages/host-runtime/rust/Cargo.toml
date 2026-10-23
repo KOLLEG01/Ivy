@@ -109,6 +109,15 @@ path = "../../../tests/rust/host-compiler-tools.rs"
 harness = false
 
 [[test]]
+name = "host-emitted-runtime"
+path = "../../../tests/rust/host-emitted-runtime-cases.rs"
+
+[[test]]
+name = "host-javascript-preparation"
+path = "../../../tests/rust/host-javascript-preparation.rs"
+harness = false
+
+[[test]]
 name = "host-native-recovery"
 path = "../../../tests/rust/host-native-recovery-cases.rs"
 

@@ -1,6 +1,6 @@
 use ivy_contracts::{IvyJson, JsString, hash, json};
 use ivy_host_runtime::{
-    IvyError, Outcome,
+    Outcome,
     executor_lock::ExecutorLock,
     journal::HostJournal,
     node_path,
@@ -10,7 +10,6 @@ use ivy_host_runtime::{
     prepare::{self, PreparationRuntime},
 };
 use std::{
-    cmp::Ordering,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -210,94 +209,17 @@ fn oracle(input: IvyJson) -> IvyJson {
     );
     json::parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
 }
-fn runtime(node: &Path, inputs: &Inputs) -> PreparationRuntime {
-    fn inventory(base: &Path, directory: &Path, files: &mut Vec<JsString>) {
-        for entry in fs::read_dir(directory).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_type().unwrap().is_dir() {
-                inventory(base, &entry.path(), files);
-            } else {
-                files.push(
-                    entry
-                        .path()
-                        .strip_prefix(base)
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .replace('\\', "/")
-                        .into(),
-                );
-            }
-        }
-    }
-    let source = native(inputs.snapshot.required("sourceRoot").unwrap());
-    let mut files = Vec::new();
-    inventory(&source, &source, &mut files);
-    let input = IvyJson::object([
-        ("operation", "order".into()),
-        (
-            "paths",
-            IvyJson::Array(files.iter().cloned().map(IvyJson::String).collect()),
-        ),
-    ]);
-    let mut child = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/host-preparation-inputs-oracle.mjs",
-        ])
-        .current_dir(root())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(json::stringify(&input, usize::MAX).unwrap().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success());
-    let matrix = json::parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
-    let matrix = matrix
-        .required("operation")
-        .unwrap()
-        .required("value")
-        .unwrap()
-        .required("matrix")
-        .unwrap()
-        .clone();
-    let compare = Arc::new(move |a: &JsString, b: &JsString| {
-        let a = files
-            .iter()
-            .position(|p| a == p)
-            .expect("unknown locale fixture key");
-        let b = files
-            .iter()
-            .position(|p| b == p)
-            .expect("unknown locale fixture key");
-        match matrix.as_array().unwrap()[a].as_array().unwrap()[b]
-            .as_f64()
-            .unwrap() as i32
-        {
-            -1 => Ordering::Less,
-            0 => Ordering::Equal,
-            1 => Ordering::Greater,
-            _ => unreachable!(),
-        }
-    });
+fn runtime(node: &Path, _inputs: &Inputs) -> PreparationRuntime {
     PreparationRuntime {
         node: Some(NodeRuntime {
             executable: node.into(),
             version: "24.18.0".into(),
         }),
-        compare,
-        imports: Some(Arc::new(|_, _| panic!("app must not invoke the service parser"))),
+        compare: ivy_host_runtime::artifact::native_file_compare().unwrap(),
         http: PortableHttp::new(reqwest::Client::builder().no_proxy()).unwrap(),
     }
 }
+
 fn append(actual: &IvyJson, expected: &IvyJson, scope: &str) {
     if let Some(file) = std::env::var_os("IVY_HOST_PREPARE_WORKFLOW_CORPUS") {
         let _guard = CORPUS.lock().unwrap();
@@ -386,9 +308,8 @@ fn service_inputs(parent: &Fixture, name: &str, tools: &(PathBuf, PathBuf, PathB
         &source.join("services/fixture/deploy.json"),
         json::canonical(&plan, usize::MAX).unwrap().as_bytes(),
     );
-    write(&source.join("package-lock.json"),br#"{"lockfileVersion":3,"packages":{"node_modules/fixture-dep":{"version":"1.0.0"},"node_modules/development":{"version":"1.0.0","dev":true}}}"#);
-    // A deterministic installer fixture exercises the original retain-after-ci
-    // branch without installing packages or contacting a registry.
+    write(&source.join("package-lock.json"),br#"{"lockfileVersion":3,"packages":{"node_modules/fixture-dep":{"version":"1.0.0"},"node_modules/development":{"version":"1.0.0","dev":true},"node_modules/typescript":{"version":"5.9.3","dev":true}}}"#);
+    // The installer fixture copies the real compiler without registry access.
     write(&source.join("tools/build/run-npm.mjs"),br#"import fs from 'node:fs';
 if(process.env.IVY_DEPENDENCY_CACHE_HIT==='1'){
  if(!fs.existsSync('node_modules/fixture-dep/index.js'))throw Error('Warm cache is unavailable');
@@ -396,6 +317,14 @@ if(process.env.IVY_DEPENDENCY_CACHE_HIT==='1'){
  for(const name of ['fixture-dep','development']){fs.mkdirSync('node_modules/'+name,{recursive:true});fs.writeFileSync('node_modules/'+name+'/package.json',JSON.stringify({name,version:'1.0.0'}));fs.writeFileSync('node_modules/'+name+'/index.js','module.exports=1;');}
 }
 "#);
+    let installer = source.join("tools/build/run-npm.mjs");
+    let mut install = fs::read_to_string(&installer).unwrap();
+    let compiler = root().join("node_modules/typescript");
+    install.push_str(&format!(
+        "\nif(process.env.IVY_DEPENDENCY_CACHE_HIT!=='1'){{const compiler={};fs.mkdirSync('node_modules/typescript/lib',{{recursive:true}});for(const name of ['package.json','lib/typescript.js'])fs.copyFileSync(compiler+'/'+name,'node_modules/typescript/'+name);}}",
+        json::stringify(&path(&compiler), usize::MAX).unwrap(),
+    ));
+    write(&installer, install.as_bytes());
     let script = format!(
         "import fs from 'node:fs';fs.mkdirSync('dist',{{recursive:true}});fs.writeFileSync('dist/main.js',{});fs.writeFileSync('dist/health.js',{});fs.writeFileSync('dist/cache-hit.txt',process.env.IVY_DEPENDENCY_CACHE_HIT);fs.writeFileSync('dist/ignored.js.map','excluded');",
         json::stringify(&SERVICE_MAIN.into(), usize::MAX).unwrap(),
@@ -403,20 +332,6 @@ if(process.env.IVY_DEPENDENCY_CACHE_HIT==='1'){
     );
     write(&source.join("tools/build.mjs"), script.as_bytes());
     input
-}
-fn service_runtime(node: &Path, input: &Inputs) -> PreparationRuntime {
-    let mut runtime = runtime(node, input);
-    // Exact fixture source bindings only. Parser compatibility is covered by
-    // the original TypeScript AST corpus; production must supply that binding.
-    runtime.imports = Some(Arc::new(|_, source| {
-        if source == &JsString::from(SERVICE_MAIN) {
-            Ok(vec!["fixture-dep".into()])
-        } else {
-            assert_eq!(source, &JsString::from(SERVICE_HEALTH));
-            Ok(Vec::new())
-        }
-    }));
-    runtime
 }
 fn advance_service_plan(input: &Inputs) {
     let source = native(input.snapshot.required("sourceRoot").unwrap());
@@ -428,8 +343,7 @@ fn advance_service_plan(input: &Inputs) {
         json::canonical(&plan, usize::MAX).unwrap().as_bytes(),
     );
 }
-#[tokio::test]
-async fn native_activation_runtime_prepares_real_captured_service_and_registers_immutable_publication()
+pub async fn emitted_javascript_native_activation_prepares_real_service_and_registers_publication()
  {
     use ivy_host_runtime::executor::{
         ActivationRuntime, ExecutorOptions, NativeActivationRuntime, NativeOfflineHiveInspector,
@@ -479,7 +393,7 @@ async fn native_activation_runtime_prepares_real_captured_service_and_registers_
     )
     .await
     .unwrap();
-    let preparation = service_runtime(&tools.0, &input);
+    let preparation = runtime(&tools.0, &input);
     let inspector = NativeOfflineHiveInspector::new(
         tools.2.clone(),
         NativeHelperLayout::Target,
@@ -499,6 +413,7 @@ async fn native_activation_runtime_prepares_real_captured_service_and_registers_
     assert_eq!(fs::read(artifact.join("dist/cache-hit.txt")).unwrap(), b"0");
     assert!(artifact.join("node_modules/fixture-dep/index.js").is_file());
     assert!(!artifact.join("node_modules/development").exists());
+    assert!(!artifact.join("node_modules/typescript").exists());
     assert!(!artifact.join("dist/ignored.js.map").exists());
     let id = candidate.required("candidateId").unwrap().as_str().unwrap();
     assert_eq!(
@@ -522,13 +437,11 @@ async fn native_activation_runtime_prepares_real_captured_service_and_registers_
     context.journal.close().await.unwrap();
     journal.close().await.unwrap();
 }
-#[tokio::test]
-async fn service_preparation_uses_the_emitted_lock_closure_and_reuses_dependencies_for_a_new_build()
+pub async fn emitted_javascript_preparation_uses_lock_closure_and_reuses_dependencies_for_a_new_build()
 {
     let fixture = Fixture::new();
     let tools = tools();
     let actual = service_inputs(&fixture, "actual", &tools);
-    let original = service_inputs(&fixture, "original", &tools);
     let mut first = None;
     for hit in [false, true] {
         let result = prepare::prepare_candidate(
@@ -536,7 +449,7 @@ async fn service_preparation_uses_the_emitted_lock_closure_and_reuses_dependenci
             "fixture".into(),
             actual.host.clone(),
             actual.bootstrap.clone(),
-            service_runtime(&tools.0, &actual),
+            runtime(&tools.0, &actual),
         )
         .await;
         assert!(result.is_ok(), "{result:?}");
@@ -548,68 +461,47 @@ async fn service_preparation_uses_the_emitted_lock_closure_and_reuses_dependenci
         );
         assert!(artifact.join("node_modules/fixture-dep/index.js").is_file());
         assert!(!artifact.join("node_modules/development").exists());
+        assert!(!artifact.join("node_modules/typescript").exists());
         assert!(!artifact.join("dist/ignored.js.map").exists());
         if let Some(prior) = &first {
             assert_ne!(candidate.get("buildId"), Some(prior));
         } else {
             first = candidate.get("buildId").cloned();
         }
-        let observed = normalize(&summary(&actual, result, None).await, &actual.root, "");
-        let expected = normalize(
-            &oracle(IvyJson::object([
-                ("fixtureRoot", path(&fixture.0)),
-                ("root", path(&original.root)),
-                ("host", original.host.clone()),
-                ("snapshot", original.snapshot.clone()),
-                ("bootstrap", path(&original.bootstrap)),
-                ("reuse", false.into()),
-            ])),
-            &original.root,
-            "",
-        );
-        append(
-            &observed,
-            &expected,
-            if hit {
-                "Full original service preparation with warm cache and a new source build identity"
-            } else {
-                "Full original service preparation with cache retain, emitted package closure and publication"
-            },
-        );
+        let journal = HostJournal::open(actual.host.clone()).await.unwrap();
+        let id = candidate.required("candidateId").unwrap().as_str().unwrap();
         assert_eq!(
-            json::canonical(&observed, usize::MAX).unwrap(),
-            json::canonical(&expected, usize::MAX).unwrap()
+            json::canonical(&journal.candidate(&id).await.unwrap(), usize::MAX).unwrap(),
+            json::canonical(candidate, usize::MAX).unwrap(),
         );
+        assert!(journal.target("fixture").await.unwrap().is_none());
+        assert!(journal.installed("fixture").await.unwrap().is_none());
+        journal.close().await.unwrap();
         assert_cache_lease_released(&native(actual.host.required("stagingRoot").unwrap())).await;
         if !hit {
             advance_service_plan(&actual);
-            advance_service_plan(&original);
         }
     }
 }
-#[tokio::test]
-async fn parser_failure_keeps_raw_error_code_message_progress_and_replaces_only_error_details() {
+pub async fn emitted_javascript_inventory_failure_records_outcome_and_releases_cache() {
     let fixture = Fixture::new();
     let tools = tools();
     let actual = service_inputs(&fixture, "actual", &tools);
-    let code = JsString(vec![102, 105, 120, 116, 117, 114, 101, 45, 0xd800]);
-    let message = JsString(vec![109, 101, 115, 115, 97, 103, 101, 45, 0xdfff]);
-    let failure = IvyError::new_js(code.clone(), message.clone())
-        .with_outcome(Outcome::Unknown)
-        .with_details("old details".into());
-    let mut runtime = service_runtime(&tools.0, &actual);
-    runtime.imports = Some(Arc::new(move |_, _| Err(failure.clone())));
+    let source = native(actual.snapshot.required("sourceRoot").unwrap());
+    let script = source.join("tools/build.mjs");
+    let mut body = fs::read_to_string(&script).unwrap();
+    body.push_str("fs.rmSync('dist',{recursive:true});");
+    write(&script, body.as_bytes());
     let error = prepare::prepare_candidate(
         actual.snapshot.clone(),
         "fixture".into(),
         actual.host.clone(),
         actual.bootstrap.clone(),
-        runtime,
+        runtime(&tools.0, &actual),
     )
     .await
     .unwrap_err();
-    assert_eq!(error.code_js(), code);
-    assert_eq!(error.message_js(), message);
+    assert_eq!(error.code, "command_failed");
     assert_eq!(error.outcome, Outcome::Unknown);
     assert_eq!(
         error.details,
@@ -619,34 +511,15 @@ async fn parser_failure_keeps_raw_error_code_message_progress_and_replaces_only_
         )]))
     );
     let observed = summary(&actual, Err(error), None).await;
-    assert_eq!(
-        observed.required("record").unwrap().get("errorCode"),
-        Some(&IvyJson::String(code.clone()))
-    );
-    assert_eq!(
-        observed.required("record").unwrap().get("phase"),
-        Some(&"unknown".into())
-    );
-    let progress_root =
-        native(actual.host.required("runtimeRoot").unwrap()).join("preparation-progress");
-    let records: Vec<_> = fs::read_dir(progress_root)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .collect();
+    assert_eq!(observed.required("record").unwrap().get("errorCode"), Some(&"command_failed".into()));
+    assert_eq!(observed.required("record").unwrap().get("phase"), Some(&"unknown".into()));
+    let progress_root = native(actual.host.required("runtimeRoot").unwrap()).join("preparation-progress");
+    let records: Vec<_> = fs::read_dir(progress_root).unwrap().map(|e| e.unwrap().path()).collect();
     assert_eq!(records.len(), 1);
-    let mut step = JsString::from("failed: ").0;
-    step.extend(code.0);
-    assert_eq!(
-        load(&records[0]).get("step"),
-        Some(&IvyJson::String(JsString(step)))
-    );
+    assert_eq!(load(&records[0]).get("step"), Some(&"failed: command_failed".into()));
     assert_cache_lease_released(&native(actual.host.required("stagingRoot").unwrap())).await;
-    append(
-        &normalize(&observed, &actual.root, ""),
-        &IvyJson::Null,
-        "Injected mandatory-parser failure: exact UTF-16 error, failure record/progress, snapshot details and released cache owner; not an original-parser differential case",
-    );
 }
+
 fn normalize(value: &IvyJson, base: &Path, key: &str) -> IvyJson {
     if [
         "createdAt",

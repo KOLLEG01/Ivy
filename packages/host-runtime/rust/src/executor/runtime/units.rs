@@ -213,7 +213,12 @@ impl NativeActivationRuntime {
                         ("artifactRoot", candidate.required("artifactRoot")?.clone()),
                         (
                             "nodeExecutable",
-                            c.config.required("executables")?.required("node")?.clone(),
+                            if crate::native_plan::is_native_plan(&manifest) {
+                                crate::layout::path_json(&crate::paths::direct_native_file(
+                                    &crate::config::path_value(candidate.required("artifactRoot")?)?,
+                                    &manifest.required("entrypoint")?.required("executable")?.as_str()?,
+                                )?)
+                            } else { c.config.required("executables")?.required("node")?.clone() },
                         ),
                     ]),
                     config.json().clone(),

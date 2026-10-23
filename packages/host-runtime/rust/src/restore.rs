@@ -53,15 +53,6 @@ fn field(v: &J, k: &str) -> IvyResult<JsString> {
 fn array(v: &J) -> IvyResult<&[J]> {
     v.as_array().ok_or_else(IvyError::internal)
 }
-fn truthy(v: &J) -> bool {
-    match v {
-        J::Null => false,
-        J::Bool(v) => *v,
-        J::Number(v) => *v != 0.0 && !v.is_nan(),
-        J::String(v) => !v.0.is_empty(),
-        _ => true,
-    }
-}
 fn concat(v: &[JsString]) -> JsString {
     JsString(v.iter().flat_map(|v| v.0.iter().copied()).collect())
 }

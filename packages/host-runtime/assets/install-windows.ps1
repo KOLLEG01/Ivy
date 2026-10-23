@@ -20,7 +20,8 @@ foreach ($ivyProcess in @($ivyPlan.processes)) {
   if ($ivyProcess.name -notmatch ('^' + [regex]::Escape($ivyPlan.installationId) + '-[0-9a-f]{12}$')) { throw 'OS name is outside this IvyNext installation.' }
   $ivyBreakaway = @(); if ($ivyProcess.allowWindowsBreakaway -eq $true) { $ivyBreakaway = @('--allow-breakaway') }
   $ivyArtifact = if ($ivyProcess.artifactRoot) { [string]$ivyProcess.artifactRoot } else { [string]$ivyPlan.artifactRoot }
-  $ivyExecutable = if ($ivyProcess.entrypoint -and $ivyProcess.entrypoint.executable -ne 'node') { [string]$ivyProcess.entrypoint.executable } else { [string]$ivyPlan.nodeExecutable }
+  $ivyExecutable = if ($ivyProcess.entrypoint -and $ivyProcess.entrypoint.executable -notin @('node','$node')) { [string]$ivyProcess.entrypoint.executable } else { [string]$ivyPlan.nodeExecutable }
+  if (-not $ivyExecutable) { throw 'A JavaScript bootstrap process requires its configured Node executable.' }
   $ivyArgs = if ($ivyProcess.entrypoint) { @($ivyProcess.entrypoint.args) } elseif ($ivyProcess.componentId -eq 'host-executor') { @('dist\packages\host-runtime\src\executor.js') } else { @('dist\services\' + $ivyProcess.componentId + '\src\main.js') }
   $ivyConfig = if ($ivyProcess.configPath) { [string]$ivyProcess.configPath } else { [string]$ivyPlan.configPath }
   $ivyConfigArgument = if ($ivyProcess.componentId -eq 'host-executor') { [string]$ivyPlan.configPath } else { $ivyConfig }

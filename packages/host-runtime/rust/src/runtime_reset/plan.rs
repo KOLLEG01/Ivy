@@ -57,8 +57,8 @@ fn deployment<'a>(config: &'a J, storage: &StorageContext) -> IvyResult<&'a J> {
     for host in hosts {
         require(
             host.get("hostId") == config.get("hostId")
-                || (host.get("ssh").is_some_and(truthy)
-                    && host.get("cliPath").is_some_and(truthy)
+                || (host.get("ssh").and_then(J::as_js_string).is_some_and(|text| !text.0.is_empty())
+                    && host.get("cliPath").and_then(J::as_js_string).is_some_and(|text| !text.0.is_empty())
                     && node_path::is_absolute(storage.paths.style, &field(host, "cliPath")?)),
             "invalid_arguments",
             "Every remote reset host requires an SSH identity and absolute CLI path.",
@@ -253,7 +253,7 @@ pub async fn local_runtime_reset_plan(
                     }
                 }
             }
-            if let Some(marker) = layout.get("completionMarker").filter(|v| truthy(v)) {
+            if let Some(marker) = layout.get("completionMarker").filter(|v| v.as_js_string().is_some_and(|text| !text.0.is_empty())) {
                 let root = resolve(
                     &storage,
                     &[field(&layout::service_paths(&config, instance)?, "data")?],

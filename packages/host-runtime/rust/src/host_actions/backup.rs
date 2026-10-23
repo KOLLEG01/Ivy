@@ -18,7 +18,7 @@ use std::{path::PathBuf, sync::Arc, time::Instant};
 /// One executing-account generation shared by restore admission and actual
 /// native relocation. Node and locale qualification belong to the caller.
 pub struct RestoreRuntime {
-    node: NodeRuntime,
+    node: Option<NodeRuntime>,
     bindings: Arc<RestoreBindings>,
     native_policy: Arc<NativeBackupPolicy>,
     project_storage: Arc<StorageContext>,
@@ -34,7 +34,7 @@ fn storage(account: &HostContext, compare: FileCompare) -> StorageContext {
     }
 }
 impl RestoreRuntime {
-    pub fn native(node: NodeRuntime, compare: FileCompare) -> IvyResult<Self> {
+    pub fn native(node: impl Into<Option<NodeRuntime>>, compare: FileCompare) -> IvyResult<Self> {
         let account = HostContext::current()?;
         let native_policy = Arc::new(NativeBackupPolicy::new(
             storage(&account, compare.clone()),
@@ -44,7 +44,7 @@ impl RestoreRuntime {
         let project_storage = Arc::new(storage(&account, compare.clone()));
         let storage = storage(&account, compare);
         Ok(Self {
-            node,
+            node: node.into(),
             bindings: Arc::new(RestoreBindings {
                 storage,
                 environment: account.environment,
@@ -96,7 +96,7 @@ impl HostActions {
                 &runtime.bindings,
             )
             .await?;
-            restore::require_restore_platform(&manifest, &runtime.node)?;
+            restore::require_restore_platform(&manifest, runtime.node.as_ref())?;
             let config = restore::target_configuration(
                 node_path::from_native(&config_path),
                 backup_root.clone(),

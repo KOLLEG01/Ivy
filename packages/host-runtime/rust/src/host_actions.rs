@@ -39,10 +39,10 @@ pub struct HostActions {
     clock: Arc<dyn Clock>,
 }
 impl HostActions {
-    /// Node and the locale comparator have already passed caller qualification.
+    /// Node is an optional capability for intentional JavaScript workloads.
     /// No parser, HTTP profile or mutable configuration is captured here.
     pub fn native(
-        node: NodeRuntime,
+        node: impl Into<Option<NodeRuntime>>,
         compare: FileCompare,
         distribution: PathBuf,
         job_launcher: PathBuf,
@@ -57,12 +57,13 @@ impl HostActions {
     }
 
     pub fn with_clock(
-        node: NodeRuntime,
+        node: impl Into<Option<NodeRuntime>>,
         compare: FileCompare,
         distribution: PathBuf,
         job_launcher: PathBuf,
         clock: Arc<dyn Clock>,
     ) -> IvyResult<Self> {
+        let node = node.into();
         let os = bootstrap_os(distribution.clone(), job_launcher.clone(), node.clone())?;
         Ok(Self {
             installation: BootstrapInstallation::native(
@@ -385,7 +386,9 @@ fn parts(values: &[J]) -> IvyResult<JsString> {
     for value in values {
         match value {
             J::String(text) => result.extend_from_slice(&text.0),
-            J::Number(number) if number.is_finite() => result.extend(number.to_string().encode_utf16()),
+            J::Number(number) if number.is_finite() => {
+                result.extend(number.to_string().encode_utf16())
+            }
             _ => return Err(IvyError::internal()),
         }
     }

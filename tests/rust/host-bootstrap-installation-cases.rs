@@ -19,6 +19,12 @@ fn p(path: &std::path::Path) -> J {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::for_plan(false).await
+    }
+    async fn for_plan(native: bool) -> Self {
+        Self::with_plan_tools(native, false).await
+    }
+    async fn with_plan_tools(native: bool, declared_node: bool) -> Self {
         let root =
             std::env::temp_dir().join(format!("ivy-bootstrap-install-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
@@ -32,7 +38,14 @@ impl Fixture {
             ("artifactRoot", p(&root.join("artifacts"))),
             ("stagingRoot", p(&root.join("staging"))),
             ("publicBaseUrl", "https://example.invalid/ivy".into()),
-            ("executables", J::object([("node", p(&node_path))])),
+            (
+                "executables",
+                if native && !declared_node {
+                    J::object([("native-host", p(&std::env::current_exe().unwrap()))])
+                } else {
+                    J::object([("node", p(&node_path))])
+                },
+            ),
             (
                 "instances",
                 J::Array(vec![J::object([
@@ -50,9 +63,27 @@ impl Fixture {
         let release = root.join("artifacts/release");
         fs::create_dir_all(release.join("artifact/dist")).unwrap();
         let build = J::from(digest(b"bootstrap command candidate"));
+        let platform = crate::portable_native_files::native_platform().unwrap();
+        let suffix = if cfg!(windows) { ".exe" } else { "" };
         let command = |file: &str| {
             J::object([
-                ("executable", "$node".into()),
+                (
+                    "executable",
+                    if native {
+                        format!(
+                            "dist/native/{platform}/{}{}",
+                            if file.contains("health") {
+                                "ivy-health"
+                            } else {
+                                "ivy-host-executor"
+                            },
+                            suffix
+                        )
+                        .into()
+                    } else {
+                        "$node".into()
+                    },
+                ),
                 ("args", J::Array(vec![file.into()])),
                 ("timeoutMs", J::Number(5000.0)),
             ])
@@ -115,9 +146,33 @@ impl Fixture {
         // The existing verifier checks retained payload presence. These are
         // inert fixture bytes, never executable/runtime qualification evidence.
         for file in crate::portable_native_files::portable_native_files("host-executor") {
+            let file = if native {
+                format!(
+                    "dist/native/{platform}/{}",
+                    file.rsplit('/').next().unwrap()
+                )
+            } else {
+                (*file).to_owned()
+            };
             let file = release.join("artifact").join(file);
             fs::create_dir_all(file.parent().unwrap()).unwrap();
             fs::write(file, b"retained native payload fixture").unwrap();
+        }
+        if native {
+            let directory = release.join(format!("artifact/dist/native/{platform}"));
+            fs::create_dir_all(&directory).unwrap();
+            for name in ["ivy-host-executor", "ivy-health"] {
+                fs::write(
+                    directory.join(format!("{name}{suffix}")),
+                    b"static plan fixture; never executed",
+                )
+                .unwrap();
+            }
+            fs::copy(
+                release.join("artifact/dist/build-info.json"),
+                directory.join("build-info.json"),
+            )
+            .unwrap();
         }
         let candidate = J::object([
             ("candidateId", build.clone()),
@@ -145,10 +200,10 @@ impl Fixture {
         ]);
         validate_host("Candidate", &candidate).unwrap();
         let installation = BootstrapInstallation::native(
-            NodeRuntime {
+            (!native).then_some(NodeRuntime {
                 executable: node_path,
                 version: "24.18.0".into(),
-            },
+            }),
             Arc::new(|_, _| panic!("One retained candidate needs no comparator")),
             root.join("unavailable-installer"),
             root.join("unavailable-job"),
@@ -157,7 +212,7 @@ impl Fixture {
         artifact::verify_candidate(
             candidate.clone(),
             root.join("artifacts"),
-            &installation.node,
+            installation.node.as_ref(),
         )
         .await
         .unwrap();
@@ -1686,4 +1741,117 @@ mod phases {
             lock.close().await.unwrap();
         }
     }
+}
+
+#[tokio::test]
+async fn native_bootstrap_plan_needs_no_node_and_legacy_candidates_still_require_it() {
+    let missing = Fixture::for_plan(true).await;
+    let plan = missing
+        .installation
+        .plan(
+            missing.path.clone(),
+            missing
+                .candidate
+                .required("candidateId")
+                .unwrap()
+                .as_js_string()
+                .unwrap()
+                .clone(),
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+    validate_host("BootstrapPlan", &plan).unwrap();
+    assert!(plan.get("nodeExecutable").is_none());
+    assert!(missing.installation.node.is_none());
+    let mut linux = plan.clone();
+    linux.insert("os", "linux".into());
+    let mut process = linux.required("processes").unwrap().as_array().unwrap()[0].clone();
+    process.insert("artifactRoot", "/native artifact".into());
+    process.insert(
+        "entrypoint",
+        J::object([
+            (
+                "executable",
+                "dist/native/linux-x64/ivy-host-executor".into(),
+            ),
+            ("args", J::Array(vec![])),
+            ("timeoutMs", J::Number(5000.0)),
+        ]),
+    );
+    assert!(
+        bootstrap::linux_unit(&linux, &process, None)
+            .unwrap()
+            .to_utf8()
+            .unwrap()
+            .contains("ExecStart=:\"/native artifact/dist/native/linux-x64/ivy-host-executor\"")
+    );
+    process.insert(
+        "entrypoint",
+        J::object([
+            ("executable", "node".into()),
+            ("args", J::Array(vec![])),
+            ("timeoutMs", J::Number(5000.0)),
+        ]),
+    );
+    assert_eq!(
+        bootstrap::linux_unit(&linux, &process, None)
+            .unwrap_err()
+            .code,
+        "unsupported_runtime"
+    );
+    missing.clean().await;
+    // Existing plans keep an explicitly declared tool without executing it.
+    let native = Fixture::with_plan_tools(true, true).await;
+    let plan = native.plan().await;
+    validate_host("BootstrapPlan", &plan).unwrap();
+    assert!(plan.get("nodeExecutable").is_some());
+    assert!(native.installation.node.is_none());
+    assert_eq!(
+        plan.required("processes")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        plan.required("processes")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|process| process
+                .required("entrypoint")
+                .unwrap()
+                .required("executable")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .starts_with("dist/native/"))
+    );
+    assert!(!native.root.join("state/bootstrap").exists());
+    native.clean().await;
+
+    let mut legacy = Fixture::new().await;
+    legacy.installation.node = None;
+    let error = legacy
+        .installation
+        .plan(
+            legacy.path.clone(),
+            legacy
+                .candidate
+                .required("candidateId")
+                .unwrap()
+                .as_js_string()
+                .unwrap()
+                .clone(),
+            None,
+            &[],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "unsupported_runtime");
+    legacy.clean().await;
 }

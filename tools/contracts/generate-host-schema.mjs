@@ -691,7 +691,6 @@ const defs = {
       "configPath",
       "configHash",
       "runtimeRoot",
-      "nodeExecutable",
       "processes",
     ],
   ),

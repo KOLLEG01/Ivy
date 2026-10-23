@@ -58,11 +58,11 @@ pub async fn target_configuration(
     )?;
     validate_host("HostConfig", &input)?;
     require(
-        !input.get("restoredFrom").is_some_and(truthy)
+        !input.get("restoredFrom").is_some_and(|value| !value.is_null())
             && input.get("hostId") == manifest.get("hostId")
             && array(input.required("instances")?)?
                 .iter()
-                .all(|v| !v.get("enabled").is_some_and(truthy)),
+                .all(|v| v.get("enabled") != Some(&J::Bool(true))),
         "target_conflict",
         "Restore needs the original host identity, a fresh configuration and every instance disabled.",
     )?;
@@ -263,7 +263,7 @@ pub async fn target_configuration(
                 )?;
             }
             if instance.get("engine") == Some(&"docker".into()) {
-                let valid = if let Some(docker) = instance.get("docker").filter(|v| truthy(v)) {
+                let valid = if let Some(docker) = instance.get("docker").filter(|value| value.as_object().is_some()) {
                     array(docker.required("ports")?)?.iter().all(|p| {
                         !prior
                             .get("docker")

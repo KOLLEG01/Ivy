@@ -1,11 +1,36 @@
-//! Native automatic-maintenance entry. Its package supplies the adjacent Job
-//! helper and ICU runtime; the retained plan supplies Node for workload checks.
-use ivy_contracts::{IvyError, IvyResult, JsString};
+//! Native automatic-maintenance entry. Node is an optional workload capability.
+use ivy_contracts::{IvyError, IvyResult};
 use ivy_host_runtime::{
     artifact::native_file_compare, bootstrap_maintenance::BootstrapMaintenance,
-    bootstrap_os::bootstrap_os, node_path, node_runtime::NodeRuntime,
+    bootstrap_os::bootstrap_os, node_runtime::NodeRuntime, paths,
 };
-use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    ffi::{OsStr, OsString},
+    path::{Path, PathBuf},
+};
+
+// Match ASCII option prefixes while retaining the OS filename representation.
+#[cfg(windows)]
+fn inline_value(argument: &OsStr, flag: &str) -> Option<OsString> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    let mut units = argument.encode_wide();
+    for unit in flag.encode_utf16().chain([b'=' as u16]) {
+        if units.next() != Some(unit) {
+            return None;
+        }
+    }
+    Some(OsString::from_wide(&units.collect::<Vec<_>>()))
+}
+#[cfg(unix)]
+fn inline_value(argument: &OsStr, flag: &str) -> Option<OsString> {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let value = argument
+        .as_bytes()
+        .strip_prefix(flag.as_bytes())?
+        .strip_prefix(b"=")?;
+    Some(OsString::from_vec(value.to_vec()))
+}
 
 pub struct WorkerPaths {
     pub config: PathBuf,
@@ -15,55 +40,60 @@ pub struct WorkerPaths {
     pub node_executable: Option<PathBuf>,
 }
 impl WorkerPaths {
-    /// Retain the original strict string options, last-value precedence and
-    /// lexical resolve. Parse failures cross IvyError::from as internal errors;
-    /// absent/empty required values are the worker's invalid_arguments error.
-    pub fn parse(args: &[OsString], paths: &node_path::Context) -> IvyResult<Self> {
+    /// Admit named path options relative to the native working directory.
+    /// Repeated options select the last value; no filesystem access is needed.
+    pub fn parse(args: &[OsString], cwd: &Path) -> IvyResult<Self> {
+        const FLAGS: [&str; 4] = [
+            "--config",
+            "--request",
+            "--distribution",
+            "--node-executable",
+        ];
         let mut values = BTreeMap::new();
         let mut args = args.iter();
         while let Some(arg) = args.next() {
-            let arg = node_path::from_native(std::path::Path::new(arg));
-            if arg == JsString::from("--") {
+            if arg == "--" {
                 if args.next().is_some() {
                     return Err(IvyError::internal());
                 }
                 break;
             }
-            let split = arg.0.iter().position(|unit| *unit == 61);
-            let key = JsString(arg.0[..split.unwrap_or(arg.0.len())].to_vec());
-            let key = match key.to_utf8().map_err(|_| IvyError::internal())?.as_str() {
-                "--config" => "config",
-                "--request" => "request",
-                "--distribution" => "distribution",
-                "--node-executable" => "node-executable",
-                _ => return Err(IvyError::internal()),
-            };
-            let value = match split {
-                Some(at) => JsString(arg.0[at + 1..].to_vec()),
+            let (key, inline) = FLAGS
+                .into_iter()
+                .find_map(|flag| {
+                    if arg == flag {
+                        Some((flag, None))
+                    } else {
+                        inline_value(arg, flag).map(|value| (flag, Some(value)))
+                    }
+                })
+                .ok_or_else(IvyError::internal)?;
+            let value = match inline {
+                Some(value) => value,
                 None => {
                     let value = args.next().ok_or_else(IvyError::internal)?;
-                    let value = node_path::from_native(std::path::Path::new(value));
-                    if value.0.len() > 1 && value.0[0] == 45 {
+                    let bytes = value.as_encoded_bytes();
+                    if bytes.len() > 1 && bytes[0] == b'-' {
                         return Err(IvyError::internal());
                     }
-                    value
+                    value.clone()
                 }
             };
             values.insert(key, value);
         }
         let required = |key: &str| -> IvyResult<PathBuf> {
-            let value = values.get(key).filter(|value| !value.0.is_empty()).ok_or_else(|| {
+            let value = values.get(key).filter(|value| !value.is_empty()).ok_or_else(|| {
                 IvyError::new("invalid_arguments", "Automatic bootstrap worker requires config, request and distribution paths.")
             })?;
-            Ok(node_path::to_native(&paths.resolve(&[value.clone()])))
+            paths::absolute(&cwd.join(value)).map_err(|_| IvyError::internal())
         };
         // Do not resolve the workload executable: NodeRuntime::discover retains
         // its absolute-file admission instead of accepting a relative override.
-        let node_executable = values.get("node-executable").map(node_path::to_native);
+        let node_executable = values.get("--node-executable").map(PathBuf::from);
         Ok(Self {
-            config: required("config")?,
-            request: required("request")?,
-            distribution: required("distribution")?,
+            config: required("--config")?,
+            request: required("--request")?,
+            distribution: required("--distribution")?,
             node_executable,
         })
     }
@@ -73,13 +103,11 @@ impl WorkerPaths {
 /// No parser or HTTP binding is needed by the independent worker. All admitted
 /// effects and dropped-waiter ownership remain in the existing worker policy.
 pub async fn run(args: &[OsString]) -> IvyResult<()> {
-    let paths = WorkerPaths::parse(
-        args,
-        &node_path::Context::current().map_err(|_| IvyError::internal())?,
-    )?;
+    let cwd = std::env::current_dir().map_err(|_| IvyError::internal())?;
+    let paths = WorkerPaths::parse(args, &cwd)?;
     let node = NodeRuntime::discover_optional(paths.node_executable.as_deref()).await?;
     let compare = native_file_compare()?;
-    // Universal payloads keep native helpers beside this selected executable.
+    // The selected native package keeps helpers beside this executable.
     // Linux does not use the Windows Job helper; no unused file is required.
     let job_launcher = std::env::current_exe()
         .map_err(|_| IvyError::internal())?

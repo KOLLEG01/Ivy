@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import { lstat, open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { linuxUnit } from './bootstrap.js';
+import { linuxUnit, processExecutable } from './bootstrap.js';
 import { ensureLinuxSlice, inspectLinuxSlice } from './linux-resources.js';
 import { runtimeEnvironment } from './process.js';
 import { digest, hashJson } from '../../contracts/src/canonical.js';
@@ -60,7 +60,7 @@ async function systemdOwner(instance: Host.BootstrapPlan['processes'][number], p
 class SystemdBootstrap implements BootstrapOs {
   async prepare(next: Host.BootstrapPlan): Promise<void> {
     for (const process of next.processes.filter(value => value.user && value.configPath)) await ensureLinuxProcessIdentity({ componentId: process.componentId,
-      user: process.user!, configPath: process.configPath!, artifactRoot: process.artifactRoot ?? next.artifactRoot, nodeExecutable: next.nodeExecutable }, await instanceConfig(process.configPath!));
+      user: process.user!, configPath: process.configPath!, artifactRoot: process.artifactRoot ?? next.artifactRoot, nodeExecutable: processExecutable(next, process) }, await instanceConfig(process.configPath!));
     if (next.linuxResources) { await ensureLinuxSlice(next.linuxResources); await this.reload(); await inspectLinuxSlice(next.linuxResources); }
   }
   async inspect(plans: Host.BootstrapPlan[]): Promise<BootstrapOwner[]> {
@@ -118,6 +118,7 @@ class SystemdBootstrap implements BootstrapOs {
     requireThat(process.getuid?.() === 0, 'unsupported_runtime', 'Automatic bootstrap maintenance needs the systemd administrator.');
     const unit = plan.installationId + '-maintenance-' + digest(operationId).slice(7, 19);
     const worker = join(plan.artifactRoot, 'dist/packages/host-runtime/src/bootstrap-auto-worker.js');
+    requireThat(plan.nodeExecutable, 'unsupported_runtime', 'The legacy JavaScript maintenance worker requires Node.');
     const state = await exec('/usr/bin/systemctl', ['show', unit + '.service', '--property=LoadState,ActiveState'],
       { timeout: 10_000, maxBuffer: 65536, env: runtimeEnvironment() }).catch(() => ({ stdout: '' }));
     const values = Object.fromEntries(state.stdout.trim().split('\n').filter(Boolean).map(line => { const index = line.indexOf('='); return [line.slice(0, index), line.slice(index + 1)]; }));

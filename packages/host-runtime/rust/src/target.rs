@@ -30,15 +30,6 @@ fn now() -> IvyJson {
 fn selected<'a>(value: &'a IvyJson, key: &str) -> Option<&'a IvyJson> {
     value.get(key).filter(|value| !value.is_null())
 }
-fn truthy(value: &IvyJson) -> bool {
-    match value {
-        IvyJson::Null => false,
-        IvyJson::Bool(value) => *value,
-        IvyJson::Number(value) => *value != 0.0 && !value.is_nan(),
-        IvyJson::String(value) => !value.0.is_empty(),
-        _ => true,
-    }
-}
 
 /// The caller supplies the selected artifact and original settings. Only the
 /// release-owned phone executable is rebound; input values remain unchanged.
@@ -124,7 +115,7 @@ pub async fn materialize_target(
             let (host, instance, candidate, manifest) = journal
                 .materialization_snapshot(&instance_id, &candidate_id)
                 .await?;
-            let basis = basis.filter(truthy);
+            let basis = basis.filter(|value| !value.is_null());
             let revision = uuid::Uuid::new_v4().to_string();
             let paths = layout::service_paths(&host, &instance)?;
             if let Some(basis) = &basis {
@@ -205,7 +196,7 @@ pub async fn materialize_target(
             } else {
                 instance.get("credential")
             };
-            if let Some(credential) = credential.filter(|value| truthy(value)) {
+            if let Some(credential) = credential.filter(|value| !value.is_null()) {
                 config.insert("credential", credential.clone());
             }
             validate_host("InstanceConfig", &config)?;

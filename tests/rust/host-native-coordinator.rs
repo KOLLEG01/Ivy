@@ -410,7 +410,6 @@ async fn lifecycle() {
         .unwrap();
     let runtime = PreparationRuntime {
         node: None,
-        imports: None,
         compare: artifact::native_file_compare().unwrap(),
         http: PortableHttp::new(Default::default()).unwrap(),
     };

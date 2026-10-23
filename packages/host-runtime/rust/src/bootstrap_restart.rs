@@ -112,7 +112,8 @@ impl NativeBootstrapRestartOs {
             let invalid = || unknown("Scheduler returned an invalid result.");
             let result = json::parse(&result.stdout.to_utf8().map_err(|_| invalid())?, usize::MAX)
                 .map_err(|_| invalid())?;
-            if !truthy(field(&result, "ok")) {
+            let succeeded = result.get("ok").and_then(IvyJson::as_bool).ok_or_else(invalid)?;
+            if !succeeded {
                 return Err(IvyError::new_js(
                     result
                         .required("code")
@@ -240,22 +241,23 @@ pub async fn restart_windows_owner(
         .iter()
         .find(|owner| owner.get("name") == Some(&IvyJson::String(name.clone())));
     require(
-        owner.is_some_and(|owner| truthy(field(owner, "enabled"))),
+        owner.is_some_and(|owner| owner.get("enabled") == Some(&IvyJson::Bool(true))),
         "target_conflict",
         "The selected Windows bootstrap task is not enabled.",
     )?;
-    if owner.is_some_and(|owner| truthy(field(owner, "running"))) {
+    let running = |owner: &IvyJson| owner.get("running").and_then(IvyJson::as_bool)
+        .ok_or_else(|| unknown("Scheduler returned an invalid owner state."));
+    if running(owner.ok_or_else(IvyError::internal)?)? {
         os.command("/End", name.clone(), distribution.clone())
             .await?;
     }
     let deadline = clock.utc_millis() + 30000;
     loop {
         let owners = os.inspect(plans.clone(), distribution.clone()).await?;
-        if !owners
+        let owner = owners
             .iter()
-            .find(|owner| owner.get("name") == Some(&IvyJson::String(name.clone())))
-            .is_some_and(|owner| truthy(field(owner, "running")))
-        {
+            .find(|owner| owner.get("name") == Some(&IvyJson::String(name.clone())));
+        if owner.map(running).transpose()?.is_none_or(|running| !running) {
             break;
         }
         require(
@@ -285,7 +287,7 @@ async fn reconcile(
         .ok_or_else(IvyError::internal)?
     {
         let component = field(owner, "componentId");
-        if !truthy(field(owner, "configPath"))
+        if owner.get("configPath").is_none()
             || !["host-executor", "service-manager"]
                 .iter()
                 .any(|value| component == &IvyJson::from(*value))
@@ -305,7 +307,8 @@ async fn reconcile(
         )?;
         let instance = instance.unwrap();
         require(
-            truthy(field(owner, "candidateId")) && truthy(field(owner, "artifactRoot")),
+            field(owner, "candidateId").as_js_string().is_some()
+                && field(owner, "artifactRoot").as_js_string().is_some(),
             "target_conflict",
             "Selected bootstrap owner has no immutable release.",
         )?;
@@ -337,7 +340,7 @@ async fn reconcile(
             );
         }
         desired.insert("settings", settings);
-        if let Some(credential) = instance.get("credential").filter(|value| truthy(value)) {
+        if let Some(credential) = instance.get("credential").filter(|value| !value.is_null()) {
             desired.insert("credential", credential.clone());
         } else {
             desired.remove("credential");
@@ -352,8 +355,7 @@ async fn reconcile(
         else {
             continue;
         };
-        // JSON null is absent here too: the original tests health truthiness.
-        if !truthy(&health) {
+        if health.is_null() {
             continue;
         }
         validate_host("Health", &health)?;
@@ -464,15 +466,6 @@ fn field<'a>(value: &'a IvyJson, key: &str) -> &'a IvyJson {
 }
 fn date(value: &IvyJson, key: &str) -> IvyResult<f64> {
     Ok(value.get(key).and_then(IvyJson::as_js_string).map_or(f64::NAN, parse_date))
-}
-fn truthy(value: &IvyJson) -> bool {
-    match value {
-        IvyJson::Null => false,
-        IvyJson::Bool(value) => *value,
-        IvyJson::Number(value) => *value != 0.0 && !value.is_nan(),
-        IvyJson::String(value) => !value.0.is_empty(),
-        _ => true,
-    }
 }
 fn concat(parts: &[JsString]) -> JsString {
     JsString(

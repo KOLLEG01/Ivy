@@ -145,7 +145,11 @@ export const rustTests = {
   'tests/rust/phone_windows_render_device.rs': {package: 'ivy-phone-bridge', lib: true, filter: 'media::windows_render::device::tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1},
   'tests/rust/phone_windows_render_owner.rs': {package: 'ivy-phone-bridge', lib: true, filter: 'media::windows_render::worker::tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1},
   'tests/rust/phone_windows_render_status.rs': {package: 'ivy-phone-bridge', lib: true, filter: 'media::windows_render::status::tests::', platform: 'win32', architectures: ['x64', 'arm64'], testThreads: 1},
-  'tests/rust/host-actions.rs': {package: 'ivy-host-runtime', test: 'host-actions', platforms: ['win32', 'linux'], architectures: ['x64', 'arm64'], testThreads: 1},
+  'tests/rust/host-actions.rs': {
+    package: 'ivy-host-runtime', test: 'host-actions',
+    platforms: ['win32', 'linux'], architectures: ['x64', 'arm64'], testThreads: 1,
+    prerequisites: [{ package: 'ivy-host-runtime', bin: 'ivy-job', platform: 'win32' }],
+  },
   'tests/rust/host-preparation-actions.rs': {package: 'ivy-host-runtime', test: 'host-actions', filter: 'preparation_cases::', platforms: ['win32', 'linux'], architectures: ['x64', 'arm64'], testThreads: 1},
   'tests/rust/host-backup-actions.rs': {package: 'ivy-host-runtime', test: 'host-actions', filter: 'backup_cases::', platforms: ['win32', 'linux'], architectures: ['x64', 'arm64'], testThreads: 1},
   'tests/rust/host-reset-actions.rs': {package: 'ivy-host-runtime', test: 'host-actions', filter: 'reset_cases::', platforms: ['win32', 'linux'], architectures: ['x64', 'arm64'], testThreads: 1},
@@ -344,7 +348,10 @@ export const rustTests = {
   'tests/rust/sdk-error-outcome.rs': { package: 'ivy-sdk', test: 'sdk-error-outcome' },
   'tests/rust/cli-error-outcome.rs': { package: 'ivy-cli', test: 'cli-error-outcome' },
   'tests/rust/host-reset-storage.rs': { package: 'ivy-host-executor', test: 'host-reset-storage' },
-  'tests/rust/host-executor-service.rs': { package: 'ivy-host-executor', test: 'host-executor-service' },
+  'tests/rust/host-executor-service.rs': {
+    package: 'ivy-host-executor', test: 'host-executor-service',
+    prerequisites: [{ package: 'ivy-host-runtime', bin: 'ivy-job', platform: 'win32' }],
+  },
   'tests/rust/sdk-native-http.rs': { package: 'ivy-sdk', lib: true },
   'tests/rust/sdk-native-http-config.rs': { package: 'ivy-sdk', lib: true, filter: 'native_http_config_tests::', testThreads: 1 },
   'tests/rust/sdk-fetch-response.rs': { package: 'ivy-sdk', test: 'sdk-fetch-response' },
@@ -400,6 +407,14 @@ export const rustTests = {
   'tests/rust/host-build-input-cases.rs': { package: 'ivy-host-runtime', test: 'host-build-inputs' },
   'tests/rust/host-native-recovery-cases.rs': { package: 'ivy-host-runtime', test: 'host-native-recovery' },
   'tests/rust/host-service-storage.rs': { package: 'ivy-host-runtime', test: 'host-service-storage' },
+  'tests/rust/host-emitted-runtime-cases.rs': {
+    package: 'ivy-host-runtime', test: 'host-emitted-runtime',
+    prerequisites: [{ package: 'ivy-host-runtime', bin: 'ivy-job', platform: 'win32' }],
+  },
+  'tests/rust/host-javascript-preparation.rs': {
+    package: 'ivy-host-runtime', test: 'host-javascript-preparation',
+    prerequisites: [{ package: 'ivy-host-runtime', bin: 'ivy-job', platform: 'win32' }],
+  },
   'tests/rust/host-compiler-tools.rs': {
     package: 'ivy-host-runtime', test: 'host-compiler-tools',
     prerequisites: [{ package: 'ivy-host-runtime', bin: 'ivy-job', platform: 'win32' }],

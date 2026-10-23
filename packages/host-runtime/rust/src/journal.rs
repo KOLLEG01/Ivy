@@ -32,7 +32,6 @@ fn decoded(text: &str) -> IvyResult<IvyJson> { internal(json::parse(text, usize:
 fn encoded(value: &IvyJson) -> IvyResult<String> { json::canonical(value, ivy_contracts::limits::MANAGEMENT_FRAME_BYTES) }
 fn field<'a>(value: &'a IvyJson, key: &str) -> &'a IvyJson { static NULL: IvyJson = IvyJson::Null; value.get(key).unwrap_or(&NULL) }
 fn non_null(value: &IvyJson) -> Option<&IvyJson> { (!value.is_null()).then_some(value) }
-fn truthy(value: &IvyJson) -> bool { match value { IvyJson::Null => false, IvyJson::Bool(v) => *v, IvyJson::Number(v) => *v != 0.0 && !v.is_nan(), IvyJson::String(v) => !v.0.is_empty(), _ => true } }
 fn fallback(value: &IvyJson, other: &IvyJson) -> IvyJson { non_null(value).unwrap_or(other).clone() }
 fn policy_key(target: &IvyJson) -> IvyResult<String> {
     validate_host("RuntimeTarget", target)?;
@@ -389,7 +388,7 @@ impl State {
         self.transaction(|s| {
             let requested_at = s.now()?;
             for process in plan.required("processes")?.as_array().ok_or_else(IvyError::internal)? {
-                if !truthy(field(process, "candidateId")) { continue; }
+                if process.get("candidateId").is_none() { continue; }
                 let id = process.required("instanceId")?.as_str()?;
                 let instance = s.instance(&id)?;
                 require(instance.get("componentId") == process.get("componentId"), "target_conflict", "Bootstrap process belongs to another configured component.")?;
@@ -401,7 +400,7 @@ impl State {
                 }
                 s.set_installed(&IvyJson::object([("instanceId", id.clone().into()), ("candidateId", field(&candidate, "candidateId").clone()), ("buildId", field(&candidate, "buildId").clone()), ("enabled", true.into()), ("installedAt", s.now()?.into())]))?;
                 if clear_targets { internal(s.db.execute("DELETE FROM runtime_targets WHERE instance_id=?", [&id]))?; continue; }
-                if !truthy(field(process, "configPath")) || field(process, "componentId") == &IvyJson::from("host-executor") { continue; }
+                if process.get("configPath").is_none() || field(process, "componentId") == &IvyJson::from("host-executor") { continue; }
                 let source = path(process.required("configPath")?)?;
                 require(internal(crate::paths::inside(&path(s.config.required("runtimeRoot")?)?, &source))?, "target_conflict", "Bootstrap runtime configuration leaves the host runtime root.")?;
                 let metadata = internal(fs::symlink_metadata(&source))?;
@@ -490,7 +489,7 @@ impl State {
         crate::artifact::release_manifest(&value)
     }
     fn normalize_entry(&self, value: IvyJson) -> IvyResult<IvyJson> {
-        if !truthy(field(&value, "configurationHash")) { validate_host("JournalEntry", &value)?; return Ok(value) }
+        if value.get("configurationHash").is_none() { validate_host("JournalEntry", &value)?; return Ok(value) }
         let request = value.required("request")?;
         let mut record = value.required("record")?.clone();
         validate_host("LocalRequest", request)?;
@@ -545,10 +544,10 @@ impl State {
             let previous = field(&prior, &id);
             if field(instance, "componentId") == &IvyJson::from("host-executor") {
                 let observation = if let Some(executor) = executor.filter(|v| fresh_executor_status(v, self.clock.as_ref())) {
-                    let matches = truthy(field(executor, "buildId")) && (installed.is_null() || executor.get("buildId") == installed.get("buildId"));
+                    let matches = field(executor, "buildId").as_js_string().is_some() && (installed.is_null() || executor.get("buildId") == installed.get("buildId"));
                     let state = if !matches { "unknown" } else { match field(executor, "state").as_str()?.as_str() { "ready" => "ready", "stopping" => "stopped", "failed" => "failed", _ => "starting" } };
                     let message: IvyJson = if !matches { "Running executor release does not match the installed release.".into() }
-                        else if truthy(field(executor, "code")) { format!("Host executor reported {}.", field(executor, "code").as_str()?).into() } else { "".into() };
+                        else if field(executor, "code").as_js_string().is_some() { format!("Host executor reported {}.", field(executor, "code").as_str()?).into() } else { "".into() };
                     IvyJson::object([
                         ("schemaVersion", IvyJson::Number(1.0)), ("instanceId", id.clone().into()), ("ownerPid", field(executor, "pid").clone()), ("ownerBootId", field(executor, "bootId").clone()),
                         ("observedAt", field(executor, "observedAt").clone()), ("targetRevision", field(&target, "revision").clone()),
@@ -572,12 +571,16 @@ impl State {
                 validate_host("Health", &health)?;
                 require(health.get("instanceId") == instance.get("instanceId") && health.get("componentId") == instance.get("componentId"), "target_conflict", "Health file belongs to another configured instance.")?;
                 let expected = if target.is_null() { field(&installed, "buildId").clone() } else { self.candidate(&target.required("candidateId")?.as_str()?)?.required("buildId")?.clone() };
-                let launch_matches = !truthy(field(&health, "launchId")) || target.is_null() || health.get("launchId") == target.get("revision");
+                let launch_matches = health.get("launchId").is_none() || target.is_null() || health.get("launchId") == target.get("revision");
                 let running = field(&target, "desired") != &IvyJson::from("stopped");
-                let ready = fresh(field(&health, "observedAt"), self.clock.as_ref()) && truthy(field(&health, "ready")) && running && launch_matches && (!truthy(&expected) || field(&health, "buildId") == &expected);
-                let state = if ready { "ready" } else if !fresh(field(&health, "observedAt"), self.clock.as_ref()) { "unknown" } else if !running { "stopped" } else if truthy(field(&health, "ready")) { "unknown" } else { "starting" };
-                let code = if ready { IvyJson::Null } else if !fresh(field(&health, "observedAt"), self.clock.as_ref()) { "health_stale".into() } else if !launch_matches || truthy(&expected) && field(&health, "buildId") != &expected { "build_mismatch".into() } else if !running { IvyJson::Null } else { "service_not_ready".into() };
-                let message = if ready { field(&health, "details").clone() } else if code == IvyJson::from("health_stale") { "Owner health is stale; readiness is not current.".into() } else if truthy(field(&health, "details")) { field(&health, "details").clone() } else { "Owner health is not ready.".into() };
+                let current = fresh(field(&health, "observedAt"), self.clock.as_ref());
+                let reports_ready = health.get("ready") == Some(&IvyJson::Bool(true));
+                let build_matches = expected.is_null() || field(&health, "buildId") == &expected;
+                let ready = current && reports_ready && running && launch_matches && build_matches;
+                let state = if ready { "ready" } else if !current { "unknown" } else if !running { "stopped" } else if reports_ready { "unknown" } else { "starting" };
+                let code = if ready { IvyJson::Null } else if !current { "health_stale".into() } else if !launch_matches || !build_matches { "build_mismatch".into() } else if !running { IvyJson::Null } else { "service_not_ready".into() };
+                let details = health.required("details")?;
+                let message = if ready { details.clone() } else if code == IvyJson::from("health_stale") { "Owner health is stale; readiness is not current.".into() } else if !details.as_js_string().ok_or_else(IvyError::internal)?.0.is_empty() { details.clone() } else { "Owner health is not ready.".into() };
                 Ok(IvyJson::object([
                     ("schemaVersion", IvyJson::Number(1.0)), ("instanceId", id.clone().into()), ("ownerPid", field(&health, "pid").clone()), ("ownerBootId", field(&health, "bootId").clone()),
                     ("observedAt", field(&health, "observedAt").clone()), ("targetRevision", fallback(field(&target, "revision"), field(&health, "launchId"))),
@@ -659,15 +662,18 @@ impl State {
             require(!requires_bootstrap_replacement(instance) || installed.is_null(), "restart_required", "Bootstrap-owned releases use prepare followed by install-bootstrap.")?;
             require(request.get("componentId").is_none() || request.get("componentId") == instance.get("componentId"), "target_conflict", "Source component does not match the configured instance.")?;
             let action = request.required("action")?.as_str()?;
+            let candidate_id = request.get("candidateId");
+            let source = request.get("source");
+            let target_build = request.get("targetBuild");
             if action == "deploy" {
-                require(truthy(field(request, "candidateId")) != truthy(field(request, "source")) && request.get("targetBuild").is_none(), "invalid_arguments", "Deploy requires exactly one candidate or source.")?;
+                require(candidate_id.is_some() != source.is_some() && target_build.is_none(), "invalid_arguments", "Deploy requires exactly one candidate or source.")?;
             } else if action == "rollback" {
-                require(truthy(field(request, "targetBuild")) && !truthy(field(request, "candidateId")) && !truthy(field(request, "source")) && request.get("componentId").is_none(), "invalid_arguments", "Rollback requires one retained target build.")?;
+                require(target_build.is_some() && candidate_id.is_none() && source.is_none() && request.get("componentId").is_none(), "invalid_arguments", "Rollback requires one retained target build.")?;
             } else {
-                require(!truthy(field(request, "targetBuild")) && !truthy(field(request, "candidateId")) && !truthy(field(request, "source")) && request.get("componentId").is_none() && !installed.is_null(), "invalid_arguments", "Lifecycle actions require one installed instance and no candidate arguments.")?;
+                require(target_build.is_none() && candidate_id.is_none() && source.is_none() && request.get("componentId").is_none() && !installed.is_null(), "invalid_arguments", "Lifecycle actions require one installed instance and no candidate arguments.")?;
             }
-            let snapshot = source_snapshot.filter(|v| truthy(v));
-            if truthy(field(request, "source")) {
+            let snapshot = source_snapshot;
+            if source.is_some() {
                 let snapshot = snapshot.ok_or_else(|| IvyError::new("source_snapshot_required", "Capture source inputs before handing the action to the independent executor."))?;
                 validate_host("SourceSnapshot", snapshot)?;
                 let root = path(s.config.required("stagingRoot")?)?;
@@ -675,8 +681,8 @@ impl State {
             } else {
                 require(snapshot.is_none(), "invalid_arguments", "This action does not accept a source snapshot.")?;
             }
-            let candidate = if truthy(field(request, "candidateId")) { s.candidate(&request.required("candidateId")?.as_str()?)? }
-                else if truthy(field(request, "targetBuild")) { s.candidate_for_build(&instance.required("componentId")?.as_str()?, &request.required("targetBuild")?.as_str()?)? }
+            let candidate = if let Some(id) = candidate_id { s.candidate(&id.as_str()?)? }
+                else if let Some(build) = target_build { s.candidate_for_build(&instance.required("componentId")?.as_str()?, &build.as_str()?)? }
                 else if action != "deploy" && !installed.is_null() { s.candidate(&installed.required("candidateId")?.as_str()?)? } else { IvyJson::Null };
             require(candidate.is_null() || candidate.get("componentId") == instance.get("componentId"), "target_conflict", "Candidate belongs to another component.")?;
             let previous_target = s.target(&id)?.unwrap_or(IvyJson::Null);
@@ -719,8 +725,8 @@ impl State {
             }
             record.insert("phase", phase.into()); record.insert("updatedAt", s.now()?.into());
             if let Some(value) = change.get("observedBuild") { record.insert("observedBuild", value.clone()); }
-            for key in ["readiness", "errorCode"] { if let Some(value) = change.get(key).filter(|v| truthy(v)) { record.insert(key, value.clone()); } }
-            if let Some(target) = change.get("target").filter(|v| truthy(v)) {
+            for key in ["readiness", "errorCode"] { if let Some(value) = change.get(key).and_then(non_null) { record.insert(key, value.clone()); } }
+            if let Some(target) = change.get("target").and_then(non_null) {
                 validate_host("RuntimeTarget", target)?;
                 require(target.get("instanceId") == record.get("instanceId") && [entry.get("candidateId"), entry.get("previousCandidateId")].contains(&target.get("candidateId")), "target_conflict", "Runtime target must belong to this deployment.")?;
                 require(internal(crate::paths::inside(&path(s.config.required("runtimeRoot")?)?, &path(target.required("configPath")?)?))?, "target_conflict", "Runtime configuration must belong to this host.")?;
@@ -746,7 +752,7 @@ impl State {
                 require(phase == "rolling_back" && target.get("revision") == Some(revision) && target.get("candidateId") == entry.get("previousCandidateId"), "target_conflict", "Rollback revision must identify the retained previous target.")?;
                 activation.insert("rollbackTargetRevision", revision.clone());
             }
-            if let Some(installed) = change.get("installed").filter(|v| truthy(v)) {
+            if let Some(installed) = change.get("installed").and_then(non_null) {
                 require(installed.get("instanceId") == record.get("instanceId") && [entry.get("candidateId"), entry.get("previousCandidateId")].contains(&installed.get("candidateId")), "target_conflict", "Installed pointer must belong to this deployment.")?;
                 s.set_installed(installed)?;
             }
@@ -787,7 +793,7 @@ impl State {
             let retained = latest.entry(instance.clone()).or_default();
             if *retained < 2 { protected.insert(operation.clone()); *retained += 1; }
             let installed = self.value("SELECT value FROM installed WHERE instance_id=?", &instance)?.unwrap_or(IvyJson::Null);
-            if phase == &IvyJson::from("succeeded") && !rollback.contains(&instance) && installed.get("candidateId") == entry.get("candidateId") && truthy(field(&entry, "previousCandidateId")) && entry.get("previousCandidateId") != entry.get("candidateId") {
+            if phase == &IvyJson::from("succeeded") && !rollback.contains(&instance) && installed.get("candidateId") == entry.get("candidateId") && field(&entry, "previousCandidateId").as_js_string().is_some() && entry.get("previousCandidateId") != entry.get("candidateId") {
                 protected.insert(operation.clone()); rollback.insert(instance);
             }
         }
@@ -811,7 +817,7 @@ impl State {
             let mut statement = internal(self.db.prepare(&format!("SELECT instance_id,value FROM {table}")))?;
             let rows = internal(statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
             for row in rows { let (instance, text) = internal(row)?; let value = decoded(&text)?;
-                if truthy(field(&value, "candidateId")) { let id = value.required("candidateId")?.as_str()?; live.insert(id.clone()); protected.insert(id.clone()); if table == "installed" { installed_order.push(instance.clone()); installed.insert(instance, id); } }
+                if let Some(id) = value.get("candidateId").and_then(non_null) { let id = id.as_str()?; live.insert(id.clone()); protected.insert(id.clone()); if table == "installed" { installed_order.push(instance.clone()); installed.insert(instance, id); } }
             }
         }
         for instance in &installed_order {
@@ -829,11 +835,11 @@ impl State {
             if !completed(record.required("phase")?) {
                 let value = self.normalize_entry(entry)?;
                 for id in [field(&value, "candidateId"), field(&value, "previousCandidateId"), field(field(&value, "request"), "candidateId"), field(field(field(&value, "activation"), "previousTarget"), "candidateId")] {
-                    if truthy(id) { protected.insert(id.as_str()?); }
+                    if let Some(id) = non_null(id) { protected.insert(id.as_str()?); }
                 }
             } else {
                 let instance = record.required("instanceId")?.as_str()?;
-                if record.get("phase") == Some(&IvyJson::from("succeeded")) && installed.get(&instance).map(|v| IvyJson::from(v.clone())).as_ref() == entry.get("candidateId") && truthy(field(&entry, "previousCandidateId")) && entry.get("previousCandidateId") != entry.get("candidateId") && !rollback_found.contains(&instance) {
+                if record.get("phase") == Some(&IvyJson::from("succeeded")) && installed.get(&instance).map(|v| IvyJson::from(v.clone())).as_ref() == entry.get("candidateId") && field(&entry, "previousCandidateId").as_js_string().is_some() && entry.get("previousCandidateId") != entry.get("candidateId") && !rollback_found.contains(&instance) {
                     protected.insert(entry.required("previousCandidateId")?.as_str()?); rollback_found.insert(instance); rollback_selections.insert(entry.required("candidateId")?.as_str()?);
                 }
             }

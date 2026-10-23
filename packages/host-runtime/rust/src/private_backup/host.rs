@@ -10,23 +10,41 @@ use crate::{
     native_backup_policy::NativeBackupPaths,
     node_path::{self, Style},
     node_runtime::NodeRuntime,
-    process, project_storage, storage_space, streaming_hash,
+    project_storage, storage_space, streaming_hash,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
-use ivy_contracts::{JsString, core_schema::validate_host, hash::hash_json, json};
+use ivy_contracts::{JsString, core_schema::validate_host, hash::hash_json};
 use ivy_sdk::clock::Clock;
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
+    collections::BTreeSet,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
 pub struct BackupBindings {
     pub compare: FileCompare,
     pub native_paths: Arc<dyn NativeBackupPaths>,
-    pub node: NodeRuntime,
+    pub node: Option<NodeRuntime>,
+    /// Supplied by the service which owns Hive; run only under offline locks.
+    pub hive_snapshot: fn(&Path, &Path) -> IvyResult<J>,
     pub distribution_root: PathBuf,
     pub clock: Arc<dyn Clock>,
+}
+async fn node_platform(config: &J, journal: &HostJournal, node: Option<&NodeRuntime>) -> IvyResult<String> {
+    if let Some(node) = node { return Ok(format!("v{}", node.version)); }
+    let mut selected = BTreeSet::new();
+    for instance in array(config.required("instances")?)?.iter().filter(|value| value.get("engine") == Some(&"process".into())) {
+        let id = instance.required("instanceId")?.as_str()?;
+        for selection in [journal.installed(&id).await?, journal.target(&id).await?].into_iter().flatten() {
+            selected.insert(selection.required("candidateId")?.as_str()?);
+        }
+    }
+    for id in selected {
+        let manifest = journal.manifest(&id).await?;
+        require(crate::native_plan::is_native_plan(&manifest) || manifest.get("kind") == Some(&"app".into()),
+            "unsupported_runtime", "A retained JavaScript workload requires its Node toolchain for backup.")?;
+    }
+    Ok("unavailable".into())
 }
 fn internal<T, E>(v: Result<T, E>) -> IvyResult<T> {
     v.map_err(|_| IvyError::internal())
@@ -205,7 +223,7 @@ impl Inventory {
     }
 }
 /// Admission owns all work and locks through publication even if its observer
-/// drops. Distribution helpers use the existing v1 command/Node envelope.
+/// drops. Hive storage stays bound to its native owner at the service layer.
 pub async fn backup_host(
     config_path: PathBuf,
     destination: PathBuf,
@@ -272,6 +290,7 @@ async fn backup(
             require(!context.paths.inside(&actual,&actual_destination)&&!context.paths.inside(&actual_destination,&actual),"target_conflict","Backup destination overlaps retained internal work.")?;
         }}
         journal=Some(HostJournal::open(config.clone()).await?);journal.as_ref().unwrap().begin_maintenance().await?;
+        let node_platform=node_platform(&config,journal.as_ref().unwrap(),b.node.as_ref()).await?;
         let configuration_hash=hash_json(&config)?;
         require(hash_json(&current_configuration(&config_path,&context).await?)?==configuration_hash,"configuration_changed","Backup master configuration changed.")?;
         let hive=array(config.required("instances")?)?.iter().filter(|i|i.get("componentId")==Some(&"hive".into())).cloned().collect::<Vec<_>>();
@@ -333,11 +352,11 @@ async fn backup(
             if !exists(&source).await?{continue}
             let local=layout::storage_path(&config,&source,&context)?;let target=backup_files::relative_file(&destination,&local)?;
             mkdir(&node_path::dirname(context.paths.style,&target),true).await?;
-            let commands=config.required("executables")?.as_object().ok_or_else(IvyError::internal)?.iter().map(|(k,v)|Ok((k.to_utf8()?,native(&text(v)?)?))).collect::<IvyResult<BTreeMap<_,_>>>()?;
-            let result=process::run_command(&process::Command{executable:"node".into(),args:vec!["dist/services/hive/src/offline-backup.js".into(),node_path::to_native(&source).into_os_string(),node_path::to_native(&target).into_os_string()],cwd:None,timeout_ms:600_000},&b.distribution_root,&commands,process::LaunchContext{job_launcher:Some(job.clone()),..Default::default()},None).await?;
-            let snapshot=json::parse(&result.stdout,usize::MAX)?;
-            let mut value=J::object([("instanceId",instance.required("instanceId")?.clone()),("path",J::String(local.clone()))]);
-            for (key,value2) in snapshot.as_object().ok_or_else(IvyError::internal)?{value.insert(key.to_utf8()?,value2.clone());}
+            let snapshot=b.hive_snapshot;
+            let (source_path,target_path)=(native(&source)?,native(&target)?);
+            let snapshot=internal(tokio::task::spawn_blocking(move || snapshot(&source_path,&target_path)).await)??;
+            let value=J::object([("instanceId",instance.required("instanceId")?.clone()),("path",J::String(local.clone())),
+                ("format",snapshot.required("format")?.clone()),("pages",snapshot.required("pages")?.clone())]);
             hive_snapshots.push(value);files.push(describe(&target,local,true).await?);
         }
         require(hash_json(&J::Array(inventory.files().await?.iter().map(RuntimeFile::json).collect()))?==hash_json(&J::Array(runtime_files.iter().map(RuntimeFile::json).collect()))?&&hash_json(&current_configuration(&config_path,&context).await?)?==configuration_hash,"backup_changed","Runtime state or configuration changed during offline snapshot.")?;
@@ -345,7 +364,7 @@ async fn backup(
         let completed_at=now(&b)?;
         let manifest=J::object([
             ("schemaVersion",J::Number(1.0)),("backupId",backup_id.clone().into()),("hostId",config.required("hostId")?.clone()),("createdAt",created_at.clone()),("completedAt",completed_at.clone()),
-            ("consistency","offline-owned-state".into()),("platform",J::object([("os",if cfg!(windows){"win32".into()}else{"linux".into()}),("arch",match std::env::consts::ARCH{"x86_64"=>"x64","aarch64"=>"arm64",v=>v}.into()),("node",format!("v{}",b.node.version).into())])),
+            ("consistency","offline-owned-state".into()),("platform",J::object([("os",if cfg!(windows){"win32".into()}else{"linux".into()}),("arch",match std::env::consts::ARCH{"x86_64"=>"x64","aarch64"=>"arm64",v=>v}.into()),("node",node_platform.into())])),
             ("configurationHash",configuration_hash.into()),("files",J::Array(files.iter().map(BackupFile::json).collect())),("externalFiles",J::Array(external_files)),("hiveSnapshots",J::Array(hive_snapshots)),("ephemeralNativePaths",J::Array(ephemeral)),("sharedNativeHomes",J::Array(shared_homes)),("storageAreas",J::Array(areas.iter().map(StorageArea::json).collect())),
             ("excluded",J::Array(["OS owner lock files","Source checkouts, staging payloads and local releases","OS bootstrap definitions","Runtime executables/native bundles outside runtime data (hashed prerequisites)","Docker daemon images (retained immutable candidate prerequisites)","Rotating Hive snapshot directories","Shared Codex user homes and externally managed App Servers (references only; separate user-state backup required)"].into_iter().map(J::from).collect())),
         ]);

@@ -49,8 +49,6 @@ mod layout_cases;
 mod host_startup_cases;
 #[path = "host-configuration-updater-cases.rs"]
 mod configuration_updater_cases;
-#[path = "host-bootstrap-restart-cases.rs"]
-mod bootstrap_restart_cases;
 #[path = "host-package-updater-cases.rs"]
 mod package_updater_cases;
 #[path = "host-bootstrap-maintenance-cases.rs"]
@@ -59,8 +57,6 @@ mod bootstrap_maintenance_cases;
 mod backup_files_cases;
 #[path = "host-private-backup-cases.rs"]
 mod private_backup_cases;
-#[path = "host-storage-retention-cases.rs"]
-mod storage_retention_cases;
 #[path = "host-restore-cases.rs"]
 mod restore_cases;
 

@@ -71,7 +71,7 @@ pub async fn retained_bootstrap_plans(config: IvyJson) -> IvyResult<Vec<IvyJson>
                     && plan.get("hostId") == config.get("hostId") && plan.get("runtimeRoot") == config.get("runtimeRoot");
                 require(path != selected || same, "storage_invalid", "Selected bootstrap plan belongs to a different installation.")?;
                 if !same { return Ok(None); }
-                if let Some(scope) = plan.get("linuxResources").filter(|v| truthy(v)) {
+                if let Some(scope) = plan.get("linuxResources").filter(|v| v.as_object().is_some()) {
                     linux_resources::validate_linux_resource_scope(scope, Some(&identity))?;
                 }
                 Ok(Some((hash, plan)))
@@ -88,7 +88,7 @@ pub async fn retained_bootstrap_plans(config: IvyJson) -> IvyResult<Vec<IvyJson>
 }
 pub async fn retain_bootstrap_plan(plan: &IvyJson, job_launcher: std::path::PathBuf) -> IvyResult<()> {
     validate_host("BootstrapPlan", plan)?;
-    if let Some(scope) = plan.get("linuxResources").filter(|value| truthy(value)) {
+    if let Some(scope) = plan.get("linuxResources").filter(|value| value.as_object().is_some()) {
         linux_resources::validate_linux_resource_scope(scope, Some(&plan.required("installationId")?.as_str()?))?;
     }
     let root = crate::config::path_value(plan.required("runtimeRoot")?)?.join("bootstrap-plans");
@@ -103,7 +103,7 @@ pub async fn retain_bootstrap_plan(plan: &IvyJson, job_launcher: std::path::Path
 /// file selects the same exact release as its OS definition.
 pub async fn publish_bootstrap_instance_configurations(plan: &IvyJson, config: &IvyJson, journal: &crate::journal::HostJournal) -> IvyResult<()> {
     for process in plan.required("processes")?.as_array().ok_or_else(IvyError::internal)? {
-        let Some(path) = process.get("configPath").filter(|value| truthy(value)) else { continue; };
+        let Some(path) = process.get("configPath").filter(|value| value.as_js_string().is_some_and(|text| !text.0.is_empty())) else { continue; };
         let instance = journal.instance(&process.required("instanceId")?.as_str()?).await?;
         let candidate = journal.candidate(&process.get("candidateId").filter(|value| !value.is_null()).unwrap_or(plan.required("candidateId")?).as_str()?).await?;
         let manifest = journal.manifest(&candidate.required("candidateId")?.as_str()?).await?;
@@ -126,7 +126,7 @@ pub async fn publish_bootstrap_instance_configurations(plan: &IvyJson, config: &
             ("artifactRoot", candidate.required("artifactRoot")?.clone()), ("buildId", candidate.required("buildId")?.clone()),
             ("version", manifest.required("version")?.clone()), ("settings", settings),
         ]);
-        if let Some(credential) = instance.get("credential").filter(|value| truthy(value)) { value.insert("credential", credential.clone()); }
+        if let Some(credential) = instance.get("credential").filter(|value| value.as_js_string().is_some_and(|text| !text.0.is_empty())) { value.insert("credential", credential.clone()); }
         validate_host("InstanceConfig", &value)?;
         crate::config::atomic_json(crate::config::path_value(path)?, value).await?;
     }
@@ -156,15 +156,6 @@ fn concat(parts: &[JsString]) -> JsString {
 fn selected<'a>(value: &'a IvyJson, key: &str) -> Option<&'a IvyJson> {
     value.get(key).filter(|value| !value.is_null())
 }
-fn truthy(value: &IvyJson) -> bool {
-    match value {
-        IvyJson::Null => false,
-        IvyJson::Bool(value) => *value,
-        IvyJson::Number(value) => *value != 0.0 && !value.is_nan(),
-        IvyJson::String(value) => !value.0.is_empty(),
-        _ => true,
-    }
-}
 pub fn configuration_bootstrap_plan(
     config: &IvyJson,
     path: &JsString,
@@ -175,7 +166,7 @@ pub fn configuration_bootstrap_plan(
     let identity = installation_identity(config)?;
     let os = candidate.required("platform")?.required("os")?;
     require(
-        resources.is_none_or(|value| !truthy(value)) || os == &IvyJson::from("linux"),
+        resources.is_none_or(IvyJson::is_null) || os == &IvyJson::from("linux"),
         "unsupported_runtime",
         "A Linux resource budget requires a Linux bootstrap candidate.",
     )?;
@@ -228,7 +219,7 @@ pub fn configuration_bootstrap_plan(
             if let Some(entrypoint) = manifest.get("entrypoint") {
                 process.insert("entrypoint", entrypoint.clone());
             }
-            if let Some(restart) = manifest.get("restart").filter(|value| truthy(value)) {
+            if let Some(restart) = manifest.get("restart").filter(|value| value.as_object().is_some()) {
                 process.insert("restart", restart.clone());
             }
             process.insert(
@@ -249,7 +240,7 @@ pub fn configuration_bootstrap_plan(
             && instance
                 .get("process")
                 .and_then(|value| value.get("allowWindowsBreakaway"))
-                .is_some_and(truthy)
+                .is_some_and(|value| value == &IvyJson::Bool(true))
         {
             process.insert("allowWindowsBreakaway", true.into());
         }
@@ -277,7 +268,14 @@ pub fn configuration_bootstrap_plan(
     if let Some(node) = config.required("executables")?.get("node") {
         plan.insert("nodeExecutable", node.clone());
     }
-    if let Some(resources) = resources.filter(|value| truthy(value)) {
+    require(
+        plan.get("nodeExecutable").is_some()
+            || plan.required("processes")?.as_array().ok_or_else(IvyError::internal)?
+                .iter().all(crate::native_plan::is_native_plan),
+        "unsupported_runtime",
+        "A JavaScript bootstrap process requires its configured Node executable.",
+    )?;
+    if let Some(resources) = resources.filter(|value| value.as_object().is_some()) {
         plan.insert(
             "linuxResources",
             linux_resources::linux_resource_scope(&identity, resources)?,
@@ -315,7 +313,7 @@ pub async fn bootstrap_components(
                 rows.into_iter().next()
             };
         let Some(candidate) = candidate else {
-            if instance.get("enabled").is_some_and(truthy) {
+            if instance.get("enabled").is_some_and(|value| value == &IvyJson::Bool(true)) {
                 return Err(IvyError::new("not_found", format!("No retained bootstrap candidate exists for {}.", component.as_str()?)));
             }
             continue;
@@ -343,6 +341,29 @@ fn unit_arg(value: &JsString) -> IvyResult<JsString> {
     result.push(34);
     Ok(JsString(result))
 }
+/// Select the admitted manifest's native file, or the declared legacy Node tool.
+pub fn process_executable(plan: &IvyJson, instance: &IvyJson) -> IvyResult<JsString> {
+    let executable = instance.get("entrypoint").and_then(|entry| entry.get("executable"))
+        .and_then(IvyJson::as_js_string);
+    match executable {
+        Some(value) if value != &JsString::from("node") && value != &JsString::from("$node") => {
+            if crate::native_plan::is_native_plan(instance) {
+                let root = string(selected(instance, "artifactRoot").unwrap_or(plan.required("artifactRoot")?))?;
+                if plan.get("os") == Some(&"linux".into()) {
+                    // Systemd text always uses Linux separators; filesystem
+                    // operations still use the executing host's native paths.
+                    let mut path = root.0;
+                    while path.last() == Some(&47) { path.pop(); }
+                    path.push(47);
+                    path.extend_from_slice(&value.0);
+                    Ok(JsString(path))
+                } else { Ok(node_path::join(Style::native(), &[root, value.clone()])) }
+            } else { Ok(value.clone()) }
+        },
+        _ => plan.get("nodeExecutable").and_then(IvyJson::as_js_string).filter(|value| !value.0.is_empty())
+            .cloned().ok_or_else(|| IvyError::new("unsupported_runtime", "A JavaScript bootstrap process requires its configured Node executable.")),
+    }
+}
 pub fn linux_unit(
     plan: &IvyJson,
     instance: &IvyJson,
@@ -354,7 +375,7 @@ pub fn linux_unit(
             crate::journal::bootstrap_launch_id_js(plan, &field(instance, "instanceId")?)?.into()
         }
     };
-    if let Some(resources) = plan.get("linuxResources").filter(|value| truthy(value)) {
+    if let Some(resources) = plan.get("linuxResources").filter(|value| value.as_object().is_some()) {
         linux_resources::validate_linux_resource_scope(
             resources,
             Some(&plan.required("installationId")?.as_str()?),
@@ -365,13 +386,7 @@ pub fn linux_unit(
     let component = field(instance, "componentId")?;
     let host = component == JsString::from("host-executor");
     let entry = selected(instance, "entrypoint");
-    let executable = if entry.is_none()
-        || entry.and_then(|value| value.get("executable")) == Some(&"node".into())
-    {
-        field(plan, "nodeExecutable")?
-    } else {
-        field(entry.unwrap(), "executable")?
-    };
+    let executable = process_executable(plan, instance)?;
     let args = match entry {
         Some(entry) => entry
             .required("args")?
@@ -394,7 +409,7 @@ pub fn linux_unit(
     let mut argv = vec![executable];
     argv.extend(args);
     argv.extend(["--config".into(), config]);
-    if host && instance.get("configPath").is_some_and(truthy) {
+    if host && instance.get("configPath").and_then(IvyJson::as_js_string).is_some_and(|path| !path.0.is_empty()) {
         argv.extend(["--instance-config".into(), field(instance, "configPath")?]);
     }
     let mut arguments = Vec::new();
@@ -448,7 +463,7 @@ pub fn linux_unit(
         string(instance.required("name")?)?,
         "\nAfter=network.target\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\n".into(),
     ];
-    if let Some(user) = instance.get("user").filter(|value| truthy(value)) {
+    if let Some(user) = instance.get("user").filter(|value| value.as_js_string().is_some_and(|text| !text.0.is_empty())) {
         let user = string(user)?;
         parts.extend([
             "User=".into(),
@@ -459,14 +474,14 @@ pub fn linux_unit(
         ]);
     }
     parts.extend(["ExecStart=:".into(),JsString(arguments),"\nWorkingDirectory=".into(),directory,"\nRestart=".into(),policy,"\nRestartSec=".into(),delay.to_string().into(),"\nKillMode=control-group\nTimeoutStopSec=630\nUMask=0077\nNoNewPrivileges=true\nEnvironment=NODE_NO_WARNINGS=1\nEnvironment=IVY_LAUNCH_ID=".into(),launch,"\n".into()]);
-    if let Some(config) = instance.get("configPath").filter(|value| truthy(value)) {
+    if let Some(config) = instance.get("configPath").filter(|value| value.as_js_string().is_some_and(|text| !text.0.is_empty())) {
         parts.extend([
             "Environment=IVY_INSTANCE_CONFIG=".into(),
             unit_arg(&string(config)?)?,
             "\n".into(),
         ]);
     }
-    if let Some(scope) = plan.get("linuxResources").filter(|value| truthy(value)) {
+    if let Some(scope) = plan.get("linuxResources").filter(|value| value.as_object().is_some()) {
         parts.extend(["Slice=".into(), field(scope, "slice")?, "\n".into()]);
     }
     parts.push("\n[Install]\nWantedBy=multi-user.target\n".into());

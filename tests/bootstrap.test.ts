@@ -8,6 +8,18 @@ import { promisify } from 'node:util';
 import { linuxUnit, replaceableSystemdOwner } from '../packages/host-runtime/src/bootstrap.js';
 import { digest } from '../packages/contracts/src/canonical.js';
 import type { Host } from '../packages/contracts/src/generated.js';
+import { validateHost } from '../packages/contracts/src/host-validation.js';
+
+test('native bootstrap units omit Node and legacy units still require it', () => {
+  const plan: Host.BootstrapPlan = {schemaVersion: 1, os: 'linux', hostId: 'native-host', installationId: 'ivy-next-111111111111',
+    candidateId: digest('native-candidate'), artifactRoot: '/native artifact', configPath: '/host.json', configHash: digest('host'), runtimeRoot: '/runtime',
+    processes: [{instanceId: 'host', componentId: 'host-executor', name: 'ivy-next-111111111111-222222222222',
+      entrypoint: {executable: 'dist/native/linux-x64/ivy-host-executor', args: [], timeoutMs: 5000}}]};
+  validateHost('BootstrapPlan', plan);
+  assert.ok(linuxUnit(plan, plan.processes[0]!).includes('ExecStart=:"/native artifact/dist/native/linux-x64/ivy-host-executor"'));
+  assert.throws(() => linuxUnit(plan, {...plan.processes[0]!, entrypoint: {executable: 'node', args: ['main.js'], timeoutMs: 5000}}),
+    (error: unknown) => (error as {code: string}).code === 'unsupported_runtime');
+});
 
 test('actual systemd parser accepts generated unit paths and literal argv', { skip: process.platform !== 'linux', timeout: 15_000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'ivy-bootstrap-test-'));
