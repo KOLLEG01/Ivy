@@ -28,7 +28,7 @@ async fn remove_retired(
     let checked = path.clone();
     let result = async {
         blocking(move || {
-            let metadata = internal(fs::symlink_metadata(fs_path(&checked)))?;
+            let metadata = internal(fs::symlink_metadata(&checked))?;
             let actual = internal(realpath(&checked))?;
             let parent = checked.parent().ok_or_else(IvyError::internal)?;
             require(
@@ -40,7 +40,7 @@ async fn remove_retired(
                 "Retired staging directory must remain directly owned.",
             )?;
             #[cfg(unix)]
-            crate::backup_files::sync_file(internal(fs::File::open(fs_path(parent)))?)?;
+            crate::backup_files::sync_file(internal(fs::File::open(parent))?)?;
             Ok(())
         })
         .await?;
@@ -67,7 +67,7 @@ async fn retired_directories(
 ) -> IvyResult<usize> {
     let scan = parent.clone();
     let names = blocking(move || {
-        let entries = match fs::read_dir(fs_path(&scan)) {
+        let entries = match fs::read_dir(&scan) {
             Ok(value) => value,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(_) => return Err(IvyError::internal()),
@@ -75,8 +75,8 @@ async fn retired_directories(
         let mut names = Vec::new();
         for entry in entries {
             let entry = internal(entry)?;
-            let name = node_path::node_utf8(&entry.file_name());
-            if let Ok(name) = name.to_utf8() {
+            let name = entry.file_name();
+            if let Some(name) = name.to_str() {
                 if name.strip_prefix(".retiring-").is_some_and(|name| {
                     if preparations {
                         build_name(name)
@@ -84,7 +84,7 @@ async fn retired_directories(
                         uuid_name(name)
                     }
                 }) {
-                    names.push(name);
+                    names.push(name.to_owned());
                 }
             }
         }
@@ -95,7 +95,7 @@ async fn retired_directories(
     let mut removed = 0;
     for name in names {
         removed += remove_retired(
-            joined(&parent, &name),
+            parent.join(name),
             if preparations {
                 "preparations"
             } else {
@@ -116,17 +116,14 @@ async fn retire_directory(
         .file_name()
         .and_then(|v| v.to_str())
         .ok_or_else(IvyError::internal)?;
-    let retired = joined(
-        path.parent().ok_or_else(IvyError::internal)?,
-        &format!(".retiring-{name}"),
-    );
+    let retired = path.parent().ok_or_else(IvyError::internal)?.join(format!(".retiring-{name}"));
     require(
         !exists(retired.clone()).await?,
         "mutation_conflict",
         "An earlier staging deletion is still pending.",
     )?;
     let destination = retired.clone();
-    blocking(move || internal(fs::rename(fs_path(&path), fs_path(&destination)))).await?;
+    blocking(move || internal(fs::rename(&path, &destination))).await?;
     Ok(remove_retired(retired, area, progress).await)
 }
 async fn protect_unknown(
@@ -178,7 +175,7 @@ async fn collect(
     progress: Option<Arc<dyn RetentionProgress>>,
 ) -> IvyResult<PreparationStorageCollection> {
     let staging = path_field(&host, "stagingRoot")?;
-    let source_root = joined(&staging, "sources");
+    let source_root = staging.join("sources");
     let mut result = PreparationStorageCollection {
         preparations: retired_directories(staging.clone(), true, &progress).await?,
         snapshots: retired_directories(source_root.clone(), false, &progress).await?,
@@ -208,7 +205,7 @@ async fn collect(
             let mut lock = None;
             let removal: IvyResult<bool>=async{
                 let build=record.required("buildId")?.as_str()?;
-                lock=Some(ExecutorLock::acquire(joined(&joined(&staging,"build-locks"),&build[7..]),false).await?);
+                lock=Some(ExecutorLock::acquire(staging.join("build-locks").join(&build[7..]),false).await?);
                 let current=record_at(staging.clone(),root.clone()).await?;
                 current_missing=current.is_none();
                 record=current.ok_or_else(||IvyError::new("preparation_unrecognized","Preparation changed while collecting its history."))?;
@@ -217,7 +214,7 @@ async fn collect(
                         if hash_json(&journal.candidate(&candidate.required("candidateId")?.as_str()?).await?)?==hash_json(candidate)?{
                             let check=root.clone();let parent=staging.clone();
                             blocking(move||{
-                                for entry in internal(fs::read_dir(fs_path(&check)))?{
+                                for entry in internal(fs::read_dir(&check))?{
                                     let entry=internal(entry)?;
                                     require(["preparation.json","preparation-before-recovery.json"].iter().any(|n|entry.file_name()==*n),"target_conflict","Compacted preparation contains unrecognized retained evidence.")?;
                                 }
@@ -290,7 +287,7 @@ async fn collect(
     }
     let scan = source_root.clone();
     let entries = blocking(move || {
-        let entries = match fs::read_dir(fs_path(&scan)) {
+        let entries = match fs::read_dir(&scan) {
             Ok(v) => v,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(_) => return Err(IvyError::internal()),
@@ -318,11 +315,11 @@ async fn collect(
             skipped(&progress, "snapshots", "referenced", false);
             continue;
         }
-        let path = joined(&source_root, &name);
+        let path = source_root.join(&name);
         let checked = path.clone();
         let (metadata, actual) = blocking(move || {
             Ok((
-                internal(fs::symlink_metadata(fs_path(&checked)))?,
+                internal(fs::symlink_metadata(&checked))?,
                 internal(realpath(&checked))?,
             ))
         })
@@ -338,7 +335,7 @@ async fn collect(
             continue;
         }
         let manifest =
-            match crate::config::json_file(joined(&path, "snapshot.json"), 8 * 1024 * 1024).await {
+            match crate::config::json_file(path.join("snapshot.json"), 8 * 1024 * 1024).await {
                 Ok(v) => v,
                 Err(_) => {
                     skipped(&progress, "snapshots", "unrecognized_manifest", true);
@@ -352,9 +349,9 @@ async fn collect(
         let snapshot = manifest.required("snapshot")?;
         if snapshot.get("snapshotId") != Some(&name.clone().into())
             || snapshot.get("manifestPath")
-                != Some(&crate::layout::path_json(&joined(&path, "snapshot.json")))
+                != Some(&crate::layout::path_json(&path.join("snapshot.json")))
             || snapshot.get("sourceRoot")
-                != Some(&crate::layout::path_json(&joined(&path, "source")))
+                != Some(&crate::layout::path_json(&path.join("source")))
         {
             skipped(&progress, "snapshots", "unrecognized_path", true);
             continue;

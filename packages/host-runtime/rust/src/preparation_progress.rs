@@ -1,7 +1,7 @@
 //! Bounded diagnostic state, independent of authoritative deployment outcomes.
 //! Output contents never enter the progress file. A queued write retains its
 //! ownership when an individual step/close waiter is dropped.
-use crate::{IvyError, IvyJson, IvyResult, config, node_path::{self, Style}, process::OutputSink};
+use crate::{IvyError, IvyJson, IvyResult, config, native_path, process::OutputSink};
 use ivy_contracts::{JsString, hash::hash_json};
 use ivy_sdk::clock::{Clock, SystemClock, parse_date};
 use std::{path::PathBuf, sync::{Arc, Mutex}, time::Duration};
@@ -13,8 +13,8 @@ fn now(clock: &dyn Clock) -> IvyResult<IvyJson> {
 }
 fn location(config: &IvyJson, component: &IvyJson, snapshot: &IvyJson) -> IvyResult<PathBuf> {
     let hash = hash_json(&IvyJson::object([("componentId",component.clone()),("snapshotId",snapshot.clone())]))?;
-    let root = config.required("runtimeRoot")?.as_js_string().ok_or_else(IvyError::internal)?;
-    Ok(node_path::filesystem_path(&node_path::join(Style::native(), &[root.clone(),"preparation-progress".into(),format!("{}.json",&hash[7..]).into()])))
+    let root = config::path_value(config.required("runtimeRoot")?)?;
+    Ok(root.join("preparation-progress").join(format!("{}.json",&hash[7..])))
 }
 struct Write { value: IvyJson, finished: oneshot::Sender<()> }
 struct State { value: Mutex<IvyJson>, clock: Arc<dyn Clock> }
@@ -50,7 +50,7 @@ impl PreparationProgress {
         runtime.spawn(async move {
             while let Some(mut request)=queue.recv().await {
                 if let Some(file)=request.value.get("filePath").and_then(IvyJson::as_js_string).filter(|s|!s.0.is_empty()) {
-                    let file=node_path::filesystem_path(file);
+                    let file=native_path::to_native(file);
                     let bytes=tokio::task::spawn_blocking(move ||std::fs::metadata(file).ok().map(|m|m.len())).await.ok().flatten();
                     request.value.insert("fileBytes",bytes.map_or(IvyJson::Null,|n|IvyJson::Number(n as f64)));
                 }

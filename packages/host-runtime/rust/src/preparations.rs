@@ -1,5 +1,5 @@
 //! Durable preparation identities and records, independent of build execution.
-use crate::{IvyError, IvyJson, IvyResult, Outcome, artifact, config::{read_json, write_json, FileError}, paths::{absolute, realpath}, node_path::{self, Style}, journal::HostJournal, node_runtime::NodeRuntime, executor_lock::ExecutorLock};
+use crate::{IvyError, IvyJson, IvyResult, Outcome, artifact, config::{read_json, write_json, FileError}, paths::{absolute, realpath}, journal::HostJournal, node_runtime::NodeRuntime, executor_lock::ExecutorLock};
 use ivy_contracts::{core_schema::validate_host, hash::hash_json};
 use std::{fs, path::{Path, PathBuf}};
 mod retention;
@@ -7,12 +7,10 @@ pub use retention::{PreparationStorageCollection, collect_preparation_storage};
 
 fn internal<T, E>(result: Result<T, E>) -> IvyResult<T> { result.map_err(|_| IvyError::internal()) }
 fn require(ok:bool,code:&str,message:&str)->IvyResult<()>{if ok{Ok(())}else{Err(IvyError::new(code,message))}}
-fn fs_path(path:&Path)->PathBuf{node_path::filesystem_path(&node_path::from_native(path))}
-fn joined(root:&Path,name:&str)->PathBuf{node_path::to_native(&node_path::join(Style::native(),&[node_path::from_native(root),name.into()]))}
-fn root_of(staging:&Path,id:&str)->PathBuf{joined(staging,&format!("build-{id}"))}
+fn root_of(staging:&Path,id:&str)->PathBuf{staging.join(format!("build-{id}"))}
 fn now()->IvyJson{chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis,true).into()}
 async fn blocking<T:Send+'static>(work:impl FnOnce()->IvyResult<T>+Send+'static)->IvyResult<T>{internal(tokio::task::spawn_blocking(work).await)?}
-async fn exists(path:PathBuf)->IvyResult<bool>{blocking(move||match fs::symlink_metadata(fs_path(&path)){Ok(_)=>Ok(true),Err(e) if e.kind()==std::io::ErrorKind::NotFound=>Ok(false),Err(_)=>Err(IvyError::internal())}).await}
+async fn exists(path:PathBuf)->IvyResult<bool>{blocking(move||match fs::symlink_metadata(&path){Ok(_)=>Ok(true),Err(e) if e.kind()==std::io::ErrorKind::NotFound=>Ok(false),Err(_)=>Err(IvyError::internal())}).await}
 pub fn preparation_id_for_build(build_id: &str) -> IvyResult<String> {
     if build_id.len() != 71 || !build_id.starts_with("sha256:")
         || !build_id[7..].bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) {
@@ -33,7 +31,7 @@ pub(crate) fn owned_root(staging_root: &Path, root: &Path) -> IvyResult<PathBuf>
     if !valid_name || internal(absolute(root))?.parent() != Some(internal(absolute(staging_root))?.as_path()) {
         return Err(IvyError::new("target_conflict", "Preparation must be one directly owned build directory."));
     }
-    let metadata = internal(fs::symlink_metadata(fs_path(root)))?;
+    let metadata = internal(fs::symlink_metadata(root))?;
     let staging = internal(realpath(staging_root))?; let actual = internal(realpath(root))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() || actual.parent() != Some(staging.as_path()) || actual.file_name() != root.file_name() {
         return Err(IvyError::new("target_conflict", "Preparation directory cannot traverse a link."));
@@ -46,7 +44,7 @@ pub async fn save_preparation(staging_root: impl Into<PathBuf>, record: IvyJson)
         validate_host("PreparationRecord", &record)?;
         let root = root_of(&staging_root,&record.required("preparationId")?.as_str()?);
         owned_root(&staging_root, &root)?;
-        write_json(&fs_path(&root.join("preparation.json")), &record)
+        write_json(&root.join("preparation.json"), &record)
     }).await)?
 }
 /// Read exactly the requested build record; recovery must not scan all history.
@@ -56,7 +54,7 @@ pub async fn preparation_record(staging_root: impl Into<PathBuf>, preparation_id
 }
 pub(crate) fn read_record(staging_root: &Path, root: &Path) -> IvyResult<Option<IvyJson>> {
     owned_root(staging_root, root)?;
-    let record = match read_json(&fs_path(&root.join("preparation.json")), 32768) {
+    let record = match read_json(&root.join("preparation.json"), 32768) {
         Ok(value) => value,
         Err(FileError::Missing) => return Ok(None),
         Err(error) => return Err(error.error()),
@@ -76,7 +74,7 @@ pub async fn preparation_inventory(host: IvyJson) -> IvyResult<IvyJson> {
     let staging = crate::config::path_value(host.required("stagingRoot")?)?;
     let inventory_root = staging.clone();
     let roots = internal(tokio::task::spawn_blocking(move || {
-        let directory = match fs::read_dir(fs_path(&inventory_root)) {
+        let directory = match fs::read_dir(&inventory_root) {
             Ok(directory) => directory,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(_) => return Err(IvyError::internal()),
@@ -84,13 +82,12 @@ pub async fn preparation_inventory(host: IvyJson) -> IvyResult<IvyJson> {
         let mut roots = Vec::new();
         for entry in directory {
             let entry = internal(entry)?;
-            if let Some(name)=entry.file_name().to_str().filter(|name|build_name(name)){roots.push(joined(&inventory_root,name));}
+            if let Some(name)=entry.file_name().to_str().filter(|name|build_name(name)){roots.push(inventory_root.join(name));}
         }
         if roots.len() > 10_000 {
             return Err(IvyError::new("limit_exceeded", "Preparation directory count exceeds its bounded inventory."));
         }
-        // All admitted names are fixed-length ASCII UUIDs, so this is the same
-        // ordering as the source's JavaScript string sort.
+        // Admitted names are fixed-length ASCII UUIDs with a stable byte order.
         roots.sort();
         Ok(roots)
     }).await)??;
@@ -132,9 +129,9 @@ pub async fn preparation_inventory(host: IvyJson) -> IvyResult<IvyJson> {
 
 async fn roots(staging:PathBuf)->IvyResult<Vec<PathBuf>>{
     blocking(move||{
-        let entries=match fs::read_dir(fs_path(&staging)){Ok(value)=>value,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(Vec::new()),Err(_)=>return Err(IvyError::internal())};
+        let entries=match fs::read_dir(&staging){Ok(value)=>value,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(Vec::new()),Err(_)=>return Err(IvyError::internal())};
         let mut roots=Vec::new();
-        for entry in entries{let entry=internal(entry)?;if let Some(name)=entry.file_name().to_str().filter(|name|build_name(name)){roots.push(joined(&staging,name));}}
+        for entry in entries{let entry=internal(entry)?;if let Some(name)=entry.file_name().to_str().filter(|name|build_name(name)){roots.push(staging.join(name));}}
         require(roots.len()<=10000,"limit_exceeded","Preparation directory count exceeds its bounded inventory.")?;roots.sort();Ok(roots)
     }).await
 }
@@ -146,13 +143,13 @@ fn record_change(record:&IvyJson,phase:&str,error:IvyJson)->IvyJson{let mut next
 async fn publication(journal:&HostJournal,record:&IvyJson,verify_release:bool,node:Option<&NodeRuntime>)->IvyResult<(IvyJson,bool)>{
     let host=journal.config().await?;let candidate=record.get("candidate").filter(|v|!v.is_null()).ok_or_else(||IvyError::new("preparation_incomplete","Preparation has no complete publication identity."))?;
     let artifact_root=path_field(&host,"artifactRoot")?;let id=candidate.required("candidateId")?.as_str()?;
-    let directory=joined(&joined(&artifact_root,"candidates"),id.get(7..).unwrap_or_default());
+    let directory=artifact_root.join("candidates").join(id.get(7..).unwrap_or_default());
     require(candidate.get("artifactRoot")==Some(&crate::layout::path_json(&directory.join("artifact")))
         && candidate.get("archivePath").filter(|v|!v.is_null()).is_none_or(|path|path==&crate::layout::path_json(&directory.join("package.tar.gz")))
         && candidate.get("manifestPath")==Some(&crate::layout::path_json(&directory.join("component.json"))),"target_conflict","Publication paths must identify the exact candidate directory.")?;
     if verify_release{crate::source::verify_snapshot(record.required("snapshot")?.clone(),path_field(&host,"stagingRoot")?).await?;}
-    let manifest=if verify_release{artifact::verify_candidate(candidate.clone(),artifact_root,node).await?}else{artifact::read_release_manifest(fs_path(&path_field(candidate,"manifestPath")?)).await?};
-    let plan=crate::source::source_build_plan(fs_path(&path_field(record.required("snapshot")?,"sourceRoot")?),&record.required("componentId")?.as_str()?).await?;
+    let manifest=if verify_release{artifact::verify_candidate(candidate.clone(),artifact_root,node).await?}else{artifact::read_release_manifest(path_field(candidate,"manifestPath")?).await?};
+    let plan=crate::source::source_build_plan(path_field(record.required("snapshot")?,"sourceRoot")?,&record.required("componentId")?.as_str()?).await?;
     let mut expected=IvyJson::object([("schemaVersion",IvyJson::Number(1.0)),("buildId",candidate.required("buildId")?.clone())]);
     for key in ["componentId","kind","version","connectsToHive","requirements"]{expected.insert(key,plan.required(key)?.clone());}
     let app=plan.get("kind")==Some(&"app".into());
@@ -187,16 +184,16 @@ pub(crate) async fn compact_preparation_locked(journal:&HostJournal,record:IvyJs
     let mut payloads=Vec::new();
     for name in ["source","artifact","artifact.tar.gz"]{
         let path=root.join(name);if !exists(path.clone()).await?{continue}
-        let target=path.clone();let metadata=blocking(move||internal(fs::symlink_metadata(fs_path(&target)))).await?;
+        let target=path.clone();let metadata=blocking(move||internal(fs::symlink_metadata(&target))).await?;
         require(!metadata.file_type().is_symlink()&&if name=="artifact.tar.gz"{metadata.is_file()}else{metadata.is_dir()},"target_conflict","Compaction payload root must be a regular owned file/directory.")?;
         require(actual(path.clone()).await?.parent()==Some(boundary.as_path()),"target_conflict","Compaction target leaves its exact owned build.")?;
-        let bytes=if measure{crate::storage_space::tree_bytes(fs_path(&path),Some(boundary.clone())).await.unwrap_or(0.0)}else{0.0};payloads.push((path,metadata.is_dir(),bytes));
+        let bytes=if measure{crate::storage_space::tree_bytes(path.clone(),Some(boundary.clone())).await.unwrap_or(0.0)}else{0.0};payloads.push((path,metadata.is_dir(),bytes));
     }
-    if record.get("errorCode").is_some_and(|v|!v.is_null())&&!exists(root.join("preparation-before-recovery.json")).await?{crate::config::atomic_json(fs_path(&root.join("preparation-before-recovery.json")),record.clone()).await?;}
+    if record.get("errorCode").is_some_and(|v|!v.is_null())&&!exists(root.join("preparation-before-recovery.json")).await?{crate::config::atomic_json(root.join("preparation-before-recovery.json"),record.clone()).await?;}
     save_preparation(staging.clone(),record_change(&record,"verified",IvyJson::Null)).await?;
     for(path,directory,_)in &payloads{
         checked_boundary(staging.clone(),root.clone()).await?;
-        let target=path.clone();let metadata=blocking(move||internal(fs::symlink_metadata(fs_path(&target)))).await?;
+        let target=path.clone();let metadata=blocking(move||internal(fs::symlink_metadata(&target))).await?;
         require(!metadata.file_type().is_symlink()&&actual(path.clone()).await?.parent()==Some(boundary.as_path()),"target_conflict","Compaction target changed before removal.")?;
         crate::filesystem::remove_payload(path.clone(),*directory,3).await?;
     }
@@ -228,7 +225,7 @@ pub async fn recover_prepared_build(journal:HostJournal,build_id:String,node:imp
     let node = node.into();
     preparation_id_for_build(&build_id)?;
     internal(tokio::spawn(async move{
-        let host=journal.config().await?;let lock=ExecutorLock::acquire(joined(&joined(&path_field(&host,"stagingRoot")?,"build-locks"),&build_id[7..]),false).await?;
+        let host=journal.config().await?;let lock=ExecutorLock::acquire(path_field(&host,"stagingRoot")?.join("build-locks").join(&build_id[7..]),false).await?;
         let result=recover_prepared_build_locked(&journal,&build_id,node.as_ref()).await;lock.close().await?;result
     }).await)?
 }
@@ -252,7 +249,7 @@ async fn compact_all(host:&IvyJson,journal:&HostJournal,only:Option<String>,meas
             let Some(record)=record_at(staging.clone(),root.clone()).await?else{entry.insert("code","preparation_unrecognized".into());return Ok(true)};
             let build=record.required("buildId")?.as_str()?;if only.as_ref().is_some_and(|filter|!filter.is_empty()&&filter!=&build){return Ok(false)}
             entry.insert("candidateId",record.get("candidate").and_then(|v|v.get("candidateId")).cloned().unwrap_or(IvyJson::Null));
-            lock=Some(ExecutorLock::acquire(joined(&joined(&staging,"build-locks"),build.get(7..).unwrap_or_default()),false).await?);
+            lock=Some(ExecutorLock::acquire(staging.join("build-locks").join(build.get(7..).unwrap_or_default()),false).await?);
             let record=record_at(staging.clone(),root.clone()).await?.ok_or_else(||IvyError::new("preparation_unrecognized","The original preparation identity must remain present after acquiring its lock."))?;
             let phase=record.required("phase")?.as_str()?;
             if phase=="building"{save_preparation(staging.clone(),record_change(&record,"unknown","preparation_interrupted".into())).await?;}

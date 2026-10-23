@@ -4,7 +4,7 @@ use ivy_host_runtime::{candidate_identity::candidate_build_id, config, preparati
 use std::{fs, path::Path};
 
 fn hash(c: &str) -> String { format!("sha256:{}", c.repeat(64)) }
-fn path(p: &Path) -> IvyJson { p.to_string_lossy().to_string().into() }
+fn path(p: &Path) -> IvyJson { IvyJson::String(ivy_host_runtime::native_path::from_native(p)) }
 fn compare(kind: &str, operation: &str, args: Vec<IvyJson>, result: IvyResult<IvyJson>) {
     compare_config_oracle(IvyJson::object([("kind",kind.into()),("operation",operation.into()),("args",IvyJson::Array(args))]),result);
 }
@@ -74,54 +74,233 @@ fn build_and_preparation_identities_preserve_recipe_and_utf16() {
     }
 }
 
+fn native_staging(fixture: &ServiceFixture) -> std::path::PathBuf {
+    let mut name = std::ffi::OsString::from("native preparation ü 空 😀; ' ");
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        name.push(std::ffi::OsString::from_wide(&[0xd800]));
+    }
+    fixture.0.join(name).join("staging")
+}
+
 #[tokio::test]
 async fn preparation_records_are_atomic_owned_and_bound_to_release_identity() {
-    let fixture=ServiceFixture::new();let staging=fixture.0.join("staging");let id=preparations::preparation_id_for_build(&hash("a")).unwrap();let root=staging.join(format!("build-{id}"));fs::create_dir_all(&root).unwrap();
-    let record=IvyJson::object([("schemaVersion",IvyJson::Number(1.0)),("preparationId",id.clone().into()),("componentId","fixture".into()),("buildId",hash("a").into()),("snapshot",snapshot(&fixture)),("phase","building".into()),("candidate",IvyJson::Null),("startedAt","2026-01-01T00:00:00.000Z".into()),("updatedAt","2026-01-01T00:00:00.000Z".into()),("errorCode",IvyJson::Null)]);
-    assert_eq!(preparations::preparation_record(staging.clone(),&id).await.unwrap(),None);
-    compare("preparations","savePreparation",vec![host(&fixture),record.clone()],preparations::save_preparation(staging.clone(),record.clone()).await.map(|_|IvyJson::Null));
-    assert_optional_json_eq(preparations::preparation_record(staging.clone(),&id).await.unwrap(),Some(record.clone()));
-    let mut invalid=record.clone();invalid.insert("phase","invalid".into());
-    compare("preparations","savePreparation",vec![host(&fixture),invalid.clone()],preparations::save_preparation(staging.clone(),invalid).await.map(|_|IvyJson::Null));
-    assert_optional_json_eq(preparations::preparation_record(staging.clone(),&id).await.unwrap(),Some(record.clone()));
-    let mut wrong=record.clone();wrong.insert("preparationId",preparations::preparation_id_for_build(&hash("b")).unwrap().into());config::atomic_json(root.join("preparation.json"),wrong).await.unwrap();
-    assert_eq!(preparations::preparation_record(staging.clone(),&id).await.unwrap_err().code,"build_mismatch");
-    let outside=fixture.0.join("outside");fs::create_dir(&outside).unwrap();fs::remove_file(root.join("preparation.json")).unwrap();fs::remove_dir(&root).unwrap();
-    #[cfg(windows)] std::os::windows::fs::symlink_dir(&outside,&root).unwrap();
-    #[cfg(unix)] std::os::unix::fs::symlink(&outside,&root).unwrap();
-    compare("preparations","savePreparation",vec![host(&fixture),record.clone()],preparations::save_preparation(staging,record).await.map(|_|IvyJson::Null));
+    let fixture = ServiceFixture::new();
+    let staging = native_staging(&fixture);
+    let id = preparations::preparation_id_for_build(&hash("a")).unwrap();
+    let root = staging.join(format!("build-{id}"));
+    fs::create_dir_all(&root).unwrap();
+    let record = IvyJson::object([
+        ("schemaVersion", IvyJson::Number(1.0)),
+        ("preparationId", id.clone().into()),
+        ("componentId", "fixture".into()),
+        ("buildId", hash("a").into()),
+        ("snapshot", snapshot(&fixture)),
+        ("phase", "building".into()),
+        ("candidate", IvyJson::Null),
+        ("startedAt", "2026-01-01T00:00:00.000Z".into()),
+        ("updatedAt", "2026-01-01T00:00:00.000Z".into()),
+        ("errorCode", IvyJson::Null),
+    ]);
+    assert_eq!(
+        preparations::preparation_record(staging.clone(), &id)
+            .await
+            .unwrap(),
+        None
+    );
+    preparations::save_preparation(staging.clone(), record.clone())
+        .await
+        .unwrap();
+    assert_optional_json_eq(
+        preparations::preparation_record(staging.clone(), &id)
+            .await
+            .unwrap(),
+        Some(record.clone()),
+    );
+    let mut invalid = record.clone();
+    invalid.insert("phase", "invalid".into());
+    assert_eq!(
+        preparations::save_preparation(staging.clone(), invalid)
+            .await
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+    assert_optional_json_eq(
+        preparations::preparation_record(staging.clone(), &id)
+            .await
+            .unwrap(),
+        Some(record.clone()),
+    );
+    let mut wrong = record.clone();
+    wrong.insert(
+        "preparationId",
+        preparations::preparation_id_for_build(&hash("b"))
+            .unwrap()
+            .into(),
+    );
+    config::atomic_json(root.join("preparation.json"), wrong)
+        .await
+        .unwrap();
+    assert_eq!(
+        preparations::preparation_record(staging.clone(), &id)
+            .await
+            .unwrap_err()
+            .code,
+        "build_mismatch"
+    );
+    let outside = fixture.0.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::remove_file(root.join("preparation.json")).unwrap();
+    fs::remove_dir(&root).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&outside, &root).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &root).unwrap();
+    assert_eq!(
+        preparations::save_preparation(staging, record)
+            .await
+            .unwrap_err()
+            .code,
+        "target_conflict"
+    );
     assert!(!outside.join("preparation.json").exists());
 }
 
 #[tokio::test]
 async fn preparation_inventory_preserves_errors_and_never_follows_linked_build_roots() {
-    let fixture=ServiceFixture::new();let staging=fixture.0.join("staging");
-    let mut host=host(&fixture);host.insert("hostId","fixture-host".into());
-    let names:Vec<_>=["a","b","c","d"].iter().map(|digit| preparations::preparation_id_for_build(&hash(digit)).unwrap()).collect();
-    let roots:Vec<_>=names.iter().map(|id| staging.join(format!("build-{id}"))).collect();
-    for root in &roots[..3] {fs::create_dir_all(root).unwrap();}
+    let fixture = ServiceFixture::new();
+    let staging = native_staging(&fixture);
+    let mut host = host(&fixture);
+    host.insert("hostId", "fixture-host".into());
+    host.insert("stagingRoot", path(&staging));
+    let names: Vec<_> = ["a", "b", "c", "d"]
+        .iter()
+        .map(|digit| preparations::preparation_id_for_build(&hash(digit)).unwrap())
+        .collect();
+    let roots: Vec<_> = names
+        .iter()
+        .map(|id| staging.join(format!("build-{id}")))
+        .collect();
+    for root in &roots[..3] {
+        fs::create_dir_all(root).unwrap();
+    }
     fs::create_dir_all(staging.join("build-not-an-id")).unwrap();
-    fs::write(staging.join("build-not-an-id/ignored"),b"not inventoried").unwrap();
-    let record=IvyJson::object([("schemaVersion",IvyJson::Number(1.0)),("preparationId",names[0].clone().into()),("componentId","fixture".into()),("buildId",hash("a").into()),("snapshot",snapshot(&fixture)),("phase","building".into()),("candidate",IvyJson::Null),("startedAt","2026-01-01T00:00:00.000Z".into()),("updatedAt","2026-01-01T00:00:00.000Z".into()),("errorCode",IvyJson::Null)]);
-    preparations::save_preparation(staging.clone(),record).await.unwrap();
-    fs::write(roots[0].join("payload"),b"retained").unwrap();
-    fs::write(roots[1].join("payload"),b"unrecognized").unwrap();
-    fs::write(roots[2].join("preparation.json"),b"{").unwrap();
-    let outside=fixture.0.join("outside");fs::create_dir(&outside).unwrap();fs::write(outside.join("payload"),b"private").unwrap();
-    #[cfg(windows)] std::os::windows::fs::symlink_dir(&outside,&roots[3]).unwrap();
-    #[cfg(unix)] std::os::unix::fs::symlink(&outside,&roots[3]).unwrap();
-    let inventory=preparations::preparation_inventory(host.clone()).await.unwrap();
-    let entries=inventory.required("entries").unwrap().as_array().unwrap();assert_eq!(entries.len(),4);
-    assert_eq!(entries[0].required("phase").unwrap(),&IvyJson::from("building"));
-    assert_eq!(entries[1].required("bytes").unwrap(),&IvyJson::Number(12.0));
-    assert_ne!(entries[2].required("code").unwrap(),&IvyJson::Null);
-    assert_eq!(entries[3].required("code").unwrap(),&IvyJson::from("target_conflict"));
-    assert_eq!(entries[3].required("bytes").unwrap(),&IvyJson::Number(0.0));
-    // Clock and live volume availability are independently measured; compare the
-    // stable inventory against the original Node implementation on these files.
-    let keys=["schemaVersion","hostId","entries"];
-    let stable=IvyJson::object(keys.map(|key| (key,inventory.required(key).unwrap().clone())));
-    compare_config_oracle(IvyJson::object([("kind","preparations".into()),("operation","preparationInventory".into()),("args",IvyJson::Array(vec![host])),("pick",IvyJson::Array(keys.map(IvyJson::from).to_vec()))]),Ok(stable));
-    assert_eq!(fs::read(outside.join("payload")).unwrap(),b"private");
-    assert_eq!(fs::read(roots[0].join("payload")).unwrap(),b"retained");
+    fs::write(staging.join("build-not-an-id/ignored"), b"not inventoried").unwrap();
+    let record = IvyJson::object([
+        ("schemaVersion", IvyJson::Number(1.0)),
+        ("preparationId", names[0].clone().into()),
+        ("componentId", "fixture".into()),
+        ("buildId", hash("a").into()),
+        ("snapshot", snapshot(&fixture)),
+        ("phase", "building".into()),
+        ("candidate", IvyJson::Null),
+        ("startedAt", "2026-01-01T00:00:00.000Z".into()),
+        ("updatedAt", "2026-01-01T00:00:00.000Z".into()),
+        ("errorCode", IvyJson::Null),
+    ]);
+    preparations::save_preparation(staging.clone(), record)
+        .await
+        .unwrap();
+    fs::write(roots[0].join("payload"), b"retained").unwrap();
+    fs::write(roots[1].join("payload"), b"unrecognized").unwrap();
+    fs::write(roots[2].join("preparation.json"), b"{").unwrap();
+    let outside = fixture.0.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("payload"), b"private").unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&outside, &roots[3]).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &roots[3]).unwrap();
+    let inventory = preparations::preparation_inventory(host.clone())
+        .await
+        .unwrap();
+    let entries = inventory.required("entries").unwrap().as_array().unwrap();
+    assert_eq!(entries.len(), 4);
+    assert_eq!(
+        entries[0].required("phase").unwrap(),
+        &IvyJson::from("building")
+    );
+    assert_eq!(
+        entries[1].required("bytes").unwrap(),
+        &IvyJson::Number(12.0)
+    );
+    assert_ne!(entries[2].required("code").unwrap(), &IvyJson::Null);
+    assert_eq!(
+        entries[3].required("code").unwrap(),
+        &IvyJson::from("target_conflict")
+    );
+    assert_eq!(entries[3].required("bytes").unwrap(), &IvyJson::Number(0.0));
+    let expected = IvyJson::Array(
+        names
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                IvyJson::object([
+                    ("preparationId", id.clone().into()),
+                    ("path", path(&roots[index])),
+                    (
+                        "phase",
+                        if index == 0 {
+                            "building"
+                        } else {
+                            "unrecognized"
+                        }
+                        .into(),
+                    ),
+                    (
+                        "buildId",
+                        if index == 0 {
+                            hash("a").into()
+                        } else {
+                            IvyJson::Null
+                        },
+                    ),
+                    ("candidateId", IvyJson::Null),
+                    (
+                        "bytes",
+                        IvyJson::Number(match index {
+                            0 => {
+                                (fs::metadata(roots[0].join("preparation.json"))
+                                    .unwrap()
+                                    .len()
+                                    + 8) as f64
+                            }
+                            1 => 12.0,
+                            _ => 0.0,
+                        }),
+                    ),
+                    (
+                        "code",
+                        match index {
+                            2 => "internal_error".into(),
+                            3 => "target_conflict".into(),
+                            _ => IvyJson::Null,
+                        },
+                    ),
+                ])
+            })
+            .collect(),
+    );
+    super::assert_json_eq(inventory.required("entries").unwrap(), &expected);
+    assert_eq!(inventory.get("schemaVersion"), Some(&IvyJson::Number(1.0)));
+    assert_eq!(inventory.get("hostId"), Some(&"fixture-host".into()));
+    assert!(
+        inventory
+            .required("observedAt")
+            .unwrap()
+            .as_js_string()
+            .is_some()
+    );
+    assert!(
+        inventory
+            .required("availableBytes")
+            .unwrap()
+            .as_f64()
+            .unwrap()
+            .is_finite()
+    );
+    assert_eq!(fs::read(outside.join("payload")).unwrap(), b"private");
+    assert_eq!(fs::read(roots[0].join("payload")).unwrap(), b"retained");
 }
