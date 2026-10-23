@@ -19,6 +19,12 @@ use std::{
 use tokio::sync::Notify;
 #[path = "host-linux-close-cases.rs"]
 mod close_cases;
+#[path = "host-docker-cases.rs"]
+mod docker_cases;
+#[path = "host-systemd-bootstrap-cases.rs"]
+mod systemd_bootstrap_cases;
+#[path = "host-systemd-cases.rs"]
+mod systemd_cases;
 static CORPUS: Mutex<()> = Mutex::new(());
 fn v(text: &str) -> IvyJson {
     json::parse(text, usize::MAX).unwrap()
@@ -581,6 +587,18 @@ async fn immutable_linux_resource_identity_and_scope_match_the_original() {
         )
         .await;
     }
+    for restored in [
+        IvyJson::Null,
+        false.into(),
+        IvyJson::Number(0.0),
+        "".into(),
+        IvyJson::Array(vec![]),
+        empty(),
+    ] {
+        let mut config = config();
+        config.insert("restoredFrom", restored);
+        assert!(resources::installation_identity(&config).is_err());
+    }
     for (key, value) in [
         ("memoryHighBytes", 0.0),
         ("memoryHighBytes", 268435456.0),
@@ -924,8 +942,17 @@ async fn systemd_state_and_dynamic_units_retain_exact_launch_identity() {
         "0x2a",
         "\u{feff}42\u{a0}",
     ] {
-        let state = systemd::parse_systemd_state(&format!("LoadState=loaded\r\nActiveState=active\r\nSubState=running\r\nMainPID={pid}\r\n").into());
-        assert_eq!(state.main_pid, if pid == "42" { Some(42) } else { None }, "{pid}");
+        let state = systemd::parse_systemd_state(
+            &format!(
+                "LoadState=loaded\r\nActiveState=active\r\nSubState=running\r\nMainPID={pid}\r\n"
+            )
+            .into(),
+        );
+        assert_eq!(
+            state.main_pid,
+            if pid == "42" { Some(42) } else { None },
+            "{pid}"
+        );
     }
     for output in [
         "",
@@ -970,8 +997,9 @@ async fn systemd_state_and_dynamic_units_retain_exact_launch_identity() {
         "mismatched-candidate",
         "missing-entrypoint",
         "false-entrypoint",
-        "null-resources",
-        "false-resources",
+        "missing-restart",
+        "never-restart",
+        "failure-restart",
         "agent",
     ] {
         let mut config = config.clone();
@@ -985,6 +1013,17 @@ async fn systemd_state_and_dynamic_units_retain_exact_launch_identity() {
                 manifest = IvyJson::object([("componentId", "task-board".into())])
             }
             "false-entrypoint" => manifest.insert("entrypoint", false.into()),
+            "missing-restart" => {
+                manifest.remove("restart");
+            }
+            "never-restart" => manifest.insert(
+                "restart",
+                v(r#"{"policy":"never","minimumDelayMs":0,"maximumDelayMs":5000}"#),
+            ),
+            "failure-restart" => manifest.insert(
+                "restart",
+                v(r#"{"policy":"on-failure","minimumDelayMs":1050,"maximumDelayMs":5000}"#),
+            ),
             "agent" => {
                 let mut instances = config
                     .required("instances")
@@ -1006,12 +1045,6 @@ async fn systemd_state_and_dynamic_units_retain_exact_launch_identity() {
             candidate,
             manifest,
         ];
-        if mode == "null-resources" {
-            args.push(IvyJson::Null);
-        }
-        if mode == "false-resources" {
-            args.push(false.into());
-        }
         if mode == "resources" {
             args.push(
                 resources::linux_resource_scope(
@@ -1022,6 +1055,104 @@ async fn systemd_state_and_dynamic_units_retain_exact_launch_identity() {
             );
         }
         check(mode, input(&fixture, "systemd", "renderSystemdUnit", args)).await;
+    }
+    let id = JsString::from("renamed-executor");
+    let normal_manifest = manifest("task-board");
+    let render = |manifest: &IvyJson, resources: Option<&IvyJson>| {
+        systemd::render_systemd_unit(&config, &id, &target, &candidate, manifest, resources)
+    };
+    for invalid in [
+        IvyJson::Null,
+        false.into(),
+        IvyJson::Number(0.0),
+        "".into(),
+        IvyJson::Array(vec![]),
+    ] {
+        assert!(
+            render(&normal_manifest, Some(&invalid)).is_err(),
+            "resource scope: {invalid:?}"
+        );
+        let mut malformed = normal_manifest.clone();
+        malformed.insert("restart", invalid.clone());
+        assert!(render(&malformed, None).is_err(), "restart: {invalid:?}");
+        malformed = normal_manifest.clone();
+        malformed.insert("entrypoint", invalid.clone());
+        assert_eq!(
+            render(&malformed, None).err().unwrap().code,
+            "target_conflict",
+            "entrypoint: {invalid:?}"
+        );
+    }
+    assert!(render(&normal_manifest, Some(&empty())).is_err());
+    for entry in [
+        empty(),
+        v(r#"{"executable":false,"args":[]}"#),
+        v(r#"{"executable":"","args":[]}"#),
+        v(r#"{"args":[]}"#),
+        v(r#"{"executable":"node","args":false}"#),
+    ] {
+        let mut malformed = normal_manifest.clone();
+        malformed.insert("entrypoint", entry);
+        assert_eq!(
+            render(&malformed, None).err().unwrap().code,
+            "target_conflict"
+        );
+    }
+    let mut native_candidate = candidate.clone();
+    native_candidate.insert("artifactRoot", "/fixture/native-release".into());
+    let mut native_manifest = normal_manifest.clone();
+    native_manifest.insert("entrypoint", v(r#"{"executable":"dist/native/ivy-task-board","args":["--literal","% $ \" \\ 😀"],"timeoutMs":30000}"#));
+    let mut prior = None;
+    for with_node in [false, true] {
+        let mut native_config = config.clone();
+        let mut executables = empty();
+        if with_node {
+            executables.insert("node", "/fixture/unused-node".into());
+        }
+        native_config.insert("executables", executables);
+        let rendered = systemd::render_systemd_unit(
+            &native_config,
+            &id,
+            &target,
+            &native_candidate,
+            &native_manifest,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            rendered.unit,
+            systemd::systemd_unit_name(&config, &id).unwrap()
+        );
+        let content = rendered.content.to_utf8().unwrap();
+        assert!(
+            content
+                .contains("\nExecStart=:\"/fixture/native-release/dist/native/ivy-task-board\" ")
+        );
+        assert!(
+            content.contains("\nEnvironment=IVY_LAUNCH_ID=11111111-1111-4111-8111-111111111111\n")
+        );
+        assert!(
+            content.contains(
+                "\nEnvironment=IVY_INSTANCE_CONFIG=\"/fixture/private %% config.json\"\n"
+            )
+        );
+        if let Some(prior) = prior {
+            assert_eq!(rendered.content, prior);
+        }
+        prior = Some(rendered.content);
+        if !with_node {
+            let error = systemd::render_systemd_unit(
+                &native_config,
+                &id,
+                &target,
+                &candidate,
+                &normal_manifest,
+                None,
+            )
+            .err()
+            .unwrap();
+            assert_eq!(error.code, "unsupported_runtime");
+        }
     }
 }
 #[tokio::test]
@@ -1202,7 +1333,10 @@ async fn linux_identity_grants_match_original_order_deduplication_and_failure_bo
     for mode in [
         "valid",
         "absent-user",
+        "missing-user",
         "empty-user",
+        "false-user",
+        "zero-user",
         "other-user",
         "other-component",
         "not-admin",
@@ -1216,11 +1350,21 @@ async fn linux_identity_grants_match_original_order_deduplication_and_failure_bo
         "duplicate-roots",
         "missing-project",
         "grant-failure",
+        "native-without-node",
+        "native-null-node",
+        "invalid-node",
+        "invalid-process",
+        "invalid-native",
     ] {
         let (mut identity, mut runtime, mut backend) = identity_fixture();
         match mode {
             "absent-user" => identity.insert("user", IvyJson::Null),
+            "missing-user" => {
+                identity.remove("user");
+            }
             "empty-user" => identity.insert("user", "".into()),
+            "false-user" => identity.insert("user", false.into()),
+            "zero-user" => identity.insert("user", IvyJson::Number(0.0)),
             "other-user" => identity.insert("user", "root".into()),
             "other-component" => identity.insert("componentId", "host-executor".into()),
             "not-admin" => backend.insert("uid", IvyJson::Number(1.0)),
@@ -1289,6 +1433,23 @@ async fn linux_identity_grants_match_original_order_deduplication_and_failure_bo
             "grant-failure" => {
                 backend.insert("faults", v(r#"[{"op":"command","at":4,"code":"EACCES"}]"#))
             }
+            "native-without-node" | "native-null-node" => {
+                if mode == "native-without-node" {
+                    identity.remove("nodeExecutable");
+                } else {
+                    identity.insert("nodeExecutable", IvyJson::Null);
+                }
+                let mut files = backend.required("files").unwrap().clone();
+                files.remove("/fixture/tools/node");
+                backend.insert("files", files);
+            }
+            "invalid-node" => identity.insert("nodeExecutable", false.into()),
+            "invalid-process" => identity.insert("processExecutable", false.into()),
+            "invalid-native" => {
+                let mut settings = runtime.required("settings").unwrap().clone();
+                settings.insert("nativeExecutable", false.into());
+                runtime.insert("settings", settings);
+            }
             _ => {}
         }
         let mut request = input(
@@ -1298,9 +1459,89 @@ async fn linux_identity_grants_match_original_order_deduplication_and_failure_bo
             vec![identity, runtime],
         );
         request.insert("model", backend);
-        if matches!(mode, "uid-nan" | "uid-unsafe") {
+        if matches!(mode, "native-without-node" | "native-null-node") {
             let actual = execute(&request).await;
-            assert_eq!(actual.required("operation").unwrap().required("error").unwrap().get("code"), Some(&"access_denied".into()));
+            assert_eq!(
+                actual.required("operation").unwrap().get("ok"),
+                Some(&true.into()),
+                "{mode}"
+            );
+            let trace = actual.required("trace").unwrap().as_array().unwrap();
+            assert!(
+                trace.iter().all(
+                    |event| event.get("path") != Some(&"/fixture/tools/node".into())
+                        && !event
+                            .get("args")
+                            .and_then(IvyJson::as_array)
+                            .is_some_and(|args| args.contains(&"/fixture/tools/node".into()))
+                ),
+                "{mode}"
+            );
+            for args in [
+                v(r#"["-m","u:ivy-agent:r--","/fixture/private/config.json"]"#),
+                v(r#"["-m","u:ivy-agent:r-x","/fixture/tools/native"]"#),
+                v(r#"["-R","-m","u:ivy-agent:r-X","/fixture/release"]"#),
+                v(r#"["-R","ivy-agent:ivy-agent","/fixture/data"]"#),
+                v(r#"["-R","-m","u:ivy-agent:rwX","/fixture/projects"]"#),
+            ] {
+                assert!(
+                    trace.iter().any(|event| event.get("args") == Some(&args)),
+                    "{mode}: {args:?}"
+                );
+            }
+            assert_eq!(
+                actual.get("files"),
+                request.required("model").unwrap().get("files")
+            );
+        } else if matches!(
+            mode,
+            "empty-user"
+                | "false-user"
+                | "zero-user"
+                | "invalid-node"
+                | "invalid-process"
+                | "invalid-native"
+        ) {
+            let actual = execute(&request).await;
+            let code = if matches!(mode, "invalid-node" | "invalid-process" | "invalid-native") {
+                "internal_error"
+            } else {
+                "unsupported_runtime"
+            };
+            assert_eq!(
+                actual
+                    .required("operation")
+                    .unwrap()
+                    .required("error")
+                    .unwrap()
+                    .required("data")
+                    .unwrap()
+                    .get("code"),
+                Some(&code.into()),
+                "{mode}"
+            );
+            assert!(
+                actual
+                    .required("trace")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .is_empty(),
+                "{mode}"
+            );
+        } else if matches!(mode, "uid-nan" | "uid-unsafe") {
+            let actual = execute(&request).await;
+            assert_eq!(
+                actual
+                    .required("operation")
+                    .unwrap()
+                    .required("error")
+                    .unwrap()
+                    .required("data")
+                    .unwrap()
+                    .get("code"),
+                Some(&"access_denied".into())
+            );
         } else {
             check(mode, request).await;
         }

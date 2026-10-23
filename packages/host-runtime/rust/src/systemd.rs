@@ -317,15 +317,6 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
 fn text(value: &IvyJson) -> IvyResult<JsString> {
     value.as_js_string().cloned().ok_or_else(IvyError::internal)
 }
-fn truthy(value: &IvyJson) -> bool {
-    match value {
-        IvyJson::Null => false,
-        IvyJson::Bool(value) => *value,
-        IvyJson::Number(value) => *value != 0.0 && !value.is_nan(),
-        IvyJson::String(value) => !value.0.is_empty(),
-        _ => true,
-    }
-}
 fn instance<'a>(config: &'a IvyJson, id: &JsString) -> IvyResult<Option<&'a IvyJson>> {
     Ok(config
         .required("instances")?
@@ -415,7 +406,6 @@ pub fn render_systemd_unit(
     manifest: &IvyJson,
     resources: Option<&IvyJson>,
 ) -> IvyResult<RenderedSystemdUnit> {
-    let resources = resources.filter(|value| truthy(value));
     require(
         cfg!(target_os = "linux")
             || candidate
@@ -445,7 +435,13 @@ pub fn render_systemd_unit(
     )?;
     require(
         manifest.get("componentId") == instance.get("componentId")
-            && manifest.get("entrypoint").is_some_and(truthy),
+            && manifest.get("entrypoint").is_some_and(|entry| {
+                entry
+                    .get("executable")
+                    .and_then(IvyJson::as_js_string)
+                    .is_some_and(|executable| !executable.0.is_empty())
+                    && entry.get("args").and_then(IvyJson::as_array).is_some()
+            }),
         "target_conflict",
         "Systemd unit has no matching component entrypoint.",
     )?;
@@ -466,7 +462,12 @@ pub fn render_systemd_unit(
     if let Some(user) = linux_process_user(&text(instance.required("componentId")?)?, "linux") {
         process.insert("user", user.into());
     }
-    if let Some(restart) = manifest.get("restart").filter(|value| truthy(value)) {
+    if let Some(restart) = manifest.get("restart") {
+        require(
+            restart.as_object().is_some(),
+            "invalid_arguments",
+            "Systemd restart must be an object.",
+        )?;
         process.insert("restart", restart.clone());
     }
     let mut plan = IvyJson::object([

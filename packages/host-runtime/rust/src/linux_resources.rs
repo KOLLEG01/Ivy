@@ -18,21 +18,12 @@ fn internal<T, E>(value: Result<T, E>) -> IvyResult<T> {
 fn string(value: &IvyJson) -> IvyResult<JsString> {
     value.as_js_string().cloned().ok_or_else(IvyError::internal)
 }
-fn truthy(value: &IvyJson) -> bool {
-    match value {
-        IvyJson::Null => false,
-        IvyJson::Bool(v) => *v,
-        IvyJson::Number(v) => *v != 0.0 && !v.is_nan(),
-        IvyJson::String(v) => !v.0.is_empty(),
-        _ => true,
-    }
-}
 fn budget_text(value: &IvyJson) -> IvyResult<JsString> {
     value.as_f64().filter(|value| value.is_finite() && value.fract() == 0.0 && (0.0..=9_007_199_254_740_991.0).contains(value))
         .map(|value| value.to_string().into()).ok_or_else(IvyError::internal)
 }
 pub fn installation_identity(config: &IvyJson) -> IvyResult<String> {
-    let value = match config.get("restoredFrom").filter(|value| truthy(value)) {
+    let value = match config.get("restoredFrom") {
         Some(restored) => IvyJson::object([
             ("hostId", config.required("hostId")?.clone()),
             ("runtimeRoot", config.required("runtimeRoot")?.clone()),

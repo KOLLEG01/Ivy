@@ -38,14 +38,8 @@ fn text(value: &J, key: &str) -> IvyResult<JsString> {
         .cloned()
         .ok_or_else(IvyError::internal)
 }
-fn truthy(value: &J) -> bool {
-    match value {
-        J::Null => false,
-        J::Bool(v) => *v,
-        J::Number(v) => *v != 0.0 && !v.is_nan(),
-        J::String(v) => !v.0.is_empty(),
-        _ => true,
-    }
+fn optional_text(value: &J, key: &str) -> IvyResult<Option<JsString>> {
+    value.get(key).map(|_| text(value, key)).transpose()
 }
 fn concat(parts: &[JsString]) -> JsString {
     JsString(
@@ -135,7 +129,11 @@ impl SystemdBootstrapOs {
         files: Arc<dyn SystemdHost>,
         linux: Arc<dyn LinuxHost>,
     ) -> Self {
-        Self { files, linux, node: node.into() }
+        Self {
+            files,
+            linux,
+            node: node.into(),
+        }
     }
     async fn command(&self, args: Vec<JsString>) -> IvyResult<()> {
         self.show(args).await.map(|_| ())
@@ -195,7 +193,7 @@ impl SystemdBootstrapOs {
             "OS unit does not match one retained immutable bootstrap candidate.",
         )?;
         let (plan, mut owner) = candidates.pop().unwrap();
-        if let Some(scope) = plan.get("linuxResources").filter(|v| truthy(v)) {
+        if let Some(scope) = plan.get("linuxResources") {
             linux_resources::inspect_linux_slice_with_host(scope.clone(), self.linux.clone())
                 .await?;
         }
@@ -257,33 +255,36 @@ impl SystemdBootstrapOs {
         futures_util::future::try_join_all(jobs).await
     }
     async fn prepare_owned(&self, next: J) -> IvyResult<()> {
-        for process in array(next.required("processes")?)?.iter().filter(|p| {
-            p.get("user").is_some_and(truthy) && p.get("configPath").is_some_and(truthy)
-        }) {
-            let executable = if crate::native_plan::is_native_plan(process) {
-                let root = process.get("artifactRoot").filter(|value| !value.is_null()).unwrap_or(next.required("artifactRoot")?);
+        for process in array(next.required("processes")?)? {
+            let user = optional_text(process, "user")?;
+            let config_path = optional_text(process, "configPath")?;
+            let (Some(user), Some(config_path)) = (user, config_path) else {
+                continue;
+            };
+            let artifact_root =
+                optional_text(process, "artifactRoot")?.unwrap_or(text(&next, "artifactRoot")?);
+            let native = crate::native_plan::is_native_plan(process);
+            let executable = if native {
                 crate::node_path::from_native(&crate::paths::direct_native_file(
-                    &config::path_value(root)?,
-                    &process.required("entrypoint")?.required("executable")?.as_str()?,
+                    &crate::node_path::to_native(&artifact_root),
+                    &process
+                        .required("entrypoint")?
+                        .required("executable")?
+                        .as_str()?,
                 )?)
-            } else { crate::bootstrap::process_executable(&next, process)? };
+            } else {
+                crate::bootstrap::process_executable(&next, process)?
+            };
             let identity = J::object([
                 ("componentId", process.required("componentId")?.clone()),
-                ("user", process.required("user")?.clone()),
-                ("configPath", process.required("configPath")?.clone()),
-                (
-                    "artifactRoot",
-                    process
-                        .get("artifactRoot")
-                        .filter(|v| !v.is_null())
-                        .unwrap_or(next.required("artifactRoot")?)
-                        .clone(),
-                ),
-                ("nodeExecutable", J::String(executable)),
+                ("user", J::String(user)),
+                ("configPath", J::String(config_path.clone())),
+                ("artifactRoot", J::String(artifact_root)),
+                ("processExecutable", J::String(executable)),
             ]);
             let runtime = config::instance_config(
-                config::path_value(process.required("configPath")?)?,
-                self.node.as_ref(),
+                crate::node_path::to_native(&config_path),
+                if native { None } else { self.node.as_ref() },
             )
             .await?;
             linux_service_identity::ensure_linux_process_identity_with_host(
@@ -293,7 +294,7 @@ impl SystemdBootstrapOs {
             )
             .await?;
         }
-        if let Some(scope) = next.get("linuxResources").filter(|v| truthy(v)) {
+        if let Some(scope) = next.get("linuxResources") {
             linux_resources::ensure_linux_slice_with_host(scope.clone(), self.linux.clone())
                 .await?;
             self.command(vec!["daemon-reload".into()]).await?;
@@ -411,7 +412,7 @@ impl SystemdBootstrapOs {
         let mut owners = self.exact(&snapshot, plans.clone()).await?;
         owners.sort_by_key(|owner| owner.get("componentId") == Some(&"host-executor".into()));
         for owner in owners {
-            if owner.get("running").is_some_and(truthy) {
+            if owner.get("running") == Some(&true.into()) {
                 self.command(vec![
                     "stop".into(),
                     concat(&[text(&owner, "name")?, ".service".into()]),
@@ -423,14 +424,21 @@ impl SystemdBootstrapOs {
             self.inspect_owned(plans)
                 .await?
                 .iter()
-                .all(|o| !o.get("running").is_some_and(truthy)),
+                .all(|o| o.get("running") == Some(&false.into())),
             "bootstrap_busy",
             "Bootstrap owners did not stop for maintenance.",
         )
     }
     async fn resume_owned(&self, snapshot: J, plans: Vec<J>) -> IvyResult<()> {
-        let owners = self.inspect_owned(plans).await?;
         let states = array(snapshot.required("owners")?)?;
+        require(
+            states
+                .iter()
+                .all(|state| state.get("running").and_then(J::as_bool).is_some()),
+            "target_conflict",
+            "Bootstrap snapshot requires boolean running states.",
+        )?;
+        let owners = self.inspect_owned(plans).await?;
         require(
             owners.len() == states.len()
                 && owners.iter().all(|owner| {
@@ -446,7 +454,7 @@ impl SystemdBootstrapOs {
             "Bootstrap scheduling state changed during maintenance.",
         )?;
         for state in states {
-            if state.get("running").is_some_and(truthy) {
+            if state.get("running") == Some(&true.into()) {
                 self.command(vec![
                     "start".into(),
                     concat(&[text(state, "name")?, ".service".into()]),

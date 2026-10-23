@@ -14,15 +14,6 @@ pub fn linux_process_user(component_id: &JsString, platform: &str) -> Option<&'s
 fn text(value: &IvyJson) -> IvyResult<JsString> {
     value.as_js_string().cloned().ok_or_else(IvyError::internal)
 }
-fn truthy(value: &IvyJson) -> bool {
-    match value {
-        IvyJson::Null => false,
-        IvyJson::Bool(value) => *value,
-        IvyJson::Number(value) => *value != 0.0 && !value.is_nan(),
-        IvyJson::String(value) => !value.0.is_empty(),
-        _ => true,
-    }
-}
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
         Ok(())
@@ -208,9 +199,14 @@ pub async fn ensure_linux_process_identity_with_host(
     host: Arc<dyn LinuxHost>,
 ) -> IvyResult<()> {
     tokio::spawn(async move{
-        let Some(user)=identity.get("user").filter(|value|truthy(value))else{return Ok(())};
+        let Some(user)=identity.get("user").filter(|value|!value.is_null())else{return Ok(())};
         require(host.platform()=="linux"&&host.user_id()==Some(0)&&identity.get("componentId")==Some(&"agent-manager".into())&&user==&IvyJson::from(LINUX_AGENT_USER),"unsupported_runtime","Linux service identity setup requires the system administrator and the configured AgentManager identity.")?;
         let user=text(user)?;
+        let config_path=text(identity.required("configPath")?)?;
+        let artifact_root=text(identity.required("artifactRoot")?)?;
+        let executable=identity.get("processExecutable").or_else(||identity.get("nodeExecutable")).filter(|value|!value.is_null()).map(text).transpose()?;
+        let settings=runtime.required("settings")?;
+        let native=settings.get("nativeExecutable").filter(|value|!value.is_null()).map(text).transpose()?;
         let uid=match host.command("/usr/bin/id",vec!["-u".into(),user.clone()],10_000,65_536).await{
             Ok(value)=>native_id(&value)?,
             Err(_)=>{
@@ -220,17 +216,25 @@ pub async fn ensure_linux_process_identity_with_host(
         };
         let gid=native_id(&host.command("/usr/bin/id",vec!["-g".into(),user.clone()],10_000,65_536).await?)?;
         require([uid,gid].into_iter().all(|value|value.is_finite()&&value.fract()==0.0&&value>0.0&&value<=9_007_199_254_740_991.0),"access_denied","AgentManager must use a non-administrative Linux user.")?;
-        file(host.as_ref(),&user,text(identity.required("configPath")?)?,"r--").await?;
-        file(host.as_ref(),&user,text(identity.required("nodeExecutable")?)?,"r-x").await?;
-        let settings=runtime.required("settings")?;
-        if let Some(native)=settings.get("nativeExecutable").and_then(IvyJson::as_js_string){file(host.as_ref(),&user,native.clone(),"r-x").await?;}
-        tree(host.as_ref(),&user,text(identity.required("artifactRoot")?)?,false).await?;
+        file(host.as_ref(),&user,config_path,"r--").await?;
+        if let Some(executable)=executable{file(host.as_ref(),&user,executable,"r-x").await?;}
+        if let Some(native)=native{file(host.as_ref(),&user,native,"r-x").await?;}
+        tree(host.as_ref(),&user,artifact_root,false).await?;
         for root in roots(&runtime,settings,false){own_tree(host.as_ref(),&user,root,uid,gid).await?;}
         for root in roots(&runtime,settings,true){tree(host.as_ref(),&user,root,true).await?;}
         Ok(())
     }).await.map_err(|_|IvyError::internal())?
 }
 fn native_id(value: &JsString) -> IvyResult<f64> {
-    value.to_utf8()?.trim().parse::<u32>().map(f64::from)
-        .map_err(|_| IvyError::new("access_denied", "Linux identity command returned an invalid numeric ID."))
+    value
+        .to_utf8()?
+        .trim()
+        .parse::<u32>()
+        .map(f64::from)
+        .map_err(|_| {
+            IvyError::new(
+                "access_denied",
+                "Linux identity command returned an invalid numeric ID.",
+            )
+        })
 }

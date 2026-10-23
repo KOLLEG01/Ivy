@@ -102,7 +102,8 @@ impl DockerAdapter {
                 && host
                     .get("executables")
                     .and_then(|v| v.get("docker"))
-                    .is_some_and(truthy),
+                    .and_then(IvyJson::as_js_string)
+                    .is_some_and(|path| !path.0.is_empty()),
             "unsupported_runtime",
             "Docker ownership requires the configured Linux host daemon.",
         )?;
@@ -185,7 +186,7 @@ impl DockerAdapter {
         let labels = raw.get("Config").and_then(|v| v.get("Labels"));
         require(
             labels.is_some_and(|labels| {
-                truthy(labels)
+                labels.as_object().is_some()
                     && labels.get("dev.ivy.host") == host.get("hostId")
                     && labels.get("dev.ivy.instance") == Some(&IvyJson::String(instance.clone()))
             }) && raw.get("Name") == Some(&IvyJson::String(concat(&["/".into(), name.clone()]))),
@@ -211,8 +212,7 @@ impl DockerAdapter {
             ("exitCode", state, "ExitCode"),
             ("startedAt", state, "StartedAt"),
         ] {
-            // The original constructed object retains undefined values. Its
-            // canonical JSON admission rejects those before schema validation.
+            // Require every observed field before admitting the container state.
             value.insert(
                 key,
                 source.get(source_key).cloned().ok_or_else(outside_json)?,
@@ -320,13 +320,42 @@ impl DockerAdapter {
     ) -> IvyResult<()> {
         let adapter = self.clone();
         owned(async move {
-            require(instance.get("componentId")==Some(&"hive".into())&&instance.get("docker").is_some_and(truthy)&&candidate.get("dockerImage").is_some_and(truthy)&&manifest.get("entrypoint").and_then(|v|v.get("executable"))==Some(&"node".into()),"unsupported_runtime","Docker activation requires a prepared Hive image with the pinned Node entry runtime.")?;
-            let docker=instance.required("docker")?;
-            require(repository(&field(docker,"imageRepository")?),"invalid_arguments","Hive image repository must be an explicit local repository name without a tag.")?;
-            for port in array(docker.required("ports")?)? { require(ip(&field(port,"host")?)!=0,"invalid_arguments","Docker port bindings require explicit IP addresses.")?; }
-            let image=adapter.command(&host,vec!["image".into(),"inspect".into(),"--format".into(),"{{.Id}}".into(),field(&candidate,"dockerImage")?],10000.0,vec![]).await?;
-            require(trimmed(&image.stdout.into())==field(&candidate,"dockerImage")?,"build_mismatch","Prepared immutable Docker image is unavailable.")
-        }).await
+            require(
+                instance.get("componentId") == Some(&"hive".into())
+                    && instance.get("docker").and_then(IvyJson::as_object).is_some()
+                    && candidate.get("dockerImage").and_then(IvyJson::as_js_string)
+                        .is_some_and(|image| !image.0.is_empty())
+                    && manifest.get("entrypoint").and_then(|v| v.get("executable"))
+                        == Some(&"node".into()),
+                "unsupported_runtime",
+                "Docker activation requires a prepared Hive image with the pinned Node entry runtime.",
+            )?;
+            let docker = instance.required("docker")?;
+            require(
+                repository(&field(docker, "imageRepository")?),
+                "invalid_arguments",
+                "Hive image repository must be an explicit local repository name without a tag.",
+            )?;
+            for port in array(docker.required("ports")?)? {
+                require(
+                    ip(&field(port, "host")?) != 0,
+                    "invalid_arguments",
+                    "Docker port bindings require explicit IP addresses.",
+                )?;
+            }
+            let image = adapter.command(
+                &host,
+                vec!["image".into(), "inspect".into(), "--format".into(), "{{.Id}}".into(), field(&candidate, "dockerImage")?],
+                10000.0,
+                vec![],
+            ).await?;
+            require(
+                trimmed(&image.stdout.into()) == field(&candidate, "dockerImage")?,
+                "build_mismatch",
+                "Prepared immutable Docker image is unavailable.",
+            )
+        })
+        .await
     }
     pub async fn start_container(
         &self,
@@ -369,8 +398,14 @@ impl DockerAdapter {
     ) -> IvyResult<ManagedContainer> {
         require(
             instance.get("componentId") == Some(&"hive".into())
-                && instance.get("docker").is_some_and(truthy)
-                && candidate.get("dockerImage").is_some_and(truthy),
+                && instance
+                    .get("docker")
+                    .and_then(IvyJson::as_object)
+                    .is_some()
+                && candidate
+                    .get("dockerImage")
+                    .and_then(IvyJson::as_js_string)
+                    .is_some_and(|image| !image.0.is_empty()),
             "unsupported_runtime",
             "The Docker driver requires a prepared Hive image and explicit bindings.",
         )?;
@@ -381,6 +416,9 @@ impl DockerAdapter {
         )?;
         let settings = config.required("settings")?;
         validate_host("HiveSettings", settings)?;
+        let work = optional_root(&config, "workRoot")?;
+        let logs = optional_root(&config, "logsRoot")?;
+        let restart_policy = docker_restart_policy(&manifest)?;
         let instance_id = field(&instance, "instanceId")?;
         if let Some(resources) = &resources {
             linux_resources::validate_linux_resource_scope(
@@ -457,12 +495,9 @@ impl DockerAdapter {
             ] {
                 mount(paths.style, path, writable, &mut mounts)?;
             }
-            for key in ["workRoot", "logsRoot"] {
-                if let Some(path) = config.get(key).filter(|v| truthy(v)) {
-                    let path = text(path)?;
-                    self.host.mkdir(path.clone()).await?;
-                    mount(paths.style, path, true, &mut mounts)?;
-                }
+            for path in work.iter().chain(logs.iter()) {
+                self.host.mkdir(path.clone()).await?;
+                mount(paths.style, path.clone(), true, &mut mounts)?;
             }
             let docker = instance.required("docker")?;
             let mut ports = vec![];
@@ -482,9 +517,17 @@ impl DockerAdapter {
                         address
                     },
                     ":".into(),
-                    port.required("port")?.as_f64().ok_or_else(IvyError::internal)?.to_string().into(),
+                    port.required("port")?
+                        .as_f64()
+                        .ok_or_else(IvyError::internal)?
+                        .to_string()
+                        .into(),
                     ":".into(),
-                    port.required("containerPort")?.as_f64().ok_or_else(IvyError::internal)?.to_string().into(),
+                    port.required("containerPort")?
+                        .as_f64()
+                        .ok_or_else(IvyError::internal)?
+                        .to_string()
+                        .into(),
                 ]));
             }
             let image = field(&candidate, "dockerImage")?;
@@ -511,7 +554,7 @@ impl DockerAdapter {
                 .collect();
             args.push(owned_container_name(&host, &instance_id)?);
             args.extend(["--pull", "never", "--restart"].map(Into::into));
-            args.push(docker_restart_policy(&manifest)?);
+            args.push(restart_policy);
             args.extend(
                 [
                     "--read-only",
@@ -555,11 +598,8 @@ impl DockerAdapter {
                 .iter()
                 .map(text)
                 .collect::<IvyResult<_>>()?;
-            let work = config
-                .get("workRoot")
-                .filter(|v| !matches!(v, IvyJson::Null));
-            let cwd = if let Some(work) = work {
-                text(work)?
+            let cwd = if let Some(work) = &work {
+                work.clone()
             } else {
                 paths.resolve(&[
                     field(&candidate, "artifactRoot")?,
@@ -582,7 +622,7 @@ impl DockerAdapter {
                 "/usr/local/bin/node".into(),
                 image,
             ]);
-            if work.is_some_and(truthy)
+            if work.is_some()
                 && entry_args
                     .first()
                     .is_some_and(|v| v.0.starts_with(&JsString::from("dist/").0))
@@ -862,14 +902,22 @@ fn field(value: &IvyJson, key: &str) -> IvyResult<JsString> {
 fn array(value: &IvyJson) -> IvyResult<&[IvyJson]> {
     value.as_array().ok_or_else(IvyError::internal)
 }
-fn truthy(value: &IvyJson) -> bool {
-    match value {
-        IvyJson::Null => false,
-        IvyJson::Bool(v) => *v,
-        IvyJson::Number(v) => *v != 0.0 && !v.is_nan(),
-        IvyJson::String(v) => !v.0.is_empty(),
-        _ => true,
-    }
+fn optional_root(config: &IvyJson, key: &str) -> IvyResult<Option<JsString>> {
+    config
+        .get(key)
+        .map(|value| {
+            value
+                .as_js_string()
+                .filter(|path| !path.0.is_empty())
+                .cloned()
+                .ok_or_else(|| {
+                    IvyError::new(
+                        "invalid_arguments",
+                        "Docker roots must be nonempty path strings.",
+                    )
+                })
+        })
+        .transpose()
 }
 fn concat(values: &[JsString]) -> JsString {
     JsString(values.iter().flat_map(|v| v.0.iter().copied()).collect())
@@ -896,7 +944,6 @@ pub fn container_name(
 fn owned_container_name(host: &IvyJson, instance: &JsString) -> IvyResult<JsString> {
     let recovery = host
         .get("restoredFrom")
-        .filter(|v| truthy(v))
         .map(|v| -> IvyResult<IvyJson> {
             Ok(IvyJson::object([
                 ("runtimeRoot", host.required("runtimeRoot")?.clone()),
@@ -907,13 +954,21 @@ fn owned_container_name(host: &IvyJson, instance: &JsString) -> IvyResult<JsStri
     Ok(container_name(field(host, "hostId")?, instance.clone(), recovery)?.into())
 }
 pub fn docker_restart_policy(manifest: &IvyJson) -> IvyResult<JsString> {
-    manifest
-        .get("restart")
-        .and_then(|v| v.get("policy"))
-        .filter(|v| !matches!(v, IvyJson::Null))
-        .map(text)
-        .transpose()
-        .map(|v| v.unwrap_or_else(|| "never".into()))
+    let Some(restart) = manifest.get("restart") else {
+        return Ok("never".into());
+    };
+    let policy = restart.get("policy").and_then(IvyJson::as_js_string);
+    require(
+        restart.as_object().is_some()
+            && policy.is_some_and(|policy| {
+                ["never", "on-failure", "always"]
+                    .iter()
+                    .any(|value| policy == &JsString::from(*value))
+            }),
+        "invalid_arguments",
+        "Docker restart requires a declared restart policy.",
+    )?;
+    Ok(policy.unwrap().clone())
 }
 fn repository(value: &JsString) -> bool {
     let mut component = false;
