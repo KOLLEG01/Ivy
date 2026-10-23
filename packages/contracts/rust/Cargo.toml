@@ -65,9 +65,5 @@ name = "native-catalog-path"
 path = "../../../tests/rust/native-catalog-path.rs"
 
 [[test]]
-name = "json-coercion"
-path = "../../../tests/rust/json-coercion.rs"
-
-[[test]]
 name = "ui-route"
 path = "../../../tests/rust/ui-route.rs"

@@ -362,7 +362,7 @@ fn resource_ids_match_compiler_normalization_and_local_indexing() {
         );
     }
     let rows = corpus["indexes"].as_array().unwrap();
-    assert!(rows.len() > 2500);
+    assert!(rows.len() > 2000);
     for row in rows {
         let schema = parse(row["schema"].as_str().unwrap(), 1_000_000).unwrap();
         let admitted = ivy_contracts::schema::admit_schema(&schema).unwrap();

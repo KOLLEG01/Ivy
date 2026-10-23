@@ -36,7 +36,7 @@ fn failure(error: IvyError) -> IvyJson {
 }
 
 #[test]
-fn query_projection_and_utc_date_match_typescript() {
+fn query_projection_and_protocol_timestamps_preserve_public_formats() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = std::process::Command::new("node")
         .args([
@@ -102,6 +102,40 @@ fn query_projection_and_utc_date_match_typescript() {
         ivy_sdk::clock::date_to_iso(-0.0).unwrap(),
         ivy_sdk::clock::date_to_iso(0.0).unwrap()
     );
+}
+
+#[test]
+fn checked_notification_preserves_public_content_and_excludes_transport() {
+    let expected = parse(
+        r#"{"action":"notify","operationId":"\ud800","source":{"taskId":"task"},"text":"message"}"#,
+        1_000_000,
+    )
+    .unwrap();
+    let mut original = expected.clone();
+    original.insert("transport", IvyJson::Number(9_007_199_254_740_992.0));
+    let before = original.clone();
+    assert!(ivy_contracts::hash::hash_json(&original).is_err());
+    let projected = main_notification_checked(&original).unwrap();
+    assert_eq!(projected, expected);
+    assert_eq!(
+        ivy_contracts::hash::hash_json(&projected).unwrap(),
+        ivy_contracts::hash::hash_json(&expected).unwrap()
+    );
+    assert_eq!(original, before);
+    for key in ["action", "operationId", "source", "text"] {
+        let mut missing = expected.clone();
+        missing.remove(key);
+        assert_eq!(
+            main_notification_checked(&missing).unwrap_err().code,
+            "invalid_arguments"
+        );
+    }
+    for invalid in [IvyJson::Null, IvyJson::Array(vec![])] {
+        assert_eq!(
+            main_notification_checked(&invalid).unwrap_err().code,
+            "invalid_arguments"
+        );
+    }
 }
 
 #[derive(Default)]

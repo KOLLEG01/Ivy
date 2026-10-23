@@ -1,15 +1,180 @@
 use ivy_contracts::{
     IvyJson, IvyResult,
     checked_native_contract::{CheckedNativeContracts, native_versions},
-    json::parse,
+    hash::hash_json,
+    json::{parse, stringify},
+    native_contract::NativeContract,
 };
 use std::{path::PathBuf, sync::Arc};
+
+struct Directory(PathBuf);
+impl Directory {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "ivy-checked-rust-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+}
+impl Drop for Directory {
+    fn drop(&mut self) {
+        let path = std::fs::canonicalize(&self.0).unwrap();
+        let parent = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        assert_eq!(path.parent(), Some(parent.as_path()));
+        assert!(
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("ivy-checked-rust-")
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+}
 fn capture(result: IvyResult<IvyJson>) -> IvyJson {
     match result {
         Ok(value) => IvyJson::object([("ok", true.into()), ("value", value)]),
         Err(e) => IvyJson::object([("ok", false.into()), ("error", e.to_wire())]),
     }
 }
+
+#[test]
+fn candidate_reuse_keeps_file_changes_errors_and_failed_selections_fresh() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut catalog = parse(
+        &std::fs::read_to_string(repo.join("specs/native/codex-0.159.2/catalog.json")).unwrap(),
+        usize::MAX,
+    )
+    .unwrap();
+    let mut method = catalog.get("clientRequests").unwrap().as_array().unwrap()[0].clone();
+    method.insert("inputSchema", true.into());
+    method.insert("outputSchema", true.into());
+    catalog.insert("clientRequests", IvyJson::Array(vec![method.clone()]));
+    for key in [
+        "serverRequests",
+        "serverNotifications",
+        "clientNotifications",
+        "derivedLegacyTypes",
+    ] {
+        catalog.insert(key, IvyJson::Array(vec![]));
+    }
+    let identity = |letter: char| {
+        IvyJson::object([(
+            "sourceHash",
+            format!("sha256:{}", letter.to_string().repeat(64)).into(),
+        )])
+    };
+    catalog.insert(
+        "sourceHash",
+        identity('a').get("sourceHash").unwrap().clone(),
+    );
+    let version = catalog
+        .get("version")
+        .unwrap()
+        .as_js_string()
+        .unwrap()
+        .clone();
+    let root = Directory::new();
+    let directory = root
+        .0
+        .join("specs/native")
+        .join(format!("codex-{}", version.to_utf8().unwrap()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let first = directory.join("catalog.aaa-x64.json");
+    let write = |path: &std::path::Path, value: &IvyJson| {
+        std::fs::write(path, stringify(value, usize::MAX).unwrap()).unwrap()
+    };
+    write(&first, &catalog);
+    let mut last = catalog.clone();
+    last.insert(
+        "sourceHash",
+        identity('b').get("sourceHash").unwrap().clone(),
+    );
+    write(&directory.join("catalog.json"), &last);
+    let store = CheckedNativeContracts::new(&root.0);
+    let missing = identity('0');
+    let error = || {
+        store
+            .checked_native_contract(&version, Some(&missing))
+            .err()
+            .expect("Selection must fail")
+    };
+    assert_eq!(error().code, "native_catalog_mismatch");
+    assert_eq!(error().code, "native_catalog_mismatch");
+
+    let selected = store
+        .checked_native_contract(&version, Some(&identity('a')))
+        .unwrap();
+    let by_hash = IvyJson::object([("catalogHash", hash_json(&catalog).unwrap().into())]);
+    let shared = store
+        .checked_native_contract(&version, Some(&by_hash))
+        .unwrap();
+    // Reuse the validated candidate across selector cache keys.
+    assert!(Arc::ptr_eq(&selected, &shared));
+
+    std::fs::write(&first, "{").unwrap();
+    assert_eq!(error().code, "internal_error");
+    assert!(Arc::ptr_eq(
+        &selected,
+        &store
+            .checked_native_contract(&version, Some(&identity('a')))
+            .unwrap()
+    ));
+    let mut duplicate = catalog.clone();
+    duplicate.insert(
+        "clientRequests",
+        IvyJson::Array(vec![method.clone(), method]),
+    );
+    write(&first, &duplicate);
+    assert_eq!(
+        error().to_wire(),
+        NativeContract::new(&duplicate).err().unwrap().to_wire()
+    );
+    let mut invalid = catalog.clone();
+    invalid.insert("sourceHash", false.into());
+    write(&first, &invalid);
+    assert_eq!(error().code, "invalid_arguments");
+
+    let original_length = stringify(&catalog, usize::MAX).unwrap().len();
+    catalog.insert(
+        "sourceHash",
+        identity('c').get("sourceHash").unwrap().clone(),
+    );
+    assert_eq!(
+        stringify(&catalog, usize::MAX).unwrap().len(),
+        original_length
+    );
+    write(&first, &catalog);
+    let changed = store
+        .checked_native_contract(&version, Some(&identity('c')))
+        .unwrap();
+    assert_eq!(changed.catalog_hash(), hash_json(&catalog).unwrap());
+    assert!(!Arc::ptr_eq(&selected, &changed));
+
+    std::fs::remove_file(&first).unwrap();
+    std::fs::create_dir(&first).unwrap();
+    assert_eq!(error().code, "internal_error");
+    std::fs::remove_dir(&first).unwrap();
+    catalog.insert("sourceHash", missing.get("sourceHash").unwrap().clone());
+    write(&first, &catalog);
+    let repaired = store
+        .checked_native_contract(&version, Some(&missing))
+        .unwrap();
+    assert_eq!(repaired.catalog_hash(), hash_json(&catalog).unwrap());
+    // A previously accepted selector keeps its immutable snapshot after repair.
+    assert!(Arc::ptr_eq(
+        &selected,
+        &store
+            .checked_native_contract(&version, Some(&identity('a')))
+            .unwrap()
+    ));
+}
+
 #[test]
 fn retained_filesystem_selection_matches_original_typescript() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
@@ -39,28 +204,12 @@ fn retained_filesystem_selection_matches_original_typescript() {
         ),
         parse(suite["versions"].as_str().unwrap(), usize::MAX).unwrap()
     );
-    let root = std::env::temp_dir().join(format!(
-        "ivy-checked-rust-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir(&root).unwrap();
-    struct Cleanup(PathBuf);
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.0).unwrap();
-        }
-    }
-    let _cleanup = Cleanup(root.clone());
+    let root = Directory::new();
     let mut count = 0;
     for (index, row) in suite["rows"].as_array().unwrap().iter().enumerate() {
-        let directory = root.join(index.to_string());
+        let directory = root.0.join(index.to_string());
         std::fs::create_dir(&directory).unwrap();
         let store = CheckedNativeContracts::new(&directory);
-        let mut identities = Vec::new();
         for op in row["ops"].as_array().unwrap() {
             let path = op["path"].as_str().map(|p| directory.join(p));
             match op["kind"].as_str().unwrap() {
@@ -103,18 +252,8 @@ fn retained_filesystem_selection_matches_original_typescript() {
                     let actual = store
                         .checked_native_contract(&version, identity.as_ref())
                         .map(|contract| {
-                            let id = if let Some(index) =
-                                identities.iter().position(|v| Arc::ptr_eq(v, &contract))
-                            {
-                                index + 1
-                            } else {
-                                identities.push(contract.clone());
-                                identities.len()
-                            };
-                            let mut value = IvyJson::object([
-                                ("id", IvyJson::Number(id as f64)),
-                                ("catalogHash", contract.catalog_hash().into()),
-                            ]);
+                            let mut value =
+                                IvyJson::object([("catalogHash", contract.catalog_hash().into())]);
                             for key in ["version", "sourceHash", "nativeExecutableHash"] {
                                 value.insert(key, contract.catalog().get(key).unwrap().clone());
                             }

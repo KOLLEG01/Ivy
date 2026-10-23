@@ -1,8 +1,7 @@
+import './schema-oracle-dependencies.mjs';
 import {readFileSync,readdirSync,existsSync} from 'node:fs';
-import {registerHooks,createRequire} from 'node:module';import {fileURLToPath,pathToFileURL} from 'node:url';
-const require=createRequire(import.meta.url);
-const external=new Map(['ajv/dist/2020.js','re2js'].map(name=>[name,pathToFileURL(require.resolve(name)).href]));
-registerHooks({resolve(s,c,n){if(external.has(s))return n(external.get(s),c);if(s.startsWith('.')&&s.endsWith('.js')){const u=new URL(s.slice(0,-3)+'.ts',c.parentURL);if(existsSync(fileURLToPath(u)))return n(u.href,c);}return n(s,c);}});
+import {registerHooks} from 'node:module';import {fileURLToPath} from 'node:url';
+registerHooks({resolve(s,c,n){if(s.startsWith('.')&&s.endsWith('.js')){const u=new URL(s.slice(0,-3)+'.ts',c.parentURL);if(existsSync(fileURLToPath(u)))return n(u.href,c);}return n(s,c);}});
 const {NativeContract,nativeToolDefinition,isReadOnlyNativeMethod}=await import('../../packages/contracts/src/native-contract.ts');
 const {IvyError}=await import('../../packages/contracts/src/errors.ts');
 const {hashJson,digest}=await import('../../packages/contracts/src/canonical.ts');

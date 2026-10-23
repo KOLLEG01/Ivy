@@ -65,6 +65,8 @@ fn retained_plan_identity_matches_original_catalog_and_error_order() {
         .args([
             "--experimental-transform-types",
             "--disable-warning=ExperimentalWarning",
+            "--import",
+            "./tests/fixtures/schema-oracle-dependencies.mjs",
             "tests/fixtures/native-plan-identity-oracle.mjs",
         ])
         .current_dir(&root)
@@ -283,6 +285,8 @@ async fn native_evidence_and_reconciliation_match_typescript() {
         .args([
             "--experimental-transform-types",
             "--disable-warning=ExperimentalWarning",
+            "--import",
+            "./tests/fixtures/schema-oracle-dependencies.mjs",
             "tests/fixtures/native-evidence-oracle.mjs",
         ])
         .current_dir(root)

@@ -1,5 +1,5 @@
 use super::{
-    Component, escaped_byte, hex, normalize_component, normalize_percent, remove_dot_segments,
+    Component, escaped_byte, normalize_component, normalize_percent, remove_dot_segments,
     serialize_component, unreserved,
 };
 use crate::{IvyError, IvyResult, JsString};
@@ -44,38 +44,16 @@ fn lower(input: &JsString) -> JsString {
     JsString(output)
 }
 fn scheme(input: &[u16]) -> IvyResult<JsString> {
-    // The original resolver uses legacy unescape, including %uXXXX, for schemes.
-    let mut decoded = Vec::new();
-    let mut i = 0;
-    while i < input.len() {
-        if input[i..].starts_with(&[37, 117]) && input.len() - i >= 6 {
-            if let Some(value) = input[i + 2..i + 6]
-                .iter()
-                .try_fold(0u16, |n, u| hex(*u).map(|v| n * 16 + v as u16))
-            {
-                decoded.push(value);
-                i += 6;
-                continue;
-            }
-        }
-        if let Some(value) = escaped_byte(&input[i..]) {
-            decoded.push(value as u16);
-            i += 3;
-        } else {
-            decoded.push(input[i]);
-            i += 1;
-        }
-    }
-    if !decoded
+    if !input
         .first()
         .is_some_and(|c| matches!(c, 65..=90 | 97..=122))
-        || !decoded
+        || !input
             .iter()
             .all(|c| matches!(c, 65..=90 | 97..=122 | 48..=57 | 43 | 45 | 46))
     {
         return Err(invalid());
     }
-    Ok(lower(&JsString(decoded)))
+    Ok(lower(&part(input)))
 }
 fn check_percent(input: &JsString) -> IvyResult<()> {
     let mut i = 0;
@@ -130,19 +108,19 @@ fn parse(input: &JsString, strict: bool) -> IvyResult<Reference> {
             out.userinfo = Some(part(&units[i..i + at]));
             i += at + 1;
         }
-        // A well-formed bracket capture takes precedence over a reg-name. On an
-        // unmatched bracket, the original parser falls back to the reg-name arm.
-        let bracket_end = (units.get(i) == Some(&91))
-            .then(|| units[i + 1..end].iter().position(|c| *c == 93))
-            .flatten()
-            .filter(|n| *n > 0)
-            .map(|n| i + n + 2);
-        let host_end = bracket_end.unwrap_or_else(|| {
+        let host_end = if units.get(i) == Some(&91) {
+            let close = units[i + 1..end]
+                .iter()
+                .position(|c| *c == 93)
+                .filter(|n| *n > 0)
+                .ok_or_else(invalid)?;
+            i + close + 2
+        } else {
             i + units[i..end]
                 .iter()
                 .position(|c| *c == 58)
                 .unwrap_or(end - i)
-        });
+        };
         out.host = Some(part(&units[i..host_end]));
         i = host_end;
         if units.get(i) == Some(&58) {
@@ -198,13 +176,7 @@ fn parse(input: &JsString, strict: bool) -> IvyResult<Reference> {
     }
     if units.get(i) == Some(&35) {
         i += 1;
-        // JavaScript dot excludes line/paragraph separators even with the
-        // resolver's explicit CR/LF alternative; the pattern is not end-anchored.
-        let end = i + units[i..]
-            .iter()
-            .position(|c| matches!(c, 0x2028 | 0x2029))
-            .unwrap_or(units.len() - i);
-        out.fragment = Some(part(&units[i..end]));
+        out.fragment = Some(part(&units[i..]));
     }
     for component in [&out.userinfo, &out.query, &out.fragment]
         .into_iter()
@@ -227,7 +199,7 @@ fn parse(input: &JsString, strict: bool) -> IvyResult<Reference> {
         let ip = host::ip_literal(value);
         let malformed =
             (value.0.contains(&91) || value.0.contains(&93)) && (!bracketed || ip.is_none());
-        if strict && malformed {
+        if malformed {
             return Err(invalid());
         }
         if let Some(ip) = ip {
@@ -337,9 +309,7 @@ fn canonicalize_domain(value: &mut JsString) -> IvyResult<()> {
     Ok(())
 }
 
-/// Normalize a compiler resource ID with the scheme handlers enabled and return
-/// its document prefix, ending in `#`. Unlike resolve, parser diagnostics alone
-/// do not reject the ID; serialization still enforces scheme/port/URN syntax.
+/// Normalize a schema resource ID and return its document prefix, ending in `#`.
 pub fn full_path(id: &JsString) -> IvyResult<JsString> {
     let mut value = parse(id, false)?;
     let scheme = value.scheme.clone().unwrap_or_default();
@@ -373,7 +343,7 @@ pub fn full_path(id: &JsString) -> IvyResult<JsString> {
         };
         let nid = &value.path.0[..colon];
         let nss = &value.path.0[colon + 1..];
-        let letter = |c: u16| matches!(c,65..=90|97..=122|48..=57|0x17f|0x212a);
+        let letter = |c: u16| matches!(c,65..=90|97..=122|48..=57);
         if nid.is_empty()
             || nid.len() > 32
             || !letter(nid[0])
@@ -412,8 +382,8 @@ pub fn full_path(id: &JsString) -> IvyResult<JsString> {
 }
 
 pub(crate) fn reference_parts(id: &JsString) -> IvyResult<(JsString, Option<JsString>)> {
-    // The pinned serializer copies its input, so scheme serialization does not
-    // erase the parsed fragment used by compiler pointer selection.
+    // Keep the complete fragment for pointer selection before removing it from
+    // the document prefix.
     Ok((full_path(id)?, parse(id, false)?.fragment))
 }
 

@@ -59,8 +59,6 @@ fn deep_lifecycle_and_error_cleanup_in_subprocess() {
             for check in [canonical(&value, usize::MAX).map(|_| ()), validate_json(&value, usize::MAX)] {
                 assert_eq!(check.unwrap_err().code, "limit_exceeded");
             }
-            let expected = if kind == "array" { JsString(vec![0xd800]) } else { "[object Object]".into() };
-            assert_eq!(js_string(&value), expected);
             for broken in [format!("{text}!"), format!("[{text},]"), text[..text.len()-1].to_owned()] {
                 assert_eq!(parse(&broken, broken.len()).unwrap_err().code, "invalid_arguments");
             }
@@ -76,7 +74,7 @@ fn deep_lifecycle_and_error_cleanup_in_subprocess() {
 }
 
 #[test]
-fn deep_values_match_successful_pinned_node_operations() {
+fn deep_values_preserve_public_json_and_validation_results() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = std::process::Command::new("node")
         .args([
@@ -97,7 +95,7 @@ fn deep_values_match_successful_pinned_node_operations() {
     assert_eq!(oracle["runtime"]["node"], "24.18.0");
     let cases = oracle["cases"].as_array().unwrap();
     assert_eq!(cases.len(), 15);
-    let mut runtime_stack_failures = 0;
+    let mut compared_hashes = 0;
     for case in cases {
         let text = nested(
             case["depth"].as_u64().unwrap() as usize,
@@ -109,35 +107,7 @@ fn deep_values_match_successful_pinned_node_operations() {
         assert_eq!(encoded, text);
         if let Some(hash) = case["stringifyHash"].as_str() {
             assert_eq!(digest(encoded), format!("sha256:{hash}"));
-        } else {
-            assert_eq!(case["stringifyError"]["name"], "RangeError");
-            assert_eq!(
-                case["stringifyError"]["message"],
-                "Maximum call stack size exceeded"
-            );
-            runtime_stack_failures += 1;
-        }
-        let expected_coercion = if case["kind"] == "array" {
-            JsString(vec![0xd800])
-        } else {
-            "[object Object]".into()
-        };
-        assert_eq!(js_string(&value), expected_coercion);
-        if let Some(units) = case["coercionUnits"].as_array() {
-            assert_eq!(
-                js_string(&value).0,
-                units
-                    .iter()
-                    .map(|unit| unit.as_u64().unwrap() as u16)
-                    .collect::<Vec<_>>()
-            );
-        } else {
-            assert_eq!(case["coercionError"]["name"], "RangeError");
-            assert_eq!(
-                case["coercionError"]["message"],
-                "Maximum call stack size exceeded"
-            );
-            runtime_stack_failures += 1;
+            compared_hashes += 1;
         }
         for (name, result) in [
             ("canonical", canonical(&value, 4_000_000).map(|_| ())),
@@ -149,8 +119,7 @@ fn deep_values_match_successful_pinned_node_operations() {
             );
         }
     }
-    // These are native runtime exhaustion cases, not successful parity comparisons.
-    assert!(runtime_stack_failures > 0);
+    assert!(compared_hashes > 0);
 }
 
 #[test]

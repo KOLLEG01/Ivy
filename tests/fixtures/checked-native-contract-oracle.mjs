@@ -1,3 +1,4 @@
+import './schema-oracle-dependencies.mjs';
 import {readFileSync,writeFileSync,existsSync,readdirSync,mkdtempSync,mkdirSync,rmSync,copyFileSync} from 'node:fs';
 import {resolve,join,dirname} from 'node:path';import {tmpdir} from 'node:os';
 import {registerHooks} from 'node:module';import {fileURLToPath,pathToFileURL} from 'node:url';
@@ -15,12 +16,12 @@ const write=(path,value)=>({kind:'write',path,bytes:[...Buffer.from(typeof value
 const read=(identity,selectedVersion=version)=>({kind:'read',version:JSON.stringify(selectedVersion),...(identity===undefined?{}:{identity:JSON.stringify(identity)})});
 const rows=[];
 async function collect(label,ops){const root=mkdtempSync(join(tmpdir(),'ivy-checked-oracle-')),module=join(root,'packages/contracts/src/checked-native-contract.ts');mkdirSync(dirname(module),{recursive:true});writeFileSync(module,original);
- try{const {checkedNativeContract}=await import(pathToFileURL(module).href),identities=new Map();let next=1;
+ try{const {checkedNativeContract}=await import(pathToFileURL(module).href);
   for(const op of ops){if(op.kind==='write'){mkdirSync(dirname(join(root,op.path)),{recursive:true});writeFileSync(join(root,op.path),Buffer.from(op.bytes));}
    else if(op.kind==='copy'){mkdirSync(dirname(join(root,op.path)),{recursive:true});copyFileSync(op.source,join(root,op.path));}
    else if(op.kind==='mkdir')mkdirSync(join(root,op.path),{recursive:true});
    else if(op.kind==='remove')rmSync(join(root,op.path),{recursive:true,force:true});
-   else {try{const selected=checkedNativeContract(JSON.parse(op.version),op.identity===undefined?undefined:JSON.parse(op.identity));if(!identities.has(selected))identities.set(selected,next++);const {catalog,contract}=selected;op.expected=JSON.stringify({ok:true,value:{id:identities.get(selected),catalogHash:selected.catalogHash,version:catalog.version,sourceHash:catalog.sourceHash,nativeExecutableHash:catalog.nativeExecutableHash,definitions:[...contract.definitions().keys()]}});}catch(e){op.expected=JSON.stringify({ok:false,error:IvyError.from(e).toWire()});}}
+   else {try{const selected=checkedNativeContract(JSON.parse(op.version),op.identity===undefined?undefined:JSON.parse(op.identity));const {catalog,contract}=selected;op.expected=JSON.stringify({ok:true,value:{catalogHash:selected.catalogHash,version:catalog.version,sourceHash:catalog.sourceHash,nativeExecutableHash:catalog.nativeExecutableHash,definitions:[...contract.definitions().keys()]}});}catch(e){op.expected=JSON.stringify({ok:false,error:IvyError.from(e).toWire()});}}
   }
   rows.push({label,ops});
  }finally{rmSync(root,{recursive:true,force:true});}

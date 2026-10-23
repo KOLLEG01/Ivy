@@ -1,8 +1,8 @@
 use crate::{IvyError, IvyResult, JsString};
 
-/// Equivalent to `new Date(utc_millis).toISOString()` for a JavaScript number.
-/// Applies TimeClip before formatting the full ECMAScript UTC calendar range.
-/// Invalid dates return `invalid_arguments` with the native "Invalid time value" message.
+/// Format Unix milliseconds as a canonical UTC protocol timestamp, including
+/// signed six-digit years outside 0000..=9999. Reject invalid values and values
+/// outside the protocol's supported range.
 pub fn date_to_iso(utc_millis: f64) -> IvyResult<JsString> {
     if !utc_millis.is_finite() || utc_millis.abs() > 8_640_000_000_000_000.0 {
         return Err(IvyError::new("invalid_arguments", "Invalid time value"));

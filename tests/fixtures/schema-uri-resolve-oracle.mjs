@@ -6,15 +6,15 @@ function add(base, relative) {
   catch { result = {ok: false}; }
   rows.push({base: JSON.stringify(base), relative: JSON.stringify(relative), result: JSON.stringify(result)});
 }
-const relatives = ['', '#', '#/', '#a', '#a\u2028ignored%', '#a\nline', '?', '?q', '?q#',
+// Runtime-only scheme decoding and fragment truncation have native checks.
+const relatives = ['', '#', '#/', '#a', '#a\nline', '?', '?q', '?q#',
   'g', './g', 'g/', '/g', '//g', '?y', 'g?y', '#s', 'g#s', 'g?y#s', ';x',
   'g;x', 'g;x?y#s', '.', './', '..', '../', '../g', '../..', '../../', '../../g',
   '../../../g', '../../../../g', '/./g', '/../g', 'g.', '.g', 'g..', '..g',
   './g/.', 'g/./h', 'g/../h', 'g;x=1/./y', 'g;x=1/../y', 'g?y/./x', 'g#s/../x',
   'http:g', './x:y', './a//', '/%2e/%2E%2e/g', 'a%2fb', 'a%23b', '%41%7a',
   '%', '%a', '%ag', '%ff', '%c0%af', '\ud800', '雪', '😀', '\\x', '/\\x',
-  '\\\\x', '\t//x', '/\t/x', '//x\\y', '%68ttp://EXAMPLE.invalid/a',
-  '%u0068ttp://EXAMPLE.invalid/a', '1scheme:x', 'a_b:x', ':x'];
+  '\\\\x', '\t//x', '/\t/x', '//x\\y', '1scheme:x', 'a_b:x', ':x'];
 const bases = ['', '#', 'a', 'a/b', 'a/b?x#f', 'http://a/b/c/d;p?q',
   'https://EXAMPLE.invalid:443', 'https://user:pass@example.invalid/a/',
   'custom://host:', 'custom:a/b', 'urn:x:a/b', 'ws://example.invalid:80/a?q#f',
@@ -38,7 +38,7 @@ for (const host of hosts) for (const scheme of ['http', 'https', 'ws', 'custom']
 for (const user of ['', 'a', 'a:b', 'a@b', '%ff', '%', '雪', '\ud800']) {
   add('http://' + user + '@example.invalid/a', '../b');
 }
-for (const fragment of ['a\u2028b', 'a\u2029b', '\u2028%', '\ud800', '\r\n', '?/#']) {
+for (const fragment of ['\ud800', '\r\n', '?/#']) {
   add('custom:a/b#old', '#' + fragment);
 }
 process.stdout.write(JSON.stringify(rows));

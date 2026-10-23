@@ -24,8 +24,7 @@ if(process.argv[2]==='deep') {
       }
       const input=opens.join('')+'"\\ud800"'+closes.reverse().join('');
       const value=JSON.parse(input), item={depth,kind};
-      try {item.stringifyHash=createHash('sha256').update(JSON.stringify(value)).digest('hex');}catch(error){item.stringifyError={name:error.name,message:error.message};}
-      try {const text=String(value);item.coercionUnits=Array.from({length:text.length},(_,i)=>text.charCodeAt(i));}catch(error){item.coercionError={name:error.name,message:error.message};}
+      try {item.stringifyHash=createHash('sha256').update(JSON.stringify(value)).digest('hex');}catch {/* The native codec still round-trips depths beyond this runtime's stack. */}
       for(const [name,fn] of Object.entries({canonical,validateJson})) {
         try {fn(value,4_000_000);item[name]=null;}catch(error){item[name]=error.code??error.name;}
       }

@@ -2,6 +2,7 @@
 pub use crate::native_catalog_path::native_catalog_path;
 use crate::{
     IvyError, IvyJson, IvyResult, JsString,
+    hash::digest,
     json::{parse, stringify},
     native_contract::NativeContract,
 };
@@ -79,25 +80,42 @@ fn catalog_filename(name: &str) -> bool {
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
     })
 }
-fn load(path: &Path) -> IvyResult<NativeContract> {
-    let bytes = std::fs::read(path).map_err(|_| IvyError::internal())?;
-    let value =
-        parse(&String::from_utf8_lossy(&bytes), usize::MAX).map_err(|_| IvyError::internal())?;
-    NativeContract::new(&value)
+#[derive(Default)]
+struct Cache {
+    selections: HashMap<String, Arc<NativeContract>>,
+    catalogs: HashMap<PathBuf, (String, Arc<NativeContract>)>,
+}
+impl Cache {
+    fn load(&mut self, path: &Path) -> IvyResult<Arc<NativeContract>> {
+        let bytes = std::fs::read(path).map_err(|_| IvyError::internal())?;
+        let hash = digest(&bytes);
+        if let Some((previous, contract)) = self.catalogs.get(path) {
+            if previous == &hash {
+                return Ok(contract.clone());
+            }
+        }
+        let value = parse(&String::from_utf8_lossy(&bytes), usize::MAX)
+            .map_err(|_| IvyError::internal())?;
+        let contract = Arc::new(NativeContract::new(&value)?);
+        self.catalogs
+            .insert(path.to_owned(), (hash, contract.clone()));
+        Ok(contract)
+    }
 }
 
 /// Keep one store for the distribution root. Successful selections survive later
-/// file changes; failed reads/selection are not cached. Callers supply the runtime
-/// distribution root, never a compiled-in source or installation path.
+/// file changes; failed selections read files again. Validated candidates are
+/// reused only for unchanged file bytes, with one snapshot per catalog path.
+/// Callers supply the runtime distribution root, never an installation path.
 pub struct CheckedNativeContracts {
     root: PathBuf,
-    cache: Mutex<HashMap<String, Arc<NativeContract>>>,
+    cache: Mutex<Cache>,
 }
 impl CheckedNativeContracts {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(Cache::default()),
         }
     }
     pub fn checked_native_contract(
@@ -116,9 +134,9 @@ impl CheckedNativeContracts {
             version_text,
             stringify(identity.unwrap_or(&IvyJson::Null), usize::MAX)?
         );
-        // The original synchronous loader serializes reads and cache insertion.
+        // Serialize reads, validation and cache insertion for this store.
         let mut cache = self.cache.lock().map_err(|_| IvyError::internal())?;
-        if let Some(value) = cache.get(&key) {
+        if let Some(value) = cache.selections.get(&key) {
             return Ok(value.clone());
         }
         let directory = self
@@ -154,7 +172,7 @@ impl CheckedNativeContracts {
             files.sort();
             let mut selected = None;
             for file in files {
-                let contract = load(&directory.join(file))?;
+                let contract = cache.load(&directory.join(file))?;
                 if contract
                     .catalog()
                     .get("version")
@@ -217,10 +235,9 @@ impl CheckedNativeContracts {
                     "The retained catalog identifies another native version.",
                 ));
             }
-            contract
+            Arc::new(contract)
         };
-        let selected = Arc::new(selected);
-        cache.insert(key, selected.clone());
+        cache.selections.insert(key, selected.clone());
         Ok(selected)
     }
 }

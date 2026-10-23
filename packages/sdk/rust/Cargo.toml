@@ -23,7 +23,6 @@ futures-util.workspace = true
 uuid.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
-iana-time-zone.workspace = true
 jiff-tzdb.workspace = true
 tz-rs.workspace = true
 

@@ -342,3 +342,124 @@ fn native_keywords_reject_non_schemas_and_keep_utf16_property_names() {
         assert!(!compiled.matches(&IvyJson::Object(Vec::new())).unwrap());
     }
 }
+
+#[test]
+fn native_uri_schemes_namespaces_and_ip_literals_use_literal_syntax() {
+    use ivy_contracts::schema::uri::{full_path, resolve};
+    for id in [
+        "%68ttp://example.invalid/a",
+        "%u0068ttp://example.invalid/a",
+        "h%74tp://example.invalid/a",
+        "1http://example.invalid/a",
+        "bad_name:resource",
+        "http://[::1/a",
+        "http://[invalid]/a",
+        "http://[]/a",
+        "custom://x[foo]/a",
+    ] {
+        assert_eq!(
+            full_path(&id.into()).unwrap_err().code,
+            "registry_invalid",
+            "{id}"
+        );
+        assert_eq!(
+            resolve(&"https://base.invalid/a".into(), &id.into())
+                .unwrap_err()
+                .code,
+            "registry_invalid",
+            "{id}"
+        );
+    }
+    for id in ["urn:ſ:abc", "urn:K:abc", "urn:x:K"] {
+        assert_eq!(
+            full_path(&id.into()).unwrap_err().code,
+            "registry_invalid",
+            "{id}"
+        );
+    }
+    for (id, expected) in [
+        (
+            "HTTPS://EXAMPLE.invalid:443/a",
+            "https://example.invalid/a#",
+        ),
+        ("EXAMPLE+V1.0-TEST:resource", "example+v1.0-test:resource#"),
+        ("urn:EXAMPLE:Item", "urn:example:Item#"),
+        ("urn:UUID:ABCD", "urn:uuid:abcd#"),
+        ("urn:example:%E9%9B%AA", "urn:example:%E9%9B%AA#"),
+        ("http://[0:0:0:0:0:0:0:1]/a", "http://[::1]/a#"),
+        (
+            "custom://[vF.address:future]/a",
+            "custom://[vf.address:future]/a#",
+        ),
+    ] {
+        assert_eq!(full_path(&id.into()).unwrap(), expected.into(), "{id}");
+    }
+}
+
+#[test]
+fn uri_fragments_keep_complete_names_and_select_the_exact_schema() {
+    use ivy_contracts::{
+        JsString,
+        schema::{SchemaValidators, uri::resolve},
+    };
+    for (separator, encoded) in [('\u{2028}', "%E2%80%A8"), ('\u{2029}', "%E2%80%A9")] {
+        assert_eq!(
+            resolve(&"custom:a/b#old".into(), &format!("#a{separator}b").into()).unwrap(),
+            format!("custom:a/b#a{encoded}b").into()
+        );
+        assert_eq!(
+            resolve(&"custom:a/b".into(), &format!("#a{separator}%").into())
+                .unwrap_err()
+                .code,
+            "registry_invalid"
+        );
+        let name = format!("value{separator}suffix");
+        let mut schema = IvyJson::object([
+            ("$id", "https://example.invalid/root".into()),
+            (
+                "$defs",
+                IvyJson::Object(vec![
+                    ("value".into(), IvyJson::object([("type", "number".into())])),
+                    (
+                        JsString::from(name.as_str()),
+                        IvyJson::object([("type", "string".into())]),
+                    ),
+                ]),
+            ),
+            ("$ref", format!("#/$defs/{name}").into()),
+        ]);
+        let compiled = SchemaValidators::new().compile(&schema).unwrap();
+        assert!(compiled.matches(&"text".into()).unwrap());
+        assert!(!compiled.matches(&IvyJson::Number(1.0)).unwrap());
+
+        schema.insert("$ref", format!("#/$defs/value{separator}absent").into());
+        assert!(SchemaValidators::new().compile(&schema).is_err());
+
+        let aliases = IvyJson::object([
+            ("$id", "#x".into()),
+            (
+                "$defs",
+                IvyJson::object([(
+                    "child",
+                    IvyJson::object([
+                        ("$id", format!("a#/{separator}").into()),
+                        ("type", "string".into()),
+                    ]),
+                )]),
+            ),
+        ]);
+        let admitted = ivy_contracts::schema::admit_schema(&aliases).unwrap();
+        let index = admitted.resource_index().unwrap();
+        assert!(index.references.iter().any(|reference| {
+            reference.alias
+                && reference.id == format!("a#/{encoded}").into()
+                && reference.full_path == "#/$defs/child".into()
+        }));
+        assert!(
+            !index
+                .references
+                .iter()
+                .any(|reference| { reference.alias && reference.id == "a".into() })
+        );
+    }
+}

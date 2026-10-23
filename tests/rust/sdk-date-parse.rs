@@ -1,125 +1,74 @@
-use ivy_contracts::json::parse;
 use ivy_sdk::{
     JsString,
-    clock::{parse_date, parse_date_in_zone},
+    clock::{date_to_iso, parse_date},
 };
 use std::process::Command;
 
 #[test]
-fn date_parse_matches_node() {
-    // Separate Node processes keep timezone mutation outside the Rust test process.
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    for zone in [
-        "UTC",
-        "Europe/Berlin",
-        "America/New_York",
-        "Australia/Lord_Howe",
-        "Pacific/Apia",
-        "Asia/Kathmandu",
+fn timestamp_formats_resolve_to_the_same_instant() {
+    for (value, expected) in [
+        ("1970-01-01T00:00:00Z", 0_i64),
+        ("1970-01-01T01:30:00+01:30", 0),
+        ("1969-12-31T16:00:00-08:00", 0),
+        ("1969-12-31T23:59:59.999999Z", -1),
+        ("2000-01-01T00:00:00.123456789Z", 946_684_800_123),
+        ("2000-01-01T02:30:00+02:30", 946_684_800_000),
+        ("Sat, 01 Jan 2000 00:00:00 +0000", 946_684_800_000),
+        ("Fri, 31 Dec 1999 19:00:00 -0500", 946_684_800_000),
+        ("2000-01-01", 946_684_800_000),
+        ("2000-02-29", 951_782_400_000),
     ] {
-        let output = Command::new("node")
-            .arg("tests/fixtures/date-parse-oracle.mjs")
-            .env("TZ", zone)
-            .current_dir(&repo)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let rows = parse(&String::from_utf8(output.stdout).unwrap(), usize::MAX).unwrap();
-        assert!(rows.as_array().unwrap().len() > 2000);
-        for row in rows.as_array().unwrap() {
-            let value = row.get("value").unwrap().as_js_string().unwrap();
-            let actual = parse_date_in_zone(value, zone);
-            match row.get("expected").unwrap().as_f64() {
-                Some(expected) => assert_eq!(actual, expected, "zone={zone} input={value:?}"),
-                None => assert!(
-                    actual.is_nan(),
-                    "zone={zone} input={value:?} actual={actual}"
-                ),
-            }
-        }
+        assert_eq!(parse_date(&value.into()), expected as f64, "{value}");
     }
-    // Default system-zone path, including the native runtime's environment policy.
+}
+
+#[test]
+fn canonical_extended_timestamps_preserve_the_public_range() {
+    for (value, expected) in [
+        ("-271821-04-20T00:00:00.000Z", -8_640_000_000_000_000_i64),
+        ("-000001-01-01T00:00:00.000Z", -62_198_755_200_000),
+        ("0000-01-01T00:00:00.000Z", -62_167_219_200_000),
+        ("9999-12-31T23:59:59.999Z", 253_402_300_799_999),
+        ("+010000-01-01T00:00:00.000Z", 253_402_300_800_000),
+        ("+275760-09-13T00:00:00.000Z", 8_640_000_000_000_000),
+    ] {
+        let at = parse_date(&value.into());
+        assert_eq!(at, expected as f64, "{value}");
+        assert_eq!(date_to_iso(at).unwrap(), JsString::from(value));
+    }
+    for value in ["-271821-04-19T23:59:59.999Z", "+275760-09-13T00:00:00.001Z"] {
+        assert!(parse_date(&value.into()).is_nan(), "{value}");
+    }
+}
+
+#[test]
+fn malformed_dates_and_runtime_only_grammar_are_rejected() {
     for value in [
-        "2026-01-01T00:00:00",
-        "2026-03-29T02:30:00",
-        "2026-10-25T02:30:00",
-        "2026-02-30T00:00:00Z",
-    ] {
-        let output = Command::new("node")
-            .args(["-p", "JSON.stringify(Date.parse(process.argv[1]))", value])
-            .output()
-            .unwrap();
-        let expected = String::from_utf8(output.stdout)
-            .unwrap()
-            .trim()
-            .parse::<f64>()
-            .unwrap();
-        assert_eq!(
-            parse_date(&JsString::from(value)),
-            expected,
-            "system zone {value}"
-        );
-    }
-    for zone in [
-        "UTC",
-        "Europe/Berlin",
-        "America/New_York",
-        "Australia/Lord_Howe",
-        "Pacific/Apia",
-        "Asia/Kathmandu",
         "",
-        "unknown",
-        "GMT+05:30",
-        "GMT-8",
-        "GMT+0530",
-        "UTC+01:00",
-        "europe/berlin",
-        "EST5EDT",
-        "CET",
-        "US/Eastern",
-        "ACT",
-        "AET",
-        "AGT",
-        "ART",
-        "AST",
-        "BET",
-        "BST",
-        "CAT",
-        "CNT",
-        "CST",
-        "CTT",
-        "EAT",
-        "ECT",
-        "IET",
-        "IST",
-        "JST",
-        "MIT",
-        "NET",
-        "NST",
-        "PLT",
-        "PNT",
-        "PRT",
-        "PST",
-        "SST",
-        "VST",
-        "gmt+5:30",
-        "GMT+٠٥:٣٠",
-        "GMT+５:３０",
-        "GMT+123456",
-        "GMT+1234567",
-        "GMT+000000",
-        "GMT+5:30:15",
-        "GMT+24",
-        "GMT+23:60",
-        "GMT+1:01:60",
+        "0",
+        "1",
+        "2026",
+        "March 1, 2026 3:30 pm",
+        "2026-01-01T00:00:00",
+        "2026-02-29T00:00:00Z",
+        "2026-02-30T00:00:00Z",
+        "2026-01-01T25:00:00Z",
+        "2026-01-01T00:00:00+24:00",
+        "2026-01-01T00:00:00Z (ignored comment)",
+        "2026-01-01T00:00:00Z\0ignored suffix",
+        "not a timestamp",
     ] {
+        assert!(parse_date(&value.into()).is_nan(), "{value}");
+    }
+    assert!(parse_date(&JsString(vec![0xd800])).is_nan());
+}
+
+#[test]
+fn timestamp_parsing_is_independent_of_process_timezone() {
+    for zone in ["UTC", "Europe/Berlin", "America/New_York", "unknown"] {
         let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "runtime_zone_child", "--nocapture"])
-            .env("IVY_DATE_ZONE_CASE", "1")
+            .args(["--exact", "timestamp_zone_child", "--nocapture"])
+            .env("IVY_TIMESTAMP_ZONE_CASE", "1")
             .env("TZ", zone)
             .output()
             .unwrap();
@@ -133,30 +82,11 @@ fn date_parse_matches_node() {
 }
 
 #[test]
-fn runtime_zone_child() {
-    if std::env::var_os("IVY_DATE_ZONE_CASE").is_none() {
+fn timestamp_zone_child() {
+    if std::env::var_os("IVY_TIMESTAMP_ZONE_CASE").is_none() {
         return;
     }
-    for value in [
-        "2026-01-01T00:00:00",
-        "2026-07-01T00:00:00",
-        "2026-03-29T02:30:00",
-        "2026-10-25T02:30:00",
-    ] {
-        let output = Command::new("node")
-            .args(["-p", "JSON.stringify(Date.parse(process.argv[1]))", value])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        let expected = String::from_utf8(output.stdout)
-            .unwrap()
-            .trim()
-            .parse::<f64>()
-            .unwrap();
-        assert_eq!(
-            parse_date(&JsString::from(value)),
-            expected,
-            "input={value}"
-        );
-    }
+    assert_eq!(parse_date(&"1970-01-01".into()), 0.0);
+    assert_eq!(parse_date(&"1970-01-01T01:00:00+01:00".into()), 0.0);
+    assert!(parse_date(&"2026-10-25T02:30:00".into()).is_nan());
 }

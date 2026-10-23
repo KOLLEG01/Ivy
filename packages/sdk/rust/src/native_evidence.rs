@@ -85,8 +85,8 @@ pub fn validate_native_payload(
     Ok(())
 }
 
-/// Accept exactly Date.parse followed by an identical Date.toISOString result.
-/// Arithmetic covers the entire ECMAScript TimeClip range, including extended years.
+/// Read a canonical UTC protocol timestamp with exactly three fractional digits.
+/// Includes signed six-digit years and the full supported timestamp range.
 pub fn native_instant(value: &JsString, code: Option<&str>) -> IvyResult<i64> {
     let parsed = (|| {
         let value = value.to_utf8().ok()?;

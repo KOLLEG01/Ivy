@@ -357,6 +357,7 @@ export const rustTests = {
   'tests/rust/sdk-fetch-response.rs': { package: 'ivy-sdk', test: 'sdk-fetch-response' },
   'tests/rust/sdk-fetch-credentials.rs': { package: 'ivy-sdk', test: 'sdk-fetch-credentials' },
   'tests/rust/sdk-collation.rs': { package: 'ivy-sdk', test: 'sdk-collation' },
+  'tests/rust/sdk-locale-case.rs': { package: 'ivy-sdk', lib: true, filter: 'collation::casing_tests' },
   'tests/rust/phone_sip_tls.rs': { package: 'ivy-phone-bridge', lib: true },
   'tests/rust/agent-projects.rs': {
     package: 'ivy-agent-manager', test: 'agent-projects',
@@ -376,7 +377,6 @@ export const rustTests = {
   'tests/rust/native-contract.rs': { package: 'ivy-contracts', test: 'native-contract' },
   'tests/rust/checked-native-contract.rs': { package: 'ivy-contracts', test: 'checked-native-contract' },
   'tests/rust/native-catalog-path.rs': { package: 'ivy-contracts', test: 'native-catalog-path' },
-  'tests/rust/json-coercion.rs': { package: 'ivy-contracts', test: 'json-coercion' },
   'tests/rust/cli-publish-ui.rs': { package: 'ivy-cli', test: 'cli-publish-ui' },
   'tests/rust/cli-reset-ui.rs': { package: 'ivy-cli', test: 'cli-reset-ui' },
   'tests/rust/cli-arguments.rs': { package: 'ivy-cli', test: 'cli-arguments' },
