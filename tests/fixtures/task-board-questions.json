@@ -1,0 +1,1444 @@
+{
+  "cases": [
+    {
+      "name": "empty",
+      "task": {
+        "comments": []
+      },
+      "runId": "run",
+      "expected": {
+        "all": [],
+        "run": []
+      }
+    },
+    {
+      "name": "own user question",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "foreign source question",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            },
+            "sourceTaskId": "other"
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [],
+        "run": []
+      }
+    },
+    {
+      "name": "user addressed answer",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          },
+          {
+            "commentId": "c39",
+            "sequence": 39,
+            "authorKind": "user",
+            "purpose": "update",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": "c35"
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [],
+        "run": []
+      }
+    },
+    {
+      "name": "worker answer does not close user question",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          },
+          {
+            "commentId": "c40",
+            "sequence": 40,
+            "authorKind": "agent",
+            "purpose": "update",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": "c35"
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "unrelated handoff does not answer",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          },
+          {
+            "commentId": "c41",
+            "sequence": 41,
+            "authorKind": "agent",
+            "purpose": "handoff",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "earlier reply cannot close later question",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c42",
+            "sequence": 42,
+            "authorKind": "user",
+            "purpose": "update",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": "c35"
+          },
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "explicit resolution closes",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          },
+          {
+            "commentId": "c43",
+            "sequence": 43,
+            "authorKind": "agent",
+            "purpose": "update",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "resolvesQuestions": [
+              "c35"
+            ]
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [],
+        "run": []
+      }
+    },
+    {
+      "name": "task recipient remains open on user reply",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c36",
+            "sequence": 36,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "task",
+              "taskId": "parent"
+            }
+          },
+          {
+            "commentId": "c44",
+            "sequence": 44,
+            "authorKind": "user",
+            "purpose": "update",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": "c36"
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [
+          {
+            "commentId": "c36",
+            "sequence": 36,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "task",
+              "taskId": "parent"
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c36",
+            "sequence": 36,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "task",
+              "taskId": "parent"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "task recipient exact source reply",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c36",
+            "sequence": 36,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "task",
+              "taskId": "parent"
+            }
+          },
+          {
+            "commentId": "c45",
+            "sequence": 45,
+            "authorKind": "agent",
+            "purpose": "update",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": "c36",
+            "sourceTaskId": "parent"
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [],
+        "run": []
+      }
+    },
+    {
+      "name": "wrong source does not close task question",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c36",
+            "sequence": 36,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "task",
+              "taskId": "parent"
+            }
+          },
+          {
+            "commentId": "c46",
+            "sequence": 46,
+            "authorKind": "agent",
+            "purpose": "update",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": "c36",
+            "sourceTaskId": "other"
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [
+          {
+            "commentId": "c36",
+            "sequence": 36,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "task",
+              "taskId": "parent"
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c36",
+            "sequence": 36,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "task",
+              "taskId": "parent"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "requests all answered across later comments",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c38",
+            "sequence": 38,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [
+              {
+                "requestId": "r1"
+              },
+              {
+                "requestId": "r2"
+              }
+            ],
+            "responses": [],
+            "replyTo": null
+          },
+          {
+            "commentId": "c47",
+            "sequence": 47,
+            "authorKind": "agent",
+            "purpose": "update",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [
+              {
+                "requestId": "r1"
+              }
+            ],
+            "replyTo": null
+          },
+          {
+            "commentId": "c48",
+            "sequence": 48,
+            "authorKind": "agent",
+            "purpose": "update",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [
+              {
+                "requestId": "r2"
+              }
+            ],
+            "replyTo": null
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [],
+        "run": []
+      }
+    },
+    {
+      "name": "partial request coverage remains open",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c38",
+            "sequence": 38,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [
+              {
+                "requestId": "r1"
+              },
+              {
+                "requestId": "r2"
+              }
+            ],
+            "responses": [],
+            "replyTo": null
+          },
+          {
+            "commentId": "c49",
+            "sequence": 49,
+            "authorKind": "agent",
+            "purpose": "update",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [
+              {
+                "requestId": "r1"
+              }
+            ],
+            "replyTo": null
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [
+          {
+            "commentId": "c38",
+            "sequence": 38,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [
+              {
+                "requestId": "r1"
+              },
+              {
+                "requestId": "r2"
+              }
+            ],
+            "responses": [],
+            "replyTo": null
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c38",
+            "sequence": 38,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [
+              {
+                "requestId": "r1"
+              },
+              {
+                "requestId": "r2"
+              }
+            ],
+            "responses": [],
+            "replyTo": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "native same run open",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "native other run filtered",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      },
+      "runId": "other",
+      "expected": {
+        "all": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": []
+      }
+    },
+    {
+      "name": "empty run does not filter",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      },
+      "runId": "",
+      "expected": {
+        "all": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "native addressed answer",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          },
+          {
+            "commentId": "c50",
+            "sequence": 50,
+            "authorKind": "user",
+            "purpose": "update",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": "c37",
+            "nativeInput": {
+              "state": "answered",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            }
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [],
+        "run": []
+      }
+    },
+    {
+      "name": "native expiration",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          },
+          {
+            "commentId": "c51",
+            "sequence": 51,
+            "authorKind": "system",
+            "purpose": "update",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": "c37",
+            "nativeInput": {
+              "state": "expired",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            }
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [],
+        "run": []
+      }
+    },
+    {
+      "name": "native plain user reply is not native completion",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          },
+          {
+            "commentId": "c52",
+            "sequence": 52,
+            "authorKind": "user",
+            "purpose": "update",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": "c37"
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "native wrong state remains open",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          },
+          {
+            "commentId": "c53",
+            "sequence": 53,
+            "authorKind": "user",
+            "purpose": "update",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": "c37",
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            }
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "native explicit resolution alone stays open",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          },
+          {
+            "commentId": "c54",
+            "sequence": 54,
+            "authorKind": "agent",
+            "purpose": "update",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "resolvesQuestions": [
+              "c37"
+            ]
+          }
+        ]
+      },
+      "runId": "run",
+      "expected": {
+        "all": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "normal question survives different run filter",
+      "task": {
+        "comments": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      },
+      "runId": "other",
+      "expected": {
+        "all": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "lossless question and run identity",
+      "task": {
+        "comments": [
+          {
+            "commentId": "q-\udfff",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run-\ud800",
+              "revision": 1
+            }
+          }
+        ]
+      },
+      "runId": "run-\ud800",
+      "expected": {
+        "all": [
+          {
+            "commentId": "q-\udfff",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run-\ud800",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "q-\udfff",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run-\ud800",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -31,8 +31,8 @@ pub(crate) fn strip_extended(path: &[u16]) -> Vec<u16> {
 fn ascii_upper(c: u16) -> u16 {
     if (97..=122).contains(&c) { c - 32 } else { c }
 }
-/// ECMAScript default lowercase retains unpaired UTF-16 units as non-cased boundaries.
-pub(crate) fn lowercase(value: &[u16]) -> JsString {
+/// Lowercase Unicode text, retaining unpaired UTF-16 units as boundaries.
+pub fn lowercase(value: &[u16]) -> JsString {
     let mut output = Vec::new();
     let mut segment = String::new();
     for c in char::decode_utf16(value.iter().copied()) {

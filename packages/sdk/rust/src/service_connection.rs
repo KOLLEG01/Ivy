@@ -376,6 +376,20 @@ impl ServiceConnection {
     pub fn generation(&self) -> u64 {
         self.0.generation.load(Ordering::Acquire)
     }
+    /// Bind an internal handler to this generation and its first close reason.
+    pub fn invocation_context(
+        &self,
+        caller_principal_id: JsString,
+        operation_id: Option<JsString>,
+    ) -> InvocationContext {
+        InvocationContext {
+            caller_principal_id,
+            operation_id,
+            generation: self.generation(),
+            signal: self.signal(),
+            close_reason: self.0.close_reason.clone(),
+        }
+    }
     pub fn set_generation(&self, generation: u64) {
         self.0.generation.store(generation, Ordering::Release);
     }

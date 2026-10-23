@@ -1,0 +1,408 @@
+{
+  "baseTask": {
+    "taskKey": "TASK-0123",
+    "fields": {
+      "control": "agent"
+    },
+    "workflowState": "todo",
+    "claim": null,
+    "publication": null,
+    "runtimeWait": null,
+    "completionIssue": null,
+    "wakeAt": null,
+    "dependencies": [],
+    "comments": []
+  },
+  "baseComment": {
+    "authorKind": "agent",
+    "purpose": "question",
+    "body": "Can this artifact be accepted?",
+    "requests": [],
+    "nativeInput": null
+  },
+  "cases": [
+    {
+      "name": "ordinary ticket",
+      "method": "task",
+      "task": {},
+      "executionChange": false,
+      "service": "board",
+      "expectedHash": "sha256:0f30f04dca7142e12ce34089c33f6fac30afd097159d390a4f066790d187cb6a",
+      "units": 387
+    },
+    {
+      "name": "untriggered agent wait",
+      "method": "task",
+      "task": {
+        "workflowState": "waiting"
+      },
+      "executionChange": false,
+      "service": "board",
+      "expectedHash": "sha256:6c413fbab62a59138255dce1b07053830e496cc1ce579b50aa65f5583a39466e",
+      "units": 551
+    },
+    {
+      "name": "manual wait",
+      "method": "task",
+      "task": {
+        "workflowState": "waiting",
+        "fields": {
+          "control": "user"
+        }
+      },
+      "executionChange": false,
+      "service": "board",
+      "expectedHash": "sha256:0f30f04dca7142e12ce34089c33f6fac30afd097159d390a4f066790d187cb6a",
+      "units": 387
+    },
+    {
+      "name": "claimed wait",
+      "method": "task",
+      "task": {
+        "workflowState": "waiting",
+        "claim": {
+          "run": {
+            "objectId": "r",
+            "revision": 1
+          }
+        }
+      },
+      "executionChange": false,
+      "service": "board",
+      "expectedHash": "sha256:0f30f04dca7142e12ce34089c33f6fac30afd097159d390a4f066790d187cb6a",
+      "units": 387
+    },
+    {
+      "name": "appointment",
+      "method": "task",
+      "task": {
+        "workflowState": "waiting",
+        "wakeAt": "2026-10-24T00:00:00.000Z"
+      },
+      "executionChange": false,
+      "service": "board",
+      "expectedHash": "sha256:0f30f04dca7142e12ce34089c33f6fac30afd097159d390a4f066790d187cb6a",
+      "units": 387
+    },
+    {
+      "name": "watched task",
+      "method": "task",
+      "task": {
+        "workflowState": "waiting",
+        "dependencies": [
+          "peer"
+        ]
+      },
+      "executionChange": false,
+      "service": "board",
+      "expectedHash": "sha256:0f30f04dca7142e12ce34089c33f6fac30afd097159d390a4f066790d187cb6a",
+      "units": 387
+    },
+    {
+      "name": "open user question",
+      "method": "task",
+      "task": {
+        "workflowState": "waiting",
+        "comments": [
+          {
+            "commentId": "q",
+            "authorKind": "agent",
+            "purpose": "question",
+            "recipient": {
+              "kind": "user"
+            },
+            "requests": [],
+            "responses": []
+          }
+        ]
+      },
+      "executionChange": false,
+      "service": "board",
+      "expectedHash": "sha256:0f30f04dca7142e12ce34089c33f6fac30afd097159d390a4f066790d187cb6a",
+      "units": 387
+    },
+    {
+      "name": "unrelated answer keeps question",
+      "method": "task",
+      "task": {
+        "workflowState": "waiting",
+        "comments": [
+          {
+            "commentId": "q",
+            "authorKind": "agent",
+            "purpose": "question",
+            "recipient": {
+              "kind": "user"
+            },
+            "requests": [],
+            "responses": []
+          },
+          {
+            "authorKind": "user",
+            "replyTo": "other"
+          }
+        ]
+      },
+      "executionChange": false,
+      "service": "board",
+      "expectedHash": "sha256:0f30f04dca7142e12ce34089c33f6fac30afd097159d390a4f066790d187cb6a",
+      "units": 387
+    },
+    {
+      "name": "addressed user answer",
+      "method": "task",
+      "task": {
+        "workflowState": "waiting",
+        "comments": [
+          {
+            "commentId": "q",
+            "authorKind": "agent",
+            "purpose": "question",
+            "recipient": {
+              "kind": "user"
+            },
+            "requests": [],
+            "responses": []
+          },
+          {
+            "authorKind": "user",
+            "replyTo": "q"
+          }
+        ]
+      },
+      "executionChange": false,
+      "service": "board",
+      "expectedHash": "sha256:6c413fbab62a59138255dce1b07053830e496cc1ce579b50aa65f5583a39466e",
+      "units": 551
+    },
+    {
+      "name": "foreign task answer keeps question",
+      "method": "task",
+      "task": {
+        "workflowState": "waiting",
+        "comments": [
+          {
+            "commentId": "q",
+            "authorKind": "agent",
+            "purpose": "question",
+            "recipient": {
+              "kind": "task",
+              "taskId": "peer"
+            },
+            "requests": [],
+            "responses": []
+          },
+          {
+            "authorKind": "agent",
+            "sourceTaskId": "other",
+            "replyTo": "q"
+          }
+        ]
+      },
+      "executionChange": false,
+      "service": "board",
+      "expectedHash": "sha256:0f30f04dca7142e12ce34089c33f6fac30afd097159d390a4f066790d187cb6a",
+      "units": 387
+    },
+    {
+      "name": "addressed task answer",
+      "method": "task",
+      "task": {
+        "workflowState": "waiting",
+        "comments": [
+          {
+            "commentId": "q",
+            "authorKind": "agent",
+            "purpose": "question",
+            "recipient": {
+              "kind": "task",
+              "taskId": "peer"
+            },
+            "requests": [],
+            "responses": []
+          },
+          {
+            "authorKind": "agent",
+            "sourceTaskId": "peer",
+            "replyTo": "q"
+          }
+        ]
+      },
+      "executionChange": false,
+      "service": "board",
+      "expectedHash": "sha256:6c413fbab62a59138255dce1b07053830e496cc1ce579b50aa65f5583a39466e",
+      "units": 551
+    },
+    {
+      "name": "expired native question",
+      "method": "task",
+      "task": {
+        "workflowState": "waiting",
+        "comments": [
+          {
+            "commentId": "q",
+            "authorKind": "agent",
+            "purpose": "question",
+            "recipient": {
+              "kind": "user"
+            },
+            "requests": [],
+            "responses": [],
+            "nativeInput": {
+              "identity": {
+                "requestId": 42
+              },
+              "state": "pending"
+            }
+          },
+          {
+            "replyTo": "q",
+            "nativeInput": {
+              "state": "expired"
+            }
+          }
+        ]
+      },
+      "executionChange": false,
+      "service": "board",
+      "expectedHash": "sha256:6c413fbab62a59138255dce1b07053830e496cc1ce579b50aa65f5583a39466e",
+      "units": 551
+    },
+    {
+      "name": "execution change bypasses malformed questions",
+      "method": "task",
+      "task": {
+        "comments": null
+      },
+      "executionChange": true,
+      "service": "board",
+      "expectedHash": "sha256:66db1e2b5401445b91d1487f4d094d7b28388e78cea33d5d6db4c40eeaedd1d1",
+      "units": 360
+    },
+    {
+      "name": "UTF16 identities",
+      "method": "task",
+      "task": {
+        "taskKey": "TASK-\ud800"
+      },
+      "executionChange": false,
+      "service": "service-\udfff",
+      "expectedHash": "sha256:09f99add0e5cf08dc49e99cd52f3afae5f5ca892bb2d0474af2eb60c744632f5",
+      "units": 388
+    },
+    {
+      "name": "handoff ordinary question",
+      "method": "handoff",
+      "expectedHash": "sha256:0d201762f900bdde353ce7b09988d6f99dd96749a1e56d0f8aff6cba05c6e0cc",
+      "units": 769
+    },
+    {
+      "name": "handoff ready result",
+      "method": "handoff",
+      "comment": {
+        "purpose": "handoff"
+      },
+      "expectedHash": "sha256:2d25f2cd08850555267086884dcbdf44a66ef5f4603803b62e2b2ca7c37c363a",
+      "units": 808
+    },
+    {
+      "name": "handoff typed requests",
+      "method": "handoff",
+      "comment": {
+        "requests": [
+          {
+            "title": "Approval",
+            "requestId": "r",
+            "type": "approval"
+          }
+        ]
+      },
+      "expectedHash": "sha256:516833b368b8cdd48c5bd9fc8061ab59f5fc7ad5cf8b0a7a03f0d20eeecdaeba",
+      "units": 842
+    },
+    {
+      "name": "handoff native identity wins",
+      "method": "handoff",
+      "comment": {
+        "nativeInput": {
+          "identity": {
+            "requestId": 42,
+            "epoch": "e\ud800",
+            "serviceNodeId": "owner"
+          }
+        },
+        "requests": [
+          {
+            "requestId": "ignored"
+          }
+        ]
+      },
+      "expectedHash": "sha256:6bed5c2d84b79cbd59e90c69054bc3203a46130bbe3f010c8e34fddefaa44b05",
+      "units": 853
+    },
+    {
+      "name": "handoff UTF16 truncation",
+      "method": "handoff",
+      "bodyFill": 16325,
+      "expectedHash": "sha256:8375d51bd0b65fa53a58e17624f6b1ce2317d7dd5d7f75132f20adc228c00e2c",
+      "units": 16384
+    },
+    {
+      "name": "voice ordinary question",
+      "method": "voice",
+      "expectedHash": "sha256:afd31990eab9282e23c89f3b61a7eb3a36ad8f5e861883361a5f2c7ea815acb0",
+      "units": 653
+    },
+    {
+      "name": "voice ready result",
+      "method": "voice",
+      "comment": {
+        "purpose": "handoff"
+      },
+      "expectedHash": "sha256:11eb76cce0e29827a870d84e33ae2c949cba57c2cceb66e82973e7e50460b766",
+      "units": 692
+    },
+    {
+      "name": "voice typed requests",
+      "method": "voice",
+      "comment": {
+        "requests": [
+          {
+            "title": "Approval",
+            "requestId": "r",
+            "type": "approval"
+          }
+        ]
+      },
+      "expectedHash": "sha256:2cd3e352e9ede18856bed09ac7b52b57a1dbd3f903443ef401d0459cca59466d",
+      "units": 726
+    },
+    {
+      "name": "voice native identity wins",
+      "method": "voice",
+      "comment": {
+        "nativeInput": {
+          "identity": {
+            "requestId": 42,
+            "epoch": "e\ud800",
+            "serviceNodeId": "owner"
+          }
+        },
+        "requests": [
+          {
+            "requestId": "ignored"
+          }
+        ]
+      },
+      "expectedHash": "sha256:03ee219d9d8a8c629ebbcad1eb812ad405547c1be7ddefb21d3425ee0582abe9",
+      "units": 737
+    },
+    {
+      "name": "voice UTF16 truncation",
+      "method": "voice",
+      "bodyFill": 3984,
+      "expectedHash": "sha256:157399d23a2d841692c7acaea5112b43e191a968a486ef23a3624c17c5b1e7c4",
+      "units": 4096
+    }
+  ]
+}

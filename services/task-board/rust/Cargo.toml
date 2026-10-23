@@ -1,0 +1,46 @@
+[package]
+name = "ivy-task-board"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ivy-host-runtime.workspace = true
+ivy-contracts.workspace = true
+ivy-sdk.workspace = true
+ivy-store.workspace = true
+uuid.workspace = true
+base64.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[example]]
+name = "task-board-policy-probe"
+path = "../../../tests/fixtures/task-board-rust-policy.rs"
+
+[[test]]
+name = "task-board-evidence"
+path = "../../../tests/rust/task-board-evidence.rs"
+
+[[test]]
+name = "task-board-operations"
+path = "../../../tests/rust/task-board-operations.rs"
+
+[[test]]
+name = "task-board-blobs"
+path = "../../../tests/rust/task-board-blobs.rs"
+
+[[test]]
+name = "task-board-output"
+path = "../../../tests/rust/task-board-output.rs"
+
+[[test]]
+name = "task-board-host-runtime"
+path = "../../../tests/rust/task-board-host-runtime.rs"

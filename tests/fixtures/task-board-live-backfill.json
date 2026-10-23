@@ -1,0 +1,36 @@
+{
+  "calls": [
+    {
+      "objectId": "synthetic-first",
+      "revision": 1
+    },
+    {
+      "objectId": "synthetic-second",
+      "revision": 1
+    }
+  ],
+  "atSecond": {
+    "sameSecondPin": true,
+    "peerHasByteLength": false
+  },
+  "firstParameterIsOutputPin": true,
+  "secondParameterIsOutputPin": true,
+  "retainedParameterPeerIsOutputArtifact": true,
+  "retainedParameterPeerByteLength": 17,
+  "sourceFirstPinIsolated": true,
+  "sourceSecondPinIsolated": true,
+  "sourceArtifactsUnchanged": true,
+  "latestChecksRemoved": true,
+  "attachmentPinIdentities": [
+    {
+      "filename": "first.bin",
+      "isFirst": true,
+      "isSecond": false
+    },
+    {
+      "filename": "second.bin",
+      "isFirst": false,
+      "isSecond": true
+    }
+  ]
+}

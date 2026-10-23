@@ -380,6 +380,13 @@ async fn accepted_handlers_retain_capacity_across_connection_generations() {
         }),
     );
     let first = peer.open(config).await;
+    let caller = JsString(vec![0xd800, 0x41]);
+    let operation = JsString(vec![0x42, 0xdfff]);
+    let local_context = first.invocation_context(caller.clone(), Some(operation.clone()));
+    assert_eq!(local_context.caller_principal_id, caller);
+    assert_eq!(local_context.operation_id, Some(operation));
+    assert_eq!(local_context.generation, first.generation());
+    local_context.throw_if_aborted().unwrap();
     call(&first, "test.startInvocations", json(r#"{"count":64}"#))
         .await
         .unwrap();
@@ -390,7 +397,18 @@ async fn accepted_handlers_retain_capacity_across_connection_generations() {
     })
     .await
     .unwrap();
-    first.close();
+    let reason = IvyError::new_js("connection_lost".into(), JsString(vec![0xd800, 0x43]))
+        .with_outcome(Outcome::Unknown)
+        .with_details(json(r#"{"original":true}"#));
+    first.close_with(reason.clone());
+    first.close_with(IvyError::new(
+        "later",
+        "A later close cannot replace the first reason.",
+    ));
+    assert_eq!(
+        local_context.throw_if_aborted().unwrap_err().to_wire(),
+        reason.to_wire()
+    );
     let mut config = options();
     config.capacity = capacity;
     let second = peer.open(config).await;

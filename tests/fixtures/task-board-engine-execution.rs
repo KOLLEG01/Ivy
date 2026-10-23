@@ -1,0 +1,634 @@
+use ivy_contracts::{
+    IvyError, IvyJson as Json, IvyResult, JsString, Outcome, hash::hash_json, json::parse,
+    limits::MANAGEMENT_FRAME_BYTES,
+};
+use ivy_task_board::{
+    engine_execution::{
+        CachedExecution, ExecutionCategories, ExecutionComponents, ExecutionProofs,
+        ExecutionPublication, ExecutionQueue, ExecutionReadScope, ExecutionStore,
+    },
+    operations::{Document, Operations, Store},
+    publication_coordination::{CoordinationStore, PublicationCoordination},
+    reconciler::ReconcileExecutor,
+};
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    future::{Future, poll_fn},
+    path::Path,
+    pin::Pin,
+    process::Command,
+    sync::{Arc, Mutex, OnceLock},
+    task::Poll,
+};
+#[path = "task-board-engine-execution-journal.rs"]
+mod journal;
+fn f<'a>(v: &'a Json, k: &str) -> &'a Json {
+    static NULL: Json = Json::Null;
+    v.get(k).unwrap_or(&NULL)
+}
+fn s<'a>(v: &'a Json, k: &str) -> &'a JsString {
+    v.required(k).unwrap().as_js_string().unwrap()
+}
+fn data() -> &'static Json {
+    static D: OnceLock<Json> = OnceLock::new();
+    D.get_or_init(|| {
+        if let Ok(path) = std::env::var("IVY_TASK_BOARD_EXECUTION_FIXTURE") {
+            return parse(
+                &std::fs::read_to_string(path).unwrap(),
+                MANAGEMENT_FRAME_BYTES,
+            )
+            .unwrap();
+        }
+        let p = Command::new("node")
+            .args([
+                "--experimental-transform-types",
+                "--disable-warning=ExperimentalWarning",
+                "tests/fixtures/task-board-engine-execution-oracle.mjs",
+            ])
+            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+            .output()
+            .unwrap();
+        assert!(p.status.success(), "{}", String::from_utf8_lossy(&p.stderr));
+        parse(
+            std::str::from_utf8(&p.stdout).unwrap(),
+            MANAGEMENT_FRAME_BYTES,
+        )
+        .unwrap()
+    })
+}
+fn error(v: &Json) -> IvyError {
+    IvyError::new_js(s(v, "code").clone(), s(v, "message").clone())
+        .with_provider_outcome(v.required("outcome").unwrap().clone())
+        .with_details(f(v, "details").clone())
+}
+fn outcome(v: IvyResult<Json>) -> Json {
+    match v {
+        Ok(v) => Json::object([("ok", v)]),
+        Err(e) => Json::object([(
+            "error",
+            Json::object([
+                ("code", Json::String(e.code_js())),
+                ("message", Json::String(e.message_js())),
+                ("outcome", e.outcome.to_json()),
+                ("details", e.details.unwrap_or(Json::Null)),
+            ]),
+        )]),
+    }
+}
+struct Replay {
+    steps: Mutex<VecDeque<Json>>,
+    name: JsString,
+}
+impl Replay {
+    fn call(&self, kind: &str, args: impl IntoIterator<Item = Json>) -> IvyResult<Json> {
+        let args = Json::Array(args.into_iter().collect());
+        let e = self
+            .steps
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("{:?}: unexpected {kind}: {args:?}", self.name));
+        assert_eq!(
+            f(&e, "kind"),
+            &Json::from(kind),
+            "{:?}: {args:?}",
+            self.name
+        );
+        assert_eq!(
+            hash_json(f(&e, "args")).unwrap(),
+            hash_json(&args).unwrap(),
+            "{:?} {kind}: expected {:?}, actual {args:?}",
+            self.name,
+            f(&e, "args")
+        );
+        if let Some(e) = e.get("error") {
+            Err(error(e))
+        } else {
+            Ok(f(&e, "value").clone())
+        }
+    }
+}
+struct World {
+    replay: Arc<Replay>,
+    root: Option<JsString>,
+}
+fn doc(v: &Json) -> Document {
+    Document {
+        pin: v.required("pin").unwrap().clone(),
+        value: v.required("value").unwrap().clone(),
+        parent_id: f(f(v, "metadata"), "parentId").as_js_string().cloned(),
+        content_hash: hash_json(v.required("value").unwrap()).unwrap(),
+    }
+}
+impl Store for World {
+    fn root_object_id(&self) -> Option<JsString> {
+        self.root.clone()
+    }
+    fn contract_version(&self, _: &str) -> IvyResult<String> {
+        Ok("1.0.0".into())
+    }
+    fn retired_operation(&self, _: &JsString, _: &JsString) -> IvyResult<bool> {
+        unreachable!()
+    }
+    fn local_key(&self, id: &JsString) -> IvyResult<Option<String>> {
+        self.replay
+            .call("localKey", [Json::String(id.clone())])
+            .map(|v| v.as_js_string().map(|s| s.to_utf8().unwrap()))
+    }
+    fn complete_local_workflow(&self, id: &JsString, at: &JsString) -> IvyResult<()> {
+        self.replay
+            .call(
+                "complete",
+                [Json::String(id.clone()), Json::String(at.clone())],
+            )
+            .map(|_| ())
+    }
+    async fn named(&self, k: &str, n: &str, p: Option<&JsString>) -> IvyResult<Option<Document>> {
+        let v = self.replay.call(
+            "named",
+            [
+                k.into(),
+                n.into(),
+                p.cloned().map(Json::String).unwrap_or(Json::Null),
+            ],
+        )?;
+        Ok((!v.is_null()).then(|| doc(&v)))
+    }
+    async fn read(&self, k: &str, a: &Json, p: bool) -> IvyResult<Document> {
+        Ok(doc(&self
+            .replay
+            .call("read", [k.into(), a.clone(), p.into()])?))
+    }
+    async fn write(&self, k: &str, v: &Json, m: &str, d: &Json) -> IvyResult<Json> {
+        self.replay
+            .call("write", [k.into(), v.clone(), m.into(), d.clone()])
+    }
+    async fn prepared_mutation_id(&self, _: &str) -> IvyResult<JsString> {
+        unreachable!()
+    }
+    async fn write_prepared(&self, _: &str, _: &Json, _: &JsString, _: &Json) -> IvyResult<Json> {
+        unreachable!()
+    }
+}
+impl CoordinationStore for World {
+    fn operation_gates(&self, id: &JsString) -> IvyResult<Vec<JsString>> {
+        Ok(self
+            .replay
+            .call("gateNames", [Json::String(id.clone())])?
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_js_string().unwrap().clone())
+            .collect())
+    }
+    fn retain_operation_gates(&self, id: &JsString, n: &[JsString]) -> IvyResult<()> {
+        self.replay
+            .call(
+                "retainGates",
+                [
+                    Json::String(id.clone()),
+                    Json::Array(n.iter().cloned().map(Json::String).collect()),
+                ],
+            )
+            .map(|_| ())
+    }
+    fn pending_coordination(&self) -> IvyResult<Option<Json>> {
+        self.replay
+            .call("pending", [])
+            .map(|v| (!v.is_null()).then_some(v))
+    }
+    async fn named_gate(&self, n: &JsString) -> IvyResult<Option<Document>> {
+        let v = self.replay.call(
+            "named",
+            [
+                "task-board/coordination".into(),
+                Json::String(n.clone()),
+                Json::Null,
+            ],
+        )?;
+        Ok((!v.is_null()).then(|| doc(&v)))
+    }
+}
+impl ExecutionStore for World {
+    fn release_workspace_operation(&self, id: &JsString) -> IvyResult<()> {
+        self.replay
+            .call("workspaceRelease", [Json::String(id.clone())])
+            .map(|_| ())
+    }
+}
+struct Bindings(Arc<Replay>);
+impl ExecutionCategories for Bindings {
+    async fn normalize(&self, v: &JsString) -> IvyResult<JsString> {
+        self.0
+            .call("normalize", [Json::String(v.clone())])
+            .map(|v| v.as_js_string().unwrap().clone())
+    }
+    async fn revalidate(&self, v: &JsString) -> IvyResult<JsString> {
+        self.0
+            .call("revalidate", [Json::String(v.clone())])
+            .map(|v| v.as_js_string().unwrap().clone())
+    }
+}
+impl ExecutionProofs for Bindings {
+    type Transcript = Json;
+    async fn owner_stopped(&self, v: &Json) -> IvyResult<bool> {
+        self.0
+            .call("ownerStopped", [v.clone()])
+            .map(|v| v.as_bool().unwrap())
+    }
+    async fn verify_transcript(&self, r: &Json, a: &Json) -> IvyResult<Json> {
+        self.0
+            .call("transcript", ["board".into(), r.clone(), a.clone()])
+    }
+}
+impl ExecutionPublication<Json> for Bindings {
+    async fn publish(
+        &self,
+        op: &Document,
+        t: Option<&Json>,
+        n: Option<&JsString>,
+    ) -> IvyResult<Json> {
+        self.0.call(
+            "publish",
+            [
+                op.pin.clone(),
+                op.value.clone(),
+                t.cloned().unwrap_or(Json::Null),
+                n.cloned().map(Json::String).unwrap_or(Json::Null),
+            ],
+        )
+    }
+}
+impl ExecutionReadScope for Bindings {
+    async fn with_read_cache<F: Future<Output = IvyResult<Json>>>(
+        &self,
+        work: F,
+    ) -> IvyResult<Json> {
+        self.0.call("cache", [])?;
+        work.await
+    }
+}
+#[derive(Default)]
+struct Executor<'a> {
+    work: RefCell<VecDeque<Pin<Box<dyn Future<Output = ()> + 'a>>>>,
+}
+impl<'a> ReconcileExecutor<'a> for Executor<'a> {
+    fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + 'a>>) {
+        self.work.borrow_mut().push_back(f)
+    }
+}
+impl Executor<'_> {
+    async fn drive<F: Future>(&self, f: F) -> F::Output {
+        let mut f = Box::pin(f);
+        let mut result = None;
+        poll_fn(|cx| {
+            if result.is_none() {
+                if let Poll::Ready(v) = f.as_mut().poll(cx) {
+                    result = Some(v)
+                }
+            }
+            let mut tasks = std::mem::take(&mut *self.work.borrow_mut());
+            let mut pending = VecDeque::new();
+            while let Some(mut f) = tasks.pop_front() {
+                if f.as_mut().poll(cx).is_pending() {
+                    pending.push_back(f)
+                }
+            }
+            self.work.borrow_mut().extend(pending);
+            if result.is_some() && self.work.borrow().is_empty() {
+                Poll::Ready(result.take().unwrap())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
+    }
+}
+async fn assert_execution_rows(rows: &[Json]) -> Vec<Json> {
+    let mut results = Vec::new();
+    for row in rows {
+        let replay = Arc::new(Replay {
+            steps: Mutex::new(
+                f(row, "boundaries")
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .cloned()
+                    .collect(),
+            ),
+            name: s(row, "name").clone(),
+        });
+        let root = f(row, "options")
+            .get("root")
+            .map(|v| v.as_js_string().cloned())
+            .unwrap_or(Some("root".into()));
+        let operations = Operations {
+            store: World {
+                replay: replay.clone(),
+                root,
+            },
+            now: || "2026-01-02T03:04:05.006Z".to_owned(),
+        };
+        let principal = JsString::from("board");
+        let bindings = Bindings(replay.clone());
+        let components = ExecutionComponents {
+            categories: &bindings,
+            proofs: &bindings,
+            publication: &bindings,
+            read_scope: &bindings,
+        };
+        let cached = CachedExecution {
+            operations: &operations,
+            principal_id: &principal,
+            services: &components,
+        };
+        let executor = Executor::default();
+        let queue = ExecutionQueue::new(&cached, &executor);
+        let gates = PublicationCoordination {
+            store: &operations.store,
+            principal_id: &principal,
+            now: &operations.now,
+        };
+        let mut outcomes = vec![];
+        for step in f(row, "steps").as_array().unwrap() {
+            let r = match s(step, "method").to_utf8().unwrap().as_str() {
+                "patch" => Ok(Json::Null),
+                "current" => gates
+                    .current(&"TaskBoard publication gate".into())
+                    .await
+                    .map(|d| Json::object([("pin", d.pin), ("value", d.value)])),
+                "acquire" => gates
+                    .acquire(&doc(f(step, "operation")))
+                    .await
+                    .map(|_| Json::Null),
+                "reserved" => gates
+                    .reserved(&doc(f(step, "operation")))
+                    .await
+                    .map(Json::Bool),
+                "release" => gates
+                    .release(&"op".into(), f(step, "reserved").as_bool().unwrap_or(false))
+                    .await
+                    .map(|_| Json::Null),
+                "unstarted" => gates.release_unstarted(&"op".into()).await.map(Json::Bool),
+                "pending" => gates.pending().map(|v| v.unwrap_or(Json::Null)),
+                "failure" => {
+                    let e = f(step, "cause");
+                    cached
+                        .failed_publication(&"op".into(), supplied_cause(e))
+                        .await
+                }
+                "recordFailure" => operations
+                    .failure(&"op".into(), &supplied_cause(f(step, "cause")), false)
+                    .await
+                    .map(|document| {
+                        Json::object([("pin", document.pin), ("value", document.value)])
+                    }),
+                "cached" => cached.execute_cached(doc(f(step, "operation"))).await,
+                "queue" => {
+                    let first = queue.execute(doc(f(step, "operation"))).unwrap();
+                    let second = queue.execute(doc(f(step, "operation"))).unwrap();
+                    executor
+                        .drive(async {
+                            Ok(Json::Array(vec![
+                                outcome(first.await),
+                                outcome(second.await),
+                            ]))
+                        })
+                        .await
+                }
+                "drop" => {
+                    drop(queue.execute(doc(f(step, "operation"))).unwrap());
+                    executor.drive(queue.settled()).await;
+                    Ok(Json::Null)
+                }
+                "execute" => {
+                    executor
+                        .drive(queue.execute(doc(f(step, "operation"))).unwrap())
+                        .await
+                }
+                k => panic!("Unknown execution action {k}"),
+            };
+            outcomes.push(outcome(r));
+        }
+        executor.drive(queue.settled()).await;
+        let actual = Json::object([("outcomes", Json::Array(outcomes))]);
+        assert_eq!(
+            hash_json(&actual).unwrap(),
+            s(row, "expectedHash").to_utf8().unwrap(),
+            "{:?}: actual {actual:?}, expected {:?}",
+            replay.name,
+            f(row, "expected")
+        );
+        assert!(
+            replay.steps.lock().unwrap().is_empty(),
+            "{:?}: unconsumed execution boundaries",
+            replay.name
+        );
+        results.push(Json::object([
+            ("name", f(row, "name").clone()),
+            ("actual", actual),
+        ]));
+    }
+    results
+}
+
+fn supplied_cause(value: &Json) -> IvyError {
+    let mut error = IvyError::new_js(s(value, "code").clone(), s(value, "message").clone());
+    if let Some(outcome) = value.get("outcome") {
+        error = error.with_provider_outcome(outcome.clone());
+    }
+    if let Some(details) = value.get("details") {
+        error = error.with_details(details.clone());
+    }
+    error
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn publication_gates_and_retained_execution_match_original_recovery() {
+    assert_execution_rows(data().as_array().unwrap()).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn raw_outcome_projection_replay_and_uncertainty_match_frozen_engine() {
+    let fixture = parse(
+        &std::fs::read_to_string(std::env::var("IVY_TASK_BOARD_OUTCOME_FIXTURE").unwrap()).unwrap(),
+        MANAGEMENT_FRAME_BYTES,
+    )
+    .unwrap();
+    let results =
+        assert_execution_rows(fixture.required("cases").unwrap().as_array().unwrap()).await;
+    std::fs::write(
+        std::env::var("IVY_TASK_BOARD_OUTCOME_NATIVE").unwrap(),
+        ivy_contracts::json::stringify(&Json::Array(results), usize::MAX).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_owner_work_coalesces_survives_caller_loss_and_drains() {
+    use ivy_task_board::engine_execution::ExecutionProgram;
+    use std::{cell::Cell, task::Waker};
+    struct Program {
+        calls: Cell<usize>,
+        open: Cell<bool>,
+        waiter: RefCell<Option<Waker>>,
+        fail: bool,
+    }
+    impl ExecutionProgram for Program {
+        async fn run(&self, operation: Document) -> IvyResult<Json> {
+            self.calls.set(self.calls.get() + 1);
+            poll_fn(|cx| {
+                if self.open.get() {
+                    Poll::Ready(())
+                } else {
+                    *self.waiter.borrow_mut() = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+            })
+            .await;
+            if self.fail {
+                Err(IvyError::new("fixture_unknown", "Retained uncertain work.")
+                    .with_outcome(Outcome::Unknown))
+            } else {
+                Ok(operation.value)
+            }
+        }
+    }
+    let operation = |id: &str, value: &str| {
+        let value = Json::String(value.into());
+        Document {
+            pin: Json::object([("objectId", id.into()), ("revision", Json::Number(1.0))]),
+            content_hash: hash_json(&value).unwrap(),
+            value,
+            parent_id: None,
+        }
+    };
+    for fail in [false, true] {
+        let program = Program {
+            calls: Cell::new(0),
+            open: Cell::new(false),
+            waiter: RefCell::new(None),
+            fail,
+        };
+        let executor = Executor::default();
+        let queue = ExecutionQueue::new(&program, &executor);
+        drop(queue.execute(operation("one", "first")).unwrap());
+        let duplicate = queue
+            .execute(operation("one", "ignored replacement"))
+            .unwrap();
+        let other = queue.execute(operation("two", "second")).unwrap();
+        let mut drain = Box::pin(queue.settled());
+        poll_fn(|cx| {
+            let mut tasks = std::mem::take(&mut *executor.work.borrow_mut());
+            assert_eq!(tasks.len(), 2);
+            while let Some(mut task) = tasks.pop_front() {
+                assert!(task.as_mut().poll(cx).is_pending());
+                executor.work.borrow_mut().push_back(task);
+            }
+            assert!(drain.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(program.calls.get(), 2);
+        program.open.set(true);
+        program.waiter.borrow_mut().take().unwrap().wake();
+        let results = executor
+            .drive(async { [duplicate.await, other.await] })
+            .await;
+        if fail {
+            for result in results {
+                assert_eq!(result.unwrap_err().outcome, Outcome::Unknown)
+            }
+        } else {
+            assert_eq!(results[0].as_ref().unwrap(), &Json::from("first"));
+            assert_eq!(results[1].as_ref().unwrap(), &Json::from("second"));
+        }
+        executor.drive(drain).await;
+        assert!(executor.work.borrow().is_empty());
+        let result = executor
+            .drive(queue.execute(operation("one", "later")).unwrap())
+            .await;
+        assert_eq!(program.calls.get(), 3);
+        if fail {
+            assert!(result.is_err())
+        } else {
+            assert_eq!(result.unwrap(), Json::from("later"))
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn interrupted_execution_releases_identity_and_wakes_reply_and_drain_observers() {
+    use ivy_task_board::engine_execution::ExecutionProgram;
+    use std::cell::Cell;
+    struct Program {
+        panic: Cell<bool>,
+        calls: Cell<usize>,
+    }
+    impl ExecutionProgram for Program {
+        async fn run(&self, operation: Document) -> IvyResult<Json> {
+            self.calls.set(self.calls.get() + 1);
+            assert!(!self.panic.get(), "Interrupted local execution job");
+            Ok(operation.value)
+        }
+    }
+    for poll_before_drop in [false, true] {
+        let program = Program {
+            panic: Cell::new(true),
+            calls: Cell::new(0),
+        };
+        let executor = Executor::default();
+        let queue = ExecutionQueue::new(&program, &executor);
+        let operation = || Document {
+            pin: Json::object([
+                ("objectId", "same-operation".into()),
+                ("revision", Json::Number(1.0)),
+            ]),
+            value: "original operation".into(),
+            content_hash: hash_json(&Json::from("original operation")).unwrap(),
+            parent_id: None,
+        };
+        drop(queue.execute(operation()).unwrap());
+        let mut reply = Box::pin(queue.execute(operation()).unwrap());
+        let mut drain = Box::pin(queue.settled());
+        let mut job = executor.work.borrow_mut().pop_front().unwrap();
+        assert!(
+            executor.work.borrow().is_empty(),
+            "Duplicate stored identity must coalesce"
+        );
+        poll_fn(|cx| {
+            assert!(reply.as_mut().poll(cx).is_pending());
+            assert!(drain.as_mut().poll(cx).is_pending());
+            if poll_before_drop {
+                assert!(
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job
+                        .as_mut()
+                        .poll(cx)))
+                    .is_err()
+                );
+            }
+            Poll::Ready(())
+        })
+        .await;
+        drop(job);
+        let result = poll_fn(|cx| Poll::Ready(reply.as_mut().poll(cx))).await;
+        let Poll::Ready(Err(error)) = result else {
+            panic!("Interrupted execution left a stale active identity and pending reply");
+        };
+        assert_eq!(error.code_js(), JsString::from("internal_error"));
+        assert_eq!(error.outcome, Outcome::Unknown);
+        assert_eq!(program.calls.get(), usize::from(poll_before_drop));
+        executor.drive(drain).await;
+        // A later recovery must execute the saved operation again, not observe
+        // the orphaned completion from the interrupted owner job.
+        program.panic.set(false);
+        let recovered = executor
+            .drive(queue.execute(operation()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(recovered, Json::from("original operation"));
+        assert_eq!(program.calls.get(), usize::from(poll_before_drop) + 1);
+        executor.drive(queue.settled()).await;
+    }
+}

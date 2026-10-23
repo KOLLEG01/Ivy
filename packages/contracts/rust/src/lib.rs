@@ -25,6 +25,7 @@ pub mod read_request;
 pub mod schema;
 mod schema_lookup;
 pub mod secretary_schema;
+pub mod task_board_questions;
 pub mod ui_route;
 pub mod validation;
 pub mod whatwg_url;

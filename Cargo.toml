@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["packages/contracts/rust","packages/store","packages/sdk/rust","packages/host-runtime/rust","packages/cli/rust","services/agent-manager/rust","services/chat-bridge/rust","services/dashboards/rust","services/secretary/rust","services/service-manager/rust","services/host-executor/rust","services/hive/rust","services/data-collector/rust"]
+members = ["packages/contracts/rust","packages/store","packages/sdk/rust","packages/host-runtime/rust","packages/cli/rust","services/agent-manager/rust","services/chat-bridge/rust","services/dashboards/rust","services/secretary/rust","services/service-manager/rust","services/host-executor/rust","services/hive/rust","services/data-collector/rust","services/task-board/rust"]
 
 [workspace.package]
 version = "0.2.40"

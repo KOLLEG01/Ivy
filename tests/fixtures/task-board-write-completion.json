@@ -1,0 +1,83 @@
+{
+  "value_only_root": {
+    "cacheKeys": [
+      "task-board/review:task:2:true"
+    ],
+    "returned": {
+      "objectId": "task",
+      "revision": 2
+    },
+    "seedValueIsClone": true,
+    "cloneAliases": true,
+    "cloneSourceIsolated": true,
+    "cloneVersion": 1,
+    "metadataIsSource": true,
+    "revisionIsSource": true,
+    "metadataAliasIsSource": true,
+    "metadataAliasIsSeparateFromClone": true,
+    "metadataVersion": 2,
+    "metadataCycle": true,
+    "metadataUndefined": true,
+    "revisionSparse": true,
+    "lateMetadata": "after",
+    "lateRevision": "after"
+  },
+  "canonical_after_invalidation": {
+    "ivy": {
+      "code": -32602,
+      "message": "Value is outside the JSON domain.",
+      "data": {
+        "code": "invalid_arguments",
+        "outcome": "not_executed"
+      }
+    },
+    "remaining": [
+      "other"
+    ]
+  },
+  "key_after_invalidation": {
+    "javascript": {
+      "kind": "TypeError",
+      "message": "Cannot convert object to primitive value"
+    },
+    "remaining": [
+      "other"
+    ]
+  },
+  "key_collision": {
+    "keys": [
+      "task-board/review:task:1:true:true:false"
+    ],
+    "returned": {
+      "objectId": "task:1:true",
+      "revision": "true"
+    },
+    "readPin": {
+      "objectId": "task:1:true",
+      "revision": "true"
+    },
+    "readValue": {
+      "marker": "cached-write"
+    },
+    "readMetadataParent": "other-root",
+    "readIsSeparateRoot": true
+  },
+  "postawait_context": {
+    "before": [],
+    "after": [
+      "task-board/review:task:2:true"
+    ]
+  },
+  "no_cache": {
+    "returned": {
+      "objectId": "task",
+      "revision": 2
+    }
+  },
+  "source_cause": {
+    "same": true,
+    "remaining": [
+      "same"
+    ]
+  }
+}

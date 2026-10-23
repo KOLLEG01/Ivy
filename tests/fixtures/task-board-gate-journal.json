@@ -1,0 +1,303 @@
+{
+  "timestamp": "2026-10-22T09:30:00.000Z",
+  "trigger": "CREATE TABLE clear_refusal(gate_id TEXT NOT NULL);\nCREATE TRIGGER refuse_gate_clear BEFORE INSERT ON revisions\nWHEN NEW.id IN (SELECT gate_id FROM clear_refusal) AND json_extract(NEW.value_json,'$.activeOperation') IS NULL\nBEGIN SELECT RAISE(ABORT,'gate clear refused'); END;",
+  "cases": [
+    {
+      "name": "release_clear_sql_failure",
+      "request": {
+        "action": "comment",
+        "operationId": "intent",
+        "taskId": "task"
+      },
+      "actor": {
+        "principalId": "caller",
+        "source": "worker"
+      },
+      "allocated": [
+        "6f1af3ee-0797-42a0-88c6-bbb51021c64a",
+        "efbb000e-3a4b-4056-b7a9-a79550a003e7",
+        "1a847b93-19e2-4966-aaa4-fc7e61677c22"
+      ],
+      "sqlFailure": true,
+      "saved": {
+        "actor": {
+          "principalId": "caller",
+          "source": "worker"
+        },
+        "callerPrincipalId": "caller",
+        "createdAt": "2026-10-22T09:30:00.000Z",
+        "error": {
+          "code": "invalid_arguments",
+          "execution": "not_executed",
+          "message": "Refused before publication."
+        },
+        "operationId": "intent",
+        "outcome": null,
+        "phase": "failed",
+        "request": {
+          "action": "comment",
+          "operationId": "intent",
+          "taskId": "task"
+        },
+        "requestHash": "sha256:ecaea986fd54156294d29becb91ec3a8c1193ed96f8816f52a157a86f919e041",
+        "schemaVersion": 1,
+        "updatedAt": "2026-10-22T09:30:00.000Z",
+        "writes": []
+      },
+      "heads": [
+        {
+          "id": "efbb000e-3a4b-4056-b7a9-a79550a003e7",
+          "name": "TaskBoard publication gate",
+          "revision": 3,
+          "value": {
+            "activeOperation": null,
+            "principalId": "board",
+            "schemaVersion": 1,
+            "updatedAt": "2026-10-22T09:30:00.000Z"
+          }
+        },
+        {
+          "id": "1a847b93-19e2-4966-aaa4-fc7e61677c22",
+          "name": "TaskBoard publication gate task",
+          "revision": 2,
+          "value": {
+            "activeOperation": {
+              "objectId": "6f1af3ee-0797-42a0-88c6-bbb51021c64a",
+              "revision": 1
+            },
+            "principalId": "board",
+            "schemaVersion": 1,
+            "updatedAt": "2026-10-22T09:30:00.000Z"
+          }
+        }
+      ],
+      "owners": [
+        {
+          "gate_id": "1a847b93-19e2-4966-aaa4-fc7e61677c22",
+          "operation_id": "6f1af3ee-0797-42a0-88c6-bbb51021c64a"
+        }
+      ],
+      "cleanup": [
+        {
+          "root_id": "6f1af3ee-0797-42a0-88c6-bbb51021c64a",
+          "delete_after": "2026-10-22T09:30:00.000Z"
+        }
+      ],
+      "workspace": 0,
+      "retainedNames": [
+        "TaskBoard publication gate",
+        "TaskBoard publication gate task"
+      ],
+      "revisionCounts": [
+        {
+          "id": "1a847b93-19e2-4966-aaa4-fc7e61677c22",
+          "count": 1
+        },
+        {
+          "id": "6f1af3ee-0797-42a0-88c6-bbb51021c64a",
+          "count": 2
+        },
+        {
+          "id": "efbb000e-3a4b-4056-b7a9-a79550a003e7",
+          "count": 1
+        }
+      ],
+      "transactionReleased": true
+    },
+    {
+      "name": "unstarted_clear_sql_failure",
+      "request": {
+        "action": "comment",
+        "operationId": "intent",
+        "taskId": "task"
+      },
+      "actor": {
+        "principalId": "caller",
+        "source": "worker"
+      },
+      "allocated": [
+        "2ce89b3b-f025-4530-af04-3837b44eccac",
+        "1ed245d4-baee-4b68-a437-a15c869e1fe6",
+        "588a7921-159e-4728-9267-667e570fe909"
+      ],
+      "sqlFailure": true,
+      "saved": {
+        "actor": {
+          "principalId": "caller",
+          "source": "worker"
+        },
+        "callerPrincipalId": "caller",
+        "createdAt": "2026-10-22T09:30:00.000Z",
+        "error": null,
+        "operationId": "intent",
+        "outcome": null,
+        "phase": "accepted",
+        "request": {
+          "action": "comment",
+          "operationId": "intent",
+          "taskId": "task"
+        },
+        "requestHash": "sha256:ecaea986fd54156294d29becb91ec3a8c1193ed96f8816f52a157a86f919e041",
+        "schemaVersion": 1,
+        "updatedAt": "2026-10-22T09:30:00.000Z",
+        "writes": []
+      },
+      "heads": [
+        {
+          "id": "1ed245d4-baee-4b68-a437-a15c869e1fe6",
+          "name": "TaskBoard publication gate",
+          "revision": 3,
+          "value": {
+            "activeOperation": null,
+            "principalId": "board",
+            "schemaVersion": 1,
+            "updatedAt": "2026-10-22T09:30:00.000Z"
+          }
+        },
+        {
+          "id": "588a7921-159e-4728-9267-667e570fe909",
+          "name": "TaskBoard publication gate task",
+          "revision": 2,
+          "value": {
+            "activeOperation": {
+              "objectId": "2ce89b3b-f025-4530-af04-3837b44eccac",
+              "revision": 1
+            },
+            "principalId": "board",
+            "schemaVersion": 1,
+            "updatedAt": "2026-10-22T09:30:00.000Z"
+          }
+        }
+      ],
+      "owners": [
+        {
+          "gate_id": "588a7921-159e-4728-9267-667e570fe909",
+          "operation_id": "2ce89b3b-f025-4530-af04-3837b44eccac"
+        }
+      ],
+      "cleanup": [],
+      "workspace": 0,
+      "retainedNames": [
+        "TaskBoard publication gate",
+        "TaskBoard publication gate task"
+      ],
+      "revisionCounts": [
+        {
+          "id": "1ed245d4-baee-4b68-a437-a15c869e1fe6",
+          "count": 1
+        },
+        {
+          "id": "2ce89b3b-f025-4530-af04-3837b44eccac",
+          "count": 1
+        },
+        {
+          "id": "588a7921-159e-4728-9267-667e570fe909",
+          "count": 1
+        }
+      ],
+      "transactionReleased": true
+    },
+    {
+      "name": "final_catch_release_sql_failure",
+      "request": {
+        "action": "comment",
+        "operationId": "intent",
+        "taskId": "task"
+      },
+      "actor": {
+        "principalId": "caller",
+        "source": "worker"
+      },
+      "allocated": [
+        "ee60a06a-1fe9-47fe-b2c2-9536432d50df",
+        "73cfb131-67b0-4b14-b775-ac32d6b1ae79",
+        "a8ff3940-4ab8-4cd2-9a5a-d03896211f4e"
+      ],
+      "sqlFailure": true,
+      "saved": {
+        "actor": {
+          "principalId": "caller",
+          "source": "worker"
+        },
+        "callerPrincipalId": "caller",
+        "createdAt": "2026-10-22T09:30:00.000Z",
+        "error": {
+          "code": "invalid_arguments",
+          "execution": "not_executed",
+          "message": "Refused before publication."
+        },
+        "operationId": "intent",
+        "outcome": null,
+        "phase": "failed",
+        "request": {
+          "action": "comment",
+          "operationId": "intent",
+          "taskId": "task"
+        },
+        "requestHash": "sha256:ecaea986fd54156294d29becb91ec3a8c1193ed96f8816f52a157a86f919e041",
+        "schemaVersion": 1,
+        "updatedAt": "2026-10-22T09:30:00.000Z",
+        "writes": []
+      },
+      "heads": [
+        {
+          "id": "73cfb131-67b0-4b14-b775-ac32d6b1ae79",
+          "name": "TaskBoard publication gate",
+          "revision": 3,
+          "value": {
+            "activeOperation": null,
+            "principalId": "board",
+            "schemaVersion": 1,
+            "updatedAt": "2026-10-22T09:30:00.000Z"
+          }
+        },
+        {
+          "id": "a8ff3940-4ab8-4cd2-9a5a-d03896211f4e",
+          "name": "TaskBoard publication gate task",
+          "revision": 2,
+          "value": {
+            "activeOperation": {
+              "objectId": "ee60a06a-1fe9-47fe-b2c2-9536432d50df",
+              "revision": 1
+            },
+            "principalId": "board",
+            "schemaVersion": 1,
+            "updatedAt": "2026-10-22T09:30:00.000Z"
+          }
+        }
+      ],
+      "owners": [
+        {
+          "gate_id": "a8ff3940-4ab8-4cd2-9a5a-d03896211f4e",
+          "operation_id": "ee60a06a-1fe9-47fe-b2c2-9536432d50df"
+        }
+      ],
+      "cleanup": [
+        {
+          "root_id": "ee60a06a-1fe9-47fe-b2c2-9536432d50df",
+          "delete_after": "2026-10-22T09:30:00.000Z"
+        }
+      ],
+      "workspace": 1,
+      "retainedNames": [
+        "TaskBoard publication gate",
+        "TaskBoard publication gate task"
+      ],
+      "revisionCounts": [
+        {
+          "id": "73cfb131-67b0-4b14-b775-ac32d6b1ae79",
+          "count": 1
+        },
+        {
+          "id": "a8ff3940-4ab8-4cd2-9a5a-d03896211f4e",
+          "count": 1
+        },
+        {
+          "id": "ee60a06a-1fe9-47fe-b2c2-9536432d50df",
+          "count": 2
+        }
+      ],
+      "transactionReleased": true
+    }
+  ]
+}

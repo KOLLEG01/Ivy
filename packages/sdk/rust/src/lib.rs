@@ -1,5 +1,13 @@
 //! Rust consumer and provider APIs. The public npm SDK remains independent.
 pub use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, Outcome};
+pub use native_project_path::lowercase as lowercase_utf16;
+pub use ivy_contracts::task_board_questions::open_task_questions;
+pub use task_board_records::{
+    upgrade_comment_record, upgrade_configuration_record, upgrade_result_content,
+    upgrade_result_record, upgrade_run_record, upgrade_task_record,
+};
+pub mod task_board_records;
+pub mod task_comments;
 pub mod admission;
 pub mod assessment;
 mod batching;

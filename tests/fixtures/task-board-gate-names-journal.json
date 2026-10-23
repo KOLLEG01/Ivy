@@ -1,0 +1,198 @@
+{
+  "timestamp": "2026-10-22T11:30:00.000Z",
+  "trigger": "CREATE TRIGGER refuse_gate_retention BEFORE INSERT ON operation_gates WHEN NEW.gate_name='TaskBoard publication gate task' BEGIN SELECT RAISE(ABORT,'gate retention refused'); END;",
+  "cases": [
+    {
+      "name": "current_native_gate_indexes",
+      "task": {
+        "schemaVersion": 1,
+        "fields": {
+          "category": "Ivy"
+        },
+        "nextSteps": [
+          {
+            "id": "main",
+            "scope": "original",
+            "requires": []
+          }
+        ],
+        "comments": [],
+        "commentDeliveries": [],
+        "attachments": []
+      },
+      "request": {
+        "action": "nativeUpdate",
+        "operationId": "intent",
+        "taskId": "task",
+        "expectedRevision": 1,
+        "change": {
+          "kind": "snapshot"
+        }
+      },
+      "actor": {
+        "principalId": "caller",
+        "source": "worker"
+      },
+      "allocation": [
+        "task",
+        "4f31f586-9056-4d82-902e-ca0486992395",
+        "e294a19c-bb11-4618-9811-8676d753904d",
+        "52d1a3de-13ca-4ea6-8189-01b80e7303dc"
+      ],
+      "retainedNames": [
+        "TaskBoard publication gate",
+        "TaskBoard publication gate task"
+      ],
+      "owners": [],
+      "heads": [
+        {
+          "id": "e294a19c-bb11-4618-9811-8676d753904d",
+          "name": "TaskBoard publication gate",
+          "revision": 3,
+          "value": {
+            "activeOperation": null,
+            "principalId": "board",
+            "schemaVersion": 1,
+            "updatedAt": "2026-10-22T11:30:00.000Z"
+          }
+        },
+        {
+          "id": "52d1a3de-13ca-4ea6-8189-01b80e7303dc",
+          "name": "TaskBoard publication gate task",
+          "revision": 3,
+          "value": {
+            "activeOperation": null,
+            "principalId": "board",
+            "schemaVersion": 1,
+            "updatedAt": "2026-10-22T11:30:00.000Z"
+          }
+        }
+      ],
+      "revisionCounts": [
+        {
+          "id": "4f31f586-9056-4d82-902e-ca0486992395",
+          "count": 2
+        },
+        {
+          "id": "52d1a3de-13ca-4ea6-8189-01b80e7303dc",
+          "count": 1
+        },
+        {
+          "id": "e294a19c-bb11-4618-9811-8676d753904d",
+          "count": 1
+        },
+        {
+          "id": "task",
+          "count": 1
+        }
+      ],
+      "saved": {
+        "actor": {
+          "principalId": "caller",
+          "source": "worker"
+        },
+        "callerPrincipalId": "caller",
+        "createdAt": "2026-10-22T11:30:00.000Z",
+        "error": {
+          "code": "invalid_arguments",
+          "execution": "not_executed",
+          "message": "Refused before publication."
+        },
+        "operationId": "intent",
+        "outcome": null,
+        "phase": "failed",
+        "request": {
+          "action": "nativeUpdate",
+          "change": {
+            "kind": "snapshot"
+          },
+          "expectedRevision": 1,
+          "operationId": "intent",
+          "taskId": "task"
+        },
+        "requestHash": "sha256:1eb774a43d58ef71f6301df7ef7cfda347bb6a4a275501cae756a267d6aee3b2",
+        "schemaVersion": 1,
+        "updatedAt": "2026-10-22T11:30:00.000Z",
+        "writes": []
+      },
+      "released": true,
+      "transactionReleased": true
+    },
+    {
+      "name": "current_gate_retention_sql_failure",
+      "task": {
+        "schemaVersion": 1,
+        "fields": {
+          "category": "Ivy"
+        },
+        "nextSteps": [
+          {
+            "id": "main",
+            "scope": "original",
+            "requires": []
+          }
+        ],
+        "comments": [],
+        "commentDeliveries": [],
+        "attachments": []
+      },
+      "request": {
+        "action": "nativeUpdate",
+        "operationId": "intent",
+        "taskId": "task",
+        "expectedRevision": 1,
+        "change": {
+          "kind": "snapshot"
+        }
+      },
+      "actor": {
+        "principalId": "caller",
+        "source": "worker"
+      },
+      "allocation": [
+        "task",
+        "315f407d-a97e-4d6a-9a26-d81c1209d1bf"
+      ],
+      "retainedNames": [],
+      "owners": [],
+      "heads": [],
+      "revisionCounts": [
+        {
+          "id": "315f407d-a97e-4d6a-9a26-d81c1209d1bf",
+          "count": 1
+        },
+        {
+          "id": "task",
+          "count": 1
+        }
+      ],
+      "saved": {
+        "actor": {
+          "principalId": "caller",
+          "source": "worker"
+        },
+        "callerPrincipalId": "caller",
+        "createdAt": "2026-10-22T11:30:00.000Z",
+        "error": null,
+        "operationId": "intent",
+        "outcome": null,
+        "phase": "accepted",
+        "request": {
+          "action": "nativeUpdate",
+          "change": {
+            "kind": "snapshot"
+          },
+          "expectedRevision": 1,
+          "operationId": "intent",
+          "taskId": "task"
+        },
+        "requestHash": "sha256:1eb774a43d58ef71f6301df7ef7cfda347bb6a4a275501cae756a267d6aee3b2",
+        "schemaVersion": 1,
+        "updatedAt": "2026-10-22T11:30:00.000Z",
+        "writes": []
+      },
+      "sqlFailure": true,
+      "transactionReleased": true
+    }
+  ]
+}
