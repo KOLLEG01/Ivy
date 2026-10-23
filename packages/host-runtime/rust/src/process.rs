@@ -678,11 +678,15 @@ async fn spawn_resolved_with_stdio(
         tokio::select! {
             observation = async {
                 #[cfg(windows)]
-                if memory_request.is_some() {
-                    let proof = launch_proof.as_mut()
-                        .ok_or_else(|| std::io::Error::other("Limited Job ownership is unavailable."))?;
+                if memory_request.is_some() && launch_proof.is_none() {
+                    return Err(std::io::Error::other("Limited Job ownership is unavailable."));
+                }
+                #[cfg(windows)]
+                if let Some(proof) = launch_proof.as_mut() {
                     loop {
-                        if proof.poll_memory_limit()? {
+                        // Observe births while they still identify this tree. Waiting
+                        // until a long command exits can reopen an unrelated reused PID.
+                        if proof.poll_events()? && memory_request.is_some() {
                             return Ok(());
                         }
                         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -743,7 +747,10 @@ async fn spawn_resolved_with_stdio(
         if let Some(proof) = &mut launch_proof {
             match proof.retire(retirement_deadline).await {
                 Ok(()) => retirement_observation.store(true, std::sync::atomic::Ordering::Release),
-                Err(_) => unknown = true,
+                Err(error) => {
+                    eprintln!("Owned process tree retirement is unconfirmed: {error}");
+                    unknown = true;
+                }
             }
             // A notice can race child exit/stop. Drain it through the same retained
             // owner before publishing Completion, even if retirement is unknown.

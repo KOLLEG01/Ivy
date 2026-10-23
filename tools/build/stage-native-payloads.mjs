@@ -21,7 +21,13 @@ function choices(value, fallback, allowed) {
   return value;
 }
 
-function runtimeAssets(component, root) {
+function runtimeAssets(component, root, os) {
+  if (component === 'host-executor' && os.includes('win32')) {
+    return ['install-windows.ps1', 'bootstrap-maintenance-windows.ps1', 'windows-principal.ps1'].map(name => {
+      const path = 'packages/host-runtime/assets/' + name;
+      return { path, bytes: readFileSync(regular(root, resolve(root, path))) };
+    });
+  }
   if (!['agent-manager', 'service-manager', 'chat-bridge', 'task-board', 'phone-bridge', 'secretary'].includes(component)) return [];
   const assets = [];
   const visit = directory => {
@@ -127,7 +133,7 @@ export function stageNativePayloads({ component, root = process.cwd(), outputRoo
     instructions ??= group.instructions;
     if (instructions.size !== group.instructions.size || [...instructions].some(([name, value]) => !group.instructions.get(name)?.bytes.equals(value.bytes))) throw Error('Native targets have different shared instruction assets.');
   }
-  const assets = runtimeAssets(component, root);
+  const assets = runtimeAssets(component, root, os);
   outputRoot = resolve(outputRoot);
   let parent = outputRoot;
   while (!existsSync(parent)) parent = dirname(parent);

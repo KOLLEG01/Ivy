@@ -349,8 +349,9 @@ impl ProcessEvents {
     }
 }
 impl Proof {
-    pub fn poll_memory_limit(&mut self) -> io::Result<bool> {
+    pub fn poll_events(&mut self) -> io::Result<bool> {
         self.events.drain()?;
+        self.events.signaled()?;
         Ok(self.events.memory_limit_seen)
     }
 
