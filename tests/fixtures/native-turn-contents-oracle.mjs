@@ -1,7 +1,9 @@
 import {existsSync,readFileSync} from 'node:fs';
-import {registerHooks} from 'node:module';
-import {fileURLToPath} from 'node:url';
-registerHooks({resolve(s,c,n){if(s.startsWith('.')&&s.endsWith('.js')){const u=new URL(s.slice(0,-3)+'.ts',c.parentURL);if(existsSync(fileURLToPath(u)))return n(u.href,c);}return n(s,c);}});
+import {registerHooks,createRequire} from 'node:module';
+import {fileURLToPath,pathToFileURL} from 'node:url';
+const require=createRequire(import.meta.url);
+const external=new Map(['ajv/dist/2020.js','re2js'].map(name=>[name,pathToFileURL(require.resolve(name)).href]));
+registerHooks({resolve(s,c,n){if(external.has(s))return n(external.get(s),c);if(s.startsWith('.')&&s.endsWith('.js')){const u=new URL(s.slice(0,-3)+'.ts',c.parentURL);if(existsSync(fileURLToPath(u)))return n(u.href,c);}return n(s,c);}});
 const {readNativeTurnContents,verifyNativeTurnContents}=await import('../../packages/sdk/src/native-turn-contents.ts');
 const {checkedNativeContract}=await import('../../packages/contracts/src/checked-native-contract.ts');
 const {NativeContract}=await import('../../packages/contracts/src/native-contract.ts');
@@ -55,7 +57,7 @@ const mutations={
  error:f=>f.pages[0].reply={error:{code:-32601,message:'Unsupported'}},
  limit:f=>f.snapshot.params.limit=2,query:f=>f.snapshot.params.itemsView='full',order:f=>f.snapshot.params.sortDirection='asc',
  turn:f=>f.snapshot.reply.result.data[0].id='other',turnCount:f=>f.snapshot.reply.result.data=[],
- status:f=>f.snapshot.reply.result.data[0].status='unknown',statusArray:f=>f.snapshot.reply.result.data[0].status=['completed'],
+ status:f=>f.snapshot.reply.result.data[0].status='unknown',
  items:f=>f.snapshot.reply.result.data[0].items=[{}],view:f=>f.snapshot.reply.result.data[0].itemsView='full',
  fallbackCatalog:f=>{f.snapshot.catalogHash='sha256:'+'0'.repeat(64)},unsupportedVersion:f=>{f.snapshot.nativeVersion='unknown'},
 };
@@ -63,8 +65,4 @@ for(const [name,mutate]of Object.entries(mutations)){const f=fixture();mutate(f)
 for(const [name,mutate] of Object.entries(mutations).filter(([n])=>['cursorRepeat','cursorCycle','emptyCursor','numberCursor','missingCursor','prematureEnd','unfinished','emptyIntermediate','oversize','foreignTurn','duplicate','epoch','params'].includes(n))){const f=fixture();mutate(f);await run('read-'+name,{kind:'read',snapshot:f.snapshot,responses:f.pages});}
 for(const fault of ['duplicate','empty','null','array','number']){const f=fixture();const items=f.full.reply.result.data[0].items;if(fault==='duplicate')items[1].id=items[0].id;else if(fault==='empty')items[0].id='';else items[0]=fault==='null'?null:fault==='array'?[]:1;await run('full-'+fault,{kind:'verify',value:f.full});}
 {const f=fixture();f.snapshot.nativeVersion='unknown';await run('contract-error',{kind:'verify',value:f.value,contractError:true});}
-for(const status of [['completed'],[['completed']],{toString:null},null,42,{}])for(const id of ['turn','foreign']){
- const f=fixture();Object.assign(f.full.reply.result.data[0],{status,id});await run('coerced-status-'+JSON.stringify(status)+'-'+id,{kind:'verify',value:f.full});
-}
-{const f=fixture();f.pages[0].reply={error:{code:-32601,message:'Unsupported'}};f.snapshot.reply.result.data[0].status=['completed'];f.full.reply.result.data[0].status=['completed'];await run('fallback-distinct-status-objects',{kind:'read',snapshot:f.snapshot,responses:[f.pages[0],f.full]});}
 process.stdout.write(JSON.stringify(rows));

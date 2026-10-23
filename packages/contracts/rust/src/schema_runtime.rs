@@ -2,7 +2,8 @@
 //! deliberately uses the admitted RE2 engine, separately from built-in schemas.
 use super::{admit_schema, compiler_plan, entries};
 use crate::{
-    IvyError, IvyJson, IvyResult, JsString, hash::hash_json, json::canonical, re2::Re2Pattern,
+    IvyError, IvyJson, IvyResult, JsString, builtin_schema::json_equal, hash::hash_json,
+    json::canonical, re2::Re2Pattern,
 };
 use std::{
     collections::HashMap,
@@ -421,61 +422,8 @@ fn dynamic_targets(nodes: &[Node], root: usize) -> std::collections::HashSet<(us
     targets
 }
 
-/// The original compiler uses fast-deep-equal, whose constructor/coercion checks
-/// differ observably from structural JSON equality for own shadow properties.
-fn equal(left: &IvyJson, right: &IvyJson) -> IvyResult<bool> {
-    fn strict(left: &IvyJson, right: &IvyJson) -> bool {
-        match (left, right) {
-            (IvyJson::Object(_) | IvyJson::Array(_), _)
-            | (_, IvyJson::Object(_) | IvyJson::Array(_)) => std::ptr::eq(left, right),
-            _ => left == right,
-        }
-    }
-    let mut pending = vec![(left, right)];
-    while let Some((left, right)) = pending.pop() {
-        if strict(left, right) {
-            continue;
-        }
-        match (left, right) {
-            (IvyJson::Array(a), IvyJson::Array(b)) => {
-                if a.len() != b.len() {
-                    return Ok(false);
-                }
-                pending.extend(a.iter().zip(b));
-            }
-            (IvyJson::Object(a), IvyJson::Object(b)) => {
-                match (left.get("constructor"), right.get("constructor")) {
-                    (Some(a), Some(b)) if strict(a, b) => {}
-                    (None, None) => {}
-                    _ => return Ok(false),
-                }
-                if left.get("valueOf").is_some() || left.get("toString").is_some() {
-                    return Err(IvyError::internal());
-                }
-                if a.len() != b.len() {
-                    return Ok(false);
-                }
-                let keys = entries(left);
-                for (key, _) in keys.iter().rev() {
-                    if right.get_key(key).is_none() {
-                        return Ok(false);
-                    }
-                }
-                for (key, child) in keys {
-                    pending.push((child, right.get_key(key).unwrap()));
-                }
-            }
-            _ => return Ok(false),
-        }
-    }
-    Ok(true)
-}
-
 fn type_matches(schema: &IvyJson, value: &IvyJson) -> bool {
-    let Some(types) = schema
-        .get("type")
-        .filter(|types| types != &&IvyJson::String(JsString::default()))
-    else {
+    let Some(types) = schema.get("type") else {
         return true;
     };
     let matches = |kind: &IvyJson| match kind.as_str().ok().as_deref() {
@@ -491,8 +439,7 @@ fn type_matches(schema: &IvyJson, value: &IvyJson) -> bool {
     if value.is_null() && schema.get("nullable").and_then(IvyJson::as_bool) == Some(true) {
         return true;
     }
-    types.as_array().map_or_else(
-        || matches(types),
-        |types| types.is_empty() || types.iter().any(matches),
-    )
+    types
+        .as_array()
+        .map_or_else(|| matches(types), |types| types.iter().any(matches))
 }

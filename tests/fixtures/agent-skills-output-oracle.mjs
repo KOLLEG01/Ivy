@@ -56,7 +56,9 @@ try {
     }
     preparation.push({mode:test.mode??'inheritance',defaults,hostId,hive:effectiveHive,replies,expected});
   }
-  const modes=['missing','null','false','zero','empty-string','array-state','object-state','true-state','wrong-version','wrong-authority','v2-empty','v1-empty','owned-same','owned-change','owned-edit','owned-missing','owned-number','unowned','legacy-same','legacy-change','legacy-edit','legacy-target','legacy-nonprefix','invalid-name','invalid-removed','retained-unselected','applied-array','applied-string','applied-bool','applied-number','applied-null','applied-empty-array'];
+  // Keep actual ownership/migration effects; malformed typed state is checked
+  // directly by Rust instead of requiring JavaScript primitive boxing.
+  const modes=['missing','null','array-state','object-state','true-state','wrong-version','wrong-authority','v2-empty','v1-empty','owned-same','owned-change','owned-edit','owned-missing','owned-number','unowned','legacy-same','legacy-change','legacy-edit','legacy-target','legacy-nonprefix','invalid-name','invalid-removed','retained-unselected','applied-array','applied-string','applied-null'];
   const names=['alpha','beta','ivy-managed-alpha','removed'];
   for(const selection of ['one','two','empty','disabled'])for(const mode of modes){
     const base=join(root,'ownership-'+ownership.length),home=join(base,'home'),target=join(base,'skills'),stage=join(base,'desired');await mkdir(home,{recursive:true});await mkdir(target);
@@ -65,7 +67,7 @@ try {
     for(const [name,files]of groups){await writeTree(join(stage,name),files);after.push([name,await original.treeHash(join(stage,name))]);}
     const desiredVersion=original.selectEnvironmentDocument(defaults,null,null).version;
     let state;
-    if(mode==='null')state=null;else if(mode==='false')state=false;else if(mode==='zero')state=0;else if(mode==='empty-string')state='';else if(mode==='array-state')state=[];else if(mode==='object-state')state={};else if(mode==='true-state')state=true;
+    if(mode==='null')state=null;else if(mode==='array-state')state=[];else if(mode==='object-state')state={};else if(mode==='true-state')state=true;
     else if(mode!=='missing')state={schemaVersion:mode.startsWith('legacy-')||mode==='v1-empty'?1:2,authority,applied:{},appliedVersion:'prior'};
     if(mode==='wrong-version')state.schemaVersion=3;
     if(mode==='wrong-authority')state.authority='other';
@@ -82,7 +84,7 @@ try {
     if(mode==='invalid-name')state.applied['../outside']='bad';
     if(mode==='invalid-removed')state.applied['UPPER']='bad';
     if(mode==='retained-unselected'){await writeTree(join(target,'removed'),new Map([['SKILL.md','locally changed']]));state.applied.removed='old hash';}
-    if(mode==='applied-array')state.applied=['bad'];if(mode==='applied-string')state.applied='bad';if(mode==='applied-bool')state.applied=true;if(mode==='applied-number')state.applied=1;if(mode==='applied-null')state.applied=null;if(mode==='applied-empty-array')state.applied=[];
+    if(mode==='applied-array')state.applied=['bad'];if(mode==='applied-string')state.applied='bad';if(mode==='applied-null')state.applied=null;
     const stateDir=join(base,'.ivy-agent-skills-'+digest(target).slice(7,23)),statePath=join(stateDir,'state.json');
     if(state!==undefined){await mkdir(stateDir);await writeFile(statePath,JSON.stringify(state));}
     const beforeTrees=await snapshot(target,names);
@@ -93,5 +95,5 @@ try {
     ownership.push({mode,selection,state:state??null,authority,desiredVersion,after,beforeTrees,expected});
   }
 }finally{await rm(root,{recursive:true,force:true});}
-assert.equal(preparation.length,47);assert.equal(ownership.length,128);
+assert.equal(preparation.length,47);assert.equal(ownership.length,104);
 process.stdout.write(JSON.stringify({preparation,ownership}));

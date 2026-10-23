@@ -1,4 +1,4 @@
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::number_from_string};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 
 /// Admitted CLI syntax. Host configuration, paths and command execution remain
 /// host-runtime responsibilities; admission performs no filesystem operations.
@@ -129,20 +129,46 @@ pub fn parse(args: &[JsString]) -> IvyResult<Arguments> {
             ));
         }
     }
-    let wait_ms = values
-        .get("wait-ms")
-        .and_then(IvyJson::as_js_string)
-        .map_or(0.0, number_from_string);
-    if !wait_ms.is_finite() || wait_ms.fract() != 0.0 || !(0.0..=600_000.0).contains(&wait_ms) {
-        return Err(invalid(
-            "--wait-ms must be a finite integer from 0 to 600000.",
-        ));
-    }
+    let wait_ms = parse_wait_ms(values.get("wait-ms").and_then(IvyJson::as_js_string))?;
     Ok(Arguments {
         command,
         values,
         wait_ms,
     })
+}
+
+fn parse_wait_ms(value: Option<&JsString>) -> IvyResult<f64> {
+    let invalid_wait = || invalid("--wait-ms must be a finite integer from 0 to 600000.");
+    let Some(value) = value else { return Ok(0.0) };
+    let text = value.to_utf8().map_err(|_| invalid_wait())?;
+    // CLI option syntax permits a surrounding BOM with whitespace. NEL is
+    // ordinary input and must reach numeric validation.
+    let text =
+        text.trim_matches(|c: char| c == '\u{feff}' || (c.is_whitespace() && c != '\u{0085}'));
+    // The CLI accepts decimal/exponent and unsigned radix spellings. Its small
+    // bound needs only native integer/float parsing, not generic JSON coercion.
+    let radix = match text.as_bytes().get(..2) {
+        Some(b"0x" | b"0X") => Some(16),
+        Some(b"0o" | b"0O") => Some(8),
+        Some(b"0b" | b"0B") => Some(2),
+        _ => None,
+    };
+    let number = if text.is_empty() {
+        0.0
+    } else if let Some(radix) = radix {
+        let digits = &text[2..];
+        if digits.starts_with('+') {
+            return Err(invalid_wait());
+        }
+        u32::from_str_radix(digits, radix).map_err(|_| invalid_wait())? as f64
+    } else {
+        text.parse::<f64>().map_err(|_| invalid_wait())?
+    };
+    if number.is_finite() && number.fract() == 0.0 && (0.0..=600_000.0).contains(&number) {
+        Ok(number)
+    } else {
+        Err(invalid_wait())
+    }
 }
 
 fn invalid(message: &str) -> IvyError {

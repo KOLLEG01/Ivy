@@ -195,3 +195,146 @@ async fn original_turn_contents_and_owner_call_order_match_typescript() {
         assert_eq!(result, expected, "{}", row["label"]);
     }
 }
+
+fn turn_snapshot(status: IvyJson, view: &str) -> IvyJson {
+    IvyJson::object([
+        ("observationId", view.into()),
+        ("epoch", "epoch".into()),
+        ("method", "thread/turns/list".into()),
+        (
+            "params",
+            IvyJson::object([
+                ("threadId", "thread".into()),
+                ("cursor", IvyJson::Null),
+                ("limit", IvyJson::Number(1.0)),
+                ("sortDirection", "desc".into()),
+                ("itemsView", view.into()),
+            ]),
+        ),
+        (
+            "reply",
+            IvyJson::object([(
+                "result",
+                IvyJson::object([
+                    (
+                        "data",
+                        IvyJson::Array(vec![IvyJson::object([
+                            ("id", "turn".into()),
+                            ("status", status),
+                            ("itemsView", view.into()),
+                            ("items", IvyJson::Array(vec![])),
+                        ])]),
+                    ),
+                    ("nextCursor", IvyJson::Null),
+                ]),
+            )]),
+        ),
+    ])
+}
+fn unsupported_page() -> IvyJson {
+    parse(r#"{"observationId":"page","epoch":"epoch","method":"thread/items/list","params":{"threadId":"thread","turnId":"turn","cursor":null,"limit":16,"sortDirection":"asc"},"reply":{"error":{"code":-32601,"message":"Unsupported"}}}"#, 1024).unwrap()
+}
+
+#[tokio::test]
+async fn native_turn_status_requires_a_string_in_verification_and_fallback_reads() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let retained = CheckedNativeContracts::new(&root);
+    let contract = Arc::new(
+        NativeContract::new(
+            &parse(
+                &std::fs::read_to_string(root.join("specs/native/codex-0.158.0/catalog.json"))
+                    .unwrap(),
+                usize::MAX,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let owner = |replies: Vec<IvyJson>| Owner {
+        replies: Mutex::new(replies.into()),
+        trace: Mutex::new(Vec::new()),
+        contract: contract.clone(),
+        contract_error: false,
+    };
+    let valid = ["inProgress", "completed", "failed", "interrupted"];
+    let mut statuses: Vec<IvyJson> = valid.iter().map(|status| (*status).into()).collect();
+    statuses.extend([
+        "unknown".into(),
+        IvyJson::Array(vec!["completed".into()]),
+        IvyJson::Array(vec![IvyJson::Array(vec!["completed".into()])]),
+        IvyJson::object([("toString", IvyJson::Null)]),
+        IvyJson::Null,
+        IvyJson::Number(42.0),
+        false.into(),
+        IvyJson::object(Vec::<(String, IvyJson)>::new()),
+        IvyJson::String(JsString(vec![0xd800])),
+    ]);
+    for status in statuses {
+        let accepted = status
+            .as_js_string()
+            .is_some_and(|text| valid.iter().any(|s| text == &JsString::from(*s)));
+        let full = turn_snapshot(status.clone(), "full");
+        let result = verify_native_turn_contents(
+            &owner(vec![]),
+            &retained,
+            &full,
+            &"thread".into(),
+            &"turn".into(),
+        )
+        .await;
+        if accepted {
+            assert_eq!(result.unwrap().turn.get("status"), Some(&status));
+        } else {
+            assert_eq!(
+                result
+                    .err()
+                    .expect("non-string/unknown status must fail")
+                    .code,
+                "native_turn_mismatch",
+                "{status:?}"
+            );
+        }
+        let snapshot = turn_snapshot(status.clone(), "notLoaded");
+        let reader = owner(vec![unsupported_page(), full.clone()]);
+        let result = read_native_turn_contents(
+            &reader,
+            &retained,
+            &snapshot,
+            &"thread".into(),
+            &"turn".into(),
+            None,
+        )
+        .await;
+        if accepted {
+            assert_eq!(result.unwrap(), full);
+        } else {
+            assert_eq!(
+                result.unwrap_err().code,
+                "native_turn_mismatch",
+                "{status:?}"
+            );
+            assert_eq!(
+                reader.trace.lock().unwrap().len(),
+                1,
+                "reject before requesting any item page"
+            );
+        }
+        if !accepted {
+            let reader = owner(vec![unsupported_page(), full]);
+            let result = read_native_turn_contents(
+                &reader,
+                &retained,
+                &turn_snapshot("completed".into(), "notLoaded"),
+                &"thread".into(),
+                &"turn".into(),
+                None,
+            )
+            .await;
+            assert_eq!(result.unwrap_err().code, "native_turn_mismatch");
+            assert!(
+                reader.replies.lock().unwrap().is_empty(),
+                "validate the returned full-turn status after both original reads"
+            );
+        }
+    }
+}

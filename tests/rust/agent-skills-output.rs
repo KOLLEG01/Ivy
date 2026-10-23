@@ -138,7 +138,7 @@ async fn authoritative_skills_preparation_matches_original_reads_and_version() {
 #[test]
 fn skills_ownership_migration_collisions_and_retention_match_original_effects() {
     let rows = oracle().get("ownership").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), 128);
+    assert_eq!(rows.len(), 104);
     for (index, row) in rows.iter().enumerate() {
         let after: Vec<(JsString, String)> = row
             .get("after")
@@ -222,5 +222,40 @@ fn skills_ownership_migration_collisions_and_retention_match_original_effects() 
             row.get("mode"),
             row.get("selection")
         );
+    }
+}
+
+#[test]
+fn malformed_skill_ownership_is_refused_before_reading_any_tree() {
+    let malformed = [
+        IvyJson::Bool(false),
+        IvyJson::Bool(true),
+        IvyJson::Number(0.0),
+        IvyJson::from(""),
+        IvyJson::Array(vec![]),
+        IvyJson::Array(vec![IvyJson::Null]),
+    ];
+    for value in &malformed {
+        let error = inspect_ownership(Some(value), "owner", &["alpha".into()], |_| {
+            panic!("invalid ownership must not inspect a skill directory")
+        })
+        .err()
+        .unwrap();
+        assert_eq!(error.code, "target_conflict");
+    }
+    for version in [1.0, 2.0] {
+        for applied in &malformed {
+            let state = IvyJson::object([
+                ("schemaVersion", IvyJson::Number(version)),
+                ("authority", "owner".into()),
+                ("applied", applied.clone()),
+            ]);
+            let error = inspect_ownership(Some(&state), "owner", &["alpha".into()], |_| {
+                panic!("invalid ownership must not inspect a skill directory")
+            })
+            .err()
+            .unwrap();
+            assert_eq!(error.code, "target_conflict");
+        }
     }
 }

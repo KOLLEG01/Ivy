@@ -1,6 +1,6 @@
 //! Compiler branch selection before reference targets are added to the worklist.
 use super::{entries, resources, uri, validate_compiler_keyword_values};
-use crate::{IvyError, IvyJson, IvyResult, JsString};
+use crate::{IvyJson, IvyResult, JsString};
 
 pub struct CompilerNode<'a> {
     pub schema: &'a IvyJson,
@@ -85,8 +85,8 @@ fn has_rules_except_ref(schema: &IvyJson, without_ref: bool) -> bool {
 fn always_valid(schema: &IvyJson) -> bool {
     match schema {
         IvyJson::Bool(value) => *value,
-        IvyJson::Null => false,
-        _ => !has_rules(schema),
+        IvyJson::Object(_) => !has_rules(schema),
+        _ => false,
     }
 }
 
@@ -202,14 +202,6 @@ pub(super) fn walk_scoped<'a>(
                         continue;
                     }
                     if !always_valid(child) {
-                        // getSubschema builds an encoded error path only for an
-                        // active property; encodeURIComponent rejects lone units.
-                        if String::from_utf16(&key.0).is_err() {
-                            return Err(IvyError::new(
-                                "registry_invalid",
-                                "Invalid or unsupported JSON schema.",
-                            ));
-                        }
                         add(keyword, child, Some(key.clone()));
                     }
                 }

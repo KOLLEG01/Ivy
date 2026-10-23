@@ -254,7 +254,7 @@ impl ResponsePort for Response {
             return Err(IvyError::new("head_failure", "Head failed."));
         }
         self.status = status;
-        for (name, value) in ivy_contracts::json::object_entries(&headers) {
+        for (name, value) in headers.as_object().unwrap_or(&[]) {
             self.headers
                 .insert(name.to_utf8().unwrap().to_ascii_lowercase(), value.clone());
         }

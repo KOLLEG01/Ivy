@@ -155,11 +155,26 @@ fn parse(input: &JsString, strict: bool) -> IvyResult<Reference> {
             out.port = Some(if digits.is_empty() {
                 JsString::default()
             } else {
-                let number = crate::json::number_from_string(&part(digits));
-                if strict && number > 65535.0 {
-                    return Err(invalid());
+                let text: String = digits.iter().map(|digit| *digit as u8 as char).collect();
+                if strict {
+                    text.parse::<u16>()
+                        .map_err(|_| invalid())?
+                        .to_string()
+                        .into()
+                } else {
+                    // Resource IDs retain their canonical numeric spelling;
+                    // strict reference resolution admits only actual TCP ports.
+                    let number = text.parse::<f64>().map_err(|_| invalid())?;
+                    if !number.is_finite() {
+                        return Err(invalid());
+                    }
+                    let mut buffer = ryu_js::Buffer::new();
+                    let normalized = buffer.format(number);
+                    if !normalized.bytes().all(|byte| byte.is_ascii_digit()) {
+                        return Err(invalid());
+                    }
+                    normalized.into()
                 }
-                crate::json::js_string(&crate::IvyJson::Number(number))
             });
         }
     }

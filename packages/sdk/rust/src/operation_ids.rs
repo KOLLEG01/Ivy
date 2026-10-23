@@ -59,13 +59,8 @@ fn state(client: &Arc<dyn RpcClient>) -> Arc<State> {
         .clone()
 }
 fn drive(pending: &Pending) {
-    // Like a JS Promise, a started shared request survives an individual waiter.
+    // The lookup continues even when every caller drops its waiter.
     let future = pending.future.clone();
-    // Enter the request before returning to the caller, rather than waiting for
-    // the background task to be scheduled behind a later initialization call.
-    if future.clone().now_or_never().is_some() {
-        return;
-    }
     tokio::spawn(async move {
         let _ = future.await;
     });
@@ -81,25 +76,22 @@ impl State {
         let owner = Arc::downgrade(self);
         let future = async move {
             let result = async {
-                client
+                let status = client
                     .request(
                         "system.status",
                         IvyJson::object(Vec::<(String, IvyJson)>::new()),
                         RequestOptions::default(),
                     )
-                    .await?
-                    .required("runtimeEpoch")?
-                    .as_js_string()
-                    .cloned()
-                    .ok_or_else(|| {
-                        IvyError::new("invalid_frame", "Hive returned an invalid runtime epoch.")
-                    })
+                    .await?;
+                match status.get("runtimeEpoch") {
+                    Some(IvyJson::String(epoch)) => Ok(epoch.clone()),
+                    _ => Err(IvyError::new(
+                        "invalid_frame",
+                        "Hive returned an invalid runtime epoch.",
+                    )),
+                }
             }
             .await;
-            // Promise callbacks settle asynchronously even when request() has
-            // an immediately available result. Keep synchronous sibling starts
-            // attached to this same pending lookup until that settlement.
-            tokio::task::yield_now().await;
             if result.is_err() {
                 if let Some(owner) = owner.upgrade() {
                     let mut entries = owner.entries.lock().unwrap();
@@ -131,14 +123,9 @@ impl State {
         nonce: Option<JsString>,
     ) -> IvyResult<JsString> {
         let epoch = self.epoch(client).await?;
-        let time = u64::try_from(self.clock.utc_millis()).map_err(|_| {
-            IvyError::new("invalid_arguments", "Invalid operation identity fields.")
-        })?;
-        operation_id_js(
-            &epoch,
-            time,
-            &nonce.unwrap_or_else(|| uuid::Uuid::new_v4().to_string().into()),
-        )
+        let time = u64::try_from(self.clock.utc_millis()).map_err(|_| invalid_identity())?;
+        let nonce = nonce.unwrap_or_else(|| uuid::Uuid::new_v4().to_string().into());
+        operation_id_js(&epoch, time, &nonce)
     }
     fn scoped(
         self: &Arc<Self>,
@@ -195,6 +182,10 @@ impl State {
         drive(&pending);
         Ok(future)
     }
+}
+
+fn invalid_identity() -> IvyError {
+    IvyError::new("invalid_arguments", "Invalid operation identity fields.")
 }
 
 /// A started lookup whose original success or failure survives cache eviction.

@@ -4,8 +4,7 @@ use crate::{
     rpc::RequestFuture,
 };
 use ivy_contracts::{
-    checked_native_contract::CheckedNativeContracts,
-    json::{canonical, try_js_string},
+    checked_native_contract::CheckedNativeContracts, json::canonical,
     native_contract::NativeContract,
 };
 use std::{collections::HashSet, future::Future, pin::Pin, sync::Arc};
@@ -105,12 +104,9 @@ fn turn_of<'a>(
     let value = &data.unwrap()[0];
     require(
         value.get("id").and_then(IvyJson::as_js_string) == Some(turn)
-            && {
-                let status = try_js_string(field(value, "status"))?;
-                ["inProgress", "completed", "failed", "interrupted"]
-                    .iter()
-                    .any(|s| status == JsString::from(*s))
-            }
+            && ["inProgress", "completed", "failed", "interrupted"]
+                .iter()
+                .any(|status| text(value, "status", status))
             && text(value, "itemsView", view)
             && field(value, "items")
                 .as_array()
@@ -328,10 +324,8 @@ pub async fn read_native_turn_contents(
                 .read("thread/turns/list", params, epoch, false)
                 .await?;
             let status = field(turn_of(&full, thread_id, turn_id, "full")?, "status");
-            // Separate JSON observations cannot share an object/array identity.
-            // String(status) admission above does not replace JS strict equality.
             require(
-                status.as_js_string().is_some() && status == field(turn, "status"),
+                status == field(turn, "status"),
                 "native_turn_changed",
                 "The native turn changed while reading its contents.",
             )?;

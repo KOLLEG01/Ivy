@@ -6,7 +6,7 @@ use crate::schema::VERSION;
 use ivy_contracts::{
     IvyError, IvyJson as Json, JsString,
     hash::hash_json,
-    json::{canonical, number_from_string, object_entries, parse, try_js_string},
+    json::{canonical, parse},
     limits::MANAGEMENT_FRAME_BYTES,
     operation::parse_operation_id_js,
 };
@@ -64,15 +64,6 @@ fn at<'a>(value: &'a Json, keys: &[&str]) -> Option<&'a Json> {
 fn is(value: Option<&Json>, expected: &str) -> bool {
     value == Some(&Json::from(expected))
 }
-fn truthy(value: &Json) -> bool {
-    match value {
-        Json::Null => false,
-        Json::Bool(v) => *v,
-        Json::Number(v) => *v != 0.0 && !v.is_nan(),
-        Json::String(v) => !v.0.is_empty(),
-        _ => true,
-    }
-}
 fn terminal(value: &Json) -> bool {
     is(value.get("phase"), "succeeded") || is(value.get("phase"), "failed")
 }
@@ -92,18 +83,7 @@ fn strings(value: &Json) -> HashSet<JsString> {
     found
 }
 fn number(value: &Json) -> StoreResult<f64> {
-    Ok(match value {
-        Json::Number(v) => *v,
-        Json::Null => 0.0,
-        Json::Bool(v) => {
-            if *v {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        _ => number_from_string(&try_js_string(value)?),
-    })
+    value.as_f64().ok_or_else(|| IvyError::internal().into())
 }
 
 impl LocalStore {
@@ -205,15 +185,21 @@ impl LocalStore {
             .unwrap_or_else(|| Ok(Json::Object(vec![])))
     }
     pub fn save_diagnostic_notice_state(&self, scope: &str, value: &mut Json) -> StoreResult<()> {
-        let mut count = object_entries(value).len();
+        let mut count = value.as_object().unwrap_or(&[]).len();
         let mut bytes = encoded(value)?.len();
-        let mut completed = object_entries(value)
+        let mut completed = value
+            .as_object()
+            .unwrap_or(&[])
             .into_iter()
             .filter(|(_, e)| {
-                !e.get("active").is_some_and(truthy)
+                !e.get("active").and_then(Json::as_bool).unwrap_or(false)
                     && e.get("resolvedAt") != Some(&Json::Null)
-                    && at(e, &["alert", "confirmed"]).is_some_and(truthy)
-                    && at(e, &["recovery", "confirmed"]).is_some_and(truthy)
+                    && at(e, &["alert", "confirmed"])
+                        .and_then(Json::as_bool)
+                        .unwrap_or(false)
+                    && at(e, &["recovery", "confirmed"])
+                        .and_then(Json::as_bool)
+                        .unwrap_or(false)
             })
             .map(|(key, entry)| (key.clone(), entry.clone()))
             .collect::<Vec<_>>();
@@ -272,7 +258,7 @@ impl LocalStore {
     fn protected_pins(&self) -> StoreResult<HashSet<String>> {
         let mut result = HashSet::new();
         for (id, main) in self.current("chat-bridge/main")? {
-            let Some(pending) = main.get("pendingAction").filter(|v| truthy(v)) else {
+            let Some(pending) = main.get("pendingAction").filter(|v| !(v).is_null()) else {
                 continue;
             };
             let operation_id = text(pending, "objectId")?;
@@ -290,7 +276,7 @@ impl LocalStore {
                     {
                         result.insert(format!("{id}:{}", rev.as_f64().unwrap_or(0.0)));
                     }
-                    if let Some(resume) = request.get("resumeMain").filter(|v| truthy(v)) {
+                    if let Some(resume) = request.get("resumeMain").filter(|v| !(v).is_null()) {
                         result.insert(format!(
                             "{}:{}",
                             text(resume, "objectId")?,
@@ -414,7 +400,7 @@ impl LocalStore {
                     if let Some(id) = ticket.get("inputId").and_then(Json::as_js_string) {
                         queued_inputs.insert(id.clone());
                     }
-                    if let Some(identity) = ticket.get("identity").filter(|v| truthy(v)) {
+                    if let Some(identity) = ticket.get("identity").filter(|v| !(v).is_null()) {
                         queued_notices.insert(hash_json(&Json::Array(vec![
                             identity.required("senderPrincipalId")?.clone(),
                             identity.required("messageId")?.clone(),
@@ -534,10 +520,7 @@ impl LocalStore {
                 }
                 self.db.execute(
                     "INSERT OR IGNORE INTO retired_operations VALUES(?,?)",
-                    params![
-                        String::from_utf16_lossy(&operation_id.0),
-                        identity.issued_at_unix_ms as i64
-                    ],
+                    params![operation_id.to_utf8()?, identity.issued_at_unix_ms as i64],
                 )?;
                 self.delete_technical_tree(&id, true)?;
                 self.set_marker(

@@ -1,63 +1,127 @@
-use ivy_contracts::{IvyJson, JsString, json::parse};
-use ivy_store::receipts::has_unresolved_outcome_with;
-use std::{cell::Cell, rc::Rc};
-
-struct RawCause;
+use ivy_contracts::{IvyJson, json::parse};
+use ivy_store::receipts::has_unresolved_outcome;
 
 #[test]
-fn coercion_preserves_the_borrowed_value_and_local_raw_cause() {
-    let value = parse(r#"{"nested":[{"phase":{"toString":null}}]}"#, usize::MAX).unwrap();
-    let phase = value.get("nested").unwrap().as_array().unwrap()[0]
-        .get("phase")
-        .unwrap();
-    let cause = Rc::new(RawCause);
-    let calls = Cell::new(0);
-    let result = has_unresolved_outcome_with(&value, &|part| {
-        assert!(std::ptr::eq(part, phase));
-        calls.set(calls.get() + 1);
-        Err(Rc::clone(&cause))
-    });
-    match result {
-        Err(actual) => assert!(Rc::ptr_eq(&actual, &cause)),
-        Ok(_) => panic!("raw coercion failure was swallowed"),
+fn typed_receipt_markers_and_structured_errors_are_detected_without_coercion() {
+    for (text, expected) in [
+        (r#"null"#, false),
+        (r#""unknown""#, false),
+        (r#"{"ordinary":"unknown"}"#, false),
+        (
+            r#"{"phase":"done","state":null,"outcome":"completed"}"#,
+            false,
+        ),
+        (
+            r#"{"error":{"code":-32601,"message":"Unsupported"}}"#,
+            false,
+        ),
+        (
+            r#"{"error":{"code":"known","outcome":"not_executed","details":{"value":"unknown"}}}"#,
+            false,
+        ),
+        (
+            r#"{"code":0,"errorCode":9007199254740991,"error":null}"#,
+            false,
+        ),
+        (r#"{"nested":[{"phase":"unknown"}]}"#, true),
+        (r#"{"owner":{"outcome":"unknown"}}"#, true),
+        (r#"{"execution":"outcome_unknown"}"#, true),
+        (r#"{"state":"needs_attention"}"#, true),
+        (r#"{"error":{"code":"native_epoch_lost"}}"#, true),
+        (
+            r#"{"error":{"code":-1,"data":{"outcome":"unknown"}}}"#,
+            true,
+        ),
+        (r#"{"errorCode":"prefix_outcome_unknown_suffix"}"#, true),
+        (r#"{"code":"\ud800outcome_unknown\udfff"}"#, true),
+        (r#"{"\ud800":{"ownerPhase":"unknown"}}"#, true),
+    ] {
+        assert_eq!(
+            has_unresolved_outcome(&parse(text, usize::MAX).unwrap()).unwrap(),
+            expected,
+            "{text}"
+        );
     }
-    assert_eq!(calls.get(), 1);
+    for phase in ["phase", "state", "ownerPhase", "outcome", "execution"] {
+        for marker in ["unknown", "outcome_unknown", "needs_attention"] {
+            let value = IvyJson::object([(phase, marker.into())]);
+            assert!(has_unresolved_outcome(&value).unwrap());
+        }
+        assert!(!has_unresolved_outcome(&IvyJson::object([(phase, IvyJson::Null)])).unwrap());
+    }
+    // Field insertion and numeric-key enumeration order cannot change a boolean guard.
+    for (first, second) in [("1", "0"), ("01", "1"), ("4294967295", "4294967294")] {
+        for reverse in [false, true] {
+            let mut fields = vec![
+                (
+                    first,
+                    parse(r#"{"code":{"unrecognized":"value"}}"#, 1024).unwrap(),
+                ),
+                (second, parse(r#"{"outcome":"unknown"}"#, 1024).unwrap()),
+            ];
+            if reverse {
+                fields.reverse();
+            }
+            assert!(has_unresolved_outcome(&IvyJson::object(fields)).unwrap());
+        }
+    }
 }
 
 #[test]
-fn coercion_keeps_first_refusal_and_unresolved_short_circuit_order() {
-    for unresolved_first in [true, false] {
-        let malformed = IvyJson::object([("toString", IvyJson::Null)]);
-        let properties = if unresolved_first {
-            [("execution", "outcome_unknown".into()), ("code", malformed)]
-        } else {
-            [("code", malformed), ("execution", "outcome_unknown".into())]
-        };
-        let value = IvyJson::object(properties);
-        let first = value
-            .get(if unresolved_first {
-                "execution"
-            } else {
-                "code"
-            })
-            .unwrap();
-        let cause = Rc::new(RawCause);
-        let calls = Cell::new(0);
-        let result = has_unresolved_outcome_with(&value, &|part| {
-            assert!(std::ptr::eq(part, first));
-            calls.set(calls.get() + 1);
-            match part {
-                IvyJson::String(text) => Ok(JsString::clone(text)),
-                _ => Err(Rc::clone(&cause)),
-            }
-        });
-        match result {
-            Ok(found) => assert!(unresolved_first && found),
-            Err(actual) => {
-                assert!(!unresolved_first);
-                assert!(Rc::ptr_eq(&actual, &cause));
-            }
+fn malformed_non_null_control_fields_conservatively_protect_receipts() {
+    for key in [
+        "phase",
+        "state",
+        "ownerPhase",
+        "outcome",
+        "execution",
+        "error",
+        "errorCode",
+        "code",
+    ] {
+        for text in [
+            "false",
+            "[]",
+            r#"["completed"]"#,
+            r#"[["unknown"]]"#,
+            "{}",
+            r#"{"toString":null}"#,
+        ] {
+            let value = IvyJson::object([(key, parse(text, 1024).unwrap())]);
+            assert!(has_unresolved_outcome(&value).unwrap(), "{key}: {text}");
         }
-        assert_eq!(calls.get(), 1);
+        assert!(!has_unresolved_outcome(&IvyJson::object([(key, IvyJson::Null)])).unwrap());
+    }
+    for key in [
+        "phase",
+        "state",
+        "ownerPhase",
+        "outcome",
+        "execution",
+        "error",
+    ] {
+        for number in [0.0, -1.0, 1.5, 9_007_199_254_740_992.0] {
+            assert!(
+                has_unresolved_outcome(&IvyJson::object([(key, IvyJson::Number(number))])).unwrap()
+            );
+        }
+    }
+    for key in ["code", "errorCode"] {
+        for number in [
+            -9_007_199_254_740_991.0,
+            -32601.0,
+            0.0,
+            9_007_199_254_740_991.0,
+        ] {
+            assert!(
+                !has_unresolved_outcome(&IvyJson::object([(key, IvyJson::Number(number))]))
+                    .unwrap()
+            );
+        }
+        for number in [1.5, f64::NAN, f64::INFINITY, 9_007_199_254_740_992.0] {
+            assert!(
+                has_unresolved_outcome(&IvyJson::object([(key, IvyJson::Number(number))])).unwrap()
+            );
+        }
     }
 }

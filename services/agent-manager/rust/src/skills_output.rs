@@ -1,5 +1,5 @@
 //! Existing skills ownership rules, separate from locked filesystem effects.
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::object_entries};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 
 pub struct SkillsOwnership {
     before: Vec<(JsString, IvyJson)>,
@@ -19,15 +19,6 @@ pub struct SkillsOutput {
 fn conflict(message: &str) -> IvyError {
     IvyError::new("target_conflict", message)
 }
-fn truthy(value: &IvyJson) -> bool {
-    match value {
-        IvyJson::Null => false,
-        IvyJson::Bool(value) => *value,
-        IvyJson::Number(value) => *value != 0.0 && !value.is_nan(),
-        IvyJson::String(value) => !value.0.is_empty(),
-        _ => true,
-    }
-}
 fn valid_name(name: &JsString) -> bool {
     name.0.len() <= 64
         && name.0.first().is_some_and(|c| (97..=122).contains(c))
@@ -44,7 +35,7 @@ pub fn inspect_ownership(
     mut tree_hash: impl FnMut(&JsString) -> IvyResult<Option<String>>,
 ) -> IvyResult<SkillsOwnership> {
     let version = state.and_then(|s| s.get("schemaVersion"));
-    if state.is_some_and(truthy)
+    if state.is_some_and(|state| !state.is_null())
         && (!matches!(version, Some(IvyJson::Number(v)) if *v == 1.0 || *v == 2.0)
             || state.and_then(|s| s.get("authority")) != Some(&IvyJson::from(authority)))
     {
@@ -52,21 +43,10 @@ pub fn inspect_ownership(
     }
     let legacy = version == Some(&IvyJson::Number(1.0));
     let applied = state.and_then(|s| s.get("applied"));
-    // Object.entries boxes primitives. Nonempty arrays/strings have numeric
-    // keys, which fail the exact skill-name rule before any directory read.
-    if matches!(applied, Some(IvyJson::Array(v)) if !v.is_empty())
-        || matches!(applied, Some(IvyJson::String(v)) if !v.0.is_empty())
-    {
-        return Err(conflict(
-            "Managed skill state contains an invalid directory name.",
-        ));
+    if applied.is_some_and(|value| !value.is_null() && value.as_object().is_none()) {
+        return Err(conflict("Managed skill ownership must be an object."));
     }
-    let before: Vec<_> = applied
-        .map(object_entries)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
+    let before: Vec<_> = applied.and_then(IvyJson::as_object).unwrap_or(&[]).to_vec();
     let prefix = JsString::from("ivy-managed-");
     for (name, hash) in &before {
         let skill = if legacy {

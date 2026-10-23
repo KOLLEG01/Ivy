@@ -1,9 +1,5 @@
 use crate::sqlite::error;
-use ivy_contracts::{
-    IvyError, IvyJson, IvyResult, JsString,
-    hash::digest,
-    json::{object_entries, parse, try_js_string},
-};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::digest, json::parse};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 fn count_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<usize> {
@@ -11,44 +7,54 @@ fn count_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<usize
     usize::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
 }
 
-pub fn has_unresolved_outcome(value: &IvyJson) -> IvyResult<bool> {
-    enum Work<'a> {
-        Visit(&'a IvyJson),
-        Property(&'a JsString, &'a IvyJson),
+fn error_code(value: &IvyJson) -> bool {
+    match value {
+        IvyJson::String(_) => true,
+        IvyJson::Number(number) => {
+            number.is_finite() && number.fract() == 0.0 && number.abs() <= 9_007_199_254_740_991.0
+        }
+        _ => false,
     }
-    let mut pending = vec![Work::Visit(value)];
-    while let Some(work) = pending.pop() {
-        match work {
-            Work::Visit(IvyJson::Array(values)) => {
-                pending.extend(values.iter().rev().map(Work::Visit))
-            }
-            Work::Visit(value @ IvyJson::Object(_)) => pending.extend(
-                object_entries(value)
-                    .into_iter()
-                    .rev()
-                    .map(|(k, v)| Work::Property(k, v)),
-            ),
-            Work::Property(key, part) => {
-                let key = key.to_utf8().unwrap_or_default();
-                let phase = ["phase", "state", "ownerPhase", "outcome", "execution"]
-                    .contains(&key.as_str());
-                let error = ["error", "errorCode", "code"].contains(&key.as_str());
-                if phase || error {
-                    let text = try_js_string(part)?;
-                    if (phase
-                        && ["unknown", "outcome_unknown", "needs_attention"]
-                            .iter()
-                            .any(|s| text == JsString::from(*s)))
-                        || (error
-                            && (text.contains_ascii("outcome_unknown")
-                                || ["native_connection_lost", "native_epoch_lost"]
-                                    .iter()
-                                    .any(|s| text == JsString::from(*s))))
-                    {
-                        return Ok(true);
+}
+
+/// Inspect actual string markers throughout an opaque receipt. Null means no
+/// marker; malformed non-null status/code values conservatively stay retained.
+pub fn has_unresolved_outcome(value: &IvyJson) -> IvyResult<bool> {
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            IvyJson::Array(values) => pending.extend(values),
+            IvyJson::Object(fields) => {
+                for (key, part) in fields {
+                    let key = key.to_utf8().unwrap_or_default();
+                    let phase = ["phase", "state", "ownerPhase", "outcome", "execution"]
+                        .contains(&key.as_str());
+                    let error = ["error", "errorCode", "code"].contains(&key.as_str());
+                    if phase || error {
+                        match part {
+                            IvyJson::Null => {}
+                            IvyJson::String(text) => {
+                                if phase
+                                    && ["unknown", "outcome_unknown", "needs_attention"]
+                                        .iter()
+                                        .any(|s| text == &JsString::from(*s))
+                                    || error
+                                        && (text.contains_ascii("outcome_unknown")
+                                            || ["native_connection_lost", "native_epoch_lost"]
+                                                .iter()
+                                                .any(|s| text == &JsString::from(*s)))
+                                {
+                                    return Ok(true);
+                                }
+                            }
+                            IvyJson::Number(_) if key != "error" && error && error_code(part) => {}
+                            IvyJson::Object(_)
+                                if key == "error" && part.get("code").is_some_and(error_code) => {}
+                            _ => return Ok(true),
+                        }
                     }
+                    pending.push(part);
                 }
-                pending.push(Work::Visit(part));
             }
             _ => {}
         }

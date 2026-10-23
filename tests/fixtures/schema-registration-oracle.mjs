@@ -10,11 +10,10 @@ registerHooks({resolve(s,c,n){
   return n(s,c);
 }});
 const {admitSchema}=await import('../../packages/contracts/src/schema.ts');
-const prototypeNames=Object.getOwnPropertyNames(Object.prototype);
 const initial=new Ajv2020({strict:false,validateFormats:false});
 const documents=Object.values(initial.schemas).map(env=>env.schema);
 const ids=['','normal','root','root#','root#/','#','#/','#anchor','#/$defs/a',
-  'http://json-schema.org/schema',...documents.map(s=>s.$id),...prototypeNames];
+  'http://json-schema.org/schema',...documents.map(s=>s.$id)];
 const containsId=value=>value!==null&&typeof value==='object'&&
   (Object.hasOwn(value,'$id')||Object.values(value).some(containsId));
 const rows=[];
@@ -35,7 +34,7 @@ function add(schema){
   }catch{result={ok:false};}
   rows.push({schema:JSON.stringify(schema),result:JSON.stringify(result)});
 }
-for(const schema of [true,false,{},{$id:false},{$id:null},{$id:0},{$id:1},{$id:[]},{$id:{}}])add(schema);
+for(const schema of [true,false,{}])add(schema);
 for(const root of ids){
   add({$id:root});
   for(const child of ids){
@@ -55,11 +54,5 @@ for(const original of documents){
   add({description:{...original,$id:original.$id+'#/'}});
   add({description:{...original,$id:'http://json-schema.org/schema'}});
   add({description:{a:original,b:original}});
-}
-// Constructor-property aliases can replace inherited functions, but aliases
-// resolving to Object.prototype suppress registration instead of installing it.
-for(const name of prototypeNames){
-  add({description:{a:{$id:name},b:{$id:'second'}}});
-  add({$id:name,description:{$id:'#local'}});
 }
 process.stdout.write(JSON.stringify({rows}));

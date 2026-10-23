@@ -11,6 +11,7 @@ registerHooks({resolve(s,c,n){
 }});
 const {admitSchema}=await import('../../packages/contracts/src/schema.ts');
 const rows=[];
+const meta=new Ajv2020({strict:false,validateFormats:false,logger:false});
 const values=[null,false,true,0,-0,1,-1,1.5,'','string','integer','number','object',
   'array','null','boolean','String','unknown','\ud800',[],['string'],['string','null'],
   ['string','string'],['integer',null],[false],[1],['string','unknown'],{},
@@ -21,6 +22,9 @@ const keywords=['type','minimum','maximum','exclusiveMinimum','exclusiveMaximum'
   'examples','deprecated','readOnly','writeOnly','const'];
 function add(schema){
   try{admitSchema(schema);}catch{return;}
+  // Malformed keyword shapes have native admission checks; compare compilation
+  // here only for actual JSON Schema values.
+  if(!meta.validateSchema(schema))return;
   let ok,reason;
   try{
     const compiler=new Ajv2020({strict:false,allErrors:false,ownProperties:true,

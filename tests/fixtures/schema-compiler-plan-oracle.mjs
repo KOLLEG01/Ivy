@@ -30,7 +30,7 @@ function add(input){
   rows.push({schema:JSON.stringify(schema),ok});
 }
 const leaves=[true,false,{}, {type:'string'}, {enum:[]}, {minimum:'bad'},
-  {type:[]}, {format:false}, {required:1}, {$defs:{unused:{minimum:'bad'}}},
+  {format:false}, {required:1}, {$defs:{unused:{minimum:'bad'}}},
   {properties:{x:{type:'number'}}}, {if:{format:false},then:{title:'unused'}}];
 for(const root of [null,'','root','https://example.invalid/a/root','urn:x:root','#tag']){
   for(const child of [null,'child','../other','#local'])for(const leaf of leaves){
@@ -48,7 +48,7 @@ for(const leaf of leaves)for(const name of ['x','a/b','a~b','%78','雪','\ud800'
   add({$defs:{x:{minimum:'bad'},[name]:leaf},$ref:'#/$defs/'+encoded});
   add({description:{value:leaf},$ref:'#/description/value'});
 }
-for(const id of [null,'','root','https://example.invalid/root','constructor','__proto__']){
+for(const id of [null,'','root','https://example.invalid/root']){
   for(const keyword of ['properties','items','additionalProperties']){
     const recursive=keyword==='properties'?{properties:{next:{$ref:'#/$defs/node'}}}:{[keyword]:{$ref:'#/$defs/node'}};
     const target={type:keyword==='items'?'array':'object',...recursive};

@@ -249,22 +249,22 @@ impl CompiledSchema {
                 }
                 Check::Literal(id, input) => {
                     let schema = &self.nodes[id].schema;
-                    result = ResultValue::new(input.with(|value| -> IvyResult<bool> {
+                    result = ResultValue::new(input.with(|value| {
                         if let Some(constant) = schema.get("const") {
-                            if !equal(value, constant)? {
-                                return Ok(false);
+                            if !json_equal(value, constant) {
+                                return false;
                             }
                         }
                         if let Some(choices) = schema.get("enum").and_then(IvyJson::as_array) {
                             for choice in choices {
-                                if equal(value, choice)? {
-                                    return Ok(true);
+                                if json_equal(value, choice) {
+                                    return true;
                                 }
                             }
-                            return Ok(false);
+                            return false;
                         }
-                        Ok(true)
-                    })?);
+                        true
+                    }));
                 }
                 Check::Unique(id, values) => result = ResultValue::new(self.unique(id, values)?),
                 Check::Contains(id, values, root) => {

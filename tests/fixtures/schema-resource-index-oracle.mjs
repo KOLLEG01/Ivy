@@ -53,7 +53,7 @@ for (const anchor of ['', 'a', 'A_1.b-c', '-a', '1a', 'a/b', '\ud800', 'ſ']) {
   add({description:{$anchor:anchor}});
   add({$id:'https://example.invalid/root',description:{$id:'nested',$anchor:anchor,$dynamicAnchor:anchor}});
 }
-for (const id of [null,false,0,1,true,[],{}]) add({$id:id,$defs:{child:{$id:'c'}}});
+// Non-string IDs are covered by native admission checks.
 add({description:{'a/b':{$id:'https://first.invalid/base'},a:{$id:'https://second.invalid/base',b:{nested:{$id:'child'}}}}});
 add({description:{a:{b:{$id:'https://first.invalid/base'}},'a/b':{nested:{$id:'child'}}}});
 add({$id:'https://example.invalid/root',properties:{'a/b':{$id:'one',items:{$id:'two'}}}});

@@ -57,14 +57,11 @@ function add(schema,queries){
   }
   rows.push({schema:JSON.stringify(schema),registered:true,queries:results});
 }
-const pointers=['/$defs/value','/$defs/value/type','/$defs/resource','/$defs/resource/type',
+const pointers=['/$defs/value','/$defs/resource',
   '/$defs/wrapper','/$defs/decorated','/properties/item/items','/description/properties/nested',
-  '/description/$defs/x','/description/constructor','/description/__proto__',
-  '/description/empty','/description/text/length','/description/text/0','/description/list/length',
-  '/description/list/0','/description/null','/description/null/x','/description/number/x',
-  '/description/rawid','/missing','/description/a~1b','/description/a~1b/type',
-  '/description/text/constructor/prototype','/description/__proto__/constructor',
-  '/description/%74ext','/description/%FF','/description/%','/description/~2',
+  '/description/$defs/x','/description/empty','/description/list/0',
+  '/missing','/description/a~1b',
+  '/description/%65mpty','/description/%FF','/description/%','/description/~2',
   '/description/%EF%BF%BD'];
 const ids=['','root','https://example.invalid/a/root','urn:x:root','ws://example.invalid/a','#tag'];
 for(const root of ids)for(const child of ['child','child#part','../other','urn:x:child','https://example.invalid/sub']){
@@ -78,15 +75,13 @@ for(const root of ids)for(const child of ['child','child#part','../other','urn:x
   for(const base of [root||'#','',child,'local-level']){
     for(const pointer of pointers)queries.push([base,'#'+pointer]);
     for(const ref of ['', '#','#/','#anchor','child','annotation-resource#anchor',
-      'constructor','__proto__','http://json-schema.org/schema#/properties/type',
-      'https://json-schema.org/draft/2020-12/schema#/title',
+      'http://json-schema.org/schema#/properties/type',
       'https://json-schema.org/draft/2020-12/meta/validation#/$defs/nonNegativeInteger'])queries.push([base,ref]);
   }
   add(schema,queries);
 }
 for(const schema of [true,false,{}, {description:{$anchor:'a',type:'string'}},
-  {$id:false,description:{$anchor:'a',type:'string'}},
   {description:{a:{$ref:'#/description/b'},b:{$ref:'#/description/a'}}}]){
-  add(schema,[['#','#/description'],['','#/description/a'],['','#a'],['',''],['','constructor'],['','__proto__']]);
+  add(schema,[['#','#/description'],['','#/description/a'],['','#a'],['','']]);
 }
 process.stdout.write(JSON.stringify(rows));

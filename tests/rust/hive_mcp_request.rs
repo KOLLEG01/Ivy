@@ -127,7 +127,7 @@ pub(super) fn execute(
     let defaults=IvyJson::from_serde(&json!({"surface":"ivy","version":"1.2.3","publicBaseUrl":"https://hive.invalid/ivy/","resourceMetadataUrl":"https://hive.invalid/ivy/.well-known/oauth-protected-resource"})).unwrap();
     let mut settings = defaults;
     if let Some(v) = input.get("options") {
-        for (k, v) in ivy_contracts::json::object_entries(v) {
+        for (k, v) in v.as_object().unwrap_or(&[]) {
             settings.insert(k.clone(), v.clone());
         }
     }

@@ -32,8 +32,7 @@ const arrays=['items','allOf','anyOf','oneOf'];
 const skipped=['default','enum','const','required','maximum','minimum','exclusiveMaximum',
   'exclusiveMinimum','multipleOf','maxLength','minLength','pattern','format','maxItems',
   'minItems','uniqueItems','maxProperties','minProperties'];
-const inherited=Object.getOwnPropertyNames(Object.prototype);
-const keys=[...new Set([...maps,...arrays,...skipped,...inherited,'title','description',
+const keys=[...new Set([...maps,...arrays,...skipped,'title','description',
   'examples','if','then','else','not','additionalProperties','propertyNames','contains',
   'additionalItems','custom','0','2','10','01','a/b','a~b','', '\ud800'])];
 for(const key of keys){

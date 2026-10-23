@@ -1,12 +1,9 @@
 use crate::{IvyError, IvyResult, limits::MANAGEMENT_FRAME_BYTES};
 use std::cmp::Ordering;
-#[path = "json_number.rs"]
-mod number;
 #[path = "json_trim.rs"]
 mod text;
 #[path = "json_value.rs"]
 mod value_traits;
-pub use number::number_from_string;
 
 /// ECMAScript string code units, including unpaired surrogates. Ord is UTF-16 order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -718,19 +715,6 @@ impl Encoder {
         }
         Ok(())
     }
-}
-
-/// Own entries of a JSON object in ECMAScript enumeration order: numeric index
-/// keys first, then other keys in insertion order. Other JSON types have no entries.
-pub fn object_entries(value: &IvyJson) -> Vec<(&JsString, &IvyJson)> {
-    let mut entries: Vec<_> = value
-        .as_object()
-        .unwrap_or(&[])
-        .iter()
-        .map(|(k, v)| (k, v))
-        .collect();
-    entries.sort_by_key(|(key, _)| array_index(key).map_or((1, 0), |index| (0, index)));
-    entries
 }
 
 pub(crate) fn array_index(s: &JsString) -> Option<u32> {

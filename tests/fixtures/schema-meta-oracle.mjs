@@ -1,4 +1,4 @@
-import {registerHooks} from 'node:module';
+import {createRequire,registerHooks} from 'node:module';
 import {existsSync,readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {Ajv2020} from 'ajv/dist/2020.js';
@@ -7,6 +7,7 @@ registerHooks({resolve(specifier,context,next){
   return next(specifier,context);
 }});
 const {admitSchema}=await import('../../packages/contracts/src/schema.ts');
+const require=createRequire(import.meta.url);
 const compiler=new Ajv2020({strict:false,allErrors:false,ownProperties:true,inlineRefs:false,validateFormats:false,loopRequired:64,loopEnum:64});
 const rows=[];
 function add(name,schema){
@@ -36,16 +37,20 @@ for(const meta of ['schema','meta/core','meta/applicator','meta/validation','met
 }
 // Walk the pinned source documents, independently of the generated native lookup.
 for(const file of ['schema','meta/core','meta/applicator','meta/validation','meta/meta-data','meta/unevaluated','meta/format-annotation','meta/content']){
-  const document=JSON.parse(readFileSync(new URL('../../node_modules/ajv/dist/refs/json-schema-2020-12/'+file+'.json',import.meta.url),'utf8'));
+  const document=JSON.parse(readFileSync(require.resolve('ajv/dist/refs/json-schema-2020-12/'+file+'.json'),'utf8'));
   const walk=(value,path)=>{
+    if(typeof value!=='boolean'&&(!value||typeof value!=='object'||Array.isArray(value)))return;
     for(const body of [{},{type:'bad'},{properties:{x:{type:'bad'}}}])add('source pointer '+file+path+' '+JSON.stringify(body),{$schema:prefix+file+'#'+path,...body});
-    if(value&&typeof value==='object')for(const [key,child] of Object.entries(value))walk(child,path+'/'+key.replaceAll('~','~0').replaceAll('/','~1'));
+    const escape=key=>key.replaceAll('~','~0').replaceAll('/','~1');
+    for(const keyword of ['$defs','properties','patternProperties','dependentSchemas'])
+      for(const [key,child] of Object.entries(value[keyword]??{}))walk(child,path+'/'+keyword+'/'+escape(key));
+    for(const keyword of ['items','contains','additionalProperties','unevaluatedProperties','unevaluatedItems','propertyNames','not','if','then','else'])
+      if(Object.hasOwn(value,keyword))walk(value[keyword],path+'/'+keyword);
+    for(const keyword of ['allOf','anyOf','oneOf','prefixItems'])
+      if(Array.isArray(value[keyword]))value[keyword].forEach((child,index)=>walk(child,path+'/'+keyword+'/'+index));
   };walk(document,'');
 }
-for(const path of ['', '/title','/allOf','/allOf/length','/properties/definitions/default','/properties/definitions/deprecated']){
-  for(const tail of ['constructor','constructor/prototype','constructor/name','constructor/length','constructor/caller','constructor/arguments','__proto__','__proto__/constructor','hasOwnProperty','constructor/prototype/__proto__','__proto__/__proto__','__proto__/__proto__/__proto__','__proto__/valueOf/name','__proto__/constructor/prototype/constructor/prototype'])add('inherited '+path+'/'+tail,{$schema:prefix+'schema#'+path+'/'+tail});
-}
-for(const selected of ['', 'http://json-schema.org/schema','https://json-schema.org/schema',prefix+'schema#unknown',prefix+'meta/validation#/$defs/nonNegativeInteger',prefix+'meta/meta-data#/properties/default',prefix+'meta/core#/$defs/uriString','\ud800','missing'])add('selected '+selected,{$schema:selected});
+for(const selected of ['http://json-schema.org/schema','https://json-schema.org/schema',prefix+'schema#unknown',prefix+'meta/validation#/$defs/nonNegativeInteger',prefix+'meta/meta-data#/properties/default',prefix+'meta/core#/$defs/uriString','\ud800','missing'])add('selected '+selected,{$schema:selected});
 for(const selected of [
   'HTTPS://JSON-SCHEMA.ORG/draft/2020-12/schema',
   'https://json-schema.org:443/draft/2020-12/schema',
@@ -58,10 +63,9 @@ for(const selected of [
   prefix+'meta/meta-data#/properties/%ZZ',
   prefix+'meta/meta-data#/properties/default/unknown',
   prefix+'schema?query',
-  ...['constructor','__proto__','constructor/prototype','__proto__/constructor','toString','allOf/length','allOf/00','allOf/-0','allOf/01'].map(p=>prefix+'schema#/'+p),
 ])add('normalized '+selected,{$schema:selected});
 for(const meta of ['schema','meta/core','meta/applicator','meta/validation','meta/meta-data','meta/unevaluated','meta/format-annotation','meta/content']){
-  for(const fragment of ['#meta','#/properties','#/properties/default','#/properties/properties','#/$defs/schemaArray','#/$defs/stringArray','#/$defs/nonNegativeInteger','#/$defs/uriReferenceString'])add('fragment '+meta+fragment,{$schema:prefix+meta+fragment,type:'bad'});
+  for(const fragment of ['#meta','#/properties/default','#/properties/properties','#/$defs/schemaArray','#/$defs/stringArray','#/$defs/nonNegativeInteger','#/$defs/uriReferenceString'])add('fragment '+meta+fragment,{$schema:prefix+meta+fragment,type:'bad'});
 }
 for(const id of ['','#','a','a#','a#b','a b','\ud800'])add('id '+JSON.stringify(id),{$id:id});
 add('deep literal remains data',{default:{type:'bad',examples:false,$id:'bad#id'}});

@@ -97,6 +97,40 @@ fn admission_and_failures_match_original_cli() {
 
 #[test]
 fn output_validation_and_required_values_preserve_boundaries() {
+    for wait in ["\u{feff}16\u{2029}", "\u{2028}\u{feff} 16 \u{feff}"] {
+        let args =
+            arguments::parse(&["deploy".into(), format!("--wait-ms={wait}").into()]).unwrap();
+        assert_eq!(args.wait_ms, 16.0);
+    }
+    for wait in ["\u{0085}16", "16\u{0085}"] {
+        assert_eq!(
+            arguments::parse(&["deploy".into(), format!("--wait-ms={wait}").into()])
+                .unwrap_err()
+                .code,
+            "invalid_arguments"
+        );
+    }
+    for prefix in ["0x", "0X", "0o", "0O", "0b", "0B"] {
+        let wait = format!("{prefix}{}10", "0".repeat(1024));
+        let args =
+            arguments::parse(&["deploy".into(), format!("--wait-ms={wait}").into()]).unwrap();
+        assert_eq!(
+            args.wait_ms,
+            match prefix {
+                "0x" | "0X" => 16.0,
+                "0o" | "0O" => 8.0,
+                _ => 2.0,
+            }
+        );
+        for suffix in ["f".repeat(32), "1".repeat(64), "+10".into(), "-10".into()] {
+            let error = arguments::parse(&[
+                "deploy".into(),
+                format!("--wait-ms={prefix}{suffix}").into(),
+            ])
+            .unwrap_err();
+            assert_eq!(error.code, "invalid_arguments");
+        }
+    }
     for (code, ok, exit) in [
         ("host_status", true, 0),
         ("deployment_failed", false, 1),

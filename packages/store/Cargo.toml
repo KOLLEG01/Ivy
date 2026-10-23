@@ -14,3 +14,7 @@ uuid.workspace = true
 [[test]]
 name = "store"
 path = "../../tests/rust/store.rs"
+
+[[test]]
+name = "store-coercion"
+path = "../../tests/rust/store-coercion.rs"

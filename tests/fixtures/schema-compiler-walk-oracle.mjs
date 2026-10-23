@@ -57,7 +57,7 @@ function add(input){
   rows.push({schema:JSON.stringify(schema),result:JSON.stringify(result)});
 }
 const leaves=[true,false,{}, {title:'annotation'},{$id:'child'}, {type:'string'},
-  {minimum:'bad'}, {type:[]},{enum:[]},{format:false},{required:1},
+  {minimum:'bad'}, {enum:[]},{format:false},{required:1},
   {$defs:{unused:{minimum:'bad'}}}, {description:{minimum:'bad'}}];
 for(const leaf of leaves){
   for(const keyword of ['not','items','additionalProperties','if','then','else'])add({[keyword]:leaf});
@@ -80,7 +80,7 @@ for(const root of ids)for(const child of ids)for(const leaf of leaves){
 }
 add({$defs:{x:{type:'string'}},properties:{x:{$ref:'#/$defs/x'}}});
 add({$defs:{x:{type:'string'}},if:{$ref:'#/$defs/x'},then:{title:'unused'}});
-for(const key of ['a/b','a~b','','2','10','01','\ud800','\udc00','😀','雪','\0','é','e\u0301']){
+for(const key of ['a/b','a~b','','2','10','01','😀','雪','\0','é','e\u0301']){
   for(const child of [{type:'string'}, {}, {$id:'child'}, {format:false}])
     add({properties:{[key]:child}});
 }

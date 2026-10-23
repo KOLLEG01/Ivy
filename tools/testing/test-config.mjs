@@ -380,7 +380,6 @@ export const rustTests = {
   'tests/rust/cli-publish-ui.rs': { package: 'ivy-cli', test: 'cli-publish-ui' },
   'tests/rust/cli-reset-ui.rs': { package: 'ivy-cli', test: 'cli-reset-ui' },
   'tests/rust/cli-arguments.rs': { package: 'ivy-cli', test: 'cli-arguments' },
-  'tests/rust/number-string.rs': { package: 'ivy-contracts', test: 'number-string' },
   'tests/rust/ui-route.rs': { package: 'ivy-contracts', test: 'ui-route' },
   'tests/rust/builtin_schema.rs': { package: 'ivy-contracts', test: 'builtin_schema' },
   'tests/rust/store.rs': { package: 'ivy-store', test: 'store' },
@@ -476,6 +475,10 @@ export const rustTests = {
     prerequisites: [{ platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-job' }],
   },
   'tests/rust/agent-instructions.rs': { package: 'ivy-agent-manager', test: 'agent-instructions', originalBackend: 'agent-manager' },
+  'tests/rust/agent-skills-output.rs': {
+    package: 'ivy-agent-manager', test: 'agent-instructions', filter: 'skills_output_cases::',
+    originalBackend: 'agent-manager',
+  },
   'tests/rust/agent-native-restore.rs': { package: 'ivy-agent-manager', test: 'agent-native-restore', originalBackend: 'agent-manager' },
   'tests/rust/service-manager-policy.rs': { package: 'ivy-service-manager', test: 'service-manager-policy' },
   'tests/rust/service-manager-data.rs': { package: 'ivy-service-manager', test: 'service-manager-data' },
