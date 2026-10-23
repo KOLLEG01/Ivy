@@ -1,4 +1,5 @@
 use super::*;
+use crate::native_path;
 
 pub(super) struct Entry {
     pub phase: J,
@@ -36,23 +37,20 @@ pub(super) async fn load(
     kind: &'static str,
     progress: &Progress,
 ) -> IvyResult<Vec<Entry>> {
-    let root = joined(&path(config, "runtimeRoot")?, kind);
+    let root = path(config, "runtimeRoot")?.join(kind);
     let mut result = Vec::new();
     for entry in entries(root.clone()).await? {
         let file_type = internal(entry.file_type())?;
-        let name = node_path::node_utf8(&entry.file_name());
-        let name = name.to_utf8().ok();
-        if !file_type.is_dir()
-            || file_type.is_symlink()
-            || !name.as_ref().is_some_and(|v| hash_name(v))
-        {
+        let filename = entry.file_name();
+        let name = filename.to_str();
+        if !file_type.is_dir() || file_type.is_symlink() || !name.is_some_and(hash_name) {
             progress.skipped("maintenance", "unrecognized_history_entry", true);
             continue;
         }
         let name = name.unwrap();
-        let directory = joined(&root, &name);
+        let directory = root.join(name);
         let record = config::json_file_if_present(
-            joined(&directory, "record.json"),
+            directory.join("record.json"),
             config::CONFIGURATION_BYTES,
         )
         .await?
@@ -60,7 +58,7 @@ pub(super) async fn load(
         let request = match record.get("request").filter(|v| !v.is_null()) {
             Some(request) => request.clone(),
             None => config::json_file_if_present(
-                joined(&directory, "request.json"),
+                directory.join("request.json"),
                 config::CONFIGURATION_BYTES,
             )
             .await?
@@ -134,13 +132,10 @@ pub(super) async fn collect_plans(
     }
     let runtime = path(config, "runtimeRoot")?;
     let selected = config::json_file(
-        joined(
-            &joined(&runtime, "bootstrap"),
-            &format!(
-                "{}.json",
-                crate::linux_resources::installation_identity(config)?
-            ),
-        ),
+        runtime.join("bootstrap").join(format!(
+            "{}.json",
+            crate::linux_resources::installation_identity(config)?
+        )),
         config::CONFIGURATION_BYTES,
     )
     .await?;
@@ -217,10 +212,9 @@ pub(super) async fn collect_plans(
     }
     let mut inventory = Vec::new();
     for plan in plans {
-        let file = joined(
-            &joined(&runtime, "bootstrap-plans"),
-            &format!("{}.json", &hash_json(&plan)?[7..]),
-        );
+        let file = runtime
+            .join("bootstrap-plans")
+            .join(format!("{}.json", &hash_json(&plan)?[7..]));
         let info = metadata(file.clone()).await?;
         inventory.push((plan, file, info));
     }
@@ -271,7 +265,7 @@ pub(super) async fn collect_plans(
             "storage_invalid",
             "Bootstrap history must remain a regular file.",
         )?;
-        blocking(move || internal(fs::remove_file(fs_path(&file)))).await?;
+        blocking(move || internal(fs::remove_file(&file))).await?;
         progress.removed("bootstrapPlans");
     }
     Ok(protected)
@@ -317,7 +311,7 @@ pub(super) async fn collect_details(
                 "Completed bootstrap record is invalid.",
             )?;
             let current = config::json_file(
-                joined(&entry.directory, "record.json"),
+                entry.directory.join("record.json"),
                 config::CONFIGURATION_BYTES,
             )
             .await?;
@@ -335,7 +329,7 @@ pub(super) async fn collect_details(
                     && !info.file_type().is_symlink()
                     && actual.parent()
                         == Some(
-                            realpath(joined(&path(config, "runtimeRoot")?, entry.kind))
+                            realpath(path(config, "runtimeRoot")?.join(entry.kind))
                                 .await?
                                 .as_path(),
                         ),
@@ -343,14 +337,11 @@ pub(super) async fn collect_details(
                 "Maintenance history leaves its owned root.",
             )?;
             for definition in array(value.required("definitions")?)? {
-                let id = field(definition, "instanceId")?;
+                let id = native_path::to_native(&field(definition, "instanceId")?).into_os_string();
                 for suffix in ["prior", "desired"] {
                     let mut name = id.clone();
-                    name.0.extend(format!(".{suffix}.json").encode_utf16());
-                    let file = node_path::to_native(&node_path::join(
-                        node_path::Style::native(),
-                        &[node_path::from_native(&entry.directory), name],
-                    ));
+                    name.push(format!(".{suffix}.json"));
+                    let file = entry.directory.join(name);
                     let Some(info) = metadata(file.clone()).await? else {
                         continue;
                     };
@@ -361,7 +352,7 @@ pub(super) async fn collect_details(
                         "target_conflict",
                         "Maintenance detail must be an owned regular file.",
                     )?;
-                    blocking(move || internal(fs::remove_file(fs_path(&file)))).await?;
+                    blocking(move || internal(fs::remove_file(&file))).await?;
                     progress.removed("maintenance");
                 }
             }

@@ -3,7 +3,6 @@ use crate::{
     IvyError, IvyJson as J, IvyResult, config,
     executor_lock::ExecutorLock,
     journal::HostJournal,
-    node_path,
     node_runtime::NodeRuntime,
     storage_space::{self, RetentionProgress},
 };
@@ -12,7 +11,7 @@ use ivy_sdk::clock::Clock;
 use std::{
     collections::BTreeSet,
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::UNIX_EPOCH,
 };
@@ -44,22 +43,13 @@ fn field(v: &J, k: &str) -> IvyResult<JsString> {
 fn path(v: &J, k: &str) -> IvyResult<PathBuf> {
     config::path_value(v.required(k)?)
 }
-fn joined(root: &Path, name: &str) -> PathBuf {
-    node_path::to_native(&node_path::join(
-        node_path::Style::native(),
-        &[node_path::from_native(root), name.into()],
-    ))
-}
-fn fs_path(path: &Path) -> PathBuf {
-    node_path::filesystem_path(&node_path::from_native(path))
-}
 async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> IvyResult<T> + Send + 'static,
 ) -> IvyResult<T> {
     internal(tokio::task::spawn_blocking(work).await)?
 }
 async fn metadata(path: PathBuf) -> IvyResult<Option<fs::Metadata>> {
-    blocking(move || match fs::symlink_metadata(fs_path(&path)) {
+    blocking(move || match fs::symlink_metadata(&path) {
         Ok(v) => Ok(Some(v)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(IvyError::internal()),
@@ -71,7 +61,7 @@ async fn realpath(path: PathBuf) -> IvyResult<PathBuf> {
 }
 async fn entries(root: PathBuf) -> IvyResult<Vec<fs::DirEntry>> {
     blocking(move || {
-        let values = match fs::read_dir(fs_path(&root)) {
+        let values = match fs::read_dir(&root) {
             Ok(v) => v,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(_) => return Err(IvyError::internal()),
@@ -173,8 +163,8 @@ impl RetentionProgress for Progress {
     }
 }
 async fn owned_candidate(config: &J, id: &str) -> IvyResult<Option<(PathBuf, f64)>> {
-    let parent = joined(&path(config, "artifactRoot")?, "candidates");
-    let path = joined(&parent, id);
+    let parent = path(config, "artifactRoot")?.join("candidates");
+    let path = parent.join(id);
     let Some(info) = metadata(path.clone()).await? else {
         return Ok(None);
     };
@@ -197,18 +187,16 @@ async fn finish_removal(
     progress: &Progress,
 ) -> IvyResult<()> {
     let id = candidate.required("candidateId")?.as_str()?;
-    let root = joined(
-        &joined(&path(config, "artifactRoot")?, "candidates"),
-        &id[7..],
-    );
+    let root = path(config, "artifactRoot")?
+        .join("candidates")
+        .join(&id[7..]);
     require(
-        candidate.get("artifactRoot")
-            == Some(&crate::layout::path_json(&joined(&root, "artifact")))
+        candidate.get("artifactRoot") == Some(&crate::layout::path_json(&root.join("artifact")))
             && candidate.get("manifestPath")
-                == Some(&crate::layout::path_json(&joined(&root, "component.json")))
+                == Some(&crate::layout::path_json(&root.join("component.json")))
             && candidate
                 .get("archivePath")
-                .is_none_or(|v| *v == crate::layout::path_json(&joined(&root, "package.tar.gz"))),
+                .is_none_or(|v| *v == crate::layout::path_json(&root.join("package.tar.gz"))),
         "target_conflict",
         "Retiring candidate paths changed.",
     )?;
@@ -251,7 +239,7 @@ async fn collect(
     bindings: Arc<RetentionBindings>,
 ) -> IvyResult<J> {
     let runtime = path(&config, "runtimeRoot")?;
-    let lock = ExecutorLock::acquire(joined(&runtime, "artifact-retention-lock"), false).await?;
+    let lock = ExecutorLock::acquire(runtime.join("artifact-retention-lock"), false).await?;
     let progress = Arc::new(Progress::default());
     let mut journal = None;
     let mut bootstrap_lock = None;
@@ -300,9 +288,8 @@ async fn collect(
         }
         progress.set(status.clone());
         journal.save_storage_retention_status(status).await?;
-        bootstrap_lock = Some(
-            ExecutorLock::acquire(joined(&runtime, "bootstrap-maintenance-lock"), false).await?,
-        );
+        bootstrap_lock =
+            Some(ExecutorLock::acquire(runtime.join("bootstrap-maintenance-lock"), false).await?);
         crate::dependency_cache::collect_dependency_caches(
             path(&config, "stagingRoot")?,
             progress.clone(),
@@ -374,10 +361,9 @@ async fn collect(
                 let build = candidate.required("buildId")?.as_str()?;
                 build_lock = Some(
                     ExecutorLock::acquire(
-                        joined(
-                            &joined(&path(&config, "stagingRoot")?, "build-locks"),
-                            &build[7..],
-                        ),
+                        path(&config, "stagingRoot")?
+                            .join("build-locks")
+                            .join(&build[7..]),
                         false,
                     )
                     .await?,
@@ -411,14 +397,11 @@ async fn collect(
                 continue;
             };
             if candidate.get("artifactRoot")
-                != Some(&crate::layout::path_json(&joined(&directory, "artifact")))
+                != Some(&crate::layout::path_json(&directory.join("artifact")))
                 || candidate.get("manifestPath")
-                    != Some(&crate::layout::path_json(&joined(
-                        &directory,
-                        "component.json",
-                    )))
+                    != Some(&crate::layout::path_json(&directory.join("component.json")))
                 || candidate.get("archivePath").is_some_and(|v| {
-                    *v != crate::layout::path_json(&joined(&directory, "package.tar.gz"))
+                    *v != crate::layout::path_json(&directory.join("package.tar.gz"))
                 })
             {
                 progress.skipped("candidates", "unrecognized_path", true);
@@ -441,10 +424,9 @@ async fn collect(
             let removal: IvyResult<()> = async {
                 build_lock = Some(
                     ExecutorLock::acquire(
-                        joined(
-                            &joined(&path(&config, "stagingRoot")?, "build-locks"),
-                            &id[7..],
-                        ),
+                        path(&config, "stagingRoot")?
+                            .join("build-locks")
+                            .join(&id[7..]),
                         false,
                     )
                     .await?,

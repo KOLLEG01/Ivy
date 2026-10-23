@@ -5,7 +5,7 @@ use ivy_contracts::{
     json,
 };
 use ivy_host_runtime::{
-    bootstrap, config, filesystem, journal::HostJournal, node_path, preparations, storage_space,
+    bootstrap, config, filesystem, journal::HostJournal, native_path, preparations, storage_space,
 };
 use ivy_store::rusqlite::{Connection, params};
 use std::{
@@ -27,7 +27,7 @@ pub struct Setup {
     history_records: BTreeMap<String, Vec<u8>>,
 }
 fn path(value: &J) -> PathBuf {
-    node_path::to_native(value.as_js_string().unwrap())
+    native_path::to_native(value.as_js_string().unwrap())
 }
 fn stamp(at: i64) -> J {
     chrono::DateTime::from_timestamp_millis(at)
@@ -209,7 +209,7 @@ async fn preparation(
 fn plan(config: &J, root: &Path, candidate: &J, components: &[J]) -> J {
     let mut plan = bootstrap::configuration_bootstrap_plan(
         config,
-        &node_path::from_native(&root.join("config.json")),
+        &native_path::from_native(&root.join("config.json")),
         candidate,
         None,
         components,
@@ -332,7 +332,19 @@ fn history_directory(config: &J, id: &str) -> PathBuf {
 }
 
 pub async fn setup(root: &Path, case: &str) -> Setup {
-    fs::create_dir_all(root).unwrap();
+    // Keep SQLite roots Unicode and retain the native long-path prefix.
+    let root = root.join("native ü 空 😀; '");
+    fs::create_dir_all(&root).unwrap();
+    let root = fs::canonicalize(root).unwrap();
+    let root = root.as_path();
+    let artifact_root = root.join("artifacts ü 空 😀; '");
+    #[cfg(windows)]
+    let artifact_root = {
+        use std::os::windows::ffi::OsStringExt;
+        let mut name = artifact_root.into_os_string();
+        name.push(std::ffi::OsString::from_wide(&[0xd800]));
+        PathBuf::from(name)
+    };
     let bootstrap_case = case.starts_with("bootstrap") || case == "maintenance-ring";
     let component = if bootstrap_case {
         "host-executor"
@@ -352,7 +364,7 @@ pub async fn setup(root: &Path, case: &str) -> Setup {
         ("schemaVersion", J::Number(1.0)),
         ("hostId", "retention-fixture".into()),
         ("runtimeRoot", text(&root.join("runtime"))),
-        ("artifactRoot", text(&root.join("artifacts"))),
+        ("artifactRoot", text(&artifact_root)),
         ("stagingRoot", text(&root.join("staging"))),
         ("publicBaseUrl", "http://127.0.0.1:38081/ivy".into()),
         ("executables", executables),

@@ -2,13 +2,13 @@ use super::ServiceFixture;
 use ivy_contracts::{IvyJson as J, core_schema::validate_host, hash::hash_json};
 use ivy_host_runtime::{
     executor_lock::ExecutorLock,
-    node_path,
+    native_path,
     node_runtime::NodeRuntime,
     storage_retention::{self, RetentionBindings},
 };
 use ivy_sdk::clock::Clock;
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -28,7 +28,7 @@ impl Clock for FixedClock {
     }
 }
 fn text(path: &Path) -> J {
-    J::String(node_path::from_native(path))
+    J::String(native_path::from_native(path))
 }
 fn bindings(setup: &fixture::Setup, clock: Arc<dyn Clock>) -> Arc<RetentionBindings> {
     Arc::new(RetentionBindings {
@@ -38,7 +38,7 @@ fn bindings(setup: &fixture::Setup, clock: Arc<dyn Clock>) -> Arc<RetentionBindi
             .unwrap()
             .get("node")
             .map(|executable| NodeRuntime {
-                executable: node_path::to_native(executable.as_js_string().unwrap()),
+                executable: native_path::to_native(executable.as_js_string().unwrap()),
                 version: "24.18.0".into(),
             }),
         clock,
@@ -239,7 +239,7 @@ async fn run_case(case: &str) -> J {
         );
     }
     for name in ["artifact-retention-lock", "bootstrap-maintenance-lock"] {
-        let runtime = node_path::to_native(
+        let runtime = native_path::to_native(
             setup
                 .config
                 .required("runtimeRoot")
@@ -474,7 +474,13 @@ async fn admitted_collection_keeps_locks_after_its_observer_drops() {
     });
     let _release_on_exit = ReleaseGate(gate.clone());
     let config = setup.config.clone();
-    let runtime = PathBuf::from(config.required("runtimeRoot").unwrap().as_str().unwrap());
+    let runtime = native_path::to_native(
+        config
+            .required("runtimeRoot")
+            .unwrap()
+            .as_js_string()
+            .unwrap(),
+    );
     let b = bindings(&setup, gate.clone());
     let observer = tokio::spawn(async move {
         storage_retention::collect_host_storage(config, None, None, b).await
