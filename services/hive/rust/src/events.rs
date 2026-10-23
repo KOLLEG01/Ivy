@@ -21,8 +21,23 @@ fn string<'a>(value: &'a IvyJson, name: &str) -> IvyResult<&'a JsString> {
         .as_js_string()
         .ok_or_else(IvyError::internal)
 }
-fn number(value: &IvyJson, name: &str) -> IvyResult<f64> {
-    field(value, name)?.as_f64().ok_or_else(IvyError::internal)
+fn integer(value: &IvyJson) -> IvyResult<i64> {
+    value
+        .as_f64()
+        .filter(|value| value.fract() == 0.0 && (0.0..=9_007_199_254_740_991.0).contains(value))
+        .map(|value| value as i64)
+        .ok_or_else(IvyError::internal)
+}
+fn sequence(value: &IvyJson, name: &str) -> IvyResult<i64> {
+    integer(field(value, name)?)
+}
+pub(crate) fn sequence_value(sequence: i64) -> IvyResult<IvyJson> {
+    require(
+        (0..=9_007_199_254_740_991).contains(&sequence),
+        "storage_invalid",
+        "Retained event sequence is invalid.",
+    )?;
+    Ok(IvyJson::Number(sequence as f64))
 }
 fn require(condition: bool, code: &str, message: &str) -> IvyResult<()> {
     if condition {
@@ -142,7 +157,7 @@ pub fn publish(
             params![text(topic),text(version),format!("service:{}",text(service_node_id)),text(now),text(string(parameters,"mutationId")?),payload],
         ).map_err(|e|store.query_error(e))?;
         Ok(LedgerResult::snapshot(IvyJson::object([
-            ("sequence",IvyJson::Number(store.connection().last_insert_rowid() as f64)),
+            ("sequence",sequence_value(store.connection().last_insert_rowid())?),
             ("topic",IvyJson::String(topic.clone())),("publishedAt",IvyJson::String(now.clone())),
         ])))
     })
@@ -171,7 +186,7 @@ impl Event {
     }
     fn value(self) -> IvyResult<IvyJson> {
         Ok(IvyJson::object([
-            ("sequence", IvyJson::Number(self.sequence as f64)),
+            ("sequence", sequence_value(self.sequence)?),
             ("topic", IvyJson::String(self.topic)),
             ("topicVersion", IvyJson::String(self.version)),
             ("source", IvyJson::String(self.source)),
@@ -181,7 +196,7 @@ impl Event {
         ]))
     }
 }
-fn has_more(store: &Store, through: f64) -> IvyResult<bool> {
+fn has_more(store: &Store, through: i64) -> IvyResult<bool> {
     Ok(store
         .connection()
         .query_row(
@@ -194,27 +209,27 @@ fn has_more(store: &Store, through: f64) -> IvyResult<bool> {
         .is_some())
 }
 pub fn head(store: &Store) -> IvyResult<IvyJson> {
-    let pruned = store.metadata_number("events_pruned_through")?;
+    let pruned = store.metadata_integer("events_pruned_through")?;
     let retained = store
         .connection()
         .query_row("SELECT MAX(sequence) FROM events", [], |row| {
             row.get::<_, Option<i64>>(0)
         })
         .map_err(|e| store.query_error(e))?
-        .unwrap_or(0) as f64;
+        .unwrap_or(0);
     let through = pruned.max(retained);
     Ok(IvyJson::object([(
         "throughSequence",
-        IvyJson::Number(through),
+        sequence_value(through)?,
     )]))
 }
-fn batch(items: Vec<IvyJson>, through: f64, has_more: bool, gap: IvyJson) -> IvyJson {
-    IvyJson::object([
+fn batch(items: Vec<IvyJson>, through: i64, has_more: bool, gap: IvyJson) -> IvyResult<IvyJson> {
+    Ok(IvyJson::object([
         ("items", IvyJson::Array(items)),
-        ("throughSequence", IvyJson::Number(through)),
+        ("throughSequence", sequence_value(through)?),
         ("hasMore", has_more.into()),
         ("gap", gap),
-    ])
+    ]))
 }
 fn includes(filter: &IvyJson, name: &str, value: &IvyJson) -> IvyResult<bool> {
     if filter.get(name).is_none_or(IvyJson::is_null) {
@@ -250,20 +265,21 @@ fn matches(filter: &IvyJson, event: &IvyJson) -> IvyResult<bool> {
     }
 }
 pub fn read(store: &Store, parameters: &IvyJson) -> IvyResult<IvyJson> {
-    let after = number(parameters, "afterSequence")?;
+    let after = sequence(parameters, "afterSequence")?;
     let filter = field(parameters, "filter")?;
     let limit = parameters
         .get("limit")
         .filter(|v| !v.is_null())
-        .and_then(IvyJson::as_f64)
-        .unwrap_or(100.0);
-    let pruned = store.metadata_number("events_pruned_through")?;
+        .map(integer)
+        .transpose()?
+        .unwrap_or(100) as usize;
+    let pruned = store.metadata_integer("events_pruned_through")?;
     if after < pruned {
         let gap = IvyJson::object([
-            ("prunedThroughSequence", IvyJson::Number(pruned)),
-            ("resumeAfterSequence", IvyJson::Number(pruned)),
+            ("prunedThroughSequence", sequence_value(pruned)?),
+            ("resumeAfterSequence", sequence_value(pruned)?),
         ]);
-        return Ok(batch(vec![], pruned, has_more(store, pruned)?, gap));
+        return batch(vec![], pruned, has_more(store, pruned)?, gap);
     }
     let mut statement = store
         .connection()
@@ -277,9 +293,9 @@ pub fn read(store: &Store, parameters: &IvyJson) -> IvyResult<IvyJson> {
     let (mut through, mut bytes, mut items) = (after, 128, Vec::new());
     for event in events {
         store.check_budget()?;
+        let sequence = event.sequence;
         let event = event.value()?;
         let matched = matches(filter, &event)?;
-        let sequence = number(&event, "sequence")?;
         if matched {
             let size = canonical(&event, MANAGEMENT_FRAME_BYTES)?.len();
             if bytes + size > 1024 * 1024 - 1024 {
@@ -294,22 +310,17 @@ pub fn read(store: &Store, parameters: &IvyJson) -> IvyResult<IvyJson> {
             items.push(event);
         }
         through = sequence;
-        if items.len() as f64 >= limit {
+        if items.len() >= limit {
             break;
         }
     }
-    Ok(batch(
-        items,
-        through,
-        has_more(store, through)?,
-        IvyJson::Null,
-    ))
+    batch(items, through, has_more(store, through)?, IvyJson::Null)
 }
 
 struct Subscription {
     filter: String,
-    initial: f64,
-    acknowledged: f64,
+    initial: i64,
+    acknowledged: i64,
     issued: Option<String>,
 }
 fn subscription(
@@ -353,13 +364,13 @@ pub fn subscribe(
             let count=store.connection().query_row("SELECT COUNT(*) FROM subscriptions WHERE node_id=?",[text(service_node_id)],|row|row.get::<_,i64>(0))
                 .map_err(|e|store.query_error(e))?;
             require(count<MAXIMUM_SUBSCRIPTIONS_PER_NODE,"capacity_exceeded","Service Node subscription limit reached.")?;
-            let initial=parameters.get("initialSequence").filter(|v|!v.is_null()).and_then(IvyJson::as_f64).unwrap_or(0.0);
+            let initial=parameters.get("initialSequence").filter(|v|!v.is_null()).map(integer).transpose()?.unwrap_or(0);
             store.connection().execute("INSERT INTO subscriptions(node_id,name,filter_json,initial_sequence,acknowledged_sequence,batch_json) VALUES (?,?,?,?,?,NULL)",
                 params![text(service_node_id),text(name),encoded,initial,initial]).map_err(|e|store.query_error(e))?;
             saved=subscription(store,service_node_id,name)?;
         }
         let saved=saved.ok_or_else(IvyError::internal)?;
-        require(saved.filter==encoded&&parameters.get("initialSequence").is_none_or(|v|v.as_f64()==Some(saved.initial)),
+        require(saved.filter==encoded&&parameters.get("initialSequence").is_none_or(|v|integer(v).ok()==Some(saved.initial)),
             "subscription_filter_conflict","Subscription filter and initial cursor are immutable.")?;
         if parameters.get("durable").and_then(IvyJson::as_bool) == Some(true) {
             store.connection().execute("INSERT OR IGNORE INTO durable_subscriptions(node_id,name) VALUES (?,?)",params![text(service_node_id),text(name)])
@@ -367,24 +378,24 @@ pub fn subscribe(
         }
         if let Some(issued)=saved.issued.filter(|v|!v.is_empty()) {
             let issued=decode(&issued)?;
-            let through=number(&issued,"throughSequence")?;
+            let through=sequence(&issued,"throughSequence")?;
             let more=field(&issued,"hasMore")?.clone();
             if issued.get("gap").is_some_and(|v| v.as_object().is_some()) {
-                return Ok(IvyJson::object([("items",IvyJson::Array(vec![])),("throughSequence",IvyJson::Number(through)),("hasMore",more),("gap",field(&issued,"gap")?.clone())]));
+                return Ok(IvyJson::object([("items",IvyJson::Array(vec![])),("throughSequence",sequence_value(through)?),("hasMore",more),("gap",field(&issued,"gap")?.clone())]));
             }
             let mut records=Vec::new();
             for sequence in field(&issued,"sequences")?.as_array().ok_or_else(IvyError::internal)? {
-                records.push(store.connection().query_row("SELECT * FROM events WHERE sequence=?",[sequence.as_f64().ok_or_else(IvyError::internal)?],Event::row)
+                records.push(store.connection().query_row("SELECT * FROM events WHERE sequence=?",[integer(sequence)?],Event::row)
                     .optional().map_err(|e|store.query_error(e))?);
             }
             if records.iter().all(Option::is_some) {
                 let items=records.into_iter().map(|v|v.unwrap().value()).collect::<IvyResult<Vec<_>>>()?;
-                return Ok(IvyJson::object([("items",IvyJson::Array(items)),("throughSequence",IvyJson::Number(through)),("hasMore",more),("gap",IvyJson::Null)]));
+                return Ok(IvyJson::object([("items",IvyJson::Array(items)),("throughSequence",sequence_value(through)?),("hasMore",more),("gap",IvyJson::Null)]));
             }
             store.connection().execute("UPDATE subscriptions SET batch_json=NULL WHERE node_id=? AND name=?",params![text(service_node_id),text(name)])
                 .map_err(|e|store.query_error(e))?;
         }
-        let mut request=IvyJson::object([("afterSequence",IvyJson::Number(saved.acknowledged)),("filter",filter.clone())]);
+        let mut request=IvyJson::object([("afterSequence",sequence_value(saved.acknowledged)?),("filter",filter.clone())]);
         if let Some(limit)=parameters.get("limit") {request.insert("limit",limit.clone());}
         let delivered=read(store,&request)?;
         let sequences=field(&delivered,"items")?.as_array().unwrap().iter().map(|v|field(v,"sequence").cloned()).collect::<IvyResult<Vec<_>>>()?;
@@ -405,14 +416,15 @@ pub fn ack(
         let saved=subscription(store,service_node_id,name)?.ok_or_else(||IvyError::new("not_found","Subscription not found."))?;
         let issued=saved.issued.filter(|v|!v.is_empty()).map(|v|decode(&v)).transpose()?.unwrap_or(IvyJson::Null);
         let through=field(parameters,"throughSequence")?;
+        let boundary=integer(through)?;
         let result=IvyJson::object([("acknowledgedSequence",through.clone())]);
-        if through.as_f64()==Some(saved.acknowledged)&&issued.get("throughSequence")!=Some(through) {return Ok(result);}
+        if boundary==saved.acknowledged&&issued.get("throughSequence")!=Some(through) {return Ok(result);}
         require(issued.get("throughSequence")==Some(through),"invalid_ack","Acknowledgement must equal the outstanding delivered boundary.")?;
         let gap=issued.get("gap");
         require(if gap.is_some_and(|v| v.as_object().is_some()) { parameters.get("gapThroughSequence")==gap.and_then(|v|v.get("prunedThroughSequence")) }else { parameters.get("gapThroughSequence").is_none() },
             "invalid_ack","A reported journal gap must be acknowledged explicitly.")?;
         store.connection().execute("UPDATE subscriptions SET acknowledged_sequence=?,batch_json=NULL WHERE node_id=? AND name=?",
-            params![through.as_f64().ok_or_else(IvyError::internal)?,text(service_node_id),text(name)]).map_err(|e|store.query_error(e))?;
+            params![boundary,text(service_node_id),text(name)]).map_err(|e|store.query_error(e))?;
         store.prune_event_journal_for_capacity()?;
         Ok(result)
     })

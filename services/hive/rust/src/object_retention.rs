@@ -1,6 +1,6 @@
 //! Owning-service history pruning; the current revision and incoming pins survive.
 use crate::{
-    retention::Runtime,
+    retention::{Runtime, integer},
     store::{AuthenticatedContext, LedgerResult, Store},
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
@@ -29,8 +29,8 @@ pub fn prune_revisions(
 ) -> IvyResult<IvyJson> {
     store.mutate(context, &"objects.pruneRevisions".into(), parameters, now_ms, |store, principal| {
         let id = field(parameters, "objectId")?.as_str()?;
-        let expected = field(parameters, "expectedRevision")?.as_f64().ok_or_else(IvyError::internal)?;
-        let object = store.connection().query_row("SELECT current_revision,contract_key FROM objects WHERE id=?", [&id], |r| Ok((r.get::<_,f64>(0)?, r.get::<_,String>(1)?)))
+        let expected = integer(field(parameters, "expectedRevision")?).ok_or_else(IvyError::internal)?;
+        let object = store.connection().query_row("SELECT current_revision,contract_key FROM objects WHERE id=?", [&id], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,String>(1)?)))
             .optional().map_err(|e|store.query_error(e))?
             .ok_or_else(|| IvyError::new("not_found", "Result object does not exist."))?;
         require(object.0 == expected, "revision_conflict", "Result changed before retention.")?;
@@ -48,19 +48,19 @@ pub fn prune_revisions(
         }else{false};
         require(allowed,
             "forbidden", "Only the current owning service can prune result history.")?;
-        let total = store.connection().query_row("SELECT COALESCE(SUM(byte_length),0) AS bytes FROM revisions WHERE object_id=?", [&id], |r|r.get::<_,f64>(0)).map_err(|e|store.query_error(e))?;
+        let total = store.connection().query_row("SELECT COALESCE(SUM(byte_length),0) AS bytes FROM revisions WHERE object_id=?", [&id], |r|r.get::<_,i64>(0)).map_err(|e|store.query_error(e))?;
         store.check_budget()?;
-        let count = field(parameters,"maximumCount")?.as_f64().ok_or_else(IvyError::internal)?;
-        let boundary = store.connection().query_row("SELECT revision FROM revisions WHERE object_id=? ORDER BY revision DESC LIMIT 1 OFFSET ?", params![id,count-1.0], |r|r.get::<_,f64>(0))
-            .optional().map_err(|e|store.query_error(e))?.unwrap_or(0.0);
-        let mut cutoff = 0.0_f64.max(boundary-1.0);
-        let maximum_bytes = field(parameters,"maximumBytes")?.as_f64().ok_or_else(IvyError::internal)?;
+        let count = integer(field(parameters,"maximumCount")?).ok_or_else(IvyError::internal)?;
+        let boundary = store.connection().query_row("SELECT revision FROM revisions WHERE object_id=? ORDER BY revision DESC LIMIT 1 OFFSET ?", params![id,count-1], |r|r.get::<_,i64>(0))
+            .optional().map_err(|e|store.query_error(e))?.unwrap_or(0);
+        let mut cutoff = 0_i64.max(boundary-1);
+        let maximum_bytes = integer(field(parameters,"maximumBytes")?).ok_or_else(IvyError::internal)?;
         if total > maximum_bytes {
             let overflow = store.connection().query_row("SELECT revision FROM (
           SELECT revision,SUM(byte_length) OVER (ORDER BY revision DESC) AS bytes
           FROM revisions WHERE object_id=? AND revision>=? AND ivy_budget()
-        ) WHERE bytes>? LIMIT 1",params![id,boundary,maximum_bytes],|r|r.get::<_,f64>(0))
-                .optional().map_err(|e|store.query_error(e))?.unwrap_or(0.0);
+        ) WHERE bytes>? LIMIT 1",params![id,boundary,maximum_bytes],|r|r.get::<_,i64>(0))
+                .optional().map_err(|e|store.query_error(e))?.unwrap_or(0);
             cutoff = cutoff.max(overflow);
         }
         let days = field(parameters,"maximumAgeDays")?.as_f64().ok_or_else(IvyError::internal)?;
@@ -71,11 +71,11 @@ pub fn prune_revisions(
            SELECT 1 FROM revision_references
            WHERE target_object_id=r.object_id AND target_revision=r.revision
          ) ORDER BY revision LIMIT 500").map_err(|e|store.query_error(e))?
-            .query_map(params![id,expected,cutoff,before], |r|Ok((r.get::<_,f64>(0)?,r.get::<_,i64>(1)?)))
+            .query_map(params![id,expected,cutoff,before], |r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))
             .map_err(|e|store.query_error(e))?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|store.query_error(e))?;
         let protected = store.connection().query_row("SELECT COUNT(DISTINCT x.target_revision) AS count FROM revision_references x
        JOIN revisions r ON r.object_id=x.target_object_id AND r.revision=x.target_revision
-       WHERE x.target_object_id=? AND r.revision<? AND (r.revision<=? OR r.created_at<=?)",params![id,expected,cutoff,before],|r|r.get::<_,f64>(0)).map_err(|e|store.query_error(e))?;
+       WHERE x.target_object_id=? AND r.revision<? AND (r.revision<=? OR r.created_at<=?)",params![id,expected,cutoff,before],|r|r.get::<_,i64>(0)).map_err(|e|store.query_error(e))?;
         store.check_budget()?;
         let mut removed_bytes = 0_i64;
         for (revision, bytes) in &batch {
@@ -90,8 +90,8 @@ pub fn prune_revisions(
         }
         Ok(LedgerResult::snapshot(IvyJson::object([
             ("deleted",IvyJson::Number(batch.len() as f64)),
-            ("protected",IvyJson::Number(protected)),
-            ("remainingBytes",IvyJson::Number(total-removed_bytes as f64)),
+            ("protected",IvyJson::Number(protected as f64)),
+            ("remainingBytes",IvyJson::Number((total-removed_bytes) as f64)),
         ])))
     })
 }

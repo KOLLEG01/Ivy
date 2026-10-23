@@ -46,16 +46,16 @@ fn decode(value: &str) -> IvyResult<IvyJson> {
 fn encoded(value: &IvyJson) -> IvyResult<String> {
     stringify(value, usize::MAX)
 }
-fn head(store: &Store) -> IvyResult<f64> {
+fn head(store: &Store) -> IvyResult<i64> {
     sql(
         store,
         store
             .connection()
             .query_row("SELECT MAX(sequence) AS n FROM events", [], |r| {
-                r.get::<_, Option<f64>>(0)
+                r.get::<_, Option<i64>>(0)
             }),
     )
-    .map(|v| v.unwrap_or(0.0))
+    .map(|v| v.unwrap_or(0))
 }
 fn notice_schema() -> &'static IvyJson {
     static SCHEMA: OnceLock<IvyJson> = OnceLock::new();
@@ -147,14 +147,14 @@ pub fn push_subscription(input: &IvyJson, crypto: &dyn Crypto) -> IvyResult<IvyJ
 pub struct BrowserPushStore {
     root: JsString,
     crypto: Rc<dyn Crypto>,
-    clock: Rc<dyn Fn() -> f64>,
+    clock: Rc<dyn Fn() -> i64>,
 }
 impl BrowserPushStore {
     pub fn new(
         store: &Store,
         base: &JsString,
         crypto: Rc<dyn Crypto>,
-        clock: Rc<dyn Fn() -> f64>,
+        clock: Rc<dyn Fn() -> i64>,
     ) -> IvyResult<Self> {
         let base = parse_url(base)?.href;
         let root = if base.ends_with('/') {
@@ -369,7 +369,7 @@ impl BrowserPushStore {
         store: &Store,
         mut notice: IvyJson,
         endpoint: Option<&str>,
-        sequence: Option<f64>,
+        sequence: Option<i64>,
     ) -> IvyResult<bool> {
         let filtered = endpoint.filter(|v| !v.is_empty());
         let query = format!(
@@ -390,7 +390,7 @@ impl BrowserPushStore {
             arguments.push(rusqlite::types::Value::Text(endpoint.into()));
         }
         if let Some(sequence) = sequence {
-            arguments.push(rusqlite::types::Value::Real(sequence));
+            arguments.push(rusqlite::types::Value::Integer(sequence));
         }
         let mut statement = sql(store, store.connection().prepare_cached(&query))?;
         let rows = sql(
@@ -451,7 +451,7 @@ impl BrowserPushStore {
         store: &Store,
         payload: &IvyJson,
         source: &str,
-        sequence: f64,
+        sequence: i64,
     ) -> IvyResult<bool> {
         if store
             .validators()
@@ -512,9 +512,9 @@ impl BrowserPushStore {
     pub fn next(&self, store: &mut Store) -> IvyResult<IvyJson> {
         let has_more=store.transaction(|store|{
             sql(store,store.connection().execute("DELETE FROM browser_push WHERE session_digest NOT IN\n        (SELECT s.digest FROM browser_sessions s JOIN credentials c ON c.digest=s.credential_digest WHERE c.revoked=0)",[]))?;
-            let cursor=store.metadata_number("browser_push_cursor")?;
+            let cursor=store.metadata_integer("browser_push_cursor")?;
             let rows={let mut statement=sql(store,store.connection().prepare_cached("SELECT sequence,topic,topic_version,source,payload FROM events WHERE sequence>? ORDER BY sequence LIMIT 100"))?;
-                sql(store,sql(store,statement.query_map([cursor],|r|Ok((r.get::<_,f64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?))))?.collect::<rusqlite::Result<Vec<_>>>())?};
+                sql(store,sql(store,statement.query_map([cursor],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?))))?.collect::<rusqlite::Result<Vec<_>>>())?};
             let subscribed=sql(store,store.connection().query_row("SELECT 1 FROM browser_push LIMIT 1",[],|r|r.get::<_,i64>(0)).optional())?.is_some();
             let mut through=cursor;let mut blocked=false;
             for (sequence,topic,version,source,payload) in &rows {
@@ -522,7 +522,7 @@ impl BrowserPushStore {
                 through=*sequence;
             }
             if !rows.is_empty(){store.set_metadata("browser_push_cursor",&through.to_string())?;}
-            sql(store,store.connection().execute("DELETE FROM browser_push_receipts WHERE created_at<?",[(self.clock)()-7.0*86_400_000.0]))?;
+            sql(store,store.connection().execute("DELETE FROM browser_push_receipts WHERE created_at<?",[(self.clock)().saturating_sub(7*86_400_000)]))?;
             sql(store,store.connection().execute("DELETE FROM browser_push_receipts WHERE tag IN (SELECT tag FROM browser_push_receipts ORDER BY created_at DESC LIMIT -1 OFFSET 10000)",[]))?;
             Ok(!blocked&&rows.len()==100)
         })?;
@@ -533,8 +533,8 @@ impl BrowserPushStore {
                 store,
                 statement.query_map([(self.clock)()], |r| {
                     Ok((
-                        r.get::<_, f64>(0)?,
-                        r.get::<_, f64>(4)?,
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, u32>(4)?,
                         r.get::<_, String>(6)?,
                         r.get::<_, String>(3)?,
                     ))
@@ -545,9 +545,16 @@ impl BrowserPushStore {
         let deliveries = rows
             .into_iter()
             .map(|(id, attempts, subscription, notice)| {
+                // The worker wire keeps JSON numbers. Never round a retained ID
+                // into another delivery when converting at that boundary.
+                require(
+                    (1..=9_007_199_254_740_991).contains(&id),
+                    "storage_invalid",
+                    "Retained push delivery ID is invalid.",
+                )?;
                 Ok(IvyJson::object([
-                    ("id", IvyJson::Number(id)),
-                    ("attempts", IvyJson::Number(attempts)),
+                    ("id", IvyJson::Number(id as f64)),
+                    ("attempts", IvyJson::Number(attempts as f64)),
                     ("subscription", decode(&subscription)?),
                     ("notice", decode(&notice)?),
                 ]))
@@ -558,7 +565,7 @@ impl BrowserPushStore {
             ("hasMore", has_more.into()),
         ]))
     }
-    pub fn complete(&self, store: &Store, id: f64, status: f64) -> IvyResult<()> {
+    pub fn complete(&self, store: &Store, id: i64, status: u16) -> IvyResult<()> {
         let row = sql(
             store,
             store
@@ -566,14 +573,14 @@ impl BrowserPushStore {
                 .query_row(
                     "SELECT endpoint,attempts FROM browser_push_outbox WHERE id=?",
                     [id],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)),
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)),
                 )
                 .optional(),
         )?;
         let Some((endpoint, attempts)) = row else {
             return Ok(());
         };
-        if status == 404.0 || status == 410.0 {
+        if status == 404 || status == 410 {
             sql(
                 store,
                 store
@@ -582,10 +589,9 @@ impl BrowserPushStore {
             )?;
             return Ok(());
         }
-        let ok = (200.0..300.0).contains(&status);
-        let attempts = attempts + 1.0;
+        let ok = (200..300).contains(&status);
         sql(store,store.connection().execute("UPDATE browser_push SET last_error=? WHERE endpoint=?",params![if ok{None}else{Some("Push delivery failed. Try a test notification or enable notifications again.")},endpoint]))?;
-        if ok || attempts >= 5.0 {
+        if ok || attempts >= 4 {
             sql(
                 store,
                 store
@@ -593,15 +599,15 @@ impl BrowserPushStore {
                     .execute("DELETE FROM browser_push_outbox WHERE id=?", [id]),
             )?;
         } else {
+            let attempts = attempts + 1;
+            let next_attempt = (self.clock)()
+                .checked_add(30_000_i64 << (attempts - 1))
+                .ok_or_else(|| IvyError::new("storage_invalid", "Push retry deadline overflow."))?;
             sql(
                 store,
                 store.connection().execute(
                     "UPDATE browser_push_outbox SET attempts=?,next_attempt=? WHERE id=?",
-                    params![
-                        attempts,
-                        (self.clock)() + 30_000.0 * 2.0_f64.powf(attempts - 1.0),
-                        id
-                    ],
+                    params![attempts, next_attempt, id],
                 ),
             )?;
         }

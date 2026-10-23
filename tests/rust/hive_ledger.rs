@@ -1,4 +1,4 @@
-use super::{Root, native, oracle};
+use super::{AuthenticatedContext, LedgerResult, Root, Store, native, oracle};
 use ivy_contracts::{
     IvyJson,
     hash::hash_json,
@@ -208,4 +208,109 @@ fn event_capacity_durable_acknowledgement_and_consumer_reserve_match_original() 
         ),
         event("archive", "fixture/value"),
     ]);
+}
+
+#[test]
+fn ledger_integer_bounds_reject_corrupt_usage_and_keep_replay_fences() {
+    let root = Root::new();
+    let path = root.0.join("native-integers.sqlite");
+    let mut store = Store::open(&path).unwrap();
+    store
+        .connection()
+        .execute_batch("INSERT INTO principals VALUES('alpha');")
+        .unwrap();
+    store.set_metadata("runtime_epoch", "epoch").unwrap();
+    let maximum = MUTATION_RECEIPT_JOURNAL_BYTES as i64;
+    let safe = 9_007_199_254_740_991_i64;
+    store
+        .connection()
+        .execute(
+            "INSERT INTO mutations VALUES('alpha','prior','hash',?,?, 'snapshot','{}',?)",
+            rusqlite::params![safe - 1, safe - 1, maximum + 2],
+        )
+        .unwrap();
+    store
+        .set_metadata("mutation_receipt_bytes", &(maximum + 1).to_string())
+        .unwrap();
+    let error = store
+        .transaction(|store| store.cleanup_mutation_receipts(0, 0))
+        .unwrap_err();
+    assert_eq!(error.code, "storage_invalid");
+    assert_eq!(store.mutation_receipt_bytes().unwrap(), maximum + 1);
+    assert_eq!(
+        store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM mutations", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .metadata("mutations_expired_before")
+            .unwrap()
+            .as_deref(),
+        Some("0")
+    );
+    store
+        .connection()
+        .execute("UPDATE mutations SET receipt_bytes=?", [maximum + 1])
+        .unwrap();
+    store
+        .transaction(|store| store.cleanup_mutation_receipts(0, 0))
+        .unwrap();
+    assert_eq!(store.mutation_receipt_bytes().unwrap(), 0);
+    assert_eq!(
+        store.metadata("mutations_expired_before").unwrap(),
+        Some((safe - 1).to_string())
+    );
+    let context = AuthenticatedContext {
+        principal_id: "alpha".into(),
+        credential_digest: "fixture".into(),
+    };
+    let request =
+        |issued, nonce| IvyJson::object([("mutationId", format!("epoch:{issued}:{nonce}").into())]);
+    for (parameters, now) in [
+        (request(safe - 1, "expired"), safe as u64),
+        (request(safe, "future"), (safe - 60_001) as u64),
+    ] {
+        let error = store
+            .mutate(&context, &"fixture".into(), &parameters, now, |_, _| {
+                panic!("Invalid identity ran work")
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "mutation_expired");
+    }
+    let parameters = request(safe, "accepted");
+    let value = IvyJson::object([("retained", true.into())]);
+    assert_eq!(
+        store
+            .mutate(
+                &context,
+                &"fixture".into(),
+                &parameters,
+                safe as u64,
+                |_, _| Ok(LedgerResult::snapshot(value.clone()))
+            )
+            .unwrap(),
+        value
+    );
+    let bytes: i64 = store
+        .connection()
+        .query_row("SELECT SUM(receipt_bytes) FROM mutations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(store.mutation_receipt_bytes().unwrap(), bytes);
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(
+        store
+            .mutate(&context, &"fixture".into(), &parameters, 0, |_, _| panic!(
+                "Replay reran work"
+            ))
+            .unwrap(),
+        value
+    );
+    assert_eq!(store.mutation_receipt_bytes().unwrap(), bytes);
 }

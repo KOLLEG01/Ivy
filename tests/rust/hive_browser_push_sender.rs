@@ -148,7 +148,7 @@ fn actor(input: &Value) -> Option<mpsc::UnboundedSender<Posted>> {
         &store,
         &"https://example.test/ivy/".into(),
         Rc::new(NoCrypto),
-        Rc::new(|| 100000.0),
+        Rc::new(|| 100000),
     )
     .unwrap();
     store
@@ -239,8 +239,8 @@ fn actor(input: &Value) -> Option<mpsc::UnboundedSender<Posted>> {
                 "browserPush.complete" => push
                     .complete(
                         &store,
-                        request.get("id").unwrap().as_f64().unwrap(),
-                        request.get("status").unwrap().as_f64().unwrap(),
+                        request.get("id").unwrap().as_f64().unwrap() as i64,
+                        request.get("status").unwrap().as_f64().unwrap() as u16,
                     )
                     .map(|_| IvyJson::Null),
                 "fixture.snapshot" => {

@@ -161,7 +161,7 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
                                     Rc::new(browser_push::ObservedCrypto::new(
                                         &profile["browserPush"],
                                     )),
-                                    Rc::new(move || clock.get()),
+                                    Rc::new(move || clock.get() as i64),
                                 )?,
                             );
                         }

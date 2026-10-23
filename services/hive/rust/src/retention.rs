@@ -15,7 +15,7 @@ use std::{
 
 const DAY: f64 = 86_400_000.0;
 const REVISION_BATCH_SIZE: usize = 500;
-const EVENT_MAX_BYTES: f64 = 64.0 * 1024.0 * 1024.0;
+const EVENT_MAX_BYTES: i64 = 64 * 1024 * 1024;
 
 /// Date and contract ordering services used by the retention policy.
 pub trait Runtime {
@@ -221,12 +221,12 @@ impl CandidatePlan {
 }
 #[derive(Default)]
 struct Summary {
-    objects: f64,
-    revisions: f64,
-    bytes: f64,
-    eligible_objects: f64,
-    eligible_revisions: f64,
-    protected: f64,
+    objects: i64,
+    revisions: i64,
+    bytes: i64,
+    eligible_objects: i64,
+    eligible_revisions: i64,
+    protected: i64,
 }
 type Saved = (String, String);
 fn saved(store: &Store, key: &JsString) -> IvyResult<Option<Saved>> {
@@ -256,15 +256,21 @@ fn summary_value(saved: Option<&Saved>) -> IvyResult<Option<IvyJson>> {
         })
         .transpose()
 }
-fn count(value: Option<&IvyJson>) -> f64 {
+pub(crate) fn integer(value: &IvyJson) -> Option<i64> {
     value
-        .and_then(IvyJson::as_f64)
+        .as_f64()
         .filter(|v| v.is_finite() && v.fract() == 0.0 && *v >= 0.0 && *v <= 9_007_199_254_740_991.0)
-        .unwrap_or(0.0)
+        .map(|value| value as i64)
 }
 fn stored_summary(saved: Option<&Saved>) -> IvyResult<Summary> {
     let value = summary_value(saved)?;
-    let n = |key| count(value.as_ref().and_then(|v| v.get(key)));
+    let n = |key| {
+        value
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(integer)
+            .unwrap_or(0)
+    };
     Ok(Summary {
         objects: n("objectCount"),
         revisions: n("revisionCount"),
@@ -279,14 +285,10 @@ fn has_stored_usage(saved: Option<&Saved>) -> IvyResult<bool> {
     Ok(value.is_some_and(|v| {
         ["objectCount", "revisionCount", "byteLength"]
             .iter()
-            .all(|key| {
-                v.get(key).and_then(IvyJson::as_f64).is_some_and(|n| {
-                    n.is_finite() && n.fract() == 0.0 && n >= 0.0 && n <= 9_007_199_254_740_991.0
-                })
-            })
+            .all(|key| v.get(key).and_then(integer).is_some())
     }))
 }
-fn totals(store: &Store, key: &JsString) -> IvyResult<(f64, f64, f64)> {
+fn totals(store: &Store, key: &JsString) -> IvyResult<(i64, i64, i64)> {
     let objects = sql(
         store,
         store.connection().query_row(
@@ -317,7 +319,7 @@ fn candidates(
     for object in sql(
         store,
         statement.query_map([text(&contract.key)], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         }),
     )? {
         let (id, current) = sql(store, object)?;
@@ -327,12 +329,12 @@ fn candidates(
             store,
             sql(
                 store,
-                history.query_map([&id], |r| Ok((r.get::<_, f64>(0)?, r.get::<_, String>(1)?))),
+                history.query_map([&id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))),
             )?
             .collect::<rusqlite::Result<Vec<_>>>(),
         )?;
         if objects.contains(&id) {
-            result.eligible_objects += 1.0;
+            result.eligible_objects += 1;
             continue;
         }
         for (revision, created) in history {
@@ -343,7 +345,7 @@ fn candidates(
                 || (mode == &"bounded".into()
                     && (policy
                         .get("maximumCount")
-                        .map(|v| number(v).map(|n| revision <= current - n))
+                        .map(|v| revision_limit(v).map(|n| revision <= current - n))
                         .transpose()?
                         .unwrap_or(false)
                         || policy
@@ -359,9 +361,9 @@ fn candidates(
             }
             let pin=sql(store,store.connection().query_row("SELECT 1 FROM revision_references WHERE target_object_id=? AND target_revision=? LIMIT 1",params![id,revision],|r|r.get::<_,i64>(0)).optional())?;
             if pin.is_some() {
-                result.protected += 1.0;
+                result.protected += 1;
             } else {
-                result.eligible_revisions += 1.0;
+                result.eligible_revisions += 1;
             }
         }
     }
@@ -369,8 +371,16 @@ fn candidates(
 }
 struct Revision {
     id: String,
-    revision: f64,
-    bytes: f64,
+    revision: i64,
+    bytes: i64,
+}
+fn revision_limit(value: &IvyJson) -> IvyResult<i64> {
+    integer(value).ok_or_else(|| {
+        IvyError::new(
+            "storage_invalid",
+            "Retained revision counts must be nonnegative integers.",
+        )
+    })
 }
 fn revision_batch(
     store: &Store,
@@ -390,7 +400,7 @@ fn revision_batch(
     } else {
         if let Some(value) = policy.get("maximumCount") {
             eligible.push("r.revision<=o.current_revision-?");
-            values.push(Value::Real(number(value)?));
+            values.push(Value::Integer(revision_limit(value)?));
         }
         if let Some(value) = policy.get("maximumAgeDays") {
             eligible.push("r.created_at<=?");
@@ -464,36 +474,42 @@ fn build_status(store: &Store, runtime: &dyn Runtime, now: f64, scan: bool) -> I
             ("policy", contract.policy),
             ("policyHash", hash.into()),
             ("previewRequired", (!same).into()),
-            ("objectCount", IvyJson::Number(summary.objects)),
-            ("revisionCount", IvyJson::Number(summary.revisions)),
-            ("byteLength", IvyJson::Number(summary.bytes)),
+            ("objectCount", IvyJson::Number(summary.objects as f64)),
+            ("revisionCount", IvyJson::Number(summary.revisions as f64)),
+            ("byteLength", IvyJson::Number(summary.bytes as f64)),
             (
                 "eligibleObjectCount",
-                IvyJson::Number(if scan || same {
-                    eligibility.eligible_objects
-                } else {
-                    0.0
-                }),
+                IvyJson::Number(
+                    (if scan || same {
+                        eligibility.eligible_objects
+                    } else {
+                        0
+                    }) as f64,
+                ),
             ),
             (
                 "eligibleRevisionCount",
-                IvyJson::Number(if scan || same {
-                    eligibility.eligible_revisions
-                } else {
-                    0.0
-                }),
+                IvyJson::Number(
+                    (if scan || same {
+                        eligibility.eligible_revisions
+                    } else {
+                        0
+                    }) as f64,
+                ),
             ),
             (
                 "protectedRevisionCount",
-                IvyJson::Number(if scan || same {
-                    eligibility.protected
-                } else {
-                    0.0
-                }),
+                IvyJson::Number(
+                    (if scan || same {
+                        eligibility.protected
+                    } else {
+                        0
+                    }) as f64,
+                ),
             ),
         ]));
     }
-    let (events,bytes)=sql(store,store.connection().query_row("SELECT COUNT(*) AS count,COALESCE(SUM(length(CAST(payload AS BLOB))),0) AS bytes FROM events",[],|r|Ok((r.get::<_,f64>(0)?,r.get::<_,f64>(1)?))))?;
+    let (events,bytes)=sql(store,store.connection().query_row("SELECT COUNT(*) AS count,COALESCE(SUM(length(CAST(payload AS BLOB))),0) AS bytes FROM events",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?))))?;
     let failure = store
         .metadata("retention_last_failure")?
         .filter(|v| !v.is_empty())
@@ -516,11 +532,11 @@ fn build_status(store: &Store, runtime: &dyn Runtime, now: f64, scan: bool) -> I
         (
             "events",
             IvyJson::object([
-                ("count", IvyJson::Number(events)),
-                ("byteLength", IvyJson::Number(bytes)),
+                ("count", IvyJson::Number(events as f64)),
+                ("byteLength", IvyJson::Number(bytes as f64)),
                 (
                     "prunedThroughSequence",
-                    IvyJson::Number(store.metadata_number("events_pruned_through")?),
+                    IvyJson::Number(store.metadata_integer("events_pruned_through")? as f64),
                 ),
             ]),
         ),
@@ -534,17 +550,17 @@ fn build_status(store: &Store, runtime: &dyn Runtime, now: f64, scan: bool) -> I
                         store.connection().query_row(
                             "SELECT COUNT(*) AS count FROM mutations",
                             [],
-                            |r| r.get(0),
+                            |r| r.get::<_, i64>(0),
                         ),
-                    )?),
+                    )? as f64),
                 ),
                 (
                     "byteLength",
-                    IvyJson::Number(store.mutation_receipt_bytes()?),
+                    IvyJson::Number(store.mutation_receipt_bytes()? as f64),
                 ),
                 (
                     "expiredBefore",
-                    IvyJson::Number(store.metadata_number("mutations_expired_before")?),
+                    IvyJson::Number(store.metadata_integer("mutations_expired_before")? as f64),
                 ),
             ]),
         ),
@@ -577,15 +593,15 @@ pub fn collect(
                 let revisions=&batch[..batch.len().min(REVISION_BATCH_SIZE)];
                 for revision in revisions {sql(store,store.connection().execute("DELETE FROM revisions WHERE object_id=? AND revision=?",params![revision.id,revision.revision]))?;}
                 if !revisions.is_empty(){store.invalidate(format!("objects/{}",text(&contract.key)).into());store.invalidate("system".into());}
-                Summary{objects:prior.objects,revisions:(prior.revisions-revisions.len() as f64).max(0.0),bytes:(prior.bytes-revisions.iter().map(|r|r.bytes).sum::<f64>()).max(0.0),eligible_objects:0.0,
-                    eligible_revisions:(prior.eligible_revisions-revisions.len() as f64).max(if batch.len()>REVISION_BATCH_SIZE{1.0}else{0.0}),protected:prior.protected}
+                Summary{objects:prior.objects,revisions:(prior.revisions-revisions.len() as i64).max(0),bytes:(prior.bytes-revisions.iter().map(|r|r.bytes).sum::<i64>()).max(0),eligible_objects:0,
+                    eligible_revisions:(prior.eligible_revisions-revisions.len() as i64).max(if batch.len()>REVISION_BATCH_SIZE{1}else{0}),protected:prior.protected}
             }else{
                 let mut preview=candidates(store,contract,runtime,now,&preview_objects)?;
                 (preview.objects,preview.revisions,preview.bytes)=totals(store,&contract.key)?;preview
             };
             let encoded=encoded(&IvyJson::object([
-                ("checkedAt",iso(runtime,now)?.into()),("objectCount",IvyJson::Number(summary.objects)),("revisionCount",IvyJson::Number(summary.revisions)),("byteLength",IvyJson::Number(summary.bytes)),
-                ("eligibleObjects",IvyJson::Number(summary.eligible_objects)),("eligibleRevisions",IvyJson::Number(summary.eligible_revisions)),("protectedRevisions",IvyJson::Number(summary.protected)),
+                ("checkedAt",iso(runtime,now)?.into()),("objectCount",IvyJson::Number(summary.objects as f64)),("revisionCount",IvyJson::Number(summary.revisions as f64)),("byteLength",IvyJson::Number(summary.bytes as f64)),
+                ("eligibleObjects",IvyJson::Number(summary.eligible_objects as f64)),("eligibleRevisions",IvyJson::Number(summary.eligible_revisions as f64)),("protectedRevisions",IvyJson::Number(summary.protected as f64)),
             ]))?;
             sql(store,store.connection().execute("INSERT INTO retention_families VALUES (?,?,1,?) ON CONFLICT(contract_key) DO UPDATE SET policy_hash=excluded.policy_hash,previewed=1,summary_json=excluded.summary_json",params![text(&contract.key),hash,encoded]))?;
             Ok(active)
@@ -649,16 +665,16 @@ pub fn record_failure(
     )
 }
 fn collect_events(store: &Store, runtime: &dyn Runtime, now: f64) -> IvyResult<()> {
-    let pruned = store.metadata_number("events_pruned_through")?;
+    let pruned = store.metadata_integer("events_pruned_through")?;
     let age = sql(
         store,
         store.connection().query_row(
             "SELECT MAX(sequence) AS sequence FROM events WHERE occurred_at<?",
             [iso(runtime, now - 7.0 * DAY)?],
-            |r| r.get::<_, Option<f64>>(0),
+            |r| r.get::<_, Option<i64>>(0),
         ),
     )?
-    .unwrap_or(0.0);
+    .unwrap_or(0);
     let mut boundary = pruned.max(age);
     let count = sql(
         store,
@@ -676,19 +692,19 @@ fn collect_events(store: &Store, runtime: &dyn Runtime, now: f64) -> IvyResult<(
                 .query_row(
                     "SELECT sequence FROM events ORDER BY sequence LIMIT 1 OFFSET ?",
                     [count - EVENT_MAX_COUNT - 1],
-                    |r| r.get::<_, f64>(0),
+                    |r| r.get::<_, i64>(0),
                 )
                 .optional(),
         )?
-        .unwrap_or(0.0);
+        .unwrap_or(0);
         boundary = boundary.max(candidate);
     }
-    let mut bytes = 0.0;
+    let mut bytes = 0_i64;
     {
         let mut statement=sql(store,store.connection().prepare_cached("SELECT sequence,length(CAST(payload AS BLOB)) AS bytes FROM events ORDER BY sequence DESC"))?;
         for row in sql(
             store,
-            statement.query_map([], |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?))),
+            statement.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))),
         )? {
             let (sequence, size) = sql(store, row)?;
             bytes += size;
@@ -701,8 +717,7 @@ fn collect_events(store: &Store, runtime: &dyn Runtime, now: f64) -> IvyResult<(
     boundary = boundary.min(
         store
             .durable_event_boundary()?
-            .map(|v| v as f64)
-            .unwrap_or(9_007_199_254_740_991.0),
+            .unwrap_or(9_007_199_254_740_991),
     );
     if boundary <= pruned {
         return Ok(());

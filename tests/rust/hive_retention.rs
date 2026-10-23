@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use std::{cmp::Ordering, path::Path, time::Duration};
 
 // Exact Node runtime observations are fixture inputs, never retention decisions.
-// Production Shared clock/default-locale binding remains a separate integration.
+// The native metrics case also exercises the production NativeRuntime binding.
 struct TraceRuntime<'a>(&'a Value);
 impl Runtime for TraceRuntime<'_> {
     fn parse_date(&self, value: &JsString) -> f64 {
@@ -938,4 +938,136 @@ fn database_failure_capture_is_local_nested_and_restored_after_unwinding() {
     });
     result.unwrap();
     assert!(cause.is_none());
+}
+
+#[test]
+fn native_retention_metrics_preserve_large_cached_counts_and_revision_pins() {
+    use ivy_hive::native_runtime::NativeRuntime;
+    let root = Root::new();
+    let path = root.0.join("native-retention.sqlite");
+    let mut store = Store::open(&path).unwrap();
+    let safe = 9_007_199_254_740_991_i64;
+    let key = "fixture/counts";
+    let definition = json!({"key":key,"version":"1.0.0","retention":{"objects":{"mode":"retain"},"revisions":{"mode":"bounded","maximumCount":1}}});
+    store.connection().execute_batch("INSERT INTO principals VALUES('alpha'); INSERT INTO contract_families VALUES('fixture/counts','alpha','text/plain','retain');").unwrap();
+    store
+        .connection()
+        .execute(
+            "INSERT INTO contracts VALUES(?,?,?)",
+            rusqlite::params![key, "1.0.0", definition.to_string()],
+        )
+        .unwrap();
+    let mut seed = String::new();
+    super::query::insert(
+        &mut seed,
+        "subject",
+        key,
+        "1.0.0",
+        "NULL",
+        false,
+        "text",
+        "x",
+        safe as u64,
+    );
+    seed.push_str(&format!("INSERT INTO revisions SELECT object_id,revision-2,contract_key,contract_version,encoding,content,content_hash,byte_length,created_at,references_json FROM revisions WHERE object_id='subject'; INSERT INTO revisions SELECT object_id,revision-1,contract_key,contract_version,encoding,content,content_hash,byte_length,created_at,references_json FROM revisions WHERE object_id='subject' AND revision={safe};"));
+    super::query::insert(
+        &mut seed, "pin", key, "1.0.0", "NULL", false, "text", "x", 1,
+    );
+    seed.push_str(&format!(
+        "INSERT INTO revision_references VALUES('pin',1,'saved','subject',{});",
+        safe - 2
+    ));
+    store
+        .transaction(|store| {
+            store
+                .connection()
+                .execute_batch(&seed)
+                .map_err(|error| store.query_error(error))
+        })
+        .unwrap();
+    let now = 1_800_000_000_000.0;
+    let first = retention::collect(&mut store, &NativeRuntime, now, None)
+        .unwrap()
+        .to_serde()
+        .unwrap();
+    let family = |value: &Value| {
+        value["families"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["contractKey"] == key)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(family(&first)["eligibleRevisionCount"], 1);
+    assert_eq!(family(&first)["protectedRevisionCount"], 1);
+    let cached = json!({"objectCount":safe,"revisionCount":safe,"byteLength":safe,"eligibleObjects":0,"eligibleRevisions":1,"protectedRevisions":1});
+    store
+        .connection()
+        .execute(
+            "UPDATE retention_families SET summary_json=? WHERE contract_key=?",
+            rusqlite::params![cached.to_string(), key],
+        )
+        .unwrap();
+    let before = retention::status(&store, &NativeRuntime, now)
+        .unwrap()
+        .to_serde()
+        .unwrap();
+    assert_eq!(family(&before)["byteLength"], safe);
+    let collected = retention::collect(&mut store, &NativeRuntime, now, None)
+        .unwrap()
+        .to_serde()
+        .unwrap();
+    let actual = family(&collected);
+    assert_eq!(actual["objectCount"], safe);
+    assert_eq!(actual["revisionCount"], safe - 1);
+    assert_eq!(actual["byteLength"], safe - 1);
+    assert_eq!(actual["eligibleRevisionCount"], 0);
+    assert_eq!(actual["protectedRevisionCount"], 1);
+    let revisions = {
+        let mut statement = store
+            .connection()
+            .prepare("SELECT revision FROM revisions WHERE object_id='subject' ORDER BY revision")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    assert_eq!(revisions, vec![safe - 2, safe]);
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    let reopened = retention::status(&store, &NativeRuntime, now)
+        .unwrap()
+        .to_serde()
+        .unwrap();
+    assert_eq!(family(&reopened), actual);
+    let mut malformed = definition.clone();
+    malformed["version"] = "2.0.0".into();
+    malformed["retention"]["revisions"]["maximumCount"] = json!(0.5);
+    store
+        .connection()
+        .execute(
+            "INSERT INTO contracts VALUES(?,?,?)",
+            rusqlite::params![key, "2.0.0", malformed.to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        retention::preview(&store, &NativeRuntime, now)
+            .unwrap_err()
+            .code,
+        "storage_invalid"
+    );
+    assert_eq!(
+        store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM revisions WHERE object_id='subject'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        2
+    );
 }

@@ -52,19 +52,19 @@ impl Store {
             .map(JsString::from)
             .ok_or_else(IvyError::internal)
     }
-    pub(crate) fn metadata_number(&self, key: &str) -> IvyResult<f64> {
+    pub(crate) fn metadata_integer(&self, key: &str) -> IvyResult<i64> {
         let value = self.metadata(key)?.unwrap_or_else(|| "0".into());
         value
             .parse::<u64>()
             .ok()
             .filter(|v| *v <= 9_007_199_254_740_991)
-            .map(|v| v as f64)
+            .map(|value| value as i64)
             .ok_or_else(|| {
                 IvyError::new("storage_invalid", "Retained metadata counter is invalid.")
             })
     }
-    pub fn mutation_receipt_bytes(&self) -> IvyResult<f64> {
-        self.metadata_number("mutation_receipt_bytes")
+    pub fn mutation_receipt_bytes(&self) -> IvyResult<i64> {
+        self.metadata_integer("mutation_receipt_bytes")
     }
     pub fn cleanup_mutation_receipts(
         &self,
@@ -79,11 +79,12 @@ impl Store {
         let mut count = self
             .db
             .query_row("SELECT COUNT(*) FROM mutations", [], |r| r.get::<_, i64>(0))
-            .map_err(|e| self.query_error(e))? as f64;
+            .map_err(|e| self.query_error(e))?;
         let mut bytes = self.mutation_receipt_bytes()?;
-        let mut expired = self.metadata_number("mutations_expired_before")?;
-        let maximum_count = MUTATION_RECEIPT_COUNT as f64 - reserved_count as f64;
-        let maximum_bytes = MUTATION_RECEIPT_JOURNAL_BYTES as f64 - reserved_bytes as f64;
+        let mut expired = self.metadata_integer("mutations_expired_before")?;
+        let maximum_count =
+            MUTATION_RECEIPT_COUNT as i64 - i64::try_from(reserved_count).map_err(sql_error)?;
+        let maximum_bytes = (MUTATION_RECEIPT_JOURNAL_BYTES - reserved_bytes) as i64;
         if count <= maximum_count && bytes <= maximum_bytes {
             return Ok(());
         }
@@ -91,7 +92,7 @@ impl Store {
             let limit = if bytes > maximum_bytes {
                 256
             } else {
-                (count - maximum_count).min(256.0) as i64
+                count.saturating_sub(maximum_count).min(256)
             };
             let oldest = self
                 .db
@@ -102,8 +103,8 @@ impl Store {
                 .query_map([limit], |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
-                        r.get::<_, f64>(1)?,
-                        r.get::<_, f64>(2)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
                     ))
                 })
                 .map_err(|e| self.query_error(e))?
@@ -117,7 +118,12 @@ impl Store {
             let mut boundary = 0;
             for (rowid, issued, size) in oldest {
                 boundary = rowid;
-                count -= 1.0;
+                require(
+                    (0..=bytes).contains(&size),
+                    "storage_invalid",
+                    "Mutation receipt usage does not match stored receipts.",
+                )?;
+                count -= 1;
                 bytes -= size;
                 expired = expired.max(issued);
                 if count <= maximum_count && bytes <= maximum_bytes {
@@ -159,7 +165,7 @@ impl Store {
                 }
                 return Ok(reference);
             }
-            require(identity.issued_at_unix_ms as f64 <= now_ms as f64 + 60_000.0 && identity.issued_at_unix_ms as f64 > store.metadata_number("mutations_expired_before")?, "mutation_expired", "Mutation identity is in the future or predates the receipt ring's replay boundary.")?;
+            require(identity.issued_at_unix_ms <= now_ms.saturating_add(60_000) && identity.issued_at_unix_ms > store.metadata_integer("mutations_expired_before")? as u64, "mutation_expired", "Mutation identity is in the future or predates the receipt ring's replay boundary.")?;
             let result=work(store,&principal)?;
             let reference=result.reference.as_ref().filter(|v|!v.is_null()).unwrap_or(&result.value);
             let receipt=canonical(reference,MUTATION_RECEIPT_RESULT_BYTES)?;
@@ -170,7 +176,7 @@ impl Store {
             let bytes=String::from_utf16_lossy(&units).len()+16;
             store.cleanup_mutation_receipts(bytes,1)?;
             store.db.execute("INSERT INTO mutations VALUES (?, ?, ?, ?, ?, ?, ?, ?)",params![text(&principal.principal_id),text(&mutation_id),request_hash,identity.issued_at_unix_ms as i64,i64::try_from(now_ms).map_err(sql_error)?,kind,receipt,bytes as i64]).map_err(sql_error)?;
-            store.set_metadata("mutation_receipt_bytes", &(store.mutation_receipt_bytes()? + bytes as f64).to_string())?;
+            store.set_metadata("mutation_receipt_bytes", &(store.mutation_receipt_bytes()? + bytes as i64).to_string())?;
             Ok(result.value)
         })
     }

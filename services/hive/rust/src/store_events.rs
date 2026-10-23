@@ -32,7 +32,7 @@ impl Store {
             self.durable_event_boundary()?
                 .unwrap_or(9_007_199_254_740_991),
         );
-        if boundary as f64 <= self.metadata_number("events_pruned_through")? {
+        if boundary <= self.metadata_integer("events_pruned_through")? {
             return Ok(());
         }
         self.db

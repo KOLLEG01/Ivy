@@ -1,4 +1,4 @@
-use super::{AuthContext, AuthenticatedContext, IvyError, IvyJson, JsString, Store};
+use super::{AuthContext, AuthenticatedContext, IvyError, IvyJson, JsString, Root, Store};
 use ivy_contracts::IvyResult;
 use ivy_hive::events;
 use serde_json::{Value, json};
@@ -671,4 +671,134 @@ fn event_strings_keep_raw_utf16_payloads_filters_and_sql_topic_identity_boundari
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn event_integer_cursors_freeze_and_reopen_without_aliasing_retained_sequences() {
+    let root = Root::new();
+    let path = root.0.join("native-integers.sqlite");
+    let mut store = Store::open(&path).unwrap();
+    let safe = 9_007_199_254_740_991_i64;
+    store
+        .connection()
+        .execute_batch(
+            "INSERT INTO principals VALUES('alpha');
+         INSERT INTO service_nodes VALUES('consumer','alpha','host','fixture',1,'{}');",
+        )
+        .unwrap();
+    for sequence in [safe - 1, safe] {
+        store.connection().execute(
+            "INSERT INTO events(sequence,topic,topic_version,source,occurred_at,mutation_id,payload)
+             VALUES(?,'hive.object.changed','1.0.0','source','now','id','{}')",
+            [sequence],
+        ).unwrap();
+    }
+    let request =
+        IvyJson::from_serde(&json!({"afterSequence":safe-2,"filter":{},"limit":1})).unwrap();
+    let first = events::read(&store, &request).unwrap().to_serde().unwrap();
+    assert_eq!(first["throughSequence"], safe - 1);
+    assert_eq!(first["items"][0]["sequence"], safe - 1);
+    assert_eq!(first["hasMore"], true);
+    let subscription = IvyJson::from_serde(
+        &json!({"name":"cursor","filter":{},"initialSequence":safe-2,"limit":1}),
+    )
+    .unwrap();
+    let issued = events::subscribe(&mut store, &"consumer".into(), &subscription).unwrap();
+    assert_eq!(issued.to_serde().unwrap(), first);
+    let mut repeated = subscription.clone();
+    repeated.insert("limit", IvyJson::Number(2.0));
+    assert_eq!(
+        events::subscribe(&mut store, &"consumer".into(), &repeated).unwrap(),
+        issued
+    );
+    let ack =
+        |through| IvyJson::from_serde(&json!({"name":"cursor","throughSequence":through})).unwrap();
+    events::ack(&mut store, &"consumer".into(), &ack(safe - 1)).unwrap();
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    let second = events::subscribe(&mut store, &"consumer".into(), &repeated)
+        .unwrap()
+        .to_serde()
+        .unwrap();
+    assert_eq!(second["throughSequence"], safe);
+    assert_eq!(second["items"][0]["sequence"], safe);
+    assert_eq!(second["hasMore"], false);
+    events::ack(&mut store, &"consumer".into(), &ack(safe)).unwrap();
+    let persisted: (i64, i64, String, String) = store.connection().query_row(
+        "SELECT initial_sequence,acknowledged_sequence,typeof(initial_sequence),typeof(acknowledged_sequence) FROM subscriptions", [],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+    ).unwrap();
+    assert_eq!(
+        persisted,
+        (safe - 2, safe, "integer".into(), "integer".into())
+    );
+    store
+        .set_metadata("events_pruned_through", &(safe - 1).to_string())
+        .unwrap();
+    let mut gap_request = request.clone();
+    gap_request.insert("afterSequence", IvyJson::Number((safe - 2) as f64));
+    let gap = events::read(&store, &gap_request)
+        .unwrap()
+        .to_serde()
+        .unwrap();
+    assert_eq!(gap["gap"]["prunedThroughSequence"], safe - 1);
+    assert_eq!(
+        events::head(&store).unwrap().to_serde().unwrap()["throughSequence"],
+        safe
+    );
+    let unsafe_insert = store.connection().execute(
+        "INSERT INTO events(sequence,topic,topic_version,source,occurred_at,mutation_id,payload)
+         VALUES(?,'hive.object.changed','1.0.0','source','now','id','{}')",
+        [safe + 2],
+    );
+    assert!(
+        unsafe_insert.is_err(),
+        "The current schema must reject an unsafe sequence"
+    );
+    // Simulate a damaged retained database to exercise the wire boundary too.
+    store
+        .connection()
+        .execute_batch("PRAGMA ignore_check_constraints=ON;")
+        .unwrap();
+    store.connection().execute(
+        "INSERT INTO events(sequence,topic,topic_version,source,occurred_at,mutation_id,payload)
+         VALUES(?,'hive.object.changed','1.0.0','source','now','id','{}')", [safe+2],
+    ).unwrap();
+    store
+        .connection()
+        .execute_batch("PRAGMA ignore_check_constraints=OFF;")
+        .unwrap();
+    assert_eq!(events::head(&store).unwrap_err().code, "storage_invalid");
+    let mut tail = request;
+    tail.insert("afterSequence", IvyJson::Number(safe as f64));
+    assert_eq!(
+        events::read(&store, &tail).unwrap_err().code,
+        "storage_invalid"
+    );
+    for invalid in [
+        IvyJson::Number(1.5),
+        IvyJson::Number(-1.0),
+        IvyJson::Number((safe + 1) as f64),
+        "1".into(),
+    ] {
+        let mut malformed = ack(safe);
+        malformed.insert("throughSequence", invalid);
+        assert_eq!(
+            events::ack(&mut store, &"consumer".into(), &malformed)
+                .unwrap_err()
+                .code,
+            "internal_error"
+        );
+        assert_eq!(
+            store
+                .connection()
+                .query_row(
+                    "SELECT acknowledged_sequence FROM subscriptions",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            safe
+        );
+    }
 }

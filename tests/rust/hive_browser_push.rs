@@ -1,6 +1,6 @@
 use super::*;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use ivy_hive::browser_push_store::Crypto;
+use ivy_hive::browser_push_store::{BrowserPushStore, Crypto};
 use std::collections::HashMap;
 pub(super) struct ObservedCrypto {
     keys: Vec<IvyJson>,
@@ -554,4 +554,166 @@ fn browser_push_subscription_limits_apply_after_existing_secret_ownership_and_pr
             .unwrap()["session_digest"],
         "session-two"
     );
+}
+
+#[test]
+fn browser_push_native_integers_preserve_ids_deadlines_and_receipt_cutoff() {
+    let mut store = Store::open(Path::new(":memory:")).unwrap();
+    store
+        .configure_credentials(&[Credential {
+            principal_id: "alpha".into(),
+            digest: digest().into(),
+        }])
+        .unwrap();
+    let now = 9_007_199_254_740_993_i64;
+    let clock = Rc::new(Cell::new(now));
+    let observed_clock = clock.clone();
+    let push = BrowserPushStore::new(
+        &store,
+        &"https://example.test/ivy/".into(),
+        Rc::new(ObservedCrypto::new(&json!({"vapid":[],"points":[]}))),
+        Rc::new(move || observed_clock.get()),
+    )
+    .unwrap();
+    store
+        .connection()
+        .execute_batch(&format!(
+            "INSERT INTO browser_sessions VALUES('session-one','{}','2026-01-01');
+         INSERT INTO browser_push VALUES('endpoint','session-one','{{}}',NULL,0);
+         INSERT INTO browser_push_outbox(id,endpoint,tag,notice_json)
+         VALUES(9007199254740991,'endpoint','native','{{}}');",
+            digest()
+        ))
+        .unwrap();
+    let cutoff = now - 7 * 86_400_000;
+    for (tag, created_at) in [("expired", cutoff - 1), ("boundary", cutoff)] {
+        store
+            .connection()
+            .execute(
+                "INSERT INTO browser_push_receipts VALUES(?,?)",
+                rusqlite::params![tag, created_at],
+            )
+            .unwrap();
+    }
+    let batch = push.next(&mut store).unwrap().to_serde().unwrap();
+    assert_eq!(
+        batch["deliveries"][0]["id"].as_u64(),
+        Some(9_007_199_254_740_991)
+    );
+    assert_eq!(
+        rows(&store, "SELECT tag FROM browser_push_receipts"),
+        json!([{"tag":"boundary"}])
+    );
+    push.complete(&store, 9_007_199_254_740_991, 503).unwrap();
+    let retained: (i64, u32, i64, String) = store
+        .connection()
+        .query_row(
+            "SELECT id,attempts,next_attempt,typeof(next_attempt) FROM browser_push_outbox",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        retained,
+        (9_007_199_254_740_991, 1, now + 30_000, "integer".into())
+    );
+    clock.set(now + 29_999);
+    assert!(
+        push.next(&mut store)
+            .unwrap()
+            .get("deliveries")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    clock.set(now + 30_000);
+    assert_eq!(
+        push.next(&mut store)
+            .unwrap()
+            .get("deliveries")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    push.complete(&store, 9_007_199_254_740_991, 201).unwrap();
+    store
+        .connection()
+        .execute_batch(
+            "INSERT INTO browser_push_outbox(id,endpoint,tag,notice_json)
+         VALUES(9007199254740993,'endpoint','unsafe','{}');",
+        )
+        .unwrap();
+    assert_eq!(push.next(&mut store).unwrap_err().code, "storage_invalid");
+    assert_eq!(
+        store
+            .connection()
+            .query_row("SELECT id FROM browser_push_outbox", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        9_007_199_254_740_993
+    );
+    for invalid in ["-0", "-1", "1.5", "9007199254740992"] {
+        store.set_metadata("browser_push_cursor", invalid).unwrap();
+        assert_eq!(push.next(&mut store).unwrap_err().code, "storage_invalid");
+        assert_eq!(
+            store.metadata("browser_push_cursor").unwrap().as_deref(),
+            Some(invalid)
+        );
+    }
+}
+
+#[test]
+fn browser_push_worker_rejects_non_integer_completion_without_mutation() {
+    let mut steps = setup();
+    ok(&mut steps, subscribe("session-one", "native"));
+    ok(
+        &mut steps,
+        request(
+            "session-one",
+            json!({"action":"test","endpoint":subscription("native")["endpoint"]}),
+        ),
+    );
+    let root = Root::new();
+    let observed = oracle(&root.0.join("observed.sqlite"), &steps);
+    let mut profile = observed["registryRuntime"].clone();
+    profile["browserPush"] = observed["browserPushRuntime"].clone();
+    let mut rejected = vec![];
+    for id in [
+        json!(1.5),
+        json!(-1),
+        json!(9_007_199_254_740_992_u64),
+        json!("1"),
+        Value::Null,
+    ] {
+        rejected.push(push(
+            &mut steps,
+            action(json!({"action":"browserPush.complete","id":id,"status":201})),
+        ));
+    }
+    for status in [
+        json!(201.5),
+        json!(-1),
+        json!(65536),
+        json!("201"),
+        Value::Null,
+    ] {
+        rejected.push(push(
+            &mut steps,
+            action(json!({"action":"browserPush.complete","id":1,"status":status})),
+        ));
+    }
+    let retried = ok(
+        &mut steps,
+        action(json!({"action":"browserPush.complete","id":1,"status":0})),
+    );
+    let result = native(&root.0.join("native.sqlite"), &steps, &profile);
+    for index in rejected {
+        error(&result, index, "internal_error");
+        assert_eq!(state(&result, index), state(&result, index - 1));
+    }
+    assert_eq!(state(&result, retried)["outbox"][0]["attempts"], 1);
+    assert_eq!(state(&result, retried)["outbox"][0]["next_attempt"], 130000);
 }

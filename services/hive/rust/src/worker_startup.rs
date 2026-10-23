@@ -73,11 +73,12 @@ impl KernelWorker {
         let credentials = options.credentials.clone();
         let mut kernel = Kernel::open_retained(options, ports)?;
         let actions = (|| -> IvyResult<WorkerActions> {
+            let clock = kernel.clock.clone();
             let push = BrowserPushStore::new(
                 &kernel.parts.store,
                 &kernel.options.public_base_url,
                 crypto,
-                kernel.clock.clone(),
+                Rc::new(move || clock() as i64),
             )?;
             let mut actions = WorkerActions::before_ready(&mut kernel, &credentials)?;
             actions.bind_browser_push(push);

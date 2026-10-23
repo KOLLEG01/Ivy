@@ -34,15 +34,22 @@ fn strings(value: &IvyJson) -> IvyResult<Vec<JsString>> {
         .map(|v| v.as_js_string().cloned().ok_or_else(IvyError::internal))
         .collect()
 }
-fn head(kernel: &Kernel) -> IvyResult<f64> {
+fn integer(value: &IvyJson, key: &str, maximum: u64) -> IvyResult<u64> {
+    field(value, key)?
+        .as_f64()
+        .filter(|value| value.fract() == 0.0 && *value >= 0.0 && *value <= maximum as f64)
+        .map(|value| value as u64)
+        .ok_or_else(IvyError::internal)
+}
+fn head(kernel: &Kernel) -> IvyResult<i64> {
     kernel
         .parts
         .store
         .connection()
         .query_row("SELECT MAX(sequence) AS sequence FROM events", [], |row| {
-            row.get::<_, Option<f64>>(0)
+            row.get::<_, Option<i64>>(0)
         })
-        .map(|v| v.unwrap_or(0.0))
+        .map(|v| v.unwrap_or(0))
         .map_err(|e| kernel.parts.store.query_error(e))
 }
 
@@ -50,7 +57,7 @@ pub struct WorkerActions {
     browser_push: Option<BrowserPushStore>,
     catalog: KernelCatalog,
     configured_principals: Vec<JsString>,
-    announced_event_sequence: f64,
+    announced_event_sequence: i64,
 }
 impl WorkerActions {
     /// The original configure action updates storage, without replacing the
@@ -75,7 +82,7 @@ impl WorkerActions {
             browser_push: None,
             catalog,
             configured_principals: credentials.iter().map(|v| v.principal_id.clone()).collect(),
-            announced_event_sequence: 0.0,
+            announced_event_sequence: 0,
         })
     }
     pub(crate) fn initialize_announcements(&mut self, kernel: &Kernel) -> IvyResult<()> {
@@ -118,12 +125,8 @@ impl WorkerActions {
                     _ => {
                         push.complete(
                             &kernel.parts.store,
-                            field(message, "id")?
-                                .as_f64()
-                                .ok_or_else(IvyError::internal)?,
-                            field(message, "status")?
-                                .as_f64()
-                                .ok_or_else(IvyError::internal)?,
+                            integer(message, "id", 9_007_199_254_740_991)? as i64,
+                            integer(message, "status", u16::MAX as u64)? as u16,
                         )?;
                         Ok(IvyJson::Null)
                     }
@@ -484,10 +487,11 @@ impl WorkerActions {
         }
         let through = head(kernel)?;
         if through > self.announced_event_sequence {
+            let value = crate::events::sequence_value(through)?;
             self.announced_event_sequence = through;
             emit(Notification::EventsAvailable(IvyJson::object([(
                 "throughSequence",
-                IvyJson::Number(through),
+                value,
             )])));
         }
         Ok(())
