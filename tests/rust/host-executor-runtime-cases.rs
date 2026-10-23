@@ -144,11 +144,12 @@ fn node() -> PathBuf {
         .trim(),
     )
 }
+const FIXTURE_NODE_VERSION: &str = "24.18.0";
 fn preparation() -> PreparationRuntime {
     PreparationRuntime {
         node: Some(NodeRuntime {
             executable: node(),
-            version: "24.18.0".into(),
+            version: FIXTURE_NODE_VERSION.into(),
         }),
         compare: Arc::new(|a, b| a.0.cmp(&b.0)),
         http: PortableHttp::new(reqwest::Client::builder().no_proxy()).unwrap(),
@@ -290,6 +291,8 @@ impl Fixture {
 async fn native_admission_matches_original_runtime_artifact_command_and_journal_guards() {
     for case in [
         "ready",
+        "unused-executable",
+        "invalid-timeout",
         "unsupported-os",
         "unsupported-arch",
         "unsupported-node",
@@ -305,7 +308,12 @@ async fn native_admission_matches_original_runtime_artifact_command_and_journal_
             } else {
                 "fixture"
             },
-            |_, _, manifest| match case {
+            |host, _, manifest| match case {
+                "unused-executable" => {
+                    let mut tools = host.required("executables").unwrap().clone();
+                    tools.insert(JsString(vec![0xd800]), path(&node()));
+                    host.insert("executables", tools);
+                }
                 "unsupported-os" => nested(
                     manifest,
                     "requirements",
@@ -341,6 +349,34 @@ async fn native_admission_matches_original_runtime_artifact_command_and_journal_
             },
         )
         .await;
+        if case == "invalid-timeout" {
+            for timeout in [0.0, -1.0, 0.5, 3600001.0, 2147483648.0, 1e30] {
+                let mut manifest = fixture.manifest.clone();
+                nested(
+                    &mut manifest,
+                    "entrypoint",
+                    "timeoutMs",
+                    IvyJson::Number(timeout),
+                );
+                let error = fixture
+                    .journal
+                    .save_candidate(fixture.candidate.clone(), manifest)
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.code, "invalid_arguments", "{timeout}");
+                assert_json_eq(
+                    &fixture
+                        .journal
+                        .manifest(&hash().as_str().unwrap())
+                        .await
+                        .unwrap(),
+                    &fixture.manifest,
+                );
+            }
+            assert!(fixture.journal.target("fixture").await.unwrap().is_none());
+            fixture.close().await;
+            continue;
+        }
         let artifact = native(fixture.candidate.required("artifactRoot").unwrap());
         if case == "stamp-mismatch" {
             config::atomic_json(
@@ -362,7 +398,38 @@ async fn native_admission_matches_original_runtime_artifact_command_and_journal_
                 .compatibility(&fixture.context, &hash().as_str().unwrap(), None)
                 .await,
         );
-        let expected = oracle(fixture.input());
+        let mut expected = oracle(fixture.input());
+        if matches!(
+            case,
+            "unsupported-os" | "unsupported-arch" | "unsupported-node"
+        ) {
+            let mut error = expected.required("error").unwrap().clone();
+            assert_eq!(
+                error.required("data").unwrap().get("code"),
+                Some(&"unsupported_runtime".into()),
+                "{case}",
+            );
+            // Native platform admission precedes the optional, normalized Node capability.
+            let platform = if cfg!(windows) {
+                "win32"
+            } else {
+                std::env::consts::OS
+            };
+            let architecture = match std::env::consts::ARCH {
+                "x86_64" => "x64",
+                "aarch64" => "arm64",
+                other => other,
+            };
+            let message = if case == "unsupported-node" {
+                format!(
+                    "Package does not support {platform}/{architecture} on {FIXTURE_NODE_VERSION}."
+                )
+            } else {
+                format!("Package does not support {platform}/{architecture}.")
+            };
+            error.insert("message", message.into());
+            expected.insert("error", error);
+        }
         pair(case, &result, &expected);
         assert!(fixture.journal.target("fixture").await.unwrap().is_none());
         fixture.close().await;
@@ -553,7 +620,32 @@ async fn observe(f: &Fixture, target: Option<&IvyJson>, state: &str, old: bool) 
 }
 #[tokio::test]
 async fn native_live_hive_inspection_uses_bound_identity_even_after_observation_ages() {
-    for case in ["ready-stale", "identity-changed", "storage-incompatible"] {
+    for case in [
+        "ready-stale",
+        "identity-changed",
+        "storage-incompatible",
+        "database-absent",
+        "malformed-exists",
+        "missing-exists",
+    ] {
+        let mut inspection = IvyJson::object([
+            ("schemaVersion", IvyJson::Number(1.0)),
+            ("exists", (case != "database-absent").into()),
+            (
+                "format",
+                IvyJson::Number(match case {
+                    "storage-incompatible" => 2.0,
+                    "database-absent" => 0.0,
+                    _ => 1.0,
+                }),
+            ),
+            ("contracts", IvyJson::Array(vec![])),
+        ]);
+        if case == "malformed-exists" {
+            inspection.insert("exists", IvyJson::Number(0.0));
+        } else if case == "missing-exists" {
+            inspection.remove("exists");
+        }
         let rpc = Rpc::new(
             IvyJson::object([
                 ("ready", true.into()),
@@ -566,19 +658,7 @@ async fn native_live_hive_inspection_uses_bound_identity_even_after_observation_
                     },
                 ),
             ]),
-            IvyJson::object([
-                ("schemaVersion", IvyJson::Number(1.0)),
-                ("exists", true.into()),
-                (
-                    "format",
-                    if case == "storage-incompatible" {
-                        IvyJson::Number(2.0)
-                    } else {
-                        IvyJson::Number(1.0)
-                    },
-                ),
-                ("contracts", IvyJson::Array(vec![])),
-            ]),
+            inspection,
         );
         let f = Fixture::new("hive", |host, _, manifest| {
             hive(host, manifest, Some(&rpc.endpoint))
@@ -593,10 +673,24 @@ async fn native_live_hive_inspection_uses_bound_identity_even_after_observation_
                 .await,
         );
         let before = rpc.requests.lock().unwrap().clone();
-        let expected = oracle(f.input());
-        pair(case, &actual, &expected);
-        let all = rpc.requests.lock().unwrap().clone();
-        assert_eq!(&all[..before.len()], &all[before.len()..]);
+        if matches!(case, "malformed-exists" | "missing-exists") {
+            assert_eq!(actual.get("ok"), Some(&false.into()), "{case}");
+            assert_eq!(
+                actual
+                    .required("error")
+                    .unwrap()
+                    .required("data")
+                    .unwrap()
+                    .get("code"),
+                Some(&"incompatible_storage".into()),
+                "{case}",
+            );
+        } else {
+            let expected = oracle(f.input());
+            pair(case, &actual, &expected);
+            let all = rpc.requests.lock().unwrap().clone();
+            assert_eq!(&all[..before.len()], &all[before.len()..]);
+        }
         assert!(f.inspector.calls.lock().unwrap().is_empty());
         assert_json_eq(
             &f.journal.target("fixture").await.unwrap().unwrap(),
@@ -1076,7 +1170,21 @@ fn linux_candidate(candidate: &mut IvyJson) {
 #[tokio::test]
 async fn native_systemd_reconciliation_fences_passive_revisions_and_retires_before_explicit_replacement()
  {
-    let f = Fixture::new("fixture", |_, candidate, _| linux_candidate(candidate)).await;
+    let f = Fixture::new("fixture", |host, candidate, manifest| {
+        linux_candidate(candidate);
+        let mut tools = host.required("executables").unwrap().clone();
+        tools.insert(JsString(vec![0xd800]), path(&node()));
+        host.insert("executables", tools);
+        let mut readiness = manifest.required("readiness").unwrap().clone();
+        nested(
+            &mut readiness,
+            "command",
+            "timeoutMs",
+            IvyJson::Number(3600000.0),
+        );
+        manifest.insert("readiness", readiness);
+    })
+    .await;
     prepare_readiness(&f);
     let host = UnitHost::default();
     host.0.lock().unwrap().active = "active".into();

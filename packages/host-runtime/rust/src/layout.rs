@@ -115,14 +115,14 @@ pub fn resolve_host_configuration(input: &IvyJson, source_path: &JsString, envir
             settings = agent_manager_account_settings(&settings, &home, style)?;
         }
         let mut instance = instance.clone(); instance.insert("settings", settings);
-        let process_is_falsy = match instance.get("process") {
-            None | Some(IvyJson::Null) | Some(IvyJson::Bool(false)) => true,
-            Some(IvyJson::Number(n)) => *n == 0.0 || n.is_nan(),
-            Some(IvyJson::String(s)) => s.0.is_empty(),
-            _ => false,
-        };
-        if component == "service-manager" && instance.get("engine") == Some(&"process".into()) && style == Style::Windows && process_is_falsy {
-            instance.insert("process", IvyJson::object([("allowWindowsBreakaway", true.into())]));
+        if component == "service-manager" && instance.get("engine") == Some(&"process".into()) && style == Style::Windows {
+            match instance.get("process") {
+                None | Some(IvyJson::Null) => {
+                    instance.insert("process", IvyJson::object([("allowWindowsBreakaway", true.into())]));
+                }
+                Some(IvyJson::Object(_)) => {}
+                Some(_) => return Err(IvyError::new("invalid_arguments", "Instance process options must be an object.")),
+            }
         }
         instances.push(instance);
     }

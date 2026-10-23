@@ -69,20 +69,22 @@ impl DockerHost for NativeDockerHost {
         let helper = crate::native_plan::native_binary_path(&self.bootstrap_root, "ivy-job");
         Box::pin(async move {
             let root = config_file::path_value(config.required("runtimeRoot")?)?;
-            let executables = config
-                .required("executables")?
-                .as_object()
-                .ok_or_else(IvyError::internal)?
-                .iter()
-                .map(|(key, value)| Ok((key.to_utf8()?, config_file::path_value(value)?)))
-                .collect::<IvyResult<BTreeMap<_, _>>>()?;
-            // Node timers truncate finite delays and use 1ms outside their range.
-            let timeout_ms =
-                if !timeout_ms.is_finite() || !(1.0..2147483648.0).contains(&timeout_ms) {
-                    1
-                } else {
-                    timeout_ms as u64
-                };
+            let executables = BTreeMap::from([(
+                "docker".into(),
+                config_file::path_value(config.required("executables")?.required("docker")?)?,
+            )]);
+            if !timeout_ms.is_finite()
+                || timeout_ms.fract() != 0.0
+                || !(1.0..u64::MAX as f64).contains(&timeout_ms)
+                || std::time::Instant::now()
+                    .checked_add(Duration::from_millis(timeout_ms as u64))
+                    .is_none()
+            {
+                return Err(IvyError::new(
+                    "invalid_arguments",
+                    "Docker command timeout must be a positive representable number of milliseconds.",
+                ));
+            }
             let command = process::Command {
                 executable: "docker".into(),
                 args: args
@@ -90,7 +92,7 @@ impl DockerHost for NativeDockerHost {
                     .map(|v| node_path::to_native(v).into_os_string())
                     .collect(),
                 cwd: None,
-                timeout_ms,
+                timeout_ms: timeout_ms as u64,
             };
             process::run_command(
                 &command,

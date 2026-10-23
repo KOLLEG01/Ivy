@@ -1291,11 +1291,10 @@ async fn package_polling_keeps_heartbeat_and_executor_lock_until_blocked_catalog
     f.journal.close().await.unwrap();
     let client = Arc::new(Client::default());
     client.block.store(true, Ordering::SeqCst);
-    client
-        .responses
-        .lock()
-        .unwrap()
-        .push_back(J::object([("status", J::Number(204.0))]));
+    client.responses.lock().unwrap().extend([
+        J::object([("status", J::Number(204.0))]),
+        J::object([("status", J::Number(204.0))]),
+    ]);
     let runtime = Arc::new(Automatic::default());
     let executor = HostExecutor::open_with_updates(
         f.config.clone(),
@@ -1321,6 +1320,40 @@ async fn package_polling_keeps_heartbeat_and_executor_lock_until_blocked_catalog
     .await
     .unwrap();
     executor.start().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), client.entered.notified())
+        .await
+        .unwrap();
+    client.release.notify_one();
+    let hint_path = f.root.0.join("state/desired-state-hint.json");
+    for (index, (configuration, packages)) in [
+        (false.into(), J::object([] as [(&str, J); 0])),
+        (J::Null, true.into()),
+        (false.into(), false.into()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let hint = J::object([
+            ("schemaVersion", J::Number(1.0)),
+            ("observedAt", format!("ignored-{index}").into()),
+            ("configuration", configuration),
+            ("packages", packages),
+        ]);
+        config::atomic_json(&hint_path, hint.clone()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(550)).await;
+        assert_eq!(client.calls.lock().unwrap().len(), 1, "{hint:?}");
+    }
+    config::atomic_json(
+        &hint_path,
+        J::object([
+            ("schemaVersion", J::Number(1.0)),
+            ("observedAt", "package-update".into()),
+            ("configuration", false.into()),
+            ("packages", true.into()),
+        ]),
+    )
+    .await
+    .unwrap();
     tokio::time::timeout(Duration::from_secs(10), client.entered.notified())
         .await
         .unwrap();
@@ -1354,7 +1387,7 @@ async fn package_polling_keeps_heartbeat_and_executor_lock_until_blocked_catalog
         .close()
         .await
         .unwrap();
-    assert_eq!(client.calls.lock().unwrap().len(), 1);
+    assert_eq!(client.calls.lock().unwrap().len(), 2);
     assert!(runtime.events.lock().unwrap().is_empty());
 }
 

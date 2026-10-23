@@ -1292,10 +1292,10 @@ async fn docker_native_boundary_uses_actual_process_files_and_bounded_secret_red
         "runtimeRoot",
         IvyJson::String(node_path::from_native(&fixture.0)),
     );
-    arguments[0].insert(
-        "executables",
-        IvyJson::object([("docker", IvyJson::String(node_path::from_native(&binary)))]),
-    );
+    let mut executables =
+        IvyJson::object([("docker", IvyJson::String(node_path::from_native(&binary)))]);
+    executables.insert(JsString(vec![0xd800]), "/fixture/unused-alias".into());
+    arguments[0].insert("executables", executables);
     arguments[0].insert(
         "instances",
         v(r#"[{"credential":"host-secret","componentId":"worker"}]"#),
@@ -1363,6 +1363,57 @@ async fn docker_native_boundary_uses_actual_process_files_and_bounded_secret_red
     );
     let actual = run(&input, Some(fixture.0.clone())).await;
     compare("actual-native-image-identity", &input, actual);
+    let native = NativeDockerHost::new(fixture.0.clone()).unwrap();
+    let image_args = || {
+        vec![
+            "--host".into(),
+            "unix:///var/run/docker.sock".into(),
+            "image".into(),
+            "inspect".into(),
+            "--format".into(),
+            "{{.Id}}".into(),
+            s(&hash('d')),
+        ]
+    };
+    let image = native
+        .execute(arguments[0].clone(), image_args(), 2_147_483_648.0, vec![])
+        .await
+        .unwrap();
+    assert_eq!(image.exit_code, Some(0));
+    assert_eq!(image.stdout, format!("{}\n", utf(&hash('d'))));
+    let trace = fixture.0.join("native-commands.txt");
+    let before = fs::read(&trace).unwrap();
+    for timeout in [
+        0.0,
+        -1.0,
+        0.5,
+        5000.5,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        u64::MAX as f64,
+    ] {
+        let error = native
+            .execute(arguments[0].clone(), image_args(), timeout, vec![])
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_arguments", "{timeout}");
+    }
+    for executable in [None, Some(false.into())] {
+        let mut config = arguments[0].clone();
+        let mut executables = empty();
+        if let Some(executable) = executable {
+            executables.insert("docker", executable);
+        }
+        config.insert("executables", executables);
+        assert!(
+            native
+                .execute(config, image_args(), 5000.0, vec![])
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(fs::read(&trace).unwrap(), before);
     if let Some(directory) = std::env::var_os("IVY_HOST_DOCKER_NATIVE_DIRECTORY") {
         fs::create_dir_all(&directory).unwrap();
         for (name, path) in [

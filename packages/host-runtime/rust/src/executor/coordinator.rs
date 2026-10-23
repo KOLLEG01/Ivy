@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
-    bootstrap_restart::BootstrapConfigurationRestarts,
     bootstrap_automatic::{AutomaticBootstrapRuntime, AutomaticBootstrapUpdater},
+    bootstrap_restart::BootstrapConfigurationRestarts,
     configuration_updater::{self, ConfigurationUpdater},
     executor_lock::ExecutorLock,
     package_updater::{PackageClient, PackageUpdater},
@@ -125,7 +125,17 @@ impl HostExecutor {
         runtime: Arc<dyn ActivationRuntime>,
         clock: Arc<dyn Clock>,
     ) -> IvyResult<Self> {
-        Self::open_configuration(config, config_path, credential, options, runtime, clock, None, None).await
+        Self::open_configuration(
+            config,
+            config_path,
+            credential,
+            options,
+            runtime,
+            clock,
+            None,
+            None,
+        )
+        .await
     }
     /// Service startup supplies its actual process start time and the immutable
     /// scheduler helper through the reconciler. Existing core constructors do
@@ -139,7 +149,17 @@ impl HostExecutor {
         clock: Arc<dyn Clock>,
         bootstrap_restarts: BootstrapConfigurationRestarts,
     ) -> IvyResult<Self> {
-        Self::open_configuration(config, config_path, credential, options, runtime, clock, Some(bootstrap_restarts), None).await
+        Self::open_configuration(
+            config,
+            config_path,
+            credential,
+            options,
+            runtime,
+            clock,
+            Some(bootstrap_restarts),
+            None,
+        )
+        .await
     }
     pub async fn open_with_updates(
         config: IvyJson,
@@ -151,7 +171,17 @@ impl HostExecutor {
         bootstrap_restarts: Option<BootstrapConfigurationRestarts>,
         packages: PackageUpdateRuntime,
     ) -> IvyResult<Self> {
-        Self::open_configuration(config, config_path, credential, options, runtime, clock, bootstrap_restarts, Some(packages)).await
+        Self::open_configuration(
+            config,
+            config_path,
+            credential,
+            options,
+            runtime,
+            clock,
+            bootstrap_restarts,
+            Some(packages),
+        )
+        .await
     }
     async fn open_configuration(
         config: IvyJson,
@@ -202,12 +232,33 @@ impl HostExecutor {
             }
         };
         let packages = match (&configuration, packages) {
-            (Some((path, Some(credential))), Some(bindings)) if !credential.is_empty()
-                && base.config().await?.get("packageUpdates").is_some_and(truthy) => Some((
-                PackageUpdater::new(base.clone(), credential.clone(), bindings.node, bindings.client),
-                AutomaticBootstrapUpdater::with_clock(path.clone(), bindings.distribution, base.clone(),
-                    bindings.automatic, bindings.compare, bindings.job_launcher, clock.clone()),
-            )),
+            (Some((path, Some(credential))), Some(bindings))
+                if !credential.is_empty()
+                    && base
+                        .config()
+                        .await?
+                        .get("packageUpdates")
+                        .and_then(IvyJson::as_object)
+                        .is_some() =>
+            {
+                Some((
+                    PackageUpdater::new(
+                        base.clone(),
+                        credential.clone(),
+                        bindings.node,
+                        bindings.client,
+                    ),
+                    AutomaticBootstrapUpdater::with_clock(
+                        path.clone(),
+                        bindings.distribution,
+                        base.clone(),
+                        bindings.automatic,
+                        bindings.compare,
+                        bindings.job_launcher,
+                        clock.clone(),
+                    ),
+                ))
+            }
             _ => None,
         };
         let configuration = match configuration {
@@ -380,17 +431,37 @@ impl StatusWriter {
 impl Coordinator {
     async fn reconcile_retained(&self, active: &[Active]) -> IvyResult<()> {
         let current = self.base.config().await?;
-        for instance in current.required("instances")?.as_array().ok_or_else(IvyError::internal)? {
+        for instance in current
+            .required("instances")?
+            .as_array()
+            .ok_or_else(IvyError::internal)?
+        {
             let id = text(instance, "instanceId")?;
             if self.options.own_instance_id.as_deref() == Some(id.as_str())
                 || instance.get("componentId") == Some(&"host-executor".into())
-                || active.iter().any(|lane| field(field(&lane.entry, "record"), "instanceId") == &IvyJson::from(id.clone())) {
+                || active.iter().any(|lane| {
+                    field(field(&lane.entry, "record"), "instanceId") == &IvyJson::from(id.clone())
+                })
+            {
                 continue;
             }
-            let Some(target) = self.base.target(&id).await? else { continue };
-            let config = self.base.accepted_target_policy(target.clone()).await?.unwrap_or_else(|| current.clone());
+            let Some(target) = self.base.target(&id).await? else {
+                continue;
+            };
+            let config = self
+                .base
+                .accepted_target_policy(target.clone())
+                .await?
+                .unwrap_or_else(|| current.clone());
             let journal = HostJournal::open_with_clock(config.clone(), self.clock.clone()).await?;
-            let context = OperationContext { journal, config, instance_id: id, options: self.options.clone(), cancel: self.cancel.clone(), clock: self.clock.clone() };
+            let context = OperationContext {
+                journal,
+                config,
+                instance_id: id,
+                options: self.options.clone(),
+                cancel: self.cancel.clone(),
+                clock: self.clock.clone(),
+            };
             let result = self.runtime.reconcile(&context, Some(target), true).await;
             let closed = context.journal.close().await;
             result.and(closed)?;
@@ -487,9 +558,22 @@ impl Coordinator {
                 if self.configuration.is_some() || self.packages.is_some() {
                     let config=self.base.config().await?;
                     let hint=config::json_file(config::path_value(config.required("runtimeRoot")?)?.join("desired-state-hint.json"),config::CONFIGURATION_BYTES).await.ok();
-                    if let Some(hint)=hint.filter(|v|v.get("schemaVersion")==Some(&IvyJson::Number(1.0))){
-                        let identity=json::stringify(&hint,usize::MAX)?;
-                        if identity!=last_hint {last_hint=identity;if truthy(field(&hint,"configuration")){next_configuration=0.0;}if truthy(field(&hint,"packages")){next_package=0.0;}}
+                    if let Some(hint) = hint.filter(|value| {
+                        value.get("schemaVersion") == Some(&IvyJson::Number(1.0))
+                            && ["configuration", "packages"].iter().all(|key| {
+                                value.get(key).and_then(IvyJson::as_bool).is_some()
+                            })
+                    }) {
+                        let identity = json::stringify(&hint, usize::MAX)?;
+                        if identity != last_hint {
+                            last_hint = identity;
+                            if hint.get("configuration") == Some(&true.into()) {
+                                next_configuration = 0.0;
+                            }
+                            if hint.get("packages") == Some(&true.into()) {
+                                next_package = 0.0;
+                            }
+                        }
                     }
                 }
                 if let Some(updater)=&self.configuration {
@@ -589,14 +673,5 @@ impl Drop for ActiveStatus {
         if let Ok(mut status) = self.value.lock() {
             status.active.retain(|id| id != &self.id);
         }
-    }
-}
-fn truthy(value: &IvyJson) -> bool {
-    match value {
-        IvyJson::Null => false,
-        IvyJson::Bool(v) => *v,
-        IvyJson::Number(v) => *v != 0.0 && !v.is_nan(),
-        IvyJson::String(v) => !v.0.is_empty(),
-        _ => true,
     }
 }

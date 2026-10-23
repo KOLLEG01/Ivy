@@ -228,10 +228,11 @@ impl NativeActivationRuntime {
         root: PathBuf,
         environment: BTreeMap<OsString, OsString>,
     ) -> IvyResult<Arc<ProcessResult>> {
+        let command = command_value(command)?;
         process::run_command(
-            &command_value(command)?,
+            &command,
             &root,
-            &executables(&c.config)?,
+            &executables(&c.config, &[&command.executable])?,
             LaunchContext {
                 environment,
                 job_launcher: Some(self.job_launcher.clone()),
@@ -372,13 +373,15 @@ impl ActivationRuntime for NativeActivationRuntime {
         })
     }
 }
-fn executables(config: &IvyJson) -> IvyResult<BTreeMap<String, PathBuf>> {
-    config
-        .required("executables")?
-        .as_object()
-        .ok_or_else(IvyError::internal)?
+fn executables(config: &IvyJson, names: &[&str]) -> IvyResult<BTreeMap<String, PathBuf>> {
+    let bindings = config.required("executables")?;
+    names
         .iter()
-        .map(|(key, value)| Ok((key.to_utf8()?, config::path_value(value)?)))
+        .filter_map(|name| {
+            bindings
+                .get(name)
+                .map(|value| Ok(((*name).to_owned(), config::path_value(value)?)))
+        })
         .collect()
 }
 fn command_value(value: &IvyJson) -> IvyResult<process::Command> {
@@ -386,6 +389,18 @@ fn command_value(value: &IvyJson) -> IvyResult<process::Command> {
         .required("timeoutMs")?
         .as_f64()
         .ok_or_else(IvyError::internal)?;
+    if !timeout.is_finite()
+        || timeout.fract() != 0.0
+        || !(1.0..u64::MAX as f64).contains(&timeout)
+        || std::time::Instant::now()
+            .checked_add(Duration::from_millis(timeout as u64))
+            .is_none()
+    {
+        return Err(IvyError::new(
+            "invalid_arguments",
+            "Command timeout must be a positive representable number of milliseconds.",
+        ));
+    }
     Ok(process::Command {
         executable: text(value, "executable")?,
         args: value
@@ -401,21 +416,8 @@ fn command_value(value: &IvyJson) -> IvyResult<process::Command> {
             })
             .collect::<IvyResult<_>>()?,
         cwd: value.get("cwd").map(config::path_value).transpose()?,
-        timeout_ms: if timeout.is_finite() && (1.0..2147483648.0).contains(&timeout) {
-            timeout as u64
-        } else {
-            1
-        },
+        timeout_ms: timeout as u64,
     })
-}
-fn truthy(value: &IvyJson) -> bool {
-    match value {
-        IvyJson::Null => false,
-        IvyJson::Bool(v) => *v,
-        IvyJson::Number(v) => *v != 0.0 && !v.is_nan(),
-        IvyJson::String(v) => !v.0.is_empty(),
-        _ => true,
-    }
 }
 fn timeout(manifest: &IvyJson, kind: &str, fallback: f64) -> f64 {
     field(manifest, kind)

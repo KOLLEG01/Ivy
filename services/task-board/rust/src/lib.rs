@@ -44,6 +44,7 @@ pub mod native_policies;
 pub mod native_publication;
 pub mod native_rate_limit;
 pub mod native_recovery;
+pub mod native_runtime;
 pub mod native_signals;
 pub mod native_state;
 pub mod native_turn_evidence;

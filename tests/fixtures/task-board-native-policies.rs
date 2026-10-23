@@ -8,6 +8,8 @@ use ivy_task_board::{
 };
 #[path = "task-board-registry.rs"]
 mod registry;
+#[path = "task-board-native-runtime.rs"]
+mod runtime;
 
 struct PromptBoundary;
 impl TaskPrompts for PromptBoundary {

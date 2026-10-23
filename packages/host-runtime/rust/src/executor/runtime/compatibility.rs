@@ -47,7 +47,10 @@ impl NativeActivationRuntime {
     fn runtime_requirements(&self, manifest: &IvyJson) -> IvyResult<()> {
         artifact::verify_runtime_requirements(
             manifest,
-            self.preparation.node.as_ref().map(|node| node.version.as_str()),
+            self.preparation
+                .node
+                .as_ref()
+                .map(|node| node.version.as_str()),
             &self.platform,
             match std::env::consts::ARCH {
                 "x86_64" => "x64",
@@ -111,7 +114,10 @@ impl NativeActivationRuntime {
             command_value(manifest.required("entrypoint")?)?,
             command_value(field(&manifest, "readiness").required("command")?)?,
         ];
-        let tools = executables(&c.config)?;
+        let tools = executables(
+            &c.config,
+            &[&commands[0].executable, &commands[1].executable],
+        )?;
         let command_root = root.clone();
         tokio::task::spawn_blocking(move || {
             for command in commands {
@@ -156,7 +162,7 @@ impl NativeActivationRuntime {
                 .iter()
                 .map(|r| {
                     let mut v = IvyJson::object([("key", field(r, "key").clone())]);
-                    if let Some(scope) = r.get("readScope").filter(|v| truthy(v)) {
+                    if let Some(scope) = r.get("readScope") {
                         v.insert("readScope", scope.clone());
                     }
                     v
@@ -261,17 +267,18 @@ impl NativeActivationRuntime {
             let format = field(value, "format").as_f64();
             require(
                 !storage.is_null()
-                    && (!truthy(field(value, "exists"))
-                        || format.is_some_and(|format| {
-                            storage
-                                .get("minReadableFormat")
-                                .and_then(IvyJson::as_f64)
-                                .is_some_and(|min| format >= min)
-                                && storage
-                                    .get("maxReadableFormat")
+                    && (value.get("exists") == Some(&false.into())
+                        || value.get("exists") == Some(&true.into())
+                            && format.is_some_and(|format| {
+                                storage
+                                    .get("minReadableFormat")
                                     .and_then(IvyJson::as_f64)
-                                    .is_some_and(|max| format <= max)
-                        })),
+                                    .is_some_and(|min| format >= min)
+                                    && storage
+                                        .get("maxReadableFormat")
+                                        .and_then(IvyJson::as_f64)
+                                        .is_some_and(|max| format <= max)
+                            })),
                 "incompatible_storage",
                 "Candidate cannot read the actual database format.",
             )?;
@@ -280,14 +287,15 @@ impl NativeActivationRuntime {
         {
             let credential = instance
                 .get("credential")
-                .filter(|v| truthy(v))
+                .and_then(IvyJson::as_js_string)
+                .filter(|value| !value.0.is_empty())
                 .ok_or_else(|| {
                     IvyError::new(
                         "invalid_arguments",
                         "Hive compatibility requires the instance credential.",
                     )
                 })?
-                .as_str()?;
+                .to_utf8()?;
             let client: Arc<dyn RpcClient> =
                 Arc::new(client(&text(&c.config, "publicBaseUrl")?, credential)?);
             let status = client.request("system.status", empty(), options()).await?;
@@ -306,7 +314,7 @@ impl NativeActivationRuntime {
                     )
                     .await?,
             );
-            if selected(requirements, "nativeCatalogs").is_some_and(truthy) {
+            if requirements.get("nativeCatalogs") == Some(&true.into()) {
                 native_catalog_compatibility::verify_native_catalog_compatibility(
                     client,
                     &root,
