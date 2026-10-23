@@ -1,333 +1,390 @@
-use super::*;
-use crate::{
-    engine_execution::local::failed_publication_graph,
-    journal_store::{
-        mutation_ports::{LocalMutationStore, typed_write_cause},
-        persistent_reads::mutation_journal::MutationJournal,
-    },
+use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, Outcome};
+use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
+use ivy_store::rusqlite::{Connection, params};
+use ivy_task_board::{
+    engine_execution::{CachedExecution, ExecutionServices},
+    journal_store::{Contracts, JournalStore},
     local_gates::LocalGates,
-    operations::{
-        Operations,
-        local::{begin_graph, failure_graph},
-    },
-    publication_coordination::local::Calls,
+    local_journal::{LocalJournal, initialize},
+    local_retention::HistoryLimits,
+    operations::{Document, Operations, Store},
+    publication_coordination::{CoordinationStore, PublicationCoordination},
 };
-use ivy_contracts::{Outcome, hash::hash_json};
+use std::{future::Future, sync::Arc};
 
-const OPERATION: &str = "task-board/operation";
-const GATE: &str = "task-board/coordination";
-const NAMES: [&str; 2] = [
-    "TaskBoard publication gate",
-    "TaskBoard publication gate task",
-];
+#[path = "task-board-frozen-contracts.rs"]
+mod contracts;
+const ROOT: &str = "TaskBoard publication gate";
+const TASK: &str = "TaskBoard publication gate task";
+const AT: &str = "2026-10-22T09:30:00.000Z";
 
-fn data() -> Json {
-    ivy_contracts::json::parse(
-        include_str!("task-board-gate-journal.json"),
-        MANAGEMENT_FRAME_BYTES,
-    )
-    .unwrap()
+struct NoRpc;
+impl RpcClient for NoRpc {
+    fn request<'a>(&'a self, method: &'a str, _: Json, _: RequestOptions) -> RequestFuture<'a> {
+        Box::pin(async move { panic!("Local gate work cannot issue {method}") })
+    }
 }
-fn rows(connection: &Connection, sql: &str, columns: &[&str]) -> Json {
-    let mut statement = connection.prepare(sql).unwrap();
-    let rows = statement
-        .query_map([], |row| {
-            Ok(Json::object(columns.iter().enumerate().map(|(i, key)| {
-                let value = match row.get_ref(i).unwrap() {
-                    ivy_store::rusqlite::types::ValueRef::Text(value) => {
-                        Json::from(std::str::from_utf8(value).unwrap())
-                    }
-                    ivy_store::rusqlite::types::ValueRef::Integer(value) => {
-                        Json::Number(value as f64)
-                    }
-                    _ => panic!("unexpected projected column"),
-                };
-                (*key, value)
-            })))
-        })
-        .unwrap()
-        .map(|row| row.unwrap())
-        .collect();
-    Json::Array(rows)
+struct GateContracts;
+impl Contracts for GateContracts {
+    fn version(&self, _: &str) -> IvyResult<String> {
+        Ok("1.0.0".into())
+    }
+    fn local(&self, _: &str) -> IvyResult<bool> {
+        Ok(true)
+    }
+    fn readable_version(&self, _: &str, version: &JsString) -> IvyResult<bool> {
+        Ok(version == &"1.0.0".into())
+    }
+    fn validate_definition(&self, name: &str, value: &Json) -> IvyResult<()> {
+        contracts::admission(name, value)
+    }
+    fn validate_record(&self, key: &str, _: &JsString, value: &Json) -> IvyResult<()> {
+        match key {
+            "task-board/operation" => contracts::admission("Operation", value),
+            "task-board/coordination" => contracts::admission("Coordination", value),
+            "task-board/task" => {
+                value.required("fields")?.required("workspaceRequirement")?;
+                Ok(())
+            }
+            _ => panic!("Unexpected gate record {key}"),
+        }
+    }
 }
-async fn case(name: &str) {
-    let data = data();
-    let row = data
-        .required("cases")
-        .unwrap()
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row.get("name") == Some(&name.into()))
-        .unwrap();
-    let marker = 63;
-    let source = Source::new("journal", &marker);
-    let connection = Connection::open_in_memory().unwrap();
-    initialize(&connection).unwrap();
-    let catalog = Catalog(Cell::new(0));
-    let last_sql = RefCell::new(None::<Failure<'_>>);
-    let sql_count = Cell::new(0);
-    let sql_failure = |error| {
-        sql_count.set(sql_count.get() + 1);
-        let cause = Failure::source(Opaque {
-            borrowed: &marker,
-            token: Rc::new(()),
-            native: Some(error),
-        });
-        *last_sql.borrow_mut() = Some(cause.clone());
-        cause
-    };
-    let local = SqliteReads {
+fn clock() -> String {
+    AT.into()
+}
+fn new_id() -> JsString {
+    uuid::Uuid::new_v4().to_string().into()
+}
+fn store(
+    db: &Connection,
+) -> JournalStore<'_, NoRpc, GateContracts, fn() -> String, fn() -> JsString> {
+    JournalStore {
         journal: LocalJournal {
-            connection: &connection,
+            connection: db,
             root_object_id: Some("root".into()),
         },
-        contracts: &catalog,
-        parse: |value: &str| {
-            ivy_contracts::json::parse(value, MANAGEMENT_FRAME_BYTES).map_err(Failure::from)
-        },
-        sqlite_failure: &sql_failure,
-    };
-    let documents = DocumentReads {
-        local: &local,
-        objects: &source,
-        comments: &NoTree,
+        client: Arc::new(NoRpc),
+        contracts: GateContracts,
+        limits: HistoryLimits::default(),
+        now: clock,
+        new_id,
         cache: None,
-    };
-    let allocated = row.required("allocated").unwrap().as_array().unwrap();
-    let next_id = Cell::new(0);
-    let new_id = || {
-        let n = next_id.get();
-        next_id.set(n + 1);
-        allocated[n].as_js_string().unwrap().clone()
-    };
-    let timestamp = data
-        .required("timestamp")
-        .unwrap()
-        .as_js_string()
-        .unwrap()
-        .clone();
-    let now = || timestamp.to_utf8().unwrap();
-    let hydrate = |_: Value, _: Value| {
-        std::future::ready(Err::<Value, _>(Failure::from(IvyError::internal())))
-    };
-    let comments = |_: Value, _: Value, _: Value, _: Value| {
-        std::future::ready(Err::<Value, _>(Failure::from(IvyError::internal())))
-    };
-    let identity = |_: Value| async {
-        panic!("local gate mutations do not allocate remote mutation identities");
-        #[allow(unreachable_code)]
-        Ok::<_, Failure<'_>>(Value::Null)
-    };
-    let writes = DocumentWrites {
-        source: &source,
-        hydrate: &hydrate,
-        comments: &comments,
-        identity: &identity,
-        now: &now,
-        new_id: &new_id,
-    };
-    let operations = Operations {
-        store: MutationJournal {
-            documents: &documents,
-            writes: &writes,
-        },
-        now: &now,
-    };
-    let journal = &operations.store;
-    let begun = begin_graph(
-        &operations,
-        &Value::from_json(row.required("request").unwrap()),
-        &Value::from_json(row.required("actor").unwrap()),
-    )
-    .await
-    .unwrap();
-    let id = field(&field(&begun, "pin"), "objectId");
-    let Value::String(id_text) = &id else {
-        panic!("operation ID")
-    };
-    let retained = LocalGates::new(&connection);
-    retained
-        .retain_operation_gates(id_text, &NAMES.map(JsString::from))
-        .unwrap();
-    let principal = text("board");
-    let calls = Calls {
-        store: journal,
-        principal: &principal,
-        named: |name| async move { journal.named_graph(GATE, &name, None).await },
-        gates: |operation: Value| {
-            let retained = &retained;
-            let sql_failure = &sql_failure;
-            async move {
-                let Value::String(id) = field(&field(&operation, "pin"), "objectId") else {
-                    panic!("retained operation ID")
-                };
-                Ok::<_, Failure<'_>>(
-                    retained
-                        .operation_gates(&id)
-                        .map_err(sql_failure)?
-                        .into_iter()
-                        .map(Value::String)
-                        .collect(),
-                )
-            }
-        },
-        now: || Value::String(timestamp.clone()),
-    };
-    calls.acquire(&begun).await.unwrap();
-    let original = IvyError::new("invalid_arguments", "Refused before publication.")
-        .with_outcome(Outcome::NotExecuted)
-        .with_details(Json::object([("where", "input".into())]));
-    if name == "release_clear_sql_failure" {
-        failure_graph(&operations, &id, &original, false)
-            .await
-            .unwrap();
     }
-    connection
-        .execute_batch(&data.required("trigger").unwrap().as_str().unwrap())
-        .unwrap();
-    let target: String = connection
-        .query_row("SELECT id FROM documents WHERE name=?", [NAMES[1]], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    connection
-        .execute("INSERT INTO clear_refusal VALUES(?)", [target])
-        .unwrap();
-    let workspace = Cell::new(0);
-    let result = if name == "unstarted_clear_sql_failure" {
-        calls.release_unstarted(&id).await.map(|_| Value::Null)
-    } else if name == "release_clear_sql_failure" {
-        calls.release(&id, false, true).await.map(|()| Value::Null)
+}
+fn actor() -> Json {
+    Json::object([
+        ("principalId", "caller".into()),
+        ("serviceNodeId", "fixture".into()),
+        ("generation", Json::Number(1.0)),
+        ("source", "worker".into()),
+    ])
+}
+fn request(id: &str, action: &str, task: &str, directory: &str) -> Json {
+    if action == "comment" {
+        Json::object([
+            ("action", action.into()),
+            ("operationId", id.into()),
+            ("taskId", task.into()),
+            ("expectedRevision", Json::Number(1.0)),
+            ("commentId", id.into()),
+            ("body", "Gate fixture.".into()),
+            ("requests", Json::Array(vec![])),
+            ("responses", Json::Array(vec![])),
+            ("attachments", Json::Array(vec![])),
+            ("replyTo", Json::Null),
+            ("authorKind", "agent".into()),
+        ])
     } else {
-        failed_publication_graph(&operations,&id,original.into(),|| {
-            // The original conclusive failure is already durable before release
-            // starts. A later native exception must not replace that saved cause.
-            let saved:String=connection.query_row("SELECT value_json FROM revisions r JOIN documents d ON d.id=r.id AND d.current_revision=r.revision WHERE d.key='task-board/operation'",[],|row|row.get(0)).unwrap();
-            let saved=ivy_contracts::json::parse(&saved,MANAGEMENT_FRAME_BYTES).unwrap();
-            assert_eq!(saved.get("phase"),Some(&"failed".into()));
-            assert_eq!(saved.required("error").unwrap().get("code"),Some(&"invalid_arguments".into()));
-            workspace.set(workspace.get()+1);Ok(())
-        },||calls.release(&id,false,true)).await
-    };
-    let error = result.err().expect("second gate clear must fail");
-    assert!(typed_write_cause(&error).is_none());
-    assert!(error.ptr_eq(last_sql.borrow().as_ref().unwrap()));
-    let ReadCause::Source(cause) = error.cause() else {
-        panic!("native cause was normalized")
-    };
-    assert!(std::ptr::eq(cause.borrowed, &marker));
-    assert_eq!(Rc::strong_count(&cause.token), 1);
-    assert_eq!(sql_count.get(), 1);
-    let Some(ivy_store::rusqlite::Error::SqliteFailure(code, message)) = &cause.native else {
-        panic!("original native trigger error")
-    };
-    assert_eq!(code.extended_code, 1811);
-    assert_eq!(message.as_deref(), Some("gate clear refused"));
-    let operation = journal
-        .read_graph(OPERATION, &id, true, false, false)
-        .await
-        .unwrap();
-    let mut statement=connection.prepare("SELECT d.id,d.name,d.current_revision,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='task-board/coordination' ORDER BY d.name").unwrap();
-    let heads = Json::Array(
-        statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })
-            .unwrap()
-            .map(|row| {
-                let (id, name, revision, value) = row.unwrap();
-                Json::object([
-                    ("id", id.into()),
-                    ("name", name.into()),
-                    ("revision", Json::Number(revision as f64)),
-                    (
-                        "value",
-                        ivy_contracts::json::parse(&value, MANAGEMENT_FRAME_BYTES).unwrap(),
-                    ),
-                ])
-            })
-            .collect(),
-    );
-    let owners = rows(
-        &connection,
-        "SELECT gate_id,operation_id FROM active_gates ORDER BY gate_id",
-        &["gate_id", "operation_id"],
-    );
-    let cleanup = rows(
-        &connection,
-        "SELECT root_id,delete_after FROM cleanup_roots ORDER BY root_id",
-        &["root_id", "delete_after"],
-    );
-    let actual_allocated = rows(
-        &connection,
-        "SELECT id FROM documents ORDER BY rowid",
-        &["id"],
-    )
-    .as_array()
-    .unwrap()
-    .iter()
-    .map(|row| row.required("id").unwrap().clone())
-    .collect();
-    let revision_counts = rows(
-        &connection,
-        "SELECT id,COUNT(*) AS count FROM revisions GROUP BY id ORDER BY id",
-        &["id", "count"],
-    );
-    assert!(connection.is_autocommit());
-    connection
-        .execute_batch("BEGIN IMMEDIATE; ROLLBACK")
-        .unwrap();
-    let output = Json::object([
-        ("name", name.into()),
-        ("request", row.required("request").unwrap().clone()),
-        ("actor", row.required("actor").unwrap().clone()),
-        ("allocated", Json::Array(actual_allocated)),
-        ("sqlFailure", true.into()),
-        ("saved", json(&field(&operation, "value"))),
-        ("heads", heads),
-        ("owners", owners),
-        ("cleanup", cleanup),
-        ("workspace", Json::Number(workspace.get() as f64)),
-        (
-            "retainedNames",
-            Json::Array(
-                retained
-                    .operation_gates(id_text)
-                    .unwrap()
-                    .into_iter()
-                    .map(Json::String)
-                    .collect(),
+        // Public start admission is covered by the actual factory/scheduler.
+        Json::object([
+            ("action", action.into()),
+            ("operationId", id.into()),
+            ("taskId", task.into()),
+            ("expectedRevision", Json::Number(1.0)),
+            ("target", Json::object([("hostId", "host".into())])),
+            (
+                "workspace",
+                Json::object([("canonicalCwd", directory.into())]),
             ),
-        ),
-        ("revisionCounts", revision_counts),
-        ("transactionReleased", true.into()),
-    ]);
-    assert_eq!(
-        hash_json(&output).unwrap(),
-        hash_json(row).unwrap(),
-        "{name} result {output:?}"
+        ])
+    }
+}
+fn operation(value: Json, id: &str) -> Document {
+    Document {
+        pin: Json::object([("objectId", id.into()), ("revision", Json::Number(1.0))]),
+        value: Json::object([("request", value), ("createdAt", AT.into())]),
+        parent_id: Some("root".into()),
+        content_hash: String::new(),
+    }
+}
+fn task(db: &Connection, id: &str) {
+    let value = Json::object([(
+        "fields",
+        Json::object([
+            ("category", Json::Null),
+            (
+                "workspaceRequirement",
+                Json::object([("kind", "directory_path".into())]),
+            ),
+        ]),
+    )]);
+    db.execute(
+        "INSERT INTO documents VALUES(?,'task-board/task',?,'root',1,?,?)",
+        params![id, id, AT, AT],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO revisions VALUES(?,1,?,?)",
+        params![
+            id,
+            ivy_contracts::json::canonical(&value, usize::MAX).unwrap(),
+            AT
+        ],
+    )
+    .unwrap();
+}
+fn count(db: &Connection, table: &str) -> i64 {
+    db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+        row.get(0)
+    })
+    .unwrap()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn workspace_gates_serialize_only_the_same_host_and_shared_workspace() {
+    let db = Connection::open_in_memory().unwrap();
+    initialize(&db).unwrap();
+    for id in ["first", "second", "independent"] {
+        task(&db, id);
+    }
+    let store = store(&db);
+    let principal = "board".into();
+    let gates = PublicationCoordination {
+        store: &store,
+        principal_id: &principal,
+        now: &clock,
+    };
+    let first = operation(request("one", "start", "first", "C:\\shared"), "one");
+    let second = operation(request("two", "continue", "second", "C:\\shared"), "two");
+    let independent = operation(
+        request("three", "start", "independent", "C:\\separate"),
+        "three",
     );
-    assert_eq!(next_id.get(), 3);
-    assert!(source.trace.borrow().is_empty());
+    gates.acquire(&first).await.unwrap();
+    let names = store.operation_gates(&"one".into()).unwrap();
+    assert_eq!(names.len(), 2);
+    assert!(!names.contains(&ROOT.into()));
+    assert!(names.iter().any(|name| {
+        name.to_utf8()
+            .unwrap()
+            .starts_with("TaskBoard workspace gate sha256:")
+    }));
+    let before = count(&db, "active_gates");
+    assert_eq!(
+        gates.acquire(&second).await.unwrap_err().code,
+        "task_board_publication_busy"
+    );
+    assert_eq!(
+        count(&db, "active_gates"),
+        before,
+        "The workspace gate precedes the ticket gate"
+    );
+    gates.acquire(&independent).await.unwrap();
+    assert_eq!(count(&db, "active_gates"), 4);
+    // Old retained selections survive current policy instead of being recomputed.
+    LocalGates::new(&db)
+        .retain_operation_gates(&"retained".into(), &[ROOT.into(), TASK.into()])
+        .unwrap();
+    let retained = operation(request("retained", "nativeUpdate", "task", ""), "retained");
+    gates.acquire(&retained).await.unwrap();
+    assert_eq!(
+        store.operation_gates(&"retained".into()).unwrap(),
+        [JsString::from(ROOT), JsString::from(TASK)]
+    );
+    assert!(db.is_autocommit());
+}
+
+struct Unused;
+impl ExecutionServices for Unused {
+    type Transcript = Json;
+    async fn with_read_cache<F: Future<Output = IvyResult<Json>>>(&self, _: F) -> IvyResult<Json> {
+        panic!("No execution")
+    }
+    async fn owner_stopped(&self, _: &Json) -> IvyResult<bool> {
+        panic!("No native observation")
+    }
+    async fn verify_transcript(&self, _: &Json, _: &Json) -> IvyResult<Json> {
+        panic!("No evidence")
+    }
+    async fn normalize(&self, _: &JsString) -> IvyResult<JsString> {
+        panic!("No category")
+    }
+    async fn revalidate(&self, _: &JsString) -> IvyResult<JsString> {
+        panic!("No category")
+    }
+    async fn publish(
+        &self,
+        _: &Document,
+        _: Option<&Json>,
+        _: Option<&JsString>,
+    ) -> IvyResult<Json> {
+        panic!("No publication")
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn real_gate_release_retains_first_clear_and_rolls_back_second_on_native_failure() {
-    case("release_clear_sql_failure").await;
+async fn gate_clear_failure_preserves_partial_progress_and_original_refusal_after_reopen() {
+    for mode in ["release", "unstarted", "failed-publication"] {
+        let temp = super::Temporary::new();
+        let path = temp.0.join("gates.sqlite");
+        let principal = JsString::from("board");
+        let id;
+        {
+            let db = Connection::open(&path).unwrap();
+            initialize(&db).unwrap();
+            let operations = Operations {
+                store: store(&db),
+                now: clock,
+            };
+            let begun = operations
+                .begin(&request("intent", "comment", "task", ""), &actor())
+                .await
+                .unwrap();
+            id = begun
+                .pin
+                .required("objectId")
+                .unwrap()
+                .as_js_string()
+                .unwrap()
+                .clone();
+            LocalGates::new(&db)
+                .retain_operation_gates(&id, &[ROOT.into(), TASK.into()])
+                .unwrap();
+            let gates = PublicationCoordination {
+                store: &operations.store,
+                principal_id: &principal,
+                now: &clock,
+            };
+            gates.acquire(&begun).await.unwrap();
+            db.execute_batch("CREATE TRIGGER refuse_clear BEFORE INSERT ON revisions WHEN NEW.id=(SELECT id FROM documents WHERE name='TaskBoard publication gate task') AND json_type(NEW.value_json,'$.activeOperation')='null' BEGIN SELECT RAISE(ABORT,'gate clear refused'); END;").unwrap();
+        }
+        {
+            let db = Connection::open(&path).unwrap();
+            initialize(&db).unwrap();
+            let operations = Operations {
+                store: store(&db),
+                now: clock,
+            };
+            let gates = PublicationCoordination {
+                store: &operations.store,
+                principal_id: &principal,
+                now: &clock,
+            };
+            let original = IvyError::new("invalid_arguments", "Refused before publication.")
+                .with_outcome(Outcome::NotExecuted);
+            let error = if mode == "unstarted" {
+                gates.release_unstarted(&id).await.unwrap_err()
+            } else if mode == "release" {
+                operations.failure(&id, &original, false).await.unwrap();
+                gates.release(&id, false).await.unwrap_err()
+            } else {
+                CachedExecution {
+                    operations: &operations,
+                    principal_id: &principal,
+                    services: &Unused,
+                }
+                .failed_publication(&id, original)
+                .await
+                .unwrap_err()
+            };
+            assert_eq!(error.code, "storage_unavailable");
+            assert_eq!(error.outcome, Outcome::Unknown);
+            assert!(error.message.contains("gate clear refused"));
+            assert_eq!(count(&db, "active_gates"), 1);
+            let root = gates.current(&ROOT.into()).await.unwrap();
+            let ticket = gates.current(&TASK.into()).await.unwrap();
+            assert_eq!(root.pin.get("revision"), Some(&Json::Number(3.0)));
+            assert_eq!(root.value.get("activeOperation"), Some(&Json::Null));
+            assert_eq!(ticket.pin.get("revision"), Some(&Json::Number(2.0)));
+            assert_eq!(
+                ticket
+                    .value
+                    .required("activeOperation")
+                    .unwrap()
+                    .get("objectId"),
+                Some(&Json::String(id.clone()))
+            );
+            let saved = operations
+                .store
+                .read("task-board/operation", &Json::String(id.clone()), true)
+                .await
+                .unwrap();
+            if mode != "unstarted" {
+                assert_eq!(saved.value.get("phase"), Some(&"failed".into()));
+                assert_eq!(
+                    saved.value.required("error").unwrap().get("code"),
+                    Some(&"invalid_arguments".into())
+                );
+            }
+            assert!(db.is_autocommit());
+            db.execute_batch("BEGIN IMMEDIATE; ROLLBACK; DROP TRIGGER refuse_clear")
+                .unwrap();
+        }
+        {
+            let db = Connection::open(&path).unwrap();
+            initialize(&db).unwrap();
+            let journal = store(&db);
+            let gates = PublicationCoordination {
+                store: &journal,
+                principal_id: &principal,
+                now: &clock,
+            };
+            if mode == "unstarted" {
+                assert!(gates.release_unstarted(&id).await.unwrap());
+            } else {
+                gates.release(&id, false).await.unwrap();
+            }
+            let before: i64 = db
+                .query_row("SELECT total_changes()", [], |row| row.get(0))
+                .unwrap();
+            if mode == "unstarted" {
+                assert!(!gates.release_unstarted(&id).await.unwrap());
+            } else {
+                gates.release(&id, false).await.unwrap();
+            }
+            assert_eq!(
+                db.query_row::<i64, _, _>("SELECT total_changes()", [], |row| row.get(0))
+                    .unwrap(),
+                before
+            );
+            assert_eq!(count(&db, "active_gates"), 0);
+            assert!(db.is_autocommit());
+        }
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn real_unstarted_gate_release_preserves_opaque_failure_after_partial_clear() {
-    case("unstarted_clear_sql_failure").await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn real_final_catch_retains_saved_refusal_when_late_gate_clear_fails() {
-    case("final_catch_release_sql_failure").await;
+async fn gate_name_retention_failure_rolls_back_before_any_gate_is_acquired() {
+    let db = Connection::open_in_memory().unwrap();
+    initialize(&db).unwrap();
+    task(&db, "task");
+    db.execute_batch("CREATE TRIGGER refuse_gate BEFORE INSERT ON operation_gates WHEN NEW.gate_name='TaskBoard publication gate task' BEGIN SELECT RAISE(ABORT,'gate retention refused'); END;").unwrap();
+    let journal = store(&db);
+    let principal = "board".into();
+    let gates = PublicationCoordination {
+        store: &journal,
+        principal_id: &principal,
+        now: &clock,
+    };
+    let mut request = request("one", "edit", "task", "");
+    request.insert("fields", Json::object([("category", "Changed".into())]));
+    let error = gates.acquire(&operation(request, "one")).await.unwrap_err();
+    assert_eq!(error.code, "storage_unavailable");
+    assert!(error.message.contains("gate retention refused"));
+    assert_eq!(count(&db, "operation_gates"), 0);
+    assert_eq!(count(&db, "active_gates"), 0);
+    assert_eq!(count(&db, "documents"), 1);
+    assert!(db.is_autocommit());
+    db.execute_batch("BEGIN IMMEDIATE; ROLLBACK").unwrap();
 }

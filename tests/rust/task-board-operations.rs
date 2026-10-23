@@ -23,6 +23,8 @@ mod condition_policy;
 mod configuration;
 #[path = "../fixtures/task-board-conversation.rs"]
 mod conversation_policy;
+#[path = "../fixtures/task-board-current-history.rs"]
+mod current_history;
 #[path = "../fixtures/task-board-deliveries.rs"]
 mod deliveries;
 #[path = "../fixtures/task-board-durable-admission.rs"]

@@ -8,6 +8,8 @@ use std::path::PathBuf;
 mod artifact;
 #[path = "../fixtures/task-board-context-recovery.rs"]
 mod context_recovery;
+#[path = "../fixtures/task-board-gate-journal.rs"]
+mod gates;
 #[path = "../fixtures/task-board-journal-store.rs"]
 mod journal_store;
 #[path = "../fixtures/task-board-native-driver.rs"]

@@ -14,6 +14,8 @@ use ivy_task_board::{
     },
 };
 use std::cell::Cell;
+#[path = "../rust/task-board-questions.rs"]
+mod shared_questions;
 
 fn field<'a>(v: &'a Json, key: &str) -> &'a Json {
     static NULL: Json = Json::Null;

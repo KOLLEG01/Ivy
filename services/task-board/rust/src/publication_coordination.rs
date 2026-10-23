@@ -1,5 +1,6 @@
 //! Durable root/task publication gates over the original retained journal.
 use crate::{
+    allocation::shared_project_key,
     journal_store::{
         Contracts, JournalStore, mutation_ports::WriteFailure, persistent_reads::json_values::Value,
     },
@@ -7,15 +8,11 @@ use crate::{
     local_gates::LocalGates,
     operations::{Document, Store, decoded},
 };
-use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
-};
+use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json};
 use ivy_sdk::rpc::RpcClient;
 use ivy_store::sqlite::error;
 #[path = "local_coordination.rs"]
 pub(crate) mod local;
-#[path = "local_gate_names.rs"]
-pub(crate) mod names;
 #[allow(async_fn_in_trait)]
 pub trait CoordinationStore: Store {
     fn operation_gates(&self, operation: &JsString) -> IvyResult<Vec<JsString>>;
@@ -84,20 +81,8 @@ fn f<'a>(v: &'a Json, k: &str) -> &'a Json {
 fn s<'a>(v: &'a Json, k: &str) -> IvyResult<&'a JsString> {
     v.required(k)?.as_js_string().ok_or_else(IvyError::internal)
 }
-fn truthy(v: &Json) -> bool {
-    match v {
-        Json::Null => false,
-        Json::Bool(v) => *v,
-        Json::Number(v) => *v != 0.0 && !v.is_nan(),
-        Json::String(v) => !v.0.is_empty(),
-        _ => true,
-    }
-}
 fn eq(v: &Json, k: &str, t: &str) -> bool {
     v.get(k) == Some(&Json::from(t))
-}
-fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
 }
 fn concat(parts: impl IntoIterator<Item = JsString>) -> JsString {
     JsString(parts.into_iter().flat_map(|s| s.0).collect())
@@ -117,17 +102,9 @@ impl<S: CoordinationStore, C: Fn() -> String> PublicationCoordination<'_, S, C> 
                 "TaskBoard publication gate ".into(),
                 s(request, "taskId")?.clone(),
             ]);
-            if ![
-                "edit",
-                "start",
-                "continue",
-                "transition",
-                "review",
-                "cancel",
-                "defer",
-            ]
-            .iter()
-            .any(|a| eq(request, "action", a))
+            if !["edit", "start", "continue"]
+                .iter()
+                .any(|a| eq(request, "action", a))
             {
                 vec![task]
             } else {
@@ -142,33 +119,28 @@ impl<S: CoordinationStore, C: Fn() -> String> PublicationCoordination<'_, S, C> 
                         true,
                     )
                     .await?;
-                let shared = if eq(request, "action", "edit") {
-                    !same(
-                        f(f(&previous.value, "fields"), "category"),
-                        f(f(request, "fields"), "category"),
-                    )? || request
-                        .get("parentTaskId")
-                        .is_some_and(|parent| parent != f(&previous.value, "parentTaskId"))
-                        || !same(
-                            f(f(&previous.value, "fields"), "dependencies"),
-                            f(f(request, "fields"), "dependencies"),
-                        )?
-                } else if eq(request, "action", "start") || eq(request, "action", "continue") {
-                    !f(f(&previous.value, "fields"), "dependencies")
-                        .as_array()
-                        .ok_or_else(IvyError::internal)?
-                        .is_empty()
-                        || truthy(f(&previous.value, "blocker"))
-                } else if eq(request, "action", "defer") {
-                    truthy(f(request, "blocker"))
-                } else {
-                    true
-                };
-                if shared {
-                    vec!["TaskBoard publication gate".into(), task]
-                } else {
-                    vec![task]
+                let mut names = vec![task];
+                if eq(request, "action", "edit") {
+                    if request.get("parentTaskId").is_some()
+                        || f(f(request, "fields"), "category")
+                            != f(f(&previous.value, "fields"), "category")
+                    {
+                        names.insert(0, "TaskBoard publication gate".into());
+                    }
+                } else if let Some(key) = shared_project_key(
+                    f(f(&previous.value, "fields"), "workspaceRequirement"),
+                    f(request, "workspace"),
+                ) {
+                    let hash = hash_json(&Json::object([
+                        (
+                            "host",
+                            request.required("target")?.required("hostId")?.clone(),
+                        ),
+                        ("key", Json::String(key)),
+                    ]))?;
+                    names.insert(0, format!("TaskBoard workspace gate {hash}").into());
                 }
+                names
             }
         };
         self.store.retain_operation_gates(id, &names)?;
@@ -245,9 +217,8 @@ impl<S: CoordinationStore, C: Fn() -> String> PublicationCoordination<'_, S, C> 
             gates: |operation| self.gate_names_graph(operation),
             now: || Value::String((self.now)().into()),
         };
-        // The public JSON interface keeps the legacy root-release policy.
         calls
-            .release(&Value::String(id.clone()), reserved, false)
+            .release(&Value::String(id.clone()), reserved)
             .await
             .map_err(decoded::failure)
     }

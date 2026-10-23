@@ -9,7 +9,6 @@ use std::collections::HashMap;
 struct CurrentContracts {
     records: HashMap<String, (String, Arc<CompiledSchema>)>,
     fields: Arc<CompiledSchema>,
-    step: Arc<CompiledSchema>,
     durable: DurableAdmission,
     admitted: RefCell<Vec<(String, String)>>,
 }
@@ -50,7 +49,7 @@ impl CurrentContracts {
             .iter()
             .find(|d| {
                 d.get("key") == Some(&"task-board/task".into())
-                    && d.get("version") == Some(&"2.3.0".into())
+                    && d.get("version") == Some(&"3.1.0".into())
             })
             .unwrap();
         let compile = |name: &str| {
@@ -71,7 +70,6 @@ impl CurrentContracts {
         Self {
             records,
             fields: compile("TaskBoardTaskFields"),
-            step: compile("TaskBoardNextStep"),
             durable: current_durable(),
             admitted: RefCell::default(),
         }
@@ -124,7 +122,6 @@ impl Contracts for CurrentContracts {
         match name {
             "Task" => Self::check(&self.records.get("task-board/task").unwrap().1, value),
             "TaskFields" => Self::check(&self.fields, value),
-            "NextStep" => Self::check(&self.step, value),
             "Settings" => admission(name, value), // This unchanged finite service setup remains explicit.
             _ => panic!("Unbound current creation definition {name}"),
         }
@@ -183,7 +180,7 @@ async fn current_contract_creation_recovers_reads_and_retires_the_actual_factory
     let peer = Peer::start_mode(Some("--factory")).await;
     let fixture = Fixture::new(false);
     let contracts = CurrentContracts::new();
-    assert_eq!(contracts.version("task-board/task").unwrap(), "2.3.0");
+    assert_eq!(contracts.version("task-board/task").unwrap(), "3.1.0");
     let catalogs =
         CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
     let factory = EngineFactory {
@@ -236,7 +233,16 @@ async fn current_contract_creation_recovers_reads_and_retires_the_actual_factory
         let first_task = fixture.rows("task-board/task");
         assert_eq!(first_task.len(), 1);
         assert_eq!(first_task[0].1, 1);
-        assert_eq!(first_task[0].2.get("nextSteps"), Some(&Json::Array(vec![])));
+        assert_eq!(first_task[0].2.get("wakeAt"), Some(&Json::Null));
+        assert_eq!(
+            first_task[0].2.get("dependencies"),
+            Some(&Json::Array(vec![]))
+        );
+        assert_eq!(
+            first_task[0].2.get("observedDependencies"),
+            Some(&Json::object(Vec::<(&str, Json)>::new()))
+        );
+        assert!(first_task[0].2.get("nextSteps").is_none());
         assert_eq!(first_task[0].2.get("runtimeWait"), Some(&Json::Null));
         assert!(first_task[0].2.get("waiting").is_none());
         let control = service.control.clone();
@@ -365,7 +371,7 @@ async fn current_contract_creation_recovers_reads_and_retires_the_actual_factory
             .borrow()
             .iter()
             .filter(|(key, _)| key == "task-board/task")
-            .all(|(_, version)| version == "2.3.0")
+            .all(|(_, version)| version == "3.1.0")
     );
     assert!(peer.methods(2).contains(&"events.ack".into()));
     peer.finish().await;

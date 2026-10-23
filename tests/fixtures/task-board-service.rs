@@ -32,6 +32,8 @@ use tokio::{
 mod engine;
 #[path = "task-board-engine-factory.rs"]
 mod factory;
+#[path = "task-board-read-handler.rs"]
+mod read_handler;
 
 fn json(text: &str) -> Json {
     parse(text, 32 * 1024 * 1024).unwrap()

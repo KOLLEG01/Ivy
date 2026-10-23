@@ -229,7 +229,6 @@ impl<S, N, G, C> Calls<'_, S, N, G, C> {
         &self,
         id: &Value,
         reserved: bool,
-        current_policy: bool,
     ) -> Result<(), WriteFailure<E>>
     where
         S: LocalMutationStore<E>,
@@ -246,18 +245,6 @@ impl<S, N, G, C> Calls<'_, S, N, G, C> {
         let task_reserved = reserved && self.reserved(&operation).await?;
         let value = f(&operation, "value")?;
         for name in (self.gates)(operation.clone()).await? {
-            // The public facade keeps its legacy policy. Current admission and
-            // native completion must retain the shared root until terminal.
-            if current_policy && task_reserved && name.eq(&text("TaskBoard publication gate")) {
-                let action = f(&f(&value, "request")?, "action")?;
-                if ["start", "continue", "nativeUpdate"]
-                    .iter()
-                    .any(|s| action.eq(&text(s)))
-                    && !finished(&value)?
-                {
-                    continue;
-                }
-            }
             let current = self.current(&name).await?;
             if !active_id(&f(&current, "value")?)?.eq(id) {
                 continue;

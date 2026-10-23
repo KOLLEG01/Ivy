@@ -1,0 +1,30 @@
+// Accepted source 19ae4788f935f8d5a990d4cc56effc113956057f: coordination.ts gates and checks.ts sharedProjectKey.
+const sharedProjectKey = (requirement: TaskBoard.WorkspaceRequirement, workspace: TaskBoard.WorkspaceResolution): string | null =>
+    requirement.kind === 'existing_project' && !requirement.useWorktree ? `project:${requirement.projectId}`
+      : requirement.kind === 'directory_path' ? `directory:${workspace.canonicalCwd}` : null;
+
+  private async gates(operation: Document<"task-board/operation">): Promise<string[]> {
+    const retained = this.store.operationGates(operation.pin.objectId);
+    if (retained.length) return retained;
+    const request = operation.value.request;
+    if (!("taskId" in request)) {
+      this.store.retainOperationGates(operation.pin.objectId, ["TaskBoard publication gate"]);
+      return ["TaskBoard publication gate"];
+    }
+    const task = "TaskBoard publication gate " + request.taskId;
+    const names = [task];
+    if (request.action === 'edit' || request.action === 'start' || request.action === 'continue') {
+      const previous = await this.store.read('task-board/task', {
+        objectId: request.taskId, revision: request.expectedRevision,
+      }, true, false, true);
+      if (request.action === 'edit') {
+        if (request.parentTaskId !== undefined || request.fields.category !== previous.value.fields.category)
+          names.unshift('TaskBoard publication gate');
+      } else {
+        const key = sharedProjectKey(previous.value.fields.workspaceRequirement, request.workspace);
+        if (key) names.unshift('TaskBoard workspace gate ' + hashJson({ host: request.target.hostId, key }));
+      }
+    }
+    this.store.retainOperationGates(operation.pin.objectId, names);
+    return names;
+  }

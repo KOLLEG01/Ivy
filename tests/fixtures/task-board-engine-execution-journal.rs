@@ -310,14 +310,14 @@ async fn actual_gates_and_cached_execution_reopen_lost_final_callback_without_ne
                 now: &operations.now,
             };
             gates.acquire(&operation).await.unwrap();
-            assert_eq!(count(&c, "active_gates"), 2);
+            assert_eq!(count(&c, "active_gates"), 1);
             assert_eq!(
                 operations
                     .store
                     .operation_gates(s(&operation.pin, "objectId"))
                     .unwrap()
                     .len(),
-                2
+                1
             );
             assert_eq!(
                 f(&gates.pending().unwrap().unwrap(), "objectId"),
