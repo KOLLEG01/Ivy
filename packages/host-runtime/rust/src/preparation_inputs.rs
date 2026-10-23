@@ -4,7 +4,6 @@ use crate::{
     artifact::{FileCompare, artifact_files, artifact_source_identity},
     candidate_identity::candidate_build_id_for_platform,
     config_file::{CONFIGURATION_BYTES, FileError, read_json},
-    node_path,
     preparation_cache::dependency_cache_key_json,
     streaming_hash,
 };
@@ -21,7 +20,7 @@ fn require(value: bool, message: &str) -> IvyResult<()> {
         Err(IvyError::new("invalid_arguments", message))
     }
 }
-/// Run before snapshot/plan I/O, as in prepareCandidate.
+/// Validate before snapshot or plan I/O.
 pub fn validate_component_id(component: &JsString) -> IvyResult<()> {
     require(
         component
@@ -87,7 +86,7 @@ pub async fn preparation_package_manager(source_root: PathBuf) -> IvyResult<IvyJ
     )?
 }
 
-/// Exact original process coordinates; the Node version retains its leading v.
+/// Runtime coordinates retained in the public cache identity.
 pub struct PreparationProfile {
     pub os: JsString,
     pub arch: JsString,
@@ -112,7 +111,7 @@ impl PreparationIdentity {
         ])
     }
 }
-/// Run after temporary-root/tool admission, retaining the original lock-then-tree order.
+/// Hash the lock before source inventory, after temporary-root/tool admission.
 /// Admitted hashing/inventory survives a caller dropping its wait.
 pub async fn preparation_identity(
     source_root: PathBuf,
@@ -144,9 +143,7 @@ pub async fn preparation_identity_for_platform(
 ) -> IvyResult<PreparationIdentity> {
     internal(
         tokio::spawn(async move {
-            let lock = node_path::filesystem_path(&node_path::from_native(
-                &source_root.join("package-lock.json"),
-            ));
+            let lock = source_root.join("package-lock.json");
             let dependency_lock_hash = streaming_hash::file_hash(lock).await?;
             let dependency_key = dependency_cache_key_json(
                 dependency_lock_hash.clone().into(),

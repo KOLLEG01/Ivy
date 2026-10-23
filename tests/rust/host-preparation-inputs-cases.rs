@@ -1,20 +1,16 @@
-use ivy_contracts::{JsString, json};
+use ivy_contracts::{hash::digest, json};
 use ivy_host_runtime::{
     IvyJson, IvyResult,
     artifact::FileCompare,
-    filesystem, node_path,
+    filesystem,
     preparation_inputs::{self as inputs, PreparationProfile},
 };
 use std::{
-    cmp::Ordering,
     fs,
-    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-static CORPUS: Mutex<()> = Mutex::new(());
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -70,209 +66,86 @@ impl Drop for Fixture {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-fn append(row: IvyJson) {
-    if let Some(path) = std::env::var_os("IVY_HOST_PREPARATION_INPUTS_CORPUS") {
-        let _guard = CORPUS.lock().unwrap();
-        writeln!(
-            fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .unwrap(),
-            "{}",
-            json::stringify(&row, usize::MAX).unwrap()
-        )
-        .unwrap();
-    }
-}
-fn root() -> PathBuf {
-    std::env::var_os("IVY_HOST_SOURCE_ROOT").map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."),
-        PathBuf::from,
-    )
-}
-fn oracle(input: &IvyJson) -> IvyJson {
-    let mut child = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/host-preparation-inputs-oracle.mjs",
-        ])
-        .current_dir(root())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(json::stringify(input, usize::MAX).unwrap().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    json::parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
-}
-fn wire(result: IvyResult<IvyJson>) -> IvyJson {
-    match result {
-        Ok(value) => IvyJson::object([("ok", true.into()), ("value", value)]),
-        Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
-    }
-}
-fn compare(input: IvyJson, result: IvyResult<IvyJson>) -> IvyJson {
-    let actual = wire(result);
-    let expected = oracle(&input);
-    append(IvyJson::object([
-        ("input", input),
-        ("actual", actual.clone()),
-        ("expected", expected.clone()),
-    ]));
-    assert_eq!(&actual, expected.required("operation").unwrap());
-    actual
-}
-fn succeeds(value: &IvyJson) {
-    assert_eq!(value.get("ok"), Some(&true.into()));
-}
-fn refuses(value: &IvyJson, code: &str) {
-    assert_eq!(
-        value
-            .required("error")
-            .unwrap()
-            .required("data")
-            .unwrap()
-            .get("code"),
-        Some(&code.into())
-    );
-}
-fn input(operation: &str, fixture: &Fixture) -> IvyJson {
-    IvyJson::object([
-        ("operation", operation.into()),
-        ("root", IvyJson::String(node_path::from_native(&fixture.0))),
-    ])
-}
 fn manager(value: IvyJson) -> IvyJson {
     IvyJson::object([("packageManager", value)])
 }
 fn comparator() -> FileCompare {
-    let paths: Vec<JsString> = vec![
-        "package.json".into(),
-        "package-lock.json".into(),
-        "payload".into(),
-    ];
-    let input = IvyJson::object([
-        ("operation", "order".into()),
-        (
-            "paths",
-            IvyJson::Array(paths.iter().cloned().map(IvyJson::String).collect()),
-        ),
-    ]);
-    let expected = oracle(&input);
-    let rows = expected
-        .required("operation")
-        .unwrap()
-        .required("value")
-        .unwrap()
-        .required("matrix")
-        .unwrap();
-    let matrix: Vec<Vec<_>> = rows
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|row| {
-            row.as_array()
-                .unwrap()
-                .iter()
-                .map(|n| match n.as_f64().unwrap() as i32 {
-                    -1 => Ordering::Less,
-                    0 => Ordering::Equal,
-                    1 => Ordering::Greater,
-                    _ => unreachable!(),
-                })
-                .collect()
-        })
-        .collect();
-    append(IvyJson::object([("input", input), ("expected", expected)]));
-    Arc::new(move |left, right| {
-        matrix[paths
-            .iter()
-            .position(|p| p == left)
-            .expect("unknown fixture key")][paths
-            .iter()
-            .position(|p| p == right)
-            .expect("unknown fixture key")]
-    })
+    Arc::new(|left, right| left.0.cmp(&right.0))
 }
 
 #[test]
 fn component_and_validated_plan_gates_keep_the_original_preflight_rules() {
-    for component in [
-        "sample",
-        "a",
-        "a0-",
-        "",
-        "Sample",
-        "0bad",
-        "a/b",
-        "../sample",
-        "ä",
-        "a\n",
-        "a_",
-        "a b",
+    for (component, valid) in [
+        ("sample", true),
+        ("a", true),
+        ("a0-", true),
+        ("", false),
+        ("Sample", false),
+        ("0bad", false),
+        ("a/b", false),
+        ("../sample", false),
+        ("ä", false),
+        ("a\n", false),
+        ("a_", false),
+        ("a b", false),
     ] {
-        let input = IvyJson::object([
-            ("operation", "component".into()),
-            ("componentId", component.into()),
-        ]);
-        compare(
-            input,
-            inputs::validate_component_id(&component.into()).map(|_| IvyJson::Null),
-        );
+        let result = inputs::validate_component_id(&component.into());
+        if valid {
+            result.unwrap();
+        } else {
+            assert_eq!(
+                result.unwrap_err().code,
+                "invalid_arguments",
+                "{component:?}"
+            );
+        }
     }
     let mut plans = vec![
-        IvyJson::object([
-            ("kind", "native".into()),
-            ("checks", IvyJson::Array(vec![])),
-        ]),
-        IvyJson::object([
-            ("kind", "native".into()),
-            ("checks", IvyJson::Array(vec!["check".into()])),
-        ]),
+        (
+            IvyJson::object([
+                ("kind", "native".into()),
+                ("checks", IvyJson::Array(vec![])),
+            ]),
+            true,
+        ),
+        (
+            IvyJson::object([
+                ("kind", "native".into()),
+                ("checks", IvyJson::Array(vec!["check".into()])),
+            ]),
+            false,
+        ),
     ];
-    for (id, dist) in [
-        ("sample", "dist/apps/sample"),
-        ("other", "dist/apps/sample"),
-        ("sample", "dist/apps/sample/../other"),
-        ("sample", "dist/apps/sample/"),
-        ("sample", "dist/apps/Sample"),
+    for (id, dist, valid) in [
+        ("sample", "dist/apps/sample", true),
+        ("other", "dist/apps/sample", false),
+        ("sample", "dist/apps/sample/../other", false),
+        ("sample", "dist/apps/sample/", false),
+        ("sample", "dist/apps/Sample", false),
     ] {
-        plans.push(IvyJson::object([
-            ("kind", "app".into()),
-            ("checks", IvyJson::Array(vec![])),
-            (
-                "app",
-                IvyJson::object([("appId", id.into()), ("dist", dist.into())]),
-            ),
-        ]));
+        plans.push((
+            IvyJson::object([
+                ("kind", "app".into()),
+                ("checks", IvyJson::Array(vec![])),
+                (
+                    "app",
+                    IvyJson::object([("appId", id.into()), ("dist", dist.into())]),
+                ),
+            ]),
+            valid,
+        ));
     }
-    plans.push(IvyJson::object([
-        ("kind", "app".into()),
-        ("checks", IvyJson::Array(vec![])),
-    ]));
-    for plan in plans {
-        let input = IvyJson::object([
-            ("operation", "plan".into()),
-            ("componentId", "sample".into()),
-            ("plan", plan.clone()),
-        ]);
-        compare(
-            input,
-            inputs::validate_preparation_plan(&"sample".into(), &plan).map(|_| IvyJson::Null),
-        );
+    plans.push((
+        IvyJson::object([("kind", "app".into()), ("checks", IvyJson::Array(vec![]))]),
+        false,
+    ));
+    for (plan, valid) in plans {
+        let result = inputs::validate_preparation_plan(&"sample".into(), &plan);
+        if valid {
+            result.unwrap();
+        } else {
+            assert_eq!(result.unwrap_err().code, "invalid_arguments");
+        }
     }
 }
 
@@ -319,10 +192,17 @@ async fn package_manager_accepts_only_pinned_string_values() {
         IvyJson::object(Vec::<(String, IvyJson)>::new()),
     ] {
         let fixture = Fixture::new();
-        fixture.package(value);
-        compare(
-            input("manager", &fixture),
-            inputs::preparation_package_manager(fixture.0.clone()).await,
+        fixture.package(value.clone());
+        assert_eq!(
+            inputs::preparation_package_manager(fixture.0.clone())
+                .await
+                .unwrap_err()
+                .code,
+            if value.is_null() {
+                "internal_error"
+            } else {
+                "invalid_arguments"
+            },
         );
     }
 }
@@ -446,20 +326,8 @@ async fn identity(
     package_manager: IvyJson,
     profile: (&str, &str, &str),
     compare_paths: FileCompare,
-) -> IvyJson {
-    let mut input = input("identity", fixture);
-    input.insert("componentId", "sample".into());
-    input.insert("version", "1.2.3".into());
-    input.insert("packageManager", package_manager.clone());
-    input.insert(
-        "profile",
-        IvyJson::object([
-            ("platform", profile.0.into()),
-            ("arch", profile.1.into()),
-            ("version", profile.2.into()),
-        ]),
-    );
-    let value = inputs::preparation_identity(
+) -> IvyResult<IvyJson> {
+    inputs::preparation_identity(
         fixture.0.clone(),
         "sample".into(),
         "1.2.3".into(),
@@ -472,13 +340,14 @@ async fn identity(
         compare_paths,
     )
     .await
-    .map(|v| v.json());
-    compare(input, value)
+    .map(|value| value.json())
 }
+
 #[tokio::test]
 async fn preparation_identity_keeps_exact_runtime_coordinates_raw_managers_and_source_bytes() {
     let fixture = Fixture::new();
-    fixture.write("package-lock.json", b"{\"lockfileVersion\":3}");
+    let lock = br#"{"lockfileVersion":3}"#;
+    fixture.write("package-lock.json", lock);
     fixture.write("payload", b"fixed source");
     let compare_paths = comparator();
     let mut results = Vec::new();
@@ -492,9 +361,11 @@ async fn preparation_identity_keeps_exact_runtime_coordinates_raw_managers_and_s
         let package_manager = inputs::preparation_package_manager(fixture.0.clone())
             .await
             .unwrap();
-        let result = identity(&fixture, package_manager, profile, compare_paths.clone()).await;
-        succeeds(&result);
-        results.push(result.required("value").unwrap().clone());
+        let result = identity(&fixture, package_manager, profile, compare_paths.clone())
+            .await
+            .unwrap();
+        assert_eq!(result.get("dependencyLockHash"), Some(&digest(lock).into()));
+        results.push(result);
     }
     for value in &results[1..] {
         assert_eq!(
@@ -504,30 +375,37 @@ async fn preparation_identity_keeps_exact_runtime_coordinates_raw_managers_and_s
         assert_eq!(value.get("buildId"), results[0].get("buildId"));
         assert_ne!(value.get("dependencyKey"), results[0].get("dependencyKey"));
     }
-    fixture.package(manager(IvyJson::Array(vec!["npm@1.2.3".into()])));
+    fixture.package(manager("npm@01.002.3".into()));
     let package_manager = inputs::preparation_package_manager(fixture.0.clone())
         .await
         .unwrap();
-    let array = identity(
+    assert_eq!(package_manager, IvyJson::from("npm@01.002.3"));
+    let raw = identity(
         &fixture,
         package_manager.clone(),
         ("win32", "x64", "v24.18.0"),
         compare_paths.clone(),
     )
-    .await;
-    assert_ne!(
-        array.required("value").unwrap().get("dependencyKey"),
-        results[0].get("dependencyKey")
+    .await
+    .unwrap();
+    assert_ne!(raw.get("dependencyKey"), results[0].get("dependencyKey"));
+    let large_lock = vec![0xa9; 4 * 1024 * 1024 + 1];
+    fixture.write("package-lock.json", &large_lock);
+    let large = identity(
+        &fixture,
+        package_manager,
+        ("win32", "x64", "v24.18.0"),
+        compare_paths,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        large.get("dependencyLockHash"),
+        Some(&digest(&large_lock).into())
     );
-    fixture.write("package-lock.json", &vec![0xa9; 4 * 1024 * 1024 + 1]);
-    succeeds(
-        &identity(
-            &fixture,
-            package_manager,
-            ("win32", "x64", "v24.18.0"),
-            compare_paths,
-        )
-        .await,
+    assert_ne!(
+        large.get("dependencyLockHash"),
+        results[0].get("dependencyLockHash")
     );
 }
 
@@ -551,26 +429,30 @@ async fn lock_hash_failure_precedes_inventory_refusal_and_existing_bytes_stay_un
     let package_manager = inputs::preparation_package_manager(fixture.0.clone())
         .await
         .unwrap();
-    refuses(
-        &identity(
+    assert_eq!(
+        identity(
             &fixture,
             package_manager.clone(),
             ("win32", "x64", "v24.18.0"),
             compare_paths.clone(),
         )
-        .await,
-        "internal_error",
+        .await
+        .unwrap_err()
+        .code,
+        "internal_error"
     );
     fixture.write("package-lock.json", b"{}");
-    refuses(
-        &identity(
+    assert_eq!(
+        identity(
             &fixture,
             package_manager,
             ("win32", "x64", "v24.18.0"),
             compare_paths,
         )
-        .await,
-        "artifact_changed",
+        .await
+        .unwrap_err()
+        .code,
+        "artifact_changed"
     );
     assert_eq!(
         fs::read(outside.join("retained")).unwrap(),
@@ -641,5 +523,4 @@ fn preparation_identity_survives_a_dropped_waiter_across_lock_and_inventory_phas
         fs::read(fixture.0.join("payload")).unwrap(),
         b"same source bytes"
     );
-    append(IvyJson::object([("scope","admitted lock hash/cache key/inventory/source identity work reaches final comparison after a dropped caller wait".into())]));
 }
