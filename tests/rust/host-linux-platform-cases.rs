@@ -1314,6 +1314,99 @@ fn identity_fixture() -> (IvyJson, IvyJson, IvyJson) {
     (identity, runtime, backend)
 }
 #[tokio::test]
+async fn native_linux_dashboard_uses_a_separate_unprivileged_browser_identity() {
+    let (mut service, mut runtime, backend) = identity_fixture();
+    service.insert("componentId", "dashboards".into());
+    service.insert("user", "ivy-dashboards".into());
+    service.remove("nodeExecutable");
+    runtime.insert(
+        "settings",
+        v(r#"{"chromiumExecutable":"/fixture/tools/native"}"#),
+    );
+    let host = Arc::new(SimHost::new(backend.clone()));
+    identity::ensure_linux_process_identity_with_host(
+        service.clone(),
+        runtime.clone(),
+        host.clone(),
+    )
+    .await
+    .unwrap();
+    let state = host.state.lock().unwrap();
+    assert!(state.trace.iter().any(|event| event.get("args")
+        == Some(&v(
+            r#"["-m","u:ivy-dashboards:r-x","/fixture/tools/native"]"#
+        ))));
+    assert!(state.trace.iter().any(|event| event.get("args")
+        == Some(&v(
+            r#"["-R","ivy-dashboards:ivy-dashboards","/fixture/data"]"#
+        ))));
+    assert!(!state.trace.iter().any(|event| {
+        event
+            .get("args")
+            .and_then(IvyJson::as_array)
+            .is_some_and(|args| args.contains(&"/fixture/projects".into()))
+    }));
+    drop(state);
+    for forbidden in ["root", "ivy-agent"] {
+        service.insert("user", forbidden.into());
+        let host = Arc::new(SimHost::new(backend.clone()));
+        assert_eq!(
+            identity::ensure_linux_process_identity_with_host(
+                service.clone(),
+                runtime.clone(),
+                host.clone()
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "unsupported_runtime"
+        );
+        assert!(host.state.lock().unwrap().trace.is_empty());
+    }
+    assert_eq!(
+        identity::linux_process_user(&"dashboards".into(), "win32"),
+        None
+    );
+    let mut config = config();
+    let mut instances = config
+        .required("instances")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .to_vec();
+    instances[0].insert("componentId", "dashboards".into());
+    config.insert("instances", IvyJson::Array(instances));
+    let candidate = candidate("dashboards", "linux");
+    let target = IvyJson::object([
+        ("instanceId", "renamed-executor".into()),
+        ("revision", "11111111-1111-4111-8111-111111111111".into()),
+        (
+            "candidateId",
+            candidate.required("candidateId").unwrap().clone(),
+        ),
+        ("configPath", "/fixture/private/dashboard.json".into()),
+    ]);
+    let mut manifest = manifest("dashboards");
+    manifest.insert(
+        "entrypoint",
+        v(r#"{"executable":"dist/native/linux-x64/ivy-dashboards","args":[],"timeoutMs":30000}"#),
+    );
+    let unit = systemd::render_systemd_unit(
+        &config,
+        &"renamed-executor".into(),
+        &target,
+        &candidate,
+        &manifest,
+        None,
+    )
+    .unwrap()
+    .content
+    .to_utf8()
+    .unwrap();
+    assert!(unit.contains("User=ivy-dashboards\nGroup=ivy-dashboards\n"));
+    assert!(unit.contains("dist/native/linux-x64/ivy-dashboards"));
+}
+#[tokio::test]
 async fn linux_identity_grants_match_original_order_deduplication_and_failure_boundaries() {
     let fixture = Fixture::new();
     for component in ["agent-manager", "host-executor"] {

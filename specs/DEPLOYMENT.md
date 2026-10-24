@@ -117,6 +117,11 @@ instances. Use a separate account or explicit directories when sharing a host.
 | Dashboards                    | No preselected parent object                                                                                                                                                                      | Verified Chromium executable                                                                                      |
 | PhoneBridge                   | SIP port 5070 on loopback, UDP; EVS/G722/PCMA/PCMU, 20 ms packets; 60-second ringing, one-second polling; empty recipient/incoming policies                                                       | Windows audio, native/Voice setup, SIP account, protected credentials and permitted callers/recipients            |
 
+On Linux, native AgentManager and Dashboards use separate unprivileged service
+accounts created by the host. Install the OS ACL tools and provision a readable
+Chromium executable for Dashboards, or its service account's Playwright cache.
+Keep Chromium's sandbox enabled.
+
 Account-, device- and network-specific values remain mandatory installation inputs.
 Configure non-loopback listeners and trusted proxies explicitly when required by the
 host topology. Verify optional services before enabling them. TaskBoard's initial

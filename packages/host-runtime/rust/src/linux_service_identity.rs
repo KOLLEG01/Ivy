@@ -1,4 +1,4 @@
-//! Grants for the dedicated non-administrative Linux native workload identity.
+//! Grants for dedicated non-administrative Linux native service identities.
 use crate::{
     IvyError, IvyJson, IvyResult,
     linux_host::{LinuxHost, NativeLinuxHost},
@@ -7,9 +7,16 @@ use crate::{
 use ivy_contracts::JsString;
 use std::{collections::HashSet, io, path::PathBuf, sync::Arc};
 pub const LINUX_AGENT_USER: &str = "ivy-agent";
+pub const LINUX_DASHBOARDS_USER: &str = "ivy-dashboards";
 pub fn linux_process_user(component_id: &JsString, platform: &str) -> Option<&'static str> {
-    (platform == "linux" && component_id == &JsString::from("agent-manager"))
-        .then_some(LINUX_AGENT_USER)
+    if platform != "linux" {
+        return None;
+    }
+    match component_id.to_utf8().ok()?.as_str() {
+        "agent-manager" => Some(LINUX_AGENT_USER),
+        "dashboards" => Some(LINUX_DASHBOARDS_USER),
+        _ => None,
+    }
 }
 fn text(value: &IvyJson) -> IvyResult<JsString> {
     value.as_js_string().cloned().ok_or_else(IvyError::internal)
@@ -200,13 +207,14 @@ pub async fn ensure_linux_process_identity_with_host(
 ) -> IvyResult<()> {
     tokio::spawn(async move{
         let Some(user)=identity.get("user").filter(|value|!value.is_null())else{return Ok(())};
-        require(host.platform()=="linux"&&host.user_id()==Some(0)&&identity.get("componentId")==Some(&"agent-manager".into())&&user==&IvyJson::from(LINUX_AGENT_USER),"unsupported_runtime","Linux service identity setup requires the system administrator and the configured AgentManager identity.")?;
+        let expected_user=identity.get("componentId").and_then(IvyJson::as_js_string).and_then(|component|linux_process_user(component,"linux"));
+        require(host.platform()=="linux"&&host.user_id()==Some(0)&&expected_user.is_some_and(|expected|user==&IvyJson::from(expected)),"unsupported_runtime","Linux service identity setup requires the system administrator and the configured service identity.")?;
         let user=text(user)?;
         let config_path=text(identity.required("configPath")?)?;
         let artifact_root=text(identity.required("artifactRoot")?)?;
         let executable=identity.get("processExecutable").or_else(||identity.get("nodeExecutable")).filter(|value|!value.is_null()).map(text).transpose()?;
         let settings=runtime.required("settings")?;
-        let native=settings.get("nativeExecutable").filter(|value|!value.is_null()).map(text).transpose()?;
+        let native=settings.get("nativeExecutable").or_else(||settings.get("chromiumExecutable")).filter(|value|!value.is_null()).map(text).transpose()?;
         let uid=match host.command("/usr/bin/id",vec!["-u".into(),user.clone()],10_000,65_536).await{
             Ok(value)=>native_id(&value)?,
             Err(_)=>{
@@ -215,7 +223,7 @@ pub async fn ensure_linux_process_identity_with_host(
             }
         };
         let gid=native_id(&host.command("/usr/bin/id",vec!["-g".into(),user.clone()],10_000,65_536).await?)?;
-        require([uid,gid].into_iter().all(|value|value.is_finite()&&value.fract()==0.0&&value>0.0&&value<=9_007_199_254_740_991.0),"access_denied","AgentManager must use a non-administrative Linux user.")?;
+        require([uid,gid].into_iter().all(|value|value.is_finite()&&value.fract()==0.0&&value>0.0&&value<=9_007_199_254_740_991.0),"access_denied","The service must use a non-administrative Linux user.")?;
         file(host.as_ref(),&user,config_path,"r--").await?;
         if let Some(executable)=executable{file(host.as_ref(),&user,executable,"r-x").await?;}
         if let Some(native)=native{file(host.as_ref(),&user,native,"r-x").await?;}
