@@ -200,6 +200,49 @@ fn durable_requests_admit_overlapping_actions_and_keep_nested_record_guards() {
     }
 }
 
+#[test]
+fn retained_task_field_requests_do_not_change_current_action_admission() {
+    let contracts = runtime_inputs::contracts().unwrap();
+    let mut operation = parse(
+        r#"{"schemaVersion":1,"operationId":"retained-create","callerPrincipalId":"fixture-caller","request":{"action":"create","operationId":"retained-create","workflowState":"backlog","fields":{"title":"Original retained ticket","description":"","acceptanceCriteria":[],"category":null,"control":"user","priority":2,"executionRequirement":null,"workspaceRequirement":{"kind":"task_workspace"},"dependencies":["dependency-task"],"userContact":"ticket","nextReviewAt":"2026-01-01T00:00:00.000Z","dueAt":null}},"requestHash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","actor":{"principalId":"fixture-caller","serviceNodeId":"fixture.task-board","generation":1,"source":"user"},"createdAt":"2026-01-01T00:00:00.000Z","updatedAt":"2026-01-01T00:00:00.000Z","phase":"succeeded","writes":[],"outcome":null,"error":null}"#,
+        usize::MAX,
+    ).unwrap();
+    let mut request = operation.required("request").unwrap().clone();
+    for action in ["create", "edit"] {
+        request.insert("action", action.into());
+        if action == "edit" {
+            request.remove("workflowState");
+            request.insert("taskId", "retained-task".into());
+            request.insert("expectedRevision", Json::Number(4.0));
+        }
+        operation.insert("requestHash", hash_json(&request).unwrap().into());
+        operation.insert("request", request.clone());
+        contracts
+            .validate_record("task-board/operation", &"1.0.0".into(), &operation)
+            .unwrap();
+        for definition in ["ActionInput", "DurableRequest"] {
+            assert_eq!(
+                contracts
+                    .validate_definition(definition, &request)
+                    .unwrap_err()
+                    .code,
+                "invalid_arguments"
+            );
+        }
+    }
+    let mut fields = request.required("fields").unwrap().clone();
+    fields.insert("dependencies", "dependency-task".into());
+    request.insert("fields", fields);
+    operation.insert("request", request);
+    assert_eq!(
+        contracts
+            .validate_record("task-board/operation", &"1.0.0".into(), &operation)
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+}
+
 struct ReadOnlyTask {
     contracts: RuntimeContracts,
     task: Json,

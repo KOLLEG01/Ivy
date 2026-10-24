@@ -257,6 +257,17 @@ defs.NativeUpdateRequest = obj({ action: { const: 'nativeUpdate' }, ...existing,
 // Transition/defer are accepted through both the public and scheduler interfaces.
 defs.DurableRequest = { anyOf: [ref('ActionRequest'), ref('SchedulerRequest'), ref('NativeUpdateRequest'), ref('ArchiveRequest')] };
 
+// Retained create/edit receipts keep their original request and hash after task
+// dependencies and review appointments moved out of editable task fields.
+defs.RetainedTaskFieldsInput = { ...defs.TaskFieldsInput,
+  properties: { ...defs.TaskFieldsInput.properties, dependencies: { ...array(id), uniqueItems: true }, nextReviewAt: nullable(timestamp) },
+  required: [...defs.TaskFieldsInput.required, 'dependencies', 'nextReviewAt'],
+};
+for (const name of ['CreateRequest', 'EditRequest']) defs['Retained' + name] = { ...defs[name],
+  properties: { ...defs[name].properties, fields: ref('RetainedTaskFieldsInput') },
+};
+defs.RetainedDurableRequest = { anyOf: [ref('DurableRequest'), ref('RetainedCreateRequest'), ref('RetainedEditRequest')] };
+
 defs.NativeLifecycleCall = obj({ key: id,
   owner: obj({ serviceNodeId: id, hostId: id, nativeVersion: id, nativeExecutableHash: hash, catalogHash: hash }),
   operationId: id, method: { enum: ['thread/archive', 'thread/unarchive', 'thread/start', 'thread/resume'] }, params: wire('Json'),
@@ -266,7 +277,7 @@ defs.PreparedWrite = obj({
   destination: { oneOf: [obj({ create: obj({ parentId: nullable(id), name: str(256, 1) }) }),
     obj({ objectId: id, expectedRevision: integer(1) })] }, outcome: nullable(ref('ObjectPin')) });
 defs.HandoffWork = obj({ claimOperationId: id, workRevision: integer(0), contentHash: hash, primaryResourceRef: nullable(resource) });
-defs.Operation = obj({ schemaVersion: { const: 1 }, operationId: id, callerPrincipalId: id, request: ref('DurableRequest'),
+defs.Operation = obj({ schemaVersion: { const: 1 }, operationId: id, callerPrincipalId: id, request: ref('RetainedDurableRequest'),
   requestHash: hash, actor: ref('Actor'), createdAt: timestamp, updatedAt: timestamp,
   phase: { type: 'string', enum: ['accepted', 'preparing', 'publishing', 'succeeded', 'failed', 'needs_attention'] },
   writes: array(ref('PreparedWrite'), 16), outcome: nullable(ref('ActionOutcome')),

@@ -5260,6 +5260,247 @@
         }
       ]
     },
+    "RetainedTaskFieldsInput": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "description": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 1048576
+        },
+        "acceptanceCriteria": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16384
+          },
+          "maxItems": 256
+        },
+        "category": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "control": {
+          "type": "string",
+          "enum": [
+            "user",
+            "agent"
+          ],
+          "description": "user means manual work; agent lets TaskBoard schedule and resume native agent work."
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4,
+          "description": "Scheduling priority: 4 is highest and 0 is lowest."
+        },
+        "executionRequirement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionRequirement"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Required field. null inherits TaskBoard defaults; automatic selects any eligible PC; host restricts scheduling to that PC."
+        },
+        "nativeOptions": {
+          "$ref": "#/$defs/NativeOptions"
+        },
+        "workspaceRequirement": {
+          "$ref": "#/$defs/WorkspaceRequirement",
+          "description": "Required workspace policy for this task. Choose one kind deliberately; TaskBoard resolves it on the selected host before starting agent work."
+        },
+        "requiredCapabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "maxItems": 32,
+          "uniqueItems": true,
+          "description": "Capability keys the selected host must advertise before agent work starts. Missing means none."
+        },
+        "userContact": {
+          "type": "string",
+          "enum": [
+            "ticket",
+            "chat",
+            "phone"
+          ],
+          "description": "Contact route: ticket records only in the ticket; chat also contacts Main; phone also contacts by voice. Omit on root creation to inherit task_configuration defaults.userContact; delegated creation defaults to ticket and delivers completion to the parent. Omit on edit to preserve the setting."
+        },
+        "allowParallel": {
+          "type": "boolean"
+        },
+        "dueAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 24,
+              "maxLength": 24,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+          },
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "nextReviewAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 24,
+              "maxLength": 24,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "title",
+        "description",
+        "acceptanceCriteria",
+        "category",
+        "control",
+        "priority",
+        "executionRequirement",
+        "workspaceRequirement",
+        "dueAt",
+        "dependencies",
+        "nextReviewAt"
+      ],
+      "additionalProperties": false
+    },
+    "RetainedCreateRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "create"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedWorkspace": {
+          "$ref": "#/$defs/ExpectedWorkspace"
+        },
+        "fields": {
+          "$ref": "#/$defs/RetainedTaskFieldsInput"
+        },
+        "parentTaskId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
+          "description": "When delegating part of your current task, identify that task as the parent. It owns result review, Done and archival. Omitted userContact defaults to ticket for delegated tasks."
+        },
+        "workflowState": {
+          "type": "string",
+          "enum": [
+            "backlog",
+            "todo",
+            "in_progress",
+            "waiting",
+            "review",
+            "done",
+            "cancelled"
+          ],
+          "description": "Initial workflow state; omitted means todo. Agent in_progress requires a real scheduler claim and cannot be created directly. Review requires an initial manual final Result."
+        },
+        "initialResult": {
+          "$ref": "#/$defs/ResultContent",
+          "description": "Manual final material for a user-controlled review or done task. Required for review; does not claim native execution."
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "fields"
+      ],
+      "additionalProperties": false
+    },
+    "RetainedEditRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "edit"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "taskId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expectedWorkspace": {
+          "$ref": "#/$defs/ExpectedWorkspace"
+        },
+        "fields": {
+          "$ref": "#/$defs/RetainedTaskFieldsInput"
+        },
+        "parentTaskId": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Assign or remove the delegating parent. Omit to preserve the current parent."
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "taskId",
+        "expectedRevision",
+        "fields"
+      ],
+      "additionalProperties": false
+    },
+    "RetainedDurableRequest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DurableRequest"
+        },
+        {
+          "$ref": "#/$defs/RetainedCreateRequest"
+        },
+        {
+          "$ref": "#/$defs/RetainedEditRequest"
+        }
+      ]
+    },
     "NativeLifecycleCall": {
       "type": "object",
       "properties": {
@@ -5501,7 +5742,7 @@
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
         },
         "request": {
-          "$ref": "#/$defs/DurableRequest"
+          "$ref": "#/$defs/RetainedDurableRequest"
         },
         "requestHash": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
