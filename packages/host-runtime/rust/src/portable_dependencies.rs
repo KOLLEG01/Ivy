@@ -10,7 +10,6 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok { Ok(()) } else { Err(IvyError::new(code, message)) }
 }
 fn internal<T, E>(value: Result<T, E>) -> IvyResult<T> { value.map_err(|_| IvyError::internal()) }
-fn fs_path(path: &Path) -> PathBuf { node_path::filesystem_path(&node_path::from_native(path)) }
 fn local(root: &Path, location: &JsString) -> PathBuf {
     let mut parts = vec![node_path::from_native(root)];
     parts.extend(location.0.split(|c| *c == 47).map(|part| JsString(part.to_vec())));
@@ -49,7 +48,7 @@ pub async fn portable_dependency_plan(lock: IvyJson, selected: Vec<JsString>, ar
         let mut missing = Vec::new(); let mut seen = BTreeSet::new();
         for location in selected {
             if !seen.insert(location.clone()) { continue }
-            match fs::metadata(fs_path(&local(&artifact_root, &location))) {
+            match fs::metadata(local(&artifact_root, &location)) {
                 Ok(_) => continue,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
                 Err(_) => return Err(IvyError::internal()),
@@ -125,13 +124,13 @@ pub async fn install_portable_dependency(value: PortableDependency, bytes: Vec<u
         let destination = local(&artifact_root, &value.location);
         let output = archive.clone();
         internal(tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            fs::OpenOptions::new().write(true).create_new(true).open(fs_path(&output))?.write_all(&bytes)
+            fs::OpenOptions::new().write(true).create_new(true).open(output)?.write_all(&bytes)
         }).await).and_then(internal)?;
         let result = async {
             let listing = tar(&temporary_root, &executables, vec!["-tzf".into(), archive.as_os_str().into()]).await?;
             portable_archive_entries(&listing.stdout, listing.truncated)?;
             let target = destination.clone();
-            internal(tokio::task::spawn_blocking(move || fs::create_dir_all(fs_path(&target))).await).and_then(internal)?;
+            internal(tokio::task::spawn_blocking(move || fs::create_dir_all(target)).await).and_then(internal)?;
             tar(&temporary_root, &executables, vec!["-xzf".into(), archive.as_os_str().into(), "-C".into(), destination.as_os_str().into(), "--strip-components".into(), "1".into()]).await?;
             let installed = config::json_file(local(&destination, &"package.json".into()), 1024 * 1024).await?;
             if installed.is_null() { return Err(IvyError::internal()) }
