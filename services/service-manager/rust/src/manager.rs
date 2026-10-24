@@ -37,6 +37,17 @@ impl Manager {
                 .ok_or_else(IvyError::internal)?,
         );
         let accepted = host_config(host_path).await?;
+        let node = match node.into() {
+            Some(node) => Some(node),
+            None => {
+                let configured = accepted
+                    .required("executables")?
+                    .get("node")
+                    .and_then(IvyJson::as_js_string)
+                    .map(to_native);
+                NodeRuntime::discover_optional(configured.as_deref()).await?
+            }
+        };
         let reset_active = runtime_reset_active(&accepted).await?;
         let bootstrap_root = config.artifact_root().to_path_buf();
         Self::start(config, accepted, reset_active, node, bootstrap_root).await

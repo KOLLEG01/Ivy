@@ -1,5 +1,5 @@
 use ivy_contracts::{IvyError, IvyJson, IvyResult, json::stringify};
-use ivy_host_runtime::{config::configuration_path, node_runtime::NodeRuntime};
+use ivy_host_runtime::config::configuration_path;
 use ivy_service_manager::manager::Manager;
 
 async fn start() -> IvyResult<Manager> {
@@ -7,8 +7,7 @@ async fn start() -> IvyResult<Manager> {
         &std::env::args_os().skip(1).collect::<Vec<_>>(),
         std::env::var_os("IVY_INSTANCE_CONFIG"),
     )?;
-    let node = NodeRuntime::discover_optional(None).await?;
-    Manager::from_path(path, node).await
+    Manager::from_path(path, None).await
 }
 async fn run(manager: Manager) -> IvyResult<()> {
     let result = tokio::select! {
