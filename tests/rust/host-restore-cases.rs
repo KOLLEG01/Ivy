@@ -309,22 +309,6 @@ async fn project_restore_relocates_only_the_disposable_backup_index() {
 }
 
 #[tokio::test]
-async fn restore_final_publication_reconciles_only_working_state_and_stays_disabled() {
-    for case in ["valid", "external-area", "report-accounting", "control-link", "health-directory", "config-publication-failure", "wrong-journal-host"] {
-        let result=compare_case("publication",case).await;
-        if result.get("execution") == Some(&"blocked".into()) {
-            assert_eq!(case, "control-link");
-            assert_eq!(result.get("finding"), Some(&J::Null));
-            continue;
-        }
-        assert_eq!(ok(&result),["valid","external-area","report-accounting","control-link"].contains(&case),"{case}");
-        if ok(&result) {
-            let publication=result.get("state").unwrap().get("publication").unwrap();
-            assert!(publication.get("instances").unwrap().as_array().unwrap().iter().all(|i|i.get("enabled")==Some(&false.into())));
-        }
-    }
-}
-#[tokio::test]
 async fn restore_requires_the_exact_captured_platform_and_node_workload() {
     for case in ["valid", "wrong-os", "wrong-arch", "wrong-node", "missing-node-prefix"] {
         let result=compare_case("platform",case).await;
@@ -340,3 +324,6 @@ mod verification_cases;
 
 #[path = "host-restore-payload-cases.rs"]
 mod payload_cases;
+
+#[path = "host-restore-publication-cases.rs"]
+mod publication_cases;

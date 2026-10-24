@@ -213,24 +213,24 @@ pub async fn publish_restored_host(
         tokio::spawn(async move {
             reconcile_restored_journal(config.clone(), created_at).await?;
             for instance in array(config.required("instances")?)? {
-                let data = field(&layout::service_paths(&config, instance)?, "data")?;
+                let data = native(&field(&layout::service_paths(&config, instance)?, "data")?)?;
                 for name in ["health.json", "control.json"] {
-                    let path = join(&[data.clone(), name.into()]);
-                    if exists(&path).await? {
-                        internal(tokio::fs::remove_file(native(&path)?).await)?;
+                    let path = data.join(name);
+                    if backup_files::exists(&path).await? {
+                        internal(tokio::fs::remove_file(path).await)?;
                     }
                 }
             }
             let mut roots = layout::host_storage_areas(&config, &bindings.storage)?
                 .into_iter()
-                .map(|area| area.path)
-                .collect::<Vec<_>>();
+                .map(|area| native(&area.path))
+                .collect::<IvyResult<Vec<_>>>()?;
             roots.extend([
-                field(&config, "artifactRoot")?,
-                field(&config, "stagingRoot")?,
+                native(&field(&config, "artifactRoot")?)?,
+                native(&field(&config, "stagingRoot")?)?,
             ]);
             for root in roots {
-                backup_files::sync_directories(native(&root)?).await?;
+                backup_files::sync_directories(root).await?;
             }
             let config_path = layout::host_configuration_path(&config)?;
             config::atomic_json(config_path.clone(), config.clone()).await?;

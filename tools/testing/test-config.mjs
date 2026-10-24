@@ -154,6 +154,12 @@ export const rustTests = {
     ],
     "testThreads": 1
   },
+  "tests/rust/host-restore-publication-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "restore_cases::publication_cases::restore_final_publication_reconciles_only_working_state_and_stays_disabled",
+    "testThreads": 1
+  },
   "tests/rust/host-restore-payload-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",
