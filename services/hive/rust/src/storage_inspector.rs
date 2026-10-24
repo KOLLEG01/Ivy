@@ -4,7 +4,7 @@ use crate::storage_read::inspect_stopped_storage;
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, core_schema::validate_host, json::parse,
 };
-use ivy_host_runtime::node_path::{self, Style};
+use ivy_host_runtime::native_path;
 
 pub fn inspect_admitted_configuration(config: &IvyJson, args: &[JsString]) -> IvyResult<IvyJson> {
     validate_host("InstanceConfig", config)?;
@@ -34,8 +34,8 @@ pub fn inspect_admitted_configuration(config: &IvyJson, args: &[JsString]) -> Iv
         .get("dataRoot")
         .and_then(IvyJson::as_js_string)
         .ok_or_else(IvyError::internal)?;
-    let path = node_path::join(Style::native(), &[root.clone(), "hive.sqlite".into()]);
-    let result = inspect_stopped_storage(&node_path::filesystem_path(&path), requirements)?;
+    let path = native_path::lexical(&native_path::to_native(root).join("hive.sqlite"));
+    let result = inspect_stopped_storage(&path, requirements)?;
     validate_host("StorageInspection", &result)?;
     Ok(result)
 }

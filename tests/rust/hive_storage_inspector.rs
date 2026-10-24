@@ -1,14 +1,30 @@
 use super::*;
+use ivy_contracts::JsString;
+use ivy_hive::storage_inspector::inspect_admitted_configuration;
+use ivy_host_runtime::native_path;
+use std::collections::BTreeMap;
 
-fn config(root: &Path) -> Value {
-    json!({"schemaVersion":1,"hostId":"host","instanceId":"hive","serviceNodeId":"hive","componentId":"hive","publicBaseUrl":"https://example.invalid","dataRoot":root,"artifactRoot":root.with_extension("artifact"),"buildId":format!("sha256:{}","a".repeat(64)),"version":"1.0.0","settings":{}})
+fn config(root: &Path) -> IvyJson {
+    IvyJson::object([
+        ("schemaVersion", 1.0.into()),
+        ("hostId", "host".into()),
+        ("instanceId", "hive".into()),
+        ("serviceNodeId", "hive".into()),
+        ("componentId", "hive".into()),
+        ("publicBaseUrl", "https://example.invalid".into()),
+        ("dataRoot", native_path::from_native(root).into()),
+        (
+            "artifactRoot",
+            native_path::from_native(&root.with_extension("artifact")).into(),
+        ),
+        ("buildId", format!("sha256:{}", "a".repeat(64)).into()),
+        ("version", "1.0.0".into()),
+        ("settings", IvyJson::object(Vec::<(String, IvyJson)>::new())),
+    ])
 }
-fn invoke(input: &Value) -> Value {
-    let mut process = Command::new(env!("CARGO_BIN_EXE_ivy-hive-inspect-storage"));
-    for arg in input["args"].as_array().unwrap() {
-        process.arg(arg.as_str().unwrap());
-    }
-    let mut child = process
+fn invoke(config: &IvyJson, args: &[String]) -> Value {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ivy-hive-inspect-storage"))
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -18,147 +34,317 @@ fn invoke(input: &Value) -> Value {
         .stdin
         .take()
         .unwrap()
-        .write_all(input["config"].to_string().as_bytes())
+        .write_all(stringify(config, usize::MAX).unwrap().as_bytes())
         .unwrap();
     let out = child.wait_with_output().unwrap();
     json!({"status":out.status.code(),"stdout":String::from_utf8(out.stdout).unwrap(),"stderr":String::from_utf8(out.stderr).unwrap()})
 }
-fn compare(inputs: &[Value]) -> Vec<Value> {
-    let expected = oracle(inputs);
-    inputs
-        .iter()
-        .zip(expected)
-        .enumerate()
-        .map(|(index, (input, expected))| {
-            let actual = invoke(input);
-            assert_eq!(actual, expected, "Inspector process case{index}: {input}");
-            actual
-        })
-        .collect()
+fn domain(key: impl Into<JsString>, versions: &[&str]) -> IvyJson {
+    IvyJson::object([
+        ("key", IvyJson::String(key.into())),
+        (
+            "versions",
+            IvyJson::Array(versions.iter().map(|v| (*v).into()).collect()),
+        ),
+    ])
 }
-fn action(config: &Value, args: Value) -> Value {
-    json!({"action":"inspector","config":config,"args":args})
+fn report(exists: bool, contracts: Vec<IvyJson>) -> IvyJson {
+    IvyJson::object([
+        ("schemaVersion", 1.0.into()),
+        ("exists", exists.into()),
+        ("format", (if exists { 4.0 } else { 0.0 }).into()),
+        ("contracts", IvyJson::Array(contracts)),
+    ])
+}
+fn args(requirements: Value) -> Vec<String> {
+    vec!["--contracts".into(), requirements.to_string()]
+}
+fn assert_result(actual: Value, expected: Result<IvyJson, &str>) {
+    match expected {
+        Ok(value) => {
+            assert_eq!(actual["status"], 0, "{actual}");
+            assert_eq!(actual["stderr"], "");
+            let stdout = actual["stdout"].as_str().unwrap();
+            assert_eq!(stdout.lines().count(), 1);
+            assert!(stdout.ends_with('\n'));
+            assert_eq!(parse(stdout, usize::MAX).unwrap(), value);
+        }
+        Err(code) => {
+            assert_eq!(actual["status"], 1, "{actual}");
+            assert_eq!(actual["stdout"], "");
+            let stderr = actual["stderr"].as_str().unwrap();
+            assert_eq!(stderr.lines().count(), 1);
+            assert!(stderr.ends_with('\n'));
+            assert_eq!(
+                serde_json::from_str::<Value>(stderr).unwrap(),
+                json!({"code":code,"message":"Hive storage inspection failed without mutation."})
+            );
+        }
+    }
+}
+#[derive(Debug, PartialEq, Eq)]
+enum Entry {
+    Directory,
+    File(Vec<u8>),
+    Link(PathBuf),
+}
+fn image(root: &Path) -> BTreeMap<PathBuf, Entry> {
+    let mut image = BTreeMap::new();
+    let mut pending = vec![root.to_owned()];
+    while let Some(path) = pending.pop() {
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        let entry = if metadata.file_type().is_symlink() {
+            Entry::Link(fs::read_link(&path).unwrap())
+        } else if metadata.is_file() {
+            Entry::File(fs::read(&path).unwrap())
+        } else {
+            pending.extend(fs::read_dir(&path).unwrap().map(|v| v.unwrap().path()));
+            Entry::Directory
+        };
+        image.insert(path.strip_prefix(root).unwrap().to_owned(), entry);
+    }
+    image
+}
+fn relative_to_current(path: &Path) -> PathBuf {
+    let cwd = std::env::current_dir().unwrap();
+    let from: Vec<_> = cwd.components().collect();
+    let to: Vec<_> = path.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    assert!(common > 0);
+    let mut result: PathBuf = (common..from.len()).map(|_| "..").collect();
+    for part in &to[common..] {
+        result.push(part.as_os_str());
+    }
+    result
+}
+fn directory_link(target: &Path, link: &Path) {
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(target, link).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
 }
 
 #[test]
-fn admitted_offline_inspector_process_matches_original_arguments_domains_errors_and_missing_output_validation()
- {
+fn native_admitted_offline_inspector_keeps_arguments_domains_errors_and_missing_output_validation()
+{
     let root = Root::new();
     let path = root.0.join("hive.sqlite");
     seed(&path);
-    let before = fs::read(&path).unwrap();
-    let config = config(&root.0);
-    let mut inputs = vec![action(&config, json!([]))];
-    for requirements in [
-        json!([{"key":"fixture/value"}]),
-        json!([{"key":"fixture/value","readScope":{"roots":["root"],"history":"current","includeArchived":false,"references":[{"objectId":"archived","revision":1}]}}]),
-        json!([{"key":"fixture/many"}]),
-        json!([{"key":"fixture/value"},{"key":"fixture/value"}]),
-        json!([{}]),
-        json!([null]),
-        json!({}),
-        json!([{"key":"x".repeat(193)}]),
-        json!([{"key":"🙂".repeat(96)}]),
+    let before = image(&root.0);
+    let configuration = config(&root.0);
+    let all = ["0.1.0", "1.0.0", "1.1.0", "2.0.0", "2.1.0", "3.0.0"];
+    let mut cases = vec![(vec![], Ok(report(true, vec![])))];
+    for (requirements, expected) in [
+        (
+            json!([{"key":"fixture/value"}]),
+            Ok(report(true, vec![domain("fixture/value", &all)])),
+        ),
+        (
+            json!([{"key":"fixture/value","readScope":{"roots":["root"],"history":"current","includeArchived":false,"references":[{"objectId":"archived","revision":1}]}}]),
+            Ok(report(
+                true,
+                vec![domain("fixture/value", &["0.1.0", "2.0.0", "2.1.0"])],
+            )),
+        ),
+        (json!([{"key":"fixture/many"}]), Err("limit_exceeded")),
+        (
+            json!([{"key":"fixture/value"},{"key":"fixture/value"}]),
+            Err("invalid_arguments"),
+        ),
+        (json!([{}]), Err("invalid_arguments")),
+        (json!([null]), Err("internal_error")),
+        (json!({}), Err("invalid_arguments")),
+        (json!([{"key":"x".repeat(193)}]), Err("invalid_arguments")),
+        (
+            json!([{"key":"🙂".repeat(96)}]),
+            Ok(report(true, vec![domain("🙂".repeat(96), &[])])),
+        ),
     ] {
-        inputs.push(action(
-            &config,
-            json!(["--contracts", requirements.to_string()]),
-        ));
+        cases.push((args(requirements), expected));
     }
-    for args in [
-        json!(["--contracts", "["]),
-        json!(["--contracts"]),
-        json!(["--contracts", "[{\"key\":\"\\ud800\"}]"]),
-        json!(["ignored", "--contracts", "[]", "--contracts", "["]),
+    cases.extend([
+        (
+            vec!["--contracts".into(), "[".into()],
+            Err("internal_error"),
+        ),
+        (vec!["--contracts".into()], Err("internal_error")),
+        (
+            vec!["--contracts".into(), "[{\"key\":\"\\ud800\"}]".into()],
+            Ok(report(true, vec![domain(JsString(vec![0xd800]), &[])])),
+        ),
+        (
+            vec![
+                "ignored".into(),
+                "--contracts".into(),
+                "[]".into(),
+                "--contracts".into(),
+                "[".into(),
+            ],
+            Ok(report(true, vec![])),
+        ),
+    ]);
+    assert_eq!(cases.len(), 14);
+    for (args, expected) in cases {
+        assert_result(invoke(&configuration, &args), expected);
+    }
+    let mut other = configuration.clone();
+    other.insert("componentId", "fixture".into());
+    assert_result(
+        invoke(&other, &["--contracts".into(), "[".into()]),
+        Err("target_conflict"),
+    );
+    let mut invalid = other.clone();
+    invalid.insert("schemaVersion", 2.0.into());
+    assert_result(
+        invoke(&invalid, &["--contracts".into(), "[".into()]),
+        Err("invalid_arguments"),
+    );
+    let missing = config(&root.0.join("missing"));
+    for (requirements, expected) in [
+        (
+            json!([{"key":"fixture/value"}]),
+            Ok(report(false, vec![domain("fixture/value", &[])])),
+        ),
+        (json!([{}]), Err("invalid_arguments")),
+        (json!([null]), Err("internal_error")),
     ] {
-        inputs.push(action(&config, args));
+        assert_result(invoke(&missing, &args(requirements)), expected);
     }
-    let mut other = config.clone();
-    other["componentId"] = "fixture".into();
-    inputs.push(action(&other, json!(["--contracts", "["])));
-    let mut missing = config.clone();
-    missing["dataRoot"] = root.0.join("missing").to_string_lossy().into_owned().into();
-    for requirements in [json!([{"key":"fixture/value"}]), json!([{}]), json!([null])] {
-        inputs.push(action(
-            &missing,
-            json!(["--contracts", requirements.to_string()]),
-        ));
-    }
+    assert_eq!(image(&root.0), before);
+
+    let mut variants = vec![
+        "unicode",
+        "dot",
+        "parent",
+        "relative",
+        "canonical",
+        "linked",
+        "link-parent",
+    ];
     #[cfg(windows)]
-    {
-        use base64::{Engine, engine::general_purpose::STANDARD};
-        let fixture = json!({"action":"fixture","root":root.0,"actions":[{"kind":"write","path":"data. /hive.sqlite","data":STANDARD.encode(&before)}]});
-        assert_eq!(oracle(&[fixture]), vec![json!({"value":null})]);
-        let mut namespaced = config.clone();
-        namespaced["dataRoot"] = json!(root.0.join("data. "));
-        inputs.push(action(
-            &namespaced,
-            json!(["--contracts", json!([{"key":"fixture/value"}]).to_string()]),
-        ));
-    }
-    let results = compare(&inputs);
-    assert_eq!(results[0]["status"], 0);
-    assert_eq!(results[1]["status"], 0);
-    assert!(
-        results
-            .iter()
-            .any(|r| r["stderr"].as_str().unwrap().contains("target_conflict"))
-    );
-    assert!(
-        results
-            .iter()
-            .any(|r| r["stderr"].as_str().unwrap().contains("limit_exceeded"))
-    );
-    assert_eq!(fs::read(path).unwrap(), before);
-    assert!(!root.0.join("missing").exists());
-    assert!(!root.0.join("hive.sqlite-wal").exists());
-    #[cfg(windows)]
-    {
-        use ivy_host_runtime::node_path::{from_native, node_filesystem_path};
-        assert_eq!(results.last().unwrap()["status"], 0);
-        assert_eq!(
-            fs::read(
-                node_filesystem_path(&from_native(&root.0.join("data. /hive.sqlite"))).unwrap()
+    variants.extend(["trailing-name", "opaque-high", "opaque-low"]);
+    for variant in variants {
+        let root = Root::new();
+        let namespace = fs::canonicalize(&root.0).unwrap();
+        let mut data = root.0.join(if variant == "unicode" {
+            "data-漢字 space"
+        } else {
+            "data"
+        });
+        #[cfg(windows)]
+        if variant == "trailing-name" {
+            data = namespace.join("data. ");
+            fs::create_dir(namespace.join("data")).unwrap();
+            fs::write(
+                namespace.join("data/hive.sqlite"),
+                b"untouched trailing alias",
             )
-            .unwrap(),
-            before
+            .unwrap();
+        } else if variant.starts_with("opaque-") {
+            use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+            let mut name: Vec<_> = "data".encode_utf16().collect();
+            name.push(if variant == "opaque-high" {
+                0xd800
+            } else {
+                0xdfff
+            });
+            data = namespace.join(OsString::from_wide(&name));
+            for alias in ["data�", "data. "] {
+                fs::create_dir(namespace.join(alias)).unwrap();
+                fs::write(
+                    namespace.join(alias).join("hive.sqlite"),
+                    b"untouched native alias",
+                )
+                .unwrap();
+            }
+        }
+        fs::create_dir(&data).unwrap();
+        fs::write(data.join("hive.sqlite"), fs::read(&path).unwrap()).unwrap();
+        let configured = match variant {
+            "dot" => root.0.join(".").join("data"),
+            "parent" => root.0.join("absent").join("..").join("data"),
+            "relative" => relative_to_current(&data),
+            "canonical" => fs::canonicalize(&data).unwrap(),
+            "linked" => {
+                let link = root.0.join("linked");
+                directory_link(&data, &link);
+                link
+            }
+            "link-parent" => {
+                fs::create_dir_all(root.0.join("elsewhere/child")).unwrap();
+                fs::create_dir(root.0.join("elsewhere/data")).unwrap();
+                let alias = root.0.join("elsewhere/data/hive.sqlite");
+                seed(&alias);
+                let db = Connection::open(&alias).unwrap();
+                db.pragma_update(None, "user_version", 3).unwrap();
+                drop(db);
+                let link = root.0.join("linked");
+                directory_link(&root.0.join("elsewhere/child"), &link);
+                link.join("..").join("data")
+            }
+            _ => data,
+        };
+        let before = image(&namespace);
+        let expected = if variant.starts_with("opaque-") {
+            Err("internal_error")
+        } else {
+            Ok(report(true, vec![domain("fixture/value", &all)]))
+        };
+        let configuration = config(&configured);
+        assert_result(
+            invoke(&configuration, &args(json!([{"key":"fixture/value"}]))),
+            expected.clone(),
         );
-        assert!(!root.0.join("data").exists());
+        let direct_args = args(json!([{"key":"fixture/value"}]))
+            .into_iter()
+            .map(JsString::from)
+            .collect::<Vec<_>>();
+        let direct = inspect_admitted_configuration(&configuration, &direct_args);
+        match expected {
+            Ok(value) => assert_eq!(direct.unwrap(), value, "{variant}"),
+            Err(code) => assert_eq!(direct.unwrap_err().code, code, "{variant}"),
+        }
+        assert_eq!(
+            image(&namespace),
+            before,
+            "{variant}: read-only native tree and aliases"
+        );
     }
 }
 
 #[test]
-fn admitted_offline_inspector_process_obeys_stopped_writer_lock_timeout_and_format_without_mutation()
- {
+fn native_admitted_offline_inspector_obeys_stopped_writer_lock_timeout_and_format_without_mutation()
+{
     let root = Root::new();
     let path = root.0.join("hive.sqlite");
     seed(&path);
-    let input = action(
-        &config(&root.0),
-        json!(["--contracts", "[{\"key\":\"fixture/value\"}]"]),
-    );
+    let configuration = config(&root.0);
+    let args = args(json!([{"key":"fixture/value"}]));
     let db = Connection::open(&path).unwrap();
     db.execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE;")
         .unwrap();
-    let locked = compare(&[input.clone()]);
-    assert_eq!(locked[0]["status"], 1);
-    assert_eq!(locked[0]["stdout"], "");
+    assert_result(invoke(&configuration, &args), Err("internal_error"));
     db.execute_batch("ROLLBACK;").unwrap();
     drop(db);
-    let before = fs::read(&path).unwrap();
-    assert_eq!(compare(&[input.clone()])[0]["status"], 0);
-    assert_eq!(fs::read(&path).unwrap(), before);
+    let before = image(&root.0);
+    assert_result(
+        invoke(&configuration, &args),
+        Ok(report(
+            true,
+            vec![domain(
+                "fixture/value",
+                &["0.1.0", "1.0.0", "1.1.0", "2.0.0", "2.1.0", "3.0.0"],
+            )],
+        )),
+    );
+    assert_eq!(image(&root.0), before);
     let db = Connection::open(&path).unwrap();
     db.pragma_update(None, "user_version", 3).unwrap();
     drop(db);
-    let before = fs::read(&path).unwrap();
-    let unsupported = compare(&[input]);
-    assert_eq!(unsupported[0]["status"], 1);
-    assert!(
-        unsupported[0]["stderr"]
-            .as_str()
-            .unwrap()
-            .contains("unsupported_storage_format")
+    let before = image(&root.0);
+    assert_result(
+        invoke(&configuration, &args),
+        Err("unsupported_storage_format"),
     );
-    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(image(&root.0), before);
 }

@@ -24,7 +24,7 @@ impl Style {
 
 /// Collapse lexical dot segments without reading the filesystem. Link-sensitive
 /// I/O must use the original native path, or canonicalize it, instead.
-pub(crate) fn lexical(path: &Path) -> PathBuf {
+pub fn lexical(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     for part in path.components() {
         match part {

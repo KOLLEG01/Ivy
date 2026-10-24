@@ -824,6 +824,12 @@ export const rustTests = {
     "package": "ivy-host-runtime",
     "test": "host-filesystem-remove"
   },
+  "tests/rust/hive_storage_inspector.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "storage_read::inspector::native_",
+    "testThreads": 1
+  },
   "tests/rust/hive_filesystem.rs": {
     "package": "ivy-hive",
     "test": "hive-storage-worker",
