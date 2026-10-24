@@ -5,6 +5,16 @@ $ErrorActionPreference = 'Stop'
 function Quote-IvyArgument([string]$Value) {
   '"' + ([regex]::Replace([regex]::Replace($Value, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1')) + '"'
 }
+function Get-IvyHostLauncher($Plan) {
+  $ivyHost = @($Plan.processes | Where-Object { $_.componentId -ceq 'host-executor' })
+  if ($ivyHost.Count -ne 1) { throw 'Expected one HostExecutor bootstrap process.' }
+  $ivyEntry = [string]$ivyHost[0].entrypoint.executable
+  if ($ivyEntry -cmatch '^dist/native/(win32-(?:x64|arm64))/ivy-host-executor\.exe$') {
+    return Join-Path $Plan.artifactRoot ('dist/native/' + $Matches[1] + '/ivy-host-job.exe')
+  }
+  if ($ivyEntry -clike 'dist/native/*') { throw 'Unsupported native HostExecutor bootstrap entrypoint.' }
+  return Join-Path $Plan.artifactRoot 'dist/native/ivy-host-job.exe'
+}
 function Get-IvyAutomaticLaunch($Plan, $Data) {
   if ($null -ne $Data.workerExecutable -or $null -ne $Data.hostJobLauncher) {
     if (-not $Data.workerExecutable -or -not $Data.hostJobLauncher) { throw 'Native maintenance requires both executables.' }
@@ -71,7 +81,7 @@ function Get-IvyOwner($Instance, $Plans) {
     $ivyConfig = if ($ivyProcess.componentId -eq 'host-executor') { [string]$ivyPlan.configPath } elseif ($ivyProcess.configPath) { [string]$ivyProcess.configPath } else { [string]$ivyPlan.configPath }
     $ivyOwnConfig = @(); if ($ivyProcess.componentId -eq 'host-executor' -and $ivyProcess.configPath) { $ivyOwnConfig = @('--instance-config', [string]$ivyProcess.configPath) }
     $ivyArguments = ((@('--parent', '0') + $ivyBreakaway + @($ivyExecutable) + $ivyArgs + @('--config', $ivyConfig) + $ivyOwnConfig) | ForEach-Object { Quote-IvyArgument $_ }) -join ' '
-    $ivyAction.Type -eq 0 -and $ivyAction.Path -ceq (Join-Path $ivyPlan.artifactRoot 'dist/native/ivy-host-job.exe') -and
+    $ivyAction.Type -eq 0 -and $ivyAction.Path -ceq (Get-IvyHostLauncher $ivyPlan) -and
       $ivyAction.Arguments -ceq $ivyArguments -and $ivyAction.WorkingDirectory -ceq $ivyArtifact -and
       $ivyDefinition.RegistrationInfo.Description -ceq ('IvyNext immutable bootstrap ' + $ivyPlan.candidateId + ' host ' + $ivyPlan.hostId)
   })
@@ -112,7 +122,7 @@ try {
     $ivyConfig = if ($ivyProcess.componentId -eq 'host-executor') { [string]$ivyNext.configPath } elseif ($ivyProcess.configPath) { [string]$ivyProcess.configPath } else { [string]$ivyNext.configPath }
     $ivyOwnConfig = @(); if ($ivyProcess.componentId -eq 'host-executor' -and $ivyProcess.configPath) { $ivyOwnConfig = @('--instance-config', [string]$ivyProcess.configPath) }
     $ivyChanges = @{
-      Command=(Join-Path $ivyNext.artifactRoot 'dist/native/ivy-host-job.exe');
+      Command=(Get-IvyHostLauncher $ivyNext);
       Arguments=((@('--parent','0') + $ivyBreakaway + @($ivyExecutable) + $ivyArgs + @('--config',$ivyConfig) + $ivyOwnConfig) | ForEach-Object { Quote-IvyArgument $_ }) -join ' ';
       WorkingDirectory=$ivyArtifact
     }

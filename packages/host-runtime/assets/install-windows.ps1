@@ -3,7 +3,17 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-principal.ps1')
 $ivyPlan = Get-Content -LiteralPath $PlanPath -Raw | ConvertFrom-Json
 if ($ivyPlan.schemaVersion -ne 1 -or $ivyPlan.os -ne 'win32' -or $ivyPlan.installationId -notmatch '^ivy-next-[0-9a-f]{12}$') { throw 'Invalid IvyNext bootstrap plan.' }
-$ivyLauncher = Join-Path $ivyPlan.artifactRoot 'dist\native\ivy-host-job.exe'
+function Get-IvyHostLauncher($Plan) {
+  $ivyHost = @($Plan.processes | Where-Object { $_.componentId -ceq 'host-executor' })
+  if ($ivyHost.Count -ne 1) { throw 'Expected one HostExecutor bootstrap process.' }
+  $ivyEntry = [string]$ivyHost[0].entrypoint.executable
+  if ($ivyEntry -cmatch '^dist/native/(win32-(?:x64|arm64))/ivy-host-executor\.exe$') {
+    return Join-Path $Plan.artifactRoot ('dist/native/' + $Matches[1] + '/ivy-host-job.exe')
+  }
+  if ($ivyEntry -clike 'dist/native/*') { throw 'Unsupported native HostExecutor bootstrap entrypoint.' }
+  return Join-Path $Plan.artifactRoot 'dist/native/ivy-host-job.exe'
+}
+$ivyLauncher = Get-IvyHostLauncher $ivyPlan
 if (-not (Test-Path -LiteralPath $ivyLauncher -PathType Leaf)) { throw 'Missing verified IvyNext bootstrap executable.' }
 function Quote-IvyArgument([string]$Value) {
   '"' + ([regex]::Replace([regex]::Replace($Value, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1')) + '"'

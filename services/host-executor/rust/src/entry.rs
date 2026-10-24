@@ -5,7 +5,9 @@ use ivy_host_runtime::{
     config::{self, InstanceConfig},
     executor_lock::ExecutorLock,
     health::HealthFile,
-    host_config, node_path,
+    host_config,
+    journal::HostJournal,
+    node_path,
     process::{self, Command, LaunchContext, OutputStream},
     runtime_maintenance,
     runtime_owner::stop::{shutdown_control, stop_child},
@@ -50,7 +52,7 @@ pub async fn run_native(args: &[OsString], stop: CancellationToken) -> IvyResult
     let context = HostContext::current()?;
     let startup = crate::admit(args, &context.environment, &context.account_home, None).await?;
     if let Some(own) = &startup.own {
-        matching_instance(&startup.host, own, "host-executor")?;
+        matching_instance(&startup.host, own, "host-executor").await?;
     }
     let distribution = values
         .remove(&OsString::from("--distribution"))
@@ -172,7 +174,11 @@ impl Options {
     }
 }
 
-fn matching_instance(host: &IvyJson, instance: &InstanceConfig, component: &str) -> IvyResult<()> {
+async fn matching_instance(
+    host: &IvyJson,
+    instance: &InstanceConfig,
+    component: &str,
+) -> IvyResult<()> {
     let value = instance.json();
     let matched = value.get("componentId") == Some(&component.into())
         && value.get("hostId") == host.get("hostId")
@@ -185,12 +191,40 @@ fn matching_instance(host: &IvyJson, instance: &InstanceConfig, component: &str)
                         .iter()
                         .all(|key| entry.get(key) == value.get(key))
                         && entry.get("engine") == Some(&"process".into())
-                        && entry.get("enabled") == Some(&true.into())
                 })
             });
     if !matched {
         return Err(invalid(
-            "Native service configuration must match an enabled process instance on this host.",
+            "Native service configuration must match a process instance on this host.",
+        ));
+    }
+    // Initial installation selects and enables the durable release before its
+    // OS owner starts; the configuration's disabled default remains unchanged.
+    let journal = HostJournal::open(host.clone()).await?;
+    let installed = journal
+        .installed(&value.required("instanceId")?.as_str()?)
+        .await;
+    let closed = journal.close().await;
+    let installed = installed?;
+    closed?;
+    let configured = host
+        .required("instances")?
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry.get("instanceId") == value.get("instanceId"))
+        .unwrap();
+    let enabled = installed
+        .as_ref()
+        .and_then(|record| record.get("enabled"))
+        .unwrap_or(configured.required("enabled")?);
+    if enabled != &true.into()
+        || installed
+            .as_ref()
+            .is_some_and(|record| record.get("buildId") != value.get("buildId"))
+    {
+        return Err(invalid(
+            "Native service configuration must match its enabled installed process on this host.",
         ));
     }
     Ok(())
@@ -206,7 +240,7 @@ pub async fn run(options: Options, stop: CancellationToken) -> IvyResult<()> {
         ));
     }
     let manager = config::native_instance_config(options.manager_config.clone()).await?;
-    matching_instance(&host, &manager, "service-manager")?;
+    matching_instance(&host, &manager, "service-manager").await?;
     let configured_host = path(
         manager
             .json()
@@ -227,7 +261,7 @@ pub async fn run(options: Options, stop: CancellationToken) -> IvyResult<()> {
     let own = match &options.instance_config {
         Some(file) => {
             let instance = config::native_instance_config(file.clone()).await?;
-            matching_instance(&host, &instance, "host-executor")?;
+            matching_instance(&host, &instance, "host-executor").await?;
             Some(instance)
         }
         None => None,
