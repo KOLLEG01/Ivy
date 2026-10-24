@@ -751,8 +751,15 @@ async fn stopped_hive_requires_conclusive_identity_before_the_mandatory_owner_bi
                 ("contracts", IvyJson::Array(vec![])),
             ])
         }));
-        let result = f
-            .runtime
+        let unknown_owner = UnitHost::default();
+        unknown_owner.0.lock().unwrap().active = "active".into();
+        let unknown_runtime = linux_runtime(&f, &unknown_owner);
+        let runtime = if case == "no-observation" {
+            &unknown_runtime
+        } else {
+            &f.runtime
+        };
+        let result = runtime
             .compatibility(&f.context, &hash().as_str().unwrap(), None)
             .await;
         let expected = match case {
@@ -1165,6 +1172,80 @@ fn linux_candidate(candidate: &mut IvyJson) {
             .replace('\\', "/");
         assert!(root.as_bytes().get(1) == Some(&b':'));
         candidate.insert("artifactRoot", root[2..].into());
+    }
+}
+#[tokio::test]
+async fn first_hive_install_requires_an_absent_linux_owner_before_storage_inspection() {
+    for case in ["absent", "active-without-definition", "retained-definition"] {
+        let f = Fixture::new("hive", |host, _, manifest| hive(host, manifest, None)).await;
+        *f.inspector.result.lock().unwrap() = Some(Ok(v(
+            r#"{"schemaVersion":1,"exists":false,"format":0,"contracts":[]}"#,
+        )));
+        let host = UnitHost::default();
+        if case == "retained-definition" {
+            let unit =
+                ivy_host_runtime::systemd::systemd_unit_name(&f.host, &"fixture".into()).unwrap();
+            host.0.lock().unwrap().files.insert(
+                format!("/etc/systemd/system/{unit}").into(),
+                b"retained owner".to_vec(),
+            );
+        }
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let calls = trace.clone();
+        let command: Arc<dyn ivy_host_runtime::systemd::SystemdCommand> = Arc::new(
+            move |_: IvyJson, args: Vec<JsString>| -> BoxFuture<'static, IvyResult<JsString>> {
+                let calls = calls.clone();
+                Box::pin(async move {
+                    assert_eq!(
+                        args.first(),
+                        Some(&"show".into()),
+                        "First-install admission must not stop or start OS owners"
+                    );
+                    calls.lock().unwrap().push(args);
+                    Ok(if case == "active-without-definition" {
+                        "LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=42\n"
+                    } else {
+                        "LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\n"
+                    }
+                    .into())
+                })
+            },
+        );
+        let runtime = NativeActivationRuntime::with_adapters(
+            f.root.0.clone(),
+            preparation(),
+            PathBuf::from(env!("CARGO_BIN_EXE_ivy-job")),
+            f.inspector.clone(),
+            "linux".into(),
+            DockerAdapter::new(f.root.0.clone()).unwrap(),
+            ivy_host_runtime::systemd::SystemdAdapter::with_command(Arc::new(host), command),
+        );
+        let result = runtime
+            .compatibility(&f.context, &hash().as_str().unwrap(), None)
+            .await;
+        assert_eq!(
+            result.err().map(|error| error.code),
+            (case != "absent").then(|| "compatibility_unknown".to_owned()),
+            "{case}"
+        );
+        assert_eq!(
+            f.inspector.calls.lock().unwrap().len(),
+            usize::from(case == "absent")
+        );
+        assert_eq!(trace.lock().unwrap().len(), 1);
+        assert!(
+            f.journal
+                .observations()
+                .await
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(f.journal.target("fixture").await.unwrap().is_none());
+        assert!(f.journal.installed("fixture").await.unwrap().is_none());
+        runtime.dispose().await.unwrap();
+        f.close().await;
     }
 }
 #[tokio::test]

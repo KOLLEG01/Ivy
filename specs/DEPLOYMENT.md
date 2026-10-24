@@ -159,7 +159,11 @@ Use this order:
    source/distribution snapshot, recording their returned candidate IDs. Install
    the HostExecutor with `install-bootstrap`, then deploy and enable the exact Hive
    candidate. [Host operations](#local-host-operations) defines the commands and terminal phases.
-3. Configure the initial principal as a package publisher. For every later public
+3. After Hive is ready, publish the complete local HostConfig through the
+   authenticated `hostConfigurations.put` API with a new `mutationId`, omitting
+   `expectedRevision` for this new host. Read it back with `hostConfigurations.get`
+   before starting ServiceManager reconciliation. Later configuration writes require
+   the current revision. Configure the initial principal as a package publisher. For every later public
    candidate, use the MCP `hive_authorize_package_upload` tool with the exact
    prepared manifest/archive identity, upload bytes only to its returned one-time
    path, and confirm the release in `packages.catalog`. The

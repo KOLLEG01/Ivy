@@ -223,19 +223,49 @@ impl NativeActivationRuntime {
                         .await?,
                 );
             } else {
+                // Linux has no runtime observation before its first target.
+                // Only an uninstalled instance with no loaded or retained OS
+                // owner may enter the normal candidate storage inspection.
+                let first_install_stopped = if self.platform == "linux"
+                    && instance.get("engine") == Some(&"process".into())
+                    && observed.is_none()
+                    && current.is_none()
+                    && c.journal.installed(&c.instance_id).await?.is_none()
+                {
+                    let unit = crate::systemd::systemd_unit_name(
+                        &c.config,
+                        &c.instance_id.clone().into(),
+                    )?;
+                    let state = self
+                        .systemd
+                        .inspect_unit(c.config.clone(), unit.clone().into())
+                        .await?;
+                    state.load_state == JsString::from("not-found")
+                        && state.active_state == JsString::from("inactive")
+                        && state.sub_state == JsString::from("dead")
+                        && state.main_pid.is_none()
+                        && self
+                            .systemd
+                            .read_unit(c.config.clone(), unit.into())
+                            .await?
+                            .is_none()
+                } else {
+                    false
+                };
                 require(
-                    observed.is_some_and(|o| {
-                        (fresh_observation(o, c.clock.utc_millis() as f64)
-                            || stopped_target_is_conclusive(Some(o), current.as_ref()))
-                            && ["idle", "stopped"]
-                                .iter()
-                                .any(|s| o.get("state") == Some(&IvyJson::from(*s)))
-                            && field(o, "targetRevision")
-                                == current
-                                    .as_ref()
-                                    .map(|t| field(t, "revision"))
-                                    .unwrap_or(&IvyJson::Null)
-                    }),
+                    first_install_stopped
+                        || observed.is_some_and(|o| {
+                            (fresh_observation(o, c.clock.utc_millis() as f64)
+                                || stopped_target_is_conclusive(Some(o), current.as_ref()))
+                                && ["idle", "stopped"]
+                                    .iter()
+                                    .any(|s| o.get("state") == Some(&IvyJson::from(*s)))
+                                && field(o, "targetRevision")
+                                    == current
+                                        .as_ref()
+                                        .map(|t| field(t, "revision"))
+                                        .unwrap_or(&IvyJson::Null)
+                        }),
                     "compatibility_unknown",
                     "Hive must be observed stopped before its own offline inspector opens storage.",
                 )?;
