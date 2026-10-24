@@ -40,7 +40,7 @@ test('native Hive starts storage, serves authenticated Console/MCP and restarts'
         headers: { Connection: 'close', ...options.headers },
       });
     } catch (cause) {
-      throw Error(`Native request ${options.method ?? 'GET'} ${path.split('?')[0]} failed.\n${logs}`, { cause });
+      throw Error(`Native request ${options.method ?? 'GET'} ${path.split('?')[0]} failed: ${cause.message} ${cause.cause?.message ?? ''}\n${logs}`, { cause });
     }
   };
   const rpc = async (method, params = {}) => {
@@ -259,7 +259,8 @@ test('native Hive starts storage, serves authenticated Console/MCP and restarts'
     assert.equal(mounted.headers.get('vary'), 'Cookie, Authorization');
     assert.equal(mounted.headers.get('cache-control'), 'private, no-cache');
     assert.match(mounted.headers.get('content-security-policy'), /frame-src 'self'/);
-    assert.equal(mounted.headers.get('x-frame-options'), 'DENY');
+    assert.equal(mounted.headers.get('x-frame-options'), 'SAMEORIGIN');
+    assert.match(mounted.headers.get('content-security-policy'), /frame-ancestors 'self'/);
     const conditional = await request('/reference/', { headers: { ...authenticated, 'If-None-Match': mounted.headers.get('etag') } });
     assert.equal(conditional.status, 304); assert.equal(await conditional.text(), '');
     const canonical = await request('/reference?selected=1', { headers: authenticated });
@@ -308,8 +309,9 @@ test('native Hive starts storage, serves authenticated Console/MCP and restarts'
     for (const file of ['main.js', 'health.js']) await writeFile(join(dist, file), 'throw Error("Inert archive fixture");\n');
     await writeFile(join(dist, 'payload.bin'), randomBytes(384 * 1024));
     const archivePath = join(root, 'package.tar.gz');
-    const tar = spawn('tar', ['-czf', archivePath, '-C', candidate, 'artifact', 'component.json'], { windowsHide: true, stdio: 'ignore' });
-    const [tarCode] = await once(tar, 'close'); assert.equal(tarCode, 0);
+    const tar = spawn('tar', ['-czf', 'package.tar.gz', '-C', 'package-candidate', 'artifact', 'component.json'], { cwd: root, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    let tarError = ''; tar.stderr.on('data', bytes => { tarError += bytes; });
+    const [tarCode] = await once(tar, 'close'); assert.equal(tarCode, 0, tarError);
     const archive = await readFile(archivePath);
     const packageInput = { componentId: manifest.componentId, version: manifest.version, buildId, archiveHash: hash(archive), bytes: archive.length, manifest };
     const grant = await rpc('packages.authorizeUpload', packageInput);
