@@ -290,16 +290,6 @@ export const rustTests = {
       }
     ]
   },
-  "tests/rust/sdk-native-http.rs": {
-    "package": "ivy-sdk",
-    "lib": true
-  },
-  "tests/rust/sdk-native-http-config.rs": {
-    "package": "ivy-sdk",
-    "lib": true,
-    "filter": "native_http_config_tests::",
-    "testThreads": 1
-  },
   "tests/rust/sdk-fetch-response.rs": {
     "package": "ivy-sdk",
     "test": "sdk-fetch-response"

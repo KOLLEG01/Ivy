@@ -27,7 +27,6 @@ pub mod native_operation;
 pub mod native_observations;
 pub mod native_turn_contents;
 pub mod rpc;
-mod native_http;
 pub mod tools;
 mod service_connection;
 pub mod service;
@@ -37,7 +36,3 @@ pub mod native_project_membership;
 pub mod native_project;
 pub mod native_plan;
 pub mod native_parameters;
-
-#[cfg(test)]
-#[path = "../../../../tests/rust/sdk-native-http-config.rs"]
-mod native_http_config_tests;

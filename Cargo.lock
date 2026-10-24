@@ -2259,23 +2259,16 @@ dependencies = [
 name = "ivy-sdk"
 version = "0.2.40"
 dependencies = [
- "bytes",
  "chrono",
  "futures-util",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
  "ivy-contracts",
  "jiff-tzdb",
  "libc",
  "reqwest",
- "rustls",
  "serde_json",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
- "tower-service",
  "tz-rs",
  "uuid",
  "windows-sys 0.61.2",
