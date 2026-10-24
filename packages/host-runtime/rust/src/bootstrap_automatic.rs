@@ -168,9 +168,10 @@ impl Inner {
             return Ok(false);
         }
         let config = self.journal.config().await?;
-        let path = node_path::Context::current()
-            .map_err(|_| IvyError::internal())?
-            .resolve(&[node_path::from_native(&self.config_path)]);
+        let cwd = std::env::current_dir().map_err(|_| IvyError::internal())?;
+        let path = cwd.join(&self.config_path);
+        let absolute = std::path::absolute(&path).unwrap_or(path);
+        let path = node_path::lexical(&absolute);
         let retained = bootstrap::retained_bootstrap_plans(config.clone()).await?;
         let current = retained.first().ok_or_else(|| {
             IvyError::new(
@@ -249,7 +250,7 @@ impl Inner {
             .and_then(|value| value.get("budget"));
         let next = bootstrap::configuration_bootstrap_plan(
             &config,
-            &path,
+            &node_path::from_native(&path),
             &host_candidate,
             budget,
             &components,
@@ -349,7 +350,7 @@ impl Inner {
             )?;
             let previous = self
                 .runtime
-                .inspect(node_path::to_native(&path), self.distribution.clone())
+                .inspect(path.clone(), self.distribution.clone())
                 .await?;
             let request = IvyJson::object([
                 ("schemaVersion", IvyJson::Number(1.0)),
