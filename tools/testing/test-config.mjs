@@ -428,6 +428,12 @@ export const rustTests = {
     "test": "task-board-blobs",
     "filter": "native_journal::"
   },
+  "tests/fixtures/task-board-attachment-recovery.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-blobs",
+    "filter": "publication::attachment_recovery::",
+    "testThreads": 1
+  },
   "tests/fixtures/task-board-journal-client.rs": {
     "package": "ivy-task-board",
     "test": "task-board-blobs",

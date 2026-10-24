@@ -234,34 +234,13 @@ fn truthy(value: Option<&Json>) -> bool {
     }
 }
 
-// Objects base64 content is a string. Node decodes its low UTF-16 bytes,
-// accepts both alphabets, skips junk, and stops at the first padding unit.
 fn attachment_content_matches(value: &Json, bytes: &[u8]) -> IvyResult<bool> {
     let value = value.as_js_string().ok_or_else(IvyError::internal)?;
-    let mut carry = 0u16;
-    let mut bits = 0;
-    let mut offset = 0;
-    for unit in &value.0 {
-        let digit = match *unit as u8 {
-            byte @ b'A'..=b'Z' => byte - b'A',
-            byte @ b'a'..=b'z' => byte - b'a' + 26,
-            byte @ b'0'..=b'9' => byte - b'0' + 52,
-            b'+' | b'-' => 62,
-            b'/' | b'_' => 63,
-            b'=' => break,
-            _ => continue,
-        };
-        carry = (carry << 6) | u16::from(digit);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            if bytes.get(offset).copied() != Some((carry >> bits) as u8) {
-                return Ok(false);
-            }
-            offset += 1;
-        }
-    }
-    Ok(offset == bytes.len())
+    Ok(value
+        .to_utf8()
+        .ok()
+        .and_then(|text| STANDARD.decode(text).ok())
+        .is_some_and(|decoded| decoded == bytes))
 }
 
 impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsString>

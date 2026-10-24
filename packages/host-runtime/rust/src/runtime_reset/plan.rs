@@ -3,10 +3,14 @@ use crate::{
     artifact,
     journal::HostJournal,
     layout::{self, StorageContext},
-    node_path, source,
+    native_path, node_path, source,
 };
 use ivy_contracts::hash::{digest, hash_json};
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 fn internal<T, E>(value: Result<T, E>) -> IvyResult<T> {
     value.map_err(|_| IvyError::internal())
@@ -57,8 +61,14 @@ fn deployment<'a>(config: &'a J, storage: &StorageContext) -> IvyResult<&'a J> {
     for host in hosts {
         require(
             host.get("hostId") == config.get("hostId")
-                || (host.get("ssh").and_then(J::as_js_string).is_some_and(|text| !text.0.is_empty())
-                    && host.get("cliPath").and_then(J::as_js_string).is_some_and(|text| !text.0.is_empty())
+                || (host
+                    .get("ssh")
+                    .and_then(J::as_js_string)
+                    .is_some_and(|text| !text.0.is_empty())
+                    && host
+                        .get("cliPath")
+                        .and_then(J::as_js_string)
+                        .is_some_and(|text| !text.0.is_empty())
                     && node_path::is_absolute(storage.paths.style, &field(host, "cliPath")?)),
             "invalid_arguments",
             "Every remote reset host requires an SSH identity and absolute CLI path.",
@@ -72,13 +82,14 @@ async fn future(value: JsString) -> IvyResult<JsString> {
 pub async fn tree_hash(path: JsString, storage: Arc<StorageContext>) -> IvyResult<J> {
     internal(
         tokio::task::spawn_blocking(move || {
+            let path = native(&path)?;
             fn walk(
-                path: &JsString,
+                path: &Path,
                 local: JsString,
                 storage: &StorageContext,
                 rows: &mut Vec<J>,
             ) -> IvyResult<()> {
-                let info = internal(fs::symlink_metadata(native(path)?))?;
+                let info = internal(fs::symlink_metadata(path))?;
                 require(
                     !info.file_type().is_symlink(),
                     "target_conflict",
@@ -87,10 +98,7 @@ pub async fn tree_hash(path: JsString, storage: Arc<StorageContext>) -> IvyResul
                 if info.is_file() {
                     rows.push(J::object([
                         ("path", J::String(local)),
-                        (
-                            "hash",
-                            crate::streaming_hash::hash_file(&native(path)?)?.into(),
-                        ),
+                        ("hash", crate::streaming_hash::hash_file(path)?.into()),
                     ]));
                     return Ok(());
                 }
@@ -99,13 +107,12 @@ pub async fn tree_hash(path: JsString, storage: Arc<StorageContext>) -> IvyResul
                     "target_conflict",
                     "Preserved reset paths must be regular files or directories.",
                 )?;
-                let mut entries = internal(
-                    internal(fs::read_dir(native(path)?))?.collect::<Result<Vec<_>, _>>(),
-                )?;
+                let mut entries =
+                    internal(internal(fs::read_dir(path))?.collect::<Result<Vec<_>, _>>())?;
                 entries.sort_by(|a, b| {
                     (storage.compare)(
-                        &node_path::node_utf8(&a.file_name()),
-                        &node_path::node_utf8(&b.file_name()),
+                        &native_path::filesystem_name(&a.file_name()),
+                        &native_path::filesystem_name(&b.file_name()),
                     )
                 });
                 for entry in entries {
@@ -114,22 +121,23 @@ pub async fn tree_hash(path: JsString, storage: Arc<StorageContext>) -> IvyResul
                         "target_conflict",
                         "Preserved reset paths cannot contain links.",
                     )?;
-                    let name = node_path::node_utf8(&entry.file_name());
+                    let native_name = entry.file_name();
+                    // Checksum rows require a representable public path.
+                    #[cfg(not(windows))]
+                    if native_name.to_str().is_none() {
+                        return Err(IvyError::internal());
+                    }
+                    let name = native_path::filesystem_name(&native_name);
                     let mut child = local.0.clone();
                     if !child.is_empty() {
                         child.push(47);
                     }
                     child.extend(&name.0);
-                    walk(
-                        &node_path::join(storage.paths.style, &[path.clone(), name]),
-                        JsString(child),
-                        storage,
-                        rows,
-                    )?;
+                    walk(&entry.path(), JsString(child), storage, rows)?;
                 }
                 Ok(())
             }
-            match fs::symlink_metadata(native(&path)?) {
+            match fs::symlink_metadata(&path) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(J::Null),
                 Err(_) => return Err(IvyError::internal()),
                 Ok(_) => (),
@@ -141,6 +149,7 @@ pub async fn tree_hash(path: JsString, storage: Arc<StorageContext>) -> IvyResul
         .await,
     )?
 }
+
 fn inside(storage: &StorageContext, a: &JsString, b: &JsString) -> bool {
     storage.paths.inside(a, b)
 }
@@ -253,7 +262,10 @@ pub async fn local_runtime_reset_plan(
                     }
                 }
             }
-            if let Some(marker) = layout.get("completionMarker").filter(|v| v.as_js_string().is_some_and(|text| !text.0.is_empty())) {
+            if let Some(marker) = layout
+                .get("completionMarker")
+                .filter(|v| v.as_js_string().is_some_and(|text| !text.0.is_empty()))
+            {
                 let root = resolve(
                     &storage,
                     &[field(&layout::service_paths(&config, instance)?, "data")?],
