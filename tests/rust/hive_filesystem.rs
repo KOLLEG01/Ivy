@@ -77,9 +77,32 @@ async fn native_ui_windows_namespace_preserves_actual_staged_promoted_read_and_c
         );
     }
     let directory = files.directory(&ui, &release).unwrap();
+    let neighbor = directory.with_file_name("r1-neighbor");
+    fs::create_dir(&neighbor).unwrap();
+    fs::write(neighbor.join("payload"), b"neighbor authority").unwrap();
+    let link = directory.join("escape");
+    filesystem::directory_link(&neighbor, &link).unwrap();
+    let outside = descriptor("escape/payload", "text/plain", b"neighbor authority");
+    assert!(!files.available(&ui, &release, &outside));
+    assert!(!files.check(&ui, &release, &outside).unwrap());
+    assert_eq!(
+        files.read(&ui, &release, &outside).await.unwrap_err(),
+        IvyError::new(
+            "ui_release_invalid",
+            "UI asset leaves its private release directory."
+        )
+    );
+    assert_eq!(
+        fs::read(neighbor.join("payload")).unwrap(),
+        b"neighbor authority"
+    );
     filesystem::set_times_ms(&directory, 0, 0).unwrap();
     files.collect(&ui, &HashSet::new(), 172800000.0).unwrap();
     assert!(!directory.exists());
+    assert_eq!(
+        fs::read(neighbor.join("payload")).unwrap(),
+        b"neighbor authority"
+    );
     assert_eq!(
         fs::read(alias.join("sentinel")).unwrap(),
         b"preserved alias"

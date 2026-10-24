@@ -139,19 +139,9 @@ fn info(path: &Path) -> IvyResult<Option<fs::Metadata>> {
 fn contained(root: &Path, path: &Path) -> bool {
     let mut prefix = root.as_os_str().to_os_string();
     prefix.push(std::path::MAIN_SEPARATOR_STR);
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        path.as_os_str()
-            .encode_wide()
-            .collect::<Vec<_>>()
-            .starts_with(&prefix.encode_wide().collect::<Vec<_>>())
-    }
-    #[cfg(not(windows))]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        path.as_os_str().as_bytes().starts_with(prefix.as_bytes())
-    }
+    path.as_os_str()
+        .as_encoded_bytes()
+        .starts_with(prefix.as_encoded_bytes())
 }
 fn remove(path: &Path, recursive: bool) -> IvyResult<()> {
     let Some(info) = info(path)? else {

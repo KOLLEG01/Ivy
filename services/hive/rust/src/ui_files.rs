@@ -72,19 +72,9 @@ fn release_id(value: &JsString) -> IvyResult<String> {
 fn contained(directory: &Path, path: &Path) -> bool {
     let mut prefix = directory.as_os_str().to_os_string();
     prefix.push(std::path::MAIN_SEPARATOR_STR);
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        path.as_os_str()
-            .encode_wide()
-            .collect::<Vec<_>>()
-            .starts_with(&prefix.encode_wide().collect::<Vec<_>>())
-    }
-    #[cfg(not(windows))]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        path.as_os_str().as_bytes().starts_with(prefix.as_bytes())
-    }
+    path.as_os_str()
+        .as_encoded_bytes()
+        .starts_with(prefix.as_encoded_bytes())
 }
 fn os_string(value: &OsStr) -> JsString {
     #[cfg(windows)]
