@@ -14,6 +14,8 @@ export function inventory(root, config) {
     .map(file => ({ file, scope: config.scope(file), kind: config.kind(file) }));
 }
 
+export const typescriptDeclarations = root => walk(root, 'services').filter(file => file.endsWith('.d.ts'));
+
 // Follow local imports through fixtures and shared modules, including emitted .js -> source .ts.
 function directDependencies(root, file, cache) {
   if (cache.has(file)) return cache.get(file);

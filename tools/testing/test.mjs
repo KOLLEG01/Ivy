@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, relative, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { selectTests, dependencies, implicitSelectionTooLarge } from './test-selection.mjs';
+import { selectTests, dependencies, implicitSelectionTooLarge, typescriptDeclarations } from './test-selection.mjs';
 import * as config from './test-config.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -79,6 +79,7 @@ else if (selected.length === 0) {
   try {
     const inputCache = new Map();
     const inputs = new Set(selected.filter(t => t.scope !== 'tooling').flatMap(t => [...dependencies(root, t.file, inputCache)]));
+    if (javascriptTests.some(t => t.scope !== 'tooling')) for (const file of typescriptDeclarations(root)) inputs.add(file);
     const needsHive = !env.IVY_TEST_HIVE_URL && [...inputs].some(path =>
       /\.(mjs|ts)$/.test(path) && existsSync(join(root, path)) && /IVY_TEST_HIVE_(URL|CREDENTIAL)/.test(readFileSync(join(root, path), 'utf8')));
     const publicRoot = values['public-root'] ?? env.IVY_TEST_PUBLIC_ROOT ?? (config.privateRepo ? undefined : root);
@@ -90,7 +91,8 @@ else if (selected.length === 0) {
       if (python.error || python.status !== 0) throw Error('Selected tests need Python. Set IVY_TEST_PYTHON to an available interpreter before building or running tests.');
     }
     const testBuildStamp = resolve(root, 'dist/.test-build.json');
-    const testBuildInputs = [resolve(root, 'tests'), resolve(root, 'dist/packages'), resolve(root, 'dist/services'), resolve(root, 'tsconfig.test.json'), resolve(root, 'tsconfig.runtime.json')];
+    const testBuildInputs = [...inputs, 'tools/testing/test.mjs', 'tools/testing/test-selection.mjs', 'tsconfig.json', 'tsconfig.test.json',
+      'dist/packages', 'dist/services', 'dist/tests', 'dist/specs'].map(path => resolve(root, path));
     if (values['no-build'] && rustTests.length) throw Error('--no-build is unavailable for Cargo tests; Cargo verifies incremental inputs itself.');
     if (values['no-build'] && javascriptTests.some(t => t.scope !== 'tooling')) {
       let stamp;
@@ -100,15 +102,25 @@ else if (selected.length === 0) {
     }
     if (!values['no-build'] && javascriptTests.some(t => t.scope !== 'tooling')) {
       if (selected.some(t => t.kind === 'web')) await run(['node_modules/vue-tsc/bin/vue-tsc.js', '-p', 'tsconfig.web.json', '--noEmit']);
-        await run(['tools/build/build-backend.mjs', '--incremental', '--no-native']);
-        // The web build replaces dist/apps with production bundles. Run it before the
-        // test project emits imported ui modules that Node-based tests load directly.
-        if (selected.some(t => t.kind === 'web')) await run(['tools/build/build-web.mjs',
-          ...(selected.every(t => t.scope === 'data-collector') ? ['--ui', 'console,data-collector-ui'] : [])]);
-        // The runtime build intentionally removes dist/tests; force the separate test
-        // project to recreate its outputs instead of trusting stale incremental metadata.
-        rmSync(resolve(root, 'dist/.test.tsbuildinfo'), { force: true });
-        await run(['node_modules/typescript/bin/tsc', '-p', 'tsconfig.test.json', '--incremental', '--tsBuildInfoFile', 'dist/.test.tsbuildinfo'], root, false, Math.max(180000, testTimeout));
+      // Stage shared runtime resources without compiling unrelated legacy backends.
+      const { stageBackend } = await import('../build/build-backend.mjs');
+      const { buildIdentity } = await import('../../packages/host-runtime/src/build-identity.mjs');
+      const previousDirectory = process.cwd();
+      try { process.chdir(root); stageBackend(buildIdentity(root)); }
+      finally { process.chdir(previousDirectory); }
+      // The web build replaces dist/apps with production bundles. Run it before the
+      // test project emits imported ui modules that Node-based tests load directly.
+      if (selected.some(t => t.kind === 'web')) await run(['tools/build/build-web.mjs',
+        ...(selected.every(t => t.scope === 'data-collector') ? ['--ui', 'console,data-collector-ui'] : [])]);
+      const files = [...inputs].filter(path => path.endsWith('.ts')).sort();
+      rmSync(resolve(root, 'dist/tests'), { recursive: true, force: true });
+      if (files.length) {
+        const project = resolve(root, 'dist/.test.tsconfig.json');
+        writeFileSync(project, JSON.stringify({ extends: resolve(root, 'tsconfig.test.json'),
+          compilerOptions: { incremental: false, noEmitOnError: true },
+          include: [], files: files.map(path => resolve(root, path)) }));
+        await run(['node_modules/typescript/bin/tsc', '-p', project], root, false, Math.max(180000, testTimeout));
+      }
       mkdirSync(resolve(root, 'dist'), { recursive: true });
       writeFileSync(testBuildStamp, JSON.stringify({ fingerprint: fingerprint(testBuildInputs, { selected: pathsForFingerprint(selected) }) }));
     }
