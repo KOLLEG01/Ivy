@@ -154,6 +154,12 @@ export const rustTests = {
     ],
     "testThreads": 1
   },
+  "tests/rust/host-project-storage-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "private_backup_cases::project_storage_cases::retained_projects_follow_cached_owned_inventory_and_restored_identity",
+    "testThreads": 1
+  },
   "tests/rust/host-restore-projects-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",

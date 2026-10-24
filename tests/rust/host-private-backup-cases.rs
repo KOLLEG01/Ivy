@@ -263,78 +263,6 @@ fn storage_areas_and_members_preserve_original_locale_union_and_path_errors() {
     }
 }
 #[tokio::test]
-async fn retained_projects_follow_cached_owned_inventory_and_restored_identity() {
-    let f = ServiceFixture::new();
-    let mut c = host_configuration(&f);
-    let mut instances = c.get("instances").unwrap().as_array().unwrap().to_vec();
-    instances[0].insert("componentId", "agent-manager".into());
-    instances[0].insert(
-        "settings",
-        J::object([("internalProjectRoot", jp(&f.0.join("internal")))]),
-    );
-    c.insert("instances", J::Array(instances));
-    let data = layout::service_paths(&c, &"fixture".into())
-        .unwrap()
-        .get("data")
-        .unwrap()
-        .as_str()
-        .unwrap();
-    fs::create_dir_all(&data).unwrap();
-    let cache = PathBuf::from(data).join("project-backup-paths.json");
-    let ctx = context(&f.0);
-    for paths in [
-        J::Null,
-        v("[\"relative\"]"),
-        J::Array(vec![
-            jp(&f.0.join("state/owned")),
-            jp(&f.0.join("old-internal")),
-            jp(&f.0.join("old-internal/child")),
-        ]),
-        J::Array(vec![]),
-    ] {
-        config::atomic_json(&cache, paths).await.unwrap();
-        let mut input = request(&f, "project");
-        input.insert("config", c.clone());
-        compare(
-            "cached projects",
-            input,
-            project_storage::project_storage_areas(&c, &ctx)
-                .await
-                .map(|a| J::Array(a.iter().map(StorageArea::json).collect())),
-        );
-    }
-    let mut areas = layout::host_storage_areas(&c, &ctx).unwrap();
-    let old = node_path::from_native(&f.0.join("old"));
-    areas.push(StorageArea {
-        key: format!(
-            "retained-projects/fixture/{}",
-            &hash_json(&J::String(old.clone())).unwrap()[7..]
-        )
-        .into(),
-        path: old,
-    });
-    let captured = J::Array(areas.iter().map(StorageArea::json).collect());
-    let input = J::object([
-        ("kind", "layout".into()),
-        ("names", J::Array(vec!["fixture".into()])),
-        (
-            "cases",
-            J::Array(vec![J::object([
-                ("operation", "restoredStorageAreas".into()),
-                ("config", c.clone()),
-                ("captured", captured),
-            ])]),
-        ),
-    ]);
-    let expected = oracle(&input).get("cases").unwrap().as_array().unwrap()[0].clone();
-    let actual = wrapped(
-        project_storage::restored_storage_areas(&c, &areas, &ctx)
-            .map(|a| J::Array(a.iter().map(StorageArea::json).collect())),
-    );
-    retain("restored projects", input, actual.clone(), expected.clone());
-    assert_json_eq(&actual, &expected);
-}
-#[tokio::test]
 async fn snapshot_uses_sqlite_read_transaction_and_rejects_corruption_before_destination() {
     for (case, sql) in [
         (
@@ -817,3 +745,6 @@ fn backup_policy_reexport_preserves_trait_identity_and_calls() {
 }
 #[path = "host-private-backup-host-cases.rs"]
 mod host_cases;
+
+#[path = "host-project-storage-cases.rs"]
+mod project_storage_cases;

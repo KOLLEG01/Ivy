@@ -37,19 +37,14 @@ pub async fn project_storage_areas(
         if instance.get("componentId") != Some(&"agent-manager".into()) {
             continue;
         }
-        let data = text(layout::service_paths(config, instance)?.required("data")?)?;
-        let path = node_path::join(
-            context.paths.style,
-            &[data, "project-backup-paths.json".into()],
-        );
-        if !backup_files::exists(&node_path::filesystem_path(&path)).await? {
+        let data = node_path::filesystem_path(&text(
+            layout::service_paths(config, instance)?.required("data")?,
+        )?);
+        let path = data.join("project-backup-paths.json");
+        if !backup_files::exists(&path).await? {
             continue;
         }
-        let paths = config::json_file(
-            node_path::filesystem_path(&path),
-            config::CONFIGURATION_BYTES,
-        )
-        .await?;
+        let paths = config::json_file(path, config::CONFIGURATION_BYTES).await?;
         let paths = paths
             .as_array()
             .filter(|a| {
