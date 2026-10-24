@@ -13,9 +13,10 @@ import {
 } from "@ivy/ui";
 import { client, wikiPageUrl } from "./runtime";
 
-defineProps<{ disabled?: boolean }>();
+// Without its own trigger the dialog is opened by the caller, e.g. from a composer menu.
+withDefaults(defineProps<{ disabled?: boolean; trigger?: boolean }>(), { trigger: true });
 const emit = defineEmits<{ select: [markdown: string] }>();
-const open = ref(false),
+const open = defineModel<boolean>("open", { default: false }),
   query = ref("");
 let timer: ReturnType<typeof setTimeout> | undefined;
 const results = useRemote(
@@ -46,6 +47,7 @@ const select = (id: string, name: string) => {
 
 <template>
   <Button
+    v-if="trigger"
     type="button"
     variant="ghost"
     size="sm"

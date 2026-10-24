@@ -73,7 +73,7 @@ const selectedLabel = computed(() => {
   if (value.kind === "existing_project")
     return (
       projects.value.find((project) => project.key === selected.value)?.name ??
-      tr("Projekt nicht verfügbar", "Project unavailable")
+      (props.disabled ? value.path ?? value.projectId : tr("Projekt nicht verfügbar", "Project unavailable"))
     );
   if (value.kind === "directory_path") return value.path;
   if (value.kind === "new_project_path")

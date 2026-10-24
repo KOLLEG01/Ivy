@@ -8,6 +8,7 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
+  SegmentedControl,
 } from "@ivy/ui";
 import { Paperclip } from "@lucide/vue";
 import { attachmentView } from "./attachment-view";
@@ -27,7 +28,8 @@ const busy = ref(false),
   error = ref<string | null>(null),
   previewUrl = ref<string | null>(null),
   previewText = ref<string | null>(null),
-  dialogOpen = ref(false);
+  dialogOpen = ref(false),
+  htmlMode = ref<"preview" | "source">("preview");
 let cachedBytes: Uint8Array | null = null;
 const bytes = async () => {
   cachedBytes ??= await attachmentBytes(props.attachment, props.taskId);
@@ -49,7 +51,7 @@ const loadPreview = async () => {
       return;
     }
     const value = await bytes();
-    if (kind.value === "markdown" || kind.value === "text")
+    if (kind.value === "markdown" || kind.value === "text" || kind.value === "html")
       previewText.value = new TextDecoder().decode(value);
     else
       previewUrl.value = URL.createObjectURL(
@@ -99,7 +101,7 @@ onBeforeUnmount(() => {
       />
       <span class="min-w-0 flex-1 break-all text-sm">
         <button
-          v-if="kind === 'markdown' || kind === 'text' || kind === 'pdf'"
+          v-if="kind === 'markdown' || kind === 'html' || kind === 'text' || kind === 'pdf'"
           type="button"
           class="text-left underline-offset-2 hover:underline"
           :disabled="busy"
@@ -114,7 +116,7 @@ onBeforeUnmount(() => {
         >
       </span>
       <Button
-        v-if="kind === 'markdown' || kind === 'text' || kind === 'pdf'"
+        v-if="kind === 'markdown' || kind === 'html' || kind === 'text' || kind === 'pdf'"
         type="button"
         variant="outline"
         size="sm"
@@ -165,6 +167,13 @@ onBeforeUnmount(() => {
         <DialogTitle class="break-all">{{ attachment.filename }}</DialogTitle>
         <DialogDescription>Saved attachment preview</DialogDescription>
       </DialogHeader>
+      <SegmentedControl
+        v-if="kind === 'html'"
+        v-model="htmlMode"
+        label="HTML view"
+        :options="[{ value: 'preview', label: 'Preview' }, { value: 'source', label: 'Source' }]"
+        class="self-start"
+      />
       <p v-if="busy" role="status">Loading preview…</p>
       <p v-if="error" role="alert" class="text-sm text-destructive">
         {{ error }}
@@ -172,7 +181,7 @@ onBeforeUnmount(() => {
       <ContentView
         v-if="previewText !== null"
         :text="previewText"
-        :media-type="kind === 'markdown' ? 'text/markdown' : 'text/plain'"
+        :media-type="kind === 'markdown' ? 'text/markdown' : kind === 'html' && htmlMode === 'preview' ? 'text/html' : 'text/plain'"
         :maximum-characters="8388608"
       />
       <iframe

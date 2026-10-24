@@ -5,7 +5,6 @@ import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import heating from "../docs/examples/data-collector/home/froeling.mjs";
 import laundry from "../docs/examples/data-collector/home/laundry.mjs";
-import tesla from "../docs/examples/data-collector/home/tesla-delivery.mjs";
 
 const home = new URL("../docs/examples/data-collector/home/", import.meta.url);
 const signal = () => new AbortController().signal;
@@ -369,192 +368,19 @@ test("laundry rejects malformed pushes and keeps washer completion when the opti
   assert.equal(finished.data.remainingSeconds, null);
 });
 
-const teslaContext = () => ({
-  config: {
-    orderUrl: "https://www.tesla.com/en_US/teslaaccount/order/RN123456789",
-  },
-  secrets: { tesla_session_cookie: "fixture_session=private-fixture-cookie" },
-  state: null,
-  signal: signal(),
-});
 const htmlResponse = (html) =>
   new Response(html, {
     headers: { "Content-Type": "text/html; charset=utf-8" },
   });
 
-test("Tesla extracts actual delivery text, ignores script/hidden decoys and emits only changed windows", async (t) => {
-  const context = teslaContext();
-  t.mock.method(globalThis, "fetch", async (url, options) => {
-    assert.equal(String(url), context.config.orderUrl);
-    assert.equal(options.headers.Cookie, context.secrets.tesla_session_cookie);
-    assert.equal(options.signal, context.signal);
-    assert.equal(options.redirect, "manual");
-    return htmlResponse(
-      '<script>Estimated Delivery: January 1 - 2</script><div hidden>Estimated Delivery: February 2 - 3</div><div aria-hidden="true">Estimated Delivery: March 3 - 4</div><span>Estimated Delivery:</span><span>September&nbsp;19 &ndash; October 3, 2026</span>',
-    );
-  });
-  const first = await tesla(context);
-  assert.equal(first.data.estimatedDelivery, "September 19 - October 3, 2026");
-  assert.deepEqual(first.events, []);
-  const changed = await tesla({
-    ...context,
-    state: { estimatedDelivery: "September 1 - 2" },
-  });
-  assert.equal(changed.events[0].name, "tesla.delivery.changed");
-  assert.deepEqual(
-    (await tesla({ ...context, state: first.state })).events,
-    [],
-  );
-  assert.doesNotMatch(
-    JSON.stringify(changed),
-    /private-fixture-cookie|fixture_session/,
-  );
-});
 
-test("Tesla supports German day/month order without relying on browser execution", async (t) => {
-  t.mock.method(globalThis, "fetch", async () =>
-    htmlResponse(
-      "<main>Voraussichtliche Lieferung: 19. September – 3. Oktober 2026</main>",
-    ),
-  );
-  assert.equal(
-    (await tesla(teslaContext())).data.estimatedDelivery,
-    "19. September - 3. Oktober 2026",
-  );
-});
 
-test("Tesla follows locale redirects only for the configured RN order", async (t) => {
-  const context = teslaContext();
-  context.state = { estimatedDelivery: "September 1 - 2" };
-  const target = "https://www.tesla.com/de_DE/teslaaccount/order/RN123456789/";
-  const calls = [];
-  t.mock.method(globalThis, "fetch", async (url, options) => {
-    calls.push(String(url));
-    assert.equal(options.headers.Cookie, context.secrets.tesla_session_cookie);
-    assert.equal(options.redirect, "manual");
-    if (calls.length === 1) {
-      return new Response(null, {
-        status: 302,
-        headers: { Location: target },
-      });
-    }
-    return htmlResponse(
-      "<main>Voraussichtliche Lieferung: 19. September – 3. Oktober 2026</main>",
-    );
-  });
-  const result = await tesla(context);
-  assert.deepEqual(calls, [context.config.orderUrl, target]);
-  assert.equal(
-    result.data.estimatedDelivery,
-    "19. September - 3. Oktober 2026",
-  );
-  assert.equal(result.events[0].name, "tesla.delivery.changed");
-  assert.equal(
-    result.events[0].payload.previous,
-    context.state.estimatedDelivery,
-  );
-});
 
-test("Tesla refuses dashboard, other-order and malformed redirects before collecting their delivery", async (t) => {
-  const context = teslaContext();
-  context.state = { estimatedDelivery: "September 1 - 2" };
-  for (const target of [
-    "/de_DE/teslaaccount",
-    "/en_US/teslaaccount/order/RN987654321",
-    "https://[",
-  ]) {
-    let calls = 0;
-    t.mock.method(globalThis, "fetch", async () => {
-      calls++;
-      if (calls === 1) {
-        return new Response(null, {
-          status: 302,
-          headers: { Location: target },
-        });
-      }
-      return htmlResponse("<main>Estimated Delivery: December 1 - 2</main>");
-    });
-    await assert.rejects(tesla(context), { code: "provider_unavailable" });
-    assert.equal(calls, 1);
-    assert.deepEqual(context.state, { estimatedDelivery: "September 1 - 2" });
-  }
-});
 
-test("Tesla stops at expired sessions and fails explicitly for client-rendered account shells", async (t) => {
-  let calls = 0;
-  t.mock.method(globalThis, "fetch", async () => {
-    calls++;
-    return new Response(null, {
-      status: 302,
-      headers: { Location: "https://auth.tesla.com/oauth2/v1/authorize" },
-    });
-  });
-  await assert.rejects(tesla(teslaContext()), {
-    code: "authentication_required",
-  });
-  assert.equal(calls, 1);
-  t.mock.method(globalThis, "fetch", async () =>
-    htmlResponse('<form><input type="password"></form>'),
-  );
-  await assert.rejects(tesla(teslaContext()), {
-    code: "authentication_required",
-  });
-  t.mock.method(globalThis, "fetch", async () =>
-    htmlResponse(
-      '<main id="app"></main><script>window.delivery="September 1 - 2";</script>',
-    ),
-  );
-  await assert.rejects(tesla(teslaContext()), {
-    code: "provider_unavailable",
-  });
-});
 
-test("Tesla rejects credential forwarding, missing cookies, failed HTTP and non-HTML responses", async (t) => {
-  let calls = 0;
-  t.mock.method(globalThis, "fetch", async () => {
-    calls++;
-    return new Response("secret response", { status: 403 });
-  });
-  const context = teslaContext();
-  await assert.rejects(
-    tesla({
-      ...context,
-      config: {
-        orderUrl: "https://unrelated.example/teslaaccount/order/RN123456789",
-      },
-    }),
-    { code: "configuration_invalid" },
-  );
-  await assert.rejects(tesla({ ...context, secrets: {} }), {
-    code: "authentication_required",
-  });
-  assert.equal(calls, 0);
-  await assert.rejects(
-    tesla(context),
-    (error) =>
-      error.code === "provider_unavailable" &&
-      !error.message.includes("secret"),
-  );
-  t.mock.method(
-    globalThis,
-    "fetch",
-    async () =>
-      new Response("{}", { headers: { "Content-Type": "application/json" } }),
-  );
-  await assert.rejects(tesla(context), { code: "provider_unavailable" });
-  t.mock.method(globalThis, "fetch", async () => {
-    throw new Error(context.secrets.tesla_session_cookie);
-  });
-  await assert.rejects(
-    tesla(context),
-    (error) =>
-      error.code === "provider_unavailable" &&
-      !error.message.includes(context.secrets.tesla_session_cookie),
-  );
-});
 
 test("home templates are disabled and materializable, with explicitly token-free appliance input", async () => {
-  for (const name of ["froeling", "washer", "dryer", "tesla-delivery"]) {
+  for (const name of ["froeling", "washer", "dryer"]) {
     const template = JSON.parse(
       await readFile(new URL(`${name}.task.json`, home), "utf8"),
     );

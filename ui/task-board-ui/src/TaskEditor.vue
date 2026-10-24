@@ -27,7 +27,7 @@ import {
 import type { UploadedAttachment } from "@ivy/ui";
 import { Plus } from "@lucide/vue";
 import { priorityLabels, stateLabel, stateLabels, taskStarted } from "./board";
-import { base, client, readDocument, taskRoute } from "./runtime";
+import { base, client, readDocument, taskRoute, tr } from "./runtime";
 import { canonical } from "../../../packages/sdk/src/client.js";
 import { route } from "../../../packages/ui-client/src/runtime";
 import type { Document, TaskBoard, Wire } from "./runtime";
@@ -38,6 +38,7 @@ import WikiLinkPicker from "./WikiLinkPicker.vue";
 import { nativeRead } from "../../../packages/ui-client/src/native";
 import {
   executionEnvironments,
+  executionHostOptions,
   executionModels,
   executionSpeedAvailable,
 } from "./execution-options";
@@ -48,7 +49,8 @@ import { attachmentView } from "./attachment-view";
 const props = defineProps<{
   workspace: TaskBoard.WorkspaceInfo;
   available: boolean;
-  task?: Document<"task">;
+  task?: Pick<Document<"task">, 'value' | 'pin'>;
+  questions?: TaskBoard.Comment[];
 }>();
 const emit = defineEmits<{ saved: []; cancel: [] }>();
 const defaults: TaskBoard.TaskFields = {
@@ -61,10 +63,8 @@ const defaults: TaskBoard.TaskFields = {
   executionRequirement: null,
   nativeOptions: { model: null, reasoningEffort: null, serviceTier: null },
   workspaceRequirement: { kind: "task_workspace" },
-  dependencies: [],
   userContact: "ticket",
   allowParallel: false,
-  nextReviewAt: null,
   dueAt: null,
 };
 const sameFields = (a: TaskBoard.TaskFields, b: TaskBoard.TaskFields) =>
@@ -73,10 +73,8 @@ const form = ref<TaskBoard.TaskFields>(
   structuredClone(props.task?.value.fields ?? defaults),
 );
 const initialState = ref<TaskBoard.Task['workflowState']>('todo');
-const waitingReason = ref<TaskBoard.InitialWaiting['reason']>('user');
-const waitingDetail = ref('');
-const waitingBlocker = ref('');
-const waitingUntil = ref<TaskBoard.Blocker['until']>('idle');
+const wakeAt = ref<string | null>(props.task?.value.wakeAt ?? null);
+const dependencies = ref<string[]>([...props.task?.value.dependencies ?? []]);
 const initialSummary = ref('');
 const revision = ref(props.task?.pin.revision ?? null),
   baseFields = ref<TaskBoard.TaskFields | null>(
@@ -103,15 +101,15 @@ try {
       retained.principalId === props.workspace.principalId
     ) {
       form.value = retained.fields;
+      delete (form.value as unknown as Record<string, unknown>).dependencies;
+      delete (form.value as unknown as Record<string, unknown>).nextReviewAt;
+      wakeAt.value = retained.wakeAt ?? retained.initial?.wakeAt ?? wakeAt.value;
+      dependencies.value = retained.dependencies ?? retained.initial?.dependencies ?? dependencies.value;
       revision.value = retained.revision;
       baseFields.value = retained.baseFields ??
         (retained.revision === props.task?.pin.revision ? baseFields.value : null);
       if (!props.task && retained.initial) {
         initialState.value = retained.initial.workflowState ?? 'todo';
-        waitingReason.value = retained.initial.waiting?.reason ?? 'user';
-        waitingDetail.value = retained.initial.waiting?.detail ?? '';
-        waitingBlocker.value = retained.initial.waiting?.blocker?.taskId ?? '';
-        waitingUntil.value = retained.initial.waiting?.blocker?.until ?? 'idle';
         initialSummary.value = retained.initial.initialResult?.summary ?? '';
       }
       // A retained copy of already-saved fields starts from the current save base.
@@ -162,11 +160,7 @@ const blockers = useRemote(
 );
 const blockerOptions = computed(() =>
   (blockers.value.value ?? [])
-    .filter(
-      (task) =>
-        task.workflowState !== "cancelled" ||
-        form.value.dependencies.includes(task.id),
-    )
+    .filter(task => task.workflowState !== "cancelled")
     .map((task) => ({
       value: task.id,
       label: task.taskKey + " · " + task.title,
@@ -175,7 +169,9 @@ const blockerOptions = computed(() =>
 );
 
 // Execution: every agent Task names one host; the configured default host is preselected.
-const environments = useRemote(executionEnvironments, 30000, ["services/agent-manager"]);
+// A placed task cannot change host or project; do not load their pickers in the background.
+const environments = useRemote(signal => props.task && taskStarted(props.task.value)
+  ? Promise.resolve(null) : executionEnvironments(signal, false), 30000, ["services/agent-manager"]);
 const executionDefaults = useExecutionDefaults(
   () => props.workspace,
   () => props.task?.value,
@@ -250,6 +246,7 @@ const hostOptions = computed(() => {
   const ids = [...hosts.value.keys()];
   if (host.value && !ids.includes(host.value)) ids.unshift(host.value);
   return ids.map((hostId) => {
+    if (placed.value) return { value: hostId, label: hostId, disabled: true };
     const missing = missingOn(hostId),
       isDefault = hostId === defaultHost.value;
     const notes = [
@@ -274,6 +271,7 @@ const hostOptions = computed(() => {
   });
 });
 const hostProblem = computed(() => {
+  if (placed.value) return "";
   if (!host.value || !environments.value.value) return "";
   if (!online(host.value)) return host.value + " is not ready right now.";
   const missing = missingOn(host.value);
@@ -312,12 +310,21 @@ const hostAgents = computed(
   ),
 );
 const hostAgent = computed(() => hostAgents.value[0]);
+const nativeCatalog = useRemote(async signal => {
+  const hostId = host.value;
+  return { hostId, agents: await executionHostOptions(signal, hostId, props.task?.value.primaryResourceRef?.serviceNodeId) };
+}, 30000, ["services/agent-manager"]);
+watch([host, () => props.task?.value.primaryResourceRef?.serviceNodeId], () => void nativeCatalog.refresh());
+// useRemote keeps the last successful choices during refresh; never use another host's catalog.
+const modelAgents = computed(() => nativeCatalog.value.value?.hostId === host.value
+  ? nativeCatalog.value.value.agents.filter(agent => !props.task?.value.primaryResourceRef ||
+    agent.node.serviceNodeId === props.task.value.primaryResourceRef.serviceNodeId) : []);
 
-// Native options show the effective value; a value equal to the default is stored as inherited.
+// Unchanged values can inherit; explicit selections must survive a previous Run's defaults.
 const nativeModel = ref(form.value.nativeOptions?.model ?? ""),
   reasoningEffort = ref(form.value.nativeOptions?.reasoningEffort ?? ""),
   serviceTier = ref(form.value.nativeOptions?.serviceTier ?? "");
-const nativeChoices = computed(() => executionModels(hostAgents.value));
+const nativeChoices = computed(() => executionModels(modelAgents.value));
 const defaultModel = computed(
   () =>
     configured.value?.nativeOptions.model ??
@@ -342,23 +349,24 @@ const defaultSpeed = computed(
 );
 const shownSpeed = computed(() => serviceTier.value || defaultSpeed.value);
 const serviceTierAvailable = computed(() =>
-  executionSpeedAvailable(hostAgents.value, shownModel.value, shownEffort.value),
+  executionSpeedAvailable(modelAgents.value, shownModel.value, shownEffort.value),
 );
 const chooseModel = (value: string) => {
-  nativeModel.value = value === defaultModel.value ? "" : value;
+  nativeModel.value = value;
 };
 const chooseEffort = (value: string) => {
-  reasoningEffort.value = value === defaultEffort.value ? "" : value;
+  reasoningEffort.value = value;
 };
 const chooseSpeed = (value: string) => {
-  serviceTier.value = value === defaultSpeed.value ? "" : value;
+  serviceTier.value = value;
 };
-watch([shownModel, host], () => {
+watch([shownModel, host, nativeChoices], () => {
   if (
+    nativeChoices.value.length &&
     reasoningEffort.value &&
     !nativeEfforts.value.includes(reasoningEffort.value)
   )
-    reasoningEffort.value = "";
+    reasoningEffort.value = defaultEffort.value;
   if (nativeChoices.value.length && !serviceTierAvailable.value && ['fast', 'flex'].includes(shownSpeed.value))
     serviceTier.value = "standard";
 });
@@ -375,7 +383,7 @@ const speedOptions = computed(() => [
 ]);
 const nativeOptionsInvalid = computed(
   () =>
-    hostAgents.value.length > 0 &&
+    modelAgents.value.length > 0 &&
     ((!!nativeModel.value &&
       !nativeChoices.value.some(
         (value) => value.model === nativeModel.value,
@@ -420,16 +428,11 @@ const normalizedFields = (): TaskBoard.TaskFields => {
   return fields;
 };
 let retainDraft = true;
-const initialFields = (): Pick<TaskBoard.CreateRequest, 'workflowState' | 'waiting' | 'initialResult'> => ({
+const initialFields = (): Pick<TaskBoard.CreateRequest, 'workflowState' | 'wakeAt' | 'dependencies' | 'initialResult'> => ({
   workflowState: initialState.value,
-  ...(initialState.value === 'waiting' ? { waiting: {
-    reason: waitingReason.value,
-    detail: waitingDetail.value.trim(),
-    ...(['dependency', 'workspace'].includes(waitingReason.value) && waitingBlocker.value
-      ? { blocker: { taskId: waitingBlocker.value, until: waitingUntil.value } } : {}),
-  } } : {}),
+  wakeAt: wakeAt.value, dependencies: dependencies.value,
   ...(form.value.control === 'user' && ['review', 'done'].includes(initialState.value) && initialSummary.value.trim()
-    ? { initialResult: { summary: initialSummary.value.trim(), artifacts: [], checks: [], codeReferences: [], repositoryResult: null, limitations: [] } } : {}),
+    ? { initialResult: { summary: initialSummary.value.trim(), artifacts: [], codeReferences: [], repositoryResult: null, limitations: [] } } : {}),
 });
 const clearDraft = () => {
   retainDraft = false;
@@ -437,7 +440,7 @@ const clearDraft = () => {
 };
 watch(
   [form, revision, baseFields, capabilities, host, category, nativeModel, reasoningEffort, serviceTier,
-    initialState, waitingReason, waitingDetail, waitingBlocker, waitingUntil, initialSummary],
+    initialState, wakeAt, dependencies, initialSummary],
   () => {
     if (!retainDraft) return;
     try {
@@ -445,6 +448,7 @@ watch(
         key,
         JSON.stringify({
           fields: normalizedFields(),
+          wakeAt: wakeAt.value, dependencies: dependencies.value,
           revision: revision.value,
           baseFields: baseFields.value,
           ...(!props.task ? { initial: initialFields() } : {}),
@@ -472,13 +476,6 @@ const initialProblem = computed(() => {
       ['todo', 'waiting'].includes(initialState.value))
     return 'Create this task in Backlog to finish uploading its files before an agent can start. Move it to Todo when ready.';
   if (initialState.value === 'review' && !initialSummary.value.trim()) return 'Review needs a final result.';
-  if (initialState.value !== 'waiting') return '';
-  if (!waitingDetail.value.trim()) return 'Describe what this task is waiting for.';
-  if (waitingReason.value === 'time' && (!form.value.nextReviewAt || form.value.nextReviewAt <= new Date().toISOString()))
-    return 'Choose a future next-review time.';
-  if (waitingReason.value === 'dependency' && !waitingBlocker.value && !form.value.dependencies.length)
-    return 'Choose a blocking task or a task dependency.';
-  if (waitingReason.value === 'capability' && !capabilities.value.length) return 'Choose the required host capabilities.';
   return '';
 });
 const images = useAttachmentImages(
@@ -541,7 +538,7 @@ const localDate = (value: string | null) => {
     .toISOString()
     .slice(0, 16);
 };
-const setDate = (key: "dueAt" | "nextReviewAt", event: Event) => {
+const setDate = (key: "dueAt", event: Event) => {
   const value = (event.target as HTMLInputElement).value;
   form.value[key] = value ? new Date(value).toISOString() : null;
 };
@@ -562,6 +559,8 @@ const save = async () => {
         "task",
         props.task.pin.objectId,
         props.workspace.rootObjectId,
+        undefined,
+        { limit: 0 },
       );
       // Unchanged fields are not saved, so the worker is not told about an empty edit.
       const fields = normalizedFields();
@@ -571,19 +570,20 @@ const save = async () => {
         if (!baseFields.value && revision.value !== null)
           baseFields.value = (await readDocument("task", {
             objectId: current.pin.objectId, revision: revision.value,
-          }, props.workspace.rootObjectId)).value.fields;
+          }, props.workspace.rootObjectId, undefined, { limit: 0 })).value.fields;
         if (!baseFields.value || !sameFields(baseFields.value, current.value.fields)) {
           conflict.value = current;
           return;
         }
       }
       let pin: TaskBoard.ObjectPin | null = current.pin;
-      if (!sameFields(fields, current.value.fields)) {
+      if (!sameFields(fields, current.value.fields) || wakeAt.value !== current.value.wakeAt || JSON.stringify(dependencies.value) !== JSON.stringify(current.value.dependencies)) {
         const outcome = await action.start("Save task changes", {
           action: "edit",
           taskId: current.pin.objectId,
           expectedRevision: current.pin.revision,
           fields,
+          wakeAt: wakeAt.value, dependencies: dependencies.value,
         });
         pin = outcome?.task ?? null;
       }
@@ -619,11 +619,6 @@ const workerOptions = [
   { value: "user" as const, label: "Me" },
 ];
 const initialStateOptions = Object.keys(stateLabels).map(value => ({ value, label: stateLabel(value) }));
-const waitReasons: { value: TaskBoard.InitialWaiting['reason']; label: string }[] = [
-  { value: 'user', label: 'User input' }, { value: 'time', label: 'Time' },
-  { value: 'dependency', label: 'Task dependency' }, { value: 'host', label: 'Host' },
-  { value: 'capability', label: 'Host capabilities' }, { value: 'workspace', label: 'Workspace' },
-];
 const priorityOptions = [4, 3, 2, 1, 0].map((value) => ({
   value,
   label: priorityLabels[value]!,
@@ -711,7 +706,7 @@ const cancel = () => {
             <OptionSelect id="task-initial-state" v-model="initialState" :disabled="locked">
               <option v-for="option in initialStateOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
             </OptionSelect>
-            <FieldDescription>{{ form.control === 'user' ? 'Manual tasks never start an agent.' : 'Todo queues agent work when its host and dependencies are ready.' }}</FieldDescription>
+            <FieldDescription>{{ form.control === 'user' ? 'Manual tasks never start an agent.' : tr('Todo queues work for the agent. Backlog keeps it unscheduled.', 'Todo gibt die Aufgabe für den Agenten frei. Im Backlog bleibt sie ungeplant.') }}</FieldDescription>
           </Field>
           <div class="grid gap-6 sm:grid-cols-2">
             <Field
@@ -734,40 +729,6 @@ const cancel = () => {
                 :disabled="locked"
             /></Field>
           </div>
-          <template v-if="!task && initialState === 'waiting'">
-            <Field>
-              <Label for="task-wait-reason">Waiting for</Label>
-              <OptionSelect id="task-wait-reason" v-model="waitingReason" :disabled="locked">
-                <option v-for="option in waitReasons" :key="option.value" :value="option.value">{{ option.label }}</option>
-              </OptionSelect>
-            </Field>
-            <Field>
-              <Label for="task-wait-detail">Waiting details</Label>
-              <Input id="task-wait-detail" v-model="waitingDetail" required :maxlength="16384" :disabled="locked" />
-            </Field>
-            <div v-if="['dependency', 'workspace'].includes(waitingReason)" class="grid gap-6 sm:grid-cols-2">
-              <Field>
-                <Label for="task-wait-blocker">Blocking task</Label>
-                <OptionSelect id="task-wait-blocker" v-model="waitingBlocker" :disabled="locked" placeholder="None">
-                  <option value="">None</option>
-                  <option v-for="option in blockerOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-                </OptionSelect>
-              </Field>
-              <Field>
-                <Label for="task-wait-until">Wait until</Label>
-                <OptionSelect id="task-wait-until" v-model="waitingUntil" :disabled="locked || !waitingBlocker">
-                  <option value="idle">Idle — ready for review</option>
-                  <option value="done">Done — accepted</option>
-                </OptionSelect>
-              </Field>
-            </div>
-            <Field v-if="waitingReason === 'time' && form.control === 'agent'">
-              <Label for="task-wait-time">Next review</Label>
-              <Input id="task-wait-time" type="datetime-local" :model-value="localDate(form.nextReviewAt)" required
-                :disabled="locked" @change="setDate('nextReviewAt', $event)" />
-            </Field>
-            <FieldDescription v-if="form.control === 'agent'">User input waits for an explicit response. Other waits are checked again automatically.</FieldDescription>
-          </template>
           <Field v-if="!task && form.control === 'user' && ['review', 'done'].includes(initialState)">
             <Label>Final result{{ initialState === 'done' ? ' (optional)' : '' }}</Label>
             <MarkdownEditor v-model="initialSummary" variant="field" label="Final result" :disabled="locked"
@@ -798,15 +759,6 @@ const cancel = () => {
                 :model-value="localDate(form.dueAt)"
                 :disabled="locked"
                 @change="setDate('dueAt', $event)"
-            /></Field>
-            <Field
-              ><Label for="task-review-date">Next review</Label
-              ><Input
-                id="task-review-date"
-                type="datetime-local"
-                :model-value="localDate(form.nextReviewAt)"
-                :disabled="locked"
-                @change="setDate('nextReviewAt', $event)"
             /></Field>
           </div>
         </FieldGroup>
@@ -892,8 +844,8 @@ const cancel = () => {
                 id="task-model"
                 class="w-full"
                 :model-value="shownModel"
-                :disabled="locked || fixed || !nativeChoices.length"
-                :placeholder="hostAgents.length ? 'Host default' : 'Host not ready'"
+                :disabled="locked || !nativeChoices.length"
+                :placeholder="nativeCatalog.loading.value ? 'Loading models…' : 'Host not ready'"
                 @update:model-value="chooseModel"
                 ><option
                   v-if="
@@ -931,7 +883,7 @@ const cancel = () => {
                 :model-value="shownSpeed"
                 label="Speed"
                 :options="speedOptions"
-                :disabled="locked || fixed"
+                :disabled="locked"
                 @update:model-value="chooseSpeed"
             /></Field>
           </div>
@@ -941,32 +893,40 @@ const cancel = () => {
               :model-value="shownEffort"
               label="Reasoning"
               :options="effortOptions"
-              :disabled="locked || fixed"
+              :disabled="locked"
               @update:model-value="chooseEffort"
           /></Field>
+          <FieldDescription v-if="fixed">{{ tr(
+            'Änderungen werden gespeichert. Der Agent beendet den laufenden Turn an einem geeigneten Punkt und arbeitet im selben Chat mit den neuen Einstellungen weiter.',
+            'Changes are saved immediately. The agent finishes its current turn at a safe stopping point and continues in the same chat with the new settings.',
+          ) }}</FieldDescription>
           <Alert v-if="environments.error.value" variant="destructive"
             ><AlertTitle>Hosts unavailable</AlertTitle
             ><AlertDescription>{{
               environments.error.value
             }}</AlertDescription></Alert
           >
+          <Alert v-if="nativeCatalog.error.value" variant="destructive">
+            <AlertTitle>{{ tr('Ausführungsoptionen konnten nicht aktualisiert werden', 'Execution options could not be refreshed') }}</AlertTitle>
+            <AlertDescription>{{ nativeCatalog.error.value }}</AlertDescription>
+          </Alert>
         </FieldGroup>
       </FieldSet>
 
-      <Field
-        ><Label for="task-blockers">Blockers</Label
-        ><TagPicker
-          id="task-blockers"
-          v-model="form.dependencies"
-          label="Blockers"
-          :options="blockerOptions"
-          placeholder="Search tasks"
-          :empty-text="blockers.loading.value ? 'Loading tasks…' : 'No other task can block this one.'"
-          :disabled="locked || fixed"
-        /><FieldDescription
-          >This task starts after these tasks are done.</FieldDescription
-        ></Field
-      >
+      <FieldSet>
+        <FieldLegend>{{ tr('Aufwecken', 'Wake-ups') }}</FieldLegend>
+        <FieldGroup>
+          <Field><Label for="task-wake-at">{{ tr('Nächster Termin', 'Next appointment') }}</Label>
+            <Input id="task-wake-at" type="datetime-local" :model-value="localDate(wakeAt)" :disabled="locked || fixed"
+              @change="wakeAt = ($event.target as HTMLInputElement).value ? new Date(($event.target as HTMLInputElement).value).toISOString() : null" />
+            <FieldDescription>{{ tr('Optional. Der Agent entscheidet beim Aufwecken, was zu tun ist.', 'Optional. The agent decides what to do when it wakes.') }}</FieldDescription>
+          </Field>
+          <Field><Label>{{ tr('Beobachtete Tickets', 'Watched tickets') }}</Label>
+            <TagPicker :label="tr('Beobachtete Tickets', 'Watched tickets')" v-model="dependencies" :options="blockerOptions" :disabled="locked || fixed" />
+            <FieldDescription>{{ tr('Änderungen an diesen Tickets wecken den Agenten.', 'Changes to these tickets wake the agent.') }}</FieldDescription>
+          </Field>
+        </FieldGroup>
+      </FieldSet>
 
       <Alert v-if="error" variant="destructive"
         ><AlertTitle>Task not saved</AlertTitle

@@ -21,6 +21,7 @@ import { renderMermaidPreview } from './mermaid-preview';
 import { fileSize } from '../lib/attachments';
 import type { AttachmentInfo, UploadedAttachment } from '../lib/attachments';
 import ImagePreview from './ImagePreview.vue';
+import ComposerAddMenu from './ComposerAddMenu.vue';
 import { Alert, AlertDescription } from '../components/alert';
 import '@milkdown/crepe/theme/common/prosemirror.css';
 import '@milkdown/crepe/theme/common/reset.css';
@@ -35,11 +36,12 @@ import '@milkdown/crepe/theme/common/table.css';
 import '@milkdown/crepe/theme/frame.css';
 import { Button } from '../components/button';
 
-// `field` is the compact form-field presentation; `document` is the full-page writing surface.
+// `field` is the compact form-field presentation; `document` is the full-page writing surface;
+// `composer` is a one-line message input that grows with its text, with + and send around it.
 const props = defineProps<{ modelValue: string; disabled?: boolean; trustedImageUrls?: Record<string, string>; trustedAttachments?: Record<string, AttachmentInfo>; uploadFile?: (file: File) => Promise<UploadedAttachment>;
-  variant?: 'document' | 'field'; placeholder?: string; label?: string }>();
+  variant?: 'document' | 'field' | 'composer'; placeholder?: string; label?: string }>();
 // `normalized` reports how the editor serializes externally supplied Markdown, so callers can tell edits from formatting.
-const emit = defineEmits<{ 'update:modelValue': [value: string]; normalized: [value: string, source: string]; uploaded: [] }>();
+const emit = defineEmits<{ 'update:modelValue': [value: string]; normalized: [value: string, source: string]; uploaded: []; submit: [] }>();
 const root = ref<HTMLElement>(), fileInput = ref<HTMLInputElement>();
 const uploadError = ref<string | null>(null), uploading = ref(false), previewOpen = ref(false), preview = ref({ source: '', name: '' });
 let crepe: CrepeBuilder | null = null, lastPublished = props.modelValue, replacing = false, edited = false;
@@ -174,12 +176,13 @@ onMounted(async () => {
     })
     .addFeature(linkTooltip, { editButton: 'Edit', removeButton: 'Remove', confirmButton: 'Apply', inputPlaceholder: 'Paste link…' })
     .addFeature(cursor)
-    .addFeature(blockEdit, {
+  // The composer stays a plain message line: no slash menu or drag handles.
+  if (props.variant !== 'composer') crepe.addFeature(blockEdit, {
         textGroup: { label: 'Text', text: { label: 'Text' }, h1: { label: 'Heading 1' }, h2: { label: 'Heading 2' }, h3: { label: 'Heading 3' }, h4: { label: 'Heading 4' }, h5: { label: 'Heading 5' }, h6: { label: 'Heading 6' }, quote: { label: 'Quote' }, divider: { label: 'Divider' } },
         listGroup: { label: 'Lists', bulletList: { label: 'Bulleted list' }, orderedList: { label: 'Numbered list' }, taskList: { label: 'Task list' } },
         advancedGroup: { label: 'Advanced', image: null, codeBlock: { label: 'Code' }, table: { label: 'Table' }, math: null },
-    })
-    .addFeature(placeholderFeature, { text: props.placeholder ?? "Write something, or type '/' for commands…", mode: props.variant === 'field' ? 'doc' : 'block' })
+    });
+  crepe.addFeature(placeholderFeature, { text: props.placeholder ?? "Write something, or type '/' for commands…", mode: props.variant === 'document' || !props.variant ? 'block' : 'doc' })
     .addFeature(toolbar, { boldLabel: 'Bold', italicLabel: 'Italic', codeLabel: 'Code', linkLabel: 'Link', strikethroughLabel: 'Strikethrough' })
     .addFeature(table);
   crepe.editor.config(ctx => ctx.update(linkSchema.key, previous => context => ({
@@ -207,7 +210,14 @@ onMounted(async () => {
   editable?.setAttribute('aria-label', props.label ?? 'Markdown');
   root.value.addEventListener('input', publishCurrentMarkdown);
   root.value.addEventListener('click', followInternalLink, true);
+  if (props.variant === 'composer') root.value.addEventListener('keydown', submitOnEnter, true);
 });
+// Leave Enter to the Markdown keymap (paragraphs, lists and code blocks).
+const submitOnEnter = (event: KeyboardEvent) => {
+  if (props.disabled || event.key !== 'Enter' || !(event.metaKey || event.ctrlKey) || event.shiftKey || event.isComposing || event.altKey) return;
+  event.preventDefault(); event.stopPropagation();
+  publishCurrentMarkdown(); queueMicrotask(() => emit('submit'));
+};
 
 const insertMarkdown = (markdown: string, focus = true) => {
   if (!crepe || props.disabled) return;
@@ -241,6 +251,7 @@ onBeforeUnmount(() => {
   root.value?.removeEventListener('input', markEdited, true);
   root.value?.removeEventListener('input', publishCurrentMarkdown);
   root.value?.removeEventListener('click', followInternalLink, true);
+  root.value?.removeEventListener('keydown', submitOnEnter, true);
   if (crepe) void crepe.destroy();
   crepe = null;
 });
@@ -257,6 +268,12 @@ onBeforeUnmount(() => {
       </template>
       <slot name="actions" />
     </div>
+  </div>
+  <div v-else-if="variant === 'composer'" class="markdown-composer" :class="{ 'is-readonly': disabled }">
+    <div v-if="$slots.context" class="markdown-composer-context"><slot name="context" /></div>
+    <ComposerAddMenu v-if="uploadFile || $slots['add']" :files="!!uploadFile" :disabled="disabled || uploading" class="self-end" @files="uploadFiles"><slot name="add" /></ComposerAddMenu>
+    <div ref="root" class="markdown-editor is-composer" :class="{ 'is-readonly': disabled }" />
+    <slot name="send" />
   </div>
   <div v-else ref="root" class="markdown-editor" :class="{ 'is-readonly': disabled }" aria-label="Document" />
   <ImagePreview v-model:open="previewOpen" :source="preview.source" :name="preview.name" />
@@ -315,4 +332,16 @@ onBeforeUnmount(() => {
 .markdown-field.is-readonly { opacity: .6; }
 .markdown-editor.is-field :deep(.ProseMirror) { min-height: 6rem; padding: .5rem .75rem; font-size: .875rem; line-height: 1.6; }
 .markdown-editor.is-field :deep(.milkdown-block-handle) { display: none; }
+/* Composer geometry follows desktop assistants: a 3.25rem pill whose 2.25rem round controls and
+   first text line share one centre line; it grows upward and the controls stay at the bottom. */
+.markdown-composer { box-sizing: border-box; display: flex; flex-wrap: wrap; min-width: 0; min-height: 3.25rem; align-items: flex-end; gap: .25rem; border: 1px solid var(--input); border-radius: 1.625rem; background: var(--card); padding: calc(.5rem - 1px); box-shadow: 0 2px 10px color-mix(in srgb, var(--foreground) 6%, transparent); transition: border-color .15s, box-shadow .15s; }
+.markdown-composer-context { flex: 1 0 100%; min-width: 0; padding: .25rem .5rem .375rem; }
+.markdown-composer:focus-within { border-color: color-mix(in srgb, var(--foreground) 25%, var(--input)); }
+.markdown-composer.is-readonly { opacity: .6; }
+.markdown-composer > :deep(button) { display: grid; place-items: center; flex-shrink: 0; width: 2.25rem; height: 2.25rem; padding: 0; border-radius: 9999px; }
+.markdown-composer > :deep(button svg) { width: 1.125rem; height: 1.125rem; }
+.markdown-editor.is-composer { flex: 1 1 auto; min-width: 0; max-height: min(40dvh, 18rem); overflow-y: auto; }
+.markdown-editor.is-composer :deep(.milkdown .ProseMirror) { min-height: 2.25rem; padding: .375rem .25rem; font-size: .9375rem; line-height: 1.5rem; }
+.markdown-editor.is-composer :deep(.ProseMirror > *) { margin: 0 !important; padding-block: 0 !important; }
+.markdown-editor.is-composer :deep(.ProseMirror p) { min-height: 1.5rem; line-height: 1.5rem; }
 </style>

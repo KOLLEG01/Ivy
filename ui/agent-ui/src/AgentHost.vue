@@ -5,6 +5,7 @@ import {
   ComposerAddMenu,
   ComposerAttachments,
   ConversationComposer,
+  HostMark,
   Label,
   OptionSelect,
   ProjectSelect,
@@ -490,6 +491,9 @@ watch(() => action.saved.value?.phase, (phase) => {
               @files="attachments.add"
             />
             <Label for="project" class="sr-only">Project</Label>
+            <span class="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-muted px-2.5 text-xs" :title="tr('Aktueller Host', 'Current host')">
+              <HostMark :label="status.value.value?.hostId ?? node" :seed="node" />{{ status.value.value?.hostId ?? node }}
+            </span>
             <ProjectSelect
               id="project"
               v-model="cwd"

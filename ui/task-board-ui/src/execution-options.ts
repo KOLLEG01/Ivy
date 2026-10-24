@@ -9,7 +9,7 @@ import {
 } from "../../../packages/ui-client/src/native";
 import { client } from "./runtime";
 
-export async function executionEnvironments(signal: AbortSignal) {
+async function executionNodes(signal: AbortSignal, hostId?: string) {
   const nodes = [];
   let cursor: string | undefined;
   do {
@@ -17,6 +17,7 @@ export async function executionEnvironments(signal: AbortSignal) {
       "serviceNodes.list",
       {
         serviceName: "agent-manager",
+        ...(hostId ? { hostId } : {}),
         limit: 200,
         ...(cursor ? { cursor } : {}),
       },
@@ -25,6 +26,28 @@ export async function executionEnvironments(signal: AbortSignal) {
     nodes.push(...page.items);
     cursor = page.nextCursor ?? undefined;
   } while (cursor);
+  return nodes;
+}
+
+async function agentModelOptions(node: Awaited<ReturnType<typeof executionNodes>>[number], signal: AbortSignal) {
+  const [models, bindings] = await Promise.all([
+    nativeModels(client, node.serviceNodeId, signal).then(modelsFrom),
+    Promise.all(["thread/start", "turn/start"].map((method) =>
+      discover(client, "codex." + method, { serviceNodeId: node.serviceNodeId }))),
+  ]);
+  return { node, models, bindings };
+}
+
+/** Execution choices need only the selected host, not projects or other hosts. */
+export async function executionHostOptions(signal: AbortSignal, hostId: string, serviceNodeId?: string) {
+  if (!hostId) return [];
+  const nodes = await executionNodes(signal, hostId);
+  return Promise.all(nodes.filter(node => node.connected && node.synced && node.ready &&
+    (!serviceNodeId || node.serviceNodeId === serviceNodeId)).map(node => agentModelOptions(node, signal)));
+}
+
+export async function executionEnvironments(signal: AbortSignal, includeNativeOptions = true) {
+  const nodes = await executionNodes(signal);
   const observations = await Promise.all(
     nodes
       .filter((node) => node.connected && node.synced && node.ready)
@@ -33,27 +56,12 @@ export async function executionEnvironments(signal: AbortSignal) {
           const tools = serviceTools(client, node.serviceNodeId, [
             { namespace: "agent", interfaceVersion: "1.0.0" },
           ]);
-          return {
-            node,
-            profile: (await tools.call(
-              "agent.capabilities",
-              {},
-            )) as Agent.CapabilityProfile,
-            projects: (await tools.call(
-              "agent.projects",
-              {},
-            )) as Agent.ProjectsResult,
-            models: modelsFrom(
-              await nativeModels(client, node.serviceNodeId, signal),
-            ),
-            bindings: await Promise.all(
-              ["thread/start", "turn/start"].map((method) =>
-                discover(client, "codex." + method, {
-                  serviceNodeId: node.serviceNodeId,
-                }),
-              ),
-            ),
-          };
+          const [profile, projects, options] = await Promise.all([
+            tools.call("agent.capabilities", {}) as Promise<Agent.CapabilityProfile>,
+            tools.call("agent.projects", {}) as Promise<Agent.ProjectsResult>,
+            includeNativeOptions ? agentModelOptions(node, signal) : { node, models: [], bindings: [] },
+          ]);
+          return { ...options, profile, projects };
         } catch {
           return null;
         }
@@ -104,7 +112,8 @@ export async function executionEnvironments(signal: AbortSignal) {
 export type ExecutionAgent = Awaited<
   ReturnType<typeof executionEnvironments>
 >["agents"][number];
-export function executionModels(agents: ExecutionAgent[]) {
+type ModelAgent = Awaited<ReturnType<typeof executionHostOptions>>[number];
+export function executionModels(agents: ModelAgent[]) {
   // A host can run several providers. Any of its agents may serve a model;
   // defaults for multiple hosts still require support on each eligible host.
   const hosts = new Map<string, Map<string, NativeModel>>();
@@ -164,7 +173,7 @@ export function modelAvailability(agents: ExecutionAgent[]) {
   }));
 }
 export const executionSpeedAvailable = (
-  agents: ExecutionAgent[],
+  agents: ModelAgent[],
   model?: string,
   effort?: string,
 ) => {

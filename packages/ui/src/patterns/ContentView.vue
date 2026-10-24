@@ -59,6 +59,9 @@ const showImage = (event: MouseEvent) => {
     <p v-if="text.length > limit" class="mb-3 rounded-md border px-3 py-2 text-sm text-muted-foreground" role="status">Preview limited to {{ limit.toLocaleString() }} characters. Download the saved content to read it in full.</p>
     <!-- Only the local HTML-disabled Markdown renderer supplies this HTML. -->
     <div v-if="markdown" class="ivy-markdown" @click="showImage" v-html="markdown.html" />
+    <!-- HTML renders in an opaque-origin frame without scripts, forms, popups or Ivy credentials;
+         it inherits this page's CSP, so external resources stay blocked. -->
+    <iframe v-else-if="mediaType === 'text/html'" sandbox="" referrerpolicy="no-referrer" title="Rendered HTML" :srcdoc="text.slice(0, limit)" class="h-[70dvh] w-full rounded-md border bg-white" />
     <pre v-else class="max-h-[38rem] overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/60 p-4 font-mono text-xs leading-relaxed">{{ text.slice(0, limit) }}</pre>
     <p v-if="failures.length" class="mt-2 text-sm text-muted-foreground" role="status">Some images could not be loaded. <Button variant="link" size="sm" @click="retryImages">Retry images</Button></p>
   </div>

@@ -15,6 +15,8 @@
   --popover-foreground: oklch(0.145 0 0);
   --primary: oklch(0.205 0 0);
   --primary-foreground: oklch(0.985 0 0);
+  --message-background: oklch(0.205 0 0);
+  --message-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
@@ -219,10 +221,131 @@
   max-width: 85%;
   margin-left: auto;
   border-radius: 1.125rem;
-  background: var(--muted);
+  border-bottom-right-radius: 0.375rem;
+  background: var(--message-background);
+  color: var(--message-foreground);
   padding: 0.5rem 0.875rem;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+/* Rich bubble content keeps Markdown spacing and stays readable on the inverted background. */
+.ivy-message-bubble:has(.ivy-markdown) {
+  white-space: normal;
+}
+.ivy-message-bubble :is(a, .ivy-markdown a) {
+  color: inherit;
+}
+.ivy-message-bubble .ivy-markdown :is(pre, :not(pre) > code),
+.ivy-message-bubble .ivy-attachment-link {
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  border-color: color-mix(in srgb, currentColor 25%, transparent);
+}
+/* Text and compact image thumbnails share the same message bubble. */
+.ivy-message-bubble .ivy-markdown .ivy-embedded-image {
+  display: block;
+  width: auto;
+  max-width: min(100%, 18rem);
+  max-height: 18rem;
+  margin: 0.25rem 0;
+  border-radius: 0.875rem;
+  object-fit: cover;
+}
+.ivy-message-bubble .ivy-markdown .ivy-image-button {
+  display: block;
+}
+.ivy-message-bubble .ivy-markdown blockquote {
+  border-color: color-mix(in srgb, currentColor 35%, transparent);
+  color: inherit;
+  opacity: 0.85;
+}
+/* Conversation timelines (ConversationMessage): stamps between groups, raised reply cards,
+   dashed messages from other sources. Light surfaces sit on a muted background. */
+.ivy-chat-surface {
+  background: color-mix(in srgb, var(--muted) 50%, var(--background));
+}
+.dark .ivy-chat-surface {
+  background: var(--background);
+}
+.ivy-chat-stamp {
+  padding-top: 0.75rem;
+  text-align: center;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+.ivy-chat-message {
+  display: grid;
+  min-width: 0;
+  gap: 0.25rem;
+}
+.ivy-chat-label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.375rem;
+  padding-left: 2.5rem;
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+}
+.ivy-chat-row {
+  display: flex;
+  min-width: 0;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+.ivy-chat-avatar {
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  flex-shrink: 0;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--card);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--foreground) 10%, transparent);
+}
+.ivy-chat-avatar > svg {
+  width: 1.05rem;
+  height: 1.05rem;
+}
+.ivy-chat-message[data-variant="external"] .ivy-chat-avatar {
+  border-radius: 0.375rem;
+  box-shadow: none;
+  border: 1px dashed color-mix(in srgb, var(--foreground) 40%, transparent);
+}
+.ivy-chat-card {
+  width: fit-content;
+  min-width: 0;
+  max-width: 100%;
+  border-radius: 1.125rem;
+  border-bottom-left-radius: 0.375rem;
+  background: var(--card);
+  color: var(--card-foreground);
+  padding: 0.625rem 0.875rem;
+  overflow-wrap: anywhere;
+  box-shadow:
+    0 2px 14px color-mix(in srgb, var(--foreground) 7%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--foreground) 6%, transparent);
+}
+.dark .ivy-chat-card {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--foreground) 10%, transparent);
+}
+.ivy-chat-message[data-variant="external"] .ivy-chat-card {
+  border: 1px dashed color-mix(in srgb, var(--foreground) 45%, transparent);
+  box-shadow: none;
+}
+@media (max-width: 639px) {
+  .ivy-chat-avatar {
+    display: none;
+  }
+  .ivy-chat-label {
+    padding-left: 0;
+  }
+  .ivy-chat-card {
+    border-bottom-left-radius: 1.125rem;
+  }
+  .ivy-chat-message[data-variant="reply"] .ivy-chat-card {
+    width: 100%;
+  }
 }
 .ivy-composer {
   min-width: 0;
@@ -262,7 +385,7 @@
 
 .ivy-toolbar {
   position: sticky;
-  top: 0;
+  top: var(--ivy-mobile-app-bar-height, 0px);
   z-index: 20;
   display: flex;
   height: 3rem;
@@ -276,6 +399,23 @@
 .ivy-toolbar-logo {
   display: none;
 }
+.ivy-mobile-apps {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  height: 3rem;
+  flex-shrink: 0;
+  align-items: center;
+  gap: .125rem;
+  overflow-x: auto;
+  padding-inline: .5rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+  scrollbar-width: none;
+}
+@media (min-width: 768px) { .ivy-mobile-apps { display: none; } }
+@media (max-width: 767px) { .ivy-shell:not(.ivy-embedded) { --ivy-mobile-app-bar-height: 3rem; } }
 .ivy-main {
   display: flex;
   min-width: 0;
@@ -283,6 +423,13 @@
   flex-direction: column;
   padding: 1.25rem 1rem;
   outline: none;
+}
+/* An embedded UI fills its frame; conversation pages size themselves to it. */
+.ivy-embedded {
+  --conversation-height: 100dvh;
+  display: flex;
+  min-height: 100dvh;
+  flex-direction: column;
 }
 .ivy-shell[data-layout="conversation"] .ivy-toolbar {
   border-bottom-color: transparent;
@@ -316,11 +463,6 @@
   color: var(--foreground);
   border-color: var(--foreground);
 }
-@media (max-width: 768px) {
-  .ivy-toolbar-logo {
-    display: inline-flex;
-  }
-}
 @media (min-width: 769px) {
   .ivy-main {
     padding: 1.5rem 2rem;
@@ -347,3 +489,5 @@ summary {
 .ivy-attachment-link::before { content: '📎'; flex-shrink: 0; }
 .ivy-attachment-link::after { content: attr(data-file-size); font-size: .75rem; color: var(--muted-foreground); white-space: nowrap; }
 .ivy-attachment-link:hover { background: var(--accent); }
+[data-attention="question"] { border-color: var(--color-amber-500); box-shadow: 0 0 0 1px var(--color-amber-500); }
+[data-attention="error"] { border-color: var(--destructive); box-shadow: 0 0 0 1px var(--destructive); }

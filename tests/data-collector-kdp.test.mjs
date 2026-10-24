@@ -197,6 +197,97 @@ test("Combined Sales avoids overlapping detail, subtotals and cross-currency sum
   ]);
 });
 
+test("Kindle+ KENP exports count reading and listening once with eBook identifiers", async () => {
+  const result = await parseReport(
+    await workbook({
+      "Report Definitions": [["Report", "Definition"]],
+      Summary: [salesHeaders, salesRow("USD", 1000)],
+      "Combined Sales": [salesHeaders, salesRow()],
+      "eBook Royalty": [salesHeaders, salesRow("USD", 1000)],
+      "Orders Processed": [
+        ["Date", "Title", "ASIN", "Paid Units", "Free Units"],
+      ],
+      "eBook Orders Placed": [
+        ["Date", "Title", "ASIN", "Paid Units", "Free Units"],
+      ],
+      KENP: [
+        [
+          "Date",
+          "Title",
+          "Author Name",
+          "eBook ASIN",
+          "Audiobook ASIN",
+          "Audible ASIN",
+          "Marketplace",
+          "Kindle+ Pages Read",
+          "Kindle+ Pages Listened",
+          "Total Kindle+ Pages Read and Listened",
+        ],
+        [
+          "2026-09-10",
+          "Fixture book",
+          "Fixture author",
+          "B000000001",
+          "N/A",
+          "N/A",
+          "Amazon.com",
+          20,
+          7,
+          27,
+        ],
+        [
+          "2026-09-11",
+          "Fixture book",
+          "Fixture author",
+          "B000000001",
+          "N/A",
+          "N/A",
+          "Amazon.com",
+          5,
+          0,
+          5,
+        ],
+      ],
+    }),
+    period,
+  );
+  assert.deepEqual(result.sheetsUsed, ["Combined Sales"]);
+  assert.equal(result.salesRows, 1);
+  assert.equal(result.subscriptionSheet, "KENP");
+  assert.deepEqual(result.subscriptions, {
+    status: "pages_only",
+    pagesRead: 32,
+  });
+  assert.equal(result.royaltiesByCurrency[0].salesEstimatedRoyalties, 3.75);
+  assert.equal(
+    result.royaltiesByCurrency[0].subscriptionEstimatedRoyalties,
+    null,
+  );
+});
+
+test("invalid Kindle+ totals fail instead of falling back to partial reading counts", async () => {
+  for (const pages of [-1, 1.5, "unknown"])
+    await assert.rejects(
+      parseReport(
+        await workbook({
+          "Combined Sales": [salesHeaders, salesRow()],
+          KENP: [
+            [
+              "Date",
+              "Title",
+              "eBook ASIN",
+              "Kindle+ Pages Read",
+              "Total Kindle+ Pages Read and Listened",
+            ],
+            ["2026-09-10", "Fixture book", "B000000001", 100, pages],
+          ],
+        }),
+        period,
+      ),
+      { code: "provider_unavailable" },
+    );
+});
+
 test("disjoint format details retain refunds and actual KU royalties", async () => {
   const report = await workbook({
     "eBook Royalties": [

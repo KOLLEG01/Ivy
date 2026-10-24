@@ -14,9 +14,9 @@ const fields = (title, category = null) => ({
   priority: 2,
   executionRequirement: null,
   workspaceRequirement: { kind: "task_workspace" },
-  dependencies: [],
+
   userContact: "ticket",
-  nextReviewAt: null,
+
   dueAt: null,
 });
 
@@ -42,7 +42,7 @@ for (const width of [1440, 390]) test(`task drafts and comments keep keyboard fo
       const requests = Array.isArray(body) ? body : [body];
       return requests.some(request => label !== 'Comment'
         ? request.method === 'tools.call' && request.params.qualifiedName === 'task-board.workspace'
-        : request.method === 'objects.read' && request.params.objectId === id)
+        : request.method === 'tools.call' && request.params.qualifiedName === 'task-board.read' && request.params.arguments.task === id)
         ? route.abort() : route.continue();
     });
     await f.page.evaluate(() => window.dispatchEvent(new Event('online')));
@@ -67,47 +67,88 @@ for (const width of [1440, 390]) test(`task drafts and comments keep keyboard fo
   assert.deepEqual(f.pageErrors, []);
 });
 
-for (const width of [1440, 390]) test(`comments accept multiple files and further selections without interrupting typing at ${width}px`, { timeout: 90000 }, async t => {
+for (const width of [1440, 390]) test(`comments accept multiple images and further files through a stale upload snapshot at ${width}px`, { timeout: 90000 }, async t => {
   const f = await taskBoardFixture(t, { viewport: { width, height: 1000 } });
   const created = await f.invoke({ action: 'create', fields: fields('Multiple comment attachments') });
   const id = created.task.objectId;
+  await f.invoke({ action: 'comment', taskId: id, expectedRevision: created.task.revision, authorKind: 'agent', purpose: 'question',
+    recipient: { kind: 'user' }, commentId: 'long-upload-question', body: 'Which hardware should be used? ' + 'A long question must leave space for the conversation and editor. '.repeat(60),
+    requests: [], responses: [], attachments: [], replyTo: null });
   await f.open('#/tasks?id=' + id + '&node=browser-task-board' + (width === 390 ? '&panel=sheet' : ''));
   const editor = f.page.getByRole('textbox', { name: 'Comment', exact: true });
   await editor.fill('Comment evidence');
   const picker = f.page.locator('input[type=file]');
   await expect(picker).toHaveAttribute('multiple', '');
-  const files = ['first.txt', 'second.txt', 'third.txt'].map(name => ({
-    name, mimeType: 'text/plain', buffer: Buffer.from('Exact evidence in ' + name),
-  }));
-  let releaseUpload, uploadStarted;
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j4R8AAAAASUVORK5CYII=', 'base64');
+  const files = [
+    ...['first.png', 'second.png'].map(name => ({ name, mimeType: 'image/png', buffer: png })),
+    { name: 'third.txt', mimeType: 'text/plain', buffer: Buffer.from('Exact evidence in third.txt') },
+  ];
+  let releaseUpload, uploadStarted, stalePublication;
+  t.after(() => releaseUpload?.());
   const started = new Promise(resolve => { uploadStarted = resolve; });
   await f.page.route('**/api/v1/rpc', async route => {
     const body = route.request().postDataJSON();
+    const requests = [].concat(body);
+    const readsTask = request => request?.method === 'tools.call' && request.params.qualifiedName === 'task-board.read' &&
+      request.params.arguments.task === id;
+    const publication = stalePublication;
+    if (requests.some(readsTask) && publication) {
+      const response = await route.fetch(), value = await response.json();
+      // A read started during publication may arrive after the upload's success receipt.
+      for (const reply of [].concat(value)) if (readsTask(requests.find(request => request.id === reply.id))) {
+        reply.result.object.revision = publication.revision;
+        reply.result.task.publication = publication.pin;
+      }
+      return route.fulfill({ response, json: value });
+    }
     if (body.method === 'tools.call' && body.params.qualifiedName === 'task-board.uploadAttachment' && !releaseUpload) {
+      const response = await route.fetch(), value = await response.json();
+      stalePublication = { revision: value.result.task.revision - 1, pin: { objectId: randomUUID(), revision: 1 } };
       const held = new Promise(resolve => { releaseUpload = resolve; });
       uploadStarted();
       await held;
+      return route.fulfill({ response });
     }
     await route.continue();
   });
   await picker.setInputFiles(files.slice(0, 2));
   await started;
   await expect(editor).toBeEditable();
-  await expect(f.page.getByRole('button', { name: 'Add files', exact: true })).toBeDisabled();
+  await expect(f.page.getByRole('button', { name: 'Add to message', exact: true })).toBeDisabled();
   await editor.pressSequentially(' while files upload');
+  await f.page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect(f.page.getByText('Uploading files…', { exact: true })).toBeVisible();
+  await expect(f.page.getByText('Upload task attachment', { exact: true })).toHaveCount(0);
+  await expect(f.page.getByText('A previous action is still being completed. Your draft is retained.', { exact: true })).toHaveCount(0);
+  const composer = f.page.locator('[data-slot=task-comment-composer]');
+  assert.ok((await composer.boundingBox()).height <= 1000 * .6 + 1);
+  const bounds = await composer.boundingBox();
+  assert.ok(bounds.y + bounds.height >= 999, 'The sticky composer must cover the bottom edge without exposing messages beneath it.');
+  await expect(f.page.locator('[data-slot=task-pending-questions]').getByRole('button', { name: 'Show question', exact: true })).toBeVisible();
   releaseUpload();
-  await expect(editor.locator('a')).toHaveCount(2);
-  await expect(f.page.getByRole('button', { name: 'Add files', exact: true })).toBeEnabled();
+  await expect(editor.locator('img.ivy-embedded-image')).toHaveCount(2);
+  await expect(f.page.getByRole('button', { name: 'Add to message', exact: true })).toBeEnabled();
+  await expect(f.page.getByText('This task cannot be changed right now.', { exact: true })).toHaveCount(0);
+  // A genuinely newer publication must still block mutations.
+  stalePublication = { ...stalePublication,
+    revision: (await f.client.request('objects.stat', { objectId: id })).currentRevision + 1 };
+  await f.page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect(f.page.getByText('A previous action is still being completed. Your draft is retained.', { exact: true })).toBeVisible();
+  await expect(f.page.getByRole('button', { name: 'Add comment', exact: true })).toBeDisabled();
+  stalePublication = null;
   await f.page.unroute('**/api/v1/rpc');
+  await f.page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect(f.page.getByRole('button', { name: 'Add comment', exact: true })).toBeEnabled();
   await picker.setInputFiles(files.slice(2));
-  await expect(editor.locator('a')).toHaveCount(3);
-  await expect(f.page.getByRole('button', { name: 'Add files', exact: true })).toBeEnabled();
+  await expect(editor.locator('a')).toHaveCount(1);
+  await expect(f.page.getByRole('button', { name: 'Add to message', exact: true })).toBeEnabled();
   await editor.press('End');
   await editor.pressSequentially(' after all files');
   await expect(editor.locator('a').last()).toHaveText('third.txt');
   await f.page.getByRole('button', { name: 'Add comment', exact: true }).click();
-  await expect.poll(async () => (await f.task(id)).comments.length).toBe(1);
-  const saved = await f.task(id), comment = saved.comments[0];
+  await expect.poll(async () => (await f.task(id)).comments.length).toBe(2);
+  const saved = await f.task(id), comment = saved.comments.at(-1);
   assert.equal(saved.attachments.length, 3);
   assert.deepEqual(comment.attachments.map(attachment => attachment.filename), files.map(file => file.name));
   assert.match(comment.body, /while files upload/);
@@ -138,49 +179,52 @@ for (const [layout, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
     await add("Newest long comment\n\n" + longText + "\n\nEnd of newest comment");
     const route = "#/tasks?id=" + id + "&node=browser-task-board";
     await f.open(route);
-    const cards = f.page.locator('[data-slot="comment-card"]');
+    const cards = f.page.locator('[data-slot="conversation-message"]');
     const older = cards.filter({ hasText: "Older long comment" });
     const latest = cards.filter({ hasText: "Newest long comment" });
     const editor = f.page.getByLabel("Comment", { exact: true });
     const ordered = async () => cards.evaluateAll(elements => elements.map(element => element.textContent));
-    const composerPosition = async () => {
-      const input = await editor.boundingBox(), first = await cards.first().boundingBox(), last = await cards.last().boundingBox();
-      return { before: input.y < first.y, after: input.y > last.y + last.height };
-    };
+    // The composer remains below the conversation for either comment order.
+    const composerPosition = async () => editor.evaluate(input => {
+      const messages = [...document.querySelectorAll('[data-slot="conversation-message"]')];
+      return { before: !!(input.compareDocumentPosition(messages[0]) & Node.DOCUMENT_POSITION_FOLLOWING),
+        after: !!(input.compareDocumentPosition(messages.at(-1)) & Node.DOCUMENT_POSITION_PRECEDING) };
+    });
     await expect(cards).toHaveCount(3);
-    await expect(cards.first()).toContainText("Newest long comment");
-    await expect(cards.last()).toContainText("Older long comment");
-    await expect.poll(async () => (await composerPosition()).before).toBe(true);
+    await expect(cards.first()).toContainText("Older long comment");
+    await expect(cards.last()).toContainText("Newest long comment");
+    await expect.poll(async () => (await composerPosition()).after).toBe(true);
+    // Your own messages are never shortened, whatever the preference; only agent replies are.
     const more = older.getByRole("button", { name: "Show more", exact: true });
-    await expect(more).toHaveAttribute("aria-expanded", "false");
-    await expect(older.locator('[data-slot="expandable-content-fade"]')).toBeVisible();
+    await expect(more).toHaveCount(0);
+    await expect(older.getByText("End of older comment", { exact: true })).toBeVisible();
     await expect(older.getByText("Approval detail remains visible.")).toBeVisible();
     await expect(older.getByRole("button", { name: "Approve", exact: true })).toBeVisible();
     await expect(latest.getByRole("button", { name: "Show more", exact: true })).toHaveCount(0);
     await expect(latest.getByText("End of newest comment", { exact: true })).toBeVisible();
-    await expect(cards.filter({ hasText: "Short middle comment" }).getByRole("button", { name: "Show more", exact: true })).toHaveCount(0);
-    const clippedHeight = (await older.boundingBox()).height;
-    await more.focus();
-    await more.press("Enter");
-    await expect(older.getByRole("button", { name: "Show less", exact: true })).toHaveAttribute("aria-expanded", "true");
-    await expect(older.getByText("End of older comment", { exact: true })).toBeVisible();
-    assert.ok((await older.boundingBox()).height > clippedHeight);
-    await older.getByRole("button", { name: "Show less", exact: true }).click();
-    await expect(more).toHaveAttribute("aria-expanded", "false");
     const storedComments = (await f.task(id)).comments.map(comment => comment.commentId);
     await f.page.goto(f.url + "#/settings?node=browser-task-board");
     const order = f.page.getByLabel("Comment order", { exact: true });
     const shorten = f.page.getByRole("checkbox", { name: "Shorten older comments", exact: true });
-    await expect(order).toHaveAttribute("data-value", "newest-first");
-    await expect(shorten).toBeChecked();
-    await choose(order, "oldest-first");
-    await shorten.click();
-    await f.page.reload();
     await expect(order).toHaveAttribute("data-value", "oldest-first");
     await expect(shorten).not.toBeChecked();
+    await choose(order, "newest-first");
+    await shorten.click();
+    const save = f.page.getByRole('button', { name: 'Save', exact: true });
+    await expect(save).toBeEnabled();
+    await save.click();
+    await f.page.reload();
+    await expect(order).toHaveAttribute("data-value", "newest-first");
+    await expect(shorten).toBeChecked();
+    await expect(save).toBeDisabled();
+    await shorten.click();
+    await expect(save).toBeEnabled();
+    await save.click();
+    await f.page.reload();
+    await expect(shorten).not.toBeChecked();
     await f.page.goto(f.url + route);
-    await expect(cards.first()).toContainText("Older long comment");
-    await expect(cards.last()).toContainText("Newest long comment");
+    await expect(cards.first()).toContainText("Newest long comment");
+    await expect(cards.last()).toContainText("Older long comment");
     await expect.poll(async () => (await composerPosition()).after).toBe(true);
     await expect(more).toHaveCount(0);
     await expect(older.getByText("End of older comment", { exact: true })).toBeVisible();
@@ -313,7 +357,7 @@ test("automatic native recovery stays in progress while user input stays blocked
   await expect.poll(async () => (await f.task(created.task.objectId)).claim?.run?.objectId, { timeout: 30000 }).toBeTruthy();
   const admitted = await f.task(created.task.objectId);
   const runId = admitted.claim?.run?.objectId;
-  assert.ok(runId, JSON.stringify({ state: admitted.workflowState, waiting: admitted.waiting }));
+  assert.ok(runId, JSON.stringify({ state: admitted.workflowState, runtimeWait: admitted.runtimeWait }));
   // Drive the following status changes explicitly after automatic admission.
   await runtime.stop();
   await runtime.native.drain(runId);
@@ -330,16 +374,17 @@ test("automatic native recovery stays in progress while user input stays blocked
     const progress = f.page.getByRole("region", { name: "In progress", exact: true });
     await expect(progress.getByRole("link", { name: /Recover the original execution/ })).toBeVisible();
     await expect(progress.getByText("Statusabgleich", { exact: true })).toBeVisible();
-    await expect(f.page.getByRole("region", { name: "Blocked", exact: true }).getByRole("link", { name: /Recover the original execution/ })).toHaveCount(0);
+    await expect(f.page.getByRole("region", { name: /^(Waiting|Wartend)$/, exact: true }).getByRole("link", { name: /Recover the original execution/ })).toHaveCount(0);
     assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   }
   thread.status = { type: "active", activeFlags: ["waitingOnUserInput"] };
   await runtime.native.step(runId);
-  await expect(f.page.getByRole("region", { name: "Blocked", exact: true }).getByRole("link", { name: /Recover the original execution/ })).toBeVisible();
-  await expect(f.page.getByRole("region", { name: "Blocked", exact: true }).getByText("Needs you", { exact: true })).toBeVisible();
+  await expect(f.page.getByRole("region", { name: /^(Waiting|Wartend)$/, exact: true }).locator('[data-waiting-group=user]').getByRole("link", { name: /Recover the original execution/ })).toBeVisible();
+  await expect(f.page.getByRole("region", { name: /^(Waiting|Wartend)$/, exact: true }).getByText("Needs you", { exact: true })).toHaveCount(0);
   const waiting = await f.task(created.task.objectId);
   assert.equal(waiting.workflowState, "waiting");
-  assert.equal(waiting.waiting.reason, "user");
+  assert.equal(waiting.claim.phase, "waiting_input");
+  assert.equal(waiting.runtimeWait, null);
   assert.equal(waiting.attemptCount, original.attemptCount);
   assert.deepEqual(waiting.primaryResourceRef, original.primaryResourceRef);
   for (const method of ["thread/start", "turn/start"]) assert.equal(f.current().sent.filter(frame => frame.method === method).length, 1);
@@ -351,7 +396,7 @@ test("task project names resolve on their host with desktop and mobile layouts",
   const created = await f.invoke({ action: "create", fields: { ...fields("Named project"), control: "agent",
     executionRequirement: { kind: "host", hostId: "isolated-agent-host" },
     workspaceRequirement: { kind: "existing_project", projectId: "fixture-project", path: null, useWorktree: false } } });
-  await f.open("#/tasks?id=" + created.task.objectId + "&node=browser-task-board");
+  await f.open("#/tasks?id=" + created.task.objectId + "&node=browser-task-board&tab=details");
   await expect(f.page.getByText("Isolated project", { exact: true })).toBeVisible();
   await expect(f.page.getByText("fixture-project", { exact: true })).toHaveCount(0);
   await f.page.getByRole("button", { name: "Edit task", exact: true }).click();
@@ -525,6 +570,8 @@ test(
     await f.page
       .getByRole("heading", { name: /TASK-[0-9]{4,} · Browser task lifecycle/ })
       .waitFor();
+    await expect(f.page.getByRole("tab", { name: "Chat", exact: true })).toHaveAttribute("aria-selected", "true");
+    await f.page.getByRole("tab", { name: "Details", exact: true }).click();
     await expect(
       f.page.getByRole("heading", { name: "Description", exact: true }),
     ).toBeVisible();
@@ -532,10 +579,7 @@ test(
       f.page.getByRole("complementary", { name: "Task details", exact: true }),
     ).toBeVisible();
     await expect(
-      f.page.getByRole("tab", { name: "Comments (0)", exact: true }),
-    ).toBeVisible();
-    await expect(
-      f.page.getByRole("tab", { name: "History", exact: true }),
+      f.page.getByRole("button", { name: "History", exact: true }),
     ).toBeVisible();
     const id = new URLSearchParams(
       new URL(f.page.url()).hash.split("?")[1],
@@ -553,10 +597,10 @@ test(
     await expect
       .poll(async () => (await f.task(id)).workflowState)
       .toBe("backlog");
-    await f.page.getByRole("tab", { name: "History", exact: true }).click();
+    await f.page.getByRole("button", { name: "History", exact: true }).click();
     await expect(f.page.getByText("created the task")).toBeVisible();
     await expect(f.page.getByRole("definition").filter({ hasText: /Todo.*Backlog/ })).toBeVisible();
-    await f.page.getByRole("tab", { name: /^Comments/ }).click();
+    await f.page.getByRole("tab", { name: "Chat", exact: true }).click();
     await f.page
       .getByRole("button", { name: "Move to Todo", exact: true })
       .click();
@@ -693,27 +737,24 @@ test(
     ).toHaveCount(0);
     await expect(
       f.page
-        .getByRole("region", { name: "Todo", exact: true })
+        .getByRole("region", { name: "Waiting", exact: true })
         .getByRole("heading", { name: "First category task", exact: true }),
     ).toBeVisible();
     const blocked = await f.invoke({
       action: "create",
-      fields: { ...fields("Blocked by the first task"), dependencies: [first.task.objectId] },
+      fields: fields("Blocked by the first task"),
+      wakeAt: null, dependencies: [first.task.objectId],
     });
     await f.page.getByRole("link", { name: /First category task/ }).first().click();
-    await f.page.getByRole("dialog").getByRole("link", { name: "Open full page" }).click();
-    await expect(f.page.getByRole("link", { name: "Back to board" })).toBeVisible();
+    await expect(f.page.getByRole("dialog", { name: "Task details", exact: true })).toBeVisible();
+    await expect(f.page.getByRole("button", { name: "Close", exact: true })).toBeVisible();
     await f.page.getByRole("button", { name: "Edit task", exact: true }).click();
-    const blockers = f.page.getByRole("combobox", { name: "Blockers", exact: true });
-    await blockers.fill("task");
-    await expect(f.page.getByRole("option", { name: /Second category task/ })).toBeVisible();
-    await expect(f.page.getByRole("option", { name: /Blocked by the first task/ })).toHaveCount(0);
-    await expect(f.page.getByRole("option", { name: /First category task/ })).toHaveCount(0);
-    await f.page.getByRole("option", { name: /Second category task/ }).click();
-    await f.page.keyboard.press("Escape");
+    await f.page.getByRole('combobox', { name: 'Watched tickets', exact: true }).click();
+    await f.page.getByRole('option', { name: /Second category task/ }).click();
+    await f.page.keyboard.press('Escape');
     await f.page.getByRole("button", { name: "Save changes", exact: true }).click();
     await expect
-      .poll(async () => (await f.task(first.task.objectId)).fields.dependencies)
+      .poll(async () => (await f.task(first.task.objectId)).dependencies)
       .toEqual([second.task.objectId]);
     assert.ok(blocked.task);
     assert.deepEqual(f.pageErrors, []);
@@ -722,7 +763,7 @@ test(
 );
 
 test(
-  "the backlog is ranked by hand through its menu and by dragging",
+  "the backlog and, when chosen, every other column are ranked by hand through the menu and by dragging",
   { timeout: 180000 },
   async (t) => {
     const f = await taskBoardFixture(t);
@@ -748,6 +789,26 @@ test(
     await expect.poll(order).toEqual(["Second ranked", "Third ranked", "First ranked"]);
     await f.page.reload();
     await expect.poll(order).toEqual(["Second ranked", "Third ranked", "First ranked"]);
+    // Other columns follow priority until manual order is chosen; the choice persists in this browser.
+    await f.invoke({ action: "create", workflowState: "todo", fields: { ...fields("Calm todo"), priority: 1 } });
+    await f.invoke({ action: "create", workflowState: "todo", fields: { ...fields("Urgent todo"), priority: 4 } });
+    const todo = f.page.getByRole("region", { name: "Waiting", exact: true });
+    const todoOrder = () => todo.locator("article h3").allTextContents().then((values) => values.map((value) => value.trim()));
+    await expect.poll(todoOrder).toEqual(["Urgent todo", "Calm todo"]);
+    await todo.getByRole("button", { name: "Order Waiting by priority", exact: true }).click();
+    await expect.poll(todoOrder).toEqual(["Calm todo", "Urgent todo"]);
+    await todo.getByRole("button", { name: "Actions for Urgent todo" }).click();
+    await f.page.getByRole("menuitem", { name: "Move to top", exact: true }).click();
+    await expect.poll(todoOrder).toEqual(["Urgent todo", "Calm todo"]);
+    await todo.getByRole("button", { name: "Actions for Calm todo" }).click();
+    await f.page.getByRole("menuitem", { name: "Move to top", exact: true }).click();
+    await expect.poll(todoOrder).toEqual(["Calm todo", "Urgent todo"]);
+    await f.page.reload();
+    await expect.poll(todoOrder).toEqual(["Calm todo", "Urgent todo"]);
+    await todo.getByRole("button", { name: "Order Waiting manually", exact: true }).click();
+    await expect.poll(todoOrder).toEqual(["Urgent todo", "Calm todo"]);
+    await backlog.locator('article').filter({ hasText: 'First ranked' }).dragTo(todo);
+    await expect(todo.locator('[data-waiting-group=todo]').getByRole('link', { name: 'First ranked', exact: true })).toBeVisible();
     assert.deepEqual(f.pageErrors, []);
     assert.deepEqual(f.externalRequests, []);
   },

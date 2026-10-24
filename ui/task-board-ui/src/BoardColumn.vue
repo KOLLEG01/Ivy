@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   Archive,
+  ArrowUpDown,
   Calendar,
   ChevronDown,
   ChevronsDown,
@@ -14,7 +15,7 @@ import {
   Tag,
   User,
 } from "@lucide/vue";
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import {
   Button,
   DropdownMenu,
@@ -27,14 +28,19 @@ import {
   StatusBadge,
 } from "@ivy/ui";
 import { usePage } from "../../../packages/ui-client/src/runtime";
-import { text } from "../../../packages/ui-client/src/native";
-import { and, base, client, rootWhere, taskContractVersions } from "./runtime";
+import { invalidateRuntimeCards, readCard } from './card-read';
+import { mapConcurrent } from '../../../packages/ui-client/src/concurrency';
+import { useCommentVisibility } from './comment-visibility';
+import { and, base, client, notifications, taskContractVersions, tr } from "./runtime";
 import type { TaskBoard } from "./runtime";
 import { taskFilter } from "./task-filter";
+import { prefetchTask } from './task-read';
 import {
   conditionLabel,
   conditionTone,
   noteworthyCondition,
+  waitingGroup,
+  waitingGroups,
   priorityLabel,
   shortDate,
   stateColors,
@@ -43,7 +49,6 @@ import {
   transitions,
 } from "./board";
 import type { BoardTransition, Placement, TransitionContext } from "./board";
-import { executionCondition } from "../../../services/task-board/src/runtime/condition";
 const props = defineProps<{
   workspace: TaskBoard.WorkspaceInfo;
   query: URLSearchParams;
@@ -54,6 +59,9 @@ const props = defineProps<{
   pendingTaskId?: string | null;
   archiveDisabled?: boolean;
   swimlane: string;
+  lanes?: string[];
+  collapsedLanes?: string[];
+  gridColumn?: number;
   layout?: "column" | "list";
   /** Lists archived Tasks of every state instead of one workflow column. */
   archived?: boolean;
@@ -65,193 +73,82 @@ const emit = defineEmits<{
   archive: [id: string];
   archiveAll: [];
 }>();
-// The backlog is ranked by hand; every other column follows priority.
-const ranked = computed(
-  () => props.column.id === "backlog" && !props.archived && props.workspace.role === "user",
-);
+// Each column is ordered by hand (the Hive sibling position) or by priority; the backlog starts
+// manual, the others by priority. The choice is remembered per browser and column.
+const orderKey = "ivy.task-board.order:" + base.href + ":" + props.column.id;
+const order = ref<"manual" | "priority">("priority");
+try {
+  const stored = localStorage.getItem(orderKey);
+  order.value = stored === "manual" || stored === "priority" ? stored : props.column.id === "backlog" ? "manual" : "priority";
+} catch {
+  order.value = props.column.id === "backlog" ? "manual" : "priority";
+}
+const toggleOrder = () => {
+  order.value = order.value === "manual" ? "priority" : "manual";
+  try {
+    localStorage.setItem(orderKey, order.value);
+  } catch {
+    /* Optional view state. */
+  }
+  pages.reset();
+};
+const manual = computed(() => !props.archived && order.value === "manual");
+const ranked = computed(() => manual.value && props.workspace.role === "user");
+const showCrossAgent = useCommentVisibility();
+const serviceScope = (node: string) => 'services/task-board/' + node;
+watch(() => props.workspace.serviceNodeId, (node, _previous, cleanup) => {
+  cleanup(notifications.subscribeChanges([serviceScope(node)], () => invalidateRuntimeCards(node)));
+}, { immediate: true });
 const pages = usePage(async (signal, cursor) => {
-    const result = await client.request(
-      "objects.query",
-      {
-        contractKey: "task-board/task",
-        contractVersions: taskContractVersions,
-        where: and(
-          taskFilter(props.workspace.rootObjectId, props.query),
-          props.archived
-            ? { op: "eq", field: "object.effectivelyArchived", value: true }
-            : { op: "in", field: "data:/workflowState", value: props.column.states },
-        ),
-        ...(props.archived ? { includeArchived: true } : {}),
-        select: [
-          "data:/taskKey",
-          "data:/fields/title",
-          "data:/fields/category",
-          "data:/fields/control",
-          "data:/fields/priority",
-          "data:/fields/executionRequirement/kind",
-          "data:/fields/executionRequirement/hostId",
-          "data:/fields/nextReviewAt",
-          "data:/fields/dueAt",
-          "data:/workflowState",
-          "data:/waiting/reason",
-          "data:/waiting/detail",
-          "data:/claim/phase",
-          "data:/claim/target/hostId",
-          "data:/publication",
-          "data:/latestResult",
-          "data:/agentCommentCount",
-        ],
-        orderBy: props.archived
-          ? [
-              { field: "object.updatedAt", direction: "desc" },
-              { field: "object.id", direction: "asc" },
-            ]
-          : props.column.id === "backlog"
-            ? [
-                ...(props.swimlane === "category"
-                  ? [{ field: "data:/fields/category", direction: "asc" as const }]
-                  : []),
-                { field: "object.position", direction: "asc" },
-                { field: "object.id", direction: "asc" },
-              ]
-          : props.swimlane === "category"
-            ? [
-                { field: "data:/fields/category", direction: "asc" },
-                { field: "data:/fields/priority", direction: "desc" },
-                { field: "object.id", direction: "asc" },
-              ]
-            : [
-                { field: "data:/fields/priority", direction: "desc" },
-                { field: "object.createdAt", direction: "desc" },
-                { field: "object.id", direction: "asc" },
-              ],
-        limit: 20,
-        ...(cursor ? { cursor } : {}),
-      },
-      { signal },
-    );
-    const ids = result.items.map((item) => item.objectId),
-      readCounts = new Map<string, number>();
-    if (ids.length) {
-      const reads = await client.request(
-        "objects.query",
-        {
-          contractKey: "task-board/comment-read-state",
-          contractVersions: ["1.0.0"],
-          where: and(
-            rootWhere(props.workspace.rootObjectId),
-            {
-              op: "eq",
-              field: "data:/principalId",
-              value: props.workspace.callerPrincipalId,
-            },
-            { op: "in", field: "data:/taskId", value: ids },
-          ),
-          select: ["data:/taskId", "data:/readAgentCommentCount"],
-          limit: 100,
-        },
-        { signal },
-      );
-      for (const item of reads.items)
-        readCounts.set(
-          text(item.values["data:/taskId"]),
-          Number(item.values["data:/readAgentCommentCount"] ?? 0),
-        );
-    }
+  const waiting = props.column.id === 'waiting' && !props.archived;
+  const complete = waiting || props.swimlane === 'category';
+  const load = (cursor: string | null) => client.request('objects.query', {
+    contractKey: 'task-board/task', contractVersions: taskContractVersions,
+    where: and(taskFilter(props.workspace.rootObjectId, props.query), props.archived
+      ? { op: 'eq', field: 'object.effectivelyArchived', value: true }
+      : { op: 'in', field: 'data:/workflowState', value: props.column.states }),
+    ...(props.archived ? { includeArchived: true } : {}),
+    select: ['data:/taskKey'],
+    orderBy: props.archived ? [{ field: 'object.updatedAt', direction: 'desc' }, { field: 'object.id', direction: 'asc' }]
+      : [...(props.swimlane === 'category' ? [{ field: 'data:/fields/category', direction: 'asc' as const }] : []),
+        ...(manual.value ? [{ field: 'object.position', direction: 'asc' as const }]
+          : [{ field: 'data:/fields/priority', direction: 'desc' as const }, { field: 'object.createdAt', direction: 'desc' as const }])],
+    // Hive always breaks sort ties by object ID; an explicit fourth field exceeds the query contract.
+    limit: complete ? 200 : 20, ...(cursor ? { cursor } : {}),
+  }, { signal });
+  const result = await load(cursor ?? null);
+  // Fetch the entire Waiting lane so a lower-priority User wait never hides behind another group's page.
+  const cursors = new Set<string>();
+  while (complete && result.nextCursor) {
+    if (cursors.has(result.nextCursor)) throw new Error('Waiting groups could not finish. Refresh the board.');
+    cursors.add(result.nextCursor);
+    const page = await load(result.nextCursor);
+    result.items.push(...page.items); result.nextCursor = page.nextCursor;
+  }
+  const items = await mapConcurrent(result.items, async item => {
+    const view = await readCard(props.workspace.serviceNodeId, item.objectId, item.revision, signal);
+    const task = view.task, fields = task.fields;
     return {
-      nextCursor: result.nextCursor,
-      items: result.items.map((item) => {
-        const workflowState = text(
-            item.values["data:/workflowState"],
-          ) as TaskBoard.Task["workflowState"],
-          waiting = text(item.values["data:/waiting/reason"]);
-        const waitingDetail = text(item.values["data:/waiting/detail"]),
-          claimPhase = text(item.values["data:/claim/phase"]),
-          resolvedHost = text(item.values["data:/claim/target/hostId"]);
-        const requirementKind = text(
-          item.values["data:/fields/executionRequirement/kind"],
-        );
-        const requestedEnvironment =
-          requirementKind === "host"
-            ? text(item.values["data:/fields/executionRequirement/hostId"])
-            : "";
-        const requirement =
-          requirementKind === "host"
-            ? { kind: "host" as const, hostId: requestedEnvironment }
-            : null;
-        const derived = executionCondition({
-          workflowState,
-          control: text(
-            item.values["data:/fields/control"],
-          ) as TaskBoard.TaskFields["control"],
-          publication: !!item.values["data:/publication"],
-          claim: claimPhase
-            ? {
-                phase: claimPhase as TaskBoard.Claim["phase"],
-                hostId: resolvedHost,
-              }
-            : null,
-          waiting: waiting
-            ? {
-                reason: waiting as TaskBoard.Waiting["reason"],
-                detail: waitingDetail,
-              }
-            : null,
-          executionRequirement: requirement,
-        });
-        return {
-          id: item.objectId,
-          taskKey: text(item.values["data:/taskKey"]),
-          title: text(item.values["data:/fields/title"]),
-          category: text(item.values["data:/fields/category"]),
-          priority: item.values["data:/fields/priority"],
-          control: text(
-            item.values["data:/fields/control"],
-          ) as TaskBoard.TaskFields["control"],
-          requestedEnvironment,
-          resolvedHost,
-          condition: derived.state,
-          conditionDetail: derived.detail,
-          nextReviewAt: text(item.values["data:/fields/nextReviewAt"]),
-          dueAt: text(item.values["data:/fields/dueAt"]),
-          unreadAgentComments: Math.max(
-            0,
-            Number(item.values["data:/agentCommentCount"] ?? 0) -
-              (readCounts.get(item.objectId) ?? 0),
-          ),
-          context: {
-            workflowState,
-            control: text(
-              item.values["data:/fields/control"],
-            ) as TaskBoard.TaskFields["control"],
-            claimed: !!claimPhase,
-            waiting,
-            hasResult: !!item.values["data:/latestResult"],
-            publishing: !!item.values["data:/publication"],
-          },
-        };
-      }),
+      id: item.objectId, taskKey: task.taskKey, title: fields.title, category: fields.category ?? '',
+      priority: fields.priority, control: fields.control,
+      requestedEnvironment: fields.executionRequirement?.kind === 'host' ? fields.executionRequirement.hostId : '',
+      resolvedHost: task.claim?.target.hostId ?? '', condition: view.executionCondition.state,
+      conditionDetail: view.executionCondition.detail, openQuestionCount: task.openQuestionCount ?? 0,
+      nextReviewAt: task.wakeAt ?? '', dueAt: fields.dueAt ?? '',
+      commentCount: view.commentCount, directCommentCount: view.directCommentCount,
+      group: waiting ? waitingGroup(task, view.executionCondition) : '',
+      context: { workflowState: task.workflowState, control: fields.control, claimed: !!task.claim,
+        waiting: task.runtimeWait?.reason ?? '', hasResult: !!task.latestResult, publishing: !!task.publication },
     };
-  }, 15000, () =>
-    "ivy.task-board.column:" +
-    base.href +
-    ":" +
-    props.workspace.serviceNodeId +
-    ":" +
-    props.workspace.callerPrincipalId +
-    ":" +
-    props.column.id +
-    ":" +
-    !!props.archived +
-    ":" +
-    props.swimlane +
-    ":" +
-    JSON.stringify(
-      ["q", "status", "control", "host", "category", "project"].map((key) =>
-        props.query.get(key),
-      ),
-    ), ["objects/task-board/task"]);
-type Item = { id: string; category: string; context: TransitionContext };
+  }, signal);
+  if (waiting) items.sort((a, b) => waitingGroups.findIndex(group => group.id === a.group) - waitingGroups.findIndex(group => group.id === b.group));
+  return { nextCursor: result.nextCursor, items };
+}, 15000, () => 'ivy.task-board.column:' + JSON.stringify([base.href, order.value, props.workspace.serviceNodeId,
+  props.workspace.callerPrincipalId, props.column.id, !!props.archived, props.swimlane,
+  ['q', 'status', 'control', 'host', 'category', 'project'].map(key => props.query.get(key))]),
+  () => ['objects/task-board/task', serviceScope(props.workspace.serviceNodeId)]);
+
+type Item = { id: string; category: string; group: string; context: TransitionContext };
 const dragging = ref<Item | null>(null),
   marker = ref<{ id: string; after: boolean } | null>(null);
 const startDrag = (event: DragEvent, item: Item) => {
@@ -270,10 +167,20 @@ const endDrag = () => {
   emit("drag", null);
 };
 const lane = (category: string) => category || "Uncategorized";
-const items = computed(() => (pages.value.value?.items ?? []) as Item[]);
+const items = computed(() => (pages.value.value?.items ?? []).map(item => ({ ...item,
+  commentCount: showCrossAgent.value ? item.commentCount : item.directCommentCount,
+})));
+const sections = computed(() => (props.lanes ?? (props.swimlane === 'category' && !props.archived
+  ? [...new Set(items.value.map(item => lane(item.category)))] : [''])).map(id => {
+  const values = props.swimlane === 'category' && !props.archived ? items.value.filter(item => lane(item.category) === id) : items.value;
+  const groups = props.column.id === 'waiting' && !props.archived
+    ? waitingGroups.map(group => ({ ...group, items: values.filter(item => item.group === group.id) })).filter(group => group.items.length > 0)
+    : [{ id: '', title: '', items: values }];
+  return { id, groups, count: values.length };
+}));
 // Neighbours within the same swimlane, so ranking never jumps across categories.
 const sameLane = (a: Item, b: Item | undefined) =>
-  !!b && (props.swimlane !== "category" || lane(a.category) === lane(b.category));
+  !!b && a.group === b.group && (props.swimlane !== "category" || lane(a.category) === lane(b.category));
 const previous = (index: number) =>
   sameLane(items.value[index]!, items.value[index - 1]) ? items.value[index - 1] : undefined;
 const next = (index: number) =>
@@ -314,8 +221,9 @@ defineExpose({ refresh: pages.refresh });
   <section
     :aria-label="column.title"
     class="board-column min-w-0"
-    :class="layout === 'list' ? '' : 'flex flex-col rounded-xl bg-muted/50 p-2'"
+    :class="lanes ? 'board-column-grid' : layout === 'list' ? '' : 'flex flex-col rounded-xl bg-muted/50 p-2'"
   >
+    <div class="board-column-header" :style="lanes ? { gridColumn, gridRow: 1 } : undefined">
     <h2
       v-if="!archived"
       class="flex items-center gap-2 px-1.5 text-sm font-medium"
@@ -333,9 +241,18 @@ defineExpose({ refresh: pages.refresh });
         :aria-label="count === null ? 'Counting tasks' : count + ' total tasks'"
       >{{ count ?? "…" }}</span
       >
+      <Button
+        variant="ghost"
+        size="sm"
+        class="ml-auto h-7 gap-1 px-2 text-xs font-normal text-muted-foreground"
+        :aria-label="'Order ' + column.title + (order === 'manual' ? ' manually' : ' by priority')"
+        :aria-pressed="order === 'manual'"
+        @click="toggleOrder"
+        ><ArrowUpDown aria-hidden="true" />{{ order === "manual" ? "Manual" : "Priority" }}</Button
+      >
       <DropdownMenu v-if="column.id === 'done' && workspace.role === 'user'">
         <DropdownMenuTrigger as-child>
-          <Button variant="ghost" size="icon-sm" class="ml-auto" aria-label="Done actions" :disabled="disabled || archiveDisabled">
+          <Button variant="ghost" size="icon-sm" aria-label="Done actions" :disabled="disabled || archiveDisabled">
             <MoreHorizontal aria-hidden="true" />
           </Button>
         </DropdownMenuTrigger>
@@ -348,43 +265,46 @@ defineExpose({ refresh: pages.refresh });
     </h2>
     <slot name="feedback" />
     <RemoteState
+      v-if="!lanes"
       :loading="pages.loading.value"
       :error="pages.error.value"
       :has-data="!!pages.value.value"
       @retry="pages.refresh"
     />
     <Button
-      v-if="pages.error.value && pages.page.value > 1"
+      v-if="!lanes && pages.error.value && pages.page.value > 1"
       variant="ghost"
       size="sm"
       @click="pages.reset"
       >Restart from first page</Button
     >
+    </div>
     <div
+      v-for="(section, sectionIndex) in sections" :key="section.id"
+      v-show="!collapsedLanes?.includes(section.id)"
+      :data-board-cell="lanes ? section.id : undefined"
+      :style="lanes ? { gridColumn, gridRow: 3 + sectionIndex * 2 } : undefined"
       :class="
         layout === 'list'
-          ? 'overflow-hidden rounded-lg border bg-card'
-          : 'flex flex-col gap-2'
+          ? 'overflow-hidden rounded-lg border bg-card mb-3'
+          : 'board-cell flex min-w-0 flex-col gap-2 rounded-lg bg-muted/50 p-2'
       "
     >
-      <template
-        v-for="(task, index) in pages.value.value?.items ?? []"
-        :key="task.id"
-        ><h3
-          v-if="
-            swimlane === 'category' &&
-            !archived &&
-            (index === 0 ||
-              lane(task.category) !==
-                lane(pages.value.value!.items[index - 1]!.category))
-          "
-          class="px-1.5 pt-2 text-xs font-medium text-muted-foreground"
-          :class="{ 'border-b bg-muted/40 px-3 py-1.5': layout === 'list' }"
+      <RemoteState v-if="lanes && sectionIndex === 0" :loading="pages.loading.value" :error="pages.error.value" :has-data="!!pages.value.value" @retry="pages.refresh" />
+      <Button v-if="lanes && sectionIndex === 0 && pages.error.value && pages.page.value > 1" variant="ghost" size="sm" @click="pages.reset">Restart from first page</Button>
+      <h3 v-if="swimlane === 'category' && !lanes && !archived" class="border-b bg-muted/40 px-3 py-1.5 text-xs font-medium text-muted-foreground">{{ section.id }}</h3>
+      <section v-for="group in section.groups" :key="group.id" :aria-label="group.title || undefined"
+        :data-waiting-group="group.id || undefined" class="flex flex-col gap-2"
         >
-          {{ lane(task.category) }}
-        </h3>
+      <h3 v-if="group.title" class="px-1.5 pt-2 text-xs font-semibold text-muted-foreground">{{ group.title }} <span class="font-normal">{{ group.items.length }}</span></h3>
+      <template
+        v-for="task in group.items"
+        :key="task.id"
+        >
         <article
           class="task-item group relative min-w-0"
+          :data-attention="task.condition === 'failed' ? 'error' : task.openQuestionCount ? 'question' : undefined"
+          :data-needs-user="task.openQuestionCount > 0 || task.condition === 'needs_user' || task.condition === 'failed' || task.context.workflowState === 'review' || (task.control === 'user' && ['todo', 'waiting', 'in_progress'].includes(task.context.workflowState)) || undefined"
           :class="[
             layout === 'list'
               ? 'flex items-center gap-3 border-b px-3 py-2 last:border-b-0 hover:bg-muted/50'
@@ -405,6 +325,9 @@ defineExpose({ refresh: pages.refresh });
           >
           <a
             :href="href(task.id)"
+            @pointerenter="prefetchTask(workspace.serviceNodeId, task.id)"
+            @focus="prefetchTask(workspace.serviceNodeId, task.id)"
+            @pointerdown="prefetchTask(workspace.serviceNodeId, task.id)"
             class="min-w-0 flex-1 rounded-sm outline-none after:absolute after:inset-0 focus-visible:after:rounded-lg focus-visible:after:ring-3 focus-visible:after:ring-ring/50"
             ><h3
               class="text-sm font-medium leading-snug"
@@ -466,21 +389,17 @@ defineExpose({ refresh: pages.refresh });
             <span
               v-if="task.nextReviewAt"
               class="inline-flex items-center gap-1"
-              :title="'Review ' + new Date(task.nextReviewAt).toLocaleString()"
+              :title="'Next check ' + new Date(task.nextReviewAt).toLocaleString()"
               ><Clock class="size-3.5" aria-hidden="true" />{{
-                shortDate(task.nextReviewAt)
+                new Date(task.nextReviewAt).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
               }}</span
             >
             <span
-              v-if="task.unreadAgentComments"
-              class="inline-flex items-center gap-1 font-medium text-foreground"
-              :aria-label="
-                task.unreadAgentComments +
-                ' unread agent comment' +
-                (task.unreadAgentComments === 1 ? '' : 's')
-              "
+              v-if="task.commentCount"
+              class="inline-flex items-center gap-1"
+              :title="task.commentCount + ' comments'"
               ><MessageSquare class="size-3.5" aria-hidden="true" />{{
-                task.unreadAgentComments
+                task.commentCount
               }}</span
             >
             <span
@@ -498,13 +417,14 @@ defineExpose({ refresh: pages.refresh });
             >
           </div>
           <StatusBadge
-            v-if="noteworthyCondition(task.condition)"
+            v-if="noteworthyCondition(task.condition) && !['blocked_dependency', 'blocked_environment', 'needs_user', 'deferred'].includes(task.condition)"
             class="relative"
             :class="layout === 'list' ? 'shrink-0' : 'mt-2'"
             :label="conditionLabel(task.condition)"
             :tone="conditionTone(task.condition)"
             :title="task.conditionDetail"
           />
+          <StatusBadge v-if="task.openQuestionCount" :label="task.openQuestionCount + ' ' + tr('offene Frage(n)', 'open question(s)')" tone="warning" />
           <DropdownMenu
             ><DropdownMenuTrigger as-child
               ><Button
@@ -525,22 +445,22 @@ defineExpose({ refresh: pages.refresh });
                 >{{ item.label }}</DropdownMenuItem
               ><template v-if="ranked"
                 ><DropdownMenuSeparator /><DropdownMenuItem
-                  v-if="previous(index) || pages.page.value > 1"
+                  v-if="previous(items.indexOf(task)) || pages.page.value > 1"
                   :disabled="taskDisabled(task.id)"
-                  @select="emit('reorder', task.id, { top: true })"
+                  @select="emit('reorder', task.id, { top: column.states })"
                   >Move to top</DropdownMenuItem
                 ><DropdownMenuItem
-                  v-if="previous(index)"
+                  v-if="previous(items.indexOf(task))"
                   :disabled="taskDisabled(task.id)"
-                  @select="emit('reorder', task.id, { before: previous(index)!.id })"
+                  @select="emit('reorder', task.id, { before: previous(items.indexOf(task))!.id })"
                   >Move up</DropdownMenuItem
                 ><DropdownMenuItem
-                  v-if="next(index)"
+                  v-if="next(items.indexOf(task))"
                   :disabled="taskDisabled(task.id)"
-                  @select="emit('reorder', task.id, { after: next(index)!.id })"
+                  @select="emit('reorder', task.id, { after: next(items.indexOf(task))!.id })"
                   >Move down</DropdownMenuItem
                 ><DropdownMenuItem
-                  v-if="moreBelow(index)"
+                  v-if="moreBelow(items.indexOf(task))"
                   :disabled="taskDisabled(task.id)"
                   @select="emit('reorder', task.id, { before: null })"
                   >Move to bottom</DropdownMenuItem
@@ -555,8 +475,9 @@ defineExpose({ refresh: pages.refresh });
           >
         </article></template
       >
+      </section>
       <p
-        v-if="pages.value.value?.items.length === 0"
+        v-if="pages.value.value && section.count === 0"
         class="px-3 py-6 text-center text-xs text-muted-foreground"
       >
         No tasks
@@ -568,12 +489,16 @@ defineExpose({ refresh: pages.refresh });
       :page="pages.page.value"
       :has-next="!!pages.value.value?.nextCursor"
       :loading="pages.loading.value"
+      :style="lanes ? { gridColumn, gridRow: 2 + lanes.length * 2 } : undefined"
       @next="pages.next"
       @previous="pages.previous"
     />
   </section>
 </template>
 <style scoped>
+.board-column-grid { display: contents; }
+.board-column-header { min-width: 0; }
+.board-cell { min-height: 5rem; }
 .task-actions {
   opacity: 0;
 }

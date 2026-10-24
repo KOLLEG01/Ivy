@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, useSlots, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, useSlots, watch } from "vue";
 import { useElementSize, useMediaQuery } from "@vueuse/core";
 import type { Component } from "vue";
 import {
@@ -74,6 +74,8 @@ const props = defineProps<{
   navigation: ShellNavigationItem[];
   connection: string;
   connectionTone?: "good" | "bad" | "warning" | "neutral";
+  /** Embedded in another Ivy UI: only the page, without rail, navigation or top bar. */
+  embedded?: boolean;
 }>();
 const rail = computed(() => [
   ...(props.apps ?? []).map((app) => ({
@@ -144,7 +146,15 @@ watch(sidebarOpen, (open) => {
     /* Optional view state. */
   }
 });
+// Follow theme changes made in other documents of this origin, including an embedding UI.
+const followTheme = (event: StorageEvent) => {
+  if (event.key !== "ivy.theme" || !event.newValue) return;
+  dark.value = event.newValue === "dark";
+  applyTheme();
+};
+onBeforeUnmount(() => removeEventListener("storage", followTheme));
 onMounted(() => {
+  addEventListener("storage", followTheme);
   try {
     const value = localStorage.getItem("ivy.theme");
     dark.value = value
@@ -157,6 +167,17 @@ onMounted(() => {
 });
 </script>
 <template>
+  <div
+    v-if="embedded"
+    :data-ui="uiName"
+    :data-layout="layout ?? 'default'"
+    class="ivy-shell ivy-embedded"
+  >
+    <!-- Page titles and actions still teleport here, but stay hidden: the embedding UI owns them. -->
+    <div hidden><div id="ivy-toolbar-start" /><div id="ivy-toolbar-end" /></div>
+    <div id="main-content" tabindex="-1" class="ivy-main"><slot /></div>
+  </div>
+  <template v-else>
   <a
     href="#main-content"
     class="sr-only z-[100] rounded-md bg-primary p-3 text-primary-foreground focus:not-sr-only focus:fixed focus:left-4 focus:top-4"
@@ -168,6 +189,8 @@ onMounted(() => {
     v-model:open="sidebarOpen"
     :style="{
       '--ivy-install-banner-height': installBannerHeight + 'px',
+      '--ivy-content-top': 'calc(var(--ivy-mobile-app-bar-height, 0px) + 3rem)',
+      '--ivy-sidebar-offset': sidebarOpen && panel ? 'calc(16rem + var(--sidebar-width-icon) + 1px)' : 'calc(var(--sidebar-width-icon) + 1px)',
       '--sidebar-width': panel
         ? 'calc(16rem + var(--sidebar-width-icon) + 1px)'
         : 'calc(var(--sidebar-width-icon) + 1px)',
@@ -325,8 +348,16 @@ onMounted(() => {
       </div>
     </Sidebar>
     <SidebarInset class="min-w-0">
+      <nav aria-label="Apps" class="ivy-mobile-apps md:hidden">
+        <a :href="homeUrl" aria-label="Ivy home" class="flex h-10 min-w-8 flex-1 items-center justify-center rounded-md"><IvyMark class="size-5" /></a>
+        <a v-for="item in rail" :key="item.id" :href="item.href" :aria-label="item.name" :title="item.name"
+          :aria-current="item.active ? 'page' : undefined"
+          class="flex h-10 min-w-8 flex-1 items-center justify-center rounded-md text-muted-foreground hover:bg-accent"
+          :class="{ 'bg-accent text-accent-foreground': item.active }"><component :is="item.icon" class="size-5" aria-hidden="true" /></a>
+        <Button variant="ghost" size="icon-sm" class="ml-auto shrink-0" aria-label="Account and navigation" @click="setOpenMobile(true)"><CircleUser aria-hidden="true" /></Button>
+      </nav>
       <header class="ivy-toolbar">
-        <ShellTrigger :class="{ 'md:hidden': !panel }">
+        <ShellTrigger v-if="panel">
           <PanelLeft aria-hidden="true" />
         </ShellTrigger>
         <a
@@ -342,6 +373,7 @@ onMounted(() => {
         >
           <slot name="context" />
         </div>
+        <slot name="status" />
         <div id="ivy-toolbar-end" class="flex shrink-0 items-center gap-1">
           <StatusBadge
             v-if="connectionTone === 'bad' || connectionTone === 'warning'"
@@ -367,4 +399,5 @@ onMounted(() => {
     </SidebarInset>
   </SidebarProvider>
   <BrowserAppDialog v-if="browserApp" v-model:open="browserAppOpen" :app="browserApp" />
+  </template>
 </template>

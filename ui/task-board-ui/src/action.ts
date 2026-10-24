@@ -1,4 +1,4 @@
-import { computed, ref } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import type { Ref } from 'vue';
 import { discover, IvyError, newOperationId } from '../../../packages/sdk/src/client.js';
 import type { TaskBoard, Wire } from './runtime';
@@ -28,10 +28,8 @@ export function useAction(workspace: () => TaskBoard.WorkspaceInfo, scope: strin
   };
   const readOperation = async () => {
     if (!saved.value) throw new Error('The original action is unavailable.');
-    const operation = await nativeRead(client, workspace().serviceNodeId, 'task-board.operation', { operationId: saved.value.call.operationId! }) as TaskBoard.Operation;
-    const matches = operation.request.action === 'savePlan'
-      ? operation.request.draftHash === await hashJson(saved.value.call.arguments)
-      : canonical(operation.request) === canonical(saved.value.call.arguments);
+    const operation = await nativeRead(client, workspace().serviceNodeId, 'task-board.operation', { operationId: saved.value.call.operationId! }) as TaskBoard.OperationReceipt;
+    const matches = (operation.submittedHash ?? operation.requestHash) === await hashJson(saved.value.call.arguments);
     if (operation.callerPrincipalId !== saved.value.callerPrincipalId || operation.operationId !== saved.value.call.operationId || !matches) throw new Error('The operation differs from the retained caller or original request.');
     return operation;
   };
@@ -40,7 +38,8 @@ export function useAction(workspace: () => TaskBoard.WorkspaceInfo, scope: strin
     const replay = saved.value.phase !== 'prepared';
     busy.value = true; error.value = null;
     try {
-      await checkCurrentIdentity();
+      // expectedWorkspace binds caller and owner in the mutation itself. A separate
+      // read here could time out before dispatch and leave a phantom unknown action.
       saved.value.phase = 'unknown'; saved.value.detail = 'Waiting for the original workflow operation.'; persist();
       let value = await client.request('tools.call', saved.value.call) as TaskBoard.ActionOutcome;
       // Archive returns Object metadata; its workflow receipt is retained under the same operation.
@@ -74,6 +73,7 @@ export function useAction(workspace: () => TaskBoard.WorkspaceInfo, scope: strin
   const reconcile = async () => {
     if (!saved.value || busy.value || !identityMatches()) return;
     busy.value = true; error.value = null;
+    let resumeOriginal = false;
     try {
       await checkCurrentIdentity();
       if (saved.value.call.qualifiedName === 'task-board.archive') {
@@ -88,12 +88,37 @@ export function useAction(workspace: () => TaskBoard.WorkspaceInfo, scope: strin
         }
         return;
       }
-      const operation = await readOperation();
+      let operation: TaskBoard.OperationReceipt;
+      try { operation = await readOperation(); }
+      catch (cause) {
+        if (!(cause instanceof IvyError) || cause.code !== 'not_found') throw cause;
+        // Absence is not proof of non-execution. Resubmit the exact retained call:
+        // TaskBoard deduplicates its caller/operation identity, including late arrivals.
+        resumeOriginal = true;
+        return;
+      }
       saved.value.phase = operation.phase === 'succeeded' ? 'succeeded' : operation.phase === 'failed' ? 'failed' : 'pending';
       saved.value.outcome = operation.outcome; saved.value.detail = operation.error?.message ?? 'Original operation: ' + operation.phase + '.'; persist();
-    } catch (cause) { error.value = cause instanceof Error ? cause.message : 'The original outcome is unavailable.'; }
-    finally { busy.value = false; }
+    } catch (cause) {
+      if (cause instanceof IvyError && cause.code === 'operation_expired') {
+        // The owner only retires terminal operations. A released receipt cannot
+        // be replayed, but must not keep unrelated new comments locked forever.
+        saved.value.phase = 'failed';
+        saved.value.detail = 'The original action has finished and its receipt was released. Check the task before repeating it.';
+        try { persist(); } catch (problem) { error.value = String(problem); }
+      } else error.value = cause instanceof Error ? cause.message : 'The original outcome is unavailable.';
+    }
+    finally { busy.value = false; if (resumeOriginal) await execute(); }
   };
+  // A lost HTTP reply must not leave this tab locked after the owner finishes.
+  // Observe the original identity and resume its exact request if it has no receipt.
+  let reconciliation: ReturnType<typeof setTimeout> | undefined;
+  watch([() => saved.value?.phase, busy], ([phase, running]) => {
+    if (reconciliation) clearTimeout(reconciliation);
+    if (!running && (phase === 'unknown' || phase === 'pending') && identityMatches() && !storageError.value)
+      reconciliation = setTimeout(() => { void reconcile(); }, 5000);
+  }, { immediate: true });
+  onBeforeUnmount(() => { if (reconciliation) clearTimeout(reconciliation); });
   const canRetryPreparation = computed(() => !!error.value && !storageError.value && !busy.value && (!saved.value || ['succeeded', 'failed'].includes(saved.value.phase)));
   const canDismiss = computed(() => !busy.value && !storageError.value && identityMatches() && !!saved.value && ['succeeded', 'failed'].includes(saved.value.phase));
   const dismiss = () => {
