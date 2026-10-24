@@ -24,15 +24,6 @@ fn number(value: &Json, key: &str) -> IvyResult<f64> {
 fn equal(value: &Json, key: &str, want: &str) -> bool {
     value.get(key).and_then(Json::as_js_string) == Some(&want.into())
 }
-fn truthy(value: &Json) -> bool {
-    match value {
-        Json::Null => false,
-        Json::Bool(v) => *v,
-        Json::Number(v) => *v != 0.0 && !v.is_nan(),
-        Json::String(v) => !v.0.is_empty(),
-        _ => true,
-    }
-}
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
         Ok(())
@@ -85,7 +76,11 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
         if ["completed", "failed", "cancelled"]
             .iter()
             .any(|phase| equal(&run.value, "phase", phase))
-            || !truthy(field(&run.value, "turnId"))
+            || !run
+                .value
+                .get("turnId")
+                .and_then(Json::as_js_string)
+                .is_some_and(|turn| !turn.0.is_empty())
         {
             self.forget(run_id);
             return Ok(None);
@@ -190,8 +185,7 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
             }
             inputs.push((hash_json(identity)?, selected));
         }
-        // Hashes contain only a fixed prefix and lowercase ASCII hex. Their
-        // localeCompare order is the same as ordinal order for that alphabet.
+        // Hash identities use a fixed prefix and lowercase ASCII hex.
         inputs.sort_by(|a, b| a.0.cmp(&b.0));
         require(
             inputs.windows(2).all(|pair| pair[0].0 != pair[1].0),
@@ -285,10 +279,9 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
             ("notificationCursor", Json::Number(through)),
             (
                 "notificationGap",
-                (saved
-                    .as_ref()
-                    .is_some_and(|saved| truthy(field(&saved.value, "notificationGap")))
-                    || epoch_changed
+                (saved.as_ref().is_some_and(|saved| {
+                    field(&saved.value, "notificationGap").as_bool() == Some(true)
+                }) || epoch_changed
                     || gap)
                     .into(),
             ),

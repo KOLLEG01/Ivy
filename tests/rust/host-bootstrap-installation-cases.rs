@@ -3,7 +3,11 @@ use crate::{
     IvyJson as J, artifact, bootstrap, config, executor_lock::ExecutorLock, host_config,
     journal::HostJournal, node_path, node_runtime::NodeRuntime,
 };
-use ivy_contracts::{core_schema::validate_host, hash::digest, json};
+use ivy_contracts::{
+    core_schema::validate_host,
+    hash::{digest, hash_json},
+    json,
+};
 use ivy_sdk::clock::SystemClock;
 use std::{fs, path::PathBuf, sync::Arc};
 
@@ -1743,6 +1747,125 @@ mod phases {
     }
 }
 
+async fn native_bootstrap_paths_and_retained_authority(f: &Fixture) {
+    let name = std::ffi::OsString::from("native-state-中-🚀");
+    #[cfg(windows)]
+    let name = {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let mut units: Vec<_> = name.encode_wide().collect();
+        units.push(0xd800);
+        std::ffi::OsString::from_wide(&units)
+    };
+    let root = f.root.join(&name);
+    let mut config = f.config.clone();
+    config.insert("runtimeRoot", p(&root));
+    let mut instance = config.required("instances").unwrap().as_array().unwrap()[0].clone();
+    instance.insert("instanceId", p(&PathBuf::from("nested/..").join(&name)));
+    config.insert("instances", J::Array(vec![instance]));
+    let manifest = config::json_file(
+        config::path_value(f.candidate.required("manifestPath").unwrap()).unwrap(),
+        config::CONFIGURATION_BYTES,
+    )
+    .await
+    .unwrap();
+    let mut filename = name.clone();
+    filename.push(".json");
+    let config_path = f.root.join(&filename);
+    let plan = bootstrap::configuration_bootstrap_plan(
+        &config,
+        &node_path::from_native(&f.root.join("unused/..").join(&filename)),
+        &f.candidate,
+        None,
+        &[J::object([
+            ("candidate", f.candidate.clone()),
+            ("manifest", manifest),
+        ])],
+    )
+    .unwrap();
+    assert_eq!(plan.get("configPath"), Some(&p(&config_path)));
+    let identity = plan.required("installationId").unwrap().as_str().unwrap();
+    assert_eq!(
+        plan.required("processes").unwrap().as_array().unwrap()[0].get("configPath"),
+        Some(&p(&root
+            .join("bootstrap")
+            .join(&identity)
+            .join("instances")
+            .join(&filename))),
+    );
+    assert_eq!(
+        plan.get("configHash"),
+        Some(&J::from(hash_json(&config).unwrap()))
+    );
+    assert!(
+        bootstrap::retained_bootstrap_plans(config.clone())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // These files are fixture inputs, never OS installation/publication effects.
+    let history = root.join("bootstrap-plans");
+    let selected = root.join("bootstrap").join(format!("{identity}.json"));
+    fs::create_dir_all(&history).unwrap();
+    fs::create_dir_all(selected.parent().unwrap()).unwrap();
+    let retained_path =
+        |value: &J| history.join(format!("{}.json", &hash_json(value).unwrap()[7..]));
+    let mut older = plan.clone();
+    older.insert("configHash", digest(b"older reviewed configuration").into());
+    // Select the later filename so precedence cannot pass by history ordering.
+    let (plan, older) = if hash_json(&plan).unwrap() > hash_json(&older).unwrap() {
+        (plan, older)
+    } else {
+        (older, plan)
+    };
+    let plan_bytes = json::canonical(&plan, usize::MAX).unwrap();
+    fs::write(&selected, &plan_bytes).unwrap();
+    let duplicate = retained_path(&plan);
+    fs::write(&duplicate, &plan_bytes).unwrap();
+    let older_path = retained_path(&older);
+    let older_bytes = json::canonical(&older, usize::MAX).unwrap();
+    fs::write(&older_path, &older_bytes).unwrap();
+    let mut stale = plan.clone();
+    stale.insert("hostId", "another-host".into());
+    fs::write(
+        retained_path(&stale),
+        json::canonical(&stale, usize::MAX).unwrap(),
+    )
+    .unwrap();
+    let changed_hash = history.join(format!("{}.json", "0".repeat(64)));
+    fs::write(&changed_hash, &older_bytes).unwrap();
+    let pending = history.join(format!(
+        "{}.00000000-0000-0000-0000-000000000000.tmp",
+        duplicate.file_name().unwrap().to_str().unwrap()
+    ));
+    fs::write(&pending, b"pending bytes are not a plan").unwrap();
+    let read = || bootstrap::retained_bootstrap_plans(config.clone());
+    let expect = |actual: Vec<J>, expected: Vec<J>| {
+        assert_eq!(
+            json::canonical(&J::Array(actual), usize::MAX).unwrap(),
+            json::canonical(&J::Array(expected), usize::MAX).unwrap(),
+        )
+    };
+    expect(read().await.unwrap(), vec![plan.clone(), older.clone()]);
+    fs::write(&selected, json::canonical(&stale, usize::MAX).unwrap()).unwrap();
+    expect(read().await.unwrap(), vec![older.clone(), plan.clone()]);
+    fs::write(&selected, &plan_bytes).unwrap();
+    for invalid in [history.join("unknown.json"), history.join("中.json")] {
+        fs::write(&invalid, b"not admitted").unwrap();
+        assert_eq!(read().await.unwrap_err().code, "storage_invalid");
+        fs::remove_file(invalid).unwrap();
+    }
+    fs::write(&changed_hash, b"invalid JSON").unwrap();
+    assert_eq!(read().await.unwrap_err().code, "internal_error");
+    fs::write(&changed_hash, &older_bytes).unwrap();
+    expect(read().await.unwrap(), vec![plan.clone(), older]);
+    for path in [&selected, &duplicate] {
+        assert_eq!(fs::read(path).unwrap(), plan_bytes.as_bytes());
+    }
+    assert_eq!(fs::read(&older_path).unwrap(), older_bytes.as_bytes());
+    assert_eq!(fs::read(&pending).unwrap(), b"pending bytes are not a plan");
+}
+
 #[tokio::test]
 async fn native_bootstrap_plan_needs_no_node_and_legacy_candidates_still_require_it() {
     let missing = Fixture::for_plan(true).await;
@@ -1765,6 +1888,7 @@ async fn native_bootstrap_plan_needs_no_node_and_legacy_candidates_still_require
     validate_host("BootstrapPlan", &plan).unwrap();
     assert!(plan.get("nodeExecutable").is_none());
     assert!(missing.installation.node.is_none());
+    native_bootstrap_paths_and_retained_authority(&missing).await;
     let mut linux = plan.clone();
     linux.insert("os", "linux".into());
     let mut process = linux.required("processes").unwrap().as_array().unwrap()[0].clone();

@@ -4,16 +4,13 @@ use crate::{
     linux_host::trimmed,
     linux_resources::{self, installation_identity},
     linux_service_identity::linux_process_user,
-    node_path::{self, Context, Style},
+    native_path,
+    node_path::{self, Style},
 };
 use ivy_contracts::{JsString, core_schema::validate_host, hash::hash_json};
-use std::{fs, path::Path};
+use std::fs;
 mod installation;
 pub(crate) use installation::BootstrapInstallation;
-
-fn fs_path(path: &Path) -> std::path::PathBuf {
-    node_path::filesystem_path(&node_path::from_native(path))
-}
 
 /// Selected authority precedes immutable history. Pending atomic writes are
 /// retained but never interpreted; stale contract/hash/installation plans have
@@ -24,67 +21,113 @@ pub async fn retained_bootstrap_plans(config: IvyJson) -> IvyResult<Vec<IvyJson>
         let runtime = crate::config::path_value(config.required("runtimeRoot")?)?;
         let selected = runtime.join("bootstrap").join(format!("{identity}.json"));
         let root = runtime.join("bootstrap-plans");
-        let mut entries = match fs::read_dir(fs_path(&root)) {
-            Ok(entries) => entries.collect::<Result<Vec<_>, _>>().map_err(|_| IvyError::internal())?,
+        let mut entries = match fs::read_dir(&root) {
+            Ok(entries) => entries
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| IvyError::internal())?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(_) => return Err(IvyError::internal()),
         };
-        let accepted = |name: &str| name.len() == 69 && name.ends_with(".json")
-            && name.as_bytes()[..64].iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b));
-        let pending = |name: &str| name.len() == 110 && name.ends_with(".tmp")
-            && name.as_bytes().get(69) == Some(&b'.') && accepted(&name[..69])
-            && name.as_bytes()[70..106].iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b) || *b == b'-');
-        // Name admission is ASCII, so rejecting non-ASCII before slicing also
-        // preserves Node's regexp behavior for malformed native filename bytes.
-        require(entries.len() <= 1000 && entries.iter().all(|entry| {
-            let name = entry.file_name();
-            let name = name.to_str().unwrap_or("");
-            name.is_ascii() && entry.file_type().is_ok_and(|kind| kind.is_file())
-                && (accepted(name) || pending(name))
-        }), "storage_invalid", "Invalid retained bootstrap plan set.")?;
+        let accepted = |name: &str| {
+            name.len() == 69
+                && name.ends_with(".json")
+                && name.as_bytes()[..64]
+                    .iter()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+        };
+        let pending = |name: &str| {
+            name.len() == 110
+                && name.ends_with(".tmp")
+                && name.as_bytes().get(69) == Some(&b'.')
+                && accepted(&name[..69])
+                && name.as_bytes()[70..106]
+                    .iter()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b) || *b == b'-')
+        };
+        // Retained filenames are ASCII; reject other native names before
+        // checking fixed offsets.
+        require(
+            entries.len() <= 1000
+                && entries.iter().all(|entry| {
+                    let name = entry.file_name();
+                    let name = name.to_str().unwrap_or("");
+                    name.is_ascii()
+                        && entry.file_type().is_ok_and(|kind| kind.is_file())
+                        && (accepted(name) || pending(name))
+                }),
+            "storage_invalid",
+            "Invalid retained bootstrap plan set.",
+        )?;
         entries.sort_by_key(|entry| entry.file_name());
         let mut paths = Vec::new();
-        match fs::symlink_metadata(fs_path(&selected)) {
+        match fs::symlink_metadata(&selected) {
             Ok(_) => paths.push(selected.clone()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err(IvyError::internal()),
         }
         for entry in entries {
             if entry.file_name().to_str().is_some_and(accepted) {
-                paths.push(root.join(entry.file_name()));
+                paths.push(entry.path());
             }
         }
         let mut plans = Vec::new();
         let mut hashes = std::collections::BTreeSet::new();
         for path in paths {
             let read = || -> IvyResult<Option<(String, IvyJson)>> {
-                let metadata = fs::symlink_metadata(fs_path(&path)).map_err(|_| IvyError::internal())?;
-                require(metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= 65536,
-                    "storage_invalid", "Retained bootstrap plan is not a bounded regular file.")?;
+                let metadata = fs::symlink_metadata(&path).map_err(|_| IvyError::internal())?;
+                require(
+                    metadata.is_file()
+                        && !metadata.file_type().is_symlink()
+                        && metadata.len() <= 65536,
+                    "storage_invalid",
+                    "Retained bootstrap plan is not a bounded regular file.",
+                )?;
                 let plan = crate::config::read_json(&path, crate::config::CONFIGURATION_BYTES)
                     .map_err(crate::config::FileError::error)?;
                 validate_host("BootstrapPlan", &plan)?;
                 let hash = hash_json(&plan)?;
-                require(path == selected || path == root.join(format!("{}.json", &hash[7..])),
-                    "storage_invalid", "Retained bootstrap plan hash changed.")?;
+                require(
+                    path == selected || path == root.join(format!("{}.json", &hash[7..])),
+                    "storage_invalid",
+                    "Retained bootstrap plan hash changed.",
+                )?;
                 let same = plan.get("installationId") == Some(&identity.clone().into())
-                    && plan.get("hostId") == config.get("hostId") && plan.get("runtimeRoot") == config.get("runtimeRoot");
-                require(path != selected || same, "storage_invalid", "Selected bootstrap plan belongs to a different installation.")?;
-                if !same { return Ok(None); }
-                if let Some(scope) = plan.get("linuxResources").filter(|v| v.as_object().is_some()) {
+                    && plan.get("hostId") == config.get("hostId")
+                    && plan.get("runtimeRoot") == config.get("runtimeRoot");
+                require(
+                    path != selected || same,
+                    "storage_invalid",
+                    "Selected bootstrap plan belongs to a different installation.",
+                )?;
+                if !same {
+                    return Ok(None);
+                }
+                if let Some(scope) = plan
+                    .get("linuxResources")
+                    .filter(|v| v.as_object().is_some())
+                {
                     linux_resources::validate_linux_resource_scope(scope, Some(&identity))?;
                 }
                 Ok(Some((hash, plan)))
             };
             match read() {
-                Ok(Some((hash, plan))) => { if hashes.insert(hash) { plans.push(plan); } },
-                Ok(_) => {},
-                Err(error) if ["invalid_arguments", "storage_invalid", "artifact_changed"].iter().any(|code| error.code == *code) => {},
+                Ok(Some((hash, plan))) => {
+                    if hashes.insert(hash) {
+                        plans.push(plan);
+                    }
+                }
+                Ok(_) => {}
+                Err(error)
+                    if ["invalid_arguments", "storage_invalid", "artifact_changed"]
+                        .iter()
+                        .any(|code| error.code == *code) => {}
                 Err(error) => return Err(error),
             }
         }
         Ok(plans)
-    }).await.map_err(|_| IvyError::internal())?
+    })
+    .await
+    .map_err(|_| IvyError::internal())?
 }
 pub async fn retain_bootstrap_plan(plan: &IvyJson, job_launcher: std::path::PathBuf) -> IvyResult<()> {
     validate_host("BootstrapPlan", plan)?;
@@ -219,21 +262,25 @@ pub fn configuration_bootstrap_plan(
             if let Some(entrypoint) = manifest.get("entrypoint") {
                 process.insert("entrypoint", entrypoint.clone());
             }
-            if let Some(restart) = manifest.get("restart").filter(|value| value.as_object().is_some()) {
+            if let Some(restart) = manifest
+                .get("restart")
+                .filter(|value| value.as_object().is_some())
+            {
                 process.insert("restart", restart.clone());
             }
             process.insert(
                 "configPath",
-                IvyJson::String(node_path::join(
-                    Style::native(),
-                    &[
-                        field(config, "runtimeRoot")?,
-                        "bootstrap".into(),
-                        identity.clone().into(),
-                        "instances".into(),
-                        concat(&[string(id)?, ".json".into()]),
-                    ],
-                )),
+                IvyJson::String(native_path::from_native(&{
+                    let mut filename = native_path::to_native(&string(id)?).into_os_string();
+                    filename.push(".json");
+                    native_path::lexical(
+                        &crate::config::path_value(config.required("runtimeRoot")?)?
+                            .join("bootstrap")
+                            .join(&identity)
+                            .join("instances")
+                            .join(filename),
+                    )
+                })),
             );
         }
         if os == &"win32".into()
@@ -255,11 +302,12 @@ pub fn configuration_bootstrap_plan(
         ("artifactRoot", candidate.required("artifactRoot")?.clone()),
         (
             "configPath",
-            IvyJson::String(
-                Context::current()
+            IvyJson::String(native_path::from_native(&{
+                let path = std::env::current_dir()
                     .map_err(|_| IvyError::internal())?
-                    .resolve(&[path.clone()]),
-            ),
+                    .join(native_path::to_native(path));
+                crate::paths::absolute(&path).unwrap_or_else(|_| native_path::lexical(&path))
+            })),
         ),
         ("configHash", hash_json(config)?.into()),
         ("runtimeRoot", config.required("runtimeRoot")?.clone()),
@@ -270,8 +318,12 @@ pub fn configuration_bootstrap_plan(
     }
     require(
         plan.get("nodeExecutable").is_some()
-            || plan.required("processes")?.as_array().ok_or_else(IvyError::internal)?
-                .iter().all(crate::native_plan::is_native_plan),
+            || plan
+                .required("processes")?
+                .as_array()
+                .ok_or_else(IvyError::internal)?
+                .iter()
+                .all(crate::native_plan::is_native_plan),
         "unsupported_runtime",
         "A JavaScript bootstrap process requires its configured Node executable.",
     )?;
