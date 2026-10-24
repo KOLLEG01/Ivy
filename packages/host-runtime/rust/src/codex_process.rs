@@ -253,15 +253,12 @@ pub async fn start_codex_process(options: StartOptions<'_>) -> IvyResult<NativeC
         "native_home_mismatch",
         "Automatic shared daemon startup must select the resolved Codex home.",
     )?;
-    let job_launcher = node_path::filesystem_path(&node_path::join(
-        context.paths.style,
-        &[
-            options.artifact_root.clone(),
-            "dist".into(),
-            "native".into(),
-            "ivy-job.exe".into(),
-        ],
-    ));
+    let job_launcher = node_path::lexical(
+        &node_path::to_native(options.artifact_root)
+            .join("dist")
+            .join("native")
+            .join("ivy-job.exe"),
+    );
     let shell = if cfg!(windows) && (!external || socket.is_none()) {
         Some(
             codex_windows_shell::verify_windows_shell(

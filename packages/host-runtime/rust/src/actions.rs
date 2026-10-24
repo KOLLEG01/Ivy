@@ -1,6 +1,6 @@
 //! Shared CLI/Manager mutation intake. Acceptance returns the durable journal
 //! entry, including a definite terminal failure, without waiting for execution.
-use crate::{IvyError, IvyJson, IvyResult, journal::{HostJournal, requires_bootstrap_replacement}, node_path::Context, source};
+use crate::{IvyError, IvyJson, IvyResult, journal::{HostJournal, requires_bootstrap_replacement}, node_path, source};
 use ivy_contracts::JsString;
 use std::path::PathBuf;
 
@@ -50,8 +50,11 @@ impl LocalAction {
             if let Some(value) = value.filter(|v| !v.0.is_empty()) { request.insert(key, IvyJson::String(value)); }
         }
         if let Some(source) = self.source.filter(|v| !v.0.is_empty()) {
-            let paths = Context::current().map_err(|_| IvyError::internal())?;
-            request.insert("source", IvyJson::String(paths.resolve(&[source])));
+            let cwd = std::env::current_dir().map_err(|_| IvyError::internal())?;
+            let path = cwd.join(node_path::to_native(&source));
+            let absolute = std::path::absolute(&path).unwrap_or(path);
+            let path = node_path::lexical(&absolute);
+            request.insert("source", IvyJson::String(node_path::from_native(&path)));
         }
         Ok(request)
     }

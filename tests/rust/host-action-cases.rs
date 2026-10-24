@@ -266,22 +266,8 @@ fn compare_replayed_cli(input:IvyJson,entry:&IvyJson) {
     assert_json_eq(result.required("output").unwrap().required("data").unwrap(),entry);
 }
 
-#[tokio::test]
-async fn bootstrap_owner_guard_precedes_source_capture_and_matches_original_cli() {
-    for component in ["host-executor", "service-manager"] {
-        if component=="service-manager" && !cfg!(windows) {continue;}
-        let mut f=Fixture::new().await;
-        let mut instances=f.config.required("instances").unwrap().as_array().unwrap().to_vec();instances[0].insert("componentId",component.into());f.config.insert("instances",IvyJson::Array(instances));
-        config::atomic_json(path(f.config.required("configPath").unwrap()),f.config.clone()).await.unwrap();
-        let journal=f.journal().await;seed(&journal).await;
-        let mut action=f.action(Action::Deploy,"bootstrap-guard");action.source=Some(node_path::from_native(&f.root.0.join("absent")));
-        let error=actions::accept_local_action(journal.clone(),action,f.root.0.clone()).await.unwrap_err();assert_eq!(error.code,"restart_required");
-        assert!(!path(f.config.required("stagingRoot").unwrap()).exists());
-        let result=oracle(cli_input(&f,Action::Deploy,"bootstrap-guard",&[("--source",node_path::from_native(&f.root.0.join("absent")))]));
-        let output=result.required("value").unwrap().required("output").unwrap();assert_eq!(output.get("code"),Some(&error.code.into()));assert_eq!(output.required("data").unwrap().get("message"),Some(&error.message.into()));
-        assert!(journal.operation("bootstrap-guard").await.unwrap().is_none());f.no_incoming();journal.close().await.unwrap();
-    }
-}
+#[path = "host-local-action-path-cases.rs"]
+mod source_path_cases;
 
 #[tokio::test]
 async fn local_actions_share_all_five_mutations_and_terminal_replay_with_original_cli() {
@@ -299,45 +285,4 @@ async fn local_actions_share_all_five_mutations_and_terminal_replay_with_origina
         let terminal=journal.get(&id).await.unwrap();compare_replayed_cli(cli_input(&f,action,&op,&options),&terminal);
     }
     journal.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn local_source_replay_after_checkout_loss_keeps_the_exact_durable_entry() {
-    let f=Fixture::new().await;let journal=f.journal().await;
-    let mut action=f.action(Action::Deploy,"source-fixed");action.source=Some(node_path::from_native(&f.source));
-    let accepted=actions::accept_local_action(journal.clone(),action,f.root.0.clone()).await.unwrap();let before=view(accepted.required("sourceSnapshot").unwrap());
-    fs::remove_dir_all(&f.source).unwrap();journal.close().await.unwrap();let journal=f.journal().await;
-    let mut action=f.action(Action::Deploy,"source-fixed");action.source=Some(node_path::from_native(&f.source));
-    assert_json_eq(&actions::accept_local_action(journal.clone(),action,f.root.0.clone()).await.unwrap(),&accepted);
-    compare_replayed_cli(cli_input(&f,Action::Deploy,"source-fixed",&[("--source",node_path::from_native(&f.source))]),&accepted);
-    let mut changed=f.action(Action::Deploy,"source-fixed");changed.source=Some(node_path::from_native(&f.root.0.join("other")));
-    assert_eq!(actions::accept_local_action(journal.clone(),changed,f.root.0.clone()).await.unwrap_err().code,"mutation_conflict");
-    assert_json_eq(&view(accepted.required("sourceSnapshot").unwrap()),&before);f.no_incoming();journal.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn dropped_action_waiter_retains_capture_until_the_original_journal_write_finishes() {
-    let f=Fixture::new().await;let journal=f.journal().await;
-    let lock=ivy_store::rusqlite::Connection::open(path(f.config.required("runtimeRoot").unwrap()).join("deployments.sqlite")).unwrap();lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let mut action=f.action(Action::Deploy,"dropped-source");action.source=Some(node_path::from_native(&f.source));
-    let owned=journal.clone();let bootstrap=f.root.0.clone();let waiter=tokio::spawn(async move {actions::accept_local_action(owned,action,bootstrap).await});
-    let sources=path(f.config.required("stagingRoot").unwrap()).join("sources");
-    tokio::time::timeout(Duration::from_secs(8),async {while !sources.is_dir() || fs::read_dir(&sources).unwrap().count()!=1 {tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
-    waiter.abort();let _=waiter.await;lock.execute_batch("COMMIT").unwrap();
-    let entry=tokio::time::timeout(Duration::from_secs(8),async {loop {if let Some(entry)=journal.operation("dropped-source").await.unwrap(){break entry;}tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
-    assert_eq!(entry.required("record").unwrap().get("phase"),Some(&"preparing".into()));assert_eq!(fs::read_dir(sources).unwrap().count(),1);
-    compare_replayed_cli(cli_input(&f,Action::Deploy,"dropped-source",&[("--source",node_path::from_native(&f.source))]),&entry);f.no_incoming();journal.close().await.unwrap();
-}
-
-#[test]
-fn manager_action_admission_binds_original_operation_before_any_io() {
-    let args=IvyJson::object([("instanceId","fixture".into()),("operationId","local-operation".into()),("source","relative-checkout".into())]);
-    assert_eq!(LocalAction::from_manager(Action::Deploy,&args,Some(&"other-operation".into())).err().unwrap().code,"mutation_conflict");
-    let action=LocalAction::from_manager(Action::Deploy,&args,Some(&"local-operation".into())).unwrap();let request=action.request().unwrap();
-    assert_eq!(request.required("source").unwrap().as_js_string().unwrap(),&node_path::Context::current().unwrap().resolve(&["relative-checkout".into()]));
-    assert_eq!(LocalAction::from_manager(Action::Rollback,&args,None).err().unwrap().message,"This option does not belong to the selected command.");
-    let mut values=args;values.insert("source",IvyJson::Null);values.insert("candidateId",IvyJson::Number(7.0));
-    assert_eq!(LocalAction::from_manager(Action::Deploy,&values,None).err().unwrap().code,"invalid_arguments");
-    values.insert("candidateId","7".into());
-    let request=LocalAction::from_manager(Action::Deploy,&values,None).unwrap().request().unwrap();assert_eq!(request.get("candidateId"),Some(&"7".into()));assert!(request.get("source").is_none());
 }
