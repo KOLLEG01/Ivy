@@ -64,18 +64,19 @@ impl std::fmt::Display for NoAncestor {
 }
 impl std::error::Error for NoAncestor {}
 pub fn future_path(path: &ivy_contracts::JsString) -> IvyResult<ivy_contracts::JsString> {
-    resolved_future_path(&native_path::to_native(path))
-        .map(|path| native_path::from_native(&path))
-        .map_err(|error| {
-            if error
-                .get_ref()
-                .is_some_and(|error| error.is::<NoAncestor>())
-            {
-                IvyError::new("target_conflict", "Storage path has no existing ancestor.")
-            } else {
-                IvyError::internal()
-            }
-        })
+    future_native_path(&native_path::to_native(path)).map(|path| native_path::from_native(&path))
+}
+pub(crate) fn future_native_path(path: &Path) -> IvyResult<PathBuf> {
+    resolved_future_path(path).map_err(|error| {
+        if error
+            .get_ref()
+            .is_some_and(|error| error.is::<NoAncestor>())
+        {
+            IvyError::new("target_conflict", "Storage path has no existing ancestor.")
+        } else {
+            IvyError::internal()
+        }
+    })
 }
 
 /// Resolve only the existing ancestor; future descendants are never created by

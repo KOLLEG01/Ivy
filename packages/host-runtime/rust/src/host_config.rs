@@ -2,8 +2,8 @@
 //! the configured host/service directories, in the original validation order.
 use crate::{
     IvyError, IvyJson, IvyResult, codex_home, config, layout, native_account,
-    node_path::{self, Context, Style},
-    paths,
+    native_path::{self, Context, Style},
+    paths::{self, future_native_path as future},
 };
 use ivy_contracts::{JsString, core_schema::validate_host};
 use std::{
@@ -52,11 +52,8 @@ impl HostContext {
 pub async fn host_config(path: impl Into<PathBuf>) -> IvyResult<IvyJson> {
     let path = path.into();
     tokio::task::spawn_blocking(move || {
-        let input = config::read_json(
-            &node_path::filesystem_path(&node_path::from_native(&path)),
-            config::CONFIGURATION_BYTES,
-        )
-        .map_err(config::FileError::error)?;
+        let input = config::read_json(&path, config::CONFIGURATION_BYTES)
+            .map_err(config::FileError::error)?;
         validate_host("HostConfigInput", &input)?;
         checked(input, &path, &HostContext::current()?)
     })
@@ -106,27 +103,30 @@ fn text(value: &IvyJson) -> IvyResult<JsString> {
 fn field(value: &IvyJson, key: &str) -> IvyResult<JsString> {
     text(value.required(key)?)
 }
-fn future(path: &JsString) -> IvyResult<JsString> {
-    paths::future_path(path)
+fn absolute(path: &Path) -> PathBuf {
+    paths::absolute(path).unwrap_or_else(|_| native_path::lexical(path))
 }
-fn disjoint(paths: &Context, values: &[JsString]) -> bool {
+fn inside(root: &Path, path: &Path) -> bool {
+    native_path::within(&absolute(root), &absolute(path))
+}
+fn disjoint(values: &[PathBuf]) -> bool {
     values.iter().enumerate().all(|(i, value)| {
         values
             .iter()
             .enumerate()
-            .all(|(j, other)| i == j || !paths.inside(value, other))
+            .all(|(j, other)| i == j || !inside(value, other))
     })
 }
-fn separate(paths: &Context, a: &JsString, b: &JsString) -> bool {
-    !paths.inside(a, b) && !paths.inside(b, a)
+fn separate(a: &Path, b: &Path) -> bool {
+    !inside(a, b) && !inside(b, a)
 }
-fn instance_paths(config: &IvyJson, instance: &IvyJson) -> IvyResult<Vec<JsString>> {
+fn instance_paths(config: &IvyJson, instance: &IvyJson) -> IvyResult<Vec<PathBuf>> {
     let paths = layout::service_paths(config, instance)?;
     paths
         .as_object()
         .ok_or_else(IvyError::internal)?
         .iter()
-        .map(|(_, value)| text(value))
+        .map(|(_, value)| config::path_value(value))
         .collect()
 }
 
@@ -134,14 +134,15 @@ fn instance_paths(config: &IvyJson, instance: &IvyJson) -> IvyResult<Vec<JsStrin
 /// hostStorageAreas removes descendants already covered by earlier roots. The
 /// unreduced union has the same bidirectional overlap coverage without locale
 /// sorting; stable storage-area selection remains a separate layout operation.
-fn permanent_roots(config: &IvyJson, context: &HostContext) -> IvyResult<Vec<JsString>> {
+fn permanent_roots(config: &IvyJson, context: &HostContext) -> IvyResult<Vec<PathBuf>> {
     layout::storage_overlap_roots(config, || Ok(context.account_home.clone()))
+        .map(|roots| roots.iter().map(native_path::to_native).collect())
 }
-fn shared_home_paths(config: &IvyJson, context: &HostContext) -> IvyResult<Vec<JsString>> {
+fn shared_home_paths(config: &IvyJson, context: &HostContext) -> IvyResult<Vec<PathBuf>> {
     let mut roots = permanent_roots(config, context)?;
     roots.extend([
-        field(config, "artifactRoot")?,
-        field(config, "stagingRoot")?,
+        config::path_value(config.required("artifactRoot")?)?,
+        config::path_value(config.required("stagingRoot")?)?,
     ]);
     let mut homes = Vec::new();
     for instance in config
@@ -164,28 +165,27 @@ fn shared_home_paths(config: &IvyJson, context: &HostContext) -> IvyResult<Vec<J
             continue;
         }
         let home = codex_home::expected_server_home_json(settings, &context.home_context())?;
-        let home = home.as_js_string().filter(|home| {
-            node_path::is_absolute(context.paths.style, home)
-                && roots
-                    .iter()
-                    .all(|root| separate(&context.paths, root, home))
-        });
+        let home = home
+            .as_js_string()
+            .map(native_path::to_native)
+            .filter(|home| home.is_absolute() && roots.iter().all(|root| separate(root, home)));
         require(
             home.is_some(),
             "target_conflict",
             "Shared Codex homes must not overlap owned host, service, project or software storage. Use explicit owned-stdio for an instance-owned home.",
         )?;
-        homes.push(home.unwrap().clone());
+        homes.push(home.unwrap());
     }
     Ok(homes)
 }
 
 fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> IvyResult<IvyJson> {
     let p = &context.paths;
-    let configuration_path = p.resolve(&[node_path::from_native(configuration_path)]);
+    let source = native_path::to_native(&p.cwd).join(configuration_path);
+    let configuration_path = absolute(&source);
     let config = layout::resolve_host_configuration(
         &input,
-        &configuration_path,
+        &native_path::from_native(&configuration_path),
         &context.environment,
         p.style,
         &context.account_home,
@@ -195,7 +195,7 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
     ivy_sdk::rpc::base_url(&String::from_utf16_lossy(&url.0))?;
     if let Some(path) = config.get("configPath") {
         require(
-            future(&text(path)?)? == future(&configuration_path)?,
+            future(&config::path_value(path)?)? == future(&configuration_path)?,
             "target_conflict",
             "Central configPath must identify this actual host configuration file.",
         )?;
@@ -217,17 +217,17 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
         "Host instance and Service Node identities must be unique.",
     )?;
     let roots = [
-        field(&config, "runtimeRoot")?,
-        field(&config, "artifactRoot")?,
-        field(&config, "stagingRoot")?,
+        config::path_value(config.required("runtimeRoot")?)?,
+        config::path_value(config.required("artifactRoot")?)?,
+        config::path_value(config.required("stagingRoot")?)?,
     ];
     require(
-        roots.iter().all(|v| node_path::is_absolute(p.style, v)) && disjoint(p, &roots),
+        roots.iter().all(|v| v.is_absolute()) && disjoint(&roots),
         "invalid_arguments",
         "Host runtime, artifact and staging roots must be disjoint absolute directories.",
     )?;
     require(
-        !p.inside(&roots[1], &configuration_path) && !p.inside(&roots[2], &configuration_path),
+        !inside(&roots[1], &configuration_path) && !inside(&roots[2], &configuration_path),
         "invalid_arguments",
         "Private host configuration cannot live inside artifacts or source staging.",
     )?;
@@ -239,7 +239,7 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
         .flatten()
         .collect();
     require(
-        services.iter().all(|v| node_path::is_absolute(p.style, v)) && disjoint(p, &services),
+        services.iter().all(|v| v.is_absolute()) && disjoint(&services),
         "target_conflict",
         "Service data, work and logs collide; configure explicitly separate paths for repeated service instances.",
     )?;
@@ -248,35 +248,34 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
         .is_some_and(|v| v.as_js_string().is_some_and(|v| !v.0.is_empty()));
     let excluded = if modern { &roots[..] } else { &roots[1..] };
     require(
-        services.iter().all(|v| {
-            excluded.iter().all(|r| separate(p, r, v)) && !p.inside(v, &configuration_path)
-        }),
+        services
+            .iter()
+            .all(|v| excluded.iter().all(|r| separate(r, v)) && !inside(v, &configuration_path)),
         "target_conflict",
         "Service storage must not overlap software, staging, host state or central configuration.",
     )?;
     for root in &roots {
-        fs::create_dir_all(node_path::filesystem_path(root)).map_err(|_| IvyError::internal())?;
+        fs::create_dir_all(root).map_err(|_| IvyError::internal())?;
     }
     let actual_roots: Vec<_> = roots
         .iter()
-        .map(|r| {
-            paths::realpath(&node_path::to_native(r))
-                .map(|v| node_path::from_native(&v))
-                .map_err(|_| IvyError::internal())
-        })
+        .map(|r| paths::realpath(r).map_err(|_| IvyError::internal()))
         .collect::<IvyResult<_>>()?;
     require(
-        disjoint(p, &actual_roots),
+        disjoint(&actual_roots),
         "invalid_arguments",
         "Host roots overlap through filesystem links.",
     )?;
-    let actual_services = services.iter().map(future).collect::<IvyResult<Vec<_>>>()?;
+    let actual_services = services
+        .iter()
+        .map(|path| future(path))
+        .collect::<IvyResult<Vec<_>>>()?;
     require(
-        disjoint(p, &actual_services)
+        disjoint(&actual_services)
             && actual_services.iter().all(|v| {
                 actual_roots[if modern { 0 } else { 1 }..]
                     .iter()
-                    .all(|r| separate(p, r, v))
+                    .all(|r| separate(r, v))
             }),
         "target_conflict",
         "Service storage overlaps through filesystem links.",
@@ -294,31 +293,31 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
             .filter(|v| seen.insert((*v).clone()))
         {
             require(
-                node_path::is_absolute(p.style, root),
+                native_path::to_native(root).is_absolute(),
                 "invalid_arguments",
                 "Internal project root must be absolute.",
             )?;
-            internal.push(future(root)?);
+            internal.push(future(&native_path::to_native(root))?);
         }
     }
     let shared = shared_home_paths(&config, context)?
         .iter()
-        .map(future)
+        .map(|path| future(path))
         .collect::<IvyResult<Vec<_>>>()?;
-    let configuration = p.resolve(&[config
+    let configuration = config
         .get("configPath")
-        .map(text)
+        .map(config::path_value)
         .transpose()?
-        .unwrap_or_else(|| configuration_path.clone())]);
+        .unwrap_or_else(|| configuration_path.clone());
     require(
-        disjoint(p, &internal)
+        disjoint(&internal)
             && internal.iter().all(|v| {
                 actual_roots
                     .iter()
                     .chain(&actual_services)
                     .chain(&shared)
-                    .all(|r| separate(p, r, v))
-                    && !p.inside(v, &configuration)
+                    .all(|r| separate(r, v))
+                    && !inside(v, &configuration)
             }),
         "target_conflict",
         "Internal project storage overlaps service state, software, shared Codex homes or configuration.",
@@ -330,31 +329,30 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
         if let Some(root) = instance.required("settings")?.get("projectRoot") {
             let root = root
                 .as_js_string()
-                .filter(|v| node_path::is_absolute(p.style, v));
+                .filter(|v| native_path::to_native(v).is_absolute());
             require(
                 root.is_some(),
                 "invalid_arguments",
                 "Normal project root must be absolute.",
             )?;
-            let normal = future(root.unwrap())?;
+            let normal = future(&native_path::to_native(root.unwrap()))?;
             require(
                 actual_roots
                     .iter()
                     .chain(&actual_services)
                     .chain(&shared)
                     .chain(&internal)
-                    .all(|r| !p.inside(r, &normal)),
+                    .all(|r| !inside(r, &normal)),
                 "target_conflict",
                 "New normal projects must not be allocated inside private service/internal/Codex storage or executable artifacts.",
             )?;
         }
     }
     for directory in &services {
-        fs::create_dir_all(node_path::filesystem_path(directory))
-            .map_err(|_| IvyError::internal())?;
+        fs::create_dir_all(directory).map_err(|_| IvyError::internal())?;
     }
     for directory in roots.iter().chain(&services) {
-        writable(&node_path::filesystem_path(directory)).map_err(|_| IvyError::internal())?;
+        writable(directory).map_err(|_| IvyError::internal())?;
     }
     for home in shared_home_paths(&config, context)? {
         let actual = future(&home)?;
@@ -362,7 +360,7 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
             actual_roots
                 .iter()
                 .chain(&actual_services)
-                .all(|r| separate(p, r, &actual)),
+                .all(|r| separate(r, &actual)),
             "target_conflict",
             "Shared Codex homes cannot overlap owned runtime, service, artifact or staging storage through filesystem links.",
         )?;
@@ -373,7 +371,7 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
         .ok_or_else(IvyError::internal)?;
     for (_, value) in executables {
         require(
-            node_path::is_absolute(p.style, &text(value)?),
+            native_path::to_native(&text(value)?).is_absolute(),
             "invalid_arguments",
             "Host runtime executable mappings require absolute paths.",
         )?;

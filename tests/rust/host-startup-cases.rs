@@ -41,31 +41,6 @@ fn result(value: IvyResult<J>) -> J {
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
 }
-fn replace(value: &J, from: &JsString, to: &JsString) -> J {
-    match value {
-        J::String(s) => {
-            let mut output = Vec::new();
-            let mut i = 0;
-            while i < s.0.len() {
-                if s.0[i..].starts_with(&from.0) {
-                    output.extend_from_slice(&to.0);
-                    i += from.0.len();
-                } else {
-                    output.push(s.0[i]);
-                    i += 1;
-                }
-            }
-            J::String(JsString(output))
-        }
-        J::Array(a) => J::Array(a.iter().map(|v| replace(v, from, to)).collect()),
-        J::Object(o) => J::Object(
-            o.iter()
-                .map(|(k, v)| (k.clone(), replace(v, from, to)))
-                .collect(),
-        ),
-        _ => value.clone(),
-    }
-}
 fn oracle(input: &J, home: &Path) -> J {
     let mut child = Command::new("node")
         .args([
@@ -248,10 +223,9 @@ fn agent(root: &Path) -> J {
 }
 
 #[tokio::test]
-async fn host_configuration_matches_original_admission_and_directory_effects() {
+async fn native_host_configuration_preserves_admission_and_directory_effects() {
     let root = Root::new();
-    let rust = root.0.join("rust");
-    let node = root.0.join("node");
+    let rust = root.0.join("configuration ü 空 😀");
     let account = root.0.join("account");
     let names = [
         "legacy",
@@ -261,11 +235,13 @@ async fn host_configuration_matches_original_admission_and_directory_effects() {
         "duplicate-id",
         "duplicate-node",
         "root-overlap",
+        "root-dot-overlap",
         "artifact-config",
         "config-mismatch",
         "service-collision",
         "service-relative",
         "service-in-artifacts",
+        "service-dot-overlap",
         "service-over-config",
         "modern-service-in-state",
         "legacy-service-in-state",
@@ -368,6 +344,9 @@ async fn host_configuration_matches_original_admission_and_directory_effects() {
                 instances.push(v);
             }
             "root-overlap" => c.insert("stagingRoot", val(&r, "artifacts/child")),
+            "root-dot-overlap" => {
+                c.insert("stagingRoot", val(&r, "not-created/../artifacts/child"))
+            }
             "artifact-config" => config_path = r.join("artifacts/host.json"),
             "config-mismatch" => c.insert("configPath", val(&r, "other.json")),
             "service-collision" => {
@@ -385,6 +364,9 @@ async fn host_configuration_matches_original_admission_and_directory_effects() {
             }
             "service-in-artifacts" => {
                 instances[0].insert("paths", service_paths(&r.join("artifacts")))
+            }
+            "service-dot-overlap" => {
+                instances[0].insert("paths", service_paths(&r.join("not-created/../artifacts")))
             }
             "service-over-config" => {
                 let mut p = service_paths(&r);
@@ -560,27 +542,25 @@ async fn host_configuration_matches_original_admission_and_directory_effects() {
             ("setup", J::Array(actions)),
         ]));
     }
-    let request = J::object([
-        ("kind", "configuration".into()),
-        ("cases", J::Array(cases.clone())),
-    ]);
-    let expected = oracle(
-        &replace(
-            &request,
-            &node_path::from_native(&rust),
-            &node_path::from_native(&node),
-        ),
-        &account,
-    );
-    let expected = replace(
-        &expected,
-        &node_path::from_native(&node),
-        &node_path::from_native(&rust),
-    );
-    let mut records = Vec::new();
-    let mut mismatches = Vec::new();
-    for (c, e) in cases.iter().zip(expected.as_array().unwrap()) {
+    for c in &cases {
         setup(c.required("setup").unwrap());
+        let name = c.required("id").unwrap().as_str().unwrap();
+        let directory = node_path::to_native(c.required("root").unwrap().as_js_string().unwrap());
+        let before = tree(&directory);
+        let files = c
+            .required("setup")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a.get("kind") == Some(&J::from("file")))
+            .map(|a| {
+                let path =
+                    node_path::to_native(a.required("path").unwrap().as_js_string().unwrap());
+                let bytes = fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect::<Vec<_>>();
         let path = node_path::to_native(
             c.required("configurationPath")
                 .unwrap()
@@ -588,8 +568,7 @@ async fn host_configuration_matches_original_admission_and_directory_effects() {
                 .unwrap(),
         );
         let actual = if c.required("operation").unwrap() == &J::from("file") {
-            // Read boundary is tested with the same explicit account by first
-            // parsing the original file; the production wrapper is checked below.
+            // Use the same explicit account for file and supplied-JSON admission.
             match config_read(&path).await {
                 Ok(input) => {
                     host_config::checked_host_config_with_context(input, path, context(&account))
@@ -605,48 +584,201 @@ async fn host_configuration_matches_original_admission_and_directory_effects() {
             )
             .await
         };
-        let actual = J::object([
-            ("id", c.required("id").unwrap().clone()),
-            ("result", result(actual)),
-            (
-                "tree",
-                tree(&node_path::to_native(
-                    c.required("root").unwrap().as_js_string().unwrap(),
-                )),
-            ),
-        ]);
-        records.push(actual.clone());
-        if json::canonical(&actual, usize::MAX).unwrap() != json::canonical(e, usize::MAX).unwrap()
-        {
-            mismatches.push(J::object([
-                ("id", c.required("id").unwrap().clone()),
-                ("actual", actual),
-                ("expected", e.clone()),
-            ]));
+        let expected_error = match name.as_str() {
+            "legacy"
+            | "modern"
+            | "no-instances"
+            | "defaults"
+            | "legacy-service-in-state"
+            | "repeated-explicit"
+            | "agent-default"
+            | "agent-owned"
+            | "project-ancestor"
+            | "unknown-mode"
+            | "claude"
+            | "config-alias"
+            | "loopback-http"
+            | "utf16-url"
+            | "read-file" => None,
+            "docker" if cfg!(target_os = "linux") => None,
+            "invalid-url" | "missing-file" | "invalid-json" | "root-file" | "service-file"
+            | "paths-order" => Some("internal_error"),
+            "config-mismatch"
+            | "service-collision"
+            | "service-relative"
+            | "service-in-artifacts"
+            | "service-dot-overlap"
+            | "service-over-config"
+            | "modern-service-in-state"
+            | "internal-in-state"
+            | "internal-over-config"
+            | "project-in-state"
+            | "shared-in-state"
+            | "shared-in-service"
+            | "shared-in-projects"
+            | "shared-ancestor"
+            | "shared-null"
+            | "shared-number"
+            | "service-alias"
+            | "internal-alias"
+            | "shared-alias"
+            | "normal-alias" => Some("target_conflict"),
+            "duplicate-id"
+            | "duplicate-node"
+            | "root-overlap"
+            | "root-dot-overlap"
+            | "artifact-config"
+            | "relative-executable"
+            | "invalid-id"
+            | "invalid-component"
+            | "docker"
+            | "schema"
+            | "internal-relative"
+            | "project-relative"
+            | "roots-alias"
+            | "credential-url"
+            | "remote-http"
+            | "directory-file"
+            | "oversize-file" => Some("invalid_arguments"),
+            _ => panic!("Unclassified admission case: {name}"),
+        };
+        if let Some(code) = expected_error {
+            assert_eq!(actual.unwrap_err().code, code, "{name}");
+            if [
+                "duplicate-id",
+                "duplicate-node",
+                "root-overlap",
+                "root-dot-overlap",
+                "artifact-config",
+                "config-mismatch",
+                "service-collision",
+                "service-relative",
+                "service-in-artifacts",
+                "service-dot-overlap",
+                "service-over-config",
+                "modern-service-in-state",
+                "schema",
+                "invalid-url",
+                "credential-url",
+                "remote-http",
+                "missing-file",
+                "directory-file",
+                "invalid-json",
+                "oversize-file",
+            ]
+            .contains(&name.as_str())
+            {
+                assert_eq!(
+                    tree(&directory),
+                    before,
+                    "{name}: refusal must precede directory creation"
+                );
+            }
+            if name == "root-file" {
+                assert!(directory.join("runtime").is_dir());
+                assert!(!directory.join("staging").exists());
+            } else if name == "paths-order" {
+                assert!(directory.join("logs").is_dir());
+                assert!(!directory.join("data").exists());
+            }
+        } else {
+            let admitted = actual.unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            let input = c.required("config").unwrap();
+            for key in [
+                "hostId",
+                "publicBaseUrl",
+                "runtimeRoot",
+                "artifactRoot",
+                "stagingRoot",
+                "configPath",
+            ] {
+                if let Some(expected) = input.get(key) {
+                    assert_eq!(admitted.get(key), Some(expected), "{name}/{key}");
+                }
+            }
+            for key in ["runtimeRoot", "artifactRoot", "stagingRoot"] {
+                let path =
+                    node_path::to_native(admitted.required(key).unwrap().as_js_string().unwrap());
+                assert!(path.is_absolute() && path.is_dir(), "{name}/{key}");
+            }
+            for key in ["packageUpdates", "configurationUpdates"] {
+                assert_eq!(
+                    admitted.required(key).unwrap().get("intervalSeconds"),
+                    Some(&J::Number(60.0)),
+                    "{name}/{key}"
+                );
+            }
+            let admitted_instances = admitted.required("instances").unwrap().as_array().unwrap();
+            assert_eq!(
+                admitted_instances.len(),
+                input
+                    .required("instances")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                "{name}"
+            );
+            for instance in admitted_instances {
+                let base = if let Some(root) = admitted.get("servicesRoot") {
+                    node_path::to_native(root.as_js_string().unwrap())
+                        .join(instance.required("componentId").unwrap().as_str().unwrap())
+                } else {
+                    node_path::to_native(
+                        admitted
+                            .required("runtimeRoot")
+                            .unwrap()
+                            .as_js_string()
+                            .unwrap(),
+                    )
+                    .join("instances")
+                    .join(instance.required("instanceId").unwrap().as_str().unwrap())
+                };
+                for key in ["data", "work", "logs"] {
+                    let path = instance
+                        .get("paths")
+                        .and_then(|paths| paths.get(key))
+                        .map(|value| node_path::to_native(value.as_js_string().unwrap()))
+                        .unwrap_or_else(|| base.join(key));
+                    assert!(path.is_dir(), "{name}/{key}: {path:?}");
+                }
+                if instance.get("componentId") == Some(&J::from("agent-manager")) {
+                    let settings = instance.required("settings").unwrap();
+                    for key in ["internalProjectRoot", "codexHome"] {
+                        if let Some(path) = settings.get(key).and_then(J::as_js_string) {
+                            assert!(
+                                !node_path::to_native(path).exists(),
+                                "{name}/{key}: admission cannot create project or home storage"
+                            );
+                        }
+                    }
+                    if name == "agent-default" {
+                        assert_eq!(
+                            settings.get("projectRoot"),
+                            Some(&val(&account, "projects"))
+                        );
+                        assert_eq!(
+                            settings.get("internalProjectRoot"),
+                            Some(&jp(&account.join(".ivy").join("codex-projects")))
+                        );
+                    }
+                }
+            }
         }
+        for (path, bytes) in files {
+            assert_eq!(
+                fs::read(path).unwrap(),
+                bytes,
+                "{name}: admission cannot alter existing bytes"
+            );
+        }
+        assert!(
+            !account.exists(),
+            "Admission cannot create executing-account storage"
+        );
     }
-    if let Some(path) = std::env::var_os("IVY_HOST_STARTUP_CORPUS") {
-        fs::write(
-            path,
-            json::stringify(
-                &J::object([
-                    ("request", request),
-                    ("expected", expected),
-                    ("actual", J::Array(records)),
-                ]),
-                usize::MAX,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-    }
-    println!("startup configuration differential cases: {}", cases.len());
-    assert!(
-        mismatches.is_empty(),
-        "{}",
-        json::stringify(&J::Array(mismatches), usize::MAX).unwrap()
-    );
 }
+
 async fn config_read(path: &Path) -> IvyResult<J> {
     ivy_host_runtime::config::json_file(path.to_owned(), 1024 * 1024).await
 }
@@ -861,7 +993,24 @@ async fn production_host_loader_uses_the_executing_account_and_bounded_json_file
     assert!(!invalid_root.0.join("runtime").exists());
     assert_eq!(fs::read(&invalid_path).unwrap(), bytes);
     let root = Root::new();
-    let path = root.0.join("host.json");
+    let name = std::ffi::OsString::from("host ü 空 😀");
+    #[cfg(windows)]
+    let name = {
+        use std::os::windows::ffi::OsStringExt;
+        let mut name = name;
+        name.push(std::ffi::OsString::from_wide(&[0xd800]));
+        name
+    };
+    #[cfg(unix)]
+    let name = {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let mut name = name.as_os_str().as_bytes().to_vec();
+        name.push(0xff);
+        std::ffi::OsString::from_vec(name)
+    };
+    let mut name = name;
+    name.push(".json");
+    let path = root.0.join(name);
     let config = base(&root.0);
     fs::write(&path, json::stringify(&config, usize::MAX).unwrap()).unwrap();
     let loaded = host_config::host_config(&path).await.unwrap();
