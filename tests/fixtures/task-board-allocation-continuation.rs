@@ -87,7 +87,8 @@ fn native_observation_retains_workspace_and_rejects_changed_directory_project_or
         ("cwd", "/saved".into()),
         ("projectId", "project".into()),
     ]);
-    let actual = continuation_workspace(&task.value, &previous, &observed(thread.clone())).unwrap();
+    let actual =
+        continuation_workspace(&task.value, &previous, &observed(thread.clone()), None).unwrap();
     assert_eq!(
         actual.required("nativeProjectId").unwrap(),
         &Json::from("project")
@@ -106,7 +107,7 @@ fn native_observation_retains_workspace_and_rejects_changed_directory_project_or
         let mut changed = thread.clone();
         changed.insert(key, value);
         assert_eq!(
-            continuation_workspace(&task.value, &previous, &observed(changed))
+            continuation_workspace(&task.value, &previous, &observed(changed), None)
                 .unwrap_err()
                 .code,
             "task_board_workspace_mismatch"
@@ -117,7 +118,7 @@ fn native_observation_retains_workspace_and_rejects_changed_directory_project_or
         Json::object([("error", Json::object([("code", "unavailable".into())]))]),
     )]);
     assert_eq!(
-        continuation_workspace(&task.value, &previous, &failed)
+        continuation_workspace(&task.value, &previous, &failed, None)
             .unwrap_err()
             .code,
         "task_board_native_read_failed"
@@ -127,9 +128,50 @@ fn native_observation_retains_workspace_and_rejects_changed_directory_project_or
     let mut thread = thread;
     thread.remove("projectId");
     assert!(
-        continuation_workspace(&task.value, &no_project, &observed(thread))
+        continuation_workspace(&task.value, &no_project, &observed(thread), None)
             .unwrap()
             .get("nativeProjectId")
             .is_none()
     );
+}
+
+#[test]
+fn continuation_accepts_native_owner_resolved_alias_without_changing_saved_workspace() {
+    let task = task();
+    let canonical = Json::from(r"\\?\D:\workspace");
+    let previous = Json::object([
+        ("canonicalCwd", canonical.clone()),
+        ("intendedPath", canonical.clone()),
+        ("project", Json::object([("nativeId", "project".into())])),
+    ]);
+    let thread = Json::object([
+        ("id", "saved".into()),
+        ("ephemeral", false.into()),
+        ("cwd", r"D:\workspace".into()),
+        ("projectId", "project".into()),
+    ]);
+    let observation = observed(thread.clone());
+    assert!(continuation_workspace(&task.value, &previous, &observation, None).is_err());
+    let actual =
+        continuation_workspace(&task.value, &previous, &observation, Some(&canonical)).unwrap();
+    assert_eq!(actual.required("canonicalCwd").unwrap(), &canonical);
+    assert_eq!(actual.required("intendedPath").unwrap(), &canonical);
+    assert_eq!(
+        actual.required("nativeProjectId").unwrap(),
+        &Json::from("project")
+    );
+    let other = Json::from(r"\\?\D:\other");
+    assert!(continuation_workspace(&task.value, &previous, &observation, Some(&other)).is_err());
+    for (key, value) in [
+        ("id", "other".into()),
+        ("projectId", "other-project".into()),
+        ("ephemeral", true.into()),
+    ] {
+        let mut changed = thread.clone();
+        changed.insert(key, value);
+        assert!(
+            continuation_workspace(&task.value, &previous, &observed(changed), Some(&canonical))
+                .is_err()
+        );
+    }
 }

@@ -253,7 +253,12 @@ fn validate_continuation(task: &Document, run: &Json) -> IvyResult<()> {
         "Conversation continuation requires its own terminal native Run and saved context.",
     )
 }
-fn continuation_workspace(task: &Json, previous: &Json, observed: &Json) -> IvyResult<Json> {
+fn continuation_workspace(
+    task: &Json,
+    previous: &Json,
+    observed: &Json,
+    resolved_cwd: Option<&Json>,
+) -> IvyResult<Json> {
     let result = observed.required("reply")?.get("result").ok_or_else(|| {
         IvyError::new(
             "task_board_native_read_failed",
@@ -265,7 +270,7 @@ fn continuation_workspace(task: &Json, previous: &Json, observed: &Json) -> IvyR
         thread.get("id") == field(task, "primaryResourceRef").get("nativeId")
             && thread.get("ephemeral") == Some(&Json::Bool(false))
             && thread.get("cwd").and_then(Json::as_js_string).is_some()
-            && thread.get("cwd") == previous.get("canonicalCwd")
+            && resolved_cwd.or_else(|| thread.get("cwd")) == previous.get("canonicalCwd")
             && (field(previous, "project").is_null()
                 || thread.get("projectId") == field(previous, "project").get("nativeId")),
         "task_board_workspace_mismatch",
@@ -498,10 +503,51 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                             true,
                         )
                         .await?;
+                    let previous_workspace = previous.value.required("workspace")?;
+                    let cwd = observed
+                        .get("reply")
+                        .and_then(|reply| reply.get("result"))
+                        .and_then(|result| result.get("thread"))
+                        .and_then(|thread| thread.get("cwd"));
+                    // Resolve differing spellings on the native owner, whose
+                    // filesystem can recognize aliases such as Windows'
+                    // verbatim prefix. Never interpret a remote host's paths
+                    // using this service's local platform or change its saved
+                    // workspace to the observed spelling.
+                    let resolved = if cwd.is_some_and(|cwd| {
+                        cwd.as_js_string().is_some()
+                            && Some(cwd) != previous_workspace.get("canonicalCwd")
+                    }) {
+                        Some(
+                            tools
+                                .call(
+                                    &"agent.resolveWorkspace".into(),
+                                    Json::object([
+                                        ("taskKey", task.value.required("taskKey")?.clone()),
+                                        (
+                                            "requirement",
+                                            Json::object([
+                                                ("kind", "directory_path".into()),
+                                                ("path", cwd.unwrap().clone()),
+                                            ]),
+                                        ),
+                                        ("prepare", false.into()),
+                                    ]),
+                                    None,
+                                    ToolCallOptions::default(),
+                                )
+                                .await?,
+                        )
+                    } else {
+                        None
+                    };
                     continuation_workspace(
                         &task.value,
-                        previous.value.required("workspace")?,
+                        previous_workspace,
                         &observed,
+                        resolved
+                            .as_ref()
+                            .and_then(|workspace| workspace.get("canonicalCwd")),
                     )?
                 } else {
                     tools

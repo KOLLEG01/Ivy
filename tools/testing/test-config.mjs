@@ -639,6 +639,11 @@ export const rustTests = {
     "package": "ivy-task-board",
     "test": "task-board-evidence"
   },
+  "tests/fixtures/task-board-allocation-continuation.rs": {
+    "package": "ivy-task-board",
+    "lib": true,
+    "filter": "allocation::continuation_tests::"
+  },
   "tests/rust/task-board-operations.rs": {
     "package": "ivy-task-board",
     "test": "task-board-operations"
