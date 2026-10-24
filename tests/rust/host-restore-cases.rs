@@ -245,34 +245,6 @@ fn ok(result: &J) -> bool {
 }
 
 #[tokio::test]
-async fn immutable_backup_and_captured_ownership_checks_match_original() {
-    for case in [
-        "valid",
-        "hash-mismatch",
-        "failure-marker",
-        "duplicate",
-        "case-collision",
-        "traversal",
-        "payload-changed",
-        "payload-missing",
-        "payload-extra",
-        "configuration-hash",
-        "configuration-host",
-        "captured-layout",
-        "retained-valid",
-        "retained-overlap",
-        "shared-valid",
-        "shared-mismatch",
-        "shared-missing",
-        "ephemeral-mismatch",
-        "ephemeral-contained",
-    ] {
-        let result = compare_case("verify", case).await;
-        let valid = ["valid", "retained-valid", "shared-valid"].contains(&case);
-        assert_eq!(ok(&result), valid, "{case}");
-    }
-}
-#[tokio::test]
 async fn copied_journal_reconciliation_preserves_terminal_outcomes_and_rolls_back_failures() {
     for case in [
         "valid",
@@ -370,3 +342,6 @@ async fn restore_requires_the_exact_captured_platform_and_node_workload() {
 
 #[path = "host-restore-target-cases.rs"]
 mod target_cases;
+
+#[path = "host-restore-verification-cases.rs"]
+mod verification_cases;

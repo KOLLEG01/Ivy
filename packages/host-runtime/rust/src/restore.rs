@@ -132,22 +132,23 @@ pub async fn verify_backup(
     b: &RestoreBindings,
 ) -> IvyResult<J> {
     validate_shared("Hash", &J::String(expected_hash.clone()))?;
-    let path = join(&[directory.clone(), "backup.json".into()]);
-    let info = internal(tokio::fs::symlink_metadata(native(&path)?).await)?;
+    let root = native(&directory)?;
+    let path = root.join("backup.json");
+    let info = internal(tokio::fs::symlink_metadata(&path).await)?;
     require(
         info.is_file()
             && !info.file_type().is_symlink()
             && info.len() <= 12 * 1024 * 1024
-            && !exists(&join(&[directory.clone(), "backup-failure.json".into()])).await?,
+            && !backup_files::exists(&root.join("backup-failure.json")).await?,
         "backup_invalid",
         "Backup publication is incomplete or invalid.",
     )?;
     require(
-        JsString::from(streaming_hash::file_hash(native(&path)?).await?) == expected_hash,
+        JsString::from(streaming_hash::file_hash(path.clone()).await?) == expected_hash,
         "backup_changed",
         "Backup manifest does not match the selected immutable identity.",
     )?;
-    let manifest = json_file(&path, 12 * 1024 * 1024).await?;
+    let manifest = config::json_file(path, 12 * 1024 * 1024).await?;
     validate_host("BackupManifest", &manifest)?;
     let files = array(manifest.required("files")?)?;
     let names = files
@@ -171,7 +172,7 @@ pub async fn verify_backup(
         backup_files::relative_file(&directory, &field(file, "path")?)?;
     }
     let actual = backup_files::inventory_files(
-        native(&directory)?,
+        root.clone(),
         Some(Arc::new(|path| Ok(*path == JsString::from("backup.json")))),
     )
     .await?;
@@ -182,11 +183,8 @@ pub async fn verify_backup(
         "backup_changed",
         "Backup payload is missing, extra or changed.",
     )?;
-    let configuration = json_file(
-        &join(&[directory.clone(), "configuration.json".into()]),
-        config::CONFIGURATION_BYTES,
-    )
-    .await?;
+    let configuration =
+        config::json_file(root.join("configuration.json"), config::CONFIGURATION_BYTES).await?;
     validate_host("HostConfig", &configuration)?;
     require(
         manifest.get("configurationHash") == Some(&hash_json(&configuration)?.into())

@@ -154,6 +154,12 @@ export const rustTests = {
     ],
     "testThreads": 1
   },
+  "tests/rust/host-restore-verification-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "restore_cases::verification_cases::immutable_backup_and_captured_ownership_checks_match_original",
+    "testThreads": 1
+  },
   "tests/rust/host-restore-target-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",

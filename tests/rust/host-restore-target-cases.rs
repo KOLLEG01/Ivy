@@ -3,10 +3,10 @@ use ivy_contracts::{core_schema::validate_host, hash::hash_json};
 use ivy_host_runtime::{config, default_settings, layout, streaming_hash};
 use std::collections::BTreeMap;
 
-fn jp(path: &Path) -> J {
+pub(super) fn jp(path: &Path) -> J {
     J::String(node_path::from_native(path))
 }
-fn property<'a>(value: &'a mut J, name: &str) -> &'a mut J {
+pub(super) fn property<'a>(value: &'a mut J, name: &str) -> &'a mut J {
     let J::Object(fields) = value else {
         panic!("Expected fixture object")
     };
@@ -16,13 +16,13 @@ fn property<'a>(value: &'a mut J, name: &str) -> &'a mut J {
         .unwrap()
         .1
 }
-fn instances(config: &mut J) -> &mut Vec<J> {
+pub(super) fn instances(config: &mut J) -> &mut Vec<J> {
     let J::Array(values) = property(config, "instances") else {
         panic!("Expected instances")
     };
     values
 }
-fn instance(id: &str, component: &str, settings: J) -> J {
+pub(super) fn instance(id: &str, component: &str, settings: J) -> J {
     J::object([
         ("instanceId", id.into()),
         ("componentId", component.into()),
@@ -32,7 +32,7 @@ fn instance(id: &str, component: &str, settings: J) -> J {
         ("settings", settings),
     ])
 }
-fn shared(path: &Path) -> Vec<J> {
+pub(super) fn shared(path: &Path) -> Vec<J> {
     vec![J::object([
         ("instanceId", "agent".into()),
         ("path", jp(path)),
@@ -41,12 +41,12 @@ fn shared(path: &Path) -> Vec<J> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Entry {
+pub(super) enum Entry {
     Directory,
     File(Vec<u8>),
     Link(PathBuf),
 }
-fn state(root: &Path) -> BTreeMap<PathBuf, Entry> {
+pub(super) fn state(root: &Path) -> BTreeMap<PathBuf, Entry> {
     fn visit(root: &Path, path: &Path, entries: &mut BTreeMap<PathBuf, Entry>) {
         let info = fs::symlink_metadata(path).unwrap();
         let entry = if info.file_type().is_symlink() {
