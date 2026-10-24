@@ -198,8 +198,7 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
     return { result, commands: readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) };
   };
   const expected = [
-    ...(process.platform === "win32" ? [["build", "--locked", "--package", "ivy-host-runtime", "--package", "ivy-agent-manager", "--package", "ivy-service-manager", "--package", "ivy-phone-bridge", "--bin", "ivy-job"]] : []),
-    ...(process.platform === "win32" ? [["build", "--locked", "--package", "ivy-host-runtime", "--package", "ivy-agent-manager", "--package", "ivy-service-manager", "--package", "ivy-phone-bridge", "--bin", "ivy-health"]] : []),
+    ...(process.platform === "win32" ? [["build", "--locked", "--package", "ivy-host-runtime", "--package", "ivy-agent-manager", "--package", "ivy-service-manager", "--package", "ivy-phone-bridge", "--bin", "ivy-job", "--bin", "ivy-health"]] : []),
     ["metadata", "--locked", "--no-deps", "--format-version", "1"],
     ["test", "--locked", "--package", "ivy-agent-manager", "--package", "ivy-service-manager", "--package", "ivy-phone-bridge", "--test", "agent-interactions", "--test", "service-manager-stop", "--test", "service-manager-policy", "--test", "phone_media"],
   ];
