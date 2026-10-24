@@ -339,16 +339,15 @@ impl<'a> Uis<'a> {
         let mut items = vec![];
         for row in rows {
             let (id, path, count) = sql(store, row)?;
-            let path: IvyJson = match path {
-                rusqlite::types::Value::Null => "null".into(),
-                rusqlite::types::Value::Text(path) => path.into(),
-                rusqlite::types::Value::Integer(value) => value.to_string().into(),
-                rusqlite::types::Value::Real(value) => ivy_contracts::json::stringify(&IvyJson::Number(value), usize::MAX)?.into(),
-                rusqlite::types::Value::Blob(_) => return Err(IvyError::internal()),
+            let rusqlite::types::Value::Text(path) = path else {
+                return Err(IvyError::new(
+                    "storage_invalid",
+                    "Retained UI entry path must be a string.",
+                ));
             };
             items.push(IvyJson::object([
                 ("releaseId", id.into()),
-                ("entryPath", path),
+                ("entryPath", path.into()),
                 ("assetCount", IvyJson::Number(count.unwrap_or(0) as f64)),
             ]));
         }

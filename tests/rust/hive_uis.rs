@@ -319,7 +319,7 @@ fn uis_release_pages_use_raw_sql_summaries_guard_metadata_and_enforce_actual_byt
         json!("r1"),
         vec![
             ("r1", release("r1", "a")),
-            ("r2", json!({"entryPath":null,"assets":null})),
+            ("r2", json!({"entryPath":"retained.html","assets":null})),
             ("r3", release("different-key", "c")),
         ],
     ));
@@ -371,7 +371,7 @@ fn uis_release_pages_use_raw_sql_summaries_guard_metadata_and_enforce_actual_byt
     assert_eq!(value(&r, get)["releases"].as_array().unwrap().len(), 2);
     assert_eq!(
         value(&r, next)["items"][0],
-        json!({"releaseId":"r2","entryPath":"null","assetCount":0})
+        json!({"releaseId":"r2","entryPath":"retained.html","assetCount":0})
     );
     error(&r, malformed, "internal_error");
     error(&r, missing, "not_found");
