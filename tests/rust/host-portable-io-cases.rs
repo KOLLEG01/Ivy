@@ -246,6 +246,103 @@ async fn portable_plan_retains_order_supported_cross_host_variants_and_existing_
         assert_eq!(actual, expected, "{variant}");
         assert_eq!(image(&fixture.0), before, "{variant}");
     }
+
+    let fixture = Fixture::new();
+    let (artifact, _) = roots(&fixture, "plain");
+    let modules = artifact.join("node_modules");
+    fs::create_dir(&modules).unwrap();
+    fs::write(
+        modules.join("existing"),
+        b"existing path before metadata admission",
+    )
+    .unwrap();
+    fs::create_dir_all(fixture.0.join("alternate/child")).unwrap();
+    ivy_host_runtime::filesystem::directory_link(
+        Path::new("../../../alternate/child"),
+        &modules.join("link"),
+    )
+    .unwrap();
+    let mut shortcuts = vec![
+        "",
+        "/node_modules/existing",
+        "//node_modules/existing",
+        "node_modules//existing",
+        "node_modules/./existing",
+        "node_modules/existing/",
+        "node_modules/not-there/../existing",
+        "node_modules/link/../existing",
+    ];
+    #[cfg(windows)]
+    shortcuts.extend([
+        "node_modules\\existing",
+        "node_modules\\not-there\\..\\existing",
+    ]);
+    let packages: Vec<_> = shortcuts
+        .iter()
+        .map(|location| {
+            let mut item = metadata();
+            item.insert("resolved", "http://invalid-pinned-metadata".into());
+            (JsString::from(*location), item)
+        })
+        .collect();
+    let before = image(&fixture.0);
+    assert!(
+        portable::portable_dependency_plan(
+            IvyJson::object([("packages", IvyJson::object(packages))]),
+            shortcuts
+                .iter()
+                .map(|value| JsString::from(*value))
+                .collect(),
+            artifact.clone(),
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+
+    let mut locations: Vec<JsString> = [
+        "node_modules//fixture",
+        "node_modules/./fixture",
+        "node_modules/not-there/../fixture",
+        "node_modules/fixture",
+        "/node_modules/fixture",
+        "node_modules/包",
+    ]
+    .map(JsString::from)
+    .into();
+    #[cfg(windows)]
+    for unit in [0xd800, 0xdfff] {
+        let mut name: Vec<u16> = "node_modules/opaque".encode_utf16().collect();
+        name.push(unit);
+        locations.push(JsString(name));
+    }
+    let mut expected = Vec::new();
+    let mut packages = Vec::new();
+    for (index, location) in locations.iter().enumerate() {
+        let dep = PortableDependency {
+            location: location.clone(),
+            resolved: format!("https://registry.invalid/entry-{index}.tgz").into(),
+            integrity: checksum(format!("entry-{index}").as_bytes()),
+            version: format!("1.2.{index}").into(),
+        };
+        let mut item = value(&dep);
+        item.insert("os", IvyJson::Array(vec!["linux".into()]));
+        packages.push((location.clone(), item));
+        expected.push(dep);
+    }
+    let mut selected = locations;
+    selected.push(selected[0].clone());
+    assert_eq!(
+        portable::portable_dependency_plan(
+            IvyJson::object([("packages", IvyJson::object(packages))]),
+            selected,
+            artifact,
+        )
+        .await
+        .unwrap(),
+        expected
+    );
+    assert_eq!(image(&fixture.0), before);
 }
 
 #[tokio::test]
@@ -534,6 +631,35 @@ async fn system_tar_refusals_cleanup_owned_archives_and_preserve_exclusive_creat
         );
         assert_eq!(image(&fixture.0), before, "{variant}");
         assert_eq!(fs::read(hardlink).unwrap(), b"existing writer archive");
+    }
+    for location in [
+        "node_modules//fixture",
+        "node_modules/./fixture",
+        "node_modules/not-there/../fixture",
+    ] {
+        let fixture = Fixture::new();
+        let (artifact, temporary) = roots(&fixture, "plain");
+        let bytes = archive(&package_entries("fixture"));
+        let owned = archive_path(&temporary, location);
+        let normalized = archive_path(&temporary, "node_modules/fixture");
+        assert_ne!(owned, normalized);
+        fs::write(&owned, b"original literal location archive").unwrap();
+        let hardlink = temporary.join("literal-writer-hardlink");
+        fs::hard_link(&owned, &hardlink).unwrap();
+        let before = image(&fixture.0);
+        assert_eq!(
+            install(location, bytes, artifact, temporary)
+                .await
+                .unwrap_err()
+                .code,
+            "internal_error"
+        );
+        assert_eq!(image(&fixture.0), before, "{location}");
+        assert_eq!(
+            fs::read(hardlink).unwrap(),
+            b"original literal location archive"
+        );
+        assert!(!normalized.exists());
     }
     for case in [
         "archive-directory",

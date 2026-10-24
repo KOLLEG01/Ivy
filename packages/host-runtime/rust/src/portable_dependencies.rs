@@ -1,5 +1,5 @@
 //! Pinned optional npm platform payloads; system tar owns archive extraction.
-use crate::{IvyError, IvyJson, IvyResult, config, filesystem, node_path::{self, Style}, process::{self, LaunchContext}};
+use crate::{IvyError, IvyJson, IvyResult, config, filesystem, node_path, process::{self, LaunchContext}};
 use ivy_contracts::JsString;
 use sha2::{Digest, Sha512};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -11,9 +11,11 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
 }
 fn internal<T, E>(value: Result<T, E>) -> IvyResult<T> { value.map_err(|_| IvyError::internal()) }
 fn local(root: &Path, location: &JsString) -> PathBuf {
-    let mut parts = vec![node_path::from_native(root)];
-    parts.extend(location.0.split(|c| *c == 47).map(|part| JsString(part.to_vec())));
-    node_path::to_native(&node_path::join(Style::native(), &parts))
+    let mut path = root.to_owned();
+    for part in location.0.split(|c| *c == 47) {
+        path.push(node_path::to_native(&JsString(part.to_vec())));
+    }
+    node_path::lexical(&path)
 }
 fn intersects(value: Option<&IvyJson>, supported: &[&str]) -> bool {
     value.is_none() || value.and_then(IvyJson::as_array).is_some_and(|values| values.iter()
