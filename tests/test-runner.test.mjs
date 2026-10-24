@@ -162,11 +162,12 @@ test("selection follows cyclic fixture imports, deduplicates files and rejects m
 test("partial Rust checkouts select registered files under their owning scopes", (t) => {
   const root = temporary(t);
   mkdirSync(join(root, "tests/rust"), { recursive: true });
-  for (const name of ["phone_media.rs", "hive_worker_client.rs", "service-manager-stop.rs"])
+  for (const name of ["phone_media.rs", "hive_worker_client.rs", "service-manager-stop.rs", "host-backup-files-cases.rs"])
     writeFileSync(join(root, "tests/rust", name), "// isolated selector fixture\n");
   const selected = selectTests(root, config, { files: ["tests/rust/*.rs"] });
   assert.deepEqual(selected.map(({ file, scope }) => [file, scope]), [
     ["tests/rust/hive_worker_client.rs", "hive"],
+    ["tests/rust/host-backup-files-cases.rs", "host"],
     ["tests/rust/phone_media.rs", "phone"],
     ["tests/rust/service-manager-stop.rs", "host"],
   ]);

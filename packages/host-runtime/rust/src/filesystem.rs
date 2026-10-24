@@ -33,8 +33,11 @@ pub fn directory_link(source: &Path, destination: &Path) -> std::io::Result<()> 
     }
     #[cfg(unix)]
     {
-        let target =
-            crate::native_path::relative(&paths::absolute(parent)?, &paths::absolute(source)?);
+        let target = if source.is_absolute() {
+            crate::native_path::relative(&paths::absolute(parent)?, &paths::absolute(source)?)
+        } else {
+            source.to_owned()
+        };
         std::os::unix::fs::symlink(target, destination)
     }
 }

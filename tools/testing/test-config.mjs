@@ -16,6 +16,7 @@ export const scopes = [
   "tooling",
 ];
 export function scope(file) {
+  if (file.startsWith("tests/rust/host-")) return "host";
   if (/host-(?:codex-cases|build-input|compiler-tools|service-storage|native-(?:plan|coordinator|recovery))/.test(file)) return "host";
   if (/data-collector/.test(file)) return "data-collector";
   if (/dashboards/.test(file)) return "dashboards";
@@ -33,7 +34,6 @@ export function scope(file) {
   if (/sdk/.test(file)) return "sdk";
   if (/native-|agent-|codex-|claude-|project-locations/.test(file)) return "agent";
   if (/web-e2e\/|ui-(content|live)/.test(file)) return "ui";
-  if (/^tests\/rust\/host-(?:actions|(?:preparation|backup|reset)-actions|reset-clear-cases)\.rs$/.test(file)) return "host";
   if (
     /kernel|storage|backup|transports|connection-auth|hive[-_]|browser-push|contracts|builtin_schema|schema-compiler|concurrency|console-inspection|ui-publication/.test(
       file,
@@ -182,6 +182,30 @@ export const rustTests = {
     "package": "ivy-host-runtime",
     "test": "host-paths",
     "filter": "package_updater_cases::download_cases::",
+    "testThreads": 1
+  },
+  "tests/rust/host-package-updater-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "package_updater_cases::",
+    "testThreads": 1
+  },
+  "tests/rust/host-configuration-updater-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "configuration_updater_cases::",
+    "testThreads": 1
+  },
+  "tests/rust/host-package-archive-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "package_archive_cases::",
+    "testThreads": 1
+  },
+  "tests/rust/host-restore-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "restore_cases::restore_requires_the_exact_captured_platform_and_node_workload",
     "testThreads": 1
   },
   "tests/rust/host-project-storage-cases.rs": {

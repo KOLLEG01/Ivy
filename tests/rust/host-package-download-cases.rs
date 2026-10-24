@@ -290,6 +290,8 @@ async fn package_download_keeps_native_paths_exclusive_ownership_and_status_orde
         ("version", "1.0.0".into()),
     ]);
     let mut cases = vec!["plain", "unicode-dot", "canonical", "linked"];
+    #[cfg(unix)]
+    cases.push("linked-hop");
     #[cfg(windows)]
     cases.extend(["opaque-high", "opaque-low", "trailing"]);
     for case in cases {
@@ -298,7 +300,7 @@ async fn package_download_keeps_native_paths_exclusive_ownership_and_status_orde
         fs::create_dir(&root).unwrap();
         let canonical = fs::canonicalize(&root).unwrap();
         let mut archive = root.join("archive.tar.gz");
-        let mut alias = None;
+        let mut alias: Option<PathBuf> = None;
         if case == "unicode-dot" {
             fs::create_dir(root.join("目录 space")).unwrap();
             archive = root.join("目录 space").join(".").join("archive.tar.gz");
@@ -309,6 +311,23 @@ async fn package_download_keeps_native_paths_exclusive_ownership_and_status_orde
             ivy_host_runtime::filesystem::directory_link(Path::new("real"), &root.join("link"))
                 .unwrap();
             archive = root.join("link").join("archive.tar.gz");
+        }
+        #[cfg(unix)]
+        if case == "linked-hop" {
+            fs::create_dir_all(root.join("elsewhere/step")).unwrap();
+            fs::create_dir(root.join("elsewhere/real")).unwrap();
+            fs::create_dir(root.join("real")).unwrap();
+            ivy_host_runtime::filesystem::directory_link(
+                Path::new("elsewhere/step"),
+                &root.join("route"),
+            )
+            .unwrap();
+            ivy_host_runtime::filesystem::directory_link(
+                Path::new("route/../real"),
+                &root.join("link"),
+            )
+            .unwrap();
+            archive = root.join("link/archive.tar.gz");
         }
         #[cfg(windows)]
         if case.starts_with("opaque") || case == "trailing" {
@@ -342,6 +361,13 @@ async fn package_download_keeps_native_paths_exclusive_ownership_and_status_orde
             .await
             .unwrap();
         assert_eq!(fs::read(&archive).unwrap(), payload, "{case}");
+        if case == "linked-hop" {
+            assert_eq!(
+                fs::read(root.join("elsewhere/real/archive.tar.gz")).unwrap(),
+                payload
+            );
+            assert!(!root.join("real/archive.tar.gz").exists());
+        }
         assert_eq!(server.requests.lock().unwrap().len(), before + 1, "{case}");
         let hardlink = canonical.join("owned-hardlink.tar.gz");
         fs::hard_link(&archive, &hardlink).unwrap();
