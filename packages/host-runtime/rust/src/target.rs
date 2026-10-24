@@ -3,7 +3,7 @@ use crate::{
     IvyError, IvyJson, IvyResult, accepted_configuration, config,
     journal::HostJournal,
     layout,
-    node_path::{self, Context, Style},
+    native_path::{self, Style},
     paths, streaming_hash,
 };
 use ivy_contracts::{JsString, core_schema::validate_host};
@@ -55,22 +55,22 @@ pub async fn candidate_bound_settings(
             let executable = native
                 .unwrap()
                 .get("executable")
-                .and_then(IvyJson::as_js_string);
+                .and_then(IvyJson::as_js_string)
+                .map(native_path::to_native);
             require(
-                executable.is_some_and(|path| {
-                    !path.0.is_empty() && !node_path::is_absolute(Style::native(), path)
-                }),
+                executable
+                    .as_ref()
+                    .is_some_and(|path| !path.as_os_str().is_empty() && !path.is_absolute()),
                 "invalid_arguments",
                 "Phone executable must be relative to its selected artifact.",
             )?;
-            let executable = executable.unwrap().clone();
+            let executable = executable.unwrap();
             let actual = internal(
                 tokio::task::spawn_blocking(move || -> IvyResult<PathBuf> {
                     let root = internal(paths::realpath(&artifact_root))?;
-                    let path = node_path::to_native(
-                        &internal(Context::current())?
-                            .resolve(&[node_path::from_native(&root), executable]),
-                    );
+                    let path = root.join(executable);
+                    let path =
+                        paths::absolute(&path).unwrap_or_else(|_| native_path::lexical(&path));
                     let actual = internal(paths::realpath(&path))?;
                     require(
                         internal(paths::inside(&root, &actual))?
@@ -200,24 +200,21 @@ pub async fn materialize_target(
                 config.insert("credential", credential.clone());
             }
             validate_host("InstanceConfig", &config)?;
-            let config_path = node_path::join(
-                Style::native(),
-                &[
-                    text(host.required("runtimeRoot")?)?,
-                    "instances".into(),
-                    instance_id.clone().into(),
-                    "configurations".into(),
-                    revision.clone().into(),
-                    "config.json".into(),
-                ],
+            let config_path = native_path::lexical(
+                &config::path_value(host.required("runtimeRoot")?)?
+                    .join("instances")
+                    .join(native_path::to_native(&instance_id))
+                    .join("configurations")
+                    .join(&revision)
+                    .join("config.json"),
             );
-            config::atomic_json(node_path::filesystem_path(&config_path), config.clone()).await?;
+            config::atomic_json(config_path.clone(), config.clone()).await?;
             let snapshot_host = host.clone();
             let snapshot_path = config_path.clone();
             let snapshot_revision = revision.clone();
             internal(
                 tokio::task::spawn_blocking(move || {
-                    accepted_configuration::save_accepted_instance_configuration_js(
+                    accepted_configuration::save_accepted_instance_configuration(
                         &snapshot_host,
                         &snapshot_path,
                         &snapshot_revision,
@@ -234,7 +231,10 @@ pub async fn materialize_target(
                     "desired",
                     if enabled { "running" } else { "stopped" }.into(),
                 ),
-                ("configPath", IvyJson::String(config_path)),
+                (
+                    "configPath",
+                    IvyJson::String(native_path::from_native(&config_path)),
+                ),
                 ("requestedAt", now()),
             ]);
             validate_host("RuntimeTarget", &target)?;

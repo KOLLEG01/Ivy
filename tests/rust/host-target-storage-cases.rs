@@ -525,6 +525,7 @@ async fn target_ids_preserve_utf16_and_refuse_nul_at_the_filesystem_boundary() {
         JsString(vec![114, 97, 119, 45, 0xd800]),
         JsString(vec![114, 97, 119, 45, 0xdfff]),
         JsString(vec![114, 97, 119, 0]),
+        "nested/../logical-ü-😀".into(),
     ] {
         let fixture = Fixture::new();
         let mut input = inputs(&fixture, "actual", "fixture");
@@ -554,8 +555,31 @@ async fn target_ids_preserve_utf16_and_refuse_nul_at_the_filesystem_boundary() {
         } else {
             assert_eq!(
                 published(&result).get("instanceId"),
-                Some(&IvyJson::String(id))
+                Some(&IvyJson::String(id.clone()))
             );
+            if id == JsString::from("nested/../logical-ü-😀") {
+                let target = result
+                    .required("operation")
+                    .unwrap()
+                    .required("value")
+                    .unwrap()
+                    .required("target")
+                    .unwrap();
+                let revision = target.required("revision").unwrap().as_str().unwrap();
+                assert_eq!(
+                    target.get("configPath"),
+                    Some(&path(
+                        &input
+                            .root
+                            .join("runtime")
+                            .join("instances")
+                            .join("logical-ü-😀")
+                            .join("configurations")
+                            .join(revision)
+                            .join("config.json")
+                    ))
+                );
+            }
         }
     }
 }
@@ -748,6 +772,58 @@ async fn native_settings_resolve_and_hash_only_the_selected_artifact_and_preserv
     assert_eq!(
         fs::read(fixture.0.join("outside/escape.exe")).unwrap(),
         b"outside bytes"
+    );
+    let name = std::ffi::OsString::from("native-root-中-🚀");
+    #[cfg(windows)]
+    let name = {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let mut units: Vec<_> = name.encode_wide().collect();
+        units.push(0xd800);
+        std::ffi::OsString::from_wide(&units)
+    };
+    #[cfg(unix)]
+    let name = {
+        use std::os::unix::ffi::OsStringExt;
+        let mut bytes = name.into_vec();
+        bytes.push(0xff);
+        std::ffi::OsString::from_vec(bytes)
+    };
+    let root = fixture.0.join(name);
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::write(
+        root.join("nested").join("runtime.exe"),
+        b"native path bytes",
+    )
+    .unwrap();
+    let alias = PathBuf::from(root.to_string_lossy().as_ref());
+    fs::create_dir_all(alias.join("nested")).unwrap();
+    fs::write(
+        alias.join("nested").join("runtime.exe"),
+        b"lossy alias bytes",
+    )
+    .unwrap();
+    let settings = IvyJson::object([(
+        "native",
+        IvyJson::object([
+            ("executable", "nested/./runtime.exe".into()),
+            ("executableHash", "old hash".into()),
+        ]),
+    )]);
+    let actual = target::candidate_bound_settings(
+        "phone-bridge".into(),
+        settings.clone(),
+        root.join("nested").join(".."),
+    )
+    .await
+    .unwrap();
+    let mut expected = settings;
+    let mut native = expected.required("native").unwrap().clone();
+    native.insert("executableHash", hash::digest(b"native path bytes").into());
+    expected.insert("native", native);
+    assert_json_eq(&actual, &expected);
+    assert_eq!(
+        fs::read(alias.join("nested").join("runtime.exe")).unwrap(),
+        b"lossy alias bytes"
     );
 }
 #[tokio::test]

@@ -1,6 +1,6 @@
 //! Private immutable configuration snapshots captured at operation admission.
-use crate::{IvyError, IvyJson, IvyResult, layout::{path, service_paths}, paths::inside, native_path};
-use ivy_contracts::{JsString, core_schema::validate_host, json};
+use crate::{IvyError, IvyJson, IvyResult, layout::{path, service_paths}, paths::inside};
+use ivy_contracts::{core_schema::validate_host, json};
 use std::{fs::{self, OpenOptions}, io::{Read, Write}, path::{Path, PathBuf}};
 
 const LIMIT: usize = 1024 * 1024;
@@ -120,14 +120,6 @@ pub fn save_accepted_instance_configuration(
     let target = accepted_instance_configuration_path(config, revision)?;
     write_snapshot(&directory, &target, &value)?;
     Ok(target)
-}
-/// Convert public configuration text once; filesystem work retains native paths.
-pub(crate) fn save_accepted_instance_configuration_js(
-    config: &IvyJson,
-    source: &JsString,
-    revision: &str,
-) -> IvyResult<PathBuf> {
-    save_accepted_instance_configuration(config, &native_path::to_native(source), revision)
 }
 fn check_accepted(anchor: &IvyJson, source: &Path, instance: bool) -> IvyResult<()> {
     let directory = directory(anchor)?;

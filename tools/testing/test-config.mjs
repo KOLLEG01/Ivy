@@ -591,6 +591,18 @@ export const rustTests = {
     "package": "ivy-host-runtime",
     "test": "host-native-recovery"
   },
+  "tests/rust/host-executor-runtime-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "executor_runtime_cases::native_windows_process_reconciliation_keeps_the_external_runtime_owner_authority",
+    "testThreads": 1
+  },
+  "tests/rust/host-target-storage-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-native-paths",
+    "filter": "target_storage_cases::",
+    "testThreads": 1
+  },
   "tests/rust/host-service-storage.rs": {
     "package": "ivy-host-runtime",
     "test": "host-service-storage"
