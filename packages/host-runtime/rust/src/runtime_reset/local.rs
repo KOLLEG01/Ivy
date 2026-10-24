@@ -4,12 +4,12 @@ use super::*;
 use crate::{
     config,
     journal::{ExecutorLock, HostJournal},
-    node_path, runtime_maintenance,
+    native_path, runtime_maintenance,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use ivy_contracts::{core_schema::validate_host, hash::hash_json};
 use ivy_sdk::clock::Clock;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{ffi::OsString, path::PathBuf, sync::Arc, time::Duration};
 
 fn internal<T, E>(value: Result<T, E>) -> IvyResult<T> {
     value.map_err(|_| IvyError::internal())
@@ -39,7 +39,9 @@ pub(super) fn require_publisher_digest(value: &JsString) -> IvyResult<()> {
     require(
         value.0.len() == 71
             && value.0.starts_with(&JsString::from("sha256:").0)
-            && value.0[7..].iter().all(|v| matches!(*v, 48..=57 | 97..=102)),
+            && value.0[7..]
+                .iter()
+                .all(|v| matches!(*v, 48..=57 | 97..=102)),
         "invalid_arguments",
         "Runtime reset requires the checked ui publisher credential digest.",
     )
@@ -112,7 +114,11 @@ pub async fn prepare_reset_hold(
                     && previous.get("publisherCredentialDigest") == Some(&digest)
             });
             if let Some(previous) = previous.as_ref().filter(|v| !v.is_null()) {
-                require(previous.as_object().is_some(), "storage_invalid", "Runtime reset record must be an object.")?;
+                require(
+                    previous.as_object().is_some(),
+                    "storage_invalid",
+                    "Runtime reset record must be an object.",
+                )?;
                 require(
                     previous.get("deploymentComplete") == Some(&J::Bool(true)) || same,
                     "mutation_conflict",
@@ -268,7 +274,10 @@ pub fn restored_bootstrap_target(
         .find(|process| {
             process.get("instanceId") == Some(&J::String(instance_id.clone()))
                 && process.get("candidateId") == Some(&J::String(candidate_id.clone()))
-                && process.get("configPath").and_then(J::as_js_string).is_some_and(|path| !path.0.is_empty())
+                && process
+                    .get("configPath")
+                    .and_then(J::as_js_string)
+                    .is_some_and(|path| !path.0.is_empty())
         })
     else {
         return Ok(None);
@@ -300,27 +309,20 @@ pub fn restored_bootstrap_target(
 pub async fn prove_reset_locks_released(config: J, clock: Arc<dyn Clock>) -> IvyResult<()> {
     internal(
         tokio::spawn(async move {
-            let runtime = field(&config, "runtimeRoot")?;
-            let mut names = vec![JsString::from("executor")];
+            let runtime = config::path_value(config.required("runtimeRoot")?)?;
+            let mut roots = vec![native_path::lexical(&runtime.join("executor"))];
             for instance in config
                 .required("instances")?
                 .as_array()
                 .ok_or_else(IvyError::internal)?
             {
-                names.push(JsString(
-                    [
-                        JsString::from("owners/").0,
-                        field(instance, "instanceId")?.0,
-                    ]
-                    .concat(),
-                ));
+                let instance = config::path_value(instance.required("instanceId")?)?;
+                // Keep the owners prefix even when the identity starts with a separator.
+                let mut owner = OsString::from("owners/");
+                owner.push(instance.as_os_str());
+                roots.push(native_path::lexical(&runtime.join(owner)));
             }
-            for name in names {
-                let root = node_path::node_filesystem_path(&node_path::join(
-                    node_path::Style::native(),
-                    &[runtime.clone(), name],
-                ))
-                .map_err(|_| IvyError::internal())?;
+            for root in roots {
                 let end = clock.utc_millis() + 30_000;
                 let mut lock = None;
                 while lock.is_none() && clock.utc_millis() < end {

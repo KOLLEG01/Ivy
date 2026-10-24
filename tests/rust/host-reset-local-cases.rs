@@ -119,23 +119,6 @@ async fn compare(group: &str, case: &str) -> J {
     let setup = oracle(&fixture, group, case, "setup", vec![]);
     let config = setup.get("config").unwrap().clone();
     let args = setup.get("args").unwrap();
-    let held = if group == "locks" && case.starts_with("held-") {
-        let name = match case {
-            "held-executor" => "executor",
-            "held-first" => "owners/first",
-            _ => "owners/last",
-        };
-        Some(
-            ExecutorLock::acquire(
-                PathBuf::from(config.get("runtimeRoot").unwrap().as_str().unwrap()).join(name),
-                false,
-            )
-            .await
-            .unwrap(),
-        )
-    } else {
-        None
-    };
     let result = match group {
         "saved" => runtime_reset::saved_reset_runtime(config.clone())
             .await
@@ -169,17 +152,8 @@ async fn compare(group: &str, case: &str) -> J {
             )
             .await
         }
-        "locks" => runtime_reset::prove_reset_locks_released(
-            config.clone(),
-            Arc::new(DeadlineClock(AtomicI64::new(0))),
-        )
-        .await
-        .map(|_| J::Null),
         _ => panic!("unknown reset stage"),
     };
-    if let Some(held) = held {
-        held.close().await.unwrap();
-    }
     let actual = J::object([
         ("outcome", wrap(result)),
         ("state", oracle(&fixture, group, case, "observe", vec![])),
@@ -326,9 +300,131 @@ async fn reset_local_completion_and_confirmation_require_exact_durable_phase() {
 
 #[tokio::test]
 async fn reset_local_lock_proof_requires_executor_and_every_instance_owner() {
-    for case in ["free", "held-executor", "held-first", "held-last"] {
-        let result = compare("locks", case).await;
-        assert_eq!(ok(&result), case == "free", "{case}");
+    for variant in ["ordinary", "unicode", "dot-alias"] {
+        for held_index in [None, Some(0), Some(1), Some(2), Some(3)] {
+            let fixture = ServiceFixture::new();
+            let mut config = host_configuration(&fixture);
+            let mut names: Vec<PathBuf> = ["first", "middle", "last"]
+                .into_iter()
+                .map(PathBuf::from)
+                .collect();
+            let mut state_name = PathBuf::from("state");
+            if variant == "unicode" {
+                state_name = "état 中 🚀".into();
+                names = ["première", "中間", "last 🚀"]
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .collect();
+            }
+            let runtime = fixture.0.join(state_name);
+            let configured_runtime = if variant == "dot-alias" {
+                runtime.join("absent/..")
+            } else {
+                runtime.clone()
+            };
+            config.insert(
+                "runtimeRoot",
+                J::String(node_path::from_native(&configured_runtime)),
+            );
+            config.insert(
+                "ivyRoot",
+                J::String(node_path::from_native(&fixture.0.join("installation"))),
+            );
+            let base = config.required("instances").unwrap().as_array().unwrap()[0].clone();
+            config.insert(
+                "instances",
+                J::Array(
+                    names
+                        .iter()
+                        .enumerate()
+                        .map(|(index, name)| {
+                            let mut instance = base.clone();
+                            let configured = if variant == "dot-alias" {
+                                PathBuf::from("alias/..").join(name)
+                            } else {
+                                name.clone()
+                            };
+                            instance.insert(
+                                "instanceId",
+                                J::String(node_path::from_native(&configured)),
+                            );
+                            instance.insert("serviceNodeId", format!("fixture-{index}").into());
+                            instance.insert("enabled", (index != 1).into());
+                            instance
+                        })
+                        .collect(),
+                ),
+            );
+            let mut roots = vec![runtime.join("executor")];
+            roots.extend(names.iter().map(|name| runtime.join("owners").join(name)));
+            let record = runtime_reset::reset_record_path(&config).unwrap();
+            let marker = record.parent().unwrap().join("maintenance.json");
+            fs::create_dir_all(record.parent().unwrap()).unwrap();
+            let record_bytes =
+                b"{ \"resetId\": \"original\", \"runtimeEpoch\": \"original-epoch\" }\n";
+            let marker_bytes = b"retained maintenance hold\n";
+            fs::write(&record, record_bytes).unwrap();
+            fs::write(&marker, marker_bytes).unwrap();
+            let held = if let Some(index) = held_index {
+                Some(
+                    ExecutorLock::acquire(roots[index].clone(), false)
+                        .await
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let held_bytes = held_index
+                .map(|index| fs::read(roots[index].join("executor-lock.sqlite")).unwrap());
+            let result = runtime_reset::prove_reset_locks_released(
+                config,
+                Arc::new(DeadlineClock(AtomicI64::new(0))),
+            )
+            .await;
+            if let Some(index) = held_index {
+                let probe = ExecutorLock::acquire(roots[index].clone(), false).await;
+                assert_eq!(probe.err().unwrap().code, "executor_already_running");
+                assert_eq!(
+                    fs::read(roots[index].join("executor-lock.sqlite")).unwrap(),
+                    held_bytes.unwrap(),
+                    "{variant}/{held_index:?}: live owner's bytes changed"
+                );
+            }
+            if let Some(held) = held {
+                held.close().await.unwrap();
+            }
+            if held_index.is_some() {
+                let error = result.unwrap_err();
+                assert_eq!(error.code, "outcome_unknown", "{variant}/{held_index:?}");
+                assert_eq!(
+                    error.message,
+                    "A reset writer still owns its maintenance lock."
+                );
+            } else {
+                result.unwrap();
+            }
+            for (index, root) in roots.iter().enumerate() {
+                assert_eq!(
+                    root.join("executor-lock.sqlite").is_file(),
+                    held_index.is_none_or(|held| index <= held),
+                    "{variant}/{held_index:?}: proof skipped or passed owner {index}"
+                );
+            }
+            for root in roots {
+                let lock = ExecutorLock::acquire(root, false).await.unwrap();
+                lock.close().await.unwrap();
+            }
+            assert_eq!(fs::read(&record).unwrap(), record_bytes);
+            assert_eq!(fs::read(&marker).unwrap(), marker_bytes);
+            assert!(
+                !runtime.join("absent").exists(),
+                "{variant}: runtime alias created"
+            );
+            assert!(
+                !runtime.join("owners/alias").exists(),
+                "{variant}: owner alias created"
+            );
+        }
     }
 }
 

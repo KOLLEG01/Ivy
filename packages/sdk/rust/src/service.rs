@@ -57,7 +57,7 @@ impl ServiceOptions<String> {
     }
 }
 impl ServiceOptions<JsString> {
-    /// Keep raw JavaScript code units until the credential callback is observed.
+    /// Accept UTF-16 configuration credentials for the native connection.
     pub fn new_js(
         public_base_url: String,
         credential: Dependency<JsString>,
@@ -367,8 +367,7 @@ impl ServiceClient {
                     return Ok(());
                 }
                 let options = &self.0.options;
-                let request = ServiceConnection::prepare_js(&options.public_base_url, &credential)
-                    .map_err(|error| error.into_state_error())?;
+                let request = ServiceConnection::prepare_js(&options.public_base_url, &credential)?;
                 phase = "socket.open";
                 let established = ServiceConnection::connect_prepared(
                     request,

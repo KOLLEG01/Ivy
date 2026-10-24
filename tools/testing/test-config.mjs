@@ -537,6 +537,12 @@ export const rustTests = {
     "package": "ivy-host-runtime",
     "test": "host-scheduler"
   },
+  "tests/rust/host-reset-local-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "reset_local_cases::reset_local_lock_proof_requires_executor_and_every_instance_owner",
+    "testThreads": 1
+  },
   "tests/rust/host-reset-stop-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",

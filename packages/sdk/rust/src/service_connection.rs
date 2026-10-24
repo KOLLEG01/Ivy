@@ -24,11 +24,11 @@ use std::{
 use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio_tungstenite::{
     connect_async_with_config,
-    tungstenite::{Message, client::IntoClientRequest, protocol::WebSocketConfig},
+    tungstenite::{
+        Message, client::IntoClientRequest, http::HeaderValue, protocol::WebSocketConfig,
+    },
 };
 use tokio_util::sync::CancellationToken;
-#[path = "service_header.rs"]
-mod header;
 
 pub type ServiceFuture<T> = Pin<Box<dyn Future<Output = IvyResult<T>> + Send + 'static>>;
 pub type ToolHandler =
@@ -154,32 +154,6 @@ fn throw_if_aborted(signal: &CancellationToken, reason: &OnceLock<IvyError>) -> 
     }
 }
 
-pub(crate) enum ConnectionPreparationError {
-    Ivy(IvyError),
-    NativeHeader,
-}
-impl From<IvyError> for ConnectionPreparationError {
-    fn from(error: IvyError) -> Self {
-        Self::Ivy(error)
-    }
-}
-impl ConnectionPreparationError {
-    fn into_error(self) -> IvyError {
-        match self {
-            Self::Ivy(error) => error,
-            // Match IvyError.from for the synchronous Node TypeError.
-            Self::NativeHeader => IvyError::internal(),
-        }
-    }
-    pub(crate) fn into_state_error(self) -> IvyError {
-        match self {
-            Self::Ivy(error) => error,
-            // ServiceClient.run hides non-Ivy errors from its state observer.
-            Self::NativeHeader => IvyError::new("dependency_unavailable", ""),
-        }
-    }
-}
-
 impl ServiceConnection {
     pub async fn connect(
         public_base_url: &str,
@@ -187,7 +161,8 @@ impl ServiceConnection {
         options: ConnectionOptions,
         cancellation: CancellationToken,
     ) -> IvyResult<Self> {
-        Self::connect_js(public_base_url, &credential.into(), options, cancellation).await
+        let request = Self::prepare(public_base_url, credential)?;
+        Self::connect_prepared(request, options, cancellation).await
     }
     pub async fn connect_js(
         public_base_url: &str,
@@ -195,14 +170,19 @@ impl ServiceConnection {
         options: ConnectionOptions,
         cancellation: CancellationToken,
     ) -> IvyResult<Self> {
-        let request = Self::prepare_js(public_base_url, credential)
-            .map_err(ConnectionPreparationError::into_error)?;
+        let request = Self::prepare_js(public_base_url, credential)?;
         Self::connect_prepared(request, options, cancellation).await
     }
     pub(crate) fn prepare_js(
         public_base_url: &str,
         credential: &JsString,
-    ) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, ConnectionPreparationError> {
+    ) -> IvyResult<tokio_tungstenite::tungstenite::http::Request<()>> {
+        Self::prepare(public_base_url, &credential.to_utf8()?)
+    }
+    fn prepare(
+        public_base_url: &str,
+        credential: &str,
+    ) -> IvyResult<tokio_tungstenite::tungstenite::http::Request<()>> {
         let base = base_url(public_base_url)?;
         let origin = base.origin().ascii_serialization();
         let mut url = base.join("ws").map_err(|_| websocket_failed())?;
@@ -218,8 +198,8 @@ impl ServiceConnection {
             .map_err(|_| websocket_failed())?;
         request.headers_mut().insert(
             "Authorization",
-            header::authorization(credential)
-                .map_err(|_| ConnectionPreparationError::NativeHeader)?,
+            HeaderValue::from_bytes(format!("Bearer {credential}").as_bytes())
+                .map_err(|_| IvyError::internal())?,
         );
         request
             .headers_mut()
