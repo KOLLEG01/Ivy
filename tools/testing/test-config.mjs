@@ -154,6 +154,15 @@ export const rustTests = {
     ],
     "testThreads": 1
   },
+  "tests/rust/host-bootstrap-maintenance-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "bootstrap_maintenance_cases::bootstrap_maintenance_dropped_waiter_retains_transaction_locks_and_unrelated_owner",
+    "testThreads": 1,
+    "prerequisites": [
+      { "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }
+    ]
+  },
   "tests/rust/host-bootstrap-installation-cases.rs": {
     "package": "ivy-host-runtime",
     "lib": true,

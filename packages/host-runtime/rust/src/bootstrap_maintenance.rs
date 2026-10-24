@@ -9,7 +9,7 @@ use crate::{
     executor_lock::ExecutorLock,
     host_config,
     journal::HostJournal,
-    layout, node_path,
+    layout, native_path,
     node_runtime::NodeRuntime,
     private_backup::{self, OfflineOwners},
 };
@@ -52,11 +52,10 @@ fn stamp(clock: &dyn Clock) -> IvyResult<IvyJson> {
         .into())
 }
 fn absolute(path: &Path) -> IvyResult<PathBuf> {
-    Ok(node_path::to_native(
-        &node_path::Context::current()
-            .map_err(|_| IvyError::internal())?
-            .resolve(&[node_path::from_native(path)]),
-    ))
+    let path = std::env::current_dir()
+        .map_err(|_| IvyError::internal())?
+        .join(path);
+    Ok(crate::paths::absolute(&path).unwrap_or_else(|_| native_path::lexical(&path)))
 }
 pub fn operation_root(config: &IvyJson, operation_id: &JsString) -> IvyResult<PathBuf> {
     require(
@@ -98,7 +97,7 @@ async fn current_configuration(path: &Path) -> IvyResult<IvyJson> {
     let context = host_config::HostContext::current()?;
     layout::resolve_host_configuration(
         &input,
-        &node_path::from_native(path),
+        &native_path::from_native(path),
         &context.environment,
         context.paths.style,
         &context.account_home,
@@ -129,7 +128,7 @@ pub(crate) async fn candidate_plans(
             bootstrap::bootstrap_components(config, journal, &candidate, &[], compare).await?;
         plans.push(bootstrap::configuration_bootstrap_plan(
             config,
-            &node_path::from_native(path),
+            &native_path::from_native(path),
             &candidate,
             None,
             &components,
@@ -150,7 +149,8 @@ pub(crate) async fn candidate_plans(
         }
         require(
             prior.get("artifactRoot") == candidate.get("artifactRoot")
-                && prior.get("configPath") == Some(&IvyJson::String(node_path::from_native(path)))
+                && prior.get("configPath")
+                    == Some(&IvyJson::String(native_path::from_native(path)))
                 && prior.get("nodeExecutable") == config.required("executables")?.get("node"),
             "target_conflict",
             "Retained bootstrap plan differs from this candidate or host paths.",
@@ -338,7 +338,7 @@ impl Inner {
                         .required("installationId")?
                         .clone(),
                 ),
-                ("configPath", IvyJson::String(node_path::from_native(&path))),
+                ("configPath", IvyJson::String(native_path::from_native(&path))),
                 ("configurationHash", hash_json(&config)?.into()),
                 ("observedAt", stamp(self.clock.as_ref())?),
                 (
@@ -451,7 +451,7 @@ impl Inner {
         }
         let previous = request.required("previous")?;
         let next = request.required("next")?;
-        let path_value = IvyJson::String(node_path::from_native(path));
+        let path_value = IvyJson::String(native_path::from_native(path));
         let hash = IvyJson::from(hash_json(config)?);
         require(
             next.get("configPath") == Some(&path_value)
@@ -513,7 +513,7 @@ impl Inner {
                 .await?;
         let plan = bootstrap::configuration_bootstrap_plan(
             config,
-            &node_path::from_native(path),
+            &native_path::from_native(path),
             &candidate,
             next.get("linuxResources")
                 .and_then(|value| value.get("budget")),

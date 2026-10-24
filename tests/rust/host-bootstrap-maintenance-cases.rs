@@ -311,19 +311,36 @@ impl Test {
             .unwrap();
         assert!(output.status.success());
         let executable = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+        Self::with_configuration(
+            "host.json".as_ref(),
+            &executable,
+            comparator(vec![
+                DATE.into(),
+                "executor-renamed".into(),
+                "manager-renamed".into(),
+            ]),
+        )
+        .await
+    }
+    async fn with_configuration(
+        name: &std::ffi::OsStr,
+        executable: &str,
+        compare: ivy_host_runtime::artifact::FileCompare,
+    ) -> Self {
         let mut f = Fixture::with_node(
             vec![
                 instance("executor-renamed", "host-executor", true),
                 instance("manager-renamed", "service-manager", true),
                 instance("domain", "fixture-domain", true),
             ],
-            &executable,
+            executable,
         )
         .await;
-        f.config = host_config::checked_host_config(f.config.clone(), f.config_path())
+        let config_path = f.root.0.join(name);
+        f.config = host_config::checked_host_config(f.config.clone(), &config_path)
             .await
             .unwrap();
-        config::atomic_json(f.config_path(), f.config.clone())
+        config::atomic_json(&config_path, f.config.clone())
             .await
             .unwrap();
         f.journal.use_configuration(f.config.clone()).await.unwrap();
@@ -336,11 +353,6 @@ impl Test {
             .await;
         f.install("executor-renamed", &old).await;
         f.install("manager-renamed", &manager).await;
-        let compare = comparator(vec![
-            DATE.into(),
-            "executor-renamed".into(),
-            "manager-renamed".into(),
-        ]);
         let mut plans = Vec::new();
         for pair in [&old, &next] {
             let candidate = pair.required("candidate").unwrap();
@@ -351,7 +363,7 @@ impl Test {
             plans.push(
                 bootstrap::configuration_bootstrap_plan(
                     &f.config,
-                    &node_path::from_native(&f.config_path()),
+                    &node_path::from_native(&config_path),
                     candidate,
                     None,
                     &components,
@@ -362,7 +374,7 @@ impl Test {
         let old = plans.remove(0);
         let next = plans.remove(0);
         assert!(!array(next.required("processes").unwrap()).is_empty());
-        let os = Arc::new(Os::new(owners(&old), f.config.clone(), f.config_path()));
+        let os = Arc::new(Os::new(owners(&old), f.config.clone(), config_path.clone()));
         let maintenance = BootstrapMaintenance::with_clock(
             node(),
             compare.clone(),
@@ -373,10 +385,7 @@ impl Test {
         let request = J::object([
             ("schemaVersion", J::Number(1.0)),
             ("operationId", "maintenance-1".into()),
-            (
-                "previous",
-                maintenance.inspect(f.config_path()).await.unwrap(),
-            ),
+            ("previous", maintenance.inspect(config_path).await.unwrap()),
             ("next", next.clone()),
         ]);
         validate_host("BootstrapMaintenanceRequest", &request).unwrap();
@@ -1000,15 +1009,50 @@ async fn bootstrap_worker_partial_pause_recovers_only_unchanged_definitions() {
 }
 #[tokio::test]
 async fn bootstrap_maintenance_dropped_waiter_retains_transaction_locks_and_unrelated_owner() {
-    let t = Test::new().await;
+    let name = std::ffi::OsString::from("host-中-🚀");
+    #[cfg(windows)]
+    let name = {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let mut units: Vec<_> = name.encode_wide().collect();
+        units.push(0xd800);
+        std::ffi::OsString::from_wide(&units)
+    };
+    let mut name = name;
+    name.push(".json");
+    let executable = std::env::var("IVY_TEST_NODE").expect("Pinned Node path required");
+    let t = Test::with_configuration(
+        &name,
+        &executable,
+        Arc::new(|left, right| {
+            assert_eq!(
+                left, right,
+                "Only equal fixture timestamps require comparison"
+            );
+            std::cmp::Ordering::Equal
+        }),
+    )
+    .await;
+    let config_path = t.f.root.0.join(&name);
+    let config_bytes = fs::read(&config_path).unwrap();
+    let context = node_path::Context::current().unwrap();
+    let relative = context.relative(&context.cwd, &node_path::from_native(&t.f.root.0));
+    let path = node_path::to_native(&relative)
+        .join("uncreated/..")
+        .join(&name);
     t.seed().await;
+    let snapshot = t.maintenance.inspect(path.clone()).await.unwrap();
+    assert_json_eq(&snapshot, t.request.required("previous").unwrap());
+    assert_eq!(snapshot.get("configPath"), Some(&p(&config_path)));
+    assert_eq!(
+        snapshot.get("configurationHash"),
+        Some(&hash_json(&t.f.config).unwrap().into())
+    );
     t.os.pause(J::Null, vec![]).unwrap().await.unwrap();
     t.os.block.store(true, Ordering::SeqCst);
     let unrelated = ExecutorLock::acquire(t.f.root.0.join("state/owners/domain"), false)
         .await
         .unwrap();
     let m = t.maintenance.clone();
-    let path = t.f.config_path();
     let request = t.request.clone();
     let waiter = tokio::spawn(async move { m.update(path, request).await });
     tokio::time::timeout(Duration::from_secs(5), t.os.entered.notified())
@@ -1052,6 +1096,16 @@ async fn bootstrap_maintenance_dropped_waiter_retains_transaction_locks_and_unre
     .await
     .unwrap();
     unrelated.close().await.unwrap();
+    let record = bootstrap_maintenance::bootstrap_status(&t.f.config, &"maintenance-1".into())
+        .await
+        .unwrap();
+    validate_host("BootstrapMaintenanceRecord", &record).unwrap();
+    assert_eq!(
+        record.get("requestHash"),
+        Some(&hash_json(&t.request).unwrap().into())
+    );
+    assert_json_eq(record.required("request").unwrap(), &t.request);
+    assert_eq!(fs::read(&config_path).unwrap(), config_bytes);
     let lock = ExecutorLock::acquire(t.f.root.0.join("state/executor"), false)
         .await
         .unwrap();
