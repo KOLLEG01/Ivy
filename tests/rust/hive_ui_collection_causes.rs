@@ -131,6 +131,51 @@ fn ui_collection_native_scandir_causes_and_journal_keep_public_errors_private() 
     });
     assert!(result.is_err());
     assert_eq!(cause.unwrap().to_utf8().unwrap(), "no such table: apps");
+
+    let ordered = Root::new();
+    let files = UiFiles::new(ordered.0.join("private"));
+    for ui in ["z", "a"] {
+        let release = files.root.join(ui).join("r1");
+        fs::create_dir_all(&release).unwrap();
+        fs::write(release.join("payload"), ui).unwrap();
+        ivy_host_runtime::filesystem::set_times_ms(&release, 86400000, 86400000).unwrap();
+    }
+    let incoming = files.root.join(".incoming");
+    let boundary = incoming.join("opaque\u{fffd}");
+    fs::create_dir_all(&boundary).unwrap();
+    fs::write(boundary.join("payload"), b"retained replacement").unwrap();
+    ivy_host_runtime::filesystem::set_times_ms(&boundary, 86400000, 86400000).unwrap();
+    #[cfg(windows)]
+    let opaque = {
+        use std::os::windows::ffi::OsStringExt;
+        [0xd800, 0xdfff].map(|unit| {
+            let name = std::ffi::OsString::from_wide(&[111, 112, 97, 113, 117, 101, unit]);
+            let path = incoming.join(name);
+            fs::create_dir(&path).unwrap();
+            fs::write(path.join("payload"), b"expired native name").unwrap();
+            ivy_host_runtime::filesystem::set_times_ms(&path, 0, 0).unwrap();
+            path
+        })
+    };
+    let calls = std::cell::Cell::new(0);
+    files
+        .collect_all(&Default::default(), &|| {
+            let index = calls.get();
+            calls.set(index + 1);
+            [172799999.0, 172800001.0, 172800000.0][index]
+        })
+        .unwrap();
+    assert_eq!(calls.get(), 3);
+    assert_eq!(fs::read(files.root.join("a/r1/payload")).unwrap(), b"a");
+    assert!(!files.root.join("z").exists());
+    assert_eq!(
+        fs::read(boundary.join("payload")).unwrap(),
+        b"retained replacement"
+    );
+    #[cfg(windows)]
+    for path in opaque {
+        assert!(!path.exists());
+    }
 }
 
 #[cfg(windows)]

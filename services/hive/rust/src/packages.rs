@@ -126,8 +126,7 @@ fn entries(path: &Path) -> IvyResult<Vec<fs::DirEntry>> {
         Err(e) => return Err(sql_error(e)),
     };
     let mut values = values.collect::<io::Result<Vec<_>>>().map_err(sql_error)?;
-    // Node scandir's byte ordering also determines which filesystem guard fails first.
-    values.sort_by_key(|v| v.file_name().to_string_lossy().as_bytes().to_vec());
+    values.sort_by_key(|entry| entry.file_name());
     Ok(values)
 }
 fn info(path: &Path) -> IvyResult<Option<fs::Metadata>> {

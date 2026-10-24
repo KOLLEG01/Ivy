@@ -610,9 +610,68 @@ fn package_registry_namespaced_root_preserves_logical_staging_cleanup_and_incomi
             fs::create_dir_all(old.parent().unwrap()).unwrap();
             fs::write(&old, b"old").unwrap();
             ivy_host_runtime::filesystem::set_times_ms(&old, 0, 0).unwrap();
+            let artifacts = files.join("artifacts");
+            for component in ["z-orphan", "a-orphan"] {
+                let directory = artifacts.join(component);
+                fs::create_dir_all(directory.join("1.0.0")).unwrap();
+                fs::write(directory.join(".package"), b"").unwrap();
+                fs::write(directory.join("1.0.0/payload"), b"expired package").unwrap();
+            }
+            let retained = artifacts.join("retained");
+            fs::create_dir_all(retained.join("01.0.0")).unwrap();
+            fs::write(retained.join(".package"), b"").unwrap();
+            fs::write(retained.join("README"), b"retained note").unwrap();
+            fs::write(retained.join("01.0.0/payload"), b"unknown version").unwrap();
+            use std::os::windows::ffi::OsStringExt;
+            let mut unknown = vec![std::ffi::OsString::from("opaque\u{fffd}")];
+            unknown.extend(
+                [0xd800, 0xdfff].map(|unit| {
+                    std::ffi::OsString::from_wide(&[111, 112, 97, 113, 117, 101, unit])
+                }),
+            );
+            for (index, name) in unknown.iter().enumerate() {
+                let directory = artifacts.join(name);
+                fs::create_dir_all(&directory).unwrap();
+                fs::write(directory.join("payload"), [index as u8, 255]).unwrap();
+            }
+            let extract = files.join("incoming/00000000-0000-4000-8000-000000000002-extract");
+            fs::create_dir(&extract).unwrap();
+            fs::write(extract.join("payload"), b"expired extraction").unwrap();
+            ivy_host_runtime::filesystem::set_times_ms(&extract, 0, 0).unwrap();
             clock.now.store(172800000, Ordering::SeqCst);
             registry.collect_artifacts().await.unwrap();
             assert!(!old.exists());
+            assert!(!extract.exists());
+            for component in ["a-orphan", "z-orphan"] {
+                assert!(!artifacts.join(component).exists());
+            }
+            assert_eq!(fs::read(retained.join("README")).unwrap(), b"retained note");
+            assert_eq!(
+                fs::read(retained.join("01.0.0/payload")).unwrap(),
+                b"unknown version"
+            );
+            for (index, name) in unknown.iter().enumerate() {
+                assert_eq!(
+                    fs::read(artifacts.join(name).join("payload")).unwrap(),
+                    [index as u8, 255]
+                );
+            }
+            let invalid = artifacts.join("invalid");
+            fs::create_dir_all(invalid.join(".package")).unwrap();
+            fs::create_dir(invalid.join("1.0.0")).unwrap();
+            fs::write(invalid.join("1.0.0/payload"), b"guarded package").unwrap();
+            assert_eq!(
+                registry.collect_artifacts().await.unwrap_err().code,
+                "storage_invalid"
+            );
+            assert_eq!(
+                fs::read(invalid.join("1.0.0/payload")).unwrap(),
+                b"guarded package"
+            );
+            fs::remove_dir(invalid.join(".package")).unwrap();
+            fs::write(invalid.join(".package"), b"").unwrap();
+            registry.collect_artifacts().await.unwrap();
+            assert!(!invalid.exists());
             assert!(
                 !root.0.join("native-files").exists(),
                 "No trimmed root alias"

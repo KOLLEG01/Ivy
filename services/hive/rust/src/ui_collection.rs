@@ -14,11 +14,7 @@ impl Collector<'_> {
         let mut values = self.io(path, |path| {
             fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()
         })?;
-        values.sort_by(|a, b| {
-            text(&os_string(&a.file_name()))
-                .as_bytes()
-                .cmp(text(&os_string(&b.file_name())).as_bytes())
-        });
+        values.sort_by_key(|entry| entry.file_name());
         Ok(values)
     }
     fn kind(&self, entry: &fs::DirEntry) -> IvyResult<fs::FileType> {

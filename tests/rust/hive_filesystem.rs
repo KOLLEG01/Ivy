@@ -140,7 +140,7 @@ async fn native_ui_windows_namespace_installs_actual_bundle_files_and_cleans_fai
 
 #[tokio::test]
 async fn native_ui_windows_namespace_root_keeps_logical_paths_without_creating_trimmed_aliases() {
-    let (_root, parent, alias) = native_root(0xd800);
+    let (root, parent, alias) = native_root(0xd800);
     let path = parent.join("native. ");
     let files = UiFiles::new(path.join("private"));
     let asset = descriptor("tail..", "text/plain", b"one");
@@ -157,12 +157,92 @@ async fn native_ui_windows_namespace_root_keeps_logical_paths_without_creating_t
             .unwrap(),
         b"one"
     );
-    let mut store = Store::open(Path::new(":memory:")).unwrap();
+    let database = root.0.join("migration.sqlite");
+    let mut store = Store::open(&database).unwrap();
+    for step in legacy_seed() {
+        match step["op"].as_str().unwrap() {
+            "register" => {
+                ivy_hive::objects::register(
+                    &mut store,
+                    &IvyJson::from_serde(&step["definition"]).unwrap(),
+                    &IvyJson::from_serde(&step["owner"]).unwrap(),
+                )
+                .unwrap();
+            }
+            "sql" => store
+                .connection()
+                .execute_batch(step["sql"].as_str().unwrap())
+                .unwrap(),
+            _ => panic!("Unexpected legacy seed operation"),
+        }
+    }
+    store.connection().execute_batch("UPDATE app_releases SET release_json=json_set(release_json,'$.entryPath','💡.html','$.assets[0].path','💡.html','$.assets[1].path','\u{e000}.png');").unwrap();
+    let directory = files.directory(&"sample-ui".into(), &"r1".into()).unwrap();
+    let stale = directory.join("💡.html.00000000-0000-4000-8000-000000000001.partial");
+    fs::write(&stale, b"interrupted").unwrap();
+    let kept = [
+        OsString::from("💡.html.A0000000-0000-4000-8000-000000000001.partial"),
+        opaque_name("💡.html.", 0xd800),
+        opaque_name("💡.html.", 0xdfff),
+        OsString::from("💡.html.\u{fffd}"),
+    ];
+    for name in &kept {
+        fs::write(directory.join(name), b"retained distinct sibling").unwrap();
+    }
     files.migrate_legacy(&mut store).unwrap();
     assert_eq!(
         store.metadata("ui_files_v1").unwrap().as_deref(),
         Some("ready")
     );
+    assert!(!stale.exists());
+    for name in &kept {
+        assert_eq!(
+            fs::read(directory.join(name)).unwrap(),
+            b"retained distinct sibling"
+        );
+    }
+    let encoded: String = store
+        .connection()
+        .query_row(
+            "SELECT release_json FROM app_releases WHERE app_id='sample-ui' AND release_id='r1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let release = ivy_contracts::json::parse(&encoded, usize::MAX).unwrap();
+    let assets = release.required("assets").unwrap().as_array().unwrap();
+    let expected = [
+        descriptor("💡.html", "text/html", b"<p>legacy</p>"),
+        descriptor("\u{e000}.png", "image/png", &[0, 1, 255]),
+    ];
+    assert_eq!(assets.len(), expected.len());
+    for (actual, expected) in assets.iter().zip(&expected) {
+        assert_eq!(
+            ivy_contracts::json::canonical(actual, usize::MAX).unwrap(),
+            ivy_contracts::json::canonical(expected, usize::MAX).unwrap()
+        );
+    }
+    assert_eq!(
+        fs::read(directory.join("💡.html")).unwrap(),
+        b"<p>legacy</p>"
+    );
+    assert_eq!(
+        fs::read(directory.join("\u{e000}.png")).unwrap(),
+        [0, 1, 255]
+    );
+    assert_eq!(
+        store
+            .connection()
+            .query_row("SELECT count(*) FROM objects", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    store.close().unwrap();
+    let mut store = Store::open(&database).unwrap();
+    files.migrate_legacy(&mut store).unwrap();
+    assert_eq!(store.connection().query_row("SELECT release_json FROM app_releases WHERE app_id='sample-ui' AND release_id='r1'", [], |row| row.get::<_, String>(0)).unwrap(), encoded);
+    assert_eq!(fs::read(directory.join("tail..")).unwrap(), b"one");
     assert!(path.exists());
     assert!(!parent.join("native").exists());
     assert_eq!(
