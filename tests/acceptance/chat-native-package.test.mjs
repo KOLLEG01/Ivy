@@ -11,7 +11,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 // Explicit built artifacts and a synthetic definition only. No account, pairing,
 // message dispatch, native model execution or configured installation is used.
-test('prepared native Chat registers with Hive, serves public history and restarts without Node', { timeout: 180000 }, async () => {
+test('prepared native Chat registers its public tools with Hive, serves history and restarts without Node', { timeout: 180000 }, async () => {
   for (const name of ['IVY_CHAT_PACKAGE_ARTIFACT', 'IVY_HIVE_REFERENCE_ARTIFACT', 'IVY_CHAT_PACKAGE_DEFINITION'])
     assert.ok(process.env[name] && isAbsolute(process.env[name]), `Supply ${name}.`);
   const source = await realpath(resolve(process.env.IVY_CHAT_PACKAGE_ARTIFACT));
@@ -102,13 +102,16 @@ test('prepared native Chat registers with Hive, serves public history and restar
       const health = await run(native(artifact, 'ivy-health'), ['--config', chat.path]);
       assert.equal(health.code, 0, health.text);
       const catalog = await rpc('tools.list', { namespace: 'chat', serviceNodeId: config.serviceNodeId });
-      assert.equal(catalog.items.length, 12);
+      assert.deepEqual(catalog.items.map(tool => tool.qualifiedName).sort(), [
+        'chat.acknowledge', 'chat.cancel', 'chat.createMain', 'chat.file', 'chat.history', 'chat.input', 'chat.notice',
+        'chat.notify', 'chat.operation', 'chat.receive', 'chat.retryResult', 'chat.send', 'chat.sendFile', 'chat.workspace',
+      ]);
       const history = catalog.items.find(tool => tool.qualifiedName === 'chat.history'); assert.ok(history);
       const page = await rpc('tools.call', { qualifiedName: history.qualifiedName, serviceNodeId: config.serviceNodeId,
         expectedDefinitionHash: history.definitionHash, arguments: { expectedBridge, channel: definition.channels[0].channel, afterSequence: 0, limit: 8 } });
       assert.deepEqual(page, { entries: [], throughSequence: 0, hasMore: false });
       const tools = (await rpc('tools/list', {}, true)).tools.filter(tool => tool.name.startsWith('chat_bridge_')).map(tool => tool.name).sort();
-      assert.deepEqual(tools, ['chat_bridge_read', 'chat_bridge_send']);
+      assert.deepEqual(tools, ['chat_bridge_read', 'chat_bridge_send', 'chat_bridge_send_file']);
       report.history = page; report.tools = catalog.items.map(tool => tool.qualifiedName); report.mcpTools = tools;
       await stop(chat);
       const stopped = await run(native(artifact, 'ivy-health'), ['--config', chat.path]); assert.notEqual(stopped.code, 0);
