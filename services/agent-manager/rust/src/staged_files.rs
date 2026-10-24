@@ -2,10 +2,7 @@
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, agent_schema::validate_agent, hash::digest,
 };
-use ivy_host_runtime::{
-    filesystem,
-    node_path::{self, Style},
-};
+use ivy_host_runtime::{filesystem, native_path};
 use ivy_sdk::service::ToolHandler;
 use std::{
     sync::Arc,
@@ -61,23 +58,22 @@ impl StagedFiles {
             })?;
         let hash = digest(&bytes);
         let name = staged_name(name);
-        let directory = node_path::join(Style::native(), &[self.root.clone(), hash[7..].into()]);
-        let path = node_path::join(Style::native(), &[directory.clone(), name.clone()]);
+        let root = native_path::to_native(&self.root);
+        let directory = native_path::lexical(&root.join(&hash[7..]));
+        let path = native_path::lexical(&directory.join(native_path::to_native(&name)));
         let length = bytes.len();
-        tokio::fs::create_dir_all(node_path::filesystem_path(&directory))
+        tokio::fs::create_dir_all(&directory)
             .await
             .map_err(|_| IvyError::internal())?;
-        tokio::fs::write(node_path::filesystem_path(&path), bytes)
+        tokio::fs::write(&path, bytes)
             .await
             .map_err(|_| IvyError::internal())?;
         let time = chrono::DateTime::<chrono::Utc>::from(now).timestamp_millis();
-        tokio::task::spawn_blocking(move || {
-            filesystem::set_times_ms(&node_path::to_native(&directory), time, time)
-        })
-        .await
-        .map_err(|_| IvyError::internal())?
-        .map_err(|_| IvyError::internal())?;
-        let mut entries = tokio::fs::read_dir(node_path::filesystem_path(&self.root))
+        tokio::task::spawn_blocking(move || filesystem::set_times_ms(&directory, time, time))
+            .await
+            .map_err(|_| IvyError::internal())?
+            .map_err(|_| IvyError::internal())?;
+        let mut entries = tokio::fs::read_dir(&root)
             .await
             .map_err(|_| IvyError::internal())?;
         let mut directories = Vec::new();
@@ -92,15 +88,12 @@ impl StagedFiles {
                 .map_err(|_| IvyError::internal())?
                 .is_dir()
             {
-                directories.push(node_path::join(
-                    Style::native(),
-                    &[self.root.clone(), node_path::node_utf8(&entry.file_name())],
-                ));
+                directories.push(native_path::lexical(&entry.path()));
             }
         }
         // Finish enumeration before removing expired directories.
         for directory in directories {
-            let modified = tokio::fs::metadata(node_path::filesystem_path(&directory))
+            let modified = tokio::fs::metadata(&directory)
                 .await
                 .map_err(|_| IvyError::internal())?
                 .modified()
@@ -109,11 +102,11 @@ impl StagedFiles {
                 .duration_since(modified)
                 .is_ok_and(|age| age > RETENTION)
             {
-                filesystem::remove_force(node_path::to_native(&directory)).await?;
+                filesystem::remove_force(directory).await?;
             }
         }
         Ok(IvyJson::object([
-            ("path", IvyJson::String(path)),
+            ("path", IvyJson::String(native_path::from_native(&path))),
             ("name", IvyJson::String(name)),
             ("byteLength", IvyJson::Number(length as f64)),
             ("contentHash", hash.into()),

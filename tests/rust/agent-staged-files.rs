@@ -197,4 +197,216 @@ async fn staged_file_storage_preserves_bytes_expiry_limits_and_native_names() {
             .is_symlink()
     );
     assert_eq!(fs::read(outside.join("keep")).unwrap(), b"outside bytes");
+    native_stage_paths(now).await;
+}
+
+async fn native_stage_paths(now: std::time::SystemTime) {
+    use std::{ffi::OsString, path::PathBuf, sync::Mutex};
+
+    let root = Root::new();
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let mut owner = StagedFiles::new(
+        node_path::from_native(&root.path.join("invalid\0root")),
+        Arc::new({
+            let order = order.clone();
+            move |value| {
+                order.lock().unwrap().push("decode");
+                canonical_base64(value)
+            }
+        }),
+    );
+    owner.now = Arc::new({
+        let order = order.clone();
+        move || {
+            order.lock().unwrap().push("clock");
+            now
+        }
+    });
+    for (encoded, code) in [("!", "invalid_arguments"), ("eA==", "internal_error")] {
+        assert_eq!(
+            owner
+                .stage(&"input".into(), &encoded.into())
+                .await
+                .unwrap_err()
+                .code,
+            code
+        );
+        assert_eq!(
+            std::mem::take(&mut *order.lock().unwrap()),
+            ["clock", "decode"]
+        );
+    }
+    let blocked = root.path.join("blocked");
+    fs::write(&blocked, b"retain blocker").unwrap();
+    owner.root = node_path::from_native(&blocked.join("child"));
+    assert_eq!(
+        owner
+            .stage(&"input".into(), &"eA==".into())
+            .await
+            .unwrap_err()
+            .code,
+        "internal_error"
+    );
+    assert_eq!(fs::read(&blocked).unwrap(), b"retain blocker");
+    assert_eq!(
+        std::mem::take(&mut *order.lock().unwrap()),
+        ["clock", "decode"]
+    );
+
+    let target = root.path.join("physical");
+    fs::create_dir(&target).unwrap();
+    let linked = root.path.join("linked");
+    filesystem::directory_link(&target, &linked).unwrap();
+    let mut trailing = root.path.join("trailing").into_os_string();
+    trailing.push(std::path::MAIN_SEPARATOR_STR);
+    let mut variants = vec![
+        ("absolute", root.path.join("absolute")),
+        ("unicode-dot", root.path.join("中-🚀").join(".")),
+        (
+            "canonical",
+            fs::canonicalize(&root.path).unwrap().join("canonical"),
+        ),
+        ("linked", linked),
+        ("trailing", PathBuf::from(trailing)),
+    ];
+    let cwd = std::env::current_dir().unwrap();
+    let mut base = cwd.as_path();
+    let mut relative = PathBuf::new();
+    loop {
+        if root.path.starts_with(base) {
+            relative.push(root.path.strip_prefix(base).unwrap());
+            relative.push("relative");
+            variants.push(("relative", relative));
+            break;
+        }
+        let Some(parent) = base.parent() else { break };
+        base = parent;
+        relative.push("..");
+    }
+    #[cfg(windows)]
+    {
+        variants.push((
+            "parent-missing",
+            root.path.join("uncreated/../parent-missing"),
+        ));
+        variants.push(("parent-link", root.path.join("linked/../parent-link")));
+        variants.push((
+            "opaque-high",
+            root.path.join(native_entry("root-high-", 0xd800)),
+        ));
+        variants.push((
+            "opaque-low",
+            root.path.join(native_entry("root-low-", 0xdfff)),
+        ));
+    }
+    let mut stored = vec![];
+    for (label, input) in variants {
+        let alias = PathBuf::from(input.as_os_str().to_string_lossy().as_ref());
+        let alias_marker = if alias != input {
+            fs::create_dir_all(&alias).unwrap();
+            let marker = alias.join("keep");
+            fs::write(&marker, b"retain replacement root").unwrap();
+            Some(marker)
+        } else {
+            None
+        };
+        // The public root remains mutable; every call must decode its current value.
+        owner.root = node_path::from_native(&input);
+        let bytes = format!("native bytes: {label}").into_bytes();
+        let hash = digest(&bytes);
+        let expected = node_path::lexical(&input.join(&hash[7..]).join("native.bin"));
+        let result = owner
+            .stage(&"../native.bin".into(), &STANDARD.encode(&bytes).into())
+            .await
+            .unwrap();
+        validate_agent("StagedFile", &result).unwrap();
+        assert_eq!(
+            text(&result, "path"),
+            node_path::from_native(&expected),
+            "{label}"
+        );
+        assert_eq!(text(&result, "name"), "native.bin".into());
+        assert_eq!(field(&result, "contentHash"), &hash.into());
+        assert_eq!(
+            field(&result, "byteLength"),
+            &IvyJson::Number(bytes.len() as f64)
+        );
+        assert_eq!(
+            fs::metadata(expected.parent().unwrap())
+                .unwrap()
+                .modified()
+                .unwrap(),
+            now
+        );
+        assert_eq!(
+            std::mem::take(&mut *order.lock().unwrap()),
+            ["clock", "decode"]
+        );
+        stored.push((expected, bytes));
+        if let Some(marker) = alias_marker {
+            assert_eq!(fs::read(marker).unwrap(), b"retain replacement root");
+        }
+    }
+    for (path, bytes) in stored {
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+
+    let entries = root.path.join("native-entries");
+    fs::create_dir(&entries).unwrap();
+    owner.root = node_path::from_native(&entries);
+    let mut expired = vec![];
+    let mut retained = vec![];
+    for (label, unit, kept_time) in [
+        ("high", 0xd800, now - RETENTION),
+        ("low", 0xdfff, now + Duration::from_secs(1)),
+    ] {
+        let stale_name = native_entry(&format!("expired-{label}-"), unit);
+        let stale = entries.join(&stale_name);
+        let alias = entries.join(OsString::from(stale_name.to_string_lossy().as_ref()));
+        assert_ne!(stale, alias);
+        let keep = entries.join(native_entry(&format!("retained-{label}-"), unit));
+        for (path, time) in [
+            (&stale, now - RETENTION - Duration::from_millis(1)),
+            (&alias, now + Duration::from_secs(1)),
+            (&keep, kept_time),
+        ] {
+            fs::create_dir(path).unwrap();
+            fs::write(path.join("keep"), b"native entry").unwrap();
+            let ms = chrono::DateTime::<chrono::Utc>::from(time).timestamp_millis();
+            filesystem::set_times_ms(path, ms, ms).unwrap();
+        }
+        expired.push(stale);
+        retained.extend([alias, keep]);
+    }
+    owner.stage(&"expiry".into(), &"eA==".into()).await.unwrap();
+    assert_eq!(
+        std::mem::take(&mut *order.lock().unwrap()),
+        ["clock", "decode"]
+    );
+    for path in expired {
+        assert!(
+            !path.exists(),
+            "Expired native entry was not removed: {path:?}"
+        );
+    }
+    for path in retained {
+        assert_eq!(fs::read(path.join("keep")).unwrap(), b"native entry");
+    }
+}
+
+fn native_entry(stem: &str, unit: u16) -> std::ffi::OsString {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        let mut value: Vec<_> = stem.encode_utf16().collect();
+        value.push(unit);
+        std::ffi::OsString::from_wide(&value)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let mut value = stem.as_bytes().to_vec();
+        value.push(if unit == 0xd800 { 0xff } else { 0xfe });
+        std::ffi::OsString::from_vec(value)
+    }
 }
