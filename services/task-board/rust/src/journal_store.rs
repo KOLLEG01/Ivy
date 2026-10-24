@@ -15,7 +15,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     hash::{digest, hash_json},
-    json::canonical,
+    json::{canonical, parse},
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::{
@@ -955,6 +955,24 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
             .retired_operation(caller, id)
             .map_err(error)?
             .is_some())
+    }
+    fn retired_operation_receipt(
+        &self,
+        caller: &JsString,
+        id: &JsString,
+    ) -> IvyResult<Option<Json>> {
+        let caller = Json::String(caller.clone());
+        let id = Json::String(id.clone());
+        persistent_reads::local_reads::SqliteReads {
+            journal: LocalJournal {
+                connection: self.journal.connection,
+                root_object_id: self.journal.root_object_id.clone(),
+            },
+            contracts: &self.contracts,
+            parse: |text: &str| parse(text, MANAGEMENT_FRAME_BYTES),
+            sqlite_failure: error,
+        }
+        .retired_operation_receipt(Some(&caller), Some(&id))
     }
     fn local_key(&self, id: &JsString) -> IvyResult<Option<String>> {
         self.journal.key(id)

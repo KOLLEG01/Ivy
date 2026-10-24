@@ -59,6 +59,9 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
     fn retired_operation(&self, c: &JsString, id: &JsString) -> IvyResult<bool> {
         self.journal.retired_operation(c, id)
     }
+    fn retired_operation_receipt(&self, c: &JsString, id: &JsString) -> IvyResult<Option<Json>> {
+        self.journal.retired_operation_receipt(c, id)
+    }
     fn local_key(&self, id: &JsString) -> IvyResult<Option<String>> {
         self.journal.local_key(id)
     }

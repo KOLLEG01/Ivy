@@ -25,6 +25,9 @@ pub trait Store {
     fn root_object_id(&self) -> Option<JsString>;
     fn contract_version(&self, key: &str) -> IvyResult<String>;
     fn retired_operation(&self, caller: &JsString, id: &JsString) -> IvyResult<bool>;
+    fn retired_operation_receipt(&self, _: &JsString, _: &JsString) -> IvyResult<Option<Json>> {
+        Ok(None)
+    }
     fn local_key(&self, id: &JsString) -> IvyResult<Option<String>>;
     fn complete_local_workflow(&self, id: &JsString, at: &JsString) -> IvyResult<()>;
     async fn named(

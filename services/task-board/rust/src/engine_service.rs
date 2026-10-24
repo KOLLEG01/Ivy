@@ -140,14 +140,14 @@ impl<
                     ("phoneTarget", f(settings, "phoneTarget").clone()),
                 ]))
             }
-            "operation" => {
+            "operation" | "operationReceipt" => {
                 let id = args
                     .required("operationId")?
                     .as_js_string()
                     .ok_or_else(|| {
                         IvyError::new("invalid_arguments", "operationId must be a string.")
                     })?;
-                self.reads.operation(id, &read_context).await
+                self.reads.operation(id, &read_context, true).await
             }
             "configuration" => self.admission.configuration().await,
             "read" => {

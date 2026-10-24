@@ -1,6 +1,5 @@
 use ivy_contracts::{
-    Outcome,
-    IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::parse,
+    IvyError, IvyJson as Json, IvyResult, JsString, Outcome, hash::hash_json, json::parse,
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
@@ -293,7 +292,11 @@ async fn engine_reads_match_original_queries_peer_paths_conditions_and_marker_re
                 }
                 "list" => reads.list(f(step, "query")).await,
                 "mark" => reads.mark_comments_read(f(step, "request"), &context).await,
-                "operation" => reads.operation(s(step, "operationId"), &context).await,
+                "operation" => {
+                    reads
+                        .operation(s(step, "operationId"), &context, false)
+                        .await
+                }
                 k => panic!("Unknown read scenario {k}"),
             };
             outcomes.push(outcome(r));

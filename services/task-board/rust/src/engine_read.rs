@@ -218,7 +218,12 @@ fn check_state(value: &Json, principal: &JsString, task: &JsString) -> IvyResult
     )
 }
 impl<S: LifecycleStore, C: Fn() -> String, R: EngineReadRuntime> EngineReads<'_, S, C, R> {
-    pub async fn operation(&self, id: &JsString, context: &ReadContext<'_>) -> IvyResult<Json> {
+    pub async fn operation(
+        &self,
+        id: &JsString,
+        context: &ReadContext<'_>,
+        receipt_only: bool,
+    ) -> IvyResult<Json> {
         self.runtime.verify_owner().await?;
         (context.check_cancelled)()?;
         self.runtime.validate(
@@ -230,7 +235,25 @@ impl<S: LifecycleStore, C: Fn() -> String, R: EngineReadRuntime> EngineReads<'_,
             "task_board_identity_conflict",
             "The Operation query must use this live connection generation.",
         )?;
-        self.operations
+        if receipt_only {
+            if let Some(receipt) = self
+                .operations
+                .store
+                .retired_operation_receipt(context.caller_principal_id, id)?
+            {
+                self.runtime.validate("OperationReceipt", &receipt)?;
+                require(
+                    receipt.get("callerPrincipalId")
+                        == Some(&Json::String(context.caller_principal_id.clone()))
+                        && receipt.get("operationId") == Some(&Json::String(id.clone())),
+                    "task_board_identity_conflict",
+                    "Operation receipt does not match its original caller.",
+                )?;
+                return Ok(receipt);
+            }
+        }
+        let operation = self
+            .operations
             .find(context.caller_principal_id, id)
             .await?
             .map(|d| d.value)
@@ -239,7 +262,14 @@ impl<S: LifecycleStore, C: Fn() -> String, R: EngineReadRuntime> EngineReads<'_,
                     "not_found",
                     "This caller has no retained TaskBoard operation with that identity.",
                 )
-            })
+            })?;
+        if receipt_only {
+            let receipt = crate::operation_receipt::operation_receipt::<IvyError>(&operation)?;
+            self.runtime.validate("OperationReceipt", &receipt)?;
+            Ok(receipt)
+        } else {
+            Ok(operation)
+        }
     }
     async fn task_document(&self, query: &Json) -> IvyResult<Document> {
         let address = f(query, "task");
