@@ -31,6 +31,8 @@ const BYTES: usize = ivy_contracts::limits::MANAGEMENT_FRAME_BYTES;
 mod native_home_cases;
 #[path = "agent-native-home-json.rs"]
 mod native_home_json_cases;
+#[path = "agent-runtime-reset.rs"]
+mod runtime_reset_cases;
 fn repository() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
 }

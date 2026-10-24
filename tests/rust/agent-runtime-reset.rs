@@ -165,6 +165,134 @@ async fn native_reset_markers_preserve_scope_files_and_idempotent_acknowledgemen
         fs::read(home.join("sessions/leaf")).unwrap(),
         b"new history"
     );
+
+    let mut variants = vec![
+        "unicode-dot",
+        "canonical",
+        "linked",
+        "parent-missing",
+        "parent-link",
+    ];
+    #[cfg(windows)]
+    variants.extend(["opaque-high", "opaque-low", "trailing"]);
+    for variant in variants {
+        let base = root.0.join(variant);
+        fs::create_dir(&base).unwrap();
+        let mut data = base.join(if variant == "unicode-dot" {
+            "目录 space"
+        } else {
+            "data"
+        });
+        let mut alias = None;
+        #[cfg(windows)]
+        if variant.starts_with("opaque") || variant == "trailing" {
+            use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+            let canonical = fs::canonicalize(&base).unwrap();
+            let retained = canonical.join(if variant == "trailing" {
+                "data"
+            } else {
+                "data�"
+            });
+            fs::create_dir(&retained).unwrap();
+            let sentinel = retained.join("authority");
+            fs::write(&sentinel, b"unrelated record authority").unwrap();
+            alias = Some(sentinel);
+            let mut name: Vec<u16> = "data".encode_utf16().collect();
+            if variant == "trailing" {
+                name.extend(". ".encode_utf16());
+            } else {
+                name.push(if variant == "opaque-high" {
+                    0xd800
+                } else {
+                    0xdfff
+                });
+            }
+            data = canonical.join(OsString::from_wide(&name));
+        }
+        fs::create_dir(&data).unwrap();
+        let mut configured = data.clone();
+        let mut link = None;
+        if variant == "unicode-dot" {
+            configured.push(".");
+        } else if variant == "canonical" {
+            configured = fs::canonicalize(&data).unwrap();
+        } else if variant == "linked" {
+            let path = base.join("data-link");
+            filesystem::directory_link(Path::new("data"), &path).unwrap();
+            link = Some((path.clone(), fs::read_link(&path).unwrap()));
+            configured = path;
+        } else if variant == "parent-missing" {
+            configured = base.join("missing").join("..").join("data");
+        } else if variant == "parent-link" {
+            fs::create_dir_all(base.join("alternate/child")).unwrap();
+            fs::create_dir(base.join("alternate/data")).unwrap();
+            let sentinel = base.join("alternate/data/authority");
+            fs::write(&sentinel, b"unrelated record authority").unwrap();
+            alias = Some(sentinel);
+            let path = base.join("redirect");
+            filesystem::directory_link(Path::new("alternate/child"), &path).unwrap();
+            link = Some((path.clone(), fs::read_link(&path).unwrap()));
+            configured = path.join("..").join("data");
+        }
+        let home = base.join("home");
+        fs::create_dir(&home).unwrap();
+        let history = home.join("history.jsonl");
+        fs::write(&history, b"transient history").unwrap();
+        let intent = marker();
+        let marker_path = data.join("runtime-reset.json");
+        save(&marker_path, &intent);
+        let original = fs::read(&marker_path).unwrap();
+        apply_agent_runtime_reset_with_clock(
+            configured.clone(),
+            settings(&home),
+            inputs(&root.0),
+            Arc::new(|| "2026-10-19T01:00:00.000Z".into()),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{variant}: {error:?}"));
+        assert!(!history.exists(), "{variant}");
+        assert_eq!(fs::read(&marker_path).unwrap(), original, "{variant}");
+        let applied_path = data.join("runtime-reset-applied.json");
+        let acknowledgement = fs::read(&applied_path).unwrap();
+        let actual = parse(std::str::from_utf8(&acknowledgement).unwrap(), 4096).unwrap();
+        let mut expected = intent;
+        expected.insert("appliedAt", "2026-10-19T01:00:00.000Z".into());
+        assert_eq!(
+            canonical(&actual, 4096).unwrap(),
+            canonical(&expected, 4096).unwrap(),
+            "{variant}"
+        );
+        fs::write(&history, b"new retained history").unwrap();
+        apply_agent_runtime_reset_with_clock(
+            configured,
+            IvyJson::Null,
+            inputs(&root.0),
+            Arc::new(|| panic!("Acknowledged reset must precede settings/clock admission")),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{variant}: {error:?}"));
+        assert_eq!(
+            fs::read(&history).unwrap(),
+            b"new retained history",
+            "{variant}"
+        );
+        assert_eq!(
+            fs::read(&applied_path).unwrap(),
+            acknowledgement,
+            "{variant}"
+        );
+        assert_eq!(fs::read(&marker_path).unwrap(), original, "{variant}");
+        if let Some(alias) = alias {
+            assert_eq!(
+                fs::read(alias).unwrap(),
+                b"unrelated record authority",
+                "{variant}"
+            );
+        }
+        if let Some((path, target)) = link {
+            assert_eq!(fs::read_link(path).unwrap(), target, "{variant}");
+        }
+    }
 }
 
 #[tokio::test]

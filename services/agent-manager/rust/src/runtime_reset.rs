@@ -5,7 +5,7 @@ use ivy_host_runtime::{
     codex_home::resolve_codex_home_json,
     config::{CONFIGURATION_BYTES, atomic_json, json_file, json_file_if_present},
     filesystem::remove_force,
-    node_path, paths,
+    native_path, node_path, paths,
 };
 use ivy_sdk::native_evidence::native_instant;
 use std::{fs, path::PathBuf, sync::Arc};
@@ -83,13 +83,7 @@ async fn apply(
     home: NativeHomeInputs,
     now: Arc<ResetClock>,
 ) -> IvyResult<()> {
-    let marker_path = node_path::filesystem_path(&node_path::join(
-        home.paths.style,
-        &[
-            node_path::from_native(&data_root),
-            "runtime-reset.json".into(),
-        ],
-    ));
+    let marker_path = native_path::lexical(&data_root.join("runtime-reset.json"));
     let Some(mut marker) = json_file_if_present(marker_path, CONFIGURATION_BYTES)
         .await?
         .filter(|value| !value.is_null())
@@ -97,13 +91,7 @@ async fn apply(
         return Ok(());
     };
     valid_marker(&marker)?;
-    let applied_path = node_path::filesystem_path(&node_path::join(
-        home.paths.style,
-        &[
-            node_path::from_native(&data_root),
-            "runtime-reset-applied.json".into(),
-        ],
-    ));
+    let applied_path = native_path::lexical(&data_root.join("runtime-reset-applied.json"));
     let applied = json_file(&applied_path, CONFIGURATION_BYTES)
         .await
         .unwrap_or(IvyJson::Null);

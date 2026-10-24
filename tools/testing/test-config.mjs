@@ -1033,6 +1033,12 @@ export const rustTests = {
     "package": "ivy-agent-manager",
     "test": "agent-offline-import"
   },
+  "tests/rust/agent-runtime-reset.rs": {
+    "package": "ivy-agent-manager",
+    "test": "agent-runtime-entry",
+    "filter": "runtime_reset_cases::",
+    "testThreads": 1
+  },
   "tests/rust/agent-runtime-entry.rs": {
     "package": "ivy-agent-manager",
     "test": "agent-runtime-entry",
