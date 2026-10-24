@@ -5,12 +5,12 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { inspectReference, inspectReferenceSurface } from './ivy-rust-reference.mjs';
 
-async function fixture(t) {
+async function fixture(t, components = ['service-manager', 'hive', 'data-collector']) {
   const root = await mkdtemp(join(tmpdir(), 'ivy-rust-reference-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const paths = [], calls = [];
   const buildId = 'sha256:' + 'a'.repeat(64);
-  for (const componentId of ['service-manager', 'hive', 'data-collector']) {
+  for (const componentId of components) {
     const dataRoot = join(root, componentId);
     await mkdir(dataRoot);
     const config = { schemaVersion: 1, hostId: 'fixture', componentId, instanceId: componentId,
@@ -36,12 +36,12 @@ async function fixture(t) {
     if (method === 'tools.call') return { items: [] };
     throw Error('Unexpected request');
   } };
-  return { root, configPaths: paths, client, calls, surface: async () => ({ mcp: true, consoleHtml: true }) };
+  return { root, configPaths: paths, components, client, calls, surface: async () => ({ mcp: true, consoleHtml: true }) };
 }
 
 test('reference smoke checks health and current registration before a bound collector read', async t => {
   const f = await fixture(t);
-  const report = await inspectReference(f);
+  const report = await inspectReference({ ...f, components: undefined });
   assert.equal(report.ready, true);
   assert.equal(report.services.length, 3);
   assert.equal(report.collectorTasks, 0);
@@ -72,6 +72,24 @@ test('registration mismatch and routed errors cannot produce a successful smoke 
     return original(method, params);
   };
   await assert.rejects(inspectReference(f), /collector unavailable/);
+});
+
+test('whole-stack readiness requires its complete inventory and every remote service, including Phone', async t => {
+  const components = ['host-executor', 'service-manager', 'hive', 'agent-manager', 'chat-bridge',
+    'dashboards', 'data-collector', 'phone-bridge', 'secretary', 'task-board'];
+  const f = await fixture(t, components);
+  const report = await inspectReference(f);
+  assert.equal(report.services.length, components.length);
+  assert.deepEqual(f.calls.filter(call => call.method === 'serviceNodes.get').map(call => call.params.serviceNodeId).sort(),
+    components.filter(component => !['host-executor', 'hive'].includes(component)).map(component => 'fixture.' + component).sort());
+  f.calls.length = 0;
+  await assert.rejects(inspectReference({ ...f, configPaths: f.configPaths.slice(0, -1) }));
+  await assert.rejects(inspectReference({ ...f, components: [...components.slice(0, -1), 'phone-bridge'] }), /distinct expected/);
+  assert.deepEqual(f.calls, []);
+  const original = f.client.request.bind(f.client);
+  f.client.request = async (method, params) => method === 'serviceNodes.get' && params.serviceNodeId === 'fixture.phone-bridge'
+    ? { connected: false } : original(method, params);
+  await assert.rejects(inspectReference(f), /phone-bridge registration is not ready/);
 });
 
 test('surface smoke uses the authenticated Console and public MCP tools and closes a failed session', async () => {

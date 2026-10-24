@@ -7,12 +7,17 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 import { HiveClient, discover, callBound } from '../../../dist/packages/sdk/src/client.js';
 import { validateHost } from '../../../dist/packages/contracts/src/host-validation.js';
 
-const components = ['service-manager', 'hive', 'data-collector'];
+const referenceComponents = ['service-manager', 'hive', 'data-collector'];
 const json = async path => JSON.parse(await readFile(path, 'utf8'));
 
 // Run after HostExecutor starts the isolated reference. This checks the live
 // public path; process ancestry, restart and shutdown belong to the launch run.
-export async function inspectReference({ root, configPaths, endpoint, client, surface = inspectReferenceSurface }) {
+// Supply the complete expected component inventory for a whole-stack launch.
+export async function inspectReference({ root, configPaths, components = referenceComponents, endpoint, client, surface = inspectReferenceSurface }) {
+  assert.ok(Array.isArray(components) && new Set(components).size === components.length,
+    'Supply a distinct expected component inventory');
+  assert.ok(referenceComponents.every(component => components.includes(component)),
+    'The expected inventory must include Manager, Hive and Collector');
   root = await realpath(resolve(root));
   assert.notEqual(root, parse(root).root, 'Use an explicit isolated installation root');
   const inside = async path => {
@@ -62,7 +67,9 @@ export async function inspectReference({ root, configPaths, endpoint, client, su
   const status = await client.request('system.status', {}, { timeoutMs: 5000 });
   assert.equal(status.ready, true);
   assert.equal(status.buildId, hive.buildId);
-  for (const config of configs.filter(c => c.componentId !== 'hive')) {
+  // HostExecutor publishes local health and owns Manager; it does not register
+  // a remote service node. Every other configured service must be connected.
+  for (const config of configs.filter(c => !['hive', 'host-executor'].includes(c.componentId))) {
     const node = await client.request('serviceNodes.get', { serviceNodeId: config.serviceNodeId }, { timeoutMs: 5000 });
     assert.ok(node.connected && node.synced && node.ready, config.componentId + ' registration is not ready');
     assert.equal(node.buildId, config.buildId);
@@ -99,11 +106,13 @@ export async function inspectReferenceSurface({ url, credential, collectorNode,
 
 async function main() {
   const { values } = parseArgs({ options: {
-    root: { type: 'string' }, config: { type: 'string', multiple: true }, endpoint: { type: 'string' },
+    root: { type: 'string' }, config: { type: 'string', multiple: true },
+    component: { type: 'string', multiple: true }, endpoint: { type: 'string' },
   } });
-  assert.ok(values.root && values.config?.length === 3,
-    'Usage: node tests/acceptance/scenarios/ivy-rust-reference.mjs --root PATH --config MANAGER --config HIVE --config COLLECTOR [--endpoint http://127.0.0.1:PORT/ivy]');
-  console.log(JSON.stringify(await inspectReference({ root: values.root, configPaths: values.config, endpoint: values.endpoint })));
+  assert.ok(values.root && values.config?.length >= 3,
+    'Usage: node tests/acceptance/scenarios/ivy-rust-reference.mjs --root PATH --config PATH... [--component EXPECTED_COMPONENT...] [--endpoint http://127.0.0.1:PORT/ivy]');
+  console.log(JSON.stringify(await inspectReference({ root: values.root, configPaths: values.config,
+    components: values.component, endpoint: values.endpoint })));
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
