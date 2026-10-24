@@ -780,26 +780,24 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
             }
             "task-board/result" => {
                 let content = value.required("content")?;
-                let artifacts = content
+                let mut artifacts = content
                     .required("artifacts")?
                     .as_array()
                     .ok_or_else(IvyError::internal)?
                     .iter()
-                    .chain(
-                        content
-                            .required("checks")?
-                            .as_array()
-                            .ok_or_else(IvyError::internal)?
-                            .iter()
-                            .map(|check| {
-                                check
-                                    .required("evidence")
-                                    .and_then(|v| v.as_array().ok_or_else(IvyError::internal))
-                            })
-                            .collect::<IvyResult<Vec<_>>>()?
-                            .into_iter()
-                            .flatten(),
-                    );
+                    .collect::<Vec<_>>();
+                // Current results contain artifacts directly; older stored
+                // results may also pin evidence in their retained findings.
+                if let Some(checks) = content.get("checks") {
+                    for check in checks.as_array().ok_or_else(IvyError::internal)? {
+                        artifacts.extend(
+                            check
+                                .required("evidence")?
+                                .as_array()
+                                .ok_or_else(IvyError::internal)?,
+                        );
+                    }
+                }
                 let mut selected = vec![];
                 for artifact in artifacts {
                     let pin = artifact.required("object")?;

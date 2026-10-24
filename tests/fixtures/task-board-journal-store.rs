@@ -1025,6 +1025,89 @@ async fn original_operation_values_complete_through_real_journal_cas_and_cleanup
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn result_publication_keeps_current_artifacts_and_retained_finding_evidence() {
+    let artifact = |id: &str| {
+        Json::object([(
+            "object",
+            Json::object([("objectId", id.into()), ("revision", Json::Number(1.0))]),
+        )])
+    };
+    for retained_findings in [false, true] {
+        let db = Connection::open_in_memory().unwrap();
+        local_journal::initialize(&db).unwrap();
+        let direct = artifact("direct-artifact");
+        let evidence = artifact("retained-evidence");
+        let mut content = Json::object([("artifacts", Json::Array(vec![direct.clone()]))]);
+        if retained_findings {
+            content.insert(
+                "checks",
+                Json::Array(vec![Json::object([(
+                    "evidence",
+                    Json::Array(vec![evidence.clone()]),
+                )])]),
+            );
+        }
+        let value = Json::object([("content", content)]);
+        let client = Arc::new(Client {
+            input: Json::object([(
+                "writeResult",
+                Json::object([
+                    ("object", Json::object([("id", "published-result".into())])),
+                    ("revision", Json::object([("revision", Json::Number(1.0))])),
+                ]),
+            )]),
+            trace: Mutex::default(),
+        });
+        // This case exercises the real reference publication path; the public
+        // package acceptance separately admits the complete current contract.
+        let store = JournalStore {
+            journal: LocalJournal {
+                connection: &db,
+                root_object_id: Some("root".into()),
+            },
+            client: client.clone(),
+            contracts: FixtureContracts {
+                local: HashSet::new(),
+                allowed: [hash_json(&value).unwrap()].into(),
+            },
+            limits: HistoryLimits::default(),
+            now: || TIME.into(),
+            new_id: || panic!("Remote publication must retain its Hive identity"),
+            cache: None,
+        };
+        store
+            .write(
+                "task-board/result",
+                &value,
+                "result-publication",
+                &Json::object([(
+                    "create",
+                    Json::object([("parentId", "root".into()), ("name", "Result".into())]),
+                )]),
+            )
+            .await
+            .unwrap();
+        let trace = client.trace.lock().unwrap();
+        let writes = trace
+            .iter()
+            .filter(|entry| entry.as_array().unwrap()[0] == Json::from("objects.write"))
+            .collect::<Vec<_>>();
+        assert_eq!(writes.len(), 1);
+        let sent = &writes[0].as_array().unwrap()[1];
+        assert_eq!(
+            sent.required("content").unwrap().required("value").unwrap(),
+            &value
+        );
+        let mut expected =
+            Json::object([("artifact-0", direct.required("object").unwrap().clone())]);
+        if retained_findings {
+            expected.insert("artifact-1", evidence.required("object").unwrap().clone());
+        }
+        assert_eq!(sent.required("references").unwrap(), &expected);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn retained_operations_use_the_concrete_journal_and_require_admission() {
     let db = Connection::open_in_memory().unwrap();
     local_journal::initialize(&db).unwrap();
