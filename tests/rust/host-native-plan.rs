@@ -275,16 +275,28 @@ async fn native_identity_separates_platforms_and_preserves_existing_recipe() {
     assert!(!builds.contains(&legacy));
 }
 
-async fn candidate() -> (Fixture, IvyJson, IvyJson) {
+async fn candidate_for(component: &str) -> (Fixture, IvyJson, IvyJson) {
     let f = Fixture::new();
     let root = f.0.join("artifact");
     let mut plan = materialize_native_plan(source(), os(), arch()).unwrap();
+    plan.insert("componentId", component.into());
+    let mut entrypoint = plan.required("entrypoint").unwrap().clone();
+    entrypoint.insert(
+        "executable",
+        format!(
+            "dist/native/{}/ivy-{component}{}",
+            platform(),
+            if cfg!(windows) { ".exe" } else { "" }
+        )
+        .into(),
+    );
+    plan.insert("entrypoint", entrypoint);
     let build = IvyJson::from(format!("sha256:{}", "a".repeat(64)));
     plan.insert("buildId", build.clone());
     let manifest = artifact::release_manifest(&plan).unwrap();
     let stamp = IvyJson::object([
         ("schemaVersion", IvyJson::Number(1.0)),
-        ("componentId", "agent-manager".into()),
+        ("componentId", component.into()),
         ("version", manifest.required("version").unwrap().clone()),
         ("buildId", build.clone()),
     ]);
@@ -296,10 +308,7 @@ async fn candidate() -> (Fixture, IvyJson, IvyJson) {
         .await
         .unwrap();
     for name in [
-        format!(
-            "ivy-agent-manager{}",
-            if cfg!(windows) { ".exe" } else { "" }
-        ),
+        format!("ivy-{component}{}", if cfg!(windows) { ".exe" } else { "" }),
         format!("ivy-health{}", if cfg!(windows) { ".exe" } else { "" }),
     ] {
         write(&root.join(&directory).join(name), b"native payload fixture");
@@ -315,7 +324,7 @@ async fn candidate() -> (Fixture, IvyJson, IvyJson) {
         .unwrap();
     let candidate = IvyJson::object([
         ("candidateId", build.clone()),
-        ("componentId", "agent-manager".into()),
+        ("componentId", component.into()),
         ("buildId", build),
         ("artifactRoot", text(&root)),
         ("manifestPath", text(&f.0.join("component.json"))),
@@ -330,6 +339,33 @@ async fn candidate() -> (Fixture, IvyJson, IvyJson) {
         ),
     ]);
     (f, candidate, manifest)
+}
+
+async fn candidate() -> (Fixture, IvyJson, IvyJson) {
+    candidate_for("agent-manager").await
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn native_phone_candidate_needs_its_job_helper_without_the_retired_input_dll() {
+    let (f, candidate, manifest) = candidate_for("phone-bridge").await;
+    let root = f.0.join("artifact");
+    let directory = root.join(format!("dist/native/{}", platform()));
+    assert!(!directory.join("ivy-phone-input.dll").exists());
+    artifact::verify_native_candidate(candidate.clone(), f.0.clone())
+        .await
+        .unwrap();
+    artifact::verify_launch_candidate_with_manifest(candidate.clone(), f.0.clone(), None, manifest)
+        .await
+        .unwrap();
+    fs::remove_file(directory.join("ivy-job.exe")).unwrap();
+    assert_eq!(
+        artifact::verify_native_candidate(candidate, f.0.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "artifact_missing"
+    );
 }
 
 #[tokio::test]
