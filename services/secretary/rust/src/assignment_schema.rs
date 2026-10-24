@@ -43,7 +43,7 @@ pub fn validate_rules(value: &IvyJson) -> IvyResult<()> {
 pub fn validate_execution_target(value: &IvyJson) -> IvyResult<()> {
     validate(Schema::ExecutionTarget, value)?;
     let path = value.required("threadCwd")?.as_str()?;
-    let absolute = std::path::Path::new(&path).is_absolute();
+    let absolute = std::path::Path::new(&path).has_root();
     need(
         absolute,
         "Secretary task working directories must be absolute.",

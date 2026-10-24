@@ -187,9 +187,9 @@ impl RpcClient for Scripted {
                     "completed" => Outcome::Completed,
                     _ => Outcome::NotExecuted,
                 };
-                let mut failure = IvyError::new(
-                    error.required("code")?.as_str()?,
-                    error.required("message")?.as_str()?,
+                let mut failure = IvyError::new_js(
+                    error.required("code")?.as_js_string().unwrap().clone(),
+                    error.required("message")?.as_js_string().unwrap().clone(),
                 )
                 .with_outcome(outcome);
                 failure.details = error.get("details").cloned();

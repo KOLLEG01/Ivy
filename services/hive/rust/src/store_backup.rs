@@ -23,6 +23,10 @@ impl BackupSnapshot {
 }
 /// Not Send: copying and ordinary actions use one connection on its storage actor.
 pub type OnlineBackup = Pin<Box<dyn Future<Output = IvyResult<BackupSnapshot>>>>;
+struct BackupLease(std::rc::Rc<std::cell::Cell<usize>>);
+impl Drop for BackupLease {
+    fn drop(&mut self) { self.0.set(self.0.get().saturating_sub(1)); }
+}
 
 impl Store {
     /// Return an owned task so mutable Store actions can run between copy batches.
@@ -33,9 +37,12 @@ impl Store {
         F: FnMut() -> IvyResult<()> + 'static,
     {
         let source = self.db.clone();
+        self.active_backups.set(self.active_backups.get() + 1);
+        let lease = BackupLease(self.active_backups.clone());
         // Preserve native filename identity; SQLite rejects names it cannot open.
         let destination = ivy_host_runtime::native_path::to_native(&destination);
         Box::pin(async move {
+            let _lease = lease;
             let pages = {
                 let mut target = Connection::open_with_flags(
                     &destination,

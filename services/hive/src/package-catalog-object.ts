@@ -8,9 +8,9 @@ import { Objects } from './objects.js';
 import { HiveStore } from './store.js';
 
 const contract: DataContract = {
-  key: 'ivy/package-catalog', version: '1.0.2', owner: { kind: 'hive' }, mediaType: 'application/json',
+  key: 'ivy/package-catalog', version: '1.0.3', owner: { kind: 'hive' }, mediaType: 'application/json',
   retention: { objects: { mode: 'retain' }, revisions: { mode: 'current' } },
-  specMarkdown: 'Validated Ivy package catalog. Retain the latest two archives per component and builds referenced by installation observations or unfinished deployments.',
+  specMarkdown: 'Validated Ivy package catalog. Retain the latest archive per component and builds referenced by installation observations or unfinished deployments.',
   jsonSchema: { type: 'object', properties: { schemaVersion: { const: 1 }, revision: { type: 'integer', minimum: 0 }, packages: { type: 'array' } },
     required: ['schemaVersion', 'revision', 'packages'], additionalProperties: false },
 };
@@ -61,7 +61,7 @@ export class PackageCatalogObject {
     }
     const keep = new Set<PackageCatalogEntry>();
     for (const versions of components.values())
-      for (const entry of versions.sort((a, b) => compareVersions(b.version, a.version)).slice(0, 2)) keep.add(entry);
+      for (const entry of versions.sort((a, b) => compareVersions(b.version, a.version)).slice(0, 1)) keep.add(entry);
     const protectedBuilds = this.protectedBuilds();
     return packages.filter(entry => keep.has(entry) || protectedBuilds.has(entry.buildId));
   }

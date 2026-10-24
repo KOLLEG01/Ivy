@@ -663,11 +663,12 @@ pub fn collect(
         collect_events(store,runtime,now)?;
         store.cleanup_mutation_receipts(0,0)?;
         let apps={
-            let mut statement=sql(store,store.connection().prepare_cached("SELECT app_id,current_release_id,previous_release_id FROM apps"))?;
-            sql(store,sql(store,statement.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?))))?.collect::<rusqlite::Result<Vec<_>>>())?
+            let mut statement=sql(store,store.connection().prepare_cached("SELECT app_id,current_release_id FROM apps"))?;
+            sql(store,sql(store,statement.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?))))?.collect::<rusqlite::Result<Vec<_>>>())?
         };
-        for (id,current,previous) in apps {
-            sql(store,store.connection().execute("DELETE FROM app_releases WHERE app_id=? AND release_id IS NOT ? AND release_id IS NOT ?",params![id,current,previous]))?;
+        for (id,current) in apps {
+            sql(store,store.connection().execute("DELETE FROM app_releases WHERE app_id=? AND release_id IS NOT ?",params![id,current]))?;
+            sql(store,store.connection().execute("UPDATE apps SET previous_release_id=NULL WHERE app_id=?",params![id]))?;
         }
         if let Some(diagnostics)=diagnostics.as_mut(){diagnostics.collect_diagnostics(store,now)?;}
         store.set_metadata("retention_last_success",&iso(runtime,now)?)?;

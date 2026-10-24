@@ -385,3 +385,48 @@ fn deletion_failures_restore_fts_references_usage_positions_events_receipts_and_
     no_effect(&rows, failed, "limit_exceeded");
     assert!(absent(&rows, failed + 1, "page"));
 }
+
+#[test]
+fn disposable_deletion_requires_the_current_owner_and_an_entirely_disposable_subtree() {
+    let mut steps = setup();
+    let owner = json!({"kind":"service","serviceName":"task-board"}).to_string();
+    let definition = json!({"key":"fixture/disposable","version":"1.0.0","mediaType":"application/json","owner":serde_json::from_str::<Value>(&owner).unwrap(),"retention":{"objects":{"mode":"owned"},"revisions":{"mode":"all"}},"jsonSchema":{"type":"object"},"specMarkdown":"Synthetic disposable service records."});
+    let mut source = format!("BEGIN IMMEDIATE; INSERT INTO contract_families VALUES('fixture/disposable',{},'application/json','owned'); INSERT INTO contracts VALUES('fixture/disposable','1.0.0',{});", quote(&owner), quote(&definition.to_string()));
+    object(&mut source, "disposable", "fixture/disposable", None, None, json!({}));
+    source.push_str("COMMIT;");
+    steps.push(sql(source));
+    let denied = steps.len();
+    for (nonce, node, generation) in [
+        ("no-node", None, 1.0),
+        ("wrong-service", Some("other-service"), 1.0),
+        ("wrong-principal", Some("other-principal"), 1.0),
+        ("no-generation", Some("task-node"), 0.0),
+        ("fractional-generation", Some("task-node"), 1.5),
+    ] {
+        let mut step = remove(nonce, "disposable", 1);
+        step["context"]["serviceNodeId"] = json!(node);
+        step["context"]["generation"] = json!(generation);
+        steps.push(step);
+    }
+    let mut retained = String::from("BEGIN IMMEDIATE;");
+    object(&mut retained, "retained-child", "wiki/attachment", Some("disposable"), None, json!({}));
+    retained.push_str("COMMIT;");
+    steps.push(sql(retained));
+    steps.push(refresh());
+    let mut allowed = remove("owner-delete", "disposable", 1);
+    allowed["context"]["serviceNodeId"] = json!("task-node");
+    allowed["context"]["generation"] = json!(1);
+    let blocked = steps.len();
+    steps.push(allowed.clone());
+    steps.push(sql("BEGIN IMMEDIATE; DELETE FROM object_fts WHERE object_id='retained-child'; DELETE FROM revisions WHERE object_id='retained-child'; DELETE FROM objects WHERE id='retained-child'; COMMIT;"));
+    steps.push(refresh());
+    let deleted = steps.len();
+    steps.push(allowed.clone());
+    steps.push(allowed);
+    let rows = compare(&steps);
+    for index in denied..denied + 5 { no_effect(&rows, index, "forbidden"); }
+    no_effect(&rows, blocked, "target_conflict");
+    assert_eq!(rows["rows"][deleted]["value"], json!({"deleted":true}));
+    assert_eq!(rows["rows"][deleted + 1]["value"], rows["rows"][deleted]["value"]);
+    assert!(absent(&rows, deleted, "disposable"));
+}

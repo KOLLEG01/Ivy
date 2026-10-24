@@ -142,6 +142,61 @@ export const rustTests = {
     "test": "chat-journal",
     "filter": "wa_socket::"
   },
+  "tests/rust/host-journal-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "journal_cases::",
+    "testThreads": 1
+  },
+  "tests/rust/host-storage-retention-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-actions",
+    "filter": "storage_retention_cases::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_storage_compaction.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-compaction",
+    "testThreads": 1
+  },
+  "tests/rust/hive_uis.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::registry::uis::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_object_delete.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::object_delete::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_mcp_request.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::registry::mcp_request::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_package_catalog.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::package_catalog::",
+    "testThreads": 1
+  },
+  "tests/rust/agent-native-rpc.rs": {
+    "package": "ivy-host-runtime",
+    "test": "native-rpc"
+  },
+  "tests/secretary-rust/assignment_tick_cases.rs": {
+    "package": "ivy-secretary",
+    "test": "delivery",
+    "filter": "assignment_tick_cases::"
+  },
+  "tests/secretary-rust/assignment_windows_cases.rs": {
+    "package": "ivy-secretary",
+    "test": "delivery",
+    "filter": "assignment_windows_cases::"
+  },
   "tests/secretary-rust/error-outcome.rs": {
     "package": "ivy-secretary",
     "test": "error-outcome"

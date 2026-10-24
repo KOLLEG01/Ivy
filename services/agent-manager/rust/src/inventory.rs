@@ -377,11 +377,12 @@ impl Reader<'_> {
     }
     async fn read(&self, method: &str, params: IvyJson) -> IvyResult<IvyJson> {
         self.check()?;
+        let timeout_ms = self.budget.min(crate::native_management::native_read_timeout_ms(&method.into(), &params));
         let reply = (self.owner.read)(
             method.into(),
             params,
             NativeOptions {
-                timeout_ms: self.budget,
+                timeout_ms,
                 detach_on_timeout: true,
                 ..Default::default()
             },

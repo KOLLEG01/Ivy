@@ -82,7 +82,7 @@ export function defaultServiceSettings(
     case "task-board":
       defaults = {
         rootObjectId: null,
-        scheduler: { enabled: true, intervalMs: 2000, pageSize: 50 },
+        scheduler: { enabled: true, intervalMs: 2000, pageSize: 50, stallWarningMs: 300000 },
         phoneTarget: null,
       };
       break;

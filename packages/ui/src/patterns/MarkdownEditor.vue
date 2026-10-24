@@ -10,9 +10,8 @@ import { placeholder as placeholderFeature } from '@milkdown/crepe/feature/place
 import { table } from '@milkdown/crepe/feature/table';
 import { toolbar } from '@milkdown/crepe/feature/toolbar';
 import { imageSchema, linkSchema, listItemSchema } from '@milkdown/kit/preset/commonmark';
-import { listItemBlockView } from '@milkdown/kit/component/list-item-block';
 import { $view, insert, replaceAll } from '@milkdown/kit/utils';
-import { editorViewCtx } from '@milkdown/kit/core';
+import { editorViewCtx, nodeViewCtx } from '@milkdown/kit/core';
 import { uploadConfig } from '@milkdown/kit/plugin/upload';
 import { DOMSerializer, Fragment, Slice } from '@milkdown/kit/prose/model';
 import type { Node as ProseNode, Schema } from '@milkdown/kit/prose/model';
@@ -52,7 +51,9 @@ const markEdited = () => { edited = true; };
 
 // Milkdown restores a list's mounted selection on the next animation frame.
 // A newer edit or caret move must keep its own selection instead.
-const stableListItemView = $view(listItemSchema.node, () => (node, view, getPos, decorations, innerDecorations) => {
+const stableListItemView = $view(listItemSchema.node, ctx => {
+  const render = ctx.get(nodeViewCtx).find(([name]) => name === listItemSchema.node.id)![1];
+  return (node, view, getPos, decorations, innerDecorations) => {
   const mountedState = view.state;
   const owner = new Proxy(view, { get(target, key, receiver) {
     if (key !== 'dispatch') return Reflect.get(target, key, receiver);
@@ -61,7 +62,8 @@ const stableListItemView = $view(listItemSchema.node, () => (node, view, getPos,
       target.dispatch(transaction);
     };
   } });
-  return listItemBlockView.view(node, owner, getPos, decorations, innerDecorations);
+    return render(node, owner, getPos, decorations, innerDecorations);
+  };
 });
 
 const publishCurrentMarkdown = () => {

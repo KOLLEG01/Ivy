@@ -85,6 +85,10 @@ async fn retained(config: &IvyJson, operation_id: &JsString) -> IvyResult<Option
     Ok(Some(record))
 }
 pub async fn bootstrap_status(config: &IvyJson, operation_id: &JsString) -> IvyResult<IvyJson> {
+    let journal = HostJournal::open(config.clone()).await?;
+    let retired = journal.retired_request_hash(&operation_id.to_utf8()?).await;
+    journal.close().await?;
+    require(retired?.is_none(), "operation_expired", "Superseded bootstrap maintenance was collected.")?;
     retained(config, operation_id).await?.ok_or_else(|| {
         IvyError::new(
             "not_found",
@@ -435,6 +439,11 @@ impl Inner {
         journal_slot: &mut Option<HostJournal>,
         owner_slot: &mut Option<OfflineOwners>,
     ) -> IvyResult<IvyJson> {
+        *journal_slot = Some(HostJournal::open_with_clock(config.clone(), self.clock.clone()).await?);
+        let journal = journal_slot.as_ref().unwrap();
+        let retired = journal.retired_request_hash(&text(request, "operationId")?).await?;
+        require(retired.as_ref().is_none_or(|hash| hash == request_hash), "operation_conflict", "The retired bootstrap identity belongs to another request.")?;
+        require(retired.is_none(), "operation_expired", "Superseded bootstrap maintenance cannot be replayed.")?;
         *record_slot = retained(config, &js(request, "operationId")?).await?;
         require(
             record_slot.as_ref().is_none_or(|record| {
@@ -464,9 +473,6 @@ impl Inner {
             "configuration_changed",
             "Bootstrap maintenance belongs to a different installation or configuration.",
         )?;
-        *journal_slot =
-            Some(HostJournal::open_with_clock(config.clone(), self.clock.clone()).await?);
-        let journal = journal_slot.as_ref().unwrap();
         let candidate = journal.candidate(&text(next, "candidateId")?).await?;
         require(
             candidate.get("componentId") == Some(&"host-executor".into())

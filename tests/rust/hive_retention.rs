@@ -581,7 +581,7 @@ fn journal_cleanup_respects_durable_prefixes_count_age_and_ui_release_pointers()
             .iter()
             .map(|v| v["release_id"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["current", "previous"]
+        vec!["current"]
     );
     assert!(state(&rows, released)["subscriptions"][1]["batch_json"].is_null());
 }

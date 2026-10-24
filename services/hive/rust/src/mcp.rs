@@ -108,6 +108,16 @@ fn metadata() -> &'static IvyJson {
     static DATA: OnceLock<IvyJson> = OnceLock::new();
     DATA.get_or_init(|| parse(include_str!("mcp_metadata.json"), usize::MAX).expect("MCP metadata"))
 }
+/// Order public discovery without changing provider selection or hiding extensions.
+pub fn sort_common_tools(tools: &mut [IvyJson]) {
+    let common = metadata().get("commonTools").and_then(IvyJson::as_array).unwrap_or(&[]);
+    let secondary = metadata().get("secondaryTools").and_then(IvyJson::as_array).unwrap_or(&[]);
+    let rank = |tool: &IvyJson| {
+        let name = tool.get("name");
+        common.iter().position(|v| Some(v) == name).unwrap_or_else(|| secondary.iter().position(|v| Some(v) == name).map(|n| common.len()+1+n).unwrap_or(common.len()))
+    };
+    tools.sort_by(|a,b| rank(a).cmp(&rank(b)).then_with(|| a.get("name").and_then(IvyJson::as_js_string).cmp(&b.get("name").and_then(IvyJson::as_js_string))));
+}
 fn empty() -> IvyJson {
     IvyJson::object(std::iter::empty::<(&str, IvyJson)>())
 }

@@ -54,6 +54,10 @@ pub async fn automatic_bootstrap_record(
     config: &IvyJson,
     operation_id: &JsString,
 ) -> IvyResult<Option<IvyJson>> {
+    let journal = HostJournal::open(config.clone()).await?;
+    let retired = journal.retired_request_hash(&operation_id.to_utf8()?).await;
+    journal.close().await?;
+    require(retired?.is_none(), "operation_expired", "Superseded automatic bootstrap maintenance was collected.")?;
     let path = automatic_bootstrap_root(config, operation_id)?.join("record.json");
     if !backup_files::exists(&path).await? {
         return Ok(None);
@@ -316,6 +320,7 @@ impl Inner {
         let operation_js = JsString::from(operation.as_str());
         let root = automatic_bootstrap_root(&config, &operation_js)?;
         let request_path = root.join("request.json");
+        if self.journal.retired_request_hash(&operation).await?.is_some() { return Ok(false); }
         let existing = automatic_bootstrap_record(&config, &operation_js).await?;
         if existing.as_ref().is_some_and(|value| {
             ["succeeded", "rolled_back", "needs_attention"]

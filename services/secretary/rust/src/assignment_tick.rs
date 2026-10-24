@@ -71,15 +71,15 @@ impl SchedulerAssignments {
                     .journal
                     .named("secretary/event-gap", &assignment_name, true)?;
                 if let Some(gap) = gap {
-                    if gap.value.get("relevant") == Some(&IvyJson::Bool(true)) {
+                    if gap.value.get("disposition").is_none_or(IvyJson::is_null) && gap.value.get("relevant") == Some(&IvyJson::Bool(true)) {
                         issues.issue(&gap_issue, "secretary_event_gap");
                     }
                 }
                 let configuration = configuration.required("value")?;
-                if scheduler
+                let caught_up = scheduler
                     .events_inner(&assignment, configuration, budget, issues)
-                    .await?
-                {
+                    .await?;
+                if caught_up {
                     scheduler
                         .flush_due_message_windows(&assignment, configuration, now)
                         .await?;
@@ -88,6 +88,7 @@ impl SchedulerAssignments {
                         .await?;
                 }
                 scheduler.schedules(&assignment, configuration, now).await?;
+                if caught_up { scheduler.recover_event_gap(&assignment, now, issues).await?; }
                 issues.clear(&key);
                 Ok(())
             }
@@ -96,7 +97,7 @@ impl SchedulerAssignments {
                 if evidence.cancellation.cancellation.is_cancelled() {
                     return Err(error);
                 }
-                issues.issue(&key, &error.code);
+                issues.issue(&key, crate::assignment_scheduler::diagnostic_code(&error, "secretary_assignment_failed"));
             }
         }
         Ok(())

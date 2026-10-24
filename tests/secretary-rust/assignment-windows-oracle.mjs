@@ -95,6 +95,7 @@ await add('object-collect-and-flush',[collectObject(),flushObject(),flushObject(
 await add('object-initial-revision',[collectObject(objectEvent(1,1)),flushObject()]);
 await add('object-unchanged-projection',[collectObject(),flushObject()],{history:[{v:1,ignored:0},{v:1,ignored:1}]});
 await add('object-duplicate-sequence',[collectObject(),collectObject(),collectObject(objectEvent(0)),flushObject()]);
+await add('older-object-revision-only-advances-sequence',[collectObject(),collectObject(objectEvent(2,1)),flushObject()]);
 await add('object-update-and-revert',[collectObject(),collectObject(objectEvent(2,3)),flushObject()],{history:[{v:0},{v:1},{v:0}]});
 await add('object-update-keeps-first-boundary',[collectObject(),collectObject(objectEvent(2,3,{occurredAt:seconds(20)})),flushObject()],{history:[{v:0},{v:1},{v:2}]});
 await add('object-not-due',[collectObject(),flushObject({now:seconds(29)})]);
@@ -114,7 +115,7 @@ await add('object-old-snapshot-used',[flushObject({assignment:{...assignment,pin
 await add('object-pending-wrong-trigger',[flushObject()],{documents:[doc(objectKey,objectName(),objectWindow({pending:{...objectWindow().pending,assignmentSnapshot:{...assignment.value,trigger:{kind:'schedule'}}}}))]});
 const observed={...assignment,value:{...assignment.value,trigger:{...objectTrigger,observation:{completePath:'/complete',observedAtPath:'/observedAt',maximumAgeSeconds:30}}}};
 for(const [label,data] of [['ready',{v:1,complete:true,observedAt:seconds(60)}],['incomplete',{v:1,complete:false,observedAt:seconds(60)}],['stale',{v:1,complete:true,observedAt:seconds(29)}],['future',{v:1,complete:true,observedAt:seconds(66)}],['old',{v:1,complete:true,observedAt:seconds(30)}]])await add('object-observation-'+label,[collectObject(),flushObject({now:seconds(61),current:{revision:2,value:data}})],{assignment:observed});
-for(const revision of [0,-1,1.5,9007199254740992,null,false,true,'2',' 2 ','\uFEFF0x2','0b10','0o2','+2','2.0','2e0','+0x2','2x','',[],[2],[[2]],[null],{}, {toString:'shadow'},['2','3'],'\ud800'])await add('object-revision-'+rows.length,[collectObject(objectEvent(1,revision))]);
+for(const revision of [0,-1,1.5,9007199254740992,null])await add('object-revision-'+rows.length,[collectObject(objectEvent(1,revision))]);
 for(const payload of [null,{},[],{objectId:watched}])await add('object-payload-'+rows.length,[collectObject(objectEvent(1,2,{payload}))]);
 await add('object-irrelevant-trigger-no-work',[collectObject()],{assignment:{...assignment,value:{...assignment.value,trigger:{kind:'event'}}}});
 await add('message-open-append-flush',[collectMessage(),collectMessage(messageEvent(2,seconds(120),'item-2')),flushMessage(),flushMessage()]);

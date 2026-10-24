@@ -349,7 +349,7 @@ fn package_catalog_publication_latest_identity_repeat_bytes_and_pruning_match_or
             .iter()
             .map(|p| p["version"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["2.0.0", "10.0.0"]
+        vec!["10.0.0"]
     );
 }
 
@@ -391,7 +391,7 @@ fn package_catalog_retention_keeps_stable_duplicate_identity_and_protected_build
             .iter()
             .map(|p| p["tag"].as_u64().unwrap())
             .collect::<Vec<_>>(),
-        vec![5]
+        vec![2, 4, 5]
     );
     assert_eq!(value(&r, again)[0]["tag"], 0);
     assert_eq!(value(&r, first)["catalog"]["revision"], 10);
@@ -406,7 +406,7 @@ fn package_catalog_retention_keeps_stable_duplicate_identity_and_protected_build
             .iter()
             .map(|p| p["tag"].as_u64().unwrap())
             .collect::<Vec<_>>(),
-        vec![1, 2, 3, 4]
+        vec![1, 3]
     );
 }
 

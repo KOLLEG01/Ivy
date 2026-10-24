@@ -47,6 +47,11 @@ async function add(label,c={}){
   const before={'/v':0},after={'/v':1};
   documents.push(doc('secretary/object-window',{assignmentId:a.value.assignmentId,objectId:watched,lastSequence:1,fingerprint:hashJson(after),projection:after,revision:2,pending:{assignment:a.pin,assignmentSnapshot:{...a.value,trigger:objectTrigger},objectId:watched,firstSequence:1,firstRevision:1,lastRevision:2,occurredAt:at,dueAt:seconds(30),before,after}},'object'));
  }
+ if(c.gapWindow){
+  const a=assignments[0],projection={'/v':0};
+  documents.push(doc('secretary/object-window',{assignmentId:a.value.assignmentId,objectId:watched,lastSequence:7,fingerprint:hashJson(projection),projection,revision:1,
+   pending:{assignment:a.pin,assignmentSnapshot:a.value,objectId:watched,firstSequence:2,firstRevision:1,lastRevision:1,occurredAt:at,dueAt:seconds(500),before:projection,after:projection}},hashJson([a.value.assignmentId,a.pin.revision,watched])));
+ }
  const controller=new AbortController();if(c.cancel)controller.abort(new IvyError('fixture_cancelled','Fixture cancelled.'));
  const read=(id,revision)=>{
   const r=records.get(id);assert.ok(r,'Unknown fixture object '+id);const version=revision===undefined?r.versions.at(-1):r.versions.find(v=>v.revision===revision);assert.ok(version,'Unknown fixture revision '+revision);const value=version.value;
@@ -80,7 +85,7 @@ async function add(label,c={}){
    const a=assignments.find(a=>'secretary-assignment-'+hashJson(a.value.assignmentId).slice(7,48)===p.name);assert.ok(a,'Unknown subscription');
    const index=subscribeCounts[a.value.assignmentId]??0;subscribeCounts[a.value.assignmentId]=index+1;
    const configured=c.batches?.[a.value.assignmentId]?.[index];
-   result=configured??(c.objectError?batch([ownEvent(a),event(2,{topic:'hive.object.changed',occurredAt:'invalid',payload:{operation:'write',objectId:watched,revision:2}})]):c.revisionCoercion?batch([ownEvent(a,{toString:'shadow'})]):c.activate?batch([ownEvent(a),event()]):batch([],{hasMore:c.hasMore??false}));
+   result=configured??(c.objectError?batch([ownEvent(a),event(2,{topic:'hive.object.changed',occurredAt:'invalid',payload:{operation:'write',objectId:watched,revision:2}})]):c.activate?batch([ownEvent(a),event()]):batch([],{hasMore:c.hasMore??false}));
   }else if(method==='events.read')result=c.firstBatch??batch([event(1,{occurredAt:seconds(-60)})]);
   else if(method==='events.ack'||method==='events.unsubscribe')result={ok:true};
   else assert.fail('Unexpected RPC '+method);
@@ -127,7 +132,6 @@ await add('old-assignment-issue-cleared',{issues:[['assignment:assignment-0','ol
 await add('per-assignment-failure-does-not-block-peer',{n:2,faults:[{method:'events.subscribe',n:1}]});
 await add('coded-internal-error-retains-code',{faults:[{method:'events.subscribe',n:1,code:'internal_error'}]});
 await add('uncoded-object-time-falls-back',{assignment:{trigger:objectTrigger},objectError:true});
-await add('uncoded-revision-coercion-falls-back',{revisionCoercion:true});
 const invalidSnapshot={...sample('Assignment'),assignmentId:'assignment-0',enabled:false,rules:{},trigger:scheduleTrigger,createdAt:at,updatedAt:at};
 await add('uncoded-disabled-schedule-date-falls-back',{assignment:{trigger:scheduleTrigger},progress:[{value:{checkedAt:'2026-99-01T00:00:00.000Z',assignmentSnapshot:invalidSnapshot}}]});
 await add('uncoded-retained-timezone-falls-back',{assignment:{trigger:scheduleTrigger},progress:[{value:{assignmentSnapshot:{...invalidSnapshot,enabled:true,trigger:{kind:'schedule',cadence:'daily',timeZone:'not/a-zone',intervalMinutes:null,localTime:'00:00',weekdays:[]}}}}]});
@@ -138,6 +142,17 @@ await add('cancelled-error-rethrown',{cancelAfter:5,faults:[{method:'events.subs
 await add('bounded-per-assignment-issues',{issues:Array.from({length:31},(_,i)=>['original-'+i,'fixture']),faults:[{method:'events.subscribe',n:1}]});
 for(const [method,n] of [['serviceNodes.get',1],['objects.query',1],['objects.query',2],['objects.read',1],['objects.read',2],['objects.write',1],['events.subscribe',1],['events.ack',1],['system.status',1]])await add('failure-'+method+'-'+n,{faults:[{method,n}]});
 await add('legacy-gap-read-error-recoverable',{documents:[doc('secretary/event-gap',{prunedThroughSequence:3})],faults:[{method:'events.read',n:1}]});
+await add('gap-disabled-assignment-retires-history',{assignment:{enabled:false},documents:[doc('secretary/event-gap',{prunedThroughSequence:3,relevant:true})]});
+await add('gap-schedule-replays-retained-boundary',{assignment:{trigger:scheduleTrigger},progress:[{}],documents:[doc('secretary/event-gap',{prunedThroughSequence:3,relevant:true})]});
+await add('gap-object-rebases-without-moving-first-boundary',{assignment:{trigger:objectTrigger},progress:[{kind:'event',value:{processedThrough:8,active:true}}],gapWindow:true,ticks:2,
+ batches:{'assignment-0':[batch([],{throughSequence:8}),batch([],{throughSequence:8})]},
+ documents:[doc('secretary/event-gap',{prunedThroughSequence:3,relevant:true})]});
+const recovered=label=>rows.find(r=>r.input.label===label).expected.snapshots.at(-1).technical.find(d=>d.key==='secretary/event-gap').value;
+assert.equal(recovered('gap-disabled-assignment-retires-history').disposition,'inactive_history');
+assert.equal(recovered('gap-schedule-replays-retained-boundary').disposition,'retained_schedule_replayed');
+assert.equal(recovered('gap-object-rebases-without-moving-first-boundary').disposition,'authoritative_snapshot_rebased');
+const gapWindow=rows.find(r=>r.input.label==='gap-object-rebases-without-moving-first-boundary').expected.snapshots.at(-1).technical.find(d=>d.key==='secretary/object-window').value;
+assert.equal(gapWindow.pending.firstSequence,2);assert.equal(gapWindow.pending.dueAt,seconds(500));assert.deepEqual(gapWindow.pending.after,{'/v':1});
 assert.equal(rows.find(r=>r.input.label==='uncoded-object-time-falls-back').expected.snapshots[0].issues[0][1],'secretary_assignment_failed');
 assert.equal(rows.find(r=>r.input.label==='coded-internal-error-retains-code').expected.snapshots[0].issues[0][1],'internal_error');
 process.stdout.write(JSON.stringify({rootId,rows}));

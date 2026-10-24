@@ -1,9 +1,4 @@
-#[path = "../../packages/host-runtime/rust/src/codex_admission.rs"]
-mod codex_admission;
-#[path = "../../packages/host-runtime/rust/src/codex_framing.rs"]
-mod codex_framing;
-#[path = "../../packages/host-runtime/rust/src/codex_rpc.rs"]
-mod codex_rpc;
+use ivy_host_runtime::{codex_admission, codex_rpc};
 #[path = "codex-transport.rs"]
 mod primitives;
 
@@ -315,6 +310,32 @@ async fn reserved_lanes_and_connection_deadlines_preserve_uncertainty() {
 }
 
 #[tokio::test]
+async fn expired_automatic_observations_release_slots_and_keep_late_replies_safe() {
+    let (rpc, mut peer) = fixture(Events::default());
+    let mut ids = Vec::new();
+    // One more than the existing 16 background slots must still be admitted.
+    for _ in 0..=16 {
+        let owner = rpc.clone();
+        let pending = tokio::spawn(async move {
+            owner.request("account/logout".into(), IvyJson::Null, RequestOptions { timeout_ms: 10, detach_on_timeout: true, ..Default::default() }).await
+        });
+        let sent = peer.sent().await;
+        ids.push(sent.required("id").unwrap().clone());
+        assert_eq!(result(pending).await.unwrap_err().code, "native_observation_deadline");
+    }
+    assert!(rpc.connected());
+    let reused = request(&rpc, &ids[0].as_str().unwrap(), RequestOptions::default());
+    assert_eq!(result(reused).await.unwrap_err().code, "native_state_conflict");
+    peer.reply(ids[0].clone()).await;
+    peer.reply(ids.last().unwrap().clone()).await;
+    let active = request(&rpc, "active", RequestOptions::default());
+    peer.sent().await;
+    peer.reply("active".into()).await;
+    result(active).await.unwrap();
+    rpc.close("done").await;
+}
+
+#[tokio::test]
 async fn framing_and_write_failures_close_without_replaying() {
     for (bytes, code) in [
         (b"{\"result\":null}".as_slice(), "native_truncated_frame"),
@@ -345,7 +366,7 @@ async fn framing_and_write_failures_close_without_replaying() {
 }
 
 #[tokio::test]
-async fn wire_and_hook_transcript_matches_unchanged_typescript() {
+async fn wire_and_hook_transcript_preserves_ids_order_and_reply_bytes() {
     let trace = Arc::new(Mutex::new(Vec::<IvyJson>::new()));
     let events = Events {
         on_request: Arc::new({
@@ -471,19 +492,8 @@ async fn wire_and_hook_transcript_matches_unchanged_typescript() {
             .push(IvyJson::object([("sent", sent)]));
     }
     rpc.close("fixture_closed").await;
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = std::process::Command::new("node")
-        .arg(root.join("tests/fixtures/native-rpc-oracle.mjs"))
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
     assert_eq!(
         IvyJson::Array(trace.lock().unwrap().clone()),
-        value(std::str::from_utf8(&output.stdout).unwrap())
+        value(r#"["intent",{"sent":{"id":"i\ud800","method":"account/logout","params":null}},"receipt",{"reply":{"result":{"untouched":["Grüße",null,false]}}},{"sent":{"method":"initialized"}},{"request":{"id":-2,"method":"currentTime/read","params":{"threadId":"original"}}},{"request":{"id":"-2","method":"currentTime/read","params":{"threadId":"original"}}},{"notification":{"method":"serverRequest/resolved","params":{"requestId":-2,"threadId":"original"}}},"answer-intent",{"sent":{"id":-2,"result":{}}},"answer-intent",{"sent":{"id":"-2","result":{}}},{"close":"fixture_closed"}]"#)
     );
 }

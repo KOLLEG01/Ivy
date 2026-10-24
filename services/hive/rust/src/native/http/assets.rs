@@ -352,6 +352,8 @@ pub(super) async fn serve(
     )?;
     if text(asset_path).ends_with(".sandbox.html") {
         output.headers.remove("x-frame-options");
+    } else {
+        output.set_header("X-Frame-Options", &"SAMEORIGIN".into())?;
     }
     let etag = format!("\"{}\"", asset.required("contentHash")?.as_str()?);
     output.set_header("ETag", &etag.clone().into())?;

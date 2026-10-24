@@ -80,12 +80,40 @@ pub fn delete(
     now_ms: u64,
     now: &JsString,
 ) -> IvyResult<IvyJson> {
+    delete_with_service(store, context, None, parameters, now_ms, now)
+}
+
+pub fn delete_with_service(
+    store: &mut Store,
+    context: &AuthenticatedContext,
+    service: Option<&IvyJson>,
+    parameters: &IvyJson,
+    now_ms: u64,
+    now: &JsString,
+) -> IvyResult<IvyJson> {
     store.mutate(context, &"objects.delete".into(), parameters, now_ms, |store, principal| {
         let id = parameters.get("objectId").and_then(IvyJson::as_js_string)
             .ok_or_else(||IvyError::new("invalid_arguments","Invalid object mutation arguments."))?;
         let root = row(store,id)?;
-        require(["wiki/page","wiki/attachment","task-board/task","dashboards/dashboard"].into_iter().any(|key| root.key == JsString::from(key)),
-            "invalid_arguments","Permanent deletion is available only for Wiki pages, Wiki attachments, TaskBoard tasks and dashboards.")?;
+        let document = ["wiki/page","wiki/attachment","task-board/task","dashboards/dashboard"].into_iter().any(|key| root.key == JsString::from(key));
+        let owned_by = if document { None } else {
+            let (owner, mode): (String, String) = store.connection().query_row(
+                "SELECT owner,object_mode FROM contract_families WHERE key=?", [text(&root.key)],
+                |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| store.query_error(e))?;
+            require(mode == "owned", "invalid_arguments", "Only user documents or an owning service's disposable Objects can be permanently deleted.")?;
+            let publisher = parse(&owner, usize::MAX).map_err(|_| IvyError::internal())?;
+            let node = service.and_then(|s| s.get("serviceNodeId")).and_then(IvyJson::as_js_string)
+                .map(|id| store.connection().query_row("SELECT principal_id,service_name FROM service_nodes WHERE id=?", [text(id)],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).optional().map_err(|e| store.query_error(e)))
+                .transpose()?.flatten();
+            let generation = service.and_then(|s| s.get("generation")).and_then(IvyJson::as_f64);
+            require(publisher.get("kind") == Some(&"service".into())
+                && node.as_ref().is_some_and(|(id, name)| id == &text(&context.principal_id)
+                    && publisher.get("serviceName").and_then(IvyJson::as_js_string) == Some(&JsString::from(name.as_str())))
+                && generation.is_some_and(|v| v > 0.0 && v <= 9_007_199_254_740_991.0 && v.fract() == 0.0),
+                "forbidden", "Only the current owning service can permanently delete its disposable Objects.")?;
+            Some(owner)
+        };
         require(parameters.get("expectedRevision").and_then(IvyJson::as_f64) == Some(root.revision as f64),
             "revision_conflict","The document changed. Refresh it before deleting.")?;
         let mut selected = HashSet::new();
@@ -102,6 +130,13 @@ pub fn delete(
             if !selected.insert(id.clone()) { continue; }
             selected_keys.push(id.clone());
             let current = row(store,&id)?;
+            if let Some(owner) = &owned_by {
+                let (current_owner, mode): (String, String) = store.connection().query_row(
+                    "SELECT owner,object_mode FROM contract_families WHERE key=?", [text(&current.key)],
+                    |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| store.query_error(e))?;
+                require(mode == "owned" && &current_owner == owner, "target_conflict",
+                    "An owned subtree contains retained content or content belonging to another service.")?;
+            }
             if current.key == JsString::from("task-board/task") {
                 let content = store.connection().query_row("SELECT content FROM revisions WHERE object_id=? AND revision=?",params![text(&id),current.revision],|r|r.get::<_,String>(0)).map_err(|e|store.query_error(e))?;
                 let task = parse(&content,usize::MAX).map_err(|_|IvyError::internal())?;

@@ -56,10 +56,22 @@ fn database(config: &J) -> Connection {
 }
 fn reference(config: &J, table: &str, instance: &str, candidate: &J) {
     assert!(["installed", "runtime_targets"].contains(&table));
-    let value = J::object([(
+    let mut value = J::object([(
         "candidateId",
         candidate.required("candidateId").unwrap().clone(),
     )]);
+    value.insert("instanceId", instance.into());
+    value.insert("buildId", candidate.get("buildId").unwrap_or(candidate.required("candidateId").unwrap()).clone());
+    if table == "installed" {
+        value.insert("enabled", true.into());
+        value.insert("installedAt", stamp(NOW));
+    } else {
+        value.insert("schemaVersion", J::Number(1.0));
+        value.insert("revision", "fixture-target".into());
+        value.insert("desired", "running".into());
+        value.insert("configPath", text(&path(config.required("runtimeRoot").unwrap()).join(format!("{instance}.json"))));
+        value.insert("requestedAt", stamp(NOW));
+    }
     database(config)
         .execute(
             &format!("INSERT INTO {table} VALUES (?,?)"),

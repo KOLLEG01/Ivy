@@ -377,9 +377,10 @@ fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) ->
                                         &now,
                                     )
                                 } else {
-                                    ivy_hive::objects::delete(
+                                    ivy_hive::objects::delete_with_service(
                                         store,
                                         &context,
+                                        Some(&IvyJson::from_serde(c).unwrap()),
                                         &params,
                                         step["now"].as_u64().unwrap(),
                                         &now,

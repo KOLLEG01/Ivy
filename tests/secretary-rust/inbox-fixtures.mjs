@@ -1,7 +1,19 @@
 import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
-export const oracleRoot=resolve(process.env.IVY_SECRETARY_ORACLE??'.local/build/secretary');
-export const load=p=>import(pathToFileURL(resolve(oracleRoot,p)));
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { existsSync, readFileSync } from 'node:fs';
+import { registerHooks, stripTypeScriptTypes } from 'node:module';
+export const oracleRoot=resolve(process.env.IVY_SECRETARY_ORACLE??fileURLToPath(new URL('../../',import.meta.url)));
+registerHooks({
+ resolve(specifier,context,next){
+  if(specifier.startsWith('.')&&specifier.endsWith('.js')&&context.parentURL){const source=new URL(specifier.slice(0,-3)+'.ts',context.parentURL);if(existsSync(source))return next(source.href,context);}
+  return next(specifier,context);
+ },
+ load(url,context,next){
+  if(url.endsWith('.ts'))return {format:'module',source:stripTypeScriptTypes(readFileSync(new URL(url),'utf8'),{mode:'transform'}),shortCircuit:true};
+  return next(url,context);
+ }
+});
+export const load=p=>{let path=resolve(oracleRoot,p);if(!existsSync(path)&&path.endsWith('.js')&&existsSync(path.slice(0,-3)+'.ts'))path=path.slice(0,-3)+'.ts';return import(pathToFileURL(path));};
 const {identityHash,messageHash}=await load('services/secretary/src/engine.js');
 const {hashJson}=await load('packages/sdk/src/node.js');
 export const rootId='00000000-0000-4000-8000-000000000001',itemId='00000000-0000-4000-8000-000000000002',sourceId='00000000-0000-4000-8000-000000000003',operationId='00000000-0000-4000-8000-000000000004';

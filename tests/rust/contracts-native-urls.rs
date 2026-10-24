@@ -20,6 +20,10 @@ fn native_urls_preserve_http_origins_forms_and_redirects() {
         ("https:", "example.com", "user", "pass", "#fragment")
     );
     let parts = url_components(&input).unwrap();
+    assert_eq!(parse_url(&"custom:opaque  ?q".into()).unwrap().href,"custom:opaque %20?q");
+    for (input,expected) in [("file://server/C:/base/","file://server/C:/base/"),("file://localhost/C:/base/","file:///C:/base/"),("file://C:/base/","file:///C:/base/")] {
+        assert_eq!(parse_url(&input.into()).unwrap().href,expected);
+    }
     assert_eq!(
         (parts.origin.as_str(), parts.pathname.as_str()),
         ("https://example.com", "/base")

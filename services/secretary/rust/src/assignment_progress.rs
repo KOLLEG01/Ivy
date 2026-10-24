@@ -28,10 +28,11 @@ fn text(value: &IvyJson, key: &str) -> IvyResult<JsString> {
         .ok_or_else(IvyError::internal)
 }
 fn time(value: &IvyJson, key: &str) -> IvyResult<f64> {
-    Ok(parse_date(&text(value, key)?))
+    let milliseconds = parse_date(&text(value, key)?);
+    milliseconds.is_finite().then_some(milliseconds).ok_or_else(IvyError::internal)
 }
 fn iso(value: f64) -> IvyResult<JsString> {
-    date_to_iso(value)
+    date_to_iso(value).map_err(|_| IvyError::internal())
 }
 pub(crate) fn written_at(document: &IvyJson, fallback: &str) -> IvyResult<JsString> {
     match document.get("writtenAt").filter(|v| !v.is_null()) {
@@ -130,7 +131,8 @@ impl SchedulerAssignments {
                     .get("object.archivedAt")
                     .filter(|value| !value.is_null())
                     .map(IvyJson::as_str)
-                    .transpose()?
+                    .transpose()
+                    .map_err(|_| IvyError::internal())?
                     .unwrap_or_else(|| "null".to_owned());
                 let retirement: JsString = format!("{revision}:{archived_at}").into();
                 if archived && self.retired.get(&object_id) == Some(&retirement) {
@@ -197,7 +199,7 @@ impl SchedulerAssignments {
                 Err(error) if evidence.cancellation.cancellation.is_cancelled() => {
                     return Err(error);
                 }
-                Err(error) => issues.issue(&issue_key, &error.code),
+                Err(error) => issues.issue(&issue_key, crate::assignment_scheduler::diagnostic_code(&error, "secretary_assignment_invalid")),
             }
         }
         Ok(result)
@@ -274,7 +276,7 @@ impl AssignmentScheduler<'_, '_, '_> {
                 .as_f64()
                 .ok_or_else(IvyError::internal)? as u32,
             |at, zone| {
-                let p = TimeZone::local_parts(at, zone)?;
+                let p = TimeZone::local_parts(at, zone).map_err(|_| IvyError::internal())?;
                 Ok::<_, IvyError>(LocalMinute {
                     date: format!("{:04}-{:02}-{:02}", p.year, p.month, p.day),
                     time: format!("{:02}:{:02}", p.hour, p.minute),

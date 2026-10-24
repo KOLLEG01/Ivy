@@ -2,6 +2,15 @@ use super::*;
 use ivy_hive::mcp_request::{self as request, Invocation, Storage};
 use std::collections::VecDeque;
 
+#[test]
+fn public_discovery_prioritizes_everyday_tools_and_retains_runtime_extensions() {
+    let mut tools = ["phone_bridge_answer_voice_input", "extension_z", "chat_bridge_send_file", "task_read", "extension_a", "ivy_instructions"]
+        .map(|name| IvyJson::object([("name", name.into())]));
+    ivy_hive::mcp::sort_common_tools(&mut tools);
+    let names: Vec<_> = tools.iter().map(|v| v.required("name").unwrap().as_str().unwrap()).collect();
+    assert_eq!(names, ["ivy_instructions", "task_read", "chat_bridge_send_file", "extension_a", "extension_z", "phone_bridge_answer_voice_input"]);
+}
+
 fn field<'a>(value: &'a IvyJson, key: &str) -> IvyResult<&'a IvyJson> {
     value.get(key).ok_or_else(IvyError::internal)
 }

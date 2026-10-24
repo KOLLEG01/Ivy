@@ -271,7 +271,8 @@ async fn list(
     runtime: &dyn mcp::Runtime,
 ) -> IvyResult<IvyJson> {
     let bindings = mcp::surface_bindings(&catalog(storage, None).await?, &options.surface)?;
-    let descriptors = mcp::direct_descriptors(&bindings, runtime)?;
+    let mut descriptors = mcp::direct_descriptors(&bindings, runtime)?;
+    if options.surface == JsString::from("ivy") { mcp::sort_common_tools(&mut descriptors); }
     let identity = IvyJson::object([
         ("method", "tools/list".into()),
         ("surface", IvyJson::String(options.surface.clone())),

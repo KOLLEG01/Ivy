@@ -1,5 +1,6 @@
 use super::*;
 use crate::storage_space::RetentionProgress;
+use ivy_contracts::JsString;
 use std::{collections::BTreeSet, sync::Arc, time::UNIX_EPOCH};
 
 pub struct PreparationStorageCollection {
@@ -150,6 +151,14 @@ fn at_or_before(record: &IvyJson, cutoff: f64) -> bool {
         .and_then(IvyJson::as_js_string)
         .is_some_and(|at| ivy_sdk::clock::parse_date(at) <= cutoff)
 }
+fn superseded(record: &IvyJson, newest: &std::collections::BTreeMap<JsString, JsString>) -> bool {
+    record.get("componentId").and_then(IvyJson::as_js_string).and_then(|id| newest.get(id))
+        .zip(record.get("candidate").and_then(|c| c.get("createdAt")).and_then(IvyJson::as_js_string))
+        .is_some_and(|(latest, created)| created < latest)
+}
+fn collectible(record: &IvyJson, cutoff: f64, newest: &std::collections::BTreeMap<JsString, JsString>) -> bool {
+    record.get("phase") == Some(&"compacted".into()) && (at_or_before(record, cutoff) || superseded(record, newest))
+}
 fn milliseconds(at: std::time::SystemTime) -> f64 {
     let (positive, d) = match at.duration_since(UNIX_EPOCH) {
         Ok(d) => (true, d),
@@ -182,6 +191,13 @@ async fn collect(
         protected_candidates: BTreeSet::new(),
     };
     let mut protected_snapshots = BTreeSet::new();
+    let mut superseded_snapshots = BTreeSet::new();
+    let mut newest = std::collections::BTreeMap::<JsString, JsString>::new();
+    for (candidate, _) in journal.storage_retention_candidates().await? {
+        let component = candidate.required("componentId")?.as_js_string().ok_or_else(IvyError::internal)?;
+        let created = candidate.required("createdAt")?.as_js_string().ok_or_else(IvyError::internal)?;
+        if newest.get(component).is_none_or(|at| created > at) { newest.insert(component.clone(), created.clone()); }
+    }
     let mut unknown = false;
     for entry in journal.unfinished_preparation_operations().await? {
         if let Some(snapshot) = entry.get("sourceSnapshot").filter(|v| !v.is_null()) {
@@ -201,7 +217,7 @@ async fn collect(
         };
         let original = record.clone();
         let mut current_missing = false;
-        if record.get("phase") == Some(&"compacted".into()) && at_or_before(&record, cutoff) {
+        if collectible(&record, cutoff, &newest) {
             let mut lock = None;
             let removal: IvyResult<bool>=async{
                 let build=record.required("buildId")?.as_str()?;
@@ -209,7 +225,7 @@ async fn collect(
                 let current=record_at(staging.clone(),root.clone()).await?;
                 current_missing=current.is_none();
                 record=current.ok_or_else(||IvyError::new("preparation_unrecognized","Preparation changed while collecting its history."))?;
-                if record.get("phase")==Some(&"compacted".into())&&at_or_before(&record,cutoff){
+                if collectible(&record,cutoff,&newest){
                     if let Some(candidate)=record.get("candidate").filter(|v|!v.is_null()){
                         if hash_json(&journal.candidate(&candidate.required("candidateId")?.as_str()?).await?)?==hash_json(candidate)?{
                             let check=root.clone();let parent=staging.clone();
@@ -221,6 +237,7 @@ async fn collect(
                                 owned_root(&parent,&check)?;Ok(())
                             }).await?;
                             result.preparations+=retire_directory(root.clone(),"preparations",&progress).await?;
+                            if superseded(&record,&newest) { superseded_snapshots.insert(record.required("snapshot")?.required("snapshotId")?.as_str()?); }
                             return Ok(true);
                         }
                     }
@@ -324,7 +341,7 @@ async fn collect(
             ))
         })
         .await?;
-        if milliseconds(internal(metadata.modified())?) > cutoff {
+        if milliseconds(internal(metadata.modified())?) > cutoff && !superseded_snapshots.contains(&name) {
             skipped(&progress, "snapshots", "grace_period", false);
             continue;
         }

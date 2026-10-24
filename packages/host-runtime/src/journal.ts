@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { canonical, compareVersions, hashJson } from "../../contracts/src/canonical.js";
+import { canonical, hashJson } from "../../contracts/src/canonical.js";
 import { IvyError, requireThat } from "../../contracts/src/errors.js";
 import { validateHost } from "../../contracts/src/host-validation.js";
 import { validateShared } from "../../contracts/src/core-validation.js";
@@ -707,11 +707,8 @@ export class HostJournal {
       : null;
   }
   private collectHistory(protectedOperationId: string): void {
-    const totals = this.db.prepare("SELECT COUNT(*) AS count,COALESCE(SUM(length(CAST(entry_json AS BLOB))),0) AS bytes FROM operations").get()!;
-    let count = Number(totals["count"]), bytes = Number(totals["bytes"]);
-    if (count <= this.historyLimits.count && bytes <= this.historyLimits.bytes) return;
-    const protectedIds = new Set([protectedOperationId]), latest = new Map<string, number>(), rollback = new Set<string>();
-    const recoveredInstances = new Set<string>(), resolvedFailures = new Set<string>();
+    const protectedIds = new Set([protectedOperationId]), successful = new Set<string>(), latest = new Set<string>();
+    const observations = this.currentOwnerObservations();
     const entries = this.db.prepare("SELECT operation_id,entry_json FROM operations ORDER BY rowid DESC").all();
     const references = (value: unknown): void => {
       if (typeof value === "string") protectedIds.add(value);
@@ -722,26 +719,64 @@ export class HostJournal {
     for (const action of adoption?.actions ?? []) protectedIds.add(action.operationId);
     for (const row of entries) {
       const entry = this.normalizeEntry(JSON.parse(String(row["entry_json"])));
-      if (entry.record.phase === "failed" && recoveredInstances.has(entry.record.instanceId)) {
-        resolvedFailures.add(String(row["operation_id"])); continue;
-      }
-      if (!["succeeded", "rolled_back"].includes(entry.record.phase)) { references(entry); continue; }
-      recoveredInstances.add(entry.record.instanceId);
-      const instance = entry.record.instanceId, retained = latest.get(instance) ?? 0;
-      if (retained < 2) { protectedIds.add(String(row["operation_id"])); latest.set(instance, retained + 1); }
-      if (entry.record.phase === "succeeded" && !rollback.has(instance) &&
-          this.installed(instance)?.candidateId === entry.candidateId && entry.previousCandidateId && entry.previousCandidateId !== entry.candidateId) {
-        protectedIds.add(String(row["operation_id"])); rollback.add(instance);
-      }
+      const instance = entry.record.instanceId;
+      if (!terminalPhases.has(entry.record.phase)) { references(entry); continue; }
+      const installed = this.installed(instance), configured = this.config.instances.some(value => value.instanceId === instance);
+      if (!configured && !installed) continue;
+      const observed = observations[instance];
+      const replaced = installed?.installedAt && installed.installedAt > entry.record.updatedAt && observed?.state === 'ready' &&
+        observed.candidateId === installed.candidateId && freshTimestamp(observed.observedAt);
+      if (replaced) continue;
+      if (['succeeded', 'rolled_back'].includes(entry.record.phase)) {
+        if (!successful.has(instance)) protectedIds.add(String(row['operation_id']));
+        successful.add(instance);
+      } else if (!successful.has(instance) && !latest.has(instance)) references(entry);
+      latest.add(instance);
     }
     for (const row of entries.reverse()) {
-      if (count <= this.historyLimits.count && bytes <= this.historyLimits.bytes) break;
       const entry = this.normalizeEntry(JSON.parse(String(row["entry_json"])));
-      if ((!["succeeded", "rolled_back"].includes(entry.record.phase) && !resolvedFailures.has(String(row["operation_id"]))) || protectedIds.has(String(row["operation_id"])) || protectedIds.has(entry.record.deploymentId)) continue;
-      this.db.prepare("INSERT INTO retired_operations VALUES(?,?,?)").run(row["operation_id"]!, entry.record.deploymentId, entry.record.requestHash);
+      if (!terminalPhases.has(entry.record.phase) || protectedIds.has(String(row["operation_id"])) || protectedIds.has(entry.record.deploymentId)) continue;
+      this.retireIdentity(String(row['operation_id']), entry.record.requestHash, entry.record.deploymentId);
       this.db.prepare("DELETE FROM operations WHERE operation_id=?").run(row["operation_id"]!);
-      count--; bytes -= Buffer.byteLength(String(row["entry_json"]));
     }
+  }
+  retiredRequestHash(operationId: string): string | null {
+    const row = this.db.prepare('SELECT request_hash FROM retired_operations WHERE operation_id=?').get(operationId);
+    return row ? String(row['request_hash']) : null;
+  }
+  /** Deployment rows are historical; collection must verify the current process owners. */
+  currentOwnerObservations(): Record<string, Host.RuntimeObservation> {
+    let executor: Host.ExecutorStatus | null = null;
+    try {
+      const value: unknown = JSON.parse(readFileSync(join(this.config.runtimeRoot, 'executor.json'), 'utf8'));
+      validateHost('ExecutorStatus', value);
+      if ((value as Host.ExecutorStatus).hostId === this.config.hostId) executor = value as Host.ExecutorStatus;
+    } catch { /* Missing or invalid current evidence cannot prove replacement. */ }
+    return this.currentObservations(executor);
+  }
+  retireIdentity(operationId: string, requestHash: string, deploymentId = operationId): void {
+    const previous = this.retiredRequestHash(operationId);
+    requireThat(!previous || previous === requestHash, 'mutation_conflict', 'A retired operation cannot change its request identity.');
+    this.db.prepare('INSERT OR IGNORE INTO retired_operations VALUES(?,?,?)').run(operationId, deploymentId, requestHash);
+  }
+  /** Configuration is authoritative once an absent instance is disabled and has no live observation. */
+  collectObsoleteState(): void {
+    this.transaction(() => {
+      const configured = new Set(this.config.instances.map(instance => instance.instanceId));
+      for (const row of this.db.prepare('SELECT instance_id FROM installed UNION SELECT instance_id FROM runtime_targets UNION SELECT instance_id FROM observations').all()) {
+        const id = String(row['instance_id']), installed = this.installed(id);
+        if (configured.has(id) || installed && installed.enabled !== false) continue;
+        const target = this.target(id);
+        if (target?.desired === 'running') continue;
+        const observed = this.observations()[id];
+        if (observed && !['idle', 'stopped', 'exited', 'failed'].includes(observed.state)) continue;
+        if (this.pendingEntries().some(entry => entry.record.instanceId === id)) continue;
+        for (const table of ['installed', 'runtime_targets', 'observations'])
+          this.db.prepare('DELETE FROM ' + table + ' WHERE instance_id=?').run(id);
+      }
+      this.db.prepare("DELETE FROM meta WHERE key LIKE 'bootstrap-rollback:%'").run();
+      this.collectHistory('');
+    });
   }
   list(limit = 200): Host.JournalEntry[] {
     return this.db
@@ -975,22 +1010,13 @@ export class HostJournal {
     );
     return normalizeCandidate(JSON.parse(String(rows[0]!["candidate_json"])));
   }
-  /** Live selections, unresolved operations and one rollback per live selection. */
+  /** Current owners and unresolved operations; superseded releases are not rollback archives. */
   retentionCandidateIds(): Set<string> {
-    const live = new Set<string>(), protectedIds = new Set<string>();
-    const installed = new Map<string, string>(), rollbackFound = new Set<string>(), rollbackSelections = new Set<string>();
+    const protectedIds = new Set<string>();
     for (const table of ['installed', 'runtime_targets', 'observations']) {
       for (const row of this.db.prepare(`SELECT instance_id,value FROM ${table}`).all()) {
         const id = (JSON.parse(String(row['value'])) as { candidateId?: string }).candidateId;
-        if (id) { live.add(id); protectedIds.add(id); if (table === 'installed') installed.set(String(row['instance_id']), id); }
-      }
-    }
-    for (const [instanceId, selectedCandidateId] of installed) {
-      const row = this.db.prepare('SELECT value FROM meta WHERE key=?').get('bootstrap-rollback:' + instanceId);
-      if (!row) continue;
-      const previous = JSON.parse(String(row['value'])) as { candidateId: string; selectedCandidateId: string };
-      if (previous.selectedCandidateId === selectedCandidateId) {
-        protectedIds.add(previous.candidateId); rollbackFound.add(instanceId); rollbackSelections.add(selectedCandidateId);
+        if (id) protectedIds.add(id);
       }
     }
     for (const row of this.db.prepare('SELECT entry_json FROM operations ORDER BY created_at DESC,operation_id DESC').all()) {
@@ -999,26 +1025,7 @@ export class HostJournal {
         const value = this.normalizeEntry(entry);
         for (const id of [value.candidateId, value.previousCandidateId, value.request.candidateId,
           value.activation.previousTarget?.candidateId]) if (id) protectedIds.add(id);
-      } else if (entry.record.phase === 'succeeded' && installed.get(entry.record.instanceId) === entry.candidateId &&
-        entry.previousCandidateId && entry.previousCandidateId !== entry.candidateId && !rollbackFound.has(entry.record.instanceId)) {
-        protectedIds.add(entry.previousCandidateId);
-        rollbackFound.add(entry.record.instanceId);
-        rollbackSelections.add(entry.candidateId);
       }
-    }
-    // Bootstrap installs and restored journals may have no deployment operation.
-    // Fall back to the nearest older version only when no exact prior build is known.
-    const releases = this.db.prepare('SELECT candidate_id,component_id,manifest_json FROM candidates').all().map(row => ({
-      id: String(row['candidate_id']), component: String(row['component_id']),
-      version: (JSON.parse(String(row['manifest_json'])) as Host.ReleaseManifest).version,
-    })).filter(value => /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(value.version));
-    for (const id of live) {
-      if (rollbackSelections.has(id)) continue;
-      const current = releases.find(value => value.id === id);
-      if (!current) continue;
-      const previous = releases.filter(value => value.component === current.component && compareVersions(value.version, current.version) < 0)
-        .sort((a, b) => compareVersions(b.version, a.version) || b.id.localeCompare(a.id))[0];
-      if (previous) protectedIds.add(previous.id);
     }
     return protectedIds;
   }

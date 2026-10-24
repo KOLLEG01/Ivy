@@ -56,7 +56,7 @@ pub fn default_service_settings_for_paths(
             r#"{"patcherEnabled":true,"limits":{"maxOperations":100000,"maxJournalBytes":536870912,"maxPendingInputs":64,"maxNotificationBytes":16777216}}"#
         }
         "task-board" => {
-            r#"{"rootObjectId":null,"scheduler":{"enabled":true,"intervalMs":2000,"pageSize":50},"phoneTarget":null}"#
+            r#"{"rootObjectId":null,"scheduler":{"enabled":true,"intervalMs":2000,"pageSize":50,"stallWarningMs":300000},"phoneTarget":null}"#
         }
         "chat-bridge" => r#"{"pollMs":1000,"language":"en"}"#,
         "secretary" => {

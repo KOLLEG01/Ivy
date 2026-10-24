@@ -24,7 +24,7 @@ impl HostJournal {
             let db=internal(sqlite::open(&database,sqlite::OpenOptions{busy_timeout:Duration::from_millis(5000),read_only}))?;
             let version:i64=internal(db.query_row("PRAGMA user_version",[],|row|row.get(0)))?;
             require(version==1,"unsupported_storage","Convert the journal format before importing target policies.")?;
-            let state=State{db,config,clock:Arc::new(SystemClock),history_limits:HistoryLimits::default()};
+            let state=State{db,config,clock:Arc::new(SystemClock)};
             require(state.text("SELECT value FROM meta WHERE key=?","hostId")?.as_ref()==Some(&state.config.required("hostId")?.as_str()?)
                 &&state.text("SELECT value FROM meta WHERE key=?","installation")?.as_ref()==Some(&installation_record(&state.config)?),"target_conflict","Policy import must use the journal's existing installation identity.")?;
             Ok::<_,IvyError>(state)

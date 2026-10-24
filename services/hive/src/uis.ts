@@ -201,10 +201,10 @@ export class Uis {
       if (!retained) {
         this.store.run('INSERT INTO app_releases VALUES (?,?,?)', metadata.uiId, release.releaseId, canonical(release));
       }
-      this.store.run('UPDATE apps SET metadata=?,previous_release_id=?,current_release_id=? WHERE app_id=?', canonical(metadata), previousReleaseId, release.releaseId, metadata.uiId);
+      this.store.run('UPDATE apps SET metadata=?,previous_release_id=NULL,current_release_id=? WHERE app_id=?', canonical(metadata), release.releaseId, metadata.uiId);
       this.prune(metadata.uiId);
       this.store.invalidate("uis");
-      return { value: { uiId: metadata.uiId, releaseId: release.releaseId, previousReleaseId: previousReleaseId as string | null } };
+      return { value: { uiId: metadata.uiId, releaseId: release.releaseId, previousReleaseId: null } };
     });
   }
   rollback(context: AuthenticatedContext, params: { uiId: string; releaseId: string; expectedReleaseId: string; mutationId: string }) {
@@ -215,10 +215,10 @@ export class Uis {
       requireThat(release, 'not_found', 'Retained ui release not found.');
       const inspection = this.inspect({ uiId: params.uiId, releaseId: params.releaseId });
       requireThat(inspection.status === 'ready', inspection.issues[0]?.code ?? 'ui_release_invalid', inspection.issues[0]?.message ?? 'Retained UI release is unavailable.');
-      this.store.run('UPDATE apps SET previous_release_id=current_release_id,current_release_id=? WHERE app_id=?', params.releaseId, params.uiId);
+      this.store.run('UPDATE apps SET previous_release_id=NULL,current_release_id=? WHERE app_id=?', params.releaseId, params.uiId);
       this.prune(params.uiId);
       this.store.invalidate("uis");
-      return { value: { uiId: params.uiId, releaseId: params.releaseId, previousReleaseId: ui.currentReleaseId } };
+      return { value: { uiId: params.uiId, releaseId: params.releaseId, previousReleaseId: null } };
     });
   }
   asset(uiId: string, releaseId: string, path: string) {
@@ -241,9 +241,8 @@ export class Uis {
   }
 
   private prune(uiId: string): void {
-    const pointer = this.store.get('SELECT current_release_id,previous_release_id FROM apps WHERE app_id=?', uiId)!;
-    this.store.run('DELETE FROM app_releases WHERE app_id=? AND release_id IS NOT ? AND release_id IS NOT ?',
-      uiId, pointer['current_release_id'] ?? null, pointer['previous_release_id'] ?? null);
+    const pointer = this.store.get('SELECT current_release_id FROM apps WHERE app_id=?', uiId)!;
+    this.store.run('DELETE FROM app_releases WHERE app_id=? AND release_id IS NOT ?', uiId, pointer['current_release_id'] ?? null);
   }
 
   collectFiles(): void {

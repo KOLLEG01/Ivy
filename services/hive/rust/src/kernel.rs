@@ -539,7 +539,7 @@ fn domain(
                     now as u64,
                     &at,
                 ),
-                _ => objects::delete(call.store, &principal, params, now as u64, &at),
+                _ => objects::delete_with_service(call.store, &principal, Some(context), params, now as u64, &at),
             }
         }
         "objects.pruneRevisions" => objects::prune_revisions(

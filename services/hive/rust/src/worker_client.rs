@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 pub const MAX_PENDING: usize = 512;
 pub const MAX_QUEUED_BYTES: u64 = 64 * 1024 * 1024;
-pub const STARTUP_TIMEOUT_MS: u64 = 30_000;
+pub const STARTUP_TIMEOUT_MS: u64 = 120_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Generation(u64);

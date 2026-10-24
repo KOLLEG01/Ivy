@@ -111,7 +111,7 @@ async fn original_scheduler_tick_composition_and_catch_site_diagnostics() {
     )
     .unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), 47);
+    assert_eq!(rows.len(), 49);
     for (i, row) in rows.iter().enumerate() {
         let input = row.required("input").unwrap();
         let journal = Journal::open(std::path::Path::new(":memory:"), Limits::default()).unwrap();

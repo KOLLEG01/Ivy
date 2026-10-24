@@ -6,8 +6,8 @@ use ivy_contracts::{
     json::{canonical, parse},
     limits::MANAGEMENT_FRAME_BYTES,
 };
-use rusqlite::{Connection, OptionalExtension, config::DbConfig, params};
-use std::{path::Path, rc::Rc, time::Duration};
+use rusqlite::{Connection, OptionalExtension, params};
+use std::{cell::Cell, path::Path, rc::Rc, time::Duration};
 
 #[path = "store_backup.rs"]
 mod backup;
@@ -66,6 +66,7 @@ pub struct Principal {
 }
 
 pub struct Store {
+    active_backups: Rc<Cell<usize>>,
     db: Rc<Connection>,
     changes: Vec<JsString>,
     cursor_secret: String,
@@ -90,16 +91,9 @@ impl Store {
                 std::fs::create_dir_all(parent).map_err(sql_error)?;
             }
         }
-        let db = Connection::open(path).map_err(sql_error)?;
-        db.busy_timeout(Duration::from_secs(1)).map_err(sql_error)?;
-        db.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY, true)
-            .map_err(sql_error)?;
-        db.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DDL, false)
-            .map_err(sql_error)?;
-        db.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DML, false)
-            .map_err(sql_error)?;
-        db.set_prepared_statement_cache_capacity(256);
+        let (db, pending) = crate::storage_compaction::open(path)?;
         let mut store = Self {
+            active_backups: Rc::new(Cell::new(0)),
             db: Rc::new(db),
             changes: vec![],
             cursor_secret: String::new(),
@@ -108,6 +102,7 @@ impl Store {
             validators: ivy_contracts::schema::SchemaValidators::new(),
         };
         store.initialize()?;
+        store.set_metadata("storage_compaction_pending", pending.as_deref().unwrap_or(""))?;
         store.install_query_functions()?;
         Ok(store)
     }
@@ -115,6 +110,10 @@ impl Store {
     pub fn close(self) -> IvyResult<()> {
         let connection = Rc::try_unwrap(self.db).map_err(sql_error)?;
         connection.close().map_err(|(_, error)| sql_error(error))
+    }
+    pub fn reclaim_storage_pages(&self) -> IvyResult<()> {
+        if self.active_backups.get() == 0 { crate::storage_compaction::reclaim_pages(&self.db)?; }
+        Ok(())
     }
     fn initialize(&mut self) -> IvyResult<()> {
         let format: i64 = self
@@ -127,7 +126,7 @@ impl Store {
             "This binary cannot read the database format.",
         )?;
         // Reject unsupported formats before journal_mode can alter their header.
-        self.db.execute_batch("PRAGMA locking_mode=EXCLUSIVE; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=1000;").map_err(sql_error)?;
+        self.db.execute_batch("PRAGMA locking_mode=EXCLUSIVE; PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=1000;").map_err(sql_error)?;
         if format == 0 {
             self.transaction(|store|{
                 // JavaScript template literals normalize source CRLF to LF.

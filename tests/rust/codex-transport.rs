@@ -1,7 +1,4 @@
-#[path = "../../packages/host-runtime/rust/src/codex_admission.rs"]
-mod admission;
-#[path = "../../packages/host-runtime/rust/src/codex_framing.rs"]
-mod framing;
+use ivy_host_runtime::{codex_admission as admission, codex_framing as framing};
 
 use admission::{
     AdmissionError, NativeAdmission, PendingRequest, Priority, ResponseOwner, Timeout,
@@ -167,10 +164,7 @@ fn expired_observations_keep_ids_reserved_until_validated_late_response() {
     }
     assert_eq!(ledger.pending_count(), 0);
     assert_eq!(ledger.expired_count(), 16);
-    assert_eq!(
-        ledger.admit("next".into(), request(true), Priority::Background),
-        Err(AdmissionError::Capacity)
-    );
+    ledger.admit("next".into(), request(true), Priority::Background).unwrap();
     assert_eq!(
         ledger.admit("0".into(), request(false), Priority::Interaction),
         Err(AdmissionError::DuplicateId)
@@ -178,7 +172,7 @@ fn expired_observations_keep_ids_reserved_until_validated_late_response() {
     assert_eq!(ledger.response_owner("0"), ResponseOwner::Expired);
     assert_eq!(ledger.complete("0"), None);
     ledger
-        .admit("next".into(), request(true), Priority::Background)
+        .admit("after-reply".into(), request(true), Priority::Background)
         .unwrap();
     assert_eq!(ledger.response_owner("0"), ResponseOwner::Unknown);
     ledger.close();
@@ -192,15 +186,18 @@ fn interaction_detached_requests_use_their_existing_larger_budget() {
         ledger
             .admit(n.to_string(), request(true), Priority::Interaction)
             .unwrap();
+    }
+    assert_eq!(
+        ledger.admit("full".into(), request(true), Priority::Interaction),
+        Err(AdmissionError::Capacity)
+    );
+    for n in 0..64 {
         assert!(matches!(
             ledger.timeout(&n.to_string()),
             Timeout::Detached(_)
         ));
     }
-    assert_eq!(
-        ledger.admit("next".into(), request(true), Priority::Interaction),
-        Err(AdmissionError::Capacity)
-    );
+    ledger.admit("next".into(), request(true), Priority::Interaction).unwrap();
     ledger
         .admit("cleanup".into(), request(false), Priority::Interaction)
         .unwrap();

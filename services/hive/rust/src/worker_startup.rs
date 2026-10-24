@@ -82,6 +82,22 @@ impl KernelWorker {
             )?;
             let mut actions = WorkerActions::before_ready(&mut kernel, &credentials)?;
             actions.bind_browser_push(push);
+            let pending = kernel.parts.store.metadata("storage_compaction_pending")?.unwrap_or_default();
+            let prior = kernel.parts.registry.borrow().diagnostics(&kernel.parts.store, Some(&"current".into()))?
+                .iter().any(|value| value.get("code") == Some(&"storage_compaction_pending".into())
+                    && value.get("source") == Some(&"hive.storage".into()));
+            if pending.is_empty() && !prior { return Ok(actions); }
+            let now = (kernel.clock)();
+            let at = ivy_sdk::clock::date_to_iso(now)?;
+            let diagnostic = IvyJson::object([
+                ("code", "storage_compaction_pending".into()), ("source", "hive.storage".into()),
+                ("resource", IvyJson::object([] as [(&str, IvyJson); 0])),
+                ("severity", if pending.is_empty() { "info" } else { "warning" }.into()),
+                ("status", if pending.is_empty() { "resolved" } else { "current" }.into()),
+                ("firstObservedAt", at.clone().into()), ("lastObservedAt", at.into()),
+                ("message", if pending.is_empty() { "Incremental database storage reclamation is available.".to_owned() } else { pending }.into()),
+            ]);
+            kernel.parts.registry.borrow_mut().diagnostic(&mut kernel.parts.store, &diagnostic, kernel.runtime.as_ref(), now)?;
             Ok(actions)
         })()
         .map_err(|error| StartupFailure::retain(error, &kernel.parts.store))?;

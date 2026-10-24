@@ -16,11 +16,11 @@ use std::{
 };
 
 const CONTRACT_KEY: &str = "ivy/package-catalog";
-const CONTRACT_VERSION: &str = "1.0.2";
+const CONTRACT_VERSION: &str = "1.0.3";
 const CONTRACT: &str = r#"{
-  "key":"ivy/package-catalog","version":"1.0.2","owner":{"kind":"hive"},"mediaType":"application/json",
+  "key":"ivy/package-catalog","version":"1.0.3","owner":{"kind":"hive"},"mediaType":"application/json",
   "retention":{"objects":{"mode":"retain"},"revisions":{"mode":"current"}},
-  "specMarkdown":"Validated Ivy package catalog. Retain the latest two archives per component and builds referenced by installation observations or unfinished deployments.",
+  "specMarkdown":"Validated Ivy package catalog. Retain the latest archive per component and builds referenced by installation observations or unfinished deployments.",
   "jsonSchema":{"type":"object","properties":{"schemaVersion":{"const":1},"revision":{"type":"integer","minimum":0},"packages":{"type":"array"}},"required":["schemaVersion","revision","packages"],"additionalProperties":false}
 }"#;
 
@@ -219,7 +219,7 @@ impl<F: Fn(&Store) -> IvyResult<HashSet<JsString>>> PackageCatalogObject<F> {
             if let Some(error) = failure {
                 return Err(error);
             }
-            for index in indices.into_iter().take(2) {
+            for index in indices.into_iter().take(1) {
                 keep[index] = true;
             }
         }

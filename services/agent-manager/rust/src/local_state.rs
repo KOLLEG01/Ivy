@@ -30,6 +30,11 @@ CREATE TABLE IF NOT EXISTS state (
   PRIMARY KEY(kind,key)
 ) STRICT;
 CREATE TABLE IF NOT EXISTS state_metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;
+CREATE INDEX IF NOT EXISTS state_usage ON state(kind,json_extract(value_json,'$.phase'),byte_length,terminal_at_ms,key);
+CREATE INDEX IF NOT EXISTS state_completion_owner ON state(json_extract(value_json,'$.params.threadId'),
+  json_extract(value_json,'$.reply.result.turn.id'),json_extract(value_json,'$.callerPrincipalId'),key)
+  WHERE kind='operation' AND json_extract(value_json,'$.method')='turn/start'
+    AND json_extract(value_json,'$.phase')='succeeded';
 INSERT OR IGNORE INTO state_metadata VALUES ('expired_before','0');
 CREATE TABLE IF NOT EXISTS completion_receipts(operation_key TEXT PRIMARY KEY,released INTEGER NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS retired_operations(operation_key TEXT PRIMARY KEY,issued_at INTEGER NOT NULL) STRICT;
@@ -332,7 +337,8 @@ impl LocalAgentState {
 
     pub fn release_completion(&self, thread_id: &str, turn_id: &str) -> IvyResult<()> {
         self.db.as_ref().ok_or_else(IvyError::internal)?.execute("UPDATE completion_receipts SET released=1 WHERE operation_key IN
-            (SELECT key FROM state WHERE kind='operation' AND json_extract(value_json,'$.params.threadId')=?
+            (SELECT key FROM state WHERE kind='operation' AND json_extract(value_json,'$.method')='turn/start'
+              AND json_extract(value_json,'$.phase')='succeeded' AND json_extract(value_json,'$.params.threadId')=?
               AND json_extract(value_json,'$.reply.result.turn.id')=?)", params![thread_id, turn_id]).map_err(storage_error)?;
         Ok(())
     }
@@ -346,7 +352,7 @@ fn make_room(
     protected_key: &str,
 ) -> IvyResult<()> {
     let (count, bytes): (i64, i64) = db.query_row("SELECT COUNT(*),COALESCE(SUM(byte_length),0)+
-        COALESCE(SUM(CASE WHEN kind='operation' AND json_extract(value_json,'$.phase') IN ('accepted','dispatched') THEN ? ELSE 0 END),0) FROM state",
+        COALESCE(SUM(CASE WHEN kind='operation' AND json_extract(value_json,'$.phase') IN ('accepted','dispatched') THEN ? ELSE 0 END),0) FROM state INDEXED BY state_usage",
         [RESULT_RESERVATION], |row| Ok((row.get(0)?, row.get(1)?))).map_err(storage_error)?;
     let (mut count, mut bytes) = (count + extra_count, bytes + extra_bytes);
     let boundary: String = db
@@ -360,7 +366,7 @@ fn make_room(
     if count <= limits.max_operations && bytes <= limits.max_journal_bytes {
         return Ok(());
     }
-    let mut statement = db.prepare("SELECT key,value_json,byte_length FROM state s WHERE kind='operation' AND key<>?
+    let mut statement = db.prepare("SELECT key,byte_length FROM state s INDEXED BY state_usage WHERE kind='operation' AND key<>?
         AND json_extract(value_json,'$.phase') IN ('succeeded','failed')
         AND NOT EXISTS(SELECT 1 FROM completion_receipts c WHERE c.operation_key=s.key AND c.released=0)
         ORDER BY terminal_at_ms,rowid").map_err(storage_error)?;
@@ -369,14 +375,15 @@ fn make_room(
         .query_map([protected_key], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(1)?,
             ))
         })
         .map_err(storage_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(storage_error)?;
-    for (key, json, size) in candidates {
+    let mut original = db.prepare("SELECT value_json FROM state WHERE kind='operation' AND key=?").map_err(storage_error)?;
+    for (key, size) in candidates {
+        let json: String = original.query_row([&key], |row| row.get(0)).map_err(storage_error)?;
         let value = parse(&json, MANAGEMENT_FRAME_BYTES)?;
         if has_unresolved_outcome(&value)? {
             continue;

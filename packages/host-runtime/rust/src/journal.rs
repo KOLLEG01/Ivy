@@ -66,7 +66,7 @@ pub use crate::executor_lock::ExecutorLock;
 #[derive(Clone, Copy)]
 pub struct HistoryLimits { pub count: usize, pub bytes: usize }
 impl Default for HistoryLimits { fn default() -> Self { Self { count: 10_000, bytes: 64 * 1024 * 1024 } } }
-struct State { db: Connection, config: IvyJson, clock: Arc<dyn Clock>, history_limits: HistoryLimits }
+struct State { db: Connection, config: IvyJson, clock: Arc<dyn Clock> }
 #[derive(Default)]
 struct RetentionIds { seen:BTreeSet<String>, order:Vec<String> }
 impl RetentionIds {
@@ -300,6 +300,14 @@ impl HostJournal {
         self.with(move |s| { validate_host("StorageRetentionStatus", &value)?; s.save_meta("storage-retention", &encoded(&value)?) }).await
     }
     pub async fn current_observations(&self, executor: Option<IvyJson>) -> IvyResult<IvyJson> { self.with(move |s| s.current_observations(executor.as_ref())).await }
+    pub async fn current_owner_observations(&self) -> IvyResult<IvyJson> { self.with(|s| s.current_owner_observations()).await }
+    pub async fn retired_request_hash(&self, operation_id: &str) -> IvyResult<Option<String>> {
+        let id = operation_id.to_owned(); self.with(move |s| s.text("SELECT request_hash FROM retired_operations WHERE operation_id=?", &id)).await
+    }
+    pub async fn retire_identity(&self, operation_id: String, request_hash: String, deployment_id: Option<String>) -> IvyResult<()> {
+        self.with(move |s| s.retire_identity(&operation_id, &request_hash, deployment_id.as_deref().unwrap_or(&operation_id))).await
+    }
+    pub async fn collect_obsolete_state(&self) -> IvyResult<()> { self.with(|s| s.collect_obsolete_state()).await }
     pub async fn status(&self, executor: Option<IvyJson>) -> IvyResult<IvyJson> { self.with(move |s| s.status(executor.as_ref())).await }
     pub async fn management_snapshot(&self, executor: Option<IvyJson>, minimum_sequence: f64, status: Option<IvyJson>) -> IvyResult<IvyJson> {
         self.with(move |s| {
@@ -308,8 +316,8 @@ impl HostJournal {
             require(status.get("hostId") == s.config.get("hostId"), "target_conflict", "Management status belongs to another host.")?;
             s.transaction(|s| {
                 let prior = s.text("SELECT value FROM meta WHERE key=?", "hostReportSequence")?.unwrap_or_else(|| "0".into());
-                let prior = prior.parse::<u64>().map_err(|_| IvyError::internal())?;
-                let sequence = (prior as f64).max(minimum_sequence) + 1.0;
+                let prior = prior.parse::<f64>().unwrap_or(f64::NAN);
+                let sequence = if prior.is_finite() { prior.max(minimum_sequence) + 1.0 } else { f64::NAN };
                 require(sequence.is_finite() && sequence.fract() == 0.0 && sequence.abs() <= SAFE_INTEGER, "limit_exceeded", "Host observation sequence is exhausted.")?;
                 let snapshot = IvyJson::object([("sequence", IvyJson::Number(sequence)), ("status", status)]);
                 validate_host("ManagementSnapshot", &snapshot)?;
@@ -421,7 +429,7 @@ impl State {
         require(values.len() == 1, if values.is_empty() { "not_found" } else { "ambiguous_candidate" }, "The retained build must identify one exact local candidate.")?;
         normalize_candidate(&decoded(&values[0])?)
     }
-    fn open(config: IvyJson, clock: Arc<dyn Clock>, history_limits: HistoryLimits) -> IvyResult<Self> {
+    fn open(config: IvyJson, clock: Arc<dyn Clock>, _history_limits: HistoryLimits) -> IvyResult<Self> {
         validate_host("HostConfig", &config)?;
         let root = path(config.required("runtimeRoot")?)?;
         internal(fs::create_dir_all(&root))?;
@@ -430,7 +438,7 @@ impl State {
         let format: i64 = internal(db.query_row("PRAGMA user_version", [], |r| r.get(0)))?;
         require(format == 0 || format == 1, "unsupported_storage", "Host journal format is not supported by this executor.")?;
         internal(db.execute_batch(SCHEMA))?;
-        let state = Self { db, config, clock, history_limits };
+        let state = Self { db, config, clock };
         state.transaction(|s| {
             let host = s.config.required("hostId")?.as_str()?;
             require(s.text("SELECT value FROM meta WHERE key=?", "hostId")?.is_none_or(|v| v == host), "target_conflict", "A host journal cannot be reused for another host identity.")?;
@@ -631,6 +639,13 @@ fn normalize_candidate(value: &IvyJson) -> IvyResult<IvyJson> {
 }
 
 fn completed(value: &IvyJson) -> bool { ["succeeded", "rolled_back"].iter().any(|phase| value == &IvyJson::from(*phase)) }
+fn protect_references(ids: &mut BTreeSet<String>, entry: &IvyJson) {
+    let mut values = vec![entry];
+    while let Some(value) = values.pop() { match value {
+        IvyJson::String(value) => { if let Ok(value) = value.to_utf8() { ids.insert(value); } },
+        IvyJson::Array(value) => values.extend(value), IvyJson::Object(value) => values.extend(value.iter().map(|(_, v)| v)), _ => (),
+    } }
+}
 fn transition_allowed(previous: &str, next: &str) -> bool {
     if previous == next { return !TERMINAL.contains(&previous); }
     let allowed: &[&str] = match previous {
@@ -765,12 +780,9 @@ impl State {
         })
     }
     fn collect_history(&self, protected_operation: &str) -> IvyResult<()> {
-        let (mut count, mut bytes): (i64, i64) = internal(self.db.query_row("SELECT COUNT(*),COALESCE(SUM(length(CAST(entry_json AS BLOB))),0) FROM operations", [], |r| Ok((r.get(0)?, r.get(1)?))))?;
-        let fits = |count: i64, bytes: i64| count as usize <= self.history_limits.count && bytes as usize <= self.history_limits.bytes;
-        if fits(count, bytes) { return Ok(()) }
         let mut protected = BTreeSet::from([protected_operation.to_owned()]);
-        let mut latest = BTreeMap::<String, usize>::new(); let mut rollback = BTreeSet::new();
-        let mut recovered = BTreeSet::new(); let mut resolved = BTreeSet::new();
+        let mut latest = BTreeSet::new(); let mut successful = BTreeSet::new();
+        let observations = self.current_owner_observations()?;
         let mut statement = internal(self.db.prepare("SELECT operation_id,entry_json FROM operations ORDER BY rowid DESC"))?;
         let rows = internal(statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
         let rows = internal(rows.collect::<Result<Vec<_>, _>>())?;
@@ -780,95 +792,91 @@ impl State {
         for (operation, text) in &rows {
             let entry = self.normalize_entry(decoded(text)?)?; let record = entry.required("record")?;
             let instance = record.required("instanceId")?.as_str()?; let phase = record.required("phase")?;
-            if phase == &IvyJson::from("failed") && recovered.contains(&instance) { resolved.insert(operation.clone()); continue; }
-            if !completed(phase) {
-                let mut values = vec![&entry];
-                while let Some(value) = values.pop() { match value {
-                    IvyJson::String(value) => { if let Ok(value) = value.to_utf8() { protected.insert(value); } },
-                    IvyJson::Array(value) => values.extend(value), IvyJson::Object(value) => values.extend(value.iter().map(|(_, v)| v)), _ => (),
-                } }
+            if !TERMINAL.iter().any(|p| phase == &IvyJson::from(*p)) {
+                protect_references(&mut protected, &entry);
                 continue;
             }
-            recovered.insert(instance.clone());
-            let retained = latest.entry(instance.clone()).or_default();
-            if *retained < 2 { protected.insert(operation.clone()); *retained += 1; }
             let installed = self.value("SELECT value FROM installed WHERE instance_id=?", &instance)?.unwrap_or(IvyJson::Null);
-            if phase == &IvyJson::from("succeeded") && !rollback.contains(&instance) && installed.get("candidateId") == entry.get("candidateId") && field(&entry, "previousCandidateId").as_js_string().is_some() && entry.get("previousCandidateId") != entry.get("candidateId") {
-                protected.insert(operation.clone()); rollback.insert(instance);
+            let configured = self.config.required("instances")?.as_array().ok_or_else(IvyError::internal)?.iter().any(|i| i.get("instanceId") == record.get("instanceId"));
+            if !configured && installed.is_null() { continue; }
+            let observed = field(&observations, &instance);
+            let replaced = field(&installed, "installedAt").as_js_string().zip(field(record, "updatedAt").as_js_string()).is_some_and(|(a,b)| a > b)
+                && observed.get("state") == Some(&"ready".into()) && observed.get("candidateId") == installed.get("candidateId")
+                && fresh(field(observed, "observedAt"), self.clock.as_ref());
+            if replaced { continue; }
+            if completed(phase) {
+                if !successful.contains(&instance) { protected.insert(operation.clone()); }
+                successful.insert(instance.clone());
+            } else if !successful.contains(&instance) && !latest.contains(&instance) {
+                protect_references(&mut protected, &entry);
             }
+            latest.insert(instance);
         }
         for (operation, text) in rows.iter().rev() {
-            if fits(count, bytes) { break; }
             let entry = self.normalize_entry(decoded(text)?)?; let record = entry.required("record")?; let id = record.required("deploymentId")?.as_str()?;
-            if !completed(record.required("phase")?) && !resolved.contains(operation) || protected.contains(operation) || protected.contains(&id) { continue; }
-            internal(self.db.execute("INSERT INTO retired_operations VALUES (?,?,?)", params![operation, id, record.required("requestHash")?.as_str()?]))?;
+            if !TERMINAL.iter().any(|p| record.get("phase") == Some(&IvyJson::from(*p))) || protected.contains(operation) || protected.contains(&id) { continue; }
+            self.retire_identity(operation, &record.required("requestHash")?.as_str()?, &id)?;
             internal(self.db.execute("DELETE FROM operations WHERE operation_id=?", [operation]))?;
-            count -= 1; bytes -= text.len() as i64;
         }
         Ok(())
+    }
+    fn current_owner_observations(&self) -> IvyResult<IvyJson> {
+        let executor = path(self.config.required("runtimeRoot")?) .ok()
+            .and_then(|root| fs::read(root.join("executor.json")).ok())
+            .and_then(|bytes| json::parse(&String::from_utf8_lossy(&bytes), crate::config::CONFIGURATION_BYTES).ok())
+            .filter(|value| validate_host("ExecutorStatus", value).is_ok() && value.get("hostId") == self.config.get("hostId"));
+        self.current_observations(executor.as_ref())
+    }
+    fn retire_identity(&self, operation_id: &str, request_hash: &str, deployment_id: &str) -> IvyResult<()> {
+        let previous = self.text("SELECT request_hash FROM retired_operations WHERE operation_id=?", operation_id)?;
+        require(previous.is_none_or(|v| v == request_hash), "mutation_conflict", "A retired operation cannot change its request identity.")?;
+        internal(self.db.execute("INSERT OR IGNORE INTO retired_operations VALUES(?,?,?)", params![operation_id, deployment_id, request_hash]))?;
+        Ok(())
+    }
+    fn collect_obsolete_state(&mut self) -> IvyResult<()> {
+        self.transaction(|s| {
+            let configured: BTreeSet<_> = s.config.required("instances")?.as_array().ok_or_else(IvyError::internal)?.iter()
+                .map(|i| i.required("instanceId")?.as_str()).collect::<IvyResult<_>>()?;
+            let mut statement = internal(s.db.prepare("SELECT instance_id FROM installed UNION SELECT instance_id FROM runtime_targets UNION SELECT instance_id FROM observations"))?;
+            let ids = internal(statement.query_map([], |r| r.get::<_,String>(0)))?;
+            let ids = internal(ids.collect::<Result<Vec<_>,_>>())?;
+            let pending = s.entries("SELECT entry_json FROM operations WHERE phase NOT IN ('succeeded','rolled_back','failed','needs_attention')", [])?;
+            for id in ids {
+                let installed = s.value("SELECT value FROM installed WHERE instance_id=?", &id)?;
+                if configured.contains(&id) || installed.as_ref().is_some_and(|i| i.get("enabled") != Some(&IvyJson::Bool(false))) { continue; }
+                if s.target(&id)?.as_ref().is_some_and(|t| t.get("desired") == Some(&"running".into())) { continue; }
+                let observed = s.value("SELECT value FROM observations WHERE instance_id=?", &id)?;
+                if observed.as_ref().is_some_and(|o| !["idle","stopped","exited","failed"].iter().any(|p| o.get("state") == Some(&(*p).into()))) { continue; }
+                if pending.iter().any(|e| field(field(e, "record"), "instanceId") == &IvyJson::from(id.clone())) { continue; }
+                for table in ["installed","runtime_targets","observations"] { internal(s.db.execute(&format!("DELETE FROM {table} WHERE instance_id=?"), [&id]))?; }
+            }
+            internal(s.db.execute("DELETE FROM meta WHERE key LIKE 'bootstrap-rollback:%'", []))?;
+            s.collect_history("")
+        })
     }
     fn retention_candidate_ids(&self) -> IvyResult<BTreeSet<String>> {
         Ok(self.retention_candidate_order()?.into_iter().collect())
     }
     fn retention_candidate_order(&self) -> IvyResult<Vec<String>> {
-        let mut live = RetentionIds::default(); let mut protected = RetentionIds::default();
-        let mut installed = BTreeMap::new(); let mut installed_order=Vec::new(); let mut rollback_found = BTreeSet::new(); let mut rollback_selections = BTreeSet::new();
+        let mut protected = RetentionIds::default();
         for table in ["installed", "runtime_targets", "observations"] {
-            let mut statement = internal(self.db.prepare(&format!("SELECT instance_id,value FROM {table}")))?;
-            let rows = internal(statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
-            for row in rows { let (instance, text) = internal(row)?; let value = decoded(&text)?;
-                if let Some(id) = value.get("candidateId").and_then(non_null) { let id = id.as_str()?; live.insert(id.clone()); protected.insert(id.clone()); if table == "installed" { installed_order.push(instance.clone()); installed.insert(instance, id); } }
-            }
-        }
-        for instance in &installed_order {
-            let selected=installed.get(instance).ok_or_else(IvyError::internal)?;
-            if let Some(previous) = self.value("SELECT value FROM meta WHERE key=?", &format!("bootstrap-rollback:{instance}"))? {
-                if previous.get("selectedCandidateId") == Some(&IvyJson::from(selected.clone())) {
-                    protected.insert(previous.required("candidateId")?.as_str()?); rollback_found.insert(instance.clone()); rollback_selections.insert(selected.clone());
-                }
+            let mut statement = internal(self.db.prepare(&format!("SELECT value FROM {table}")))?;
+            let rows = internal(statement.query_map([], |r| r.get::<_, String>(0)))?;
+            for row in rows {
+                let value = decoded(&internal(row)?)?;
+                if let Some(id) = value.get("candidateId").and_then(non_null) { protected.insert(id.as_str()?); }
             }
         }
         let mut statement = internal(self.db.prepare("SELECT entry_json FROM operations ORDER BY created_at DESC,operation_id DESC"))?;
         let rows = internal(statement.query_map([], |r| r.get::<_, String>(0)))?;
         for row in rows {
-            let entry = decoded(&internal(row)?)?; let record = entry.required("record")?;
-            if !completed(record.required("phase")?) {
+            let entry = decoded(&internal(row)?)?;
+            if !completed(entry.required("record")?.required("phase")?) {
                 let value = self.normalize_entry(entry)?;
                 for id in [field(&value, "candidateId"), field(&value, "previousCandidateId"), field(field(&value, "request"), "candidateId"), field(field(field(&value, "activation"), "previousTarget"), "candidateId")] {
                     if let Some(id) = non_null(id) { protected.insert(id.as_str()?); }
                 }
-            } else {
-                let instance = record.required("instanceId")?.as_str()?;
-                if record.get("phase") == Some(&IvyJson::from("succeeded")) && installed.get(&instance).map(|v| IvyJson::from(v.clone())).as_ref() == entry.get("candidateId") && field(&entry, "previousCandidateId").as_js_string().is_some() && entry.get("previousCandidateId") != entry.get("candidateId") && !rollback_found.contains(&instance) {
-                    protected.insert(entry.required("previousCandidateId")?.as_str()?); rollback_found.insert(instance); rollback_selections.insert(entry.required("candidateId")?.as_str()?);
-                }
             }
-        }
-        let mut statement = internal(self.db.prepare("SELECT candidate_id,component_id,manifest_json FROM candidates"))?;
-        let rows = internal(statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))))?;
-        let mut releases = Vec::new();
-        for row in rows {
-            let (id, component, text) = internal(row)?; let value = decoded(&text)?;
-            if let Ok(version) = field(&value, "version").as_str() {
-                let parts: Vec<_> = version.split('.').collect();
-                if parts.len() == 3 && parts.iter().all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) && (part.len() == 1 || !part.starts_with('0'))) { releases.push((id, component, version)); }
-            }
-        }
-        for id in &live.order {
-            if rollback_selections.contains(id) { continue; }
-            let Some(current) = releases.iter().find(|r| &r.0 == id) else { continue };
-            let mut previous: Option<&(String, String, String)> = None;
-            for candidate in releases.iter().filter(|r| r.1 == current.1) {
-                if json::compare_versions(&candidate.2, &current.2)? != std::cmp::Ordering::Less { continue; }
-                let later = match previous { None => true, Some(prior) => {
-                    let order = json::compare_versions(&candidate.2, &prior.2)?;
-                    // Candidate identities are fixed lowercase SHA-256 strings;
-                    // their ASCII ordering equals the original locale tie-break.
-                    order == std::cmp::Ordering::Greater || order == std::cmp::Ordering::Equal && candidate.0 > prior.0
-                } };
-                if later { previous = Some(candidate); }
-            }
-            if let Some(previous) = previous { protected.insert(previous.0.clone()); }
         }
         Ok(protected.order)
     }

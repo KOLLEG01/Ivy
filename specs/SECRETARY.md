@@ -33,6 +33,12 @@ Contracts: [inbox](schemas/secretary.schema.json), [triage](schemas/secretary-tr
   batch is acknowledged only after matching executions and any revision transition are saved.
   Historical journal gaps are exposed as recovery issues. Secretary's own Hive Object changes
   never trigger an Object-change assignment, preventing an execution from retriggering itself. Internal execution and progress writes do not produce Object-change events.
+- After retained events are consumed, schedule gaps settle only when the schedule cursor has
+  replayed retained assignment revisions through the present. Object-change gaps rebase from
+  authoritative JSON snapshots and retained projections; older events cannot roll that baseline
+  backwards. This restores current-state triggering, not lost intermediate history. Disabled
+  assignments retain an inactive-history disposition without starting work. Unique lost events
+  remain explicitly unrecoverable; no synthetic event or external effect is replayed.
   Archived assignments release their event subscriptions so they cannot block journal capacity.
   Their retained progress and execution history remain available; restoring an assignment must
   skip already processed journal pages before resuming collection.

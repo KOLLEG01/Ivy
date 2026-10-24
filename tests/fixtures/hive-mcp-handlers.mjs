@@ -5,11 +5,12 @@ import {stripTypeScriptTypes} from 'node:module';
 import {mcpIconPath} from '../../services/hive/src/mcp-branding.ts';
 import {hiveMcpInstructions} from '../../instructions/hive-mcp.ts';
 import {ivyDevMcpInstructions} from '../../instructions/ivy-dev-mcp.ts';
+import {compareMcpTools} from '../../services/hive/src/mcp-presentation.ts';
 const source=readFileSync(new URL('../../services/hive/src/mcp.ts',import.meta.url),'utf8');
 const start=source.indexOf('export function mcpSurfaceBindings(');
 if(start<0)throw Error('Original MCP handler boundary changed');
 const code=stripTypeScriptTypes(source.slice(start).replace(/export (?=(?:async )?function)/g,''),{mode:'strip'});
-const original=new Function('randomUUID','createMcpHandler','INVALID_PARAMS','METHOD_NOT_FOUND','ProtocolError','Server','toNodeHandler','hashJson','mcpDiscoveryResultBytes','IvyError','requireThat','directCall','directDescriptors','hasStructuredOutput','hiveMcpInstructions','ivyDevMcpInstructions','mcpIconPath',code+';return {handleMcp,mcpServerInfo,measuredListResult,failure};');
+const original=new Function('randomUUID','createMcpHandler','INVALID_PARAMS','METHOD_NOT_FOUND','ProtocolError','Server','toNodeHandler','hashJson','mcpDiscoveryResultBytes','IvyError','requireThat','directCall','directDescriptors','hasStructuredOutput','hiveMcpInstructions','ivyDevMcpInstructions','mcpIconPath','compareMcpTools',code+';return {handleMcp,mcpServerInfo,measuredListResult,failure};');
 export async function request(input,dependencies){
  const {store,discovery,hashJson,IvyError,requireThat,directCall,directDescriptors,hasStructuredOutput}=dependencies;
  class ProtocolError extends Error{constructor(code,message,data){super(message);this.code=code;this.data=data;}}
@@ -44,7 +45,7 @@ export async function request(input,dependencies){
    Date.now=()=>input.clock?.[ticks++]??input.clock?.at(-1)??realNow();
    try{result=await handler.server.handlers.get(handlerName)(body);}finally{Date.now=realNow;}
   },hashJson,512*1024,IvyError,requireThat,directCall,directDescriptors,hasStructuredOutput,
-  hiveMcpInstructions,ivyDevMcpInstructions,mcpIconPath,
+  hiveMcpInstructions,ivyDevMcpInstructions,mcpIconPath,compareMcpTools,
  );
  options.catalog=name=>storage({action:'mcp.catalog',...(name?{name}:{})});
  options.cursors={create:async(identity,offset)=>(await storage({action:'mcp.cursor.create',identity,offset})).cursor,read:async(identity,cursor)=>(await storage({action:'mcp.cursor.read',identity,cursor})).offset};

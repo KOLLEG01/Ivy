@@ -27,6 +27,10 @@ use std::{
     sync::{Arc, Mutex, atomic::AtomicBool},
 };
 
+pub(crate) fn native_read_timeout_ms(method: &JsString, params: &IvyJson) -> u64 {
+    if method == &JsString::from("thread/read") && params.get("includeTurns") == Some(&false.into()) { 15_000 } else { 120_000 }
+}
+
 pub struct NativeManagementOwner {
     pub service_node_id: JsString,
     pub epoch: JsString,
@@ -247,6 +251,7 @@ impl NativeManagement {
     ) -> IvyResult<IvyJson> {
         context.throw_if_aborted()?;
         self.0.dispatch.available()?;
+        let timeout_ms = native_read_timeout_ms(&method, &args);
         let reply = self
             .0
             .owner
@@ -255,6 +260,7 @@ impl NativeManagement {
                 method,
                 args,
                 RequestOptions {
+                    timeout_ms,
                     detach_on_timeout: true,
                     priority: Priority::Interaction,
                     ..Default::default()
@@ -420,10 +426,12 @@ impl NativeManagement {
                         args.required("method")?.as_js_string().unwrap().clone(),
                         args.required("params")?.clone(),
                         move |request| async move {
+                            let timeout_ms = native_read_timeout_ms(&request.method, &request.params);
                             rpc.request(
                                 request.method,
                                 request.params,
                                 RequestOptions {
+                                    timeout_ms,
                                     request_id: Some(request.request_id.into()),
                                     detach_on_timeout: request.detach_on_timeout,
                                     priority: if request.interaction_priority {
@@ -543,6 +551,7 @@ impl NativeManagement {
                 method.clone(),
                 args.required("params")?.clone(),
                 RequestOptions {
+                    timeout_ms: native_read_timeout_ms(&method, args.required("params")?),
                     detach_on_timeout: true,
                     priority: Priority::Interaction,
                     before_send: Some(before_send),

@@ -55,6 +55,7 @@ pub mod server_rpc;
 pub mod server_runtime;
 pub mod storage_inspector;
 pub mod storage_read;
+pub mod storage_compaction;
 pub mod store;
 pub mod tool_binding_diagnostics;
 pub mod ui_files;

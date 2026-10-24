@@ -5,7 +5,6 @@ import { validateHost } from '../../contracts/src/host-validation.js';
 import { hashJson } from '../../contracts/src/canonical.js';
 import type { Host } from '../../contracts/src/generated.js';
 import { retainedBootstrapPlans } from './bootstrap.js';
-import { readReleaseManifest } from './artifact.js';
 import { jsonFile } from './config.js';
 import { ExecutorLock, HostJournal } from './journal.js';
 import { installationIdentity } from './linux-resources.js';
@@ -19,7 +18,7 @@ const versionName = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const graceMs = 3 * 24 * 60 * 60 * 1000;
 const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT';
 type MaintenanceHistory = Array<{ phase: string; updatedAt: string; request: Host.BootstrapMaintenanceRequest;
-  kind: string; directory: string; record: unknown }>;
+  kind: string; directory: string; record: unknown; obsolete?: boolean }>;
 
 function protectPlan(ids: Set<string>, plan: Host.BootstrapPlan): void {
   validateHost('BootstrapPlan', plan);
@@ -54,8 +53,8 @@ async function maintenanceHistory(config: Host.HostConfig, name: string, progres
   return result;
 }
 
-/** Caller holds bootstrap maintenance's lock; history alone does not pin releases. */
-async function collectBootstrapPlans(config: Host.HostConfig, journal: HostJournal, ids: Set<string>, cutoff: number,
+/** Only the selected OS plan and genuinely unfinished maintenance own installation artifacts. */
+async function collectBootstrapPlans(config: Host.HostConfig, journal: HostJournal, ids: Set<string>,
   history: MaintenanceHistory, progress: RetentionProgress): Promise<Set<string>> {
   const protectedHistory = new Set<string>();
   const plans = await retainedBootstrapPlans(config), keep = new Set<string>();
@@ -65,16 +64,23 @@ async function collectBootstrapPlans(config: Host.HostConfig, journal: HostJourn
   requireThat(plans.some(plan => hashJson(plan) === hashJson(selected)), 'storage_invalid', 'Selected bootstrap plan must belong to this installation.');
   const retain = (plan: Host.BootstrapPlan) => { keep.add(hashJson(plan)); protectPlan(ids, plan); };
   retain(selected);
-  let previousSelected = false;
+  let selectedRecord = false;
+  const observations = journal.currentOwnerObservations();
   for (const entry of history) {
-    const unresolved = !['succeeded', 'rolled_back'].includes(entry.phase);
-    const previous = !previousSelected && entry.phase === 'succeeded' && entry.request.next.processes.length === selected.processes.length &&
-      selected.processes.every(process => entry.request.next.processes.some(owner => owner.instanceId === process.instanceId &&
-        (owner.candidateId ?? entry.request.next.candidateId) === (process.candidateId ?? selected.candidateId)));
-    if (!unresolved && !previous) continue;
+    const completed = ['succeeded', 'rolled_back'].includes(entry.phase);
+    const current = !selectedRecord && entry.phase === 'succeeded' && hashJson(entry.request.next) === hashJson(selected);
+    const superseded = ['needs_attention', 'outcome_unknown', 'failed'].includes(entry.phase) &&
+      config.instances.every(instance => {
+        const installed = journal.installed(instance.instanceId), observed = observations[instance.instanceId];
+        return installed && installed.installedAt > entry.updatedAt && observed &&
+          observed.candidateId === installed.candidateId && ['ready', 'stopped', 'idle'].includes(observed.state) &&
+          Date.now() - Date.parse(observed.observedAt) < 15_000;
+      });
+    entry.obsolete = !current && (completed || superseded);
+    if (entry.obsolete) continue;
     protectedHistory.add(entry.directory);
-    if (previous) previousSelected = true;
-    if (unresolved) retain(entry.request.next);
+    if (current) { selectedRecord = true; continue; }
+    retain(entry.request.next);
     const snapshot = entry.request.previous;
     for (const owner of snapshot.owners) ids.add(owner.candidateId);
     for (const plan of plans) {
@@ -89,17 +95,9 @@ async function collectBootstrapPlans(config: Host.HostConfig, journal: HostJourn
     return { plan, path, metadata };
   }));
   inventory.sort((a, b) => (b.metadata?.mtimeMs ?? 0) - (a.metadata?.mtimeMs ?? 0));
-  // Preserve one exact OS plan for each live/rollback release even when installs
-  // predate maintenance records. Do not recursively retain every historical plan.
-  for (const id of journal.retentionCandidateIds()) {
-    const matches = (plan: Host.BootstrapPlan) => plan.candidateId === id || plan.processes.some(process => process.candidateId === id);
-    if (plans.some(plan => keep.has(hashJson(plan)) && matches(plan))) continue;
-    const prior = inventory.find(value => matches(value.plan));
-    if (prior) retain(prior.plan);
-  }
   for (const { plan, path, metadata } of inventory) {
     if (keep.has(hashJson(plan))) continue;
-    if (!metadata || metadata.mtimeMs > cutoff) { retain(plan); continue; }
+    requireThat(metadata, 'storage_invalid', 'A retained bootstrap plan disappeared during collection.');
     requireThat(metadata.isFile() && !metadata.isSymbolicLink(), 'storage_invalid', 'Bootstrap history must remain a regular file.');
     await rm(path);
     progress.removed('bootstrapPlans');
@@ -107,21 +105,15 @@ async function collectBootstrapPlans(config: Host.HostConfig, journal: HostJourn
   return protectedHistory;
 }
 
-async function collectMaintenanceHistory(config: Host.HostConfig, history: MaintenanceHistory,
+async function collectMaintenanceHistory(config: Host.HostConfig, journal: HostJournal, history: MaintenanceHistory,
   protectedHistory: Set<string>, progress: RetentionProgress): Promise<void> {
-  const activeOperations = new Set(history.filter(entry => !['succeeded', 'rolled_back'].includes(entry.phase)).flatMap(entry =>
-    [entry.request.operationId, entry.request.operationId + '-rollback']));
-  let completed = 0;
   for (const entry of history) {
-    // Automatic operations already contain only their small request and outcome records.
-    if (entry.kind !== 'bootstrap-maintenance') continue;
-    if (!['succeeded', 'rolled_back'].includes(entry.phase)) { progress.skipped('maintenance', 'unfinished_operation', true); continue; }
-    if (++completed <= 20 || protectedHistory.has(entry.directory) || activeOperations.has(entry.request.operationId)) {
+    if (!entry.obsolete || protectedHistory.has(entry.directory)) {
       progress.skipped('maintenance', 'retained_history'); continue;
     }
     try {
       const value = entry.record as Host.BootstrapMaintenanceRecord;
-      validateHost('BootstrapMaintenanceRecord', value);
+      if (entry.kind === 'bootstrap-maintenance') validateHost('BootstrapMaintenanceRecord', value);
       requireThat(value.operationId === entry.request.operationId && value.requestHash === hashJson(entry.request),
         'storage_invalid', 'Completed bootstrap record is invalid.');
       const current = await jsonFile(join(entry.directory, 'record.json'));
@@ -130,15 +122,17 @@ async function collectMaintenanceHistory(config: Host.HostConfig, history: Maint
       const metadata = await lstat(entry.directory), actual = await realpath(entry.directory);
       requireThat(metadata.isDirectory() && !metadata.isSymbolicLink() && dirname(actual) === await realpath(join(config.runtimeRoot, entry.kind)),
         'target_conflict', 'Maintenance history leaves its owned root.');
-      // Leave record.json unchanged for replay and restore. Missing detail files simply mean an earlier pass removed them.
-      for (const definition of value.definitions) for (const suffix of ['prior', 'desired']) {
-        const path = join(entry.directory, definition.instanceId + '.' + suffix + '.json');
-        const file = await lstat(path).catch(error => { if (missing(error)) return null; throw error; });
-        if (!file) continue;
-        requireThat(file.isFile() && !file.isSymbolicLink() && dirname(await realpath(path)) === actual,
-          'target_conflict', 'Maintenance detail must be an owned regular file.');
-        await rm(path); progress.removed('maintenance');
+      const allowed = new Set(['record.json', ...(entry.kind === 'bootstrap-automatic' ? ['request.json'] :
+        value.definitions.flatMap(definition => [definition.instanceId + '.prior.json', definition.instanceId + '.desired.json']))]);
+      for (const name of await readdir(actual)) {
+        const file = await lstat(join(actual, name));
+        requireThat(allowed.has(name) && file.isFile() && !file.isSymbolicLink(),
+          'target_conflict', 'Unrecognized maintenance evidence must be reviewed before collection.');
       }
+      // Retain only the replay fence; an expired operation must never launch again.
+      journal.retireIdentity(value.operationId, value.requestHash);
+      await rm(actual, { recursive: true });
+      progress.removed('maintenance');
     } catch (error) { progress.skipped('maintenance', IvyError.from(error).code, true); }
   }
 }
@@ -179,6 +173,7 @@ export async function collectHostStorage(config: Host.HostConfig, now = Date.now
       ...await hostStorageSpace(config), skipped: [], errorCode: null };
     journal.saveStorageRetentionStatus(status);
     bootstrapLock = new ExecutorLock(join(config.runtimeRoot, 'bootstrap-maintenance-lock'));
+    journal.collectObsoleteState();
     await collectDependencyCaches(config.stagingRoot, progress);
     const compaction = await compactPreparations(config, undefined, false);
     for (const entry of compaction.entries) {
@@ -190,11 +185,11 @@ export async function collectHostStorage(config: Host.HostConfig, now = Date.now
     const protectedIds = new Set([...preparation.protectedCandidates, ...journal.retentionCandidateIds()]);
     const history = [...await maintenanceHistory(config, 'bootstrap-maintenance', progress), ...await maintenanceHistory(config, 'bootstrap-automatic', progress)]
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    const protectedHistory = await collectBootstrapPlans(config, journal, protectedIds, cutoff, history, progress);
-    await collectMaintenanceHistory(config, history, protectedHistory, progress);
+    const protectedHistory = await collectBootstrapPlans(config, journal, protectedIds, history, progress);
+    await collectMaintenanceHistory(config, journal, history, protectedHistory, progress);
     // Requests can also exist before the first selected bootstrap plan is written.
     for (const entry of history) {
-      if (['succeeded', 'rolled_back'].includes(entry.phase)) continue;
+      if (entry.obsolete || ['succeeded', 'rolled_back'].includes(entry.phase)) continue;
       protectPlan(protectedIds, entry.request.next);
       for (const owner of entry.request.previous.owners) protectedIds.add(owner.candidateId);
     }
@@ -205,6 +200,11 @@ export async function collectHostStorage(config: Host.HostConfig, now = Date.now
       const version = (JSON.parse(String(row['manifest_json'])) as { version?: unknown }).version;
       return [String(row['candidate_id']), typeof version === 'string' && versionName.test(version) ? version : null] as const;
     }));
+    const newest = new Map<string, Host.Candidate>();
+    for (const candidate of candidates) {
+      const prior = newest.get(candidate.componentId);
+      if (!prior || candidate.createdAt > prior.createdAt) newest.set(candidate.componentId, candidate);
+    }
     for (const [id, version] of versions) if (!version) protectedIds.add(id);
     let removed = 0;
     const failures: unknown[] = [];
@@ -232,12 +232,15 @@ export async function collectHostStorage(config: Host.HostConfig, now = Date.now
       const id = candidate.candidateId;
       if (protectedIds.has(id)) { progress.skipped('candidates', 'protected_release'); continue; }
       const directory = await ownedCandidateDirectory(config, id.slice(7));
-      if (directory && directory.mtimeMs > cutoff) { progress.skipped('candidates', 'grace_period'); continue; }
+      if (directory && directory.mtimeMs > cutoff && newest.get(candidate.componentId)?.candidateId === id) {
+        progress.skipped('candidates', 'grace_period'); continue;
+      }
       if (!directory || candidate.artifactRoot !== join(directory.path, 'artifact') ||
         candidate.manifestPath !== join(directory.path, 'component.json') ||
         (candidate.archivePath && candidate.archivePath !== join(directory.path, 'package.tar.gz'))) { progress.skipped('candidates', 'unrecognized_path', true); continue; }
-      const manifestMatches = await readReleaseManifest(candidate.manifestPath).then(
-        manifest => hashJson(manifest) === hashJson(journal!.manifest(id)), () => false);
+      const manifestMatches = await jsonFile<Host.ReleaseManifest>(candidate.manifestPath).then(
+        manifest => manifest.buildId === candidate.buildId && manifest.componentId === candidate.componentId &&
+          hashJson(manifest) === hashJson(JSON.parse(String(rows.find(row => row['candidate_id'] === id)!['manifest_json']))), () => false);
       if (!manifestMatches) { progress.skipped('candidates', 'unrecognized_manifest', true); continue; }
       let buildLock: ExecutorLock | null = null;
       try {

@@ -1,6 +1,6 @@
 //! UI publication, retained manifests, requirement inspection and private assets.
 use crate::{
-    paging::catalog_page,
+    paging::{catalog_boundary, catalog_page},
     registry::Registry,
     retention::Runtime,
     store::{AuthenticatedContext, LedgerResult, Store, sql_error},
@@ -74,10 +74,7 @@ fn limit(parameters: &IvyJson) -> Option<usize> {
 }
 fn after(store: &Store, identity: &IvyJson, parameters: &IvyJson) -> IvyResult<JsString> {
     match cursor(parameters) {
-        Some(c) => store
-            .read_cursor(identity, c)?
-            .and_then(IvyJson::into_js_string)
-            .ok_or_else(|| IvyError::new("invalid_cursor", "Invalid UI cursor.")),
+        Some(c) => catalog_boundary(store, identity, c),
         None => Ok(JsString::default()),
     }
 }
@@ -342,15 +339,16 @@ impl<'a> Uis<'a> {
         let mut items = vec![];
         for row in rows {
             let (id, path, count) = sql(store, row)?;
-            let rusqlite::types::Value::Text(path) = path else {
-                return Err(IvyError::new(
-                    "storage_invalid",
-                    "Retained UI entry path must be a string.",
-                ));
+            let path: IvyJson = match path {
+                rusqlite::types::Value::Null => "null".into(),
+                rusqlite::types::Value::Text(path) => path.into(),
+                rusqlite::types::Value::Integer(value) => value.to_string().into(),
+                rusqlite::types::Value::Real(value) => ivy_contracts::json::stringify(&IvyJson::Number(value), usize::MAX)?.into(),
+                rusqlite::types::Value::Blob(_) => return Err(IvyError::internal()),
             };
             items.push(IvyJson::object([
                 ("releaseId", id.into()),
-                ("entryPath", path.into()),
+                ("entryPath", path),
                 ("assetCount", IvyJson::Number(count.unwrap_or(0) as f64)),
             ]));
         }
@@ -722,10 +720,9 @@ impl<'a> Uis<'a> {
             if let Some(encoded)=retained.as_ref(){require(*encoded==canonical(release,MANAGEMENT_FRAME_BYTES)?,"release_conflict","Release identity already has different immutable assets.")?;}
             if existing.is_none(){sql(store,store.connection().execute("INSERT INTO apps VALUES (?,?,NULL,NULL)",params![text(ui),canonical(metadata,MANAGEMENT_FRAME_BYTES)?]))?;}
             if retained.is_none(){sql(store,store.connection().execute("INSERT INTO app_releases VALUES (?,?,?)",params![text(ui),text(id),canonical(release,MANAGEMENT_FRAME_BYTES)?]))?;}
-            let previous_id=previous.as_js_string().map(text);
-            sql(store,store.connection().execute("UPDATE apps SET metadata=?,previous_release_id=?,current_release_id=? WHERE app_id=?",params![canonical(metadata,MANAGEMENT_FRAME_BYTES)?,previous_id,text(id),text(ui)]))?;
+            sql(store,store.connection().execute("UPDATE apps SET metadata=?,previous_release_id=NULL,current_release_id=? WHERE app_id=?",params![canonical(metadata,MANAGEMENT_FRAME_BYTES)?,text(id),text(ui)]))?;
             self.prune(store,ui)?;store.invalidate("uis".into());
-            Ok(LedgerResult::snapshot(IvyJson::object([("uiId",IvyJson::String(ui.clone())),("releaseId",IvyJson::String(id.clone())),("previousReleaseId",previous)])))
+            Ok(LedgerResult::snapshot(IvyJson::object([("uiId",IvyJson::String(ui.clone())),("releaseId",IvyJson::String(id.clone())),("previousReleaseId",IvyJson::Null)])))
         })
     }
     pub fn rollback(
@@ -746,9 +743,9 @@ impl<'a> Uis<'a> {
                 let issue=array(&inspection,"issues")?.first();
                 return Err(IvyError::new_js(issue.and_then(|i|i.get("code")).and_then(IvyJson::as_js_string).cloned().unwrap_or_else(||"ui_release_invalid".into()),issue.and_then(|i|i.get("message")).and_then(IvyJson::as_js_string).cloned().unwrap_or_else(||"Retained UI release is unavailable.".into())));
             }
-            sql(store,store.connection().execute("UPDATE apps SET previous_release_id=current_release_id,current_release_id=? WHERE app_id=?",params![text(id),text(ui)]))?;
+            sql(store,store.connection().execute("UPDATE apps SET previous_release_id=NULL,current_release_id=? WHERE app_id=?",params![text(id),text(ui)]))?;
             self.prune(store,ui)?;store.invalidate("uis".into());
-            Ok(LedgerResult::snapshot(IvyJson::object([("uiId",IvyJson::String(ui.clone())),("releaseId",IvyJson::String(id.clone())),("previousReleaseId",field(&current,"currentReleaseId")?.clone())])))
+            Ok(LedgerResult::snapshot(IvyJson::object([("uiId",IvyJson::String(ui.clone())),("releaseId",IvyJson::String(id.clone())),("previousReleaseId",IvyJson::Null)])))
         })
     }
     pub fn asset(
@@ -800,20 +797,15 @@ impl<'a> Uis<'a> {
         }
     }
     fn prune(&self, store: &Store, ui: &JsString) -> IvyResult<()> {
-        let (current, previous) = sql(
+        let current = sql(
             store,
             store.connection().query_row(
-                "SELECT current_release_id,previous_release_id FROM apps WHERE app_id=?",
+                "SELECT current_release_id FROM apps WHERE app_id=?",
                 [text(ui)],
-                |r| {
-                    Ok((
-                        r.get::<_, Option<String>>(0)?,
-                        r.get::<_, Option<String>>(1)?,
-                    ))
-                },
+                |r| r.get::<_, Option<String>>(0),
             ),
         )?;
-        sql(store,store.connection().execute("DELETE FROM app_releases WHERE app_id=? AND release_id IS NOT ? AND release_id IS NOT ?",params![text(ui),current,previous]))?;
+        sql(store,store.connection().execute("DELETE FROM app_releases WHERE app_id=? AND release_id IS NOT ?",params![text(ui),current]))?;
         Ok(())
     }
     pub fn collect_files(&self, store: &Store, clock: &dyn Fn() -> f64) -> IvyResult<()> {

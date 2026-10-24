@@ -271,6 +271,10 @@ export class AssignmentScheduler {
       name,
     );
     if (saved && event.sequence <= saved.value.lastSequence) return;
+    if (saved && revision <= saved.value.revision) {
+      this.engine.store.technicalAmend(objectWindowKey, saved, { ...saved.value, lastSequence: event.sequence });
+      return;
+    }
     const read = await this.engine.client.request("objects.read", {
       objectId,
       revision,
@@ -577,8 +581,8 @@ export class AssignmentScheduler {
     for (const assignment of assignments) {
       const key = 'assignment:' + assignment.value.assignmentId;
       try {
-        const gap = this.engine.store.technicalNamed<{ prunedThroughSequence: number; relevant?: boolean | null }>('secretary/event-gap', assignment.value.assignmentId);
-        if (gap && gap.value.relevant === undefined) {
+        const gap = this.engine.store.technicalNamed<{ prunedThroughSequence: number; relevant?: boolean | null; disposition?: string }>('secretary/event-gap', assignment.value.assignmentId);
+        if (gap && !gap.value.disposition && gap.value.relevant === undefined) {
           const first = await this.engine.client.request('events.read', { afterSequence: gap.value.prunedThroughSequence, filter: {}, limit: 1 });
           const original = await this.engine.store.original('secretary/assignment', assignment);
           if (!first.gap && first.items[0] && Date.parse(first.items[0].occurredAt) < Date.parse(original.writtenAt ?? original.value.createdAt)) {
@@ -588,7 +592,7 @@ export class AssignmentScheduler {
             this.engine.store.technicalAmend('secretary/event-gap', gap, { ...gap.value, relevant: true });
             this.engine.issue('event-gap:' + assignment.value.assignmentId, 'secretary_event_gap');
           }
-        } else if (gap?.value.relevant === true) this.engine.issue('event-gap:' + assignment.value.assignmentId, 'secretary_event_gap');
+        } else if (gap?.value.relevant === true && !gap.value.disposition) this.engine.issue('event-gap:' + assignment.value.assignmentId, 'secretary_event_gap');
         const eventsCaughtUp = await this.events(assignment, configuration.value, eventBudget);
         if (eventsCaughtUp) {
           await this.flushDueMessageWindows(assignment, configuration.value, now);
@@ -599,6 +603,7 @@ export class AssignmentScheduler {
           );
         }
         await this.schedules(assignment, configuration.value, now);
+        if (eventsCaughtUp) await this.recoverEventGap(assignment, now);
         this.engine.recoveryIssues.delete(key);
       } catch (error) {
         if (this.engine.signal.aborted) throw error;
@@ -606,5 +611,52 @@ export class AssignmentScheduler {
         this.engine.issue(key, code);
       }
     }
+  }
+
+  /** Reconstructible triggers recover from their owners, never by inventing lost unique events. */
+  private async recoverEventGap(assignment: Document<'secretary/assignment'>, now: Date): Promise<void> {
+    const id = assignment.value.assignmentId;
+    const gap = this.engine.store.technicalNamed<{ prunedThroughSequence: number; relevant?: boolean | null; disposition?: string }>('secretary/event-gap', id);
+    if (!gap || gap.value.disposition) { if (gap?.value.disposition) this.engine.recoveryIssues.delete('event-gap:' + id); return; }
+    const trigger = assignment.value.trigger;
+    let disposition: string;
+    if (!assignment.value.enabled) disposition = 'inactive_history';
+    else if (trigger.kind === 'schedule') {
+      const progress = await this.engine.store.named('secretary/schedule-progress', 'schedule-' + hashJson(id).slice('sha256:'.length));
+      if (!progress || progress.value.assignment.revision !== assignment.pin.revision || progress.value.checkedAt < now.toISOString()) return;
+      disposition = 'retained_schedule_replayed';
+    } else if (trigger.kind === 'object-change') {
+      const progress = await this.engine.store.named('secretary/event-progress', 'event-' + hashJson(id).slice('sha256:'.length));
+      if (!progress) return;
+      for (const objectId of trigger.objectIds) {
+        const current = await this.engine.client.request('objects.read', { objectId });
+        need(current.content.encoding === 'json', 'secretary_gap_source_unavailable', 'Gap recovery needs the authoritative JSON source.');
+        const name = hashJson([id, assignment.pin.revision, objectId]);
+        const previous = this.engine.store.technicalNamed<ObjectWindowState>(objectWindowKey, name);
+        const projection = objectProjection(current.content.value, trigger), fingerprint = hashJson(projection);
+        if (!previous) {
+          this.engine.store.technicalCreate<ObjectWindowState>(objectWindowKey, name, { assignmentId: id, objectId,
+            lastSequence: progress.value.processedThrough, fingerprint, projection, revision: current.revision.revision, pending: null });
+          continue;
+        }
+        const before = previous.value.pending?.before ?? previous.value.projection;
+        const pending = hashJson(before) === fingerprint ? null : {
+          assignment: assignment.pin, assignmentSnapshot: structuredClone(assignment.value), objectId,
+          firstSequence: previous.value.pending?.firstSequence ?? progress.value.processedThrough,
+          firstRevision: previous.value.pending?.firstRevision ?? previous.value.revision,
+          lastRevision: current.revision.revision, occurredAt: now.toISOString(),
+          dueAt: previous.value.pending?.dueAt ?? new Date(now.getTime() + trigger.delaySeconds * 1000).toISOString(), before, after: projection };
+        this.engine.store.technicalAmend(objectWindowKey, previous, { ...previous.value,
+          lastSequence: Math.max(previous.value.lastSequence, progress.value.processedThrough),
+          fingerprint, projection, revision: current.revision.revision, pending });
+      }
+      disposition = 'authoritative_snapshot_rebased';
+    } else {
+      this.engine.issue('event-gap:' + id, 'secretary_event_gap_unrecoverable');
+      return;
+    }
+    this.engine.store.technicalAmend('secretary/event-gap', gap, { ...gap.value, disposition, resolvedAt: now.toISOString(),
+      assignment: assignment.pin });
+    this.engine.recoveryIssues.delete('event-gap:' + id);
   }
 }

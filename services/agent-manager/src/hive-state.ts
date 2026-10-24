@@ -24,6 +24,11 @@ export class LocalAgentState {
         PRIMARY KEY(kind,key)
       ) STRICT;
       CREATE TABLE IF NOT EXISTS state_metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;
+      CREATE INDEX IF NOT EXISTS state_usage ON state(kind,json_extract(value_json,'$.phase'),byte_length,terminal_at_ms,key);
+      CREATE INDEX IF NOT EXISTS state_completion_owner ON state(json_extract(value_json,'$.params.threadId'),
+        json_extract(value_json,'$.reply.result.turn.id'),json_extract(value_json,'$.callerPrincipalId'),key)
+        WHERE kind='operation' AND json_extract(value_json,'$.method')='turn/start'
+          AND json_extract(value_json,'$.phase')='succeeded';
       INSERT OR IGNORE INTO state_metadata VALUES ('expired_before','0');
       CREATE TABLE IF NOT EXISTS completion_receipts(operation_key TEXT PRIMARY KEY,released INTEGER NOT NULL) STRICT;
       CREATE TABLE IF NOT EXISTS retired_operations(operation_key TEXT PRIMARY KEY,issued_at INTEGER NOT NULL) STRICT;
@@ -46,23 +51,25 @@ export class LocalAgentState {
   }
   releaseCompletion(threadId: string, turnId: string): void {
     this.db.prepare(`UPDATE completion_receipts SET released=1 WHERE operation_key IN
-      (SELECT key FROM state WHERE kind='operation' AND json_extract(value_json,'$.params.threadId')=?
+      (SELECT key FROM state WHERE kind='operation' AND json_extract(value_json,'$.method')='turn/start'
+        AND json_extract(value_json,'$.phase')='succeeded' AND json_extract(value_json,'$.params.threadId')=?
         AND json_extract(value_json,'$.reply.result.turn.id')=?)`).run(threadId, turnId);
   }
   private id(kind: string, key: string): string { return hashJson([this.serviceNodeId, kind, key]).slice(7); }
   private makeRoom(extraBytes: number, extraCount: number, protectedKey: string): void {
     const usage = this.db.prepare(`SELECT COUNT(*) AS count,COALESCE(SUM(byte_length),0)+
-      COALESCE(SUM(CASE WHEN kind='operation' AND json_extract(value_json,'$.phase') IN ('accepted','dispatched') THEN ? ELSE 0 END),0) AS bytes FROM state`)
+      COALESCE(SUM(CASE WHEN kind='operation' AND json_extract(value_json,'$.phase') IN ('accepted','dispatched') THEN ? ELSE 0 END),0) AS bytes FROM state INDEXED BY state_usage`)
       .get(LocalAgentState.resultReservation)!;
     let count = Number(usage['count']) + extraCount, bytes = Number(usage['bytes']) + extraBytes;
     let boundary = Number(this.db.prepare("SELECT value FROM state_metadata WHERE key='expired_before'").get()!['value']);
     if (count <= this.limits.maxOperations && bytes <= this.limits.maxJournalBytes) return;
-    const candidates = this.db.prepare(`SELECT key,value_json,byte_length FROM state s WHERE kind='operation' AND key<>?
+    const candidates = this.db.prepare(`SELECT key,byte_length FROM state s INDEXED BY state_usage WHERE kind='operation' AND key<>?
       AND json_extract(value_json,'$.phase') IN ('succeeded','failed')
       AND NOT EXISTS(SELECT 1 FROM completion_receipts c WHERE c.operation_key=s.key AND c.released=0)
       ORDER BY terminal_at_ms,rowid`).all(protectedKey);
+    const original = this.db.prepare("SELECT value_json FROM state WHERE kind='operation' AND key=?");
     for (const row of candidates) {
-      const value = JSON.parse(String(row['value_json'])) as Agent.Operation;
+      const value = JSON.parse(String(original.get(row['key']!)!['value_json'])) as Agent.Operation;
       if (hasUnresolvedOutcome(value)) continue;
       // Records without a fenced identity cannot safely lose their replay evidence.
       let issuedAt: number;

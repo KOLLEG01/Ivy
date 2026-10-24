@@ -159,6 +159,8 @@ impl NativeRpc {
         let actor = Actor {
             admission: NativeAdmission::default(),
             pending: Vec::new(),
+            observation_prefix: format!("observation-{}:", uuid::Uuid::new_v4()),
+            observation_sequence: 0,
             requests,
             server,
             notifications,
@@ -314,6 +316,8 @@ async fn write_stream<W: AsyncWrite + Unpin>(
 struct Actor {
     admission: NativeAdmission,
     pending: Vec<Pending>,
+    observation_prefix: String,
+    observation_sequence: u64,
     requests: BTreeMap<JsString, IvyJson>,
     server: BTreeMap<JsString, IvyJson>,
     notifications: BTreeMap<JsString, IvyJson>,
@@ -324,6 +328,16 @@ struct Actor {
     state: watch::Sender<Option<String>>,
 }
 impl Actor {
+    fn observation(&self, id: &IvyJson) -> bool {
+        id.as_js_string()
+            .and_then(|s| s.to_utf8().ok())
+            .and_then(|s| s.strip_prefix(&self.observation_prefix).map(str::to_owned))
+            .is_some_and(|suffix| {
+                suffix.parse::<u64>().is_ok_and(|n| {
+                    n > 0 && n <= self.observation_sequence && n.to_string() == suffix
+                })
+            })
+    }
     fn writable(&self) -> IvyResult<()> {
         require(
             !self.writes.is_closed(),
@@ -375,6 +389,7 @@ impl Actor {
                         Timeout::CloseConnection => break "native_deadline_exceeded".into(),
                         Timeout::Detached(_) => {
                             let p = self.pending.remove(index);
+                            if self.observation(&p.id) { self.admission.complete(&id); }
                             let error = IvyError::new("native_observation_deadline", "Background observation expired; active turns remain connected.")
                                 .with_outcome(Outcome::Unknown).with_details(details(&p));
                             let _ = p.response.send(Err(error));
@@ -412,7 +427,7 @@ impl Actor {
     async fn command(&mut self, command: Command) -> Option<String> {
         match command {
             Command::Request(method, params, options, response) => {
-                let prepare = || -> IvyResult<(IvyJson, String, Vec<u8>)> {
+                let mut prepare = || -> IvyResult<(IvyJson, String, Vec<u8>)> {
                     self.writable()?;
                     self.admission
                         .check_capacity(options.detach_on_timeout, options.priority)
@@ -420,6 +435,13 @@ impl Actor {
                             if self.admission.pending_count() >= if options.priority == Priority::Interaction {64} else {56} {
                                 "Native request capacity is full; foreground slots remain reserved."
                             } else { "Native observation capacity is full." }))?;
+                    require(
+                        !options.detach_on_timeout
+                            || options.request_id.is_none()
+                            || self.admission.expired_count() < 64,
+                        "native_capacity",
+                        "Native unresolved request identity capacity is full.",
+                    )?;
                     require(
                         self.requests.contains_key(&method),
                         "native_method_unavailable",
@@ -430,12 +452,23 @@ impl Actor {
                         "invalid_arguments",
                         "Native observation deadline must be finite and at most ten minutes.",
                     )?;
-                    let id = IvyJson::String(
-                        options
-                            .request_id
-                            .clone()
-                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string().into()),
-                    );
+                    require(
+                        !options.request_id.as_ref().is_some_and(|id| {
+                            id.to_utf8()
+                                .is_ok_and(|s| s.starts_with(&self.observation_prefix))
+                        }),
+                        "native_state_conflict",
+                        "Native observation request IDs cannot be reused.",
+                    )?;
+                    let id = IvyJson::String(match options.request_id.clone() {
+                        Some(id) => id,
+                        None if options.detach_on_timeout => {
+                            self.observation_sequence += 1;
+                            format!("{}{}", self.observation_prefix, self.observation_sequence)
+                                .into()
+                        }
+                        None => uuid::Uuid::new_v4().to_string().into(),
+                    });
                     validate_agent_frame(&id, NativeFrameKind::RequestId)?;
                     let id_key = key(&id);
                     require(
@@ -621,10 +654,11 @@ impl Actor {
         )?;
         let id_key = key(id);
         require(
-            !matches!(
-                self.admission.response_owner(&id_key),
-                ResponseOwner::Unknown
-            ),
+            self.observation(id)
+                || !matches!(
+                    self.admission.response_owner(&id_key),
+                    ResponseOwner::Unknown
+                ),
             "native_unknown_response",
             "Native response has no outstanding client request.",
         )?;

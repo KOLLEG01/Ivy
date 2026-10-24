@@ -238,12 +238,7 @@ async fn lifecycle_case(gated: bool, failures: usize, stop_initializing: bool) {
         let binding = handlers.get(&"secretary.binding".into()).unwrap();
         let reply = binding(
             IvyJson::Null,
-            InvocationContext {
-                caller_principal_id: "caller".into(),
-                operation_id: None,
-                generation: 7,
-                signal: connection.signal(),
-            },
+            InvocationContext::detached("caller".into(),None,7,connection.signal(),IvyError::new("service_not_ready","Service generation ended.")),
         );
         let result = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::select! {_=&mut work=>panic!("Initializing service exited"),result=reply=>result}

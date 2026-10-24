@@ -196,11 +196,20 @@ async function retireDirectory(path: string, area: RetiredArea, progress?: Reten
   return removeRetiredDirectory(retired, area, progress);
 }
 
-/** Retire only completed build evidence and unreferenced source snapshots after a grace period. */
+/** Retire superseded completed builds, then age out remaining unreferenced build evidence. */
 export async function collectPreparationStorage(host: Host.HostConfig, journal: HostJournal, cutoff: number, progress?: RetentionProgress): Promise<{
   preparations: number; snapshots: number; protectedCandidates: Set<string>;
 }> {
-  const protectedSnapshots = new Set<string>(), protectedCandidates = new Set<string>();
+  const protectedSnapshots = new Set<string>(), protectedCandidates = new Set<string>(), supersededSnapshots = new Set<string>();
+  const newest = new Map<string, string>();
+  for (const row of journal.db.prepare('SELECT candidate_json FROM candidates').all()) {
+    const candidate = JSON.parse(String(row['candidate_json'])) as Host.Candidate;
+    if (candidate.createdAt > (newest.get(candidate.componentId) ?? '')) newest.set(candidate.componentId, candidate.createdAt);
+  }
+  const superseded = (record: Host.PreparationRecord) => record.candidate &&
+    record.candidate.createdAt < (newest.get(record.componentId) ?? '');
+  const collectible = (record: Host.PreparationRecord) => record.phase === 'compacted' &&
+    (Date.parse(record.updatedAt) <= cutoff || superseded(record));
   const sourceRoot = join(host.stagingRoot, 'sources');
   let preparations = await collectRetiredDirectories(host.stagingRoot, buildName, 'preparations', progress),
     snapshots = await collectRetiredDirectories(sourceRoot, snapshotName, 'snapshots', progress), unknownPreparation = false;
@@ -228,19 +237,20 @@ export async function collectPreparationStorage(host: Host.HostConfig, journal: 
     if (!record) { protectUnknown(root); continue; }
     // Retain the original references even if a later read or removal fails.
     const original = record;
-    if (record.phase === 'compacted' && Date.parse(record.updatedAt) <= cutoff) {
+    if (collectible(record)) {
       let lock: ExecutorLock | null = null;
       try {
         lock = new ExecutorLock(join(host.stagingRoot, 'build-locks', record.buildId.slice(7)));
         record = await readRecord(host, root);
         requireThat(record, 'preparation_unrecognized', 'Preparation changed while collecting its history.');
-        if (record.phase === 'compacted' && Date.parse(record.updatedAt) <= cutoff && record.candidate &&
+        if (collectible(record) && record.candidate &&
           hashJson(journal.candidate(record.candidate.candidateId)) === hashJson(record.candidate)) {
           const names = await readdir(root);
           requireThat(names.every(name => ['preparation.json', 'preparation-before-recovery.json'].includes(name)),
             'target_conflict', 'Compacted preparation contains unrecognized retained evidence.');
           await ownedRoot(host, root);
           preparations += await retireDirectory(root, 'preparations', progress);
+          if (superseded(record)) supersededSnapshots.add(record.snapshot.snapshotId);
           continue;
         }
       } catch (error) {
@@ -265,7 +275,7 @@ export async function collectPreparationStorage(host: Host.HostConfig, journal: 
     if (!snapshotName.test(entry.name) || !entry.isDirectory() || entry.isSymbolicLink()) continue;
     if (protectedSnapshots.has(entry.name)) { progress?.skipped('snapshots', 'referenced'); continue; }
     const path = join(sourceRoot, entry.name), metadata = await lstat(path), actual = await realpath(path);
-    if (metadata.mtimeMs > cutoff) { progress?.skipped('snapshots', 'grace_period'); continue; }
+    if (metadata.mtimeMs > cutoff && !supersededSnapshots.has(entry.name)) { progress?.skipped('snapshots', 'grace_period'); continue; }
     if (dirname(actual) !== boundary || basename(actual) !== entry.name) { progress?.skipped('snapshots', 'unrecognized_path', true); continue; }
     const manifest = await jsonFile<Host.SnapshotManifest>(join(path, 'snapshot.json'), 8 * 1024 * 1024).catch(() => null);
     if (!manifest) { progress?.skipped('snapshots', 'unrecognized_manifest', true); continue; }

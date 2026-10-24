@@ -194,6 +194,7 @@ impl BrowserNotices {
                                     ("includeTurns", false.into()),
                                 ]),
                                 NativeOptions {
+                                    timeout_ms: 15_000,
                                     detach_on_timeout: true,
                                     ..Default::default()
                                 },

@@ -5,6 +5,34 @@ type ToolPresentation = {
   openWorldHint?: boolean;
 };
 
+// Discovery order only: execution and provider selection remain unchanged.
+const commonTools = [
+  'ivy_instructions', 'ivy_tool_schema',
+  'task_configuration', 'task_list', 'task_read', 'task_comment', 'task_update', 'task_create', 'task_upload_attachment',
+  'wiki_search', 'wiki_read', 'wiki_list', 'wiki_create', 'wiki_update',
+  'agent_manager_status', 'agent_manager_projects', 'agent_manager_inputs', 'agent_manager_answer',
+  'hive_status', 'hive_settings', 'hive_object_search', 'hive_object_read', 'hive_object_list', 'hive_object_write',
+  'hive_object_archive', 'hive_schema_get', 'hive_schema_list', 'hive_event_topics',
+  'secretary_binding', 'secretary_list_assignments', 'secretary_create_assignment', 'secretary_update_assignment',
+  'secretary_operation_read', 'secretary_follow_up', 'secretary_follow_up_read',
+  'chat_bridge_read', 'chat_bridge_send',
+  'data_collector_read', 'data_collector_update',
+  'dashboard_list', 'dashboard_read', 'dashboard_save', 'dashboard_render', 'dashboard_delete',
+  'phone_bridge_status', 'phone_bridge_call', 'phone_bridge_hangup', 'phone_bridge_update', 'phone_bridge_restart_voice',
+];
+const secondaryTools = [
+  'agent_manager_read', 'agent_manager_discover', 'agent_manager_invoke', 'agent_manager_resolve_project',
+  'task_configure', 'hive_schema_register', 'hive_object_move',
+  'phone_bridge_speaker_voices', 'phone_bridge_answer_voice_input',
+];
+const toolOrder = new Map([...commonTools, ...secondaryTools].map((name, index) =>
+  [name, index < commonTools.length ? index : index + 1]));
+export function compareMcpTools(a: { name: string }, b: { name: string }): number {
+  // Runtime-discovered extensions remain visible without naming their implementations here.
+  return (toolOrder.get(a.name) ?? commonTools.length) - (toolOrder.get(b.name) ?? commonTools.length) ||
+    (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+}
+
 /** MCP display metadata for known tools, scoped to their owning service. */
 const presentations: Record<string, Record<string, ToolPresentation>> = {
   hive: {
@@ -322,7 +350,7 @@ const presentations: Record<string, Record<string, ToolPresentation>> = {
   "phone-bridge": {
     phone_bridge_status: {
       title: "Check phone status",
-      description: "Read availability, configured recipients, and call status.",
+      description: "Read availability, recipients and model choices. With callId, read the call, original task work/deadline and pending native inputs; with callId and operationId, read the retained command outcome.",
     },
     phone_bridge_call: {
       title: "Start phone call",

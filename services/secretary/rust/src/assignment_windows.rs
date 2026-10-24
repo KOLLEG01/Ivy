@@ -5,7 +5,9 @@ use crate::{
     },
     assignment_object::{OBJECT_WINDOW_KEY, Observation, object_projection, observation_ready},
     assignment_scheduler::AssignmentScheduler,
+    inbox_recovery::RecoveryIssues,
     journal::Document,
+    store::Record,
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json};
 use ivy_sdk::{
@@ -34,7 +36,7 @@ fn pending(value: &IvyJson) -> Option<&IvyJson> {
     value.get("pending").filter(|v| !v.is_null())
 }
 fn iso(value: f64) -> IvyResult<JsString> {
-    date_to_iso(value)
+    date_to_iso(value).map_err(|_| IvyError::internal())
 }
 fn projection(value: &IvyJson, trigger: &IvyJson) -> IvyResult<IvyJson> {
     let paths = trigger
@@ -47,17 +49,9 @@ fn projection(value: &IvyJson, trigger: &IvyJson) -> IvyResult<IvyJson> {
     Ok(object_projection(value, &paths))
 }
 
-pub(crate) fn revision_number(value: Option<&IvyJson>) -> IvyResult<f64> {
-    value.and_then(IvyJson::as_f64).ok_or_else(|| {
-        IvyError::new(
-            "secretary_object_event_invalid",
-            "Object change revision must be a number.",
-        )
-    })
-}
 // Revisions are positive JSON integers within the public wire range.
-fn object_revision(value: Option<&IvyJson>) -> IvyResult<f64> {
-    let n = revision_number(value)?;
+pub(crate) fn object_revision(value: Option<&IvyJson>) -> IvyResult<f64> {
+    let n = value.and_then(IvyJson::as_f64).unwrap_or(f64::NAN);
     need(
         n.is_finite() && n.fract() == 0.0 && n > 0.0 && n <= 9_007_199_254_740_991.0,
         "secretary_object_event_invalid",
@@ -80,8 +74,8 @@ impl AssignmentScheduler<'_, '_, '_> {
         if payload.is_null() {
             return Err(IvyError::internal());
         }
-        let object_id = text(payload, "objectId")?;
         let revision = object_revision(payload.get("revision"))?;
+        let object_id = text(payload, "objectId")?;
         let name = hash_json(&IvyJson::Array(vec![
             value.required("assignmentId")?.clone(),
             assignment.required("pin")?.required("revision")?.clone(),
@@ -93,6 +87,12 @@ impl AssignmentScheduler<'_, '_, '_> {
             number(event, "sequence")
                 .is_ok_and(|n| n <= number(&s.value, "lastSequence").unwrap_or(f64::NAN))
         }) {
+            return Ok(());
+        }
+        if let Some(prior) = saved.as_ref().filter(|s| number(&s.value, "revision").is_ok_and(|old| revision <= old)) {
+            let mut next = prior.value.clone();
+            next.insert("lastSequence", event.required("sequence")?.clone());
+            store.journal.amend_technical(OBJECT_WINDOW_KEY, &prior.pin, &next)?;
             return Ok(());
         }
         let read = store
@@ -191,6 +191,69 @@ impl AssignmentScheduler<'_, '_, '_> {
         store
             .journal
             .amend_technical(OBJECT_WINDOW_KEY, &saved.pin, &next)?;
+        Ok(())
+    }
+    /// Rebuild only triggers whose authoritative owners retain enough state.
+    pub(crate) async fn recover_event_gap(&self, assignment: &IvyJson, now: i64, issues: &dyn RecoveryIssues) -> IvyResult<()> {
+        let value = assignment.required("value")?;
+        let id = text(value, "assignmentId")?;
+        let id_text = id.to_utf8()?;
+        let issue = format!("event-gap:{id_text}");
+        let store = self.evidence.store;
+        let Some(gap) = store.journal.named("secretary/event-gap", &id_text, true)? else { return Ok(()); };
+        if gap.value.get("disposition").is_some_and(|v| !v.is_null()) { issues.clear(&issue); return Ok(()); }
+        let trigger = value.required("trigger")?;
+        let disposition = if value.get("enabled") == Some(&false.into()) {
+            "inactive_history"
+        } else if trigger.get("kind") == Some(&"schedule".into()) {
+            let name: JsString = format!("schedule-{}", &hash_json(&IvyJson::String(id.clone()))?[7..]).into();
+            let Some(progress) = store.named(Record::ScheduleProgress, &name).await? else { return Ok(()); };
+            let progress = progress.required("value")?;
+            if progress.required("assignment")?.get("revision") != assignment.required("pin")?.get("revision") || parse_date(&text(progress, "checkedAt")?) < now as f64 { return Ok(()); }
+            "retained_schedule_replayed"
+        } else if trigger.get("kind") == Some(&"object-change".into()) {
+            let name: JsString = format!("event-{}", &hash_json(&IvyJson::String(id.clone()))?[7..]).into();
+            let Some(progress) = store.named(Record::EventProgress, &name).await? else { return Ok(()); };
+            let processed = progress.required("value")?.required("processedThrough")?;
+            for object_id in trigger.required("objectIds")?.as_array().ok_or_else(IvyError::internal)? {
+                let current = store.client.request("objects.read", IvyJson::object([("objectId", object_id.clone())]), RequestOptions::default()).await?;
+                need(current.required("content")?.get("encoding") == Some(&"json".into()), "secretary_gap_source_unavailable", "Gap recovery needs the authoritative JSON source.")?;
+                let name = hash_json(&IvyJson::Array(vec![IvyJson::String(id.clone()), assignment.required("pin")?.required("revision")?.clone(), object_id.clone()]))?;
+                let previous = store.journal.named(OBJECT_WINDOW_KEY, &name, true)?;
+                let projected = projection(current.required("content")?.required("value")?, trigger)?;
+                let fingerprint = hash_json(&projected)?;
+                let revision = current.required("revision")?.required("revision")?;
+                if let Some(previous) = previous {
+                    let prior_pending = pending(&previous.value);
+                    let before = prior_pending.and_then(|v| v.get("before")).unwrap_or(previous.value.required("projection")?);
+                    let next_pending = if hash_json(before)? == fingerprint { IvyJson::Null } else {
+                        IvyJson::object([
+                            ("assignment", assignment.required("pin")?.clone()), ("assignmentSnapshot", value.clone()), ("objectId", object_id.clone()),
+                            ("firstSequence", prior_pending.and_then(|v| v.get("firstSequence")).unwrap_or(processed).clone()),
+                            ("firstRevision", prior_pending.and_then(|v| v.get("firstRevision")).unwrap_or(previous.value.required("revision")?).clone()),
+                            ("lastRevision", revision.clone()), ("occurredAt", IvyJson::String(iso(now as f64)?)),
+                            ("dueAt", prior_pending.and_then(|v| v.get("dueAt")).cloned().unwrap_or(IvyJson::String(iso(now as f64 + number(trigger,"delaySeconds")? * 1000.0)?))),
+                            ("before", before.clone()), ("after", projected.clone())
+                        ])
+                    };
+                    let mut next = previous.value.clone();
+                    next.insert("lastSequence", IvyJson::Number(number(&previous.value,"lastSequence")?.max(processed.as_f64().ok_or_else(IvyError::internal)?)));
+                    next.insert("fingerprint", fingerprint.into()); next.insert("projection", projected); next.insert("revision", revision.clone()); next.insert("pending", next_pending);
+                    store.journal.amend_technical(OBJECT_WINDOW_KEY, &previous.pin, &next)?;
+                } else {
+                    store.journal.create_technical(OBJECT_WINDOW_KEY, &name, &IvyJson::object([
+                        ("assignmentId", IvyJson::String(id.clone())), ("objectId", object_id.clone()), ("lastSequence", processed.clone()),
+                        ("fingerprint", fingerprint.into()), ("projection", projected), ("revision", revision.clone()), ("pending", IvyJson::Null)
+                    ]))?;
+                }
+            }
+            "authoritative_snapshot_rebased"
+        } else {
+            issues.issue(&issue, "secretary_event_gap_unrecoverable"); return Ok(());
+        };
+        let mut next = gap.value.clone(); next.insert("disposition", disposition.into()); next.insert("resolvedAt", IvyJson::String(iso(now as f64)?)); next.insert("assignment", assignment.required("pin")?.clone());
+        store.journal.amend_technical("secretary/event-gap", &gap.pin, &next)?;
+        issues.clear(&issue);
         Ok(())
     }
     pub async fn flush_due_object_windows(

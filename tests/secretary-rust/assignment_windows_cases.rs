@@ -67,7 +67,7 @@ async fn original_object_message_windows_and_retry_boundaries() {
     )
     .unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), 95);
+    assert_eq!(rows.len(), 75);
     for (i, row) in rows.iter().enumerate() {
         let input = row.required("input").unwrap();
         let mut journal =

@@ -103,20 +103,15 @@ async fn original_public_handler_generation_identity_dispatch_and_wake_order() {
         if c.get("cancelled") == Some(&true.into()) {
             cancellation.cancellation.cancel();
         }
-        let context = InvocationContext {
-            caller_principal_id: c
+        let context = InvocationContext::detached(c
                 .required("caller")
                 .unwrap()
                 .as_js_string()
                 .unwrap()
-                .clone(),
-            generation: c.required("generation").unwrap().as_f64().unwrap() as u64,
-            operation_id: c
+                .clone(), c
                 .get("operationId")
                 .and_then(IvyJson::as_js_string)
-                .cloned(),
-            signal: cancellation.cancellation.clone(),
-        };
+                .cloned(),c.required("generation").unwrap().as_f64().unwrap() as u64,cancellation.cancellation.clone(),cancellation.cancel_error.clone());
         let call = admit(
             method,
             input.required("args").unwrap(),
@@ -276,12 +271,7 @@ async fn sdk_handler_bridge_keeps_accepted_request_after_abandoned_waiter() {
     let (sender, mut queue) = tokio::sync::mpsc::unbounded_channel();
     let callbacks = registered_handlers(sender);
     assert_eq!(callbacks.len(), 16);
-    let context = InvocationContext {
-        caller_principal_id: "caller-\u{1f989}".into(),
-        operation_id: Some("original".into()),
-        generation: 7,
-        signal: RequestOptions::default().cancellation,
-    };
+    let context = InvocationContext::detached("caller-\u{1f989}".into(),Some("original".into()),7,RequestOptions::default().cancellation,RequestOptions::default().cancel_error);
     let handler = callbacks.get(&JsString::from("secretary.capture")).unwrap();
     let mut pending = handler(
         IvyJson::object([("operationId", "original".into())]),

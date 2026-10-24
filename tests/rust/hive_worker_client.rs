@@ -167,8 +167,8 @@ fn startup_deadline_and_shutdown_retain_their_distinct_public_errors() {
     let mut client = WorkerClient::default();
     let generation = client.start(100).unwrap();
     assert_eq!(client.start(200).unwrap(), generation);
-    assert!(client.expire(30_099).retire.is_none());
-    let effects = client.expire(30_100);
+    assert!(client.expire(120_099).retire.is_none());
+    let effects = client.expire(120_100);
     assert_eq!(effects.retire, Some(generation));
     assert_eq!(
         effects.failure.unwrap(),

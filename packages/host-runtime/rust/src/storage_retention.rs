@@ -290,6 +290,7 @@ async fn collect(
         journal.save_storage_retention_status(status).await?;
         bootstrap_lock =
             Some(ExecutorLock::acquire(runtime.join("bootstrap-maintenance-lock"), false).await?);
+        journal.collect_obsolete_state().await?;
         crate::dependency_cache::collect_dependency_caches(
             path(&config, "stagingRoot")?,
             progress.clone(),
@@ -332,14 +333,14 @@ async fn collect(
             &config,
             journal,
             &mut protected,
-            cutoff,
-            &history,
+            now as f64,
+            &mut history,
             &progress,
         )
         .await?;
-        history::collect_details(&config, &history, &retained, &progress).await?;
+        history::collect_details(&config, journal, &history, &retained, &progress).await?;
         for entry in &history {
-            if entry.completed() {
+            if entry.obsolete || entry.completed() {
                 continue;
             }
             history::protect_plan(&mut protected, entry.request.required("next")?)?;
@@ -348,7 +349,13 @@ async fn collect(
             }
         }
         let candidates = journal.storage_retention_candidates().await?;
+        let mut newest = std::collections::BTreeMap::<String, (String, String)>::new();
         for (candidate, manifest) in &candidates {
+            let component = candidate.required("componentId")?.as_str()?;
+            let created = candidate.required("createdAt")?.as_str()?;
+            if newest.get(&component).is_none_or(|(at, _)| &created > at) {
+                newest.insert(component, (created, candidate.required("candidateId")?.as_str()?));
+            }
             if !manifest.get("version").is_some_and(version_name) {
                 protected.insert(candidate.required("candidateId")?.as_str()?);
             }
@@ -381,14 +388,15 @@ async fn collect(
                 failures.push(error);
             }
         }
-        for (candidate, _) in candidates {
+        for (candidate, retained_manifest) in candidates {
             let id = candidate.required("candidateId")?.as_str()?;
             if protected.contains(&id) {
                 progress.skipped("candidates", "protected_release", false);
                 continue;
             }
             let directory = owned_candidate(&config, &id[7..]).await?;
-            if directory.as_ref().is_some_and(|(_, mtime)| *mtime > cutoff) {
+            if directory.as_ref().is_some_and(|(_, mtime)| *mtime > cutoff)
+                && newest.get(&candidate.required("componentId")?.as_str()?).is_some_and(|(_, latest)| latest == &id) {
                 progress.skipped("candidates", "grace_period", false);
                 continue;
             }
@@ -408,11 +416,13 @@ async fn collect(
                 continue;
             }
             let matches =
-                match crate::artifact::read_release_manifest(path(&candidate, "manifestPath")?)
+                match config::json_file(path(&candidate, "manifestPath")?, config::CONFIGURATION_BYTES)
                     .await
                 {
                     Ok(manifest) => {
-                        hash_json(&manifest)? == hash_json(&journal.manifest(&id).await?)?
+                        manifest.get("buildId") == candidate.get("buildId")
+                            && manifest.get("componentId") == candidate.get("componentId")
+                            && hash_json(&manifest)? == hash_json(&retained_manifest)?
                     }
                     Err(_) => false,
                 };

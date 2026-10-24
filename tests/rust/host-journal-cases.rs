@@ -162,7 +162,7 @@ async fn accepted_target_policy_is_atomic_and_restore_clears_only_launch_metadat
     let record:String=db.query_row("SELECT value FROM meta WHERE key=?",[policy_key(&target)],|r|r.get(0)).unwrap();let record=json::parse(&record,usize::MAX).unwrap();
     let file=std::path::PathBuf::from(record.required("configurationPath").unwrap().as_str().unwrap()); assert!(file.is_file());
     journal.advance(&id,"activating","verifying",empty()).await.unwrap();journal.advance(&id,"verifying","succeeded",empty()).await.unwrap();
-    // The original history policy always keeps the newest two terminal entries.
+    // New successful work supersedes terminal history without a size threshold.
     for operation in ["retention-pressure-1","retention-pressure-2"] {
         let newer=policy_operation(&journal,operation).await;
         for (from,to) in [("checking","draining"),("draining","activating"),("activating","verifying"),("verifying","succeeded")] {
@@ -236,12 +236,12 @@ async fn journal_history_keeps_recovery_and_adoption_references_and_retires_old_
     let mut adoption=adoption(&config); adoption.insert("actions", IvyJson::Array(vec![IvyJson::object([("instanceId","fixture".into()),("action","restart".into()),("operationId","op-adoption2".into())])]));
     journal.stage_configuration_adoption(adoption).await.unwrap();
     let advanced=journal.advance("active","preparing","preparing",empty()).await.unwrap();
-    for id in ["old0","old1"] { assert_eq!(journal.get(id).await.unwrap_err().code,"operation_expired"); }
-    for id in ["adoption2","latest3","latest4","active"] { assert!(journal.get(id).await.is_ok()); }
-    assert_eq!(journal.list(200.0).await.unwrap().len(),4);
+    for id in ["old0","old1","latest3"] { assert_eq!(journal.get(id).await.unwrap_err().code,"operation_expired"); }
+    for id in ["adoption2","latest4","active"] { assert!(journal.get(id).await.is_ok()); }
+    assert_eq!(journal.list(200.0).await.unwrap().len(),3);
     let mut oracle=input(&config,"advance",vec!["active".into(),"preparing".into(),"preparing".into(),empty()]);
     oracle.insert("historyLimits",IvyJson::object([("count",IvyJson::Number(1.0)),("bytes",IvyJson::Number(1.0))]));oracle.insert("seed",IvyJson::Array(seed));
-    compare_config_oracle(oracle,Ok(advanced));assert_eq!(journal.list(200.0).await.unwrap().len(),4);
+    compare_config_oracle(oracle,Ok(advanced));assert_eq!(journal.list(200.0).await.unwrap().len(),3);
     let mut replay=request("restart","op-old0");
     // The retired request hash is authoritative even after entry eviction.
     assert_eq!(journal.accept(replay.clone(),None).await.unwrap_err().code,"mutation_conflict");
@@ -252,7 +252,7 @@ async fn journal_history_keeps_recovery_and_adoption_references_and_retires_old_
 }
 
 #[tokio::test]
-async fn journal_candidate_retention_preserves_nearest_and_exact_rollback_selections() {
+async fn journal_candidate_retention_preserves_current_owners_without_rollback_archives() {
     let fixture=ServiceFixture::new(); let config=host_configuration(&fixture); let journal=open(&config).await;
     for (id,version) in [("a","1.0.0"),("b","2.0.0"),("c","2.0.0"),("d","3.0.0"),("e","4.0.0")] {
         let mut candidate=candidate(); candidate.insert("candidateId",hash(id));candidate.insert("buildId",hash(id));
@@ -260,11 +260,11 @@ async fn journal_candidate_retention_preserves_nearest_and_exact_rollback_select
         journal.save_candidate(candidate,manifest).await.unwrap();
     }
     journal.set_installed(IvyJson::object([("instanceId","fixture".into()),("candidateId",hash("d")),("buildId",hash("d")),("enabled",true.into()),("installedAt",DATE.into())])).await.unwrap();
-    let ids=journal.retention_candidate_ids().await.unwrap();assert_eq!(ids, std::collections::BTreeSet::from([hash("c").as_str().unwrap(),hash("d").as_str().unwrap()]));
+    let ids=journal.retention_candidate_ids().await.unwrap();assert_eq!(ids, std::collections::BTreeSet::from([hash("d").as_str().unwrap()]));
     compare(&config,"retentionCandidateIds",vec![],Ok(IvyJson::Array(ids.into_iter().map(IvyJson::from).collect())));
-    assert!(!journal.retire_candidate(&hash("c").as_str().unwrap()).await.unwrap());
+    assert!(!journal.retire_candidate(&hash("d").as_str().unwrap()).await.unwrap());
     let db=sql(&config);db.execute("INSERT INTO meta VALUES ('bootstrap-rollback:fixture',?)",[encode(&IvyJson::object([("candidateId",hash("a")),("selectedCandidateId",hash("d"))]))]).unwrap();
-    let ids=journal.retention_candidate_ids().await.unwrap();assert_eq!(ids,std::collections::BTreeSet::from([hash("a").as_str().unwrap(),hash("d").as_str().unwrap()]));
+    let ids=journal.retention_candidate_ids().await.unwrap();assert_eq!(ids,std::collections::BTreeSet::from([hash("d").as_str().unwrap()]));
     compare(&config,"retentionCandidateIds",vec![],Ok(IvyJson::Array(ids.into_iter().map(IvyJson::from).collect())));
     assert!(journal.retire_candidate(&hash("c").as_str().unwrap()).await.unwrap());
     assert_eq!(journal.candidate(&hash("c").as_str().unwrap()).await.unwrap_err().code,"not_found");
@@ -277,6 +277,23 @@ async fn journal_candidate_retention_preserves_nearest_and_exact_rollback_select
 pub(super) fn candidate() -> IvyJson {
     IvyJson::object([("candidateId", hash("a")), ("componentId", "fixture".into()), ("artifactRoot", "artifact".into()), ("manifestPath", "manifest.json".into()), ("createdAt", DATE.into()),
         ("platform", IvyJson::object([("os", "win32".into()), ("arch", "x64".into()), ("node", "24.18.0".into())])), ("buildId", hash("a"))])
+}
+
+#[tokio::test]
+async fn retired_maintenance_keeps_its_identity_and_cannot_be_replayed_after_reopen() {
+    let fixture = ServiceFixture::new(); let config = host_configuration(&fixture);
+    let journal = open(&config).await;
+    let operation = "retired-maintenance";
+    let request_hash = hash("b").as_str().unwrap();
+    journal.retire_identity(operation.into(), request_hash.clone(), None).await.unwrap();
+    journal.retire_identity(operation.into(), request_hash.clone(), None).await.unwrap();
+    assert_eq!(journal.retire_identity(operation.into(), hash("c").as_str().unwrap(), None).await.unwrap_err().code, "mutation_conflict");
+    journal.close().await.unwrap();
+    let journal = open(&config).await;
+    assert_eq!(journal.retired_request_hash(operation).await.unwrap(), Some(request_hash));
+    journal.close().await.unwrap();
+    assert_eq!(ivy_host_runtime::bootstrap_maintenance::bootstrap_status(&config, &operation.into()).await.unwrap_err().code, "operation_expired");
+    assert_eq!(ivy_host_runtime::bootstrap_automatic::automatic_bootstrap_record(&config, &operation.into()).await.unwrap_err().code, "operation_expired");
 }
 pub(super) fn manifest() -> IvyJson {
     let value = IvyJson::object([("schemaVersion", IvyJson::Number(1.0)), ("componentId", "fixture".into()), ("kind", "app".into()), ("version", "1.0.0".into()), ("buildId", hash("a")), ("connectsToHive", false.into()),
@@ -444,12 +461,14 @@ async fn journal_reads_preserve_order_retirement_and_legacy_reconciliation() {
 #[tokio::test]
 async fn journal_sequences_are_atomic_persistent_and_validate_before_commit() {
     let fixture = ServiceFixture::new(); let config = host_configuration(&fixture); let journal = open(&config).await; let db = sql(&config);
-    for (prior, minimum) in [("0", 0.0), ("40", 2.0), ("10", 50.0), (" 0x10 ", 0.0), ("invalid", 0.0), ("9007199254740991", 0.0), ("0", -1.0), ("0", 1.5)] {
+    for (prior, minimum) in [("0", 0.0), ("40", 2.0), ("10", 50.0), ("invalid", 0.0), ("9007199254740991", 0.0), ("0", -1.0), ("0", 1.5)] {
         db.execute("INSERT INTO meta VALUES ('hostReportSequence',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [prior]).unwrap();
         let result = journal.management_snapshot(None, minimum, None).await;
         let mut oracle = input(&config, "managementSnapshot", vec![IvyJson::Null, IvyJson::Number(minimum)]); oracle.insert("sequence", prior.into());
         compare_config_oracle(oracle, result);
     }
+    db.execute("UPDATE meta SET value='0x10' WHERE key='hostReportSequence'", []).unwrap();
+    assert_eq!(journal.management_snapshot(None, 0.0, None).await.unwrap_err().code, "limit_exceeded");
     db.execute("UPDATE meta SET value='0' WHERE key='hostReportSequence'", []).unwrap();
     let mut wrong = journal.status(None).await.unwrap(); wrong.insert("hostId", "other".into());
     compare(&config, "managementSnapshot", vec![IvyJson::Null, IvyJson::Number(0.0), wrong.clone()], journal.management_snapshot(None, 0.0, Some(wrong)).await);

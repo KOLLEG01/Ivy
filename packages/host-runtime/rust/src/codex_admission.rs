@@ -68,12 +68,11 @@ impl NativeAdmission {
             return Err(AdmissionError::Capacity);
         }
         if detach_on_timeout
-            && self.expired.len()
-                + self
-                    .pending
-                    .iter()
-                    .filter(|(_, p)| p.detach_on_timeout)
-                    .count()
+            && self
+                .pending
+                .iter()
+                .filter(|(_, p)| p.detach_on_timeout)
+                .count()
                 >= if interaction { 64 } else { 16 }
         {
             return Err(AdmissionError::Capacity);

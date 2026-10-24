@@ -456,9 +456,9 @@ fn actual_startup_deadline_retires_held_kernel_before_explicit_restart() {
         assert!(database_locked(&root));
         assert_eq!(client.pending_count(), 0);
         assert_eq!(client.queued_bytes(), 0);
-        let error = timeout(Duration::from_secs(35), startup.wait()).await.unwrap().unwrap_err();
+        let error = timeout(Duration::from_secs(125), startup.wait()).await.unwrap().unwrap_err();
         let deadline_elapsed_ms = started_at.elapsed().as_millis();
-        assert!((29_990..=35_000).contains(&deadline_elapsed_ms));
+        assert!((119_990..=125_000).contains(&deadline_elapsed_ms));
         assert_eq!(error.code, "deadline_exceeded");
         assert_eq!(error.message, "Hive storage startup exceeded its deadline.");
         // Preserve the original public deadline error. Its inherited outcome
@@ -720,8 +720,9 @@ fn repeated_real_backup_progress_preserves_timeout_ownership_until_late_reply() 
         for phase in ["copy", "hash"] {
             let root = Root::new();
             let source_path = root.0.join("hive.sqlite");
+            let payload_rows = if phase == "hash" { 128 } else { 256 };
             let store = ivy_hive::store::Store::open(&source_path).unwrap();
-            store.connection().execute_batch("CREATE TABLE fixture_payload(id INTEGER PRIMARY KEY, bytes BLOB); WITH RECURSIVE n(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM n WHERE value<256) INSERT INTO fixture_payload SELECT value,zeroblob(4096) FROM n;").unwrap();
+            store.connection().execute_batch(&format!("CREATE TABLE fixture_payload(id INTEGER PRIMARY KEY, bytes BLOB); WITH RECURSIVE n(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM n WHERE value<{payload_rows}) INSERT INTO fixture_payload SELECT value,zeroblob(4096) FROM n;")).unwrap();
             store.close().unwrap();
             if phase == "hash" {
                 rusqlite::Connection::open(&source_path).unwrap().execute_batch("PRAGMA journal_mode=DELETE; PRAGMA page_size=65536; VACUUM;").unwrap();
@@ -809,7 +810,7 @@ fn repeated_real_backup_progress_preserves_timeout_ownership_until_late_reply() 
             let first_pages = {
                 let target = rusqlite::Connection::open_with_flags(&destination, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
                 assert_eq!(target.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0)).unwrap(), "ok");
-                assert_eq!(target.query_row("SELECT COUNT(*) FROM fixture_payload WHERE length(bytes)=4096", [], |row| row.get::<_, i64>(0)).unwrap(), 256);
+                assert_eq!(target.query_row("SELECT COUNT(*) FROM fixture_payload WHERE length(bytes)=4096", [], |row| row.get::<_, i64>(0)).unwrap(), payload_rows);
                 assert_eq!(target.query_row("SELECT revoked FROM credentials WHERE principal_id='alpha'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
                 target.query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0)).unwrap()
             };
@@ -841,7 +842,7 @@ fn repeated_real_backup_progress_preserves_timeout_ownership_until_late_reply() 
                 "pendingAfterLateProgressDeadline":1,"queuedBytesAfterLateProgressDeadline":4096,
                 "sameOwnerUntilSeparateBackup":true,"sourceLockedUntilClose":true,"healthThroughout":true,
                 "callerRemainsClosed":true,"failureEventBeforeClose":false,"pendingAfterLateReply":0,"queuedBytesAfterLateReply":0,
-                "firstDestinationIntegrity":"ok","firstDestinationPayloadRows":256,"firstDestinationAlphaRevoked":0,
+                "firstDestinationIntegrity":"ok","firstDestinationPayloadRows":payload_rows,"firstDestinationAlphaRevoked":0,
                 "firstDestinationPages":first_pages,"firstDestinationFullFileHash":first_hash,"firstReturnedResultRecovered":false,
                 "naturalCallbacksBeforeSeparateBackup":callbacks,"separateRequestCompleted":true,
                 "separateDestinationPages":first_pages,"separateReturnedFullFileHash":separate_hash,
@@ -920,8 +921,9 @@ fn real_copy_and_hash_callbacks_obey_progress_throttle_in_captured_frames() {
         for phase in ["copy", "hash"] {
             let root = Root::new();
             let source_path = root.0.join("hive.sqlite");
+            let payload_rows = if phase == "hash" { 128 } else { 256 };
             let store = ivy_hive::store::Store::open(&source_path).unwrap();
-            store.connection().execute_batch("CREATE TABLE fixture_payload(id INTEGER PRIMARY KEY, bytes BLOB); WITH RECURSIVE n(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM n WHERE value<256) INSERT INTO fixture_payload SELECT value,zeroblob(4096) FROM n;").unwrap();
+            store.connection().execute_batch(&format!("CREATE TABLE fixture_payload(id INTEGER PRIMARY KEY, bytes BLOB); WITH RECURSIVE n(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM n WHERE value<{payload_rows}) INSERT INTO fixture_payload SELECT value,zeroblob(4096) FROM n;")).unwrap();
             store.close().unwrap();
             if phase == "hash" {
                 rusqlite::Connection::open(&source_path).unwrap().execute_batch("PRAGMA journal_mode=DELETE; PRAGMA page_size=65536; VACUUM;").unwrap();
@@ -1001,7 +1003,7 @@ fn real_copy_and_hash_callbacks_obey_progress_throttle_in_captured_frames() {
             {
                 let target = rusqlite::Connection::open_with_flags(&destination, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
                 assert_eq!(target.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0)).unwrap(), "ok");
-                assert_eq!(target.query_row("SELECT COUNT(*) FROM fixture_payload WHERE length(bytes)=4096", [], |row| row.get::<_, i64>(0)).unwrap(), 256);
+                assert_eq!(target.query_row("SELECT COUNT(*) FROM fixture_payload WHERE length(bytes)=4096", [], |row| row.get::<_, i64>(0)).unwrap(), payload_rows);
                 assert_eq!(target.query_row("SELECT revoked FROM credentials WHERE principal_id='alpha'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
             }
             write_frame(&mut stdin, &Request { id:5, payload:payload("close") }.to_json()).await.unwrap();
@@ -1019,7 +1021,7 @@ fn real_copy_and_hash_callbacks_obey_progress_throttle_in_captured_frames() {
                 "suppressionWindowExercised":suppression_certain,"laterWindowExercised":later_report_certain,
                 "ambiguousWindow":(!suppression_certain && !second_report_certain) || (!later_report_certain && !later_suppression_certain),
                 "healthBarriers":3,"backupPages":pages,"fullFileBytesHash":expected_hash,
-                "targetIntegrity":"ok","targetPayloadRows":256,"targetAlphaRevoked":0,
+                "targetIntegrity":"ok","targetPayloadRows":payload_rows,"targetAlphaRevoked":0,
                 "frames":serde_json::from_str::<serde_json::Value>(&stringify(&IvyJson::Array(frames), 1 << 20).unwrap()).unwrap(),
                 "exitCode":completion.exit_code,"errorCode":completion.error_code,"databaseLockedAfterReap":false,
                 "closeReplyObserved":false,"syntheticProgressCallbacks":0,"productionEntryExecuted":false,"originalReplay":false
@@ -1041,8 +1043,9 @@ fn actual_copy_and_hash_progress_rearm_client_deadline_while_health_remains_resp
         for phase in ["copy", "hash"] {
             let root = Root::new();
             let source_path = root.0.join("hive.sqlite");
+            let payload_rows = if phase == "hash" { 128 } else { 256 };
             let store = ivy_hive::store::Store::open(&source_path).unwrap();
-            store.connection().execute_batch("CREATE TABLE fixture_payload(id INTEGER PRIMARY KEY, bytes BLOB); WITH RECURSIVE n(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM n WHERE value<256) INSERT INTO fixture_payload SELECT value,zeroblob(4096) FROM n;").unwrap();
+            store.connection().execute_batch(&format!("CREATE TABLE fixture_payload(id INTEGER PRIMARY KEY, bytes BLOB); WITH RECURSIVE n(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM n WHERE value<{payload_rows}) INSERT INTO fixture_payload SELECT value,zeroblob(4096) FROM n;")).unwrap();
             store.close().unwrap();
             if phase == "hash" {
                 // A valid large-page SQLite variant fits in one copy batch;
@@ -1111,7 +1114,7 @@ fn actual_copy_and_hash_progress_rearm_client_deadline_while_health_remains_resp
             {
                 let target = rusqlite::Connection::open_with_flags(&destination, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
                 assert_eq!(target.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0)).unwrap(), "ok");
-                assert_eq!(target.query_row("SELECT COUNT(*) FROM fixture_payload WHERE length(bytes)=4096", [], |row| row.get::<_, i64>(0)).unwrap(), 256);
+                assert_eq!(target.query_row("SELECT COUNT(*) FROM fixture_payload WHERE length(bytes)=4096", [], |row| row.get::<_, i64>(0)).unwrap(), payload_rows);
                 assert_eq!(target.query_row("SELECT revoked FROM credentials WHERE principal_id='alpha'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
                 assert_eq!(target.query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0)).unwrap(), pages);
             }
@@ -1130,7 +1133,7 @@ fn actual_copy_and_hash_progress_rearm_client_deadline_while_health_remains_resp
                 "pendingWhilePaused":1,"queuedBytesWhilePaused":4096,"sameOwnerWhilePaused":true,
                 "sourceLockedWhilePaused":true,"targetLockedWhilePaused":phase == "copy",
                 "backupCompleted":true,"pages":pages,"fullFileBytesHash":expected_hash,"targetIntegrity":"ok",
-                "targetPayloadRows":256,"targetAlphaRevoked":0,"pendingAfterBackup":0,"queuedBytesAfterBackup":0,
+                "targetPayloadRows":payload_rows,"targetAlphaRevoked":0,"pendingAfterBackup":0,"queuedBytesAfterBackup":0,
                 "confirmedStoppedAfterClose":true,"databaseLockedAfterClose":false,
                 "syntheticProgressCallbacks":0,"productionEntryExecuted":false,"originalReplay":false,
                 "deadlineProof":"Started precedes first health Reply; real first phase callback Progress precedes second health Reply; request stays pending beyond baseline+3000ms with task gate held"

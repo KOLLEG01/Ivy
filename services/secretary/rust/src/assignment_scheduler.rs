@@ -16,6 +16,11 @@ use ivy_sdk::{
 };
 use std::sync::Arc;
 
+/// Keep coded RPC failures; native conversion failures use the scheduler's catch-site code.
+pub(crate) fn diagnostic_code<'a>(error: &'a IvyError, fallback: &'a str) -> &'a str {
+    if error.code == "internal_error" && error.wire_code.is_none() { fallback } else { &error.code }
+}
+
 pub fn select_default_agent_manager<'a>(
     nodes: &'a [IvyJson],
     host_id: &JsString,

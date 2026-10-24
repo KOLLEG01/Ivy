@@ -133,7 +133,7 @@ impl Maintenance {
                 )]),
             ),
             ("source", "hive".into()),
-            ("severity", if resolved { "info" } else { "error" }.into()),
+            ("severity", if resolved { "info" } else if code == "storage_pressure" { "warning" } else { "error" }.into()),
             (
                 "status",
                 if resolved { "resolved" } else { "current" }.into(),
@@ -211,7 +211,7 @@ impl Maintenance {
             self.diagnostic(
                 app,
                 "storage_pressure",
-                "Available disk space is below the operating reserve.",
+                "Available disk space is below the operating reserve; Hive continues processing requests.",
                 false,
             )
             .await;

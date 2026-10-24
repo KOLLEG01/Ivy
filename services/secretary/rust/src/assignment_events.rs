@@ -2,7 +2,7 @@
 use crate::{
     assignment_message::message_channel,
     assignment_scheduler::AssignmentScheduler,
-    assignment_windows::revision_number,
+    assignment_windows::object_revision,
     inbox_recovery::{RecoveryIssues, RecoveryScan},
     store::Record,
 };
@@ -378,13 +378,9 @@ impl AssignmentScheduler<'_, '_, '_> {
                             if payload.get("objectId")
                                 == assignment.required("pin")?.get("objectId")
                             {
-                                let revision = revision_number(payload.get("revision"))?;
+                                let revision = object_revision(payload.get("revision"))?;
                                 let retained = number(next.required("assignment")?, "revision")?;
-                                if revision.is_finite()
-                                    && revision.fract() == 0.0
-                                    && revision.abs() <= 9_007_199_254_740_991.0
-                                    && revision > retained
-                                {
+                                if revision > retained {
                                     let changed = store
                                         .read(
                                             Record::Assignment,

@@ -60,6 +60,12 @@ pub fn page(items: Vec<IvyJson>, next_cursor: Option<String>) -> IvyJson {
     ])
 }
 
+pub(crate) fn catalog_boundary(store: &Store, identity: &IvyJson, cursor: &JsString) -> IvyResult<JsString> {
+    store.read_cursor(identity, cursor)?
+        .and_then(|value| value.as_js_string().cloned())
+        .ok_or_else(|| IvyError::new("invalid_cursor", "Invalid catalog cursor boundary."))
+}
+
 pub fn catalog_page(
     store: &Store,
     records: &mut [IvyJson],
@@ -89,10 +95,7 @@ pub fn try_catalog_page(
     cursor: Option<&JsString>,
 ) -> IvyResult<IvyJson> {
     let after = match cursor.filter(|c| !c.0.is_empty()) {
-        Some(cursor) => store
-            .read_cursor(identity, cursor)?
-            .and_then(IvyJson::into_js_string)
-            .ok_or_else(|| IvyError::new("invalid_cursor", "Invalid catalog cursor."))?,
+        Some(cursor) => catalog_boundary(store, identity, cursor)?,
         None => JsString::default(),
     };
     let bytes = |s: JsString| String::from_utf16_lossy(&s.0).into_bytes();

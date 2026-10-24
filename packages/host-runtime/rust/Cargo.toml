@@ -144,3 +144,7 @@ path = "../../../tests/rust/host-portable-dependencies.rs"
 [[test]]
 name = "host-windows-process-inspection"
 path = "../../../tests/rust/host-windows-process-inspection.rs"
+
+[[test]]
+name = "native-rpc"
+path = "../../../tests/rust/agent-native-rpc.rs"

@@ -404,6 +404,7 @@ impl WorkerActions {
                         worker_identity::collect_oauth_families(store, clock() as u64, None)
                             .map(|_| ())
                     })?;
+                    store.reclaim_storage_pages()?;
                     Ok(result)
                 });
                 if let Err(error) = &result {

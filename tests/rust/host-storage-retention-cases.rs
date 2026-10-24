@@ -67,7 +67,7 @@ async fn run_case(case: &str) -> J {
     }
     let state = fixture::observe(&setup).await;
     let (error, remaining, status) = match case {
-        "basic" => (None, 3, "succeeded"),
+        "basic" => (None, 2, "succeeded"),
         "unknown-preparation" => (None, 1, "partial"),
         "retired-staging" | "pending-retirement" => (None, 0, "succeeded"),
         "pending-unowned" => (Some("target_conflict"), 0, "failed"),
@@ -78,13 +78,13 @@ async fn run_case(case: &str) -> J {
         "unresolved-unknown" | "unresolved-scalar-request" => {
             (Some("storage_invalid"), 6, "failed")
         }
-        "bootstrap-current" => (None, 2, "succeeded"),
+        "bootstrap-current" => (None, 1, "succeeded"),
         "bootstrap-prior" | "bootstrap-missing-time" | "bootstrap-null-time" => {
-            (None, 3, "partial")
+            (None, 2, "succeeded")
         }
         "bootstrap-scalar-time" => (Some("internal_error"), 6, "failed"),
-        "bootstrap-order" => (None, 4, "succeeded"),
-        "maintenance-ring" => (None, 3, "succeeded"),
+        "bootstrap-order" => (None, 3, "succeeded"),
+        "maintenance-ring" => (None, 1, "succeeded"),
         "reason-cap" => (None, 4, "partial"),
         "active-snapshot" => (None, 0, "succeeded"),
         "scalar-snapshot" => (Some("invalid_arguments"), 6, "failed"),
@@ -118,7 +118,7 @@ async fn run_case(case: &str) -> J {
         "{case}: {state:?}"
     );
     let protected: &[u8] = match case {
-        "basic" => &[1, 2, 3],
+        "basic" => &[1, 3],
         "unknown-preparation" | "unknown-version" => &[2],
         "busy-candidate" => &[4],
         "busy-bootstrap"
@@ -126,12 +126,12 @@ async fn run_case(case: &str) -> J {
         | "unresolved-scalar-request"
         | "bootstrap-scalar-time"
         | "scalar-snapshot" => &[1, 2, 3, 4, 5, 6],
-        "bootstrap-current" => &[2, 3],
+        "bootstrap-current" => &[3],
         "bootstrap-prior"
         | "bootstrap-missing-time"
-        | "bootstrap-null-time"
-        | "maintenance-ring" => &[1, 3, 4],
-        "bootstrap-order" => &[0, 4, 5, 6],
+        | "bootstrap-null-time" => &[1, 4],
+        "maintenance-ring" => &[4],
+        "bootstrap-order" => &[0, 5, 6],
         "reason-cap" => &[1, 2, 3, 4],
         _ => &[],
     };
@@ -264,7 +264,7 @@ async fn live_references_and_completed_preparation_cleanup_remain_protected() {
             .required("value")
             .unwrap(),
         &J::object([
-            ("candidates", J::Number(3.0)),
+            ("candidates", J::Number(4.0)),
             ("preparations", J::Number(1.0)),
             ("snapshots", J::Number(1.0))
         ])
@@ -338,7 +338,7 @@ async fn unknown_version_and_history_evidence_preserve_failure_boundaries() {
     }
 }
 #[tokio::test]
-async fn current_rollback_and_unresolved_bootstrap_plans_are_retained() {
+async fn selected_and_unresolved_bootstrap_plans_are_retained() {
     for case in [
         "bootstrap-current",
         "bootstrap-prior",
@@ -366,18 +366,18 @@ async fn current_rollback_and_unresolved_bootstrap_plans_are_retained() {
 }
 #[cfg(windows)]
 #[tokio::test]
-async fn bootstrap_plan_cover_preserves_referenced_releases() {
+async fn superseded_bootstrap_plans_do_not_archive_referenced_releases() {
     let observed = run_case("bootstrap-order").await;
     let plans = observed
         .required("state")
         .unwrap()
         .required("plans")
         .unwrap();
-    assert!(plans.as_array().unwrap().contains(&"plan-7".into()));
+    assert!(!plans.as_array().unwrap().contains(&"plan-7".into()));
     assert!(!plans.as_array().unwrap().contains(&"plan-8".into()));
 }
 #[tokio::test]
-async fn maintenance_details_are_pruned_without_changing_their_replay_records() {
+async fn superseded_maintenance_is_collected_while_selected_evidence_is_unchanged() {
     let observed = run_case("maintenance-ring").await;
     let details = observed
         .required("state")
@@ -386,31 +386,27 @@ async fn maintenance_details_are_pruned_without_changing_their_replay_records() 
         .unwrap()
         .as_array()
         .unwrap();
-    assert_eq!(details.len(), 25);
+    assert_eq!(details.len(), 1);
     assert!(
         details
             .iter()
             .all(|d| d.get("recordUnchanged") == Some(&true.into()))
     );
-    for number in 0..25 {
+    for number in [0] {
         let directory = hash_json(&J::from(format!("old-maintenance-{number}"))).unwrap();
         let detail = details
             .iter()
             .find(|detail| detail.get("name") == Some(&directory[7..].into()))
             .unwrap();
-        let files: &[&str] = if (1..5).contains(&number) {
-            &["record.json"]
-        } else {
-            &[
+        let files: &[&str] = &[
                 "host-executor.desired.json",
                 "host-executor.prior.json",
                 "record.json",
-            ]
-        };
+            ];
         assert_eq!(
             detail.required("files").unwrap(),
             &J::Array(files.iter().map(|file| J::from(*file)).collect()),
-            "Maintenance {number}: retain the newest 20 and the rollback record"
+            "Selected maintenance {number} retains its exact definition evidence"
         );
     }
 }

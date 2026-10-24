@@ -19,7 +19,7 @@ mod mutations;
 pub use mutations::{archive, reorder};
 #[path = "object_delete.rs"]
 mod deletion;
-pub use deletion::delete;
+pub use deletion::{delete, delete_with_service};
 #[path = "object_retention.rs"]
 mod retention;
 pub use retention::prune_revisions;

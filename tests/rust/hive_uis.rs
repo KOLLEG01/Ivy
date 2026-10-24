@@ -274,19 +274,17 @@ fn uis_catalog_filters_metadata_fills_pages_and_preserves_priority_utf8_cursor_a
         &mut s,
         "uis.catalog",
         json!({"limit":2}),
-        json!(["1000000:a"]),
+        json!("1000000:a"),
     );
-    let coerced = push(
+    let boundary = push(
         &mut s,
         from_token(operation("catalog", json!({"limit":2})), t),
     );
-    let t = token(&mut s, "uis.catalog", json!({}), json!({"toString":5}));
-    let coercion = push(&mut s, from_token(operation("catalog", json!({})), t));
     let mut overdue = operation("catalog", json!({}));
     overdue["overdue"] = true.into();
     let overdue = push(&mut s, overdue);
     let r = compare(&s);
-    for i in [first, second, third, list, slug, coerced] {
+    for i in [first, second, third, list, slug, boundary] {
         success(&r, i);
     }
     assert_eq!(
@@ -304,8 +302,12 @@ fn uis_catalog_filters_metadata_fills_pages_and_preserves_priority_utf8_cursor_a
     assert_eq!(value(&r, slug), "a");
     error(&r, bad, "not_found");
     error(&r, mismatch, "invalid_cursor");
-    error(&r, coercion, "internal_error");
     error(&r, overdue, "limit_exceeded");
+    let t = token(&mut s, "uis.catalog", json!({}), json!(["1000000:a"]));
+    let invalid = push(&mut s, from_token(operation("catalog", json!({})), t));
+    let root = Root::new();
+    let actual = native_with_runtime(&root.0.join("native.sqlite"), &s, Some(&r["registryRuntime"]));
+    error(&actual, invalid, "invalid_cursor");
 }
 
 #[test]
@@ -420,7 +422,7 @@ fn uis_stage_deploy_receipts_cas_slug_immutability_pruning_and_reopen_match_orig
             .as_array()
             .unwrap()
             .len(),
-        2
+        1
     );
     assert_eq!(
         r["rows"][replay]["state"]["apps"][0]["current_release_id"],
@@ -702,6 +704,9 @@ fn uis_rollback_uses_availability_and_saved_receipts_before_later_state_and_reje
     s.push(deploy("r1", "a", Value::Null, "d1"));
     s.push(stage("r2", "b", "s2"));
     s.push(deploy("r2", "b", json!("r1"), "d2"));
+    let retired = push(&mut s, rollback("r1", "r2", "retired"));
+    // Legacy retained releases can still be selected explicitly.
+    s.push(sql(format!("INSERT INTO app_releases VALUES('sample-ui','r1',{});", quote(&release("r1", "a").to_string()))));
     s.push(fixture(vec![write("private/sample-ui/r1/index.html", "z")]));
     let req = rollback("r1", "r2", "rollback");
     let rolled = push(&mut s, req.clone());
@@ -718,6 +723,7 @@ fn uis_rollback_uses_availability_and_saved_receipts_before_later_state_and_reje
     ]));
     let unavailable = push(&mut s, rollback("r1", "r3", "unavailable"));
     let r = compare(&s);
+    error(&r, retired, "not_found");
     success(&r, rolled);
     success(&r, replay);
     assert_eq!(value(&r, rolled), value(&r, replay));
@@ -725,7 +731,7 @@ fn uis_rollback_uses_availability_and_saved_receipts_before_later_state_and_reje
     error(&r, read, "ui_release_invalid");
     error(&r, missing, "not_found");
     error(&r, stale, "release_conflict");
-    error(&r, unavailable, "ui_release_invalid");
+    error(&r, unavailable, "not_found");
     assert_eq!(
         r["rows"][replay]["state"]["apps"][0]["current_release_id"],
         "r3"

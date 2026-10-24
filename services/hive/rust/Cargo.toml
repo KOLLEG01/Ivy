@@ -86,6 +86,10 @@ name = "hive-http"
 path = "../../../tests/rust/hive_http.rs"
 
 [[test]]
+name = "hive-storage-compaction"
+path = "../../../tests/rust/hive_storage_compaction.rs"
+
+[[test]]
 name = "hive-offline-backup"
 path = "../../../tests/rust/hive_offline_backup.rs"
 

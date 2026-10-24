@@ -305,12 +305,7 @@ async fn exercise_generation(replace: bool) {
         assert!(event.send(state("degraded")).is_ok());
         assert!(event.send(state("ready")).is_ok());
     }
-    let context = InvocationContext {
-        caller_principal_id: "caller".into(),
-        operation_id: None,
-        generation: 7,
-        signal: connection.signal(),
-    };
+    let context = InvocationContext::detached("caller".into(),None,7,connection.signal(),IvyError::new("service_not_ready","Service generation ended."));
     let binding = callbacks.get(&"secretary.binding".into()).unwrap();
     let mut response = binding(IvyJson::Null, context.clone());
     let binding_result=tokio::time::timeout(std::time::Duration::from_secs(5),async {tokio::select!{_=&mut work=>panic!("Generation returned while two workers were blocked"),reply=&mut response=>reply.unwrap()}}).await.unwrap();

@@ -565,7 +565,7 @@ try {
       if(new RealDate(step.now).toISOString()!==step.nowText)throw Error('Fixture clock mismatch');
       globalThis.Date=class extends RealDate{constructor(...args){super(...(args.length?args:[step.now]));}static now(){return step.now;}};
       try{
-        const context={...store.authenticate(step.context),serviceNodeId:step.context.serviceNodeId};
+        const context={...store.authenticate(step.context),serviceNodeId:step.context.serviceNodeId,generation:step.context.generation};
         const params=structuredClone(step.params);
         for(const [pointer,units]of Object.entries(step.parameterUnits??{}))set(params,pointer,String.fromCharCode(...units));
         value=store.withBudget(()=>new Objects(store)[step.op](context,params),step.overdue?-1:10000);
