@@ -154,6 +154,12 @@ export const rustTests = {
     ],
     "testThreads": 1
   },
+  "tests/rust/host-package-download-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "package_updater_cases::download_cases::",
+    "testThreads": 1
+  },
   "tests/rust/host-project-storage-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",

@@ -122,9 +122,7 @@ impl PackageClient for NativePackageClient {
             let mut file = tokio::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(node_path::filesystem_path(&node_path::from_native(
-                    &archive,
-                )))
+                .open(archive)
                 .await
                 .map_err(|_| IvyError::internal())?;
             let mut body = response.bytes_stream();
