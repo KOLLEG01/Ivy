@@ -65,7 +65,7 @@ pub fn default_service_settings_for_paths(
         "data-collector" => r#"{"rootName":"DataCollector","maximumMemoryMb":512}"#,
         "dashboards" => r#"{"rootObjectId":null}"#,
         "phone-bridge" => {
-            r#"{"native":{"executable":"dist/native/phone/Ivy.PhoneRuntime.exe"},"binding":{"address":"127.0.0.1","port":5070,"transport":"udp","incomingRingSeconds":60,"outgoingOfferMode":"auto"},"codecs":{"packetMs":20,"preferences":["EVS","G722","PCMA","PCMU"],"receiveReorderMs":20},"audio":{"captureBufferMs":20,"queueMs":80,"renderLatencyMs":20,"sourceMode":"system_excluding_runtime"},"policy":{"incoming":[],"recipients":[]},"registration":null,"credentialsPath":null,"incomingPrincipalId":null,"ringSeconds":60,"pollMs":1000}"#
+            r#"{"binding":{"address":"127.0.0.1","port":5070,"transport":"udp","incomingRingSeconds":60,"outgoingOfferMode":"auto"},"codecs":{"packetMs":20,"preferences":["EVS","G722","PCMA","PCMU"],"receiveReorderMs":20},"policy":{"incoming":[],"recipients":[]},"registration":null,"credentialsPath":null,"incomingPrincipalId":null,"ringSeconds":60,"pollMs":1000}"#
         }
         _ => return Ok(settings.clone()),
     };
@@ -78,6 +78,20 @@ pub fn default_service_settings_for_paths(
             let mut backup = defaults.required("backup")?.clone();
             backup.insert("directory", IvyJson::String(node_path::join(style, &[ivy_root.clone(), "backups".into(), "hive".into()])));
             defaults.insert("backup", backup);
+        }
+        "phone-bridge" => {
+            let windows = style == Style::Windows;
+            defaults.insert("native", IvyJson::object([("executable", if windows {
+                "dist/native/phone/Ivy.PhoneRuntime.exe"
+            } else {
+                "dist/native/linux-x64/ivy-phone-native"
+            }.into())]));
+            if windows {
+                defaults.insert("audio", parse(r#"{"captureBufferMs":20,"queueMs":80,"renderLatencyMs":20,"sourceMode":"system_excluding_runtime"}"#, 1024)?);
+            } else {
+                defaults.insert("incomingRoute", "voice".into());
+                defaults.insert("outgoingRoute", "voice".into());
+            }
         }
         "agent-manager" => {
             let claude = settings

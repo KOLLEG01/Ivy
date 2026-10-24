@@ -53,6 +53,68 @@ fn service_policy_paths_voice_bounds_and_audio_requirements() {
     }
 }
 
+#[test]
+fn host_defaults_admit_the_native_phone_on_each_platform() {
+    use ivy_host_runtime::default_settings::default_service_settings_for_paths;
+    for (style, root) in [
+        (node_path::Style::Windows, "C:\\phone-fixture"),
+        (node_path::Style::Posix, "/srv/phone-fixture"),
+    ] {
+        let home = JsString::from(root);
+        let paths = Context {
+            style,
+            cwd: home.clone(),
+        };
+        let environment = std::collections::BTreeMap::new();
+        let context = HomeContext {
+            paths: &paths,
+            environment: &environment,
+            user_home: Some(&home),
+            cwd: &home,
+            account_home: &home,
+        };
+        let hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        let configured = IvyJson::object([
+            ("native", IvyJson::object([("executableHash", hash.into())])),
+            (
+                "codexVoice",
+                IvyJson::object([
+                    (
+                        "nativeExecutable",
+                        node_path::join(style, &[home.clone(), "codex".into()]).into(),
+                    ),
+                    ("nativeExecutableHash", hash.into()),
+                    ("nativeVersion", "0.163.0".into()),
+                    ("cwd", home.clone().into()),
+                    (
+                        "nativeHome",
+                        node_path::join(style, &[home.clone(), "native-home".into()]).into(),
+                    ),
+                    (
+                        "appServer",
+                        IvyJson::object([("mode", "owned-stdio".into())]),
+                    ),
+                ]),
+            ),
+        ]);
+        let merged = default_service_settings_for_paths(
+            "phone-bridge",
+            &configured,
+            &home,
+            &node_path::join(style, &[home.clone(), "host.json".into()]),
+            style,
+        )
+        .unwrap();
+        phone_settings(&merged, &context).unwrap();
+        if style == node_path::Style::Posix {
+            assert!(merged.get("audio").is_none());
+            assert_eq!(merged.get("outgoingRoute"), Some(&"voice".into()));
+        } else {
+            assert!(merged.get("audio").is_some());
+        }
+    }
+}
+
 #[tokio::test]
 async fn protected_sections_refuse_missing_malformed_and_oversized_files() {
     let cases = cases();
