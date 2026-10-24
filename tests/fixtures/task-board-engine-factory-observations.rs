@@ -624,7 +624,7 @@ async fn terminal_observation_case(row: Json, unsupported: bool) {
         let result = &results.iter().find(|r| r.0 != "current-result").unwrap().2;
         let content = f(result, "content");
         assert_eq!(hash_json(content).unwrap(), hash_json(&Json::object([
-            ("summary", Json::from(if unsupported { "Native turn completed." } else { "answer" })),
+            ("summary", Json::from(if unsupported { "The agent run ended, but no response could be retrieved. Task completion is not confirmed." } else { "answer" })),
             ("artifacts", Json::Array(vec![])), ("codeReferences", Json::Array(vec![])), ("repositoryResult", Json::Null),
             ("limitations", Json::Array(vec!["Native completion does not automatically accept the task. Native conversation history remains available from its AgentManager owner while retained there.".into()])),
         ])).unwrap());

@@ -712,7 +712,13 @@ export const rustTests = {
   "tests/fixtures/task-board-turn-evidence.rs": {
     "package": "ivy-task-board",
     "test": "task-board-evidence",
-    "filter": "turn_evidence::actual_snapshot_and_transcript_reopen_without_io_or_writes_and_refuse_corrupt_receipts",
+    "filter": "turn_evidence::",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-native-publication.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-output",
+    "filter": "native_publication::",
     "testThreads": 1
   },
   "tests/fixtures/task-board-native-policies.rs": {
@@ -1176,6 +1182,15 @@ export const rustTests = {
         "package": "ivy-host-runtime",
         "bin": "ivy-host-job"
       }
+    ]
+  },
+  "tests/rust/agent-native-owner.rs": {
+    "package": "ivy-agent-manager",
+    "test": "agent-runtime-entry",
+    "filter": "native_owner_cases::",
+    "testThreads": 1,
+    "prerequisites": [
+      { "platform": "win32", "package": "ivy-host-runtime", "bin": "ivy-job" }
     ]
   },
   "tests/rust/agent-claude-events.rs": {

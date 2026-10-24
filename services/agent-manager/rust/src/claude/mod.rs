@@ -1,6 +1,6 @@
 //! Rust-owned Claude protocol/state and its private pinned SDK transport.
-//! The legacy adapter/catalog identity is unchanged. Host bindings and
-//! packaging are separate from protocol state and the private SDK owner.
+//! Public protocol and saved data stay with the native owner; JavaScript is
+//! limited to calls into the vendor SDK over a private framed transport.
 pub mod ask;
 pub mod bridge;
 mod commands;
@@ -17,6 +17,7 @@ pub mod rate_limits;
 pub mod sdk_events;
 pub mod sdk_options;
 pub mod store;
+pub mod stdio;
 mod subagents;
 mod turns;
 mod value;

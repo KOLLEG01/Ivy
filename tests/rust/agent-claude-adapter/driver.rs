@@ -174,7 +174,7 @@ async fn async_owner_keeps_native_controls_live_through_approvals_diff_and_backp
             cwd: repository,
             environment: std::env::vars_os()
                 .filter(|(k, _)| {
-                    matches!(k.to_str(), Some("SystemRoot" | "WINDIR" | "TEMP" | "TMP"))
+                    k.to_str().is_some_and(|s|matches!(s.to_ascii_lowercase().as_str(), "systemroot" | "windir" | "temp" | "tmp"))
                 })
                 .collect::<BTreeMap<_, _>>(),
         },

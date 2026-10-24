@@ -11,7 +11,13 @@ use super::{
     workflow::{EventSink, IoFuture, WorkflowFiles},
 };
 use ivy_contracts::{IvyJson as J, JsString};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tokio::{
     sync::{mpsc, oneshot},
     task::{AbortHandle, JoinHandle, JoinSet},
@@ -64,14 +70,16 @@ enum Input {
     },
 }
 enum TurnInput {
-    Message(J),
-    End(Option<AdapterError>),
+    Message(JsString, J),
+    End(JsString, Option<AdapterError>),
 }
 struct Running {
     id: JsString,
     context: J,
     auto_allow: bool,
     sender: mpsc::Sender<TurnInput>,
+    query: Arc<Mutex<JsString>>,
+    interrupted: Arc<AtomicBool>,
 }
 enum PendingKind {
     Permission(J),
@@ -408,11 +416,15 @@ impl Owner {
             }
         };
         let (sender, mut receiver) = mpsc::channel(64);
+        let query = Arc::new(Mutex::new(turn.clone()));
+        let interrupted = Arc::new(AtomicBool::new(false));
         self.running.push(Running {
             id: turn.clone(),
             context: context.clone(),
             auto_allow: options.auto_allow,
             sender,
+            query: query.clone(),
+            interrupted: interrupted.clone(),
         });
         let bridge = self.bridge.clone();
         let owner = self.sender.clone();
@@ -432,28 +444,73 @@ impl Owner {
                     .map_err(|_| AdapterError::new("Claude event response owner closed"))?
             })
         });
-        let mut state = SdkTurn::new(
-            context,
-            &self.bindings.sdk.home,
-            &self.bindings.sdk.environment,
-            self.bindings.workflow_files.clone(),
-            sink,
-        );
+        let files = self.bindings.workflow_files.clone();
+        let sdk_home = self.bindings.sdk.home.clone();
+        let sdk_environment = self.bindings.sdk.environment.clone();
+        let make_state = move || {
+            SdkTurn::new(
+                context.clone(),
+                &sdk_home,
+                &sdk_environment,
+                files.clone(),
+                sink.clone(),
+            )
+        };
         self.jobs.spawn(async move {
-            let initial=bridge.call("query/start",options.params).await;
-            if let Err(error)=initial {let _=owner.send(Input::Finished{turn,result:Err(error)}).await;return}
-            let changed = state.changed();
-            while !state.is_finished() {
-                let result=tokio::select! {
-                    input=receiver.recv()=>match input {Some(TurnInput::Message(message))=>state.message(&message).await,Some(TurnInput::End(error))=>state.end(error).await,None=>state.end(None).await},
-                    _=changed.notified()=>Ok(()),
-                };
-                if let Err(error)=result {let _=state.end(Some(error)).await;break}
-            }
-            let result=state.outcome().unwrap_or_else(||Err(AdapterError::new("Claude SDK turn closed without an outcome")));
+            let mut attempt = 0;
+            let result = 'attempt: loop {
+                let query_id = query.lock().unwrap().clone();
+                let mut params = options.params.clone();
+                params.insert("turnId", query_id.clone().into_json());
+                let mut state = make_state();
+                if interrupted.load(Ordering::Acquire) {
+                    let _ = state.end(Some(AdapterError::new("Claude turn interrupted before model work started."))).await;
+                } else if let Err(error) = bridge.call("query/start", params).await {
+                    let _ = state.end(Some(error)).await;
+                } else if interrupted.load(Ordering::Acquire) {
+                    // A native interrupt can race the SDK's start acknowledgement.
+                    let _ = bridge.call("query/interrupt", J::object([("turnId",query_id.clone().into_json())])).await;
+                }
+                let changed = state.changed();
+                while !state.is_finished() {
+                    let result = tokio::select! {
+                        input=receiver.recv()=>match input {
+                            Some(TurnInput::Message(id, message)) if id == query_id => state.message(&message).await,
+                            Some(TurnInput::End(id, error)) if id == query_id => state.end(error).await,
+                            Some(_) => Ok(()),
+                            None => state.end(None).await,
+                        },
+                        _=changed.notified()=>Ok(()),
+                    };
+                    if let Err(mut error) = result {
+                        if error.name == "empty_turn" {
+                            if attempt == 0 && !interrupted.load(Ordering::Acquire) {
+                                attempt += 1;
+                                // Distinct transport identity fences late SDK messages, EOF and controls.
+                                *query.lock().unwrap() = concat(&[&turn, &":retry1".into()]);
+                                let _ = bridge.call("query/close", J::object([("turnId", query_id.clone().into_json())])).await;
+                                let (reply, receive) = oneshot::channel();
+                                let _ = owner.send(Input::Event { turn: turn.clone(), event: J::object([
+                                    ("type", "notice".into()), ("level", "warning".into()),
+                                    ("message", "Claude returned an empty result before starting model work. Retrying once.".into()),
+                                ]), reply }).await;
+                                let _ = receive.await;
+                                continue 'attempt;
+                            }
+                            error = AdapterError::new(if attempt > 0 {
+                                "Claude returned no response after one retry. No model work was started; the task remains unfinished."
+                            } else { "Claude turn interrupted before model work started." });
+                        }
+                        let _ = state.end(Some(error)).await;
+                        break;
+                    }
+                }
+                break state.outcome().unwrap_or_else(||Err(AdapterError::new("Claude SDK turn closed without an outcome")));
+            };
             // Complete native state independently of SDK close/abort promises.
             let _=owner.send(Input::Finished{turn:turn.clone(),result}).await;
-            let _=bridge.call("query/close",J::object([("turnId",turn.into_json())])).await;
+            let query_id = query.lock().unwrap().clone();
+            let _=bridge.call("query/close",J::object([("turnId",query_id.into_json())])).await;
         });
     }
     fn control(&mut self, id: u64, method: &'static str, params: J) {
@@ -491,7 +548,7 @@ impl Owner {
                     (
                         "query/steer",
                         J::object([
-                            ("turnId", running.id.clone().into_json()),
+                            ("turnId", running.query.lock().unwrap().clone().into_json()),
                             ("messages", messages),
                         ]),
                     )
@@ -505,9 +562,10 @@ impl Owner {
                 .iter()
                 .filter(|r| field(&r.context, "threadId").as_js_string() == Some(&thread))
                 .map(|r| {
+                    r.interrupted.store(true, Ordering::Release);
                     (
                         "query/interrupt",
-                        J::object([("turnId", r.id.clone().into_json())]),
+                        J::object([("turnId", r.query.lock().unwrap().clone().into_json())]),
                     )
                 })
                 .collect())
@@ -555,7 +613,11 @@ impl Owner {
                 .filter(|n| safe_integer(*n) && *n >= 0.0)
                 .ok_or_else(|| AdapterError::new("Invalid SDK callback identifier"))?
                 as u64;
-            let Some(running) = self.running.iter().find(|r| r.id == turn) else {
+            let Some(running) = self
+                .running
+                .iter()
+                .find(|r| *r.query.lock().unwrap() == turn)
+            else {
                 self.sdk_reply(
                     callback_id,
                     Ok(J::object([
@@ -565,6 +627,7 @@ impl Owner {
                 );
                 return Ok(None);
             };
+            let turn = running.id.clone();
             let callback = ask::callback(
                 &running.context,
                 field(&frame, "toolName"),
@@ -614,20 +677,27 @@ impl Owner {
             }
             return Ok(None);
         }
-        let Some(running) = self.running.iter().find(|r| r.id == turn) else {
+        let Some(running) = self
+            .running
+            .iter()
+            .find(|r| *r.query.lock().unwrap() == turn)
+        else {
             return Ok(None);
         };
         let input = if is(kind, "message") {
-            TurnInput::Message(field(&frame, "message").clone())
+            TurnInput::Message(turn, field(&frame, "message").clone())
         } else if is(kind, "end") {
-            TurnInput::End(if field(&frame, "error").is_null() {
-                None
-            } else {
-                Some(AdapterError::new(text(field(
-                    field(&frame, "error"),
-                    "message",
-                ))))
-            })
+            TurnInput::End(
+                turn,
+                if field(&frame, "error").is_null() {
+                    None
+                } else {
+                    Some(AdapterError::new(text(field(
+                        field(&frame, "error"),
+                        "message",
+                    ))))
+                },
+            )
         } else {
             return Ok(None);
         };

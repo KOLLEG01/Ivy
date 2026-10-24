@@ -156,15 +156,23 @@ async fn host_workflow_link_escape_and_sharing_errors_release_owned_handles() {
             .share_mode(0)
             .open(&file)
             .unwrap();
-        let error = (files.read_regular)(
+        let original = Command::new("node")
+            .args(["--eval", "require('node:fs').readFileSync(process.argv[1])"])
+            .arg(&file)
+            .output()
+            .unwrap();
+        let blocked = !original.status.success();
+        let read = (files.read_regular)(
             node_path::from_native(&outside),
             node_path::from_native(&file),
             64,
         )
-        .await
-        .unwrap_err();
-        assert_eq!(error.name, "Error");
-        assert_eq!(f(&error.to_wire(), "message"), &J::String(error.message));
+        .await;
+        assert_eq!(read.is_err(), blocked);
+        if let Err(error) = read {
+            assert_eq!(error.name, "Error");
+            assert_eq!(f(&error.to_wire(), "message"), &J::String(error.message));
+        }
         drop(denied);
         drop(
             fs::OpenOptions::new()

@@ -3,9 +3,12 @@ import {readFile,realpath} from 'node:fs/promises';
 import {join,dirname,relative} from 'node:path';
 import {createHash} from 'node:crypto';
 import assert from 'node:assert/strict';
-import {startNativeProcess} from '../../dist/services/agent-manager/src/process.js';
-import {IvyError,requireThat} from '../../dist/packages/contracts/src/errors.js';
-import {initializedServerVersion} from '../../dist/packages/host-runtime/src/codex-daemon.js';
+import {registerHooks} from 'node:module';
+import {fileURLToPath} from 'node:url';
+registerHooks({resolve(s,c,next){if(s.startsWith('.')&&s.endsWith('.js')&&c.parentURL){const u=new URL(s.slice(0,-3)+'.ts',c.parentURL);if(existsSync(fileURLToPath(u)))return next(u.href,c);}return next(s,c);}});
+const {startNativeProcess}=await import('../../services/agent-manager/src/process.ts');
+const {IvyError,requireThat}=await import('../../packages/contracts/src/errors.ts');
+const {initializedServerVersion}=await import('../../services/agent-manager/src/daemon.ts');
 const digest=bytes=>'sha256:'+createHash('sha256').update(bytes).digest('hex');
 let bytes='';for await(const chunk of process.stdin)bytes+=chunk;const input=JSON.parse(bytes);
 const limits={maxOperations:100,maxJournalBytes:1048576,maxPendingInputs:8,maxNotificationBytes:1048576};
@@ -31,9 +34,9 @@ function prepare(root,variant){
  if(variant==='data-home')settings.codexHome=dataRoot;
  if(variant==='home-link'){mkdirSync(join(root,'outside'));symlinkSync(join(root,'outside'),home,'junction');}
  if(variant.startsWith('claude-')){
-  const adapter=join(root,'adapter'),source=join(adapter,'dist','src');mkdirSync(source,{recursive:true});
-  writeFileSync(join(adapter,'package-lock.json'),'{}\n');writeFileSync(join(source,'adapter.mjs'),'// pinned fixture\n');writeFileSync(join(source,'extra.mjs'),'// extra\n');
-  const manifest=['dist/src/adapter.mjs','dist/src/extra.mjs','package-lock.json'].map(name=>name+'\0'+digest(readFileSync(join(adapter,name))).slice(7)+'\0').join('');
+  const adapter=join(root,'adapter'),source=join(adapter,'bridge');mkdirSync(source,{recursive:true});
+  writeFileSync(join(adapter,'package-lock.json'),'{}\n');writeFileSync(join(source,'main.mjs'),'// pinned fixture\n');writeFileSync(join(source,'session.mjs'),'// extra\n');
+  const manifest=['bridge/main.mjs','bridge/session.mjs','package-lock.json'].map(name=>name+'\0'+digest(readFileSync(join(adapter,name))).slice(7)+'\0').join('');
   settings.nativeExecutableHash=digest(manifest);
   const cli=join(bin,'claude.cmd');writeFileSync(cli,'pinned CLI bytes; never execute\n');
   settings.appServer={mode:'claude-adapter',adapterRoot:adapter,nodeExecutableHash:digest(readFileSync(executable)),claudeExecutable:cli,claudeExecutableHash:digest(readFileSync(cli)),defaultModel:'fixture-model'};

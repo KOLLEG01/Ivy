@@ -27,6 +27,16 @@ async fn stop_signal() -> IvyResult<()> {
 }
 
 async fn run(args: &[OsString]) -> IvyResult<Option<IvyJson>> {
+    if args.first().is_some_and(|arg| arg == "--claude-stdio") {
+        if args.get(1).is_some_and(|arg| arg == "--help") {
+            println!("claude-codex-adapter app-server (Rust owner)");
+            return Ok(None);
+        }
+        ivy_agent_manager::claude::stdio::run().await.map_err(|_| {
+            IvyError::new("claude_runtime_failed", "Claude native runtime stopped.")
+        })?;
+        return Ok(None);
+    }
     let path = configuration_path(args, std::env::var_os("IVY_INSTANCE_CONFIG"))?;
     if args.iter().any(|arg| arg == "--health") {
         let config = native_instance_config(path).await?;

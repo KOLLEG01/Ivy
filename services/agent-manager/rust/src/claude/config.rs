@@ -319,19 +319,38 @@ fn redact(text: &JsString) -> JsString {
         r"(?-u:\b)AKIA[0-9A-Z]{16}(?-u:\b)",
         r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?s:.*?)-----END [A-Z ]*PRIVATE KEY-----",
     ].into_iter().map(|pattern| regex::Regex::new(pattern).expect("static redaction pattern")).collect());
-    let mut text = String::from_utf16_lossy(&text.0);
+    let mut text = text.clone();
     for (index, pattern) in patterns.iter().enumerate() {
-        text = pattern
-            .replace_all(&text, |captures: &regex::Captures<'_>| {
-                if index == 0 {
-                    format!("{}=[redacted]", &captures[1])
-                } else {
-                    "[redacted]".to_owned()
-                }
-            })
-            .into_owned();
+        // Match credential syntax without replacing untouched UTF-16 units.
+        let matched: String = text
+            .0
+            .iter()
+            .map(|u| char::from_u32(*u as u32).unwrap_or('\u{fffd}'))
+            .collect();
+        let mut boundaries = vec![0; matched.len() + 1];
+        for (unit, (byte, _)) in matched.char_indices().enumerate() {
+            boundaries[byte] = unit;
+        }
+        boundaries[matched.len()] = text.0.len();
+        let mut output = Vec::new();
+        let mut consumed = 0;
+        for captures in pattern.captures_iter(&matched) {
+            let whole = captures.get(0).unwrap();
+            let start = boundaries[whole.start()];
+            let end = boundaries[whole.end()];
+            output.extend_from_slice(&text.0[consumed..start]);
+            if index == 0 {
+                let key = captures.get(1).unwrap();
+                output.extend_from_slice(&text.0[boundaries[key.start()]..boundaries[key.end()]]);
+                output.extend(JsString::from("=").0);
+            }
+            output.extend(JsString::from("[redacted]").0);
+            consumed = end;
+        }
+        output.extend_from_slice(&text.0[consumed..]);
+        text = JsString(output);
     }
-    text.into()
+    text
 }
 pub fn provider_loop_config(environment: &J, config: &J) -> Result<J> {
     let legacy = runtime_type(&coalesce(

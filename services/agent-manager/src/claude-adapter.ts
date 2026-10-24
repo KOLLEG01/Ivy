@@ -14,16 +14,16 @@ export async function checkedClaudeAdapter(
     "Claude adapter root must be absolute.",
   );
   const actualRoot = await realpath(root);
-  const source = join(actualRoot, "dist", "src");
+  const source = join(actualRoot, "bridge");
   const names = (await readdir(source)).filter((name) => name.endsWith(".mjs"));
   requireThat(
-    names.includes("adapter.mjs"),
+    names.includes("main.mjs") && names.includes("session.mjs"),
     "native_build_mismatch",
     "Claude adapter entrypoint is missing.",
   );
   const files = [
     "package-lock.json",
-    ...names.map((name) => "dist/src/" + name),
+    ...names.map((name) => "bridge/" + name),
   ].sort();
   const hash = createHash("sha256");
   for (const name of files) {
@@ -49,7 +49,7 @@ export async function checkedClaudeAdapter(
       "native_build_mismatch",
       "Claude adapter bytes differ from the pinned catalog.",
     );
-  return join(source, "adapter.mjs");
+  return join(source, "main.mjs");
 }
 
 const paidConfigurationKeys = [

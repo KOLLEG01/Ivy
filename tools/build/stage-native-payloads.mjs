@@ -45,6 +45,10 @@ function runtimeAssets(component, root, os) {
   if (component === 'agent-manager') {
     for (const name of ['hive-mcp-instructions.md', 'hive-mcp-agent-summary.md', 'hive-mcp-examples.md', 'ivy-dev-mcp-instructions.md'])
       assets.push({ path: 'instructions/' + name, bytes: readFileSync(regular(root, resolve(root, 'instructions', name))) });
+    for (const name of ['adapter.lock.json', 'package.json', 'package-lock.json', 'bridge/main.mjs', 'bridge/session.mjs', 'LICENSE.adapter']) {
+      const path = 'services/agent-manager/claude/' + name;
+      assets.push({ path, bytes: readFileSync(regular(root, resolve(root, path))) });
+    }
   }
   if (component === 'chat-bridge') {
     const directory = resolve(root, 'services/chat-bridge/rust/licenses');

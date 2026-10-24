@@ -84,7 +84,7 @@ test('native staging needs only the selected host and emits no Node entry shim',
   assert.ok(!existsSync(join(root, 'missing')));
 });
 
-for (const component of ['fixture', 'host-executor', 'task-board', 'secretary']) test(`normal native build selects one target and registered helpers (${component})`, t => {
+for (const component of ['fixture', 'host-executor', 'task-board', 'secretary', 'agent-manager']) test(`normal native build selects one target and registered helpers (${component})`, t => {
   const root = mkdtempSync(join(tmpdir(), 'ivy-native-build-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const previousTarget = process.env.CARGO_TARGET_DIR, previousCache = process.env.IVY_BUILD_CACHE_ROOT;
@@ -132,7 +132,7 @@ for (const component of ['fixture', 'host-executor', 'task-board', 'secretary'])
     }).join('\n');
   };
   const runtimeNames = ['icudt78.dll', 'icuuc78.dll', 'icuin78.dll', 'LICENSE.icu'];
-  if (component === 'task-board' || component === 'secretary') {
+  if (['task-board', 'secretary', 'agent-manager'].includes(component)) {
     const catalogs = join(root, 'specs/native/fixture'); mkdirSync(catalogs, { recursive: true });
     writeFileSync(join(catalogs, 'catalog.json'), '{}');
   }
@@ -141,16 +141,23 @@ for (const component of ['fixture', 'host-executor', 'task-board', 'secretary'])
     mkdirSync(join(root, 'instructions'));
     writeFileSync(join(root, 'instructions/secretary-notification-policy.ts'), "export const secretaryNotificationPolicy = 'synthetic policy';");
   }
-  if (component === 'task-board') {
-    writeFileSync(join(root, 'services/task-board/build-inputs.json'), JSON.stringify({
-      schemaVersion: 1,
-      targets: { 'win32-x64': runtimeNames.map(name => '.local/native-runtime/win32-x64/' + name) },
-    }));
+  if (component === 'task-board' || component === 'agent-manager') {
     const runtime = join(root, '.local/native-runtime/win32-x64'); mkdirSync(runtime, { recursive: true });
+    writeFileSync(join(root, `services/${component}/build-inputs.json`), JSON.stringify({ schemaVersion: 1,
+      targets: { 'win32-x64': runtimeNames.map(name => '.local/native-runtime/win32-x64/' + name) } }));
     for (const name of runtimeNames.slice(0, -1)) writeFileSync(join(runtime, name), 'selected runtime ' + name);
     assert.throws(() => buildNativeDeployment({ component, root, target: 'x86_64-pc-windows-msvc', identity, cargo }));
     assert.equal(calls.length, 0, 'Incomplete runtime inputs must fail before Cargo or staging');
     writeFileSync(join(runtime, 'LICENSE.icu'), 'selected runtime LICENSE.icu');
+  }
+  const claudeAssets=['adapter.lock.json','package.json','package-lock.json','bridge/main.mjs','bridge/session.mjs','LICENSE.adapter'];
+  if (component === 'agent-manager') {
+    for (const path of [
+      ...['hive-mcp-instructions.md','hive-mcp-agent-summary.md','hive-mcp-examples.md','ivy-dev-mcp-instructions.md'].map(name=>'instructions/'+name),
+      ...claudeAssets.map(name=>'services/agent-manager/claude/'+name),
+    ]) {
+      const target=join(root,path);mkdirSync(dirname(target),{recursive:true});writeFileSync(target,readFileSync(path));
+    }
   }
   const built = buildNativeDeployment({ component, root, target: 'x86_64-pc-windows-msvc', identity, cargo });
   assert.deepEqual(built.platforms, ['win32-x64']);
@@ -161,10 +168,14 @@ for (const component of ['fixture', 'host-executor', 'task-board', 'secretary'])
   assert.ok(existsSync(join(root, built.plan.entrypoint.executable)));
   assert.ok(existsSync(join(root, built.plan.readiness.command.executable)));
   assert.equal(existsSync(join(root, 'dist/native/win32-x64/ivy-host-job.exe')), component === 'host-executor');
-  if (component === 'task-board') {
+  if (component === 'task-board' || component === 'agent-manager') {
     for (const name of runtimeNames) assert.equal(readFileSync(join(root, 'dist/native/win32-x64', name), 'utf8'), 'selected runtime ' + name);
     assert.equal(existsSync(join(root, 'dist/specs/native/fixture/catalog.json')), true);
-    assert.equal(existsSync(join(root, 'dist/services/task-board/src/main.js')), false);
+    assert.equal(existsSync(join(root, `dist/services/${component}/src/main.js`)), false);
+    if (component === 'agent-manager') {
+      for (const name of claudeAssets) assert.deepEqual(readFileSync(join(root,'dist/services/agent-manager/claude',name)),readFileSync('services/agent-manager/claude/'+name));
+      assert.equal(existsSync(join(root,'dist/services/agent-manager/claude/adapter.patch')),false);
+    }
   }
   if (component === 'secretary') {
     assert.equal(readFileSync(join(root, 'dist/services/secretary/pdf-worker.mjs'), 'utf8'), 'synthetic PDF worker');

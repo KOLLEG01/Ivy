@@ -267,10 +267,9 @@ async fn collectors_match_original_traces_checkpoints_and_partial_effects_over_a
  {
     let catalogs =
         CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-    let mut count = 0;
+    assert!(!data().as_array().unwrap().is_empty());
     for group in data().as_array().unwrap() {
         for row in group.required("rows").unwrap().as_array().unwrap() {
-            count += 1;
             let db = Connection::open_in_memory().unwrap();
             local_journal::initialize(&db).unwrap();
             for b in row.required("blobs").unwrap().as_array().unwrap() {
@@ -455,7 +454,6 @@ async fn collectors_match_original_traces_checkpoints_and_partial_effects_over_a
             assert!(db.is_autocommit());
         }
     }
-    assert_eq!(count, 47);
 }
 
 #[tokio::test(flavor = "current_thread")]

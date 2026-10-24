@@ -53,6 +53,16 @@ pub fn final_output_text(item: &Json) -> JsString {
     JsString::default()
 }
 
+pub fn missing_output_summary(status: &JsString) -> JsString {
+    if status == &JsString::from("completed") {
+        return "The agent run ended, but no response could be retrieved. Task completion is not confirmed.".into();
+    }
+    let mut summary = JsString::from("Native turn ");
+    summary.0.extend_from_slice(&status.0);
+    summary.0.push(b'.' as u16);
+    summary
+}
+
 pub fn bounded_output_summary(text: &JsString) -> JsString {
     // Buffer.byteLength replaces each unpaired surrogate with U+FFFD. Count
     // without allocating a UTF-8 copy, stopping as soon as the limit is crossed.

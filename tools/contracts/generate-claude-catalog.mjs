@@ -5,13 +5,12 @@ const root = new URL("../../", import.meta.url);
 const read = (path) => JSON.parse(readFileSync(new URL(path, root), "utf8"));
 const lock = read("services/agent-manager/claude/adapter.lock.json");
 const base = read("specs/native/codex-0.158.0/catalog.json");
-const patch = readFileSync(
-  new URL("services/agent-manager/claude/adapter.patch", root),
-);
+import { claudeAdapterBundleHash } from '../package/build-claude-adapter.mjs';
+import { fileURLToPath } from 'node:url';
 const hash = (bytes) =>
   "sha256:" + createHash("sha256").update(bytes).digest("hex");
-if (hash(patch) !== lock.patchHash)
-  throw new Error("Claude adapter patch differs from its lock");
+if (claudeAdapterBundleHash(fileURLToPath(new URL('services/agent-manager/claude', root))) !== lock.bundleHash)
+  throw new Error("Claude SDK bridge differs from its lock");
 
 // This is the tested Ivy surface of the pinned 0.142.3 adapter plus one
 // adapter-side 0.158 project ownership and item paging extensions. Do not expose upstream stubs.
@@ -57,8 +56,7 @@ const catalog = {
   version: lock.protocolVersion,
   sourceHash: hash(
     JSON.stringify({
-      commit: lock.commit,
-      patchHash: lock.patchHash,
+      agentSdkVersion: lock.agentSdkVersion,
       bundleHash: lock.bundleHash,
       protocolVersion: lock.protocolVersion,
       schemaSourceHash: base.sourceHash,

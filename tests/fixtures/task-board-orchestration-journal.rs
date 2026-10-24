@@ -611,7 +611,7 @@ async fn concrete_orchestration_persists_verified_terminal_evidence_reopens_and_
                     *engine.summary.borrow(),
                     Some(
                         if unsupported || handoff {
-                            "Native turn completed."
+                            "The agent run ended, but no response could be retrieved. Task completion is not confirmed."
                         } else {
                             "answer"
                         }

@@ -24,6 +24,9 @@ export const turnsParams = (threadId: string, cursor: string | null) => ({ threa
 export const outputParams = (threadId: string, turnId: string, cursor: string | null) => ({ threadId, turnId, cursor, limit: 1, sortDirection: 'desc' } as const);
 export const finalOutputText = (item: Record<string, Wire.Json>): string =>
   item['type'] === 'agentMessage' && item['phase'] !== 'commentary' ? nativeString(item['text']) : '';
+export const missingOutputSummary = (status: string): string => status === 'completed'
+  ? 'The agent run ended, but no response could be retrieved. Task completion is not confirmed.'
+  : 'Native turn ' + status + '.';
 export function boundedOutputSummary(text: string): string {
   if (Buffer.byteLength(text) <= 262144) return text;
   let shortened = text.slice(0, 65536); if (/[\uD800-\uDBFF]$/.test(shortened)) shortened = shortened.slice(0, -1);
@@ -105,7 +108,7 @@ export class TaskBoardTurnEvidence {
       const items = nativeTurnItems(catalogFor(source.nativeVersion, { catalogHash: observed.catalogHash }).contract, observed.reply.result, source.turnId);
       requireThat(items.length === 1 && !!(text = finalOutputText(items[0]!)), 'task_board_native_evidence_required', 'Final output must be one assistant answer from the exact turn.');
     }
-    return { snapshot, status: value.status, summary: boundedOutputSummary(text || 'Native turn ' + value.status + '.') };
+    return { snapshot, status: value.status, summary: boundedOutputSummary(text || missingOutputSummary(value.status)) };
   }
   async savePage(runPin: TaskBoard.ObjectPin, snapshot: TaskBoard.NativeTurnSnapshot, collectionId: string, previous: TaskBoard.ObjectPin | null,
     index: number, cursor: string | null, observation: Agent.ReadObservation): Promise<TaskBoard.ObjectPin> {
@@ -185,7 +188,7 @@ export class TaskBoardTurnEvidence {
     const verifiedTurn = this.selectTurn(verification.reply, initial.turnId);
     requireThat(verifiedTurn['status'] === initial.status && Number.isFinite(Date.parse(verification.observedAt)) && Date.parse(verification.observedAt) >= latestRead && !observations.has(verification.observationId),
       'task_board_native_state_changed', 'A fresh distinct native completion observation must still match after item collection.');
-    if (!text) text = lastText || 'Native turn ' + initial.status + '.';
+    if (!text) text = lastText || missingOutputSummary(initial.status);
     if (Buffer.byteLength(text) > 262144) {
       text = text.slice(0, 65536); if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
       text += '\n\nThe complete native output is retained in the transcript artifact.';

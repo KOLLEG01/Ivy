@@ -23,6 +23,30 @@ use tokio::{
 
 pub const VERSION: f64 = 1.0;
 const MAXIMUM_BYTES: usize = 32 * 1024 * 1024;
+/// Node's module/SDK path parsers require DOS/UNC spelling, including when
+/// Rust admitted the same file through a canonical Windows namespace path.
+pub(super) fn sdk_path(path: &std::path::Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::{
+            os::windows::ffi::{OsStrExt, OsStringExt},
+            path::{Component, Prefix},
+        };
+        let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if let Some(Component::Prefix(prefix)) = path.components().next() {
+            match prefix.kind() {
+                Prefix::VerbatimDisk(_) => return PathBuf::from(OsString::from_wide(&units[4..])),
+                Prefix::VerbatimUNC(_, _) => {
+                    return PathBuf::from(OsString::from_wide(
+                        &[&[92, 92][..], &units[8..]].concat(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    path.to_path_buf()
+}
 pub struct BridgeLaunch {
     pub node_executable: PathBuf,
     pub entry: PathBuf,
@@ -49,7 +73,7 @@ impl Bridge {
     ) -> Result<(Self, mpsc::Receiver<J>)> {
         let mut command = Command::new(&launch.node_executable);
         command
-            .arg(&launch.entry)
+            .arg(sdk_path(&launch.entry))
             .current_dir(&launch.cwd)
             .env_clear()
             .envs(&launch.environment)
@@ -130,8 +154,14 @@ impl Bridge {
             exited.store(true, Ordering::Release);
             // This is the exact owned child, never a process-name or host scan.
             let _ = input.shutdown().await;
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            // EOF asks the SDK transport to close its vendor-owned CLI first.
+            if tokio::time::timeout(std::time::Duration::from_secs(2), child.wait())
+                .await
+                .is_err()
+            {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+            }
             diagnostics.abort();
             let _ = diagnostics.await;
             for (_, reply) in std::mem::take(&mut *waiting.lock().unwrap()) {

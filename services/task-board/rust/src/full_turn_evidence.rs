@@ -7,6 +7,7 @@ use crate::{
     },
     operations::Store,
     read_evidence::ReadIdentity,
+    turn_output::missing_output_summary,
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
@@ -232,7 +233,7 @@ impl<S: TurnEvidenceStore> FullTurnEvidence<'_, S> {
             text = last;
         }
         if text.0.is_empty() {
-            text = format!("Native turn {}.", s(initial, "status")?.to_utf8()?).into();
+            text = missing_output_summary(s(initial, "status")?);
         }
         Ok(Completion {
             status: s(initial, "status")?.clone(),

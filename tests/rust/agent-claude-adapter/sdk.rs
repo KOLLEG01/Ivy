@@ -312,7 +312,7 @@ async fn owned_bridge_multiplexes_callbacks_and_stops_with_backpressure() {
         entry: repository.join("tests/fixtures/agent-claude-bridge-transport.mjs"),
         cwd: repository.clone(),
         environment: std::env::vars_os()
-            .filter(|(k, _)| matches!(k.to_str(), Some("SystemRoot" | "WINDIR" | "TEMP" | "TMP")))
+            .filter(|(k, _)| k.to_str().is_some_and(|s|matches!(s.to_ascii_lowercase().as_str(), "systemroot" | "windir" | "temp" | "tmp")))
             .collect::<BTreeMap<_, _>>(),
     };
     let (bridge, mut events) = Bridge::spawn(launch, Arc::new(|_| {})).unwrap();

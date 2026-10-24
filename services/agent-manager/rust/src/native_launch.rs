@@ -400,6 +400,19 @@ async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection
             [
                 ("CLAUDE_CONFIG_DIR", config.clone().into_os_string()),
                 ("CLAUDE_CODEX_HOME", adapter_home.clone().into_os_string()),
+                ("IVY_CLAUDE_SDK_NODE", executable.clone().into_os_string()),
+                (
+                    "IVY_CLAUDE_ACCOUNT_HOME",
+                    node_path::to_native(&options.home_inputs.account_home).into_os_string(),
+                ),
+                (
+                    "IVY_CLAUDE_SDK_ENTRY",
+                    adapter_script
+                        .as_ref()
+                        .ok_or_else(IvyError::internal)?
+                        .clone()
+                        .into_os_string(),
+                ),
                 ("CLAUDE_CODEX_CLI", cli.clone().into_os_string()),
                 ("CLAUDE_CODEX_RUNTIME_TYPE", "agent-sdk-sidecar".into()),
                 ("CLAUDE_CODEX_PROVIDER", "claude-code".into()),
@@ -427,6 +440,14 @@ async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection
             .map(|(key, value)| (key.into(), value)),
         );
     }
+    let executable = if claude.is_some() {
+        ivy_host_runtime::native_plan::native_binary_path(
+            &node_path::filesystem_path(&options.artifact_root),
+            "ivy-agent-manager",
+        )
+    } else {
+        executable
+    };
     let executables = BTreeMap::from([("codex".into(), executable.clone())]);
     let run = |args| {
         let command = process::Command {
@@ -454,12 +475,8 @@ async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection
             .await
         }
     };
-    let version_probe = run(if let Some(adapter) = &adapter_script {
-        vec![
-            adapter.clone().into_os_string(),
-            "app-server".into(),
-            "--help".into(),
-        ]
+    let version_probe = run(if claude.is_some() {
+        vec!["--claude-stdio".into(), "--help".into()]
     } else {
         vec!["--version".into()]
     })
@@ -541,13 +558,8 @@ async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection
     };
     let epoch = JsString::from(uuid::Uuid::new_v4().to_string());
     let events = (options.begin_epoch)(epoch.clone())?;
-    let args = if let Some(adapter) = adapter_script {
-        vec![
-            adapter.into_os_string(),
-            "app-server".into(),
-            "--listen".into(),
-            "stdio://".into(),
-        ]
+    let args = if claude.is_some() {
+        vec!["--claude-stdio".into()]
     } else if external {
         vec![
             "app-server".into(),

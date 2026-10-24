@@ -101,6 +101,7 @@ pub struct SdkTurn {
     skipped: BTreeSet<JsString>,
     tasks: Vec<Task>,
     structured: JsString,
+    saw_work: bool,
 }
 fn text(value: &J) -> JsString {
     string(&coalesce(value, &"".into()))
@@ -142,6 +143,7 @@ impl SdkTurn {
             skipped: BTreeSet::new(),
             tasks: vec![],
             structured: JsString::default(),
+            saw_work: false,
         }
     }
     pub fn is_finished(&self) -> bool {
@@ -171,6 +173,19 @@ impl SdkTurn {
     pub async fn message(&mut self, message: &J) -> Result<()> {
         if self.shared.pending.lock().unwrap().resolved {
             return Ok(());
+        }
+        if is(field(message, "type"), "stream_event")
+            || is(field(message, "type"), "assistant")
+            || (is(field(message, "type"), "user")
+                && field(field(message, "message"), "content")
+                    .as_array()
+                    .is_some_and(|blocks| {
+                        blocks
+                            .iter()
+                            .any(|block| is(field(block, "type"), "tool_result"))
+                    }))
+        {
+            self.saw_work = true;
         }
         match field(message, "type").as_str().ok().as_deref() {
             Some("system") => self.system(message).await,
@@ -427,6 +442,26 @@ impl SdkTurn {
         } else {
             string(field(message, "session_id")).into_json()
         };
+        if success
+            && text(&result).trim().0.is_empty()
+            && !self.saw_work
+            && !self.pending_workflows()
+        {
+            return Err(
+                if field(message, "num_turns").as_f64() == Some(0.0)
+                    && field(message, "duration_api_ms").as_f64() == Some(0.0)
+                {
+                    AdapterError::typed(
+                        "empty_turn",
+                        "Claude completed without starting model work.",
+                    )
+                } else {
+                    AdapterError::new(
+                        "Claude returned no response. Task completion could not be confirmed.",
+                    )
+                },
+            );
+        }
         let usage = field(message, "usage");
         if usage.as_object().is_some_and(|o| !o.is_empty())
             || usage.as_array().is_some_and(|a| !a.is_empty())
@@ -1098,7 +1133,18 @@ impl SdkTurn {
         if self.shared.pending.lock().unwrap().resolved {
             return Ok(());
         }
-        if let Some(error) = error {
+        if error.is_none() && self.shared.pending.lock().unwrap().deferred.is_some() {
+            if self.pending_workflows() {
+                self.stop_workflows().await?;
+            }
+            self.finish(true).await?;
+            if self.is_finished() {
+                return Ok(());
+            }
+        }
+        let error = error.unwrap_or_else(|| AdapterError::new(
+            "Claude stream ended without a completion result. Task completion could not be confirmed."));
+        {
             let cleanup = self.stop_workflows().await;
             self.shared.pending.lock().unwrap().resolved = true;
             let _ = self
@@ -1112,28 +1158,6 @@ impl SdkTurn {
             cleanup?;
             return Ok(());
         }
-        let deferred = self.shared.pending.lock().unwrap().deferred.is_some();
-        if deferred {
-            if self.pending_workflows() {
-                self.stop_workflows().await?
-            }
-            self.finish(true).await?;
-            if self.is_finished() {
-                return Ok(());
-            }
-        }
-        self.stop_workflows().await?;
-        self.shared.pending.lock().unwrap().resolved = true;
-        let result = self
-            .emit(J::object([
-                ("type", "completed".into()),
-                ("success", true.into()),
-                ("result", J::Null),
-            ]))
-            .await;
-        self.shared.pending.lock().unwrap().outcome = Some(result);
-        self.shared.changed.notify_one();
-        Ok(())
     }
 }
 async fn close_agents(

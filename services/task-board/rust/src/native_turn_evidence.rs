@@ -5,7 +5,7 @@ use crate::{
     operations::{Document, mutation},
     read_evidence::{ReadEvidence, ReadEvidenceStore, ReadIdentity},
     turn_output::{
-        bounded_output_summary, final_output_text, output_params, page_cursor, turns_params,
+        bounded_output_summary, final_output_text, missing_output_summary, output_params, page_cursor, turns_params,
     },
 };
 use ivy_contracts::{
@@ -482,7 +482,7 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
         }
         let status = s(v, "status")?.clone();
         if text.0.is_empty() {
-            text = format!("Native turn {}.", status.to_utf8()?).into();
+            text = missing_output_summary(&status);
         }
         Ok(Completion {
             snapshot,
@@ -828,7 +828,7 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
             text = if !last_text.0.is_empty() {
                 last_text
             } else {
-                format!("Native turn {}.", status.to_utf8()?).into()
+                missing_output_summary(&status)
             };
         }
         Ok(Completion {

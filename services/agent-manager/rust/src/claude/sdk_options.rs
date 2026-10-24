@@ -76,7 +76,7 @@ impl SdkEnvironment {
     pub fn discovery(&self, cwd: &JsString, timeout_ms: u64) -> Result<J> {
         self.assert_subscription(cwd)?;
         let mut options = J::object([
-            ("cwd", cwd.clone().into_json()),
+            ("cwd", sdk_path(cwd).into_json()),
             (
                 "settingSources",
                 J::Array(["user", "project", "local"].map(J::from).to_vec()),
@@ -95,7 +95,7 @@ impl SdkEnvironment {
         let path = self.nonempty("CLAUDE_CODEX_CLI").ok_or_else(|| {
             AdapterError::new("SDK bridge requires the admitted Claude executable")
         })?;
-        options.insert("pathToClaudeCodeExecutable", path.into_json());
+        options.insert("pathToClaudeCodeExecutable", sdk_path(&path).into_json());
         Ok(())
     }
     pub fn query(&self, context: &J) -> Result<QueryOptions> {
@@ -108,7 +108,7 @@ impl SdkEnvironment {
             ),
             ("includePartialMessages", true.into()),
             ("includeHookEvents", true.into()),
-            ("cwd", cwd.clone().into_json()),
+            ("cwd", sdk_path(&cwd).into_json()),
         ]);
         for key in ["model", "effort", "outputFormat"] {
             if nonempty_string(field(context, key)) || field(context, key).as_object().is_some() {
@@ -129,7 +129,27 @@ impl SdkEnvironment {
                 .as_array()
                 .is_some_and(|a| !a.is_empty())
             {
-                options.insert(target, field(context, source).clone())
+                let value = field(context, source);
+                options.insert(
+                    target,
+                    if source == "addDirs" {
+                        J::Array(
+                            value
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|value| {
+                                    value
+                                        .as_js_string()
+                                        .map(|value| sdk_path(value).into_json())
+                                        .unwrap_or_else(|| value.clone())
+                                })
+                                .collect(),
+                        )
+                    } else {
+                        value.clone()
+                    },
+                )
             }
         }
         if !field(context, "mcpServers").is_null()
@@ -137,6 +157,15 @@ impl SdkEnvironment {
                 || field(context, "mcpServers").as_array().is_some())
         {
             options.insert("mcpServers", field(context, "mcpServers").clone())
+        }
+        if let Some(path) = self.nonempty("CLAUDE_CODEX_MCP_SERVERS") {
+            let value = decode(&fs::read(node_path::filesystem_path(&path))?)?;
+            if value.as_object().is_none() {
+                return Err(AdapterError::new(
+                    "Claude MCP configuration must be an object",
+                ));
+            }
+            options.insert("mcpServers", value);
         }
         let override_mode = self.env("CLAUDE_CODEX_PERMISSION_MODE");
         let override_mode = if [
@@ -428,6 +457,9 @@ impl SdkEnvironment {
         }
         Some(value)
     }
+}
+fn sdk_path(value: &JsString) -> JsString {
+    node_path::from_native(&super::bridge::sdk_path(&node_path::filesystem_path(value)))
 }
 pub fn workflow_prompt(prompt: &JsString) -> JsString {
     if let Some(super::commands::WorkflowCommand::Run(task)) =

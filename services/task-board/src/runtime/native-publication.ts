@@ -8,7 +8,7 @@ import { TaskBoardEvidence } from './evidence.js';
 import type { Publication, TaskBoardEngine } from './engine.js';
 import { evidenceIdentity, intendedCall, nativeArray, nativeRecord, nativeString, resolveNativeRequest } from './native-intent.js';
 import type { Document } from './store.js';
-import { boundedOutputSummary, TaskBoardTurnEvidence } from './turn-evidence.js';
+import { boundedOutputSummary, missingOutputSummary, TaskBoardTurnEvidence } from './turn-evidence.js';
 import type { verifyNativeTranscript } from './full-turn-evidence.js';
 import { initialDelivery } from './deliveries.js';
 import { BoundToolClient } from '../../../../packages/sdk/src/client.js';
@@ -49,7 +49,7 @@ function outputSummary(turn: Record<string, Wire.Json>, status: string): string 
   const messages = nativeArray(turn['items']).map(nativeRecord).filter(item => item['type'] === 'agentMessage');
   const finals = messages.filter(item => item['phase'] === 'final_answer');
   const parts = (finals.length ? finals : messages.slice(-1)).map(item => nativeString(item['text']));
-  const text = parts.join('\n\n') || 'Native turn ' + status + '.';
+  const text = parts.join('\n\n') || missingOutputSummary(status);
   return boundedOutputSummary(text);
 }
 

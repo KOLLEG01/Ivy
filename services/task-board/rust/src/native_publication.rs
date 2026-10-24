@@ -13,7 +13,7 @@ use crate::{
     },
     operations::{Document, Store},
     read_evidence::ReadEvidenceStore,
-    turn_output::bounded_output_summary,
+    turn_output::{bounded_output_summary, missing_output_summary},
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
@@ -387,7 +387,7 @@ fn summary(turn: &Json, status: &JsString) -> JsString {
         "\n\n",
     );
     bounded_output_summary(&if joined.0.is_empty() {
-        join(&["Native turn ".into(), status.clone(), ".".into()], "")
+        missing_output_summary(status)
     } else {
         joined
     })

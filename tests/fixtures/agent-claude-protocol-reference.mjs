@@ -1,4 +1,5 @@
-// Frozen public adapter reference; tests only. MIT: services/agent-manager/claude/LICENSE.adapter.
+// Public adapter test reference, including current empty-turn/EOF handling.
+// MIT: services/agent-manager/claude/LICENSE.adapter.
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -7941,15 +7942,7 @@ var NativeClaudeRuntime = class {
         if (!pending.resolved) return;
       }
       if (!pending.resolved) {
-        await this.stopWorkflowTasks(pending);
-        pending.resolved = true;
-        this.turns.delete(context.turnId);
-        try {
-          await handlers.onEvent({ type: "completed", success: true, result: null });
-          pending.resolve();
-        } catch (err) {
-          pending.reject(err instanceof Error ? err : new Error(String(err)));
-        }
+        throw new Error("Claude stream ended without a completion result. Task completion could not be confirmed.");
       }
     } catch (err) {
       if (!pending.resolved) {
@@ -7967,6 +7960,8 @@ var NativeClaudeRuntime = class {
   }
   async handleMessage(pending, message) {
     const type = String(message.type ?? "");
+    if (type === "stream_event" || type === "assistant" || (type === "user" &&
+      Array.isArray(message.message?.content) && message.message.content.some(block => block.type === "tool_result"))) pending.sawWork = true;
     switch (type) {
       case "system":
         await this.handleSystem(pending, message);
@@ -8563,6 +8558,12 @@ agentId: ${agentId}`,
     const success = subtype === "success" && !message.is_error && pending.workflowFailure == null;
     const resultText2 = pending.workflowFailure ?? (message.result == null ? null : String(message.result));
     const claudeSessionId = message.session_id == null ? null : String(message.session_id);
+    if (success && !resultText2?.trim() && !pending.sawWork && !this.hasPendingWorkflowTasks(pending)) {
+      if (message.num_turns === 0 && message.duration_api_ms === 0) {
+        const error = new Error("Claude completed without starting model work."); error.name = "empty_turn"; throw error;
+      }
+      throw new Error("Claude returned no response. Task completion could not be confirmed.");
+    }
     const usage = message.usage || {};
     if (Object.keys(usage).length > 0) {
       await pending.handlers.onEvent({ type: "usage", usage });

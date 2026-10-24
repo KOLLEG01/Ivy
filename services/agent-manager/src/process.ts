@@ -1,6 +1,7 @@
 import { mkdir, realpath, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { jsonFile, inside } from "../../../packages/host-runtime/src/config.js";
 import {
   runCommand,
@@ -191,7 +192,10 @@ export async function startNativeProcess(options: NativeProcessOptions) {
   }
   await options.beforeLaunch?.(nativeHome);
   // Scope CODEX_HOME only to the new child; the current host/task environment is never changed.
-  const executables = { codex: executable },
+  const runtimeExecutable = claude
+    ? join(options.artifactRoot, "dist", "native", "ivy-agent-manager" + (process.platform === "win32" ? ".exe" : ""))
+    : executable;
+  const executables = { codex: runtimeExecutable },
     jobLauncher = join(options.artifactRoot, "dist", "native", "ivy-job.exe");
   requireThat(
     process.platform === "win32" || settings.windowsShell === undefined,
@@ -212,6 +216,9 @@ export async function startNativeProcess(options: NativeProcessOptions) {
       ? {
           CLAUDE_CONFIG_DIR: claudeConfig,
           CLAUDE_CODEX_HOME: adapterHome,
+          IVY_CLAUDE_SDK_NODE: executable,
+          IVY_CLAUDE_SDK_ENTRY: adapterScript!,
+          IVY_CLAUDE_ACCOUNT_HOME: homedir(),
           CLAUDE_CODEX_CLI: claudeExecutable,
           CLAUDE_CODEX_RUNTIME_TYPE: "agent-sdk-sidecar",
           CLAUDE_CODEX_PROVIDER: "claude-code",
@@ -231,7 +238,7 @@ export async function startNativeProcess(options: NativeProcessOptions) {
   const version = await runCommand(
     {
       executable: "codex",
-      args: claude ? [adapterScript!, "app-server", "--help"] : ["--version"],
+      args: claude ? ["--claude-stdio", "--help"] : ["--version"],
       timeoutMs: 15_000,
     },
     nativeHome,
@@ -297,7 +304,7 @@ export async function startNativeProcess(options: NativeProcessOptions) {
     {
       executable: "codex",
       args: claude
-        ? [adapterScript!, "app-server", "--listen", "stdio://"]
+        ? ["--claude-stdio"]
         : external
           ? ["app-server", "proxy", "--sock", socketPath!]
           : ["app-server"],
@@ -428,7 +435,7 @@ export async function startNativeProcess(options: NativeProcessOptions) {
       socketPath,
       daemon,
       ownsNativeHome: !external && ownedHome !== null,
-      executable,
+      executable: runtimeExecutable,
       windowsShell,
       launcherPid: nativeChild.child.pid ?? null,
       completion,

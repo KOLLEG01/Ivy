@@ -1,4 +1,4 @@
-// Actual frozen NativeClaudeRuntime message/consume methods. No SDK import,
+// Public NativeClaudeRuntime event reference with current empty/EOF handling. No SDK import,
 // executable, account or provider is used by this translation-only oracle.
 import {readFileSync,writeFileSync,mkdirSync,lstatSync,realpathSync} from 'node:fs';
 import {resolve,dirname,relative,isAbsolute} from 'node:path';

@@ -1,4 +1,4 @@
-//! Existing pinned Claude adapter admission. This does not implement its provider loop.
+//! Pinned vendor SDK transport admission; the native executable owns the adapter.
 use crate::native_launch::{native_realpath, require};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::digest, json::parse};
 use ivy_host_runtime::{
@@ -21,7 +21,7 @@ pub async fn checked_claude_adapter(
         "Claude adapter root must be absolute.",
     )?;
     let root = native_realpath(node_path::filesystem_path(root)).await?;
-    let source = root.join("dist").join("src");
+    let source = root.join("bridge");
     let mut entries = tokio::fs::read_dir(&source)
         .await
         .map_err(|_| IvyError::internal())?;
@@ -37,13 +37,14 @@ pub async fn checked_claude_adapter(
         }
     }
     require(
-        names.contains(&JsString::from("adapter.mjs")),
+        names.contains(&JsString::from("main.mjs"))
+            && names.contains(&JsString::from("session.mjs")),
         "native_build_mismatch",
-        "Claude adapter entrypoint is missing.",
+        "Claude SDK bridge entrypoint is missing.",
     )?;
     let mut files = vec![JsString::from("package-lock.json")];
     for name in names {
-        let mut file = JsString::from("dist/src/");
+        let mut file = JsString::from("bridge/");
         file.0.extend(name.0);
         files.push(file);
     }
@@ -72,7 +73,7 @@ pub async fn checked_claude_adapter(
         "native_build_mismatch",
         "Claude adapter bytes differ from the pinned catalog.",
     )?;
-    Ok(source.join("adapter.mjs"))
+    Ok(source.join("main.mjs"))
 }
 
 const PAID_CONFIGURATION_KEYS: &[&str] = &[

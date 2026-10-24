@@ -30,7 +30,7 @@ impl Root {
         let path =
             std::env::temp_dir().join(format!("ivy-agent-owner-Grüße😀-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&path).unwrap();
-        Self(paths::realpath(&path).unwrap())
+        Self(path)
     }
 }
 impl Drop for Root {
@@ -45,9 +45,27 @@ fn text(value: &IvyJson, key: &str) -> JsString {
     field(value, key).as_js_string().unwrap().clone()
 }
 fn same(actual: &IvyJson, expected: &IvyJson) {
+    fn native_paths(value: &IvyJson) -> IvyJson {
+        match value {
+            IvyJson::Array(values) => IvyJson::Array(values.iter().map(native_paths).collect()),
+            IvyJson::Object(values) => {
+                IvyJson::object(values.iter().map(|(k, v)| (k.clone(), native_paths(v))))
+            }
+            IvyJson::String(text) if cfg!(windows) && text.0.starts_with(&[92, 92, 63, 92]) => {
+                IvyJson::String(if text.0[4..].starts_with(&[85, 78, 67, 92]) {
+                    JsString([&[92, 92][..], &text.0[8..]].concat())
+                } else {
+                    JsString(text.0[4..].to_vec())
+                })
+            }
+            value => value.clone(),
+        }
+    }
+    let actual = native_paths(actual);
+    let expected = native_paths(expected);
     assert_eq!(
-        canonical(actual, usize::MAX).unwrap(),
-        canonical(expected, usize::MAX).unwrap()
+        canonical(&actual, usize::MAX).unwrap(),
+        canonical(&expected, usize::MAX).unwrap()
     );
 }
 fn repo() -> PathBuf {
@@ -58,6 +76,7 @@ fn path(path: &Path) -> IvyJson {
 }
 fn original(input: IvyJson) -> IvyJson {
     let mut child = Command::new("node")
+        .arg("--experimental-transform-types")
         .arg("tests/fixtures/agent-native-owner-oracle.mjs")
         .current_dir(repo())
         .stdin(Stdio::piped())
@@ -157,7 +176,7 @@ async fn agent_prelaunch_admission_and_callback_match_original_without_a_native_
         let before = Arc::new(Mutex::new(None));
         let observed = before.clone();
         let base = node_path::filesystem_path(&text(&prepared, "root"));
-        let normalize = base.clone();
+        let normalize = paths::realpath(&base).unwrap();
         let opts = options(
             &prepared,
             Arc::new(move |home| {
@@ -453,4 +472,445 @@ async fn agent_handshake_modes_and_payload_match_original_over_real_rpc_streams(
                 )
             });
     }
+}
+
+async fn claude_call(rpc: &NativeRpc, method: &str, params: IvyJson) -> IvyJson {
+    let reply = rpc
+        .request(
+            method.into(),
+            params,
+            ivy_host_runtime::codex_rpc::RequestOptions {
+                timeout_ms: 10_000,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(reply.get("error").is_none(), "{method}: {reply:?}");
+    field(&reply, "result").clone()
+}
+async fn claude_event(
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<IvyJson>,
+    method: &str,
+) -> IvyJson {
+    let mut observed = vec![];
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.get("method") == Some(&method.into()) {
+                return event;
+            }
+            observed.push(event.get("method").cloned().unwrap_or(IvyJson::Null));
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("Missing native event: {method}; observed {observed:?}"))
+}
+fn claude_launch_options(
+    root: &Root,
+    settings: &IvyJson,
+    events: tokio::sync::mpsc::UnboundedSender<IvyJson>,
+) -> NativeProcessOptions {
+    let mut inputs = ivy_agent_manager::runtime::home_inputs().unwrap();
+    inputs.account_home = node_path::from_native(&root.0);
+    NativeProcessOptions {
+        artifact_root: node_path::from_native(&root.0.join("artifact")),
+        data_root: node_path::from_native(&root.0.join("data")),
+        settings: settings.clone(),
+        client_version: "test".into(),
+        hive_credential: None,
+        home_inputs: inputs,
+        before_launch: None,
+        begin_epoch: Arc::new(move |_| {
+            let requests = events.clone();
+            let notifications = events.clone();
+            let closed = events.clone();
+            Ok(ivy_host_runtime::codex_rpc::Events {
+                on_request: Arc::new(move |r| {
+                    let result = requests.send(IvyJson::object([
+                        ("id", r.id),
+                        ("method", IvyJson::String(r.method)),
+                        ("params", r.params),
+                    ]));
+                    Box::pin(async move { result.map_err(|_| IvyError::internal()) })
+                }),
+                on_notification: Arc::new(move |r| {
+                    let result = notifications.send(IvyJson::object([
+                        ("method", IvyJson::String(r.method)),
+                        ("params", r.params),
+                    ]));
+                    Box::pin(async move { result.map_err(|_| IvyError::internal()) })
+                }),
+                on_close: Arc::new(move |code| {
+                    let _ = closed.send(IvyJson::object([
+                        ("method", "fixture/closed".into()),
+                        ("code", code.into()),
+                    ]));
+                    Box::pin(async { Ok(()) })
+                }),
+            })
+        }),
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_claude_launch_retries_only_zero_work_preserves_inputs_and_reopens_data() {
+    use ivy_contracts::hash::digest;
+    let root = Root::new();
+    let artifact = root.0.join("artifact");
+    let native = artifact.join("dist/native");
+    let sdk = root.0.join("sdk");
+    let data = root.0.join("data");
+    fs::create_dir_all(&native).unwrap();
+    fs::create_dir_all(sdk.join("bridge")).unwrap();
+    fs::create_dir_all(data.join("native")).unwrap();
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_ivy-agent-manager"));
+    let target = executable.parent().unwrap();
+    let binary = if cfg!(windows) {
+        "ivy-agent-manager.exe"
+    } else {
+        "ivy-agent-manager"
+    };
+    fs::copy(&executable, native.join(binary)).unwrap();
+    if cfg!(windows) {
+        fs::copy(target.join("ivy-job.exe"), native.join("ivy-job.exe")).unwrap();
+        for entry in fs::read_dir(target).unwrap().flatten() {
+            if entry.path().extension().is_some_and(|v| v == "dll") {
+                fs::copy(entry.path(), native.join(entry.file_name())).unwrap();
+            }
+        }
+    }
+    for name in ["main.mjs", "session.mjs"] {
+        fs::copy(
+            repo()
+                .join("services/agent-manager/claude/bridge")
+                .join(name),
+            sdk.join("bridge").join(name),
+        )
+        .unwrap();
+    }
+    let module = sdk.join("node_modules/@anthropic-ai/claude-agent-sdk");
+    fs::create_dir_all(&module).unwrap();
+    fs::write(
+        module.join("package.json"),
+        r#"{"type":"module","exports":"./index.mjs"}"#,
+    )
+    .unwrap();
+    fs::copy(
+        repo().join("tests/fixtures/agent-claude-sdk-native.mjs"),
+        module.join("index.mjs"),
+    )
+    .unwrap();
+    fs::write(sdk.join("package-lock.json"), "{}").unwrap();
+    let mut manifest = vec![];
+    for name in ["bridge/main.mjs", "bridge/session.mjs", "package-lock.json"] {
+        manifest.extend_from_slice(name.as_bytes());
+        manifest.push(0);
+        manifest.extend_from_slice(digest(fs::read(sdk.join(name)).unwrap())[7..].as_bytes());
+        manifest.push(0);
+    }
+    let bundle = digest(manifest);
+    let catalog_path = native
+        .parent()
+        .unwrap()
+        .join("specs/native/codex-0.142.3/catalog.json");
+    fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+    let mut catalog = parse(
+        &fs::read_to_string(repo().join("specs/native/codex-0.142.3/catalog.json")).unwrap(),
+        usize::MAX,
+    )
+    .unwrap();
+    catalog.insert("nativeExecutableHash", bundle.clone().into());
+    fs::write(catalog_path, stringify(&catalog, usize::MAX).unwrap()).unwrap();
+    let node = Command::new("node")
+        .args(["-p", "process.execPath"])
+        .output()
+        .unwrap();
+    assert!(node.status.success());
+    let node = PathBuf::from(String::from_utf8(node.stdout).unwrap().trim());
+    let node_hash = digest(fs::read(&node).unwrap());
+    fs::write(
+        data.join("claude-mcp.json"),
+        r#"{"inert":{"type":"http","url":"http://127.0.0.1:1/mcp"}}"#,
+    )
+    .unwrap();
+    let mut settings = IvyJson::object([
+        ("nativeExecutable", path(&node)),
+        ("nativeVersion", "0.142.3".into()),
+        ("nativeExecutableHash", bundle.into()),
+        ("codexHome", path(&data.join("native"))),
+        (
+            "appServer",
+            IvyJson::object([
+                ("mode", "claude-adapter".into()),
+                ("adapterRoot", path(&sdk)),
+                ("nodeExecutableHash", node_hash.clone().into()),
+                ("claudeExecutable", path(&node)),
+                ("claudeExecutableHash", node_hash.into()),
+                ("defaultModel", "sonnet".into()),
+            ]),
+        ),
+        (
+            "limits",
+            IvyJson::object([
+                ("maxOperations", 100.0.into()),
+                ("maxJournalBytes", 1048576.0.into()),
+                ("maxPendingInputs", 8.0.into()),
+                ("maxNotificationBytes", 1048576.0.into()),
+            ]),
+        ),
+    ]);
+    if cfg!(windows) {
+        let shell = root.0.join("pwsh.exe");
+        let compiled = Command::new("rustc")
+            .args(["--edition=2024", "-C", "debuginfo=0"])
+            .arg(repo().join("tests/fixtures/native-launch-child.rs"))
+            .arg("-o")
+            .arg(&shell)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        fs::write(
+            root.0.join("launch-fixture.txt"),
+            format!(
+                "unused\nunused\nunused\nunused\n{}\n{{}}\n0.142.3\n",
+                root.0.join("shell").display()
+            ),
+        )
+        .unwrap();
+        settings.insert(
+            "windowsShell",
+            IvyJson::object([
+                ("executable", path(&shell)),
+                ("executableHash", digest(fs::read(&shell).unwrap()).into()),
+            ]),
+        );
+    }
+    let (send, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let connection = tokio::time::timeout(
+        Duration::from_secs(45),
+        start_native_process(claude_launch_options(&root, &settings, send)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(connection.mode, NativeMode::ClaudeAdapter);
+    assert_eq!(connection.executable, native.join(binary));
+    let models = claude_call(
+        &connection.rpc,
+        "model/list",
+        IvyJson::object([] as [(&str, IvyJson); 0]),
+    )
+    .await;
+    assert_eq!(
+        text(&field(&models, "data").as_array().unwrap()[0], "model"),
+        JsString::from("sonnet")
+    );
+    let thread = claude_call(
+        &connection.rpc,
+        "thread/start",
+        IvyJson::object([
+            ("cwd", path(&root.0)),
+            ("model", "sonnet".into()),
+            ("approvalPolicy", "on-request".into()),
+            ("sandbox", "workspace-write".into()),
+        ]),
+    )
+    .await;
+    let thread = text(field(&thread, "thread"), "id");
+    for (mode, status) in [
+        ("useful", "completed"),
+        ("retry", "completed"),
+        ("empty", "failed"),
+        ("unknown-empty", "failed"),
+        ("eof", "failed"),
+        ("tool", "completed"),
+        ("stream", "completed"),
+        ("input", "completed"),
+        ("approval", "completed"),
+        ("interrupt", "interrupted"),
+    ] {
+        if mode == "retry" {
+            fs::write(
+                data.join("claude-mcp.json"),
+                r#"{"refreshed":{"type":"http","url":"http://127.0.0.1:1/mcp"}}"#,
+            )
+            .unwrap();
+        }
+        let response = claude_call(
+            &connection.rpc,
+            "turn/start",
+            IvyJson::object([
+                ("threadId", IvyJson::String(thread.clone())),
+                (
+                    "input",
+                    IvyJson::Array(vec![IvyJson::object([
+                        ("type", "text".into()),
+                        ("text", mode.into()),
+                    ])]),
+                ),
+            ]),
+        )
+        .await;
+        let turn = text(field(&response, "turn"), "id");
+        if mode == "input" {
+            let request = claude_event(&mut events, "item/tool/requestUserInput").await;
+            let question = text(
+                &field(field(&request, "params"), "questions")
+                    .as_array()
+                    .unwrap()[0],
+                "id",
+            );
+            connection
+                .rpc
+                .answer(
+                    "item/tool/requestUserInput".into(),
+                    field(&request, "id").clone(),
+                    IvyJson::object([(
+                        "result",
+                        IvyJson::object([(
+                            "answers",
+                            IvyJson::object([(
+                                question,
+                                IvyJson::object([("answers", IvyJson::Array(vec!["A".into()]))]),
+                            )]),
+                        )]),
+                    )]),
+                    Arc::new(|_| Box::pin(async { Ok(()) })),
+                )
+                .await
+                .unwrap();
+        }
+        if mode == "approval" || mode == "interrupt" {
+            let request = claude_event(&mut events, "item/commandExecution/requestApproval").await;
+            if mode == "approval" {
+                claude_call(
+                    &connection.rpc,
+                    "turn/steer",
+                    IvyJson::object([
+                        ("threadId", IvyJson::String(thread.clone())),
+                        ("expectedTurnId", IvyJson::String(turn.clone())),
+                        (
+                            "input",
+                            IvyJson::Array(vec![IvyJson::object([
+                                ("type", "text".into()),
+                                ("text", "follow up".into()),
+                            ])]),
+                        ),
+                    ]),
+                )
+                .await;
+                connection
+                    .rpc
+                    .answer(
+                        "item/commandExecution/requestApproval".into(),
+                        field(&request, "id").clone(),
+                        IvyJson::object([(
+                            "result",
+                            IvyJson::object([("decision", "accept".into())]),
+                        )]),
+                        Arc::new(|_| Box::pin(async { Ok(()) })),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                claude_call(
+                    &connection.rpc,
+                    "turn/interrupt",
+                    IvyJson::object([
+                        ("threadId", IvyJson::String(thread.clone())),
+                        ("turnId", IvyJson::String(turn.clone())),
+                    ]),
+                )
+                .await;
+            }
+        }
+        let done = claude_event(&mut events, "turn/completed").await;
+        assert_eq!(text(field(field(&done, "params"), "turn"), "id"), turn);
+        assert_eq!(
+            text(field(field(&done, "params"), "turn"), "status"),
+            JsString::from(status),
+            "{mode}: {done:?}"
+        );
+    }
+    let calls = fs::read_to_string(root.0.join("sdk-fixture.jsonl")).unwrap();
+    let calls: Vec<_> = calls
+        .lines()
+        .map(|s| parse(s, usize::MAX).unwrap())
+        .collect();
+    for (mode, count) in [
+        ("useful", 1),
+        ("retry", 2),
+        ("empty", 2),
+        ("unknown-empty", 1),
+        ("eof", 1),
+        ("tool", 1),
+        ("stream", 1),
+    ] {
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|v| v.get("mode") == Some(&mode.into()))
+                .count(),
+            count,
+            "{mode}"
+        );
+    }
+    assert!(calls.iter().any(|v| v.get("type") == Some(&"steer".into())));
+    assert!(calls.iter().any(|v| v.get("mode") == Some(&"retry".into())
+        && field(v, "mcpServers").get("refreshed").is_some()));
+    let response = claude_call(
+        &connection.rpc,
+        "turn/start",
+        IvyJson::object([
+            ("threadId", IvyJson::String(thread.clone())),
+            (
+                "input",
+                IvyJson::Array(vec![IvyJson::object([
+                    ("type", "text".into()),
+                    ("text", "hold".into()),
+                ])]),
+            ),
+        ]),
+    )
+    .await;
+    assert!(response.get("turn").is_some());
+    let held_turn = text(field(&response, "turn"), "id");
+    tokio::time::timeout(Duration::from_secs(10), connection.close())
+        .await
+        .unwrap()
+        .unwrap();
+    // Keep the event receiver alive during the second handshake.
+    let (send2, mut events2) = tokio::sync::mpsc::unbounded_channel();
+    let reopened = start_native_process(claude_launch_options(&root, &settings, send2))
+        .await
+        .unwrap();
+    let saved = claude_call(
+        &reopened.rpc,
+        "thread/read",
+        IvyJson::object([
+            ("threadId", IvyJson::String(thread)),
+            ("includeTurns", true.into()),
+        ]),
+    )
+    .await;
+    assert!(
+        field(field(&saved, "thread"), "turns")
+            .as_array()
+            .unwrap()
+            .len()
+            >= 8
+    );
+    let turns = field(field(&saved, "thread"), "turns").as_array().unwrap();
+    let held = turns
+        .iter()
+        .find(|turn| turn.get("id") == Some(&IvyJson::String(held_turn.clone())))
+        .unwrap();
+    assert_eq!(held.get("status"), Some(&"interrupted".into()));
+    while events2.try_recv().is_ok() {}
+    reopened.close().await.unwrap();
+    assert!(!data.join("process-stop-fence.json").exists());
 }

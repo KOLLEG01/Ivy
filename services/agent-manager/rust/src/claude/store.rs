@@ -1036,12 +1036,15 @@ impl SessionStore {
         self.upsert_turn(&turn)?;
         Ok(Some(turn))
     }
-    pub fn recover_stale_in_progress_turns(&self, message: &JsString) -> Result<usize> {
+    /// Startup touches unfinished runs, without reading every archived transcript.
+    pub fn recover_in_progress_turns(&self, message: &JsString) -> Result<usize> {
+        self.recover_in_progress_at(message, &self.now())
+    }
+    fn recover_in_progress_at(&self, message: &JsString, now: &IvyJson) -> Result<usize> {
         let rows = self.all(
             "SELECT id, thread_id, started_at, items_json FROM turns WHERE status = ?",
             &["inProgress".into()],
         )?;
-        let now = self.now();
         let error = encode(&IvyJson::object([(
             "message",
             IvyJson::String(message.clone()),
@@ -1053,7 +1056,7 @@ impl SessionStore {
                 IvyJson::Null
             } else {
                 IvyJson::Number(nonnegative(
-                    (number(&now) - number(field(row, "started_at"))) * 1000.0,
+                    (number(now) - number(field(row, "started_at"))) * 1000.0,
                 ))
             };
             self.run("UPDATE turns SET status = ?, completed_at = ?, duration_ms = ?, error_json = ?, items_json = ? WHERE id = ?",&["interrupted".into(),now.clone(),duration,error.clone().into(),terminalize_items(&text(field(row,"items_json")),message,true,false)?.into(),field(row,"id").clone()])?;
@@ -1070,6 +1073,13 @@ impl SessionStore {
                 &[idle.clone().into(), now.clone(), IvyJson::String(thread)],
             )?;
         }
+        Ok(count)
+    }
+    /// Explicit maintenance also repairs tools in previously terminal runs.
+    pub fn recover_stale_in_progress_turns(&self, message: &JsString) -> Result<usize> {
+        let now = self.now();
+        let mut count = self.recover_in_progress_at(message, &now)?;
+        let idle = encode(&IvyJson::object([("type", "idle".into())]))?;
         let rows = self.all(
             "SELECT id, thread_id, status, items_json FROM turns WHERE status <> ?",
             &["inProgress".into()],

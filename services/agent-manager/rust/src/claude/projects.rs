@@ -200,10 +200,16 @@ impl ProjectStore {
                         .and_then(IvyJson::as_js_string)
                         .filter(|p| node_path::is_absolute(self.style, p))
                         .ok_or_else(|| AdapterError::new("Project roots must be absolute paths"))?;
-                    Ok(IvyJson::object([(
-                        "path",
-                        IvyJson::String(node_path::normalize(self.style, path)),
-                    )]))
+                    let mut normalized = node_path::normalize(self.style, path);
+                    let separator = if self.style == Style::Windows { 92 } else { 47 };
+                    // Existing project request fingerprints retain a trailing directory separator.
+                    if path.0.last().is_some_and(|u| {
+                        *u == separator || self.style == Style::Windows && *u == 47
+                    }) && normalized.0.last() != Some(&separator)
+                    {
+                        normalized.0.push(separator);
+                    }
+                    Ok(IvyJson::object([("path", IvyJson::String(normalized))]))
                 })
                 .collect::<Result<Vec<_>>>()?,
         ))
