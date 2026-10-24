@@ -61,9 +61,8 @@ fn copy_tree(source: &Path, target: &Path) -> IvyResult<()> {
                 "Managed skills must not contain filesystem links.",
             ));
         }
-        let name = node_path::node_utf8(&entry.file_name());
-        let source = source.join(fs_path(&name));
-        let target = target.join(fs_path(&name));
+        let source = entry.path();
+        let target = target.join(entry.file_name());
         if kind.is_dir() {
             copy_tree(&source, &target)?;
         } else if kind.is_file() {

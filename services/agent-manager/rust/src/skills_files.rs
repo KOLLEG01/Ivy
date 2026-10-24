@@ -147,7 +147,7 @@ pub fn tree_hash(path: &JsString, compare: &SkillsComparator) -> IvyResult<Optio
                     "Managed skills must not contain filesystem links.",
                 ));
             }
-            let path = directory.join(fs_path(&name));
+            let path = entry.path();
             let mut local = prefix.clone();
             if !local.0.is_empty() {
                 local.0.push(47);

@@ -55,6 +55,18 @@ impl Drop for Root {
 fn value(path: &Path) -> IvyJson {
     IvyJson::String(node_path::from_native(path))
 }
+fn opaque_name(prefix: &str) -> std::ffi::OsString {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        std::ffi::OsString::from_wide(&prefix.encode_utf16().chain([0xd800]).collect::<Vec<_>>())
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        std::ffi::OsString::from_vec(prefix.bytes().chain([0xff]).collect())
+    }
+}
 fn field<'a>(value: &'a IvyJson, key: &str) -> &'a IvyJson {
     value.required(key).unwrap()
 }
@@ -264,6 +276,35 @@ fn tree_hash_keeps_the_published_path_digest_format_and_native_file_boundaries()
         .unwrap(),
         None
     );
+    let native = root.0.join("native-tree");
+    let directory = opaque_name("directory-");
+    let file = opaque_name("file-");
+    fs::create_dir_all(native.join(&directory)).unwrap();
+    fs::write(native.join(&directory).join(&file), b"native bytes").unwrap();
+    let mut relative = node_path::node_utf8(&directory).0;
+    relative.push(47);
+    relative.extend(node_path::node_utf8(&file).0);
+    let expected = hash_json(&IvyJson::Array(vec![IvyJson::Array(vec![
+        IvyJson::String(JsString(relative)),
+        digest(b"native bytes").into(),
+    ])]))
+    .unwrap();
+    assert_eq!(
+        tree_hash(&node_path::from_native(&native), comparator().as_ref()).unwrap(),
+        Some(expected)
+    );
+    let alias = file.to_string_lossy().into_owned();
+    fs::write(native.join(&directory).join(&alias), b"alias bytes").unwrap();
+    let before = tree_hash(&node_path::from_native(&native), comparator().as_ref()).unwrap();
+    fs::write(native.join(&directory).join(&file), b"edited native bytes").unwrap();
+    assert_ne!(
+        tree_hash(&node_path::from_native(&native), comparator().as_ref()).unwrap(),
+        before
+    );
+    assert_eq!(
+        fs::read(native.join(&directory).join(&alias)).unwrap(),
+        b"alias bytes"
+    );
     fs::write(target.join("a.txt"), vec![b'x'; 256 * 1024 + 1]).unwrap();
     assert_eq!(
         tree_hash(&node_path::from_native(&target), comparator().as_ref())
@@ -377,6 +418,38 @@ async fn explicit_skills_import_retains_source_and_metadata_then_uses_current_ru
             ("inPlace", in_place.into()),
         ]));
         let source = node_path::filesystem_path(&text(&prepared, "source"));
+        let directory = opaque_name("directory-");
+        let file = opaque_name("file-");
+        let source_tree = base.join("skills").join(if version == 1 {
+            "ivy-managed-alpha"
+        } else {
+            "alpha"
+        });
+        fs::create_dir(source_tree.join(&directory)).unwrap();
+        fs::write(
+            source_tree.join(&directory).join(&file),
+            b"native import bytes",
+        )
+        .unwrap();
+        let mut state = parse(&fs::read_to_string(&source).unwrap(), usize::MAX).unwrap();
+        let mut applied = field(&state, "applied").clone();
+        applied.insert(
+            if version == 1 {
+                "ivy-managed-alpha"
+            } else {
+                "alpha"
+            },
+            tree_hash(&node_path::from_native(&source_tree), comparator().as_ref())
+                .unwrap()
+                .unwrap()
+                .into(),
+        );
+        state.insert("applied", applied);
+        let source_bytes = stringify(&state, usize::MAX).unwrap();
+        fs::write(&source, &source_bytes).unwrap();
+        let mut prepared = prepared;
+        prepared.insert("state", state);
+        prepared.insert("sourceDigest", digest(&source_bytes).into());
         let original = fs::read(&source).unwrap();
         let state = field(&prepared, "state");
         let authority = field(state, "authority").as_str().unwrap();
@@ -425,6 +498,14 @@ async fn explicit_skills_import_retains_source_and_metadata_then_uses_current_ru
             "retained metadata values",
         );
         assert_eq!(current.get("appliedVersion"), state.get("appliedVersion"));
+        assert_eq!(
+            fs::read(base.join("skills/alpha").join(&directory).join(&file)).unwrap(),
+            b"native import bytes"
+        );
+        assert_eq!(
+            fs::read(source_tree.join(&directory).join(&file)).unwrap(),
+            b"native import bytes"
+        );
         for name in ["alpha", "beta"] {
             let path = node_path::from_native(&base.join("skills").join(name));
             let hash = tree_hash(&path, comparator().as_ref()).unwrap().unwrap();
