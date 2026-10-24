@@ -154,6 +154,12 @@ export const rustTests = {
     ],
     "testThreads": 1
   },
+  "tests/rust/host-restore-projects-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "restore_cases::projects_cases::project_restore_relocates_only_the_disposable_backup_index",
+    "testThreads": 1
+  },
   "tests/rust/host-restore-maintenance-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",

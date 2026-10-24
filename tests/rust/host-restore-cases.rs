@@ -245,14 +245,6 @@ fn ok(result: &J) -> bool {
 }
 
 #[tokio::test]
-async fn project_restore_relocates_only_the_disposable_backup_index() {
-    for case in ["valid", "malformed-index"] {
-        let result = compare_case("projects", case).await;
-        assert_eq!(ok(&result), case == "valid");
-    }
-}
-
-#[tokio::test]
 async fn restore_requires_the_exact_captured_platform_and_node_workload() {
     for case in ["valid", "wrong-os", "wrong-arch", "wrong-node", "missing-node-prefix"] {
         let result=compare_case("platform",case).await;
@@ -277,3 +269,6 @@ mod journal_cases;
 
 #[path = "host-restore-maintenance-cases.rs"]
 mod maintenance_cases;
+
+#[path = "host-restore-projects-cases.rs"]
+mod projects_cases;

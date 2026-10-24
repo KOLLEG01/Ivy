@@ -125,11 +125,9 @@ pub async fn relocate_projects(
                 .iter()
                 .filter(|v| v.get("componentId") == Some(&"agent-manager".into()))
             {
-                let path = join(&[
-                    field(&layout::service_paths(&config, instance)?, "data")?,
-                    "project-backup-paths.json".into(),
-                ]);
-                if !exists(&path).await? {
+                let path = native(&field(&layout::service_paths(&config, instance)?, "data")?)?
+                    .join("project-backup-paths.json");
+                if !backup_files::exists(&path).await? {
                     continue;
                 }
                 let prior = array(original.required("instances")?)?
@@ -139,12 +137,15 @@ pub async fn relocate_projects(
                 let value = |instance: &J| -> IvyResult<JsString> {
                     match instance.required("settings")?.get("internalProjectRoot") {
                         Some(v) => text(v),
-                        None => Err(IvyError::new("backup_invalid", "Retained projects require an internal project root.")),
+                        None => Err(IvyError::new(
+                            "backup_invalid",
+                            "Retained projects require an internal project root.",
+                        )),
                     }
                 };
                 let before = value(prior)?;
                 let after = value(instance)?;
-                let paths = json_file(&path, config::CONFIGURATION_BYTES).await?;
+                let paths = config::json_file(path.clone(), config::CONFIGURATION_BYTES).await?;
                 let areas = project_storage::restored_storage_areas(&config, &captured, &storage)?;
                 let prefix = concat(&[
                     "retained-projects/".into(),
@@ -173,7 +174,7 @@ pub async fn relocate_projects(
                         cwd
                     }));
                 }
-                config::atomic_json(native(&path)?, J::Array(result)).await?;
+                config::atomic_json(path, J::Array(result)).await?;
             }
             Ok(())
         })
