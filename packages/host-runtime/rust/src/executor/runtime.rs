@@ -301,8 +301,20 @@ impl ActivationRuntime for NativeActivationRuntime {
             } else if self.platform == "win32"
                 && instance.get("componentId") != Some(&"host-executor".into())
             {
-                let has_manager = c.config.required("instances")?.as_array()
-                    .ok_or_else(IvyError::internal)?.iter().any(|entry| {
+                // Installed bootstrap instances use the same OS authority as
+                // local action admission; do not create a second Manager owner.
+                if crate::journal::requires_bootstrap_replacement(&instance)
+                    && c.journal.installed(&c.instance_id).await?.is_some()
+                {
+                    return Ok(());
+                }
+                let has_manager = c
+                    .config
+                    .required("instances")?
+                    .as_array()
+                    .ok_or_else(IvyError::internal)?
+                    .iter()
+                    .any(|entry| {
                         entry.get("engine") == Some(&"process".into())
                             && entry.get("componentId") == Some(&"service-manager".into())
                     });
