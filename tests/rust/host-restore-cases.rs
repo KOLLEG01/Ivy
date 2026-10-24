@@ -273,58 +273,6 @@ async fn immutable_backup_and_captured_ownership_checks_match_original() {
     }
 }
 #[tokio::test]
-async fn fresh_disabled_restore_targets_preserve_source_and_layout_boundaries() {
-    for case in [
-        "valid",
-        "enabled",
-        "host-identity",
-        "instance-identity",
-        "same-endpoint",
-        "executables",
-        "prerequisite-valid",
-        "prerequisite-changed",
-        "existing-root",
-        "missing-parent",
-        "source-overlap",
-        "linked-parent-overlap",
-        "root-overlap",
-        "original-config",
-        "config-in-artifacts",
-        "config-exists",
-        "template-is-config",
-        "owned-native",
-        "shared-valid",
-        "shared-changed",
-        "retained-valid",
-        "manager-valid",
-        "manager-wrong-config",
-        "hive-valid",
-        "hive-same-port",
-        "hive-backup-in-data",
-    ] {
-        let result = compare_case("target", case).await;
-        assert_eq!(
-            ok(&result),
-            [
-                "valid",
-                "prerequisite-valid",
-                "template-is-config",
-                "owned-native",
-                "shared-valid",
-                "retained-valid",
-                "manager-valid",
-                "hive-valid"
-            ]
-            .contains(&case),
-            "{case}"
-        );
-        assert_json_eq(
-            result.get("state").unwrap().get("present").unwrap(),
-            result.get("state").unwrap().get("before").unwrap(),
-        );
-    }
-}
-#[tokio::test]
 async fn copied_journal_reconciliation_preserves_terminal_outcomes_and_rolls_back_failures() {
     for case in [
         "valid",
@@ -419,3 +367,6 @@ async fn restore_requires_the_exact_captured_platform_and_node_workload() {
         assert_eq!(ok(&result),case=="valid","{case}");
     }
 }
+
+#[path = "host-restore-target-cases.rs"]
+mod target_cases;

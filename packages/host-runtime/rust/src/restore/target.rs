@@ -1,7 +1,9 @@
 use super::*;
+use crate::{native_path, paths};
+use std::path::Path;
 
-async fn future(path: JsString) -> IvyResult<JsString> {
-    internal(tokio::task::spawn_blocking(move || crate::paths::future_path(&path)).await)?
+async fn future(path: PathBuf) -> IvyResult<PathBuf> {
+    internal(tokio::task::spawn_blocking(move || paths::future_native_path(&path)).await)?
 }
 fn identities(config: &J, b: &RestoreBindings) -> IvyResult<J> {
     let mut values = array(config.required("instances")?)?
@@ -22,13 +24,13 @@ fn identities(config: &J, b: &RestoreBindings) -> IvyResult<J> {
     });
     Ok(J::Array(values))
 }
-fn separate(b: &RestoreBindings, a: &JsString, v: &JsString) -> bool {
-    !b.storage.paths.inside(a, v) && !b.storage.paths.inside(v, a)
+fn separate(a: &Path, v: &Path) -> bool {
+    !native_path::within(a, v) && !native_path::within(v, a)
 }
-async fn futures(values: Vec<JsString>) -> IvyResult<Vec<JsString>> {
+async fn futures(values: Vec<JsString>) -> IvyResult<Vec<PathBuf>> {
     let mut result = Vec::with_capacity(values.len());
     for value in values {
-        result.push(future(value).await?);
+        result.push(future(native_path::to_native(&value)).await?);
     }
     Ok(result)
 }
@@ -58,7 +60,9 @@ pub async fn target_configuration(
     )?;
     validate_host("HostConfig", &input)?;
     require(
-        !input.get("restoredFrom").is_some_and(|value| !value.is_null())
+        !input
+            .get("restoredFrom")
+            .is_some_and(|value| !value.is_null())
             && input.get("hostId") == manifest.get("hostId")
             && array(input.required("instances")?)?
                 .iter()
@@ -93,7 +97,7 @@ pub async fn target_configuration(
         .collect::<IvyResult<Vec<_>>>()?;
     let source_areas = areas(manifest, &original)?;
     let target_areas = project_storage::restored_storage_areas(&input, &source_areas, &b.storage)?;
-    let target_config = node_path::from_native(&layout::host_configuration_path(&input)?);
+    let target_config = layout::host_configuration_path(&input)?;
     let actual_roots = futures(roots.clone()).await?;
     let actual_areas = futures(target_areas.iter().map(|a| a.path.clone()).collect()).await?;
     let mut protected = source_areas
@@ -115,21 +119,18 @@ pub async fn target_configuration(
     let protected = futures(protected).await?;
     let actual_config = future(target_config.clone()).await?;
     require(
-        actual_config
-            != future(node_path::from_native(&layout::host_configuration_path(
-                &original,
-            )?))
-            .await?
+        actual_config != future(layout::host_configuration_path(&original)?).await?
             && protected
                 .iter()
-                .all(|p| !b.storage.paths.inside(p, &actual_config))
+                .all(|p| !native_path::within(p, &actual_config))
             && actual_roots
                 .iter()
                 .skip(1)
                 .chain(actual_areas.iter().skip(1))
-                .all(|p| !b.storage.paths.inside(p, &actual_config))
-            && (target_config == b.storage.paths.resolve(&[template_path])
-                || !exists(&target_config).await?),
+                .all(|p| !native_path::within(p, &actual_config))
+            && (target_config
+                == native_path::to_native(&b.storage.paths.resolve(&[template_path]))
+                || !backup_files::exists(&target_config).await?),
         "target_conflict",
         "Restore configuration must be a fresh target, never the original user configuration.",
     )?;
@@ -152,14 +153,15 @@ pub async fn target_configuration(
         .iter()
         .filter(|a| a.key != JsString::from("state"))
     {
-        let actual = future(area.path.clone()).await?;
+        let path = native_path::to_native(&area.path);
+        let actual = future(path.clone()).await?;
         require(
-            node_path::is_absolute(b.storage.paths.style, &area.path)
-                && !exists(&area.path).await?
+            path.is_absolute()
+                && !backup_files::exists(&path).await?
                 && protected
                     .iter()
                     .chain(actual_roots.iter())
-                    .all(|root| separate(b, root, &actual)),
+                    .all(|root| separate(root, &actual)),
             "target_conflict",
             "Restored service and project areas must be fresh, disjoint and outside original data.",
         )?;
@@ -174,7 +176,7 @@ pub async fn target_configuration(
         base.iter().enumerate().all(|(i, a)| {
             base.iter()
                 .enumerate()
-                .all(|(j, other)| i == j || !b.storage.paths.inside(a, other))
+                .all(|(j, other)| i == j || !native_path::within(a, other))
         }),
         "target_conflict",
         "Restore storage areas overlap.",
@@ -191,19 +193,20 @@ pub async fn target_configuration(
         "Shared Codex homes are external prerequisites and must retain their captured assignment; restore never copies or relocates their data.",
     )?;
     for root in &roots {
+        let path = native_path::to_native(root);
         require(
-            node_path::is_absolute(b.storage.paths.style, root)
-                && !exists(root).await?
-                && exists(&node_path::dirname(b.storage.paths.style, root)).await?,
+            path.is_absolute()
+                && !backup_files::exists(&path).await?
+                && backup_files::exists(path.parent().unwrap_or(&path)).await?,
             "target_conflict",
             "Restore target roots must be fresh absolute directories with existing parents.",
         )?;
-        let actual = future(root.clone()).await?;
+        let actual = future(path).await?;
         require(
-            protected.iter().all(|p| separate(b, p, &actual))
+            protected.iter().all(|p| separate(p, &actual))
                 && actual_roots
                     .iter()
-                    .all(|other| *other == actual || separate(b, other, &actual)),
+                    .all(|other| *other == actual || separate(other, &actual)),
             "target_conflict",
             "Restore roots overlap each other, the backup or the source installation.",
         )?;
@@ -241,7 +244,7 @@ pub async fn target_configuration(
         {
             require(
                 instance.required("settings")?.get("hostConfigPath")
-                    == Some(&J::String(target_config.clone())),
+                    == Some(&J::String(native_path::from_native(&target_config))),
                 "target_conflict",
                 "Restored management components must explicitly reference the new host configuration.",
             )?;
@@ -263,7 +266,10 @@ pub async fn target_configuration(
                 )?;
             }
             if instance.get("engine") == Some(&"docker".into()) {
-                let valid = if let Some(docker) = instance.get("docker").filter(|value| value.as_object().is_some()) {
+                let valid = if let Some(docker) = instance
+                    .get("docker")
+                    .filter(|value| value.as_object().is_some())
+                {
                     array(docker.required("ports")?)?.iter().all(|p| {
                         !prior
                             .get("docker")

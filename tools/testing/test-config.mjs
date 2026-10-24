@@ -154,6 +154,21 @@ export const rustTests = {
     ],
     "testThreads": 1
   },
+  "tests/rust/host-restore-target-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "restore_cases::target_cases::fresh_disabled_restore_targets_preserve_source_and_layout_boundaries",
+    "testThreads": 1
+  },
+  "tests/rust/host-private-backup-host-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "private_backup_cases::host_cases::",
+    "testThreads": 1,
+    "prerequisites": [
+      { "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }
+    ]
+  },
   "tests/rust/host-private-backup-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",

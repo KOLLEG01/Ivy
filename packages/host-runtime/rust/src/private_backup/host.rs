@@ -8,9 +8,9 @@ use crate::{
     journal::HostJournal,
     layout::{self, StorageArea, StorageContext},
     native_backup_policy::NativeBackupPaths,
-    node_path::{self, Style},
+    native_path::{self, Style},
     node_runtime::NodeRuntime,
-    project_storage, storage_space, streaming_hash,
+    paths, project_storage, storage_space, streaming_hash,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use ivy_contracts::{JsString, core_schema::validate_host, hash::hash_json};
@@ -69,22 +69,20 @@ fn concat(parts: &[JsString]) -> JsString {
     JsString(parts.iter().flat_map(|s| s.0.iter().copied()).collect())
 }
 fn join(parts: &[JsString]) -> JsString {
-    node_path::join(Style::native(), parts)
+    native_path::join(Style::native(), parts)
 }
-fn native(p: &JsString) -> IvyResult<PathBuf> {
-    internal(node_path::node_filesystem_path(p))
+async fn metadata(p: &Path) -> IvyResult<std::fs::Metadata> {
+    internal(tokio::fs::symlink_metadata(p).await)
 }
-async fn exists(p: &JsString) -> IvyResult<bool> {
-    backup_files::exists(&native(p)?).await
-}
-async fn metadata(p: &JsString) -> IvyResult<std::fs::Metadata> {
-    internal(tokio::fs::symlink_metadata(native(p)?).await)
-}
-async fn realpath(p: &JsString) -> IvyResult<JsString> {
-    let p = native(p)?;
-    internal(tokio::task::spawn_blocking(move || crate::paths::realpath(&p)).await)
+async fn realpath(p: &Path) -> IvyResult<PathBuf> {
+    let p = p.to_owned();
+    internal(tokio::task::spawn_blocking(move || paths::realpath(&p)).await)
         .and_then(internal)
-        .map(|p| node_path::from_native(&p))
+}
+fn member_file(root: &Path, member: &JsString) -> IvyResult<PathBuf> {
+    // Validate at the public member boundary, then retain the native I/O root.
+    backup_files::relative_file(&native_path::from_native(root), member)?;
+    Ok(root.join(native_path::to_native(member)))
 }
 fn now(b: &BackupBindings) -> IvyResult<J> {
     Ok(
@@ -108,27 +106,27 @@ fn mode(m: &std::fs::Metadata) -> u32 {
         }
     }
 }
-async fn describe(path: &JsString, local: JsString, snapshot: bool) -> IvyResult<BackupFile> {
+async fn describe(path: &Path, local: JsString, snapshot: bool) -> IvyResult<BackupFile> {
     let m = metadata(path).await?;
     Ok(BackupFile {
         path: local,
-        hash: streaming_hash::file_hash(native(path)?).await?,
+        hash: streaming_hash::file_hash(path.to_owned()).await?,
         bytes: m.len(),
         mode: if snapshot { 0o600 } else { mode(&m) },
     })
 }
-async fn mkdir(path: &JsString, recursive: bool) -> IvyResult<()> {
+async fn mkdir(path: &Path, recursive: bool) -> IvyResult<()> {
     let mut b = tokio::fs::DirBuilder::new();
     b.recursive(recursive);
     #[cfg(unix)]
     b.mode(0o700);
-    internal(b.create(native(path)?).await)
+    internal(b.create(path).await)
 }
-async fn current_configuration(path: &JsString, context: &StorageContext) -> IvyResult<J> {
-    let input = config::json_file(native(path)?, config::CONFIGURATION_BYTES).await?;
+async fn current_configuration(path: &Path, context: &StorageContext) -> IvyResult<J> {
+    let input = config::json_file(path.to_owned(), config::CONFIGURATION_BYTES).await?;
     layout::resolve_host_configuration(
         &input,
-        &context.paths.resolve(&[path.clone()]),
+        &native_path::from_native(&internal(paths::absolute(path))?),
         &crate::native_account::environment(),
         context.paths.style,
         &context.account_home,
@@ -137,12 +135,12 @@ async fn current_configuration(path: &JsString, context: &StorageContext) -> Ivy
 #[derive(Clone)]
 struct RuntimeFile {
     record: BackupFile,
-    source: JsString,
+    source: PathBuf,
 }
 impl RuntimeFile {
     fn json(&self) -> J {
         let mut v = self.record.json();
-        v.insert("source", J::String(self.source.clone()));
+        v.insert("source", J::String(native_path::from_native(&self.source)));
         v
     }
 }
@@ -204,7 +202,8 @@ impl Inventory {
     async fn files(self: &Arc<Self>) -> IvyResult<Vec<RuntimeFile>> {
         let mut result = Vec::new();
         for area in &self.areas {
-            if !exists(&area.path).await? {
+            let root = native_path::to_native(&area.path);
+            if !backup_files::exists(&root).await? {
                 continue;
             }
             let inventory = self.clone();
@@ -212,8 +211,8 @@ impl Inventory {
             let excluded = Arc::new(move |local: &JsString| {
                 inventory.excluded(&concat(&[key.clone(), "/".into(), local.clone()]))
             });
-            for file in backup_files::inventory_files(native(&area.path)?, Some(excluded)).await? {
-                let source = backup_files::relative_file(&area.path, &file.path)?;
+            for file in backup_files::inventory_files(root.clone(), Some(excluded)).await? {
+                let source = member_file(&root, &file.path)?;
                 let mut record = file;
                 record.path = concat(&[area.key.clone(), "/".into(), record.path]);
                 result.push(RuntimeFile { record, source });
@@ -238,10 +237,8 @@ async fn backup(
 ) -> IvyResult<J> {
     let started = b.clock.monotonic();
     let config = crate::host_config::host_config(config_path.clone()).await?;
-    let config_path = node_path::from_native(&config_path);
-    let destination = node_path::from_native(&destination);
     require(
-        node_path::is_absolute(Style::native(), &destination),
+        destination.is_absolute(),
         "invalid_arguments",
         "Backup destination must be absolute.",
     )?;
@@ -253,31 +250,28 @@ async fn backup(
     });
     let mut roots = layout::host_storage_areas(&config, &context)?
         .into_iter()
-        .map(|a| a.path)
+        .map(|a| native_path::to_native(&a.path))
         .collect::<Vec<_>>();
-    roots.push(field(&config, "artifactRoot")?);
-    roots.push(field(&config, "stagingRoot")?);
+    roots.push(native_path::to_native(&field(&config, "artifactRoot")?));
+    roots.push(native_path::to_native(&field(&config, "stagingRoot")?));
     let mut source_roots = Vec::new();
     for root in roots {
-        source_roots.push(if exists(&root).await? {
+        source_roots.push(if backup_files::exists(&root).await? {
             realpath(&root).await?
         } else {
-            context.paths.resolve(&[root])
+            internal(paths::absolute(&root))?
         });
     }
-    let parent = realpath(&node_path::dirname(context.paths.style, &destination)).await?;
-    let actual_destination = join(&[
-        parent.clone(),
-        node_path::basename(context.paths.style, &destination),
-    ]);
-    require(
-        source_roots.iter().all(|root| {
-            !context.paths.inside(root, &actual_destination)
-                && !context.paths.inside(&destination, root)
-        }),
-        "target_conflict",
-        "Private backup storage must be outside live runtime, artifact and staging roots.",
-    )?;
+    let parent = realpath(destination.parent().unwrap_or(&destination)).await?;
+    let actual_destination = parent.join(destination.file_name().unwrap_or_default());
+    for root in &source_roots {
+        require(
+            !internal(paths::inside(root, &actual_destination))?
+                && !internal(paths::inside(&destination, root))?,
+            "target_conflict",
+            "Private backup storage must be outside live runtime, artifact and staging roots.",
+        )?;
+    }
     let docker = crate::docker::DockerAdapter::new(b.distribution_root.clone())?;
     let mut owners = offline_owners(&config, &b.compare, &docker).await?;
     let mut journal = None;
@@ -286,8 +280,8 @@ async fn backup(
     let created_at = now(&b)?;
     let result: IvyResult<J>=async{
         let areas=project_storage::project_storage_areas(&config,&context).await?;
-        for area in &areas{if exists(&area.path).await?{let actual=realpath(&area.path).await?;
-            require(!context.paths.inside(&actual,&actual_destination)&&!context.paths.inside(&actual_destination,&actual),"target_conflict","Backup destination overlaps retained internal work.")?;
+        for area in &areas{let path=native_path::to_native(&area.path);if backup_files::exists(&path).await?{let actual=realpath(&path).await?;
+            require(!internal(paths::inside(&actual,&actual_destination))?&&!internal(paths::inside(&actual_destination,&actual))?,"target_conflict","Backup destination overlaps retained internal work.")?;
         }}
         journal=Some(HostJournal::open(config.clone()).await?);journal.as_ref().unwrap().begin_maintenance().await?;
         let node_platform=node_platform(&config,journal.as_ref().unwrap(),b.node.as_ref()).await?;
@@ -306,8 +300,8 @@ async fn backup(
         let shared_homes=b.native_paths.shared_homes(&config)?;
         for entry in &ephemeral{
             let p=field(entry,"path")?;let key=if p.0.starts_with(&JsString::from("services/").0){p}else{concat(&["state/".into(),p])};
-            let p=layout::storage_file(&config,&key,None,&context)?;
-            if exists(&p).await?{require(metadata(&p).await?.is_dir()&&!metadata(&p).await?.file_type().is_symlink(),"target_conflict","Native helper cache root must be an owned directory.")?;}
+            let p=native_path::to_native(&layout::storage_file(&config,&key,None,&context)?);
+            if backup_files::exists(&p).await?{require(metadata(&p).await?.is_dir()&&!metadata(&p).await?.file_type().is_symlink(),"target_conflict","Native helper cache root must be an owned directory.")?;}
         }
         let inventory=Arc::new(Inventory{config:config.clone(),areas:areas.clone(),context:context.clone(),hive:hive.clone(),ephemeral:ephemeral.clone(),owner_locks});
         let runtime_files=inventory.files().await?;
@@ -319,41 +313,42 @@ async fn backup(
         }
         let mut external_files=Vec::new();
         for p in external_paths{
-            require(node_path::is_absolute(context.paths.style,&p),"invalid_arguments","Backup executable prerequisites must be absolute.")?;
-            let info=metadata(&realpath(&p).await?).await?;
+            let path=native_path::to_native(&p);
+            require(path.is_absolute(),"invalid_arguments","Backup executable prerequisites must be absolute.")?;
+            let info=metadata(&realpath(&path).await?).await?;
             require(info.is_file(),"backup_invalid","Runtime prerequisite is not a file.")?;
-            external_files.push(BackupFile{path:p.clone(),hash:streaming_hash::file_hash(native(&p)?).await?,bytes:info.len(),mode:mode(&info)}.json());
+            external_files.push(BackupFile{path:p.clone(),hash:streaming_hash::file_hash(path).await?,bytes:info.len(),mode:mode(&info)}.json());
         }
-        let journal_path=join(&[field(&config,"runtimeRoot")?,"deployments.sqlite".into()]);
+        let journal_path=native_path::to_native(&field(&config,"runtimeRoot")?).join("deployments.sqlite");
         let mut sqlite_bytes=metadata(&journal_path).await?.len() as f64;
-        for instance in &hive{let data=field(&layout::service_paths(&config,instance)?,"data")?;
-            for suffix in ["","-wal"]{let p=join(&[data.clone(),format!("hive.sqlite{suffix}").into()]);if exists(&p).await?{sqlite_bytes+=metadata(&p).await?.len() as f64;}}
+        for instance in &hive{let data=native_path::to_native(&field(&layout::service_paths(&config,instance)?,"data")?);
+            for suffix in ["","-wal"]{let p=data.join(format!("hive.sqlite{suffix}"));if backup_files::exists(&p).await?{sqlite_bytes+=metadata(&p).await?.len() as f64;}}
         }
         let reserve=runtime_files.iter().map(|f|f.record.bytes as f64).sum::<f64>()+sqlite_bytes*2.0+64.0*1024.0*1024.0;
         require(reserve<=64.0*1024_f64.powi(3),"limit_exceeded","Private backup exceeds its bounded allocation workload.")?;
-        storage_space::require_storage_space(native(&parent)?,reserve).await?;
+        storage_space::require_storage_space(parent,reserve).await?;
         let job=crate::native_plan::native_binary_path(&b.distribution_root,"ivy-job");
-        backup_files::private_directory(native(&destination)?,job.clone()).await?;created=true;
-        let configuration=join(&[destination.clone(),"configuration.json".into()]);
-        config::atomic_json(native(&configuration)?,config.clone()).await?;
+        backup_files::private_directory(destination.clone(),job.clone()).await?;created=true;
+        let configuration=destination.join("configuration.json");
+        config::atomic_json(configuration.clone(),config.clone()).await?;
         let mut files=vec![describe(&configuration,"configuration.json".into(),false).await?];
-        mkdir(&join(&[destination.clone(),"state".into()]),false).await?;
-        let snapshot=join(&[destination.clone(),"state/deployments.sqlite".into()]);
-        snapshot_journal(native(&journal_path)?,native(&snapshot)?).await?;
+        mkdir(&destination.join("state"),false).await?;
+        let snapshot=destination.join("state/deployments.sqlite");
+        snapshot_journal(journal_path,snapshot.clone()).await?;
         files.push(describe(&snapshot,"state/deployments.sqlite".into(),true).await?);
         for file in &runtime_files{
-            let target=backup_files::relative_file(&destination,&file.record.path)?;
-            let mut copied=backup_files::copy_verified(native(&file.source)?,native(&target)?,Some(file.record.clone()),false).await?;
+            let target=member_file(&destination,&file.record.path)?;
+            let mut copied=backup_files::copy_verified(file.source.clone(),target,Some(file.record.clone()),false).await?;
             copied.path=file.record.path.clone();files.push(copied);
         }
         let mut hive_snapshots=Vec::new();
         for instance in &hive{
-            let source=join(&[field(&layout::service_paths(&config,instance)?,"data")?,"hive.sqlite".into()]);
-            if !exists(&source).await?{continue}
-            let local=layout::storage_path(&config,&source,&context)?;let target=backup_files::relative_file(&destination,&local)?;
-            mkdir(&node_path::dirname(context.paths.style,&target),true).await?;
+            let source=native_path::to_native(&field(&layout::service_paths(&config,instance)?,"data")?).join("hive.sqlite");
+            if !backup_files::exists(&source).await?{continue}
+            let local=layout::storage_path(&config,&native_path::from_native(&source),&context)?;let target=member_file(&destination,&local)?;
+            mkdir(target.parent().ok_or_else(IvyError::internal)?,true).await?;
             let snapshot=b.hive_snapshot;
-            let (source_path,target_path)=(native(&source)?,native(&target)?);
+            let (source_path,target_path)=(source,target.clone());
             let snapshot=internal(tokio::task::spawn_blocking(move || snapshot(&source_path,&target_path)).await)??;
             let value=J::object([("instanceId",instance.required("instanceId")?.clone()),("path",J::String(local.clone())),
                 ("format",snapshot.required("format")?.clone()),("pages",snapshot.required("pages")?.clone())]);
@@ -369,18 +364,18 @@ async fn backup(
             ("excluded",J::Array(["OS owner lock files","Source checkouts, staging payloads and local releases","OS bootstrap definitions","Runtime executables/native bundles outside runtime data (hashed prerequisites)","Docker daemon images (retained immutable candidate prerequisites)","Rotating Hive snapshot directories","Shared Codex user homes and externally managed App Servers (references only; separate user-state backup required)"].into_iter().map(J::from).collect())),
         ]);
         validate_host("BackupManifest",&manifest)?;
-        backup_files::sync_directories(native(&destination)?).await?;
-        let manifest_path=join(&[destination.clone(),"backup.json".into()]);
-        config::atomic_json(native(&manifest_path)?,manifest).await?;
+        backup_files::sync_directories(destination.clone()).await?;
+        let manifest_path=destination.join("backup.json");
+        config::atomic_json(manifest_path.clone(),manifest).await?;
         let elapsed=b.clock.monotonic().checked_duration_since(started).unwrap_or_default().as_secs_f64()*1000.0;
-        let result=J::object([("schemaVersion",J::Number(1.0)),("backupId",backup_id.clone().into()),("hostId",config.required("hostId")?.clone()),("directory",J::String(destination.clone())),("manifestHash",streaming_hash::file_hash(native(&manifest_path)?).await?.into()),("completedAt",completed_at),("files",J::Number(files.len() as f64)),("bytes",J::Number(files.iter().map(|f|f.bytes as f64).sum())),("elapsedMs",J::Number(elapsed.round()))]);
+        let result=J::object([("schemaVersion",J::Number(1.0)),("backupId",backup_id.clone().into()),("hostId",config.required("hostId")?.clone()),("directory",J::String(native_path::from_native(&destination))),("manifestHash",streaming_hash::file_hash(manifest_path).await?.into()),("completedAt",completed_at),("files",J::Number(files.len() as f64)),("bytes",J::Number(files.iter().map(|f|f.bytes as f64).sum())),("elapsedMs",J::Number(elapsed.round()))]);
         validate_host("BackupResult",&result)?;Ok(result)
     }.await;
     if let Err(error) = &result {
         if created {
             if let Ok(at) = now(&b) {
                 let _ = config::atomic_json(
-                    native(&join(&[destination, "backup-failure.json".into()]))?,
+                    destination.join("backup-failure.json"),
                     J::object([
                         ("schemaVersion", J::Number(1.0)),
                         ("backupId", backup_id.into()),
