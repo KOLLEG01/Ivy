@@ -30,6 +30,15 @@ pub fn phone_settings(value: &IvyJson, context: &HomeContext<'_>) -> IvyResult<I
     let policy = field(value, "policy")?;
     PhoneAdmission::new(policy.clone())?;
     let absolute = |s: &JsString| node_path::is_absolute(context.paths.style, s);
+    let companion = if context.paths.style == node_path::Style::Windows {
+        "dist/native/phone/Ivy.PhoneRuntime.exe"
+    } else {
+        "dist/native/linux-x64/ivy-phone-native"
+    };
+    require(
+        field(field(value, "native")?, "executable")? == &companion.into(),
+        "Phone native executable must match its host package.",
+    )?;
     require(
         array(policy, "challengedIncoming").is_empty()
             || string(value, "accessCodePath").is_some_and(absolute),
@@ -44,6 +53,15 @@ pub fn phone_settings(value: &IvyJson, context: &HomeContext<'_>) -> IvyResult<I
         .cloned()
         .unwrap_or_else(|| "windows".into());
     let codex = field(value, "codexVoice")?;
+    require(
+        context.paths.style != node_path::Style::Posix
+            || !cfg!(target_os = "linux")
+            || incoming != "windows".into()
+                && outgoing != "windows".into()
+                && value.get("audio").is_none_or(IvyJson::is_null)
+                && value.get("speech").is_none_or(IvyJson::is_null),
+        "Windows audio and Desktop routes require a Windows host; configure digital Voice on Linux.",
+    )?;
     require(
         incoming != "voice".into() && outgoing != "voice".into() || !codex.is_null(),
         "Codex Voice routing requires its configured CLI runtime.",

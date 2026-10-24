@@ -237,6 +237,10 @@ async fn native_lease_released(path: PathBuf) -> IvyResult<bool> {
             .open(path)
         {
             Ok(lease) => {
+                #[cfg(target_os = "linux")]
+                if !crate::native_owner::linux::lock(&lease).map_err(io_error)? {
+                    return Ok(false);
+                }
                 drop(lease);
                 Ok(true)
             }
@@ -276,24 +280,30 @@ async fn reconcile_with<F: Future<Output = IvyResult<bool>>>(
     if record.is_null() {
         return Err(IvyError::internal());
     }
+    #[cfg(target_os = "linux")]
+    let linux_record = crate::native_owner::linux::validate_record(&record).is_ok();
+    #[cfg(not(target_os = "linux"))]
+    let linux_record = false;
     let fields = ["creationFileTime", "epoch", "pid", "schemaVersion"];
     require(
-        record.as_object().is_some_and(|o| o.len() == fields.len())
-            && fields.iter().all(|key| record.get(key).is_some())
-            && record.get("schemaVersion") == Some(&1.0.into())
-            && record.get("epoch") == fence.get("ownerId")
-            && record
-                .get("pid")
-                .and_then(IvyJson::as_f64)
-                .is_some_and(|n| n > 0.0 && n <= 9_007_199_254_740_991.0 && n.fract() == 0.0)
-            && record
-                .get("creationFileTime")
-                .and_then(IvyJson::as_js_string)
-                .is_some_and(|s| {
-                    (1..=20).contains(&s.0.len())
-                        && matches!(s.0[0], 49..=57)
-                        && s.0.iter().all(|c| matches!(*c, 48..=57))
-                }),
+        linux_record && record.get("epoch") == fence.get("ownerId")
+            || !cfg!(target_os = "linux")
+                && record.as_object().is_some_and(|o| o.len() == fields.len())
+                && fields.iter().all(|key| record.get(key).is_some())
+                && record.get("schemaVersion") == Some(&1.0.into())
+                && record.get("epoch") == fence.get("ownerId")
+                && record
+                    .get("pid")
+                    .and_then(IvyJson::as_f64)
+                    .is_some_and(|n| n > 0.0 && n <= 9_007_199_254_740_991.0 && n.fract() == 0.0)
+                && record
+                    .get("creationFileTime")
+                    .and_then(IvyJson::as_js_string)
+                    .is_some_and(|s| {
+                        (1..=20).contains(&s.0.len())
+                            && matches!(s.0[0], 49..=57)
+                            && s.0.iter().all(|c| matches!(*c, 48..=57))
+                    }),
         "outcome_unknown",
         "Phone native owner record does not match its retained stop fence.",
     )?;
@@ -327,7 +337,10 @@ pub async fn start_phone_process(options: PhoneProcessOptions) -> IvyResult<Phon
     start_with(
         options,
         Arc::new(SharedLauncher),
-        cfg!(all(windows, target_arch = "x86_64")),
+        cfg!(all(
+            any(windows, target_os = "linux"),
+            target_arch = "x86_64"
+        )),
     )
     .await
 }
@@ -352,7 +365,7 @@ async fn start_inner(
     require(
         supported_platform,
         "phone_platform",
-        "Phone requires its owning Windows x64 host.",
+        "Phone requires its owning Windows or Linux x64 host.",
     )?;
     let journal = options.journal;
     let data_root = journal.data_root().to_path_buf();
@@ -409,7 +422,11 @@ async fn start_inner(
             },
             root.clone(),
             LaunchContext {
-                job_launcher: Some(root.join("dist/native/ivy-job.exe")),
+                job_launcher: if cfg!(windows) {
+                    Some(root.join("dist/native/ivy-job.exe"))
+                } else {
+                    None
+                },
                 raw_output: true,
                 ..LaunchContext::default()
             },

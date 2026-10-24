@@ -10,22 +10,36 @@ const reference = Object.freeze({
 });
 const hash = value => createHash('sha256').update(value).digest('hex');
 
+export function phoneEvsTarget(platform = process.platform) {
+  assert.equal(process.arch, 'x64', 'EVS preparation requires x64.');
+  assert.ok(['win32', 'linux'].includes(platform), 'EVS preparation requires Windows or Linux.');
+  return platform === 'win32'
+    ? { library: 'ivy_phone_evs.dll', test: 'phone_evs_test.exe', compilers: ['x86_64-w64-mingw32'] }
+    : { library: 'libivy_phone_evs.so', test: 'phone_evs_test', compilers: ['x86_64-linux-gnu', 'x86_64-pc-linux-gnu'] };
+}
+
+export function phoneEvsFlags(work, platform = process.platform) {
+  return ['-std=c99', '-O3', '-DNDEBUG', '-DRELEASE', '-D__unix__', '-fno-strict-aliasing',
+    ...(platform === 'linux' ? ['-fPIC'] : []),
+    ...['lib_com', 'lib_enc', 'lib_dec'].map(name => '-I' + join(work, 'source/c-code', name))];
+}
+
 // An explicitly selected local build cache is trusted like the local compiler. Hash checks bind
 // reuse to these exact authored/reference inputs and output bytes; they are not a signature.
 export async function readPhoneEvsBuild(root, path) {
+  const target = phoneEvsTarget();
   assert.ok(isAbsolute(path), 'EVS build report must be an absolute local path.');
   const report = JSON.parse(await readFile(path, 'utf8'));
   assert.equal(report.schemaVersion, 1); assert.deepEqual(report.reference, reference);
-  assert.equal(report.compilerTarget, 'x86_64-w64-mingw32');
+  assert.ok(target.compilers.includes(report.compilerTarget), 'EVS compiler target differs from the selected platform.');
   assert.ok(typeof report.compilerVersion === 'string' && report.compilerVersion.length > 0);
   assert.ok(isAbsolute(report.work));
-  assert.deepEqual(report.flags, ['-std=c99', '-O3', '-DNDEBUG', '-DRELEASE', '-D__unix__', '-fno-strict-aliasing',
-    ...['lib_com', 'lib_enc', 'lib_dec'].map(name => '-I' + join(report.work, 'source/c-code', name))]);
+  assert.deepEqual(report.flags, phoneEvsFlags(report.work));
   for (const [key, file] of Object.entries({ adapter: 'phone_evs.c', header: 'phone_evs.h', test: 'phone_evs_test.c' }))
     assert.equal(hash(await readFile(join(root, 'services/phone-bridge/native/evs', file))), report.authoredInputs[key], 'EVS authored input changed: ' + file);
   assert.equal(report.files, 369, 'Pinned EVS translation-unit set changed.');
-  assert.equal(resolve(report.library), resolve(report.work, 'ivy_phone_evs.dll'));
-  assert.equal(resolve(report.testExecutable), resolve(report.work, 'phone_evs_test.exe'));
+  assert.equal(resolve(report.library), resolve(report.work, target.library));
+  assert.equal(resolve(report.testExecutable), resolve(report.work, target.test));
   const library = await readFile(report.library);
   assert.equal(hash(library), report.librarySha256, 'EVS library differs from original build evidence.');
   assert.equal(hash(await readFile(report.testExecutable)), report.testSha256, 'EVS test executable differs from original build evidence.');
@@ -33,11 +47,12 @@ export async function readPhoneEvsBuild(root, path) {
 }
 
 export async function preparePhoneEvs(root, reportPath = process.env.IVY_EVS_BUILD_REPORT) {
+  const target = phoneEvsTarget();
   // A source-keyed pointer lets prepare/check/publish reuse one dependency build within a
   // source snapshot. Different C inputs or builder recipe never select the same pointer.
   const inputs = await Promise.all(['services/phone-bridge/native/evs/phone_evs.c', 'services/phone-bridge/native/evs/phone_evs.h', 'services/phone-bridge/native/evs/phone_evs_test.c',
-    'tools/build/build-phone-evs.mjs'].map(async path => [path, hash(await readFile(join(root, path)))]));
-  const input = hash(JSON.stringify(inputs));
+    'tools/build/build-phone-evs.mjs', 'tools/package/phone-evs-package.mjs'].map(async path => [path, hash(await readFile(join(root, path)))]));
+  const input = hash(JSON.stringify([process.platform, process.arch, inputs]));
   const pointer = join(root, '.local/phone-evs-cache', input + '.json');
   const sharedRoot = process.env.IVY_BUILD_CACHE_ROOT;
   assert.ok(sharedRoot === undefined || isAbsolute(sharedRoot), 'Selected EVS build cache must be absolute.');
@@ -71,12 +86,10 @@ export async function preparePhoneEvs(root, reportPath = process.env.IVY_EVS_BUI
     const incoming = shared + '.incoming-' + randomUUID();
     await mkdir(incoming, { recursive: true });
     try {
-      await writeFile(join(incoming, 'ivy_phone_evs.dll'), validated.library, { flag: 'wx' });
-      await writeFile(join(incoming, 'phone_evs_test.exe'), await readFile(validated.report.testExecutable), { flag: 'wx' });
-      const cached = { ...validated.report, work: shared, library: join(shared, 'ivy_phone_evs.dll'),
-        testExecutable: join(shared, 'phone_evs_test.exe'),
-        flags: ['-std=c99', '-O3', '-DNDEBUG', '-DRELEASE', '-D__unix__', '-fno-strict-aliasing',
-          ...['lib_com', 'lib_enc', 'lib_dec'].map(name => '-I' + join(shared, 'source/c-code', name))] };
+      await writeFile(join(incoming, target.library), validated.library, { flag: 'wx' });
+      await writeFile(join(incoming, target.test), await readFile(validated.report.testExecutable), { flag: 'wx', mode: 0o755 });
+      const cached = { ...validated.report, work: shared, library: join(shared, target.library),
+        testExecutable: join(shared, target.test), flags: phoneEvsFlags(shared) };
       await writeFile(join(incoming, 'build.json'), JSON.stringify(cached, null, 2) + '\n', { flag: 'wx' });
       await mkdir(dirname(shared), { recursive: true });
       try {
@@ -101,7 +114,7 @@ export async function installPhoneEvs(root, destination, built, { replace = fals
   const checked = await readPhoneEvsBuild(root, join(built.report.work, 'build.json'));
   assert.equal(checked.report.librarySha256, built.report.librarySha256, 'Selected EVS dependency changed before packaging.');
   await mkdir(destination, { recursive: true });
-  const libraryPath = join(destination, 'ivy_phone_evs.dll');
+  const libraryPath = join(destination, phoneEvsTarget().library);
   const noticePath = join(destination, 'licenses/EVS-reference.md');
   const provenancePath = join(destination, 'evs-build.json');
   if (replace) for (const path of [libraryPath, noticePath, provenancePath]) await rm(path, { force: true });
@@ -109,6 +122,6 @@ export async function installPhoneEvs(root, destination, built, { replace = fals
   await mkdir(join(destination, 'licenses'), { recursive: true });
   await writeFile(noticePath, await readFile(join(root, 'services/phone-bridge/native/evs/NOTICE.md')), { flag: 'wx' });
   const { compilerVersion, compilerTarget, authoredInputs, librarySha256, testSha256 } = checked.report;
-  await writeFile(provenancePath, JSON.stringify({ schemaVersion: 1, abi: 1, reference,
+  await writeFile(provenancePath, JSON.stringify({ schemaVersion: 1, abi: 2, reference,
     compilerVersion, compilerTarget, authoredInputs, librarySha256, testSha256 }, null, 2) + '\n', { flag: 'wx' });
 }

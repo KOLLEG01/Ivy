@@ -6,6 +6,12 @@ or virtual audio cable. Windows calls and announcement screening use the separat
 configured `audio` settings. See [Voice requirements](../../specs/PHONE-VOICE.md) and
 the [service schema](../../specs/schemas/phone-service.schema.json).
 
+`npm run build:phone` prepares the owning Windows or Linux x64 host's service,
+companion, codec and health helper. Linux preparation needs GCC and CMake.
+Set `native.executable` to `dist/native/linux-x64/ivy-phone-native` on Linux;
+Windows retains `dist/native/phone/Ivy.PhoneRuntime.exe`. Use the executable hash
+returned by preparation. Platform and routing requirements are in the Voice spec.
+
 Configure `codexVoice` with the pinned executable/version/hash, Codex home, working
 directory and optional native project ID. Its home and app-server options follow
 AgentManager's shared runtime rules and remain independently configurable. Native

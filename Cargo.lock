@@ -2236,6 +2236,7 @@ dependencies = [
  "ivy-host-runtime",
  "ivy-sdk",
  "ivy-store",
+ "libc",
  "nanoaudio-core",
  "nanoaudio-g722",
  "opus",

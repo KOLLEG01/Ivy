@@ -9,6 +9,9 @@ use std::io;
 
 const RECORD_BYTES: usize = 4096;
 
+#[cfg(target_os = "linux")]
+pub(crate) mod linux;
+
 #[cfg(all(test, windows))]
 #[path = "../../../../tests/rust/phone_native_owner.rs"]
 mod lease_tests;
@@ -147,7 +150,11 @@ pub struct NativeOwnerLease;
 
 impl NativeOwnerLease {
     pub fn acquire(root: &std::path::Path, epoch: &str) -> io::Result<NativeOwner> {
-        if !cfg!(windows) || !root.is_absolute() || !root.is_dir() || !guid_d(epoch) {
+        if !cfg!(any(windows, target_os = "linux"))
+            || !root.is_absolute()
+            || !root.is_dir()
+            || !guid_d(epoch)
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Exact native owner directory and epoch required.",
@@ -157,7 +164,11 @@ impl NativeOwnerLease {
         {
             windows::acquire(root, epoch)
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            linux::acquire(root, epoch)
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             unreachable!()
         }

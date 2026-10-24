@@ -1,9 +1,7 @@
 use super::*;
 use crate::{
     dtmf::InputSource,
-    media::{
-        Codec, G711Codec, OpusDecoder, RtpHeader, RtpPacket, SipReceiveEvents, WindowsRtcpRuntime,
-    },
+    media::{Codec, G711Codec, OpusDecoder, RtpHeader, RtpPacket, SipReceiveEvents},
     native_pipe::{NativeRuntime, NativeShutdown},
     native_rpc::{NativeDispatcher, NativeHandler, NativeInvocation, NativeOutcome, NativeRequest},
     native_sip_commands::NativeSipCommands,
@@ -16,6 +14,11 @@ use tokio::net::UdpSocket as SipSocket;
 
 const CALL: &str = "11111111-1111-4111-8111-111111111111";
 const CONFIG: &str = r#"{"binding":{"address":"127.0.0.1","port":0,"transport":"udp","rtpPortRangeStart":32000,"rtpPortRangeEnd":32998},"codecs":{"preferences":["PCMA"],"receiveReorderMs":20},"incomingPeers":["127.0.0.1"],"registration":null,"password":null}"#;
+
+#[cfg(target_os = "linux")]
+use crate::media::LinuxRtcpRuntime as SystemRtcpRuntime;
+#[cfg(windows)]
+use crate::media::WindowsRtcpRuntime as SystemRtcpRuntime;
 
 #[derive(Default)]
 struct Resources {
@@ -76,12 +79,12 @@ impl Native {
     async fn new() -> Self {
         let resources = Arc::new(Resources::default());
         let opened = resources.clone();
-        // Use the real media factory and default Windows command composition.
+        // Use the real media factory and the platform's command composition.
         // Only candidate selection/binding is redirected to owned loopback.
         let factory = NativeSipSessionFactory::new(
             Arc::new(NoDevices),
             None,
-            Arc::new(WindowsRtcpRuntime),
+            Arc::new(SystemRtcpRuntime),
             |_| Arc::new(Events),
         )
         .test_realtime_factory(Arc::new(move |queue, prebuffer, permit, stop| {
@@ -98,11 +101,27 @@ impl Native {
             })
         }));
         let remaining = Arc::new(Remaining::default());
-        let commands = Arc::new(NativeSipCommands::windows(
-            Arc::new(factory),
+        #[cfg(windows)]
+        let commands =
+            NativeSipCommands::windows(Arc::new(factory), remaining.clone(), |_| Ok("null".into()));
+        #[cfg(target_os = "linux")]
+        let commands = NativeSipCommands::new(
+            crate::native_sip::NativeSipOperations::new(Arc::new(factory)),
             remaining.clone(),
-            |_| Ok("null".into()),
-        ));
+            |_| Box::pin(async { Ok(()) }),
+            crate::native_sip_status::NativeSipViews::new(
+                || Ok("null".into()),
+                |call| {
+                    call.media()
+                        .unwrap()
+                        .call_audio()
+                        .realtime_observation()
+                        .map(|value| value.unwrap_or_else(|| "null".into()))
+                        .map_err(|_| crate::sip::SipHostError::CleanupUnconfirmed.into())
+                },
+            ),
+        );
+        let commands = Arc::new(commands);
         let mut native = Self {
             rpc: NativeDispatcher::new(CALL.into(), 128, commands.clone()).unwrap(),
             commands,

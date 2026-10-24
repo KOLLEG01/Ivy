@@ -166,7 +166,63 @@ fn addresses() -> Result<Vec<SocketAddr>> {
     }
     Err(RealtimeError::Failed)
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn addresses() -> Result<Vec<SocketAddr>> {
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV6};
+    struct Interfaces(*mut libc::ifaddrs);
+    impl Drop for Interfaces {
+        fn drop(&mut self) {
+            // SAFETY: getifaddrs returned this list; exactly this owner frees it.
+            unsafe { libc::freeifaddrs(self.0) };
+        }
+    }
+    let mut first = std::ptr::null_mut();
+    // SAFETY: the OS initializes the out-pointer or reports failure.
+    if unsafe { libc::getifaddrs(&mut first) } != 0 {
+        return Err(RealtimeError::Failed);
+    }
+    let interfaces = Interfaces(first);
+    let mut current = interfaces.0;
+    let mut values = Vec::new();
+    // SAFETY: all list nodes and their family-specific sockaddr values remain
+    // owned by interfaces throughout traversal. No pointer escapes this scope.
+    unsafe {
+        while let Some(interface) = current.as_ref() {
+            if interface.ifa_flags & libc::IFF_UP as u32 != 0 && !interface.ifa_addr.is_null() {
+                let value = match i32::from((*interface.ifa_addr).sa_family) {
+                    libc::AF_INET => {
+                        let address = &*interface.ifa_addr.cast::<libc::sockaddr_in>();
+                        Some(SocketAddr::from((
+                            Ipv4Addr::from(address.sin_addr.s_addr.to_ne_bytes()),
+                            0,
+                        )))
+                    }
+                    libc::AF_INET6 => {
+                        let address = &*interface.ifa_addr.cast::<libc::sockaddr_in6>();
+                        Some(SocketAddr::V6(SocketAddrV6::new(
+                            Ipv6Addr::from(address.sin6_addr.s6_addr),
+                            0,
+                            0,
+                            address.sin6_scope_id,
+                        )))
+                    }
+                    _ => None,
+                };
+                if let Some(value) = value {
+                    if !value.ip().is_unspecified()
+                        && !value.ip().is_multicast()
+                        && !values.contains(&value)
+                    {
+                        values.push(value);
+                    }
+                }
+            }
+            current = interface.ifa_next;
+        }
+    }
+    Ok(values)
+}
+#[cfg(not(any(windows, target_os = "linux")))]
 fn addresses() -> Result<Vec<SocketAddr>> {
     // The native companion's Windows implementation has no foreign-host
     // enumeration substitute. Explicit bindings remain portable for tests.

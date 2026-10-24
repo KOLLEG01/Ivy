@@ -1,14 +1,47 @@
 //! The native executable's platform composition. Construction starts no media,
 //! device, desktop or provider activity; each owner keeps its existing admission.
 use crate::native_pipe::NativeRuntime;
-use std::sync::Arc;
+use std::{
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
+
+#[cfg(target_os = "linux")]
+mod linux;
+
+struct CodecLibrary {
+    directory: PathBuf,
+    loaded: OnceLock<Result<Arc<crate::media::EvsLibrary>, crate::native_codec::CodecLibraryError>>,
+}
+impl CodecLibrary {
+    fn load(
+        &self,
+    ) -> Result<Arc<crate::media::EvsLibrary>, crate::native_codec::CodecLibraryError> {
+        use crate::{media::EvsLibrary, native_codec::CodecLibraryError};
+        self.loaded
+            .get_or_init(|| {
+                if !self.directory.join(EvsLibrary::FILE_NAME).is_file() {
+                    return Err(CodecLibraryError::Missing);
+                }
+                // SAFETY: the Host owner admitted this immutable native package.
+                // Never load from a caller path, PATH or the working directory.
+                unsafe { EvsLibrary::load_packaged(&self.directory) }
+                    .map_err(|_| CodecLibraryError::Incompatible)
+            })
+            .clone()
+    }
+}
 
 pub fn system_runtime() -> std::io::Result<Arc<dyn NativeRuntime>> {
     #[cfg(all(windows, target_pointer_width = "64"))]
     {
         windows::runtime()
     }
-    #[cfg(not(all(windows, target_pointer_width = "64")))]
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    {
+        linux::runtime()
+    }
+    #[cfg(not(all(any(windows, target_os = "linux"), target_pointer_width = "64")))]
     {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -22,8 +55,7 @@ mod windows {
     use super::*;
     use crate::{
         dtmf::InputSource,
-        media::{EvsLibrary, SipReceiveEvents, WindowsAudioFactory, WindowsRtcpRuntime},
-        native_codec::CodecLibraryError,
+        media::{SipReceiveEvents, WindowsAudioFactory, WindowsRtcpRuntime},
         native_pipe::NativeShutdown,
         native_rpc::{NativeHandler, NativeInvocation, NativeOutcome, NativeRequest},
         native_sip::{NativeCallConfiguration, NativeSipMediaFactory, NativeSipMediaFuture},
@@ -31,28 +63,7 @@ mod windows {
         native_sip_media::NativeSipSessionFactory,
         sip::SipHostError,
     };
-    use std::{net::SocketAddr, path::PathBuf, sync::OnceLock};
-
-    struct CodecLibrary {
-        directory: PathBuf,
-        loaded: OnceLock<Result<Arc<EvsLibrary>, CodecLibraryError>>,
-    }
-    impl CodecLibrary {
-        fn load(&self) -> Result<Arc<EvsLibrary>, CodecLibraryError> {
-            self.loaded
-                .get_or_init(|| {
-                    if !self.directory.join(EvsLibrary::FILE_NAME).is_file() {
-                        return Err(CodecLibraryError::Missing);
-                    }
-                    // SAFETY: This is the same immutable installed package directory
-                    // as the verified native executable, admitted by the Host owner.
-                    // Never load a caller-supplied path or a library from PATH/CWD.
-                    unsafe { EvsLibrary::load_packaged(&self.directory) }
-                        .map_err(|_| CodecLibraryError::Incompatible)
-                })
-                .clone()
-        }
-    }
+    use std::net::SocketAddr;
     struct Media(Arc<CodecLibrary>);
     impl NativeSipMediaFactory for Media {
         fn create(&self, id: String, config: Arc<NativeCallConfiguration>) -> NativeSipMediaFuture {

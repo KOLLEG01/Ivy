@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { unzipSync } from 'fflate';
+import { phoneEvsFlags, phoneEvsTarget } from '../package/phone-evs-package.mjs';
 
 // Separate reproducible dependency build. No tests, package activation or runtime mutation.
 // Only the pinned archive is extracted, and every output belongs to this fresh build directory.
-assert.equal(process.platform, 'win32'); assert.equal(process.arch, 'x64');
+const target = phoneEvsTarget();
 assert.equal(process.argv.length, 2, 'Configuration uses IVY_EVS_CC / IVY_EVS_JOBS / IVY_EVS_ARCHIVE only.');
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const work = join(process.env.IVY_TEST_TEMP ?? join(root, '.local'), 'phone-evs-' + randomUUID());
@@ -36,7 +38,7 @@ async function run(label, executable, args, timeout = 120_000) {
 }
 const compilerVersion = await run('compiler-version', compiler, ['--version']);
 const compilerTarget = await run('compiler-target', compiler, ['-dumpmachine']);
-assert.equal(compilerTarget, 'x86_64-w64-mingw32', 'Windows x64 MinGW compiler required.');
+assert.ok(target.compilers.includes(compilerTarget), 'A native x64 GCC compiler for this platform is required.');
 let archive;
 if (process.env.IVY_EVS_ARCHIVE) {
   assert.ok(isAbsolute(process.env.IVY_EVS_ARCHIVE), 'Cached source archive must be an absolute path.');
@@ -52,12 +54,17 @@ if (process.env.IVY_EVS_ARCHIVE) {
   archive = Buffer.concat(chunks);
 }
 assert.ok(archive.length <= 16 * 1024 * 1024); assert.equal(hash(archive), reference.sha256);
-const outer = join(work, 'outer'), source = join(work, 'source'), objects = join(work, 'objects');
-for (const path of [outer, source, objects]) await mkdir(path);
+const source = join(work, 'source'), objects = join(work, 'objects');
+for (const path of [source, objects]) await mkdir(path);
 const archivePath = join(work, 'reference.zip'); await writeFile(archivePath, archive);
-const tar = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe');
-await run('extract-outer', tar, ['-xf', archivePath, '-C', outer]);
-await run('extract-source', tar, ['-xf', join(outer, reference.nested), '-C', source]);
+const nested = unzipSync(archive)[reference.nested];
+assert.ok(nested, 'Pinned ETSI source archive is missing.');
+for (const [name, bytes] of Object.entries(unzipSync(nested))) {
+  if (name.endsWith('/')) continue;
+  const path = join(source, name);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, bytes, { flag: 'wx' });
+}
 const code = join(source, 'c-code'), folders = ['lib_com', 'lib_enc', 'lib_dec'];
 const adapter = join(root, 'services/phone-bridge/native/evs/phone_evs.c'), test = join(root, 'services/phone-bridge/native/evs/phone_evs_test.c');
 // Snapshot authored inputs once. Root can develop the next batch without altering this build.
@@ -70,7 +77,7 @@ for (const folder of folders) for (const name of (await readdir(join(code, folde
   if (name.endsWith('.c') && !['encoder.c', 'decoder.c', 'voip_client.c'].includes(name)) files.push(join(code, folder, name));
 }
 assert.ok(files.length > 300, 'Pinned reference source set is incomplete.');
-const flags = ['-std=c99', '-O3', '-DNDEBUG', '-DRELEASE', '-D__unix__', '-fno-strict-aliasing', ...folders.map(name => '-I' + join(code, name))];
+const flags = phoneEvsFlags(work);
 const outputs = files.map((_, index) => join(objects, `${index}.o`));
 let next = 0, failure;
 await Promise.all(Array.from({ length: jobs }, async () => {
@@ -83,10 +90,14 @@ await Promise.all(Array.from({ length: jobs }, async () => {
 if (failure) throw failure;
 const responseFile = join(work, 'objects.rsp');
 await writeFile(responseFile, outputs.map(path => '"' + path.replaceAll('\\', '/') + '"').join('\n') + '\n');
-const library = join(work, 'ivy_phone_evs.dll'), imports = join(work, 'libivy_phone_evs.a');
-await run('link-library', compiler, ['-shared', '-static-libgcc', '@' + responseFile, '-Wl,--out-implib,' + imports, '-o', library, '-lm', '-lws2_32']);
-const executable = join(work, 'phone_evs_test.exe');
-await run('link-test', compiler, ['-std=c99', '-O2', '-static-libgcc', localTest, imports, '-o', executable, '-lm']);
+const library = join(work, target.library), imports = join(work, 'libivy_phone_evs.a');
+await run('link-library', compiler, ['-shared', '-static-libgcc', '@' + responseFile,
+  ...(process.platform === 'win32' ? ['-Wl,--out-implib,' + imports] : []),
+  '-o', library, '-lm', ...(process.platform === 'win32' ? ['-lws2_32'] : [])]);
+const executable = join(work, target.test);
+await run('link-test', compiler, ['-std=c99', '-O2', '-static-libgcc', localTest,
+  ...(process.platform === 'win32' ? [imports] : ['-L' + work, '-livy_phone_evs', '-Wl,-rpath,$ORIGIN']),
+  '-o', executable, '-lm']);
 const report = { schemaVersion: 1, reference, compiler, compilerVersion, compilerTarget, flags, jobs,
   authoredInputs: { adapter: hash(adapterBytes), test: hash(testBytes), header: hash(headerBytes) }, files: files.length, work,
   library, librarySha256: hash(await readFile(library)), testExecutable: executable,

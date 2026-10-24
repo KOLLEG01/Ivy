@@ -16,15 +16,18 @@ struct Functions {
 
 pub struct EvsLibrary {
     functions: Functions,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     _module: Option<Module>,
 }
 
 impl EvsLibrary {
+    #[cfg(not(target_os = "linux"))]
     pub const FILE_NAME: &'static str = "ivy_phone_evs.dll";
+    #[cfg(target_os = "linux")]
+    pub const FILE_NAME: &'static str = "libivy_phone_evs.so";
 
     /// Load only the fixed file in an absolute, verified package directory.
-    /// Dependencies are restricted to that directory and the system directory.
+    /// The caller also admits dependencies resolved by the platform loader.
     ///
     /// # Safety
     /// The caller must verify the immutable package's native library and its
@@ -35,7 +38,7 @@ impl EvsLibrary {
         if !directory.is_absolute() {
             return Err(CodecError::InvalidFormat);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         {
             let module = Module::load(&directory.join(Self::FILE_NAME))?;
             // SAFETY: The caller authenticates the native code/signatures. Each
@@ -56,9 +59,40 @@ impl EvsLibrary {
                 _module: Some(module),
             }))
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             Err(CodecError::Failed)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct Module(NonNull<c_void>);
+#[cfg(target_os = "linux")]
+impl Module {
+    fn load(path: &Path) -> Result<Self, CodecError> {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let path =
+            CString::new(path.as_os_str().as_bytes()).map_err(|_| CodecError::InvalidFormat)?;
+        // SAFETY: the caller has authenticated this absolute immutable package
+        // member. The handle stays owned until all ABI codec handles are gone.
+        NonNull::new(unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) })
+            .map(Self)
+            .ok_or(CodecError::Failed)
+    }
+    fn symbol(&self, name: &'static [u8]) -> Result<*mut c_void, CodecError> {
+        // SAFETY: names are fixed NUL-terminated ABI symbols; this module is live.
+        NonNull::new(unsafe { libc::dlsym(self.0.as_ptr(), name.as_ptr().cast()) })
+            .map(NonNull::as_ptr)
+            .ok_or(CodecError::Failed)
+    }
+}
+#[cfg(target_os = "linux")]
+impl Drop for Module {
+    fn drop(&mut self) {
+        // SAFETY: exactly this dlopen reference is released after codec owners.
+        unsafe {
+            libc::dlclose(self.0.as_ptr());
         }
     }
 }
@@ -353,7 +387,7 @@ mod tests {
                 encode,
                 decode,
             },
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             _module: None,
         });
         let format = Codec::Evs.offered_formats().remove(0);

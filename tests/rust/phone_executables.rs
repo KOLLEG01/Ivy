@@ -1,4 +1,4 @@
-#![cfg(all(windows, target_pointer_width = "64"))]
+#![cfg(all(any(windows, target_os = "linux"), target_pointer_width = "64"))]
 //! Real executable/pipe/SDK ownership, using loopback only. No calls, account,
 //! provider, audio device, UI automation or USB input is exercised.
 use ivy_contracts::{
@@ -28,6 +28,14 @@ fn object<const N: usize>(value: [(&str, IvyJson); N]) -> IvyJson {
 }
 fn id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+fn command(executable: impl AsRef<std::ffi::OsStr>) -> Command {
+    let command = Command::new(executable);
+    #[cfg(windows)]
+    let mut command = command;
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    command
 }
 async fn bounded<T>(work: impl std::future::Future<Output = T>) -> T {
     tokio::time::timeout(Duration::from_secs(120), work)
@@ -65,8 +73,7 @@ struct Native {
 }
 impl Native {
     fn start(root: &Path, epoch: String) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ivy-phone-native"))
-            .creation_flags(0x0800_0000)
+        let mut child = command(env!("CARGO_BIN_EXE_ivy-phone-native"))
             .args(["--epoch", &epoch, "--owner-root"])
             .arg(root)
             .stdin(Stdio::piped())
@@ -168,6 +175,56 @@ async fn native_stdio_owns_its_lease_and_configures_without_devices() {
     let status = native.request("status", object([]), false).await;
     assert_eq!(status.get("configured"), Some(&true.into()));
     assert!(status.get("call").unwrap().is_null());
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let record = json_file(root.0.join("phone-native-owner.json"), 4096)
+            .await
+            .unwrap();
+        assert_eq!(record.get("epoch"), Some(&epoch.clone().into()));
+        assert!(record.get("bootId").unwrap().as_str().unwrap().len() == 36);
+        assert!(record.get("startTicks").is_some());
+        assert!(record.get("creationFileTime").is_none());
+        assert_eq!(
+            std::fs::metadata(root.0.join("phone-native.lock"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let call = id();
+        native
+            .request(
+                "call.prepare",
+                object([("callId", call.clone().into())]),
+                true,
+            )
+            .await;
+        let prepared = native
+            .request(
+                "call.realtime.prepare",
+                object([
+                    ("callId", call.clone().into()),
+                    ("generation", 0.0.into()),
+                    ("queueMs", 80.0.into()),
+                ]),
+                true,
+            )
+            .await;
+        let sdp = prepared.get("sdp").unwrap().as_str().unwrap();
+        assert!(sdp.contains("a=candidate:") && sdp.contains("a=fingerprint:"));
+        native
+            .request(
+                "call.realtime.stop",
+                object([("callId", call.clone().into()), ("generation", 0.0.into())]),
+                true,
+            )
+            .await;
+        native
+            .request("call.release", object([("callId", call.into())]), true)
+            .await;
+    }
     native.input.take();
     assert!(bounded(native.child.wait()).await.unwrap().success());
     let mut replacement = Native::start(&root.0, epoch);
@@ -182,6 +239,28 @@ async fn native_stdio_owns_its_lease_and_configures_without_devices() {
     // only positive process exit and a released lease prove completion.
     replacement.send("shutdown", object([]), true).await;
     assert!(bounded(replacement.child.wait()).await.unwrap().success());
+    #[cfg(target_os = "linux")]
+    {
+        // A released lock alone cannot replace a still-live recorded process.
+        // Borrow a real companion's identity, without fabricating PID/start data.
+        let other = Root::new();
+        let mut live = Native::start(&other.0, id());
+        live.request("status", object([]), false).await;
+        let record = std::fs::read(other.0.join("phone-native-owner.json")).unwrap();
+        std::fs::write(root.0.join("phone-native-owner.json"), &record).unwrap();
+        let mut refused = Native::start(&root.0, id());
+        assert_eq!(bounded(refused.child.wait()).await.unwrap().code(), Some(1));
+        assert_eq!(
+            std::fs::read(root.0.join("phone-native-owner.json")).unwrap(),
+            record
+        );
+        live.input.take();
+        assert!(bounded(live.child.wait()).await.unwrap().success());
+        let mut admitted = Native::start(&root.0, id());
+        admitted.request("status", object([]), false).await;
+        admitted.input.take();
+        assert!(bounded(admitted.child.wait()).await.unwrap().success());
+    }
 }
 
 struct Fixture {
@@ -192,31 +271,36 @@ impl Fixture {
     async fn new(url: &str) -> Self {
         let root = Root::new();
         let artifact = root.0.join("artifact");
-        let native = artifact.join("dist/native/phone/Ivy.PhoneRuntime.exe");
+        let companion = if cfg!(windows) {
+            "dist/native/phone/Ivy.PhoneRuntime.exe"
+        } else {
+            "dist/native/linux-x64/ivy-phone-native"
+        };
+        let native = artifact.join(companion);
         std::fs::create_dir_all(native.parent().unwrap()).unwrap();
         std::fs::copy(env!("CARGO_BIN_EXE_ivy-phone-native"), &native).unwrap();
-        let executable = std::env::current_exe().unwrap();
-        let job = executable
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("ivy-job.exe");
-        assert!(
-            job.is_file(),
-            "Build the registered ivy-job prerequisite before this integration target."
-        );
-        std::fs::copy(job, artifact.join("dist/native/ivy-job.exe")).unwrap();
+        #[cfg(windows)]
+        {
+            let executable = std::env::current_exe().unwrap();
+            let job = executable
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("ivy-job.exe");
+            assert!(
+                job.is_file(),
+                "Build the registered ivy-job prerequisite before this integration target."
+            );
+            std::fs::copy(job, artifact.join("dist/native/ivy-job.exe")).unwrap();
+        }
         let hash = digest(&std::fs::read(&native).unwrap());
-        let settings = object([
+        let mut settings = object([
             (
                 "native",
                 object([
-                    (
-                        "executable",
-                        "dist/native/phone/Ivy.PhoneRuntime.exe".into(),
-                    ),
-                    ("executableHash", hash.into()),
+                    ("executable", companion.into()),
+                    ("executableHash", hash.clone().into()),
                 ]),
             ),
             ("binding", binding()),
@@ -248,6 +332,22 @@ impl Fixture {
                 ]),
             ),
         ]);
+        if cfg!(target_os = "linux") {
+            settings.remove("audio");
+            settings.insert("incomingRoute", "voice".into());
+            settings.insert("outgoingRoute", "voice".into());
+            // No call is placed. This configured executable is never started;
+            // these cases verify the service/native lifetime and registration.
+            settings.insert(
+                "codexVoice",
+                object([
+                    ("nativeExecutable", node_path::from_native(&native).into()),
+                    ("nativeExecutableHash", hash.clone().into()),
+                    ("nativeVersion", "0.1.0".into()),
+                    ("cwd", node_path::from_native(&root.0).into()),
+                ]),
+            );
+        }
         let build = format!("sha256:{}", "a".repeat(64));
         let value = object([
             ("schemaVersion", 1.0.into()),
@@ -285,9 +385,8 @@ impl Fixture {
         Self { root, config }
     }
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ivy-phone-bridge"));
+        let mut command = command(env!("CARGO_BIN_EXE_ivy-phone-bridge"));
         command
-            .creation_flags(0x0800_0000)
             .arg("--config")
             .arg(&self.config)
             .env("IVY_LAUNCH_ID", id())
@@ -411,8 +510,7 @@ async fn service_observer_loss_retains_stop_and_releases_its_journal() {
 #[tokio::test]
 async fn service_registers_all_tools_and_preserves_native_owner_across_hive_reconnect() {
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut peer = Command::new("node")
-        .creation_flags(0x0800_0000)
+    let mut peer = command("node")
         .arg(project.join("tests/fixtures/phone-service-peer.mjs"))
         .current_dir(&project)
         .stdin(Stdio::piped())
@@ -546,16 +644,19 @@ async fn failed_start_releases_ownership_before_a_corrected_start() {
     for allowed in [true, false] {
         let mut settings = valid.get("settings").unwrap().clone();
         if !allowed {
-            settings.remove("audio");
+            if cfg!(windows) {
+                settings.remove("audio");
+            } else {
+                settings.insert("outgoingRoute", "windows".into());
+            }
         }
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ivy-phone-bridge"));
+        let mut command = command(env!("CARGO_BIN_EXE_ivy-phone-bridge"));
         let mut child = command
             .arg("--validate-settings")
             .current_dir(&fixture.root.0)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .creation_flags(0x0800_0000)
             .kill_on_drop(true)
             .spawn()
             .unwrap();

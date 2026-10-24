@@ -1546,7 +1546,7 @@ export const rustTests = {
   "tests/rust/phone_executables.rs": {
     "package": "ivy-phone-bridge",
     "test": "phone_executables",
-    "platform": "win32",
+    "platforms": ["win32", "linux"],
     "architectures": [
       "x64"
     ],
@@ -1681,7 +1681,7 @@ export const rustTests = {
     "package": "ivy-phone-bridge",
     "lib": true,
     "filter": "media::realtime::tests::protocol_tests::",
-    "platform": "win32",
+    "platforms": ["win32", "linux"],
     "architectures": [
       "x64",
       "arm64"
@@ -1692,7 +1692,7 @@ export const rustTests = {
     "package": "ivy-phone-bridge",
     "lib": true,
     "filter": "media::realtime::tests::route_tests::native_tests::",
-    "platform": "win32",
+    "platforms": ["win32", "linux"],
     "architectures": [
       "x64",
       "arm64"

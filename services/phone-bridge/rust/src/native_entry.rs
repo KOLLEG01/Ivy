@@ -74,7 +74,13 @@ impl NativeEntryArguments {
     /// Supply arguments after argv[0]. No account credentials or synthetic media
     /// options are accepted. Preserve epoch spelling and the original OS path.
     pub fn parse(args: &[OsString]) -> Result<Self, i32> {
-        Self::on_platform(args, cfg!(all(windows, target_pointer_width = "64")))
+        Self::on_platform(
+            args,
+            cfg!(all(
+                any(windows, target_os = "linux"),
+                target_pointer_width = "64"
+            )),
+        )
     }
 
     fn on_platform(args: &[OsString], windows_64: bool) -> Result<Self, i32> {

@@ -120,3 +120,34 @@ impl RtcpRuntime for WindowsRtcpRuntime {
         })
     }
 }
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+pub struct LinuxRtcpRuntime;
+#[cfg(target_os = "linux")]
+impl RtcpRuntime for LinuxRtcpRuntime {
+    fn now(&self) -> Result<RtcpWallTime, MediaError> {
+        let now = chrono::Utc::now();
+        let utc = now
+            .timestamp()
+            .checked_mul(10_000_000)
+            .and_then(|ticks| ticks.checked_add(i64::from(now.timestamp_subsec_nanos() / 100)))
+            .and_then(|ticks| ticks.checked_add(RtcpWallTime::UNIX_TICKS))
+            .ok_or(MediaError::ClockUnavailable)?;
+        let offset = i64::from(now.with_timezone(&chrono::Local).offset().local_minus_utc());
+        let local = utc
+            .checked_add(offset * 10_000_000)
+            .ok_or(MediaError::ClockUnavailable)?;
+        RtcpWallTime::new(local, utc)
+    }
+    fn interval_ms(&self) -> Result<u16, MediaError> {
+        use super::{SipMediaEntropy, SystemSipMediaEntropy};
+        rtcp_interval(|| {
+            let mut bytes = [0_u8; 4];
+            SystemSipMediaEntropy
+                .fill(&mut bytes)
+                .map_err(|_| MediaError::ClockUnavailable)?;
+            Ok(u32::from_ne_bytes(bytes))
+        })
+    }
+}

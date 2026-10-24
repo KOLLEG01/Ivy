@@ -2,13 +2,17 @@
 
 Contracts: [service](schemas/phone-service.schema.json),
 [native IPC](schemas/phone-ipc.schema.json), [journal](schemas/phone-journal.schema.json).
-Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.ts),
-[call flow](../services/phone-bridge/src/runtime/flow.ts),
-[native audio](../services/phone-bridge/native/phone-runtime/WebRtcAudioRoute.cs).
+Implementation: [Codex client](../services/phone-bridge/rust/src/voice_rpc/owner.rs),
+[call flow](../services/phone-bridge/rust/src/service_flow.rs),
+[native audio](../services/phone-bridge/rust/src/media/realtime/route.rs).
 
 - Voice uses a hidden Codex CLI app-server client and native WebRTC. It requires no
   Desktop app, terminal, Micro emulator, Windows audio endpoint or virtual cable.
   Windows calls and announcement screening retain their separate audio path.
+- The service, SIP and digital Voice support Windows and Linux x64. Linux uses
+  `voice` for both incoming and outgoing routes, with `codexVoice` configured;
+  Windows audio/Desktop routes, audio endpoints and speech screening require
+  Windows. Linux rejects those settings before starting the native owner.
 - `codexVoice` independently selects the executable, exact version/hash, home,
   transport, working directory, optional native project and task configuration.
   Home resolution, daemon startup and Windows shell verification use the same
@@ -146,6 +150,7 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   requires reconnecting to the same runtime for cleanup. Service clients never
   terminate a shared daemon. Uncertain outcomes remain visible in the journal.
 
-Checks: [call flow](../tests/phone-flow.test.ts),
-[task lifecycle](../tests/phone-codex-voice.test.ts),
-[native WebRTC](../tests/native-phone/WebRtcTests.cs).
+Checks: [call flow](../tests/rust/phone_service_flow.rs),
+[task lifecycle](../tests/rust/phone_voice_control.rs),
+[native WebRTC](../tests/rust/phone_realtime_native.rs),
+[executables](../tests/rust/phone_executables.rs).

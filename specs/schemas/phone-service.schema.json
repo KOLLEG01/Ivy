@@ -69,7 +69,7 @@
           ],
           "properties": {
             "executable": {
-              "const": "dist/native/phone/Ivy.PhoneRuntime.exe"
+              "enum": ["dist/native/phone/Ivy.PhoneRuntime.exe", "dist/native/linux-x64/ivy-phone-native"]
             },
             "executableHash": {
               "type": "string",

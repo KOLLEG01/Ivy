@@ -69,6 +69,8 @@ pub use rtcp_owner::RtcpReceiveObservation;
 pub use rtcp_receive::{RtcpCompound, RtcpReceiverReport, RtcpReportBlocks, RtcpSenderReport};
 pub use rtcp_session::{RtcpSession, RtcpSessionObservation};
 pub use rtcp_statistics::{RtcpReceptionStatistics, RtcpReportSchedule, RtcpTimerEvent};
+#[cfg(target_os = "linux")]
+pub use rtcp_time::LinuxRtcpRuntime;
 #[cfg(windows)]
 pub use rtcp_time::WindowsRtcpRuntime;
 pub use rtcp_time::{RtcpRuntime, RtcpWallTime, rtcp_interval};

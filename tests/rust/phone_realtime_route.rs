@@ -10,7 +10,7 @@ use crate::media::{
 use std::{future::Future, net::UdpSocket, pin::Pin, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(all(windows, target_pointer_width = "64"))]
+#[cfg(all(any(windows, target_os = "linux"), target_pointer_width = "64"))]
 mod native_tests {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
