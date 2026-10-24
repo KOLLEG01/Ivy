@@ -231,15 +231,57 @@ fn native_executable_interoperates_with_unchanged_hive_and_public_sdk() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn native_bootstrap_launch_without_environment_accepts_fenced_graceful_control() {
+    let root = Fixture::new();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_ivy-service-manager"));
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "--import",
+            "./tests/fixtures/service-manager-native-loader.mjs",
+            "tests/fixtures/service-manager-native-hive.mjs",
+        ])
+        .arg(&binary)
+        .arg(&root.0)
+        .arg(binary.parent().unwrap().join("ivy-job.exe"))
+        .arg(std::env::current_exe().unwrap())
+        .arg(binary.parent().unwrap().join("ivy-health.exe"))
+        .arg("bootstrap-only")
+        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = parse(
+        std::str::from_utf8(&output.stdout).unwrap().trim(),
+        MANAGEMENT_FRAME_BYTES,
+    )
+    .unwrap();
+    assert_eq!(result.get("ok"), Some(&IvyJson::Bool(true)));
+    assert_eq!(
+        result
+            .required("results")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
 /// The unchanged Hive fixture drives a real Rust RuntimeOwner in this process.
 /// Its child is the actual native Manager binary under the Windows Job.
 #[cfg(windows)]
 #[tokio::test]
 async fn dispatcher_owner_fixture() {
-    use ivy_host_runtime::{
-        config::json_file, journal::HostJournal,
-        runtime_owner::RuntimeOwner,
-    };
+    use ivy_host_runtime::{config::json_file, journal::HostJournal, runtime_owner::RuntimeOwner};
     let Some(request) = std::env::var_os("IVY_MANAGER_DISPATCH_OWNER") else {
         return;
     };

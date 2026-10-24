@@ -24,6 +24,44 @@ pub struct Manager {
     configuration: Arc<Configuration>,
     shutdown: Arc<Shutdown>,
 }
+
+async fn startup_health(config: InstanceConfig, journal: &HostJournal) -> IvyResult<HealthFile> {
+    let health = HealthFile::new(config.clone());
+    if health.launch_id().is_some_and(|id| !id.0.is_empty()) {
+        return Ok(health);
+    }
+    // Independently started Windows bootstrap tasks have no launch environment.
+    // Use their retained target so health remains bound to the installed launch.
+    let source = config.json();
+    let launch = if let Some(target) = journal
+        .target(&source.required("instanceId")?.as_str()?)
+        .await?
+    {
+        let candidate = journal
+            .candidate(&target.required("candidateId")?.as_str()?)
+            .await?;
+        if target.get("instanceId") != source.get("instanceId")
+            || target.get("desired") != Some(&"running".into())
+            || ["componentId", "buildId", "artifactRoot"]
+                .iter()
+                .any(|key| candidate.get(key) != source.get(key))
+        {
+            return Err(IvyError::new(
+                "target_conflict",
+                "ServiceManager launch does not match its selected release.",
+            ));
+        }
+        target
+            .required("revision")?
+            .as_js_string()
+            .ok_or_else(IvyError::internal)?
+            .clone()
+    } else {
+        health.boot_id().into()
+    };
+    Ok(HealthFile::with_launch_id(config, Some(launch)))
+}
+
 impl Manager {
     pub async fn from_path(path: PathBuf, node: impl Into<Option<NodeRuntime>>) -> IvyResult<Self> {
         let config = config::native_instance_config(path).await?;
@@ -88,7 +126,13 @@ impl Manager {
             ));
         }
         let journal = HostJournal::open(accepted.clone()).await?;
-        let health_file = Arc::new(HealthFile::new(config.clone()));
+        let health_file = match startup_health(config.clone(), &journal).await {
+            Ok(health) => Arc::new(health),
+            Err(error) => {
+                let _ = journal.close().await;
+                return Err(error);
+            }
+        };
         let health = HealthReporter::new(health_file.clone());
         let admission = Admission::default();
         let owners = Arc::new(Mutex::new(Owners::new(bootstrap_root.clone(), node)));

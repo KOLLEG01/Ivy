@@ -14,7 +14,7 @@ import {digest} from '../../packages/contracts/src/canonical.ts';
 import {materializeNativePlan} from '../../packages/host-runtime/src/native-plan.mjs';
 
 const [binary, root, job, ownerBinary, healthBinary, mode = 'full', identityPath] = process.argv.slice(2);
-assert.ok(mode === 'full' || mode === 'dispatcher-only');
+assert.ok(mode === 'full' || mode === 'dispatcher-only' || mode === 'bootstrap-only');
 const releaseIdentity = mode === 'dispatcher-only' ? JSON.parse(await readFile(identityPath, 'utf8')) : null;
 if (releaseIdentity) {
   assert.equal(process.platform, 'win32');
@@ -89,7 +89,7 @@ function windowsProcess(pid) {
   return JSON.parse(result.stdout.trim());
 }
 
-async function qualifyDispatcherOwner() {
+async function prepareNativeManager() {
   const dist = join(artifact,'dist');
   const payload = join(dist,'native',`${process.platform}-${process.arch}`);
   await mkdir(payload,{recursive:true});
@@ -105,6 +105,52 @@ async function qualifyDispatcherOwner() {
   await atomicJson(join(artifact,'manifest.json'),manifest);
   journal.saveCandidate({candidateId:hash,componentId:'service-manager',artifactRoot:artifact,manifestPath:join(artifact,'manifest.json'),
     buildId:hash,createdAt:new Date().toISOString(),platform:{os:process.platform,arch:process.arch,node:process.versions.node}},manifest);
+  return {payload,plan};
+}
+
+async function qualifyBootstrapLaunch() {
+  assert.equal(process.platform,'win32');
+  const standalone = await start({launchId:null});
+  await stop();
+  const replacement = await start({launchId:''});
+  assert.notEqual(replacement.launchId,standalone.launchId);
+  await stop();
+  await start();await stop();
+  results.push('standalone Manager publishes fresh fallback identities and preserves a supplied launch');
+
+  const {payload} = await prepareNativeManager();
+  const target = {schemaVersion:1,instanceId:'manager',revision:digest('retained-bootstrap-launch'),candidateId:hash,desired:'running',
+    configPath:instancePath,requestedAt:new Date().toISOString()};
+  journal.restoreTarget(target);
+  const health = await start({launchId:null,jobOwned:true,executable:join(payload,'ivy-service-manager.exe'),expectedLaunch:target.revision});
+  const observed = journal.status(null).instances.find(value=>value.instanceId==='manager');
+  assert.equal(observed.observedState,'ready',JSON.stringify(observed));
+  assert.equal(observed.observedBuild,hash);
+  for (const wrong of [{launchId:'wrong-launch'},{bootId:'wrong-boot'},null]) {
+    const control = {schemaVersion:1,instanceId:'manager',launchId:health.launchId,bootId:health.bootId,
+      action:'shutdown',requestedAt:new Date().toISOString(),...wrong};
+    if (wrong === null) delete control.launchId;
+    await atomicJson(join(managerData,'control.json'),control);
+    await delay(650);assert.equal(manager.child.exitCode,null);assert.ok(windowsProcess(health.pid));
+  }
+  const helperPid = manager.child.pid;
+  await stop();
+  for (const pid of [health.pid,helperPid]) assert.equal(windowsProcess(pid),null,'Bootstrap native Job survived graceful control');
+  results.push('independent native Job binds retained target health and accepts only current launch/boot control');
+
+  const environment = {...process.env};delete environment.IVY_LAUNCH_ID;
+  for (const changed of [{candidateId},{desired:'stopped'}]) {
+    journal.restoreTarget({...target,...changed});
+    const output = spawnSync(binary,['--config',instancePath],{env:environment,windowsHide:true,encoding:'utf8',timeout:10000});
+    assert.equal(output.status,1,output.stderr);
+    assert.deepEqual(JSON.parse(output.stderr.trim()),{code:'target_conflict',message:'ServiceManager failed to start.'});
+  }
+  journal.restoreTarget(target);
+  results.push('no-environment startup refuses a different release or a stopped retained target');
+}
+
+async function qualifyDispatcherOwner() {
+  const {payload,plan} = await prepareNativeManager();
   const ownerPath = join(root,'dispatcher-owner.json'), closePath = join(root,'dispatcher-owner-close'), replacementPath = join(root,'dispatcher-replacement.json');
   const target = {schemaVersion:1,instanceId:'manager',revision:'dispatcher-owner-launch',candidateId:hash,desired:'running',
     configPath:instancePath,requestedAt:new Date().toISOString()};
@@ -195,22 +241,27 @@ async function stopDispatcherOwner() {
     dispatcherOwner = null;
   }
 }
-async function start() {
+async function start({launchId='integration-launch',jobOwned=false,executable=binary,expectedLaunch=launchId} = {}) {
   let stderr = '';
-  const environment = {...process.env, IVY_LAUNCH_ID:'integration-launch'};
+  const environment = {...process.env};
+  if (launchId === null) delete environment.IVY_LAUNCH_ID;
+  else environment.IVY_LAUNCH_ID = launchId;
   delete environment.IVY_NODE_EXECUTABLE;
   if (process.platform === 'win32') environment.PATH = join(process.env.SystemRoot, 'System32');
-  const child = spawn(binary, ['--config', instancePath], {env:environment,
+  const child = spawn(jobOwned ? job : executable, [...(jobOwned ? ['--parent','0','--allow-breakaway',executable] : []),'--config',instancePath], {env:environment,
     windowsHide:true, stdio:['ignore','ignore','pipe']});
   child.stderr.on('data', data => {stderr = (stderr + data).slice(-32768);});
   const completion = new Promise((resolve,reject) => {child.once('error',reject);child.once('exit',(code,signal) => resolve({code,signal}));});
   manager = {child,completion,stderr:()=>stderr};
   const health = await until(async () => {
     assert.equal(child.exitCode, null, stderr);
-    return readFile(join(managerData,'health.json'),'utf8').then(JSON.parse).then(h => h.ready && h).catch(()=>false);
+    return readFile(join(managerData,'health.json'),'utf8').then(JSON.parse).then(h => h.ready && (jobOwned || h.pid === child.pid) && h).catch(()=>false);
   });
-  assert.equal(health.pid, child.pid, 'Health identifies the actual Rust process');
-  assert.equal(health.launchId,'integration-launch');
+  if (jobOwned) assert.equal(windowsProcess(health.pid).ParentProcessId,child.pid);
+  else assert.equal(health.pid, child.pid, 'Health identifies the actual Rust process');
+  assert.equal(typeof health.launchId,'string');assert.ok(health.launchId.length);
+  if (expectedLaunch) assert.equal(health.launchId,expectedLaunch);
+  return health;
 }
 async function stop() {
   if (!manager) return;
@@ -218,7 +269,7 @@ async function stop() {
   try {
     if (current.child.exitCode === null) {
       const health = JSON.parse(await readFile(join(managerData,'health.json'),'utf8'));
-      await atomicJson(join(managerData,'control.json'), {schemaVersion:1,instanceId:'manager',launchId:'integration-launch',bootId:health.bootId,action:'shutdown',requestedAt:new Date().toISOString()});
+      await atomicJson(join(managerData,'control.json'), {schemaVersion:1,instanceId:'manager',launchId:health.launchId,bootId:health.bootId,action:'shutdown',requestedAt:new Date().toISOString()});
     }
     const ended = await Promise.race([current.completion, delay(10000).then(()=>{throw Error('Native manager shutdown deadline exceeded');})]);
     assert.equal(ended.code,0,current.stderr());
@@ -326,7 +377,8 @@ try {
   await stop();
   results.push('host reload refusal, control binding, process replacement replay');
   }
-  if (process.platform==='win32') await qualifyDispatcherOwner();
+  if (mode === 'bootstrap-only') await qualifyBootstrapLaunch();
+  else if (process.platform==='win32') await qualifyDispatcherOwner();
   console.log(JSON.stringify({ok:true,results,...(releaseIdentity ? {mode,identity:releaseIdentity,componentStamp:{schemaVersion:1,componentId:'service-manager',version,buildId:hash},processProof:dispatcherProof} : {}),limitations:['Executor status is a fixture; no native deployment executor or archive/platform acceptance.']}));
 } finally {
   clearInterval(executorTimer);
