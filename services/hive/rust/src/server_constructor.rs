@@ -18,8 +18,11 @@ use crate::{
     worker_runtime::{EventSink, StorageClient, WorkerLaunch},
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
-use ivy_host_runtime::node_path::{self, Style};
-use std::sync::{Arc, OnceLock};
+use ivy_host_runtime::native_path;
+use std::{
+    path::Path,
+    sync::{Arc, OnceLock},
+};
 
 /// Original ServerOptions data after typed configuration admission. Retain its
 /// ordered JSON for worker initialization instead of rebuilding a second shape.
@@ -187,16 +190,20 @@ impl Prepared {
                 .unwrap_or_default(),
             &options.credentials,
         )?;
-        let ui_root = options.ui_root.clone().unwrap_or_else(|| {
-            node_path::join(
-                Style::native(),
-                &[
-                    node_path::dirname(Style::native(), &options.filename),
-                    "ui-releases".into(),
-                ],
-            )
-        });
-        let ui_files = Arc::new(UiFiles::new(node_path::to_native(&ui_root)));
+        let (ui_root, path) = match &options.ui_root {
+            Some(root) => (root.clone(), native_path::to_native(root)),
+            None => {
+                let filename = native_path::to_native(&options.filename);
+                let parent = filename.parent().unwrap_or(if filename.has_root() {
+                    &filename
+                } else {
+                    Path::new(".")
+                });
+                let path = native_path::lexical(&parent.join("ui-releases"));
+                (native_path::from_native(&path), path)
+            }
+        };
+        let ui_files = Arc::new(UiFiles::new(path));
         let worker_options = options.worker_options(&ui_root);
         Ok(Self {
             base,
@@ -252,7 +259,7 @@ impl Prepared {
             .filter(|v| !v.0.is_empty())
             .map(|root| {
                 PackageRegistry::new(
-                    node_path::to_native(root),
+                    native_path::to_native(root),
                     self.base.base_path.clone(),
                     Arc::new(Dates(dependencies.now.clone(), dependencies.dates.clone())),
                     Some(worker.clone()),

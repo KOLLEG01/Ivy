@@ -12,7 +12,7 @@ use ivy_hive::{
     worker_client::RequestOptions,
     worker_runtime::{Event, WorkerLaunch},
 };
-use ivy_host_runtime::node_path;
+use ivy_host_runtime::{native_path, node_path};
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -367,34 +367,172 @@ fn launch() -> WorkerLaunch {
 #[test]
 fn native_constructor_is_inert_and_does_not_retain_lifecycle() {
     let source = json(
-        r#"{"filename":"state/hive.sqlite","publicBaseUrl":"https://example.test/ivy/","version":"1.2.3","buildId":"build:test","credentials":[{"principalId":"a","digest":"credential"}]}"#,
+        r#"{"filename":"state/hive.sqlite","publicBaseUrl":"https://example.test/ivy/","version":"1.2.3","buildId":"build:test","credentials":[{"principalId":"a","digest":"credential"}],"fixtureOption":{"value":"retained"},"observeMcpCall":null,"sendBrowserPush":false}"#,
     );
-    let prepared = Prepared::new(options(&source)).unwrap();
-    let original = launch();
-    let actual = prepared.launch_options(original.clone());
-    assert_eq!(actual.options, prepared.worker_options().clone());
-    assert_eq!(actual.root, original.root);
-    assert_eq!(actual.executable, original.executable);
-    assert_eq!(actual.args, original.args);
-    assert_eq!(actual.job_launcher, original.job_launcher);
-    assert_eq!(actual.environment, original.environment);
-    let events = Events::default();
-    let server = prepared
-        .native(original, dependencies(events.clone()), Admission::default())
-        .unwrap();
-    assert_eq!(
-        server.worker.lifecycle(),
-        ivy_hive::worker_client::Lifecycle::Stopped
+    let mut cases = vec![];
+    let mut add = |name: &str, filename: JsString, explicit: Option<IvyJson>, path: PathBuf| {
+        let public = explicit
+            .as_ref()
+            .and_then(IvyJson::as_js_string)
+            .cloned()
+            .unwrap_or_else(|| native_path::from_native(&path));
+        let mut input = source.clone();
+        input.insert("filename", filename.into());
+        if let Some(explicit) = explicit {
+            input.insert("uiRoot", explicit);
+        }
+        cases.push((name.to_owned(), input, public, path));
+    };
+    for (name, filename, parent) in [
+        ("relative-filename", "state/hive.sqlite", "state"),
+        ("bare-filename", "hive.sqlite", ""),
+        ("empty-filename", "", ""),
+        ("dot-filename", ".", ""),
+        ("parent-filename", "..", ""),
+        ("memory-filename", ":memory:", ""),
+        ("lexical-parent", "state/../hive.sqlite", ""),
+        ("parent-as-filename", "state/..", "state"),
+        ("unicode-filename", "漢字 space/hive.sqlite", "漢字 space"),
+    ] {
+        add(
+            name,
+            filename.into(),
+            None,
+            PathBuf::from(parent).join("ui-releases"),
+        );
+    }
+    let cwd = std::env::current_dir().unwrap();
+    let absolute = cwd.join("constructor-data");
+    add(
+        "absolute-filename",
+        native_path::from_native(&absolute.join("hive.sqlite")),
+        None,
+        absolute.join("ui-releases"),
     );
-    assert_eq!(server.worker.pending_count(), 0);
-    assert!(events.lock().unwrap().is_empty());
-    let weak = Arc::downgrade(&server.worker);
-    let callback = server.network.lifecycle.event_sink();
-    drop(server);
-    assert!(weak.upgrade().is_none());
-    callback(Event::Notification(
-        ivy_hive::worker_protocol::Notification::Changes(vec![]),
-    ));
+    let root = cwd.ancestors().last().unwrap();
+    add(
+        "root-filename",
+        native_path::from_native(root),
+        None,
+        root.join("ui-releases"),
+    );
+    for (name, path) in [
+        ("explicit-empty", PathBuf::new()),
+        ("explicit-lexical-text", PathBuf::from("ui/../custom. ")),
+        ("explicit-whitespace", PathBuf::from("  ")),
+        ("explicit-absolute", cwd.join("explicit-ui")),
+    ] {
+        add(
+            name,
+            "ignored/hive.sqlite".into(),
+            Some(native_path::from_native(&path).into()),
+            path,
+        );
+    }
+    add(
+        "null-default",
+        "state/hive.sqlite".into(),
+        Some(IvyJson::Null),
+        PathBuf::from("state").join("ui-releases"),
+    );
+    #[cfg(windows)]
+    {
+        for (name, filename, path) in [
+            ("drive-prefix-only", r"C:", PathBuf::from("ui-releases")),
+            (
+                "drive-relative",
+                r"C:hive.sqlite",
+                PathBuf::from("C:").join("ui-releases"),
+            ),
+            (
+                "rooted-filename",
+                r"\hive.sqlite",
+                PathBuf::from(r"\").join("ui-releases"),
+            ),
+            (
+                "unc-root",
+                r"\\server\share\",
+                PathBuf::from(r"\\server\share\").join("ui-releases"),
+            ),
+            (
+                "verbatim-parent",
+                r"\\?\C:\data\..\store\hive.sqlite",
+                PathBuf::from(r"\\?\C:\store").join("ui-releases"),
+            ),
+            (
+                "trailing-parent",
+                r"C:\data. \hive.sqlite",
+                PathBuf::from(r"C:\data. ").join("ui-releases"),
+            ),
+        ] {
+            add(name, filename.into(), None, path);
+        }
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+        for (name, surrogate) in [("high", 0xd800), ("low", 0xdfff)] {
+            let mut units: Vec<_> = "data".encode_utf16().collect();
+            units.push(surrogate);
+            let parent = PathBuf::from("state").join(OsString::from_wide(&units));
+            add(
+                &format!("opaque-{name}-filename"),
+                native_path::from_native(&parent.join("hive.sqlite")),
+                None,
+                parent.join("ui-releases"),
+            );
+            add(
+                &format!("opaque-{name}-explicit"),
+                "ignored/hive.sqlite".into(),
+                Some(native_path::from_native(&parent).into()),
+                parent,
+            );
+        }
+    }
+    assert_eq!(cases.len(), if cfg!(windows) { 26 } else { 16 });
+    for (name, input, public, path) in cases {
+        let prepared = Prepared::new(options(&input)).unwrap();
+        assert_eq!(prepared.ui_root(), &public, "{name}: exact public root");
+        let mut expected = input;
+        expected.insert("uiRoot", public.into());
+        expected.remove("observeMcpCall");
+        expected.remove("sendBrowserPush");
+        assert_eq!(
+            prepared.worker_options(),
+            &expected,
+            "{name}: exact worker data"
+        );
+        let original = launch();
+        let actual = prepared.launch_options(original.clone());
+        assert_eq!(actual.options, expected, "{name}");
+        assert_eq!(actual.root, original.root);
+        assert_eq!(actual.executable, original.executable);
+        assert_eq!(actual.args, original.args);
+        assert_eq!(actual.job_launcher, original.job_launcher);
+        assert_eq!(actual.environment, original.environment);
+        let events = Events::default();
+        let server = prepared
+            .native(original, dependencies(events.clone()), Admission::default())
+            .unwrap();
+        assert_eq!(
+            server.ui_files.root.as_os_str(),
+            path.as_os_str(),
+            "{name}: exact private native path"
+        );
+        assert_eq!(
+            server.worker.lifecycle(),
+            ivy_hive::worker_client::Lifecycle::Stopped
+        );
+        assert_eq!(server.worker.pending_count(), 0);
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "{name}: constructor effect"
+        );
+        let weak = Arc::downgrade(&server.worker);
+        let callback = server.network.lifecycle.event_sink();
+        drop(server);
+        assert!(weak.upgrade().is_none(), "{name}: retained lifecycle owner");
+        callback(Event::Notification(
+            ivy_hive::worker_protocol::Notification::Changes(vec![]),
+        ));
+    }
 }
 
 #[path = "hive_server_authentication.rs"]
