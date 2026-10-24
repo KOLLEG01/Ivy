@@ -1771,6 +1771,39 @@ async fn native_bootstrap_paths_and_retained_authority(f: &Fixture) {
     let mut filename = name.clone();
     filename.push(".json");
     let config_path = f.root.join(&filename);
+    let input = config::json_file(&f.path, config::CONFIGURATION_BYTES)
+        .await
+        .unwrap();
+    config::atomic_json(&config_path, input).await.unwrap();
+    let config_bytes = fs::read(&config_path).unwrap();
+    let checked = host_config::host_config(&config_path).await.unwrap();
+    let relative = crate::native_path::relative(&std::env::current_dir().unwrap(), &config_path);
+    for input_path in [relative, f.root.join("unused/..").join(&filename)] {
+        let planned = f
+            .installation
+            .plan(
+                input_path,
+                f.candidate
+                    .required("candidateId")
+                    .unwrap()
+                    .as_js_string()
+                    .unwrap()
+                    .clone(),
+                None,
+                &[],
+            )
+            .await
+            .unwrap();
+        validate_host("BootstrapPlan", &planned).unwrap();
+        assert_eq!(planned.get("configPath"), Some(&p(&config_path)));
+        assert_eq!(
+            planned.get("configHash"),
+            Some(&J::from(hash_json(&checked).unwrap()))
+        );
+        assert_eq!(planned.get("candidateId"), f.candidate.get("candidateId"));
+        assert!(planned.get("nodeExecutable").is_none());
+    }
+    assert_eq!(fs::read(&config_path).unwrap(), config_bytes);
     let plan = bootstrap::configuration_bootstrap_plan(
         &config,
         &node_path::from_native(&f.root.join("unused/..").join(&filename)),

@@ -89,15 +89,6 @@ fn string(v: &Json) -> JsString {
 fn number(v: &Json, k: &str) -> f64 {
     v.get(k).and_then(Json::as_f64).unwrap_or(f64::NAN)
 }
-fn truthy(v: &Json) -> bool {
-    match v {
-        Json::Null => false,
-        Json::Bool(v) => *v,
-        Json::String(v) => !v.0.is_empty(),
-        Json::Number(v) => *v != 0.0 && !v.is_nan(),
-        _ => true,
-    }
-}
 fn time(v: &Json) -> f64 {
     v.get("observedAt")
         .and_then(Json::as_js_string)
@@ -156,8 +147,12 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
             primary.get("namespace") == Some(&Json::from("codex"))
                 && primary.get("kind") == Some(&Json::from("thread"))
                 && primary.get("serviceNodeId") == field(&run.value, "target").get("serviceNodeId")
-                && truthy(field(&run.value, "turnId"))
-                && truthy(field(&run.value, "nativeEpoch")),
+                && field(&run.value, "turnId")
+                    .as_js_string()
+                    .is_some_and(|turn| !turn.0.is_empty())
+                && field(&run.value, "nativeEpoch")
+                    .as_js_string()
+                    .is_some_and(|epoch| !epoch.0.is_empty()),
             "task_board_turn_mismatch",
             "Turn evidence requires the saved original primary and turn identity.",
         )?;
@@ -443,7 +438,7 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
             "Completion requires the exact terminal native turn.",
         )?;
         let mut text = JsString::default();
-        if let Some(output) = output.filter(|v| truthy(v)) {
+        if let Some(output) = output.filter(|v| !v.is_null()) {
             require(
                 field(output, "evidence").get("epoch") == v.get("epoch"),
                 "task_board_native_epoch_changed",
@@ -672,8 +667,8 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
                 && v.get("phase") == Some(&Json::from("complete"))
                 && field(v, "run").get("objectId") == run_pin.get("objectId")
                 && number(field(v, "run"), "revision") <= number(run_pin, "revision")
-                && truthy(field(v, "head"))
-                && truthy(field(v, "verification")),
+                && field(v, "head").as_object().is_some()
+                && field(v, "verification").as_object().is_some(),
             "task_board_evidence_mismatch",
             "Final native material requires the exact complete transcript artifact.",
         )?;
@@ -689,8 +684,8 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
             value.get("phase") == Some(&Json::from("complete"))
                 && field(value, "run").get("objectId") == run_pin.get("objectId")
                 && number(field(value, "run"), "revision") <= number(run_pin, "revision")
-                && truthy(field(value, "head"))
-                && truthy(field(value, "verification")),
+                && field(value, "head").as_object().is_some()
+                && field(value, "verification").as_object().is_some(),
             "task_board_evidence_mismatch",
             "A complete proposal needs its exact Run scope, page head and final verification.",
         )?;
@@ -706,7 +701,7 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
         let mut pages = Vec::new();
         let mut seen = HashSet::new();
         let mut current = value.required("head")?.clone();
-        while truthy(&current) {
+        while !current.is_null() {
             require(
                 (pages.len() as f64) < number(value, "pageCount")
                     && seen.insert(s(&current, "objectId")?.clone()),

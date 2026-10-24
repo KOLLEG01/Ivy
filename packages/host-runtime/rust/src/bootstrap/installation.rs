@@ -14,7 +14,7 @@ use crate::{
     host_config,
     journal::HostJournal,
     linux_host::{LinuxHost, trimmed},
-    linux_resources, linux_service_identity, node_path,
+    linux_resources, linux_service_identity, native_path,
     node_runtime::NodeRuntime,
     process,
     process_output::Utf8Decoder,
@@ -62,11 +62,10 @@ impl BootstrapInstallation {
         mut resources: Option<J>,
         preferred: &[J],
     ) -> IvyResult<J> {
-        let path = node_path::to_native(
-            &node_path::Context::current()
-                .map_err(|_| IvyError::internal())?
-                .resolve(&[node_path::from_native(&path)]),
-        );
+        let path = std::env::current_dir()
+            .map_err(|_| IvyError::internal())?
+            .join(path);
+        let path = crate::paths::absolute(&path).unwrap_or_else(|_| native_path::lexical(&path));
         let config = host_config::host_config(path.clone()).await?;
         let journal = HostJournal::open_with_clock(config.clone(), self.clock.clone()).await?;
         let result = async {
@@ -107,14 +106,18 @@ impl BootstrapInstallation {
                 let verified = if selected_candidate == candidate {
                     releases[0].required("manifest")?.clone()
                 } else {
-                    crate::artifact::verify_candidate(selected_candidate,
-                        config::path_value(config.required("artifactRoot")?)?, self.node.as_ref()).await?
+                    crate::artifact::verify_candidate(
+                        selected_candidate,
+                        config::path_value(config.required("artifactRoot")?)?,
+                        self.node.as_ref(),
+                    )
+                    .await?
                 };
                 selected.insert("manifest", verified);
             }
             configuration_bootstrap_plan(
                 &config,
-                &node_path::from_native(&path),
+                &native_path::from_native(&path),
                 &candidate,
                 resources.as_ref().filter(|v| !v.is_null()),
                 &components,
@@ -425,7 +428,7 @@ impl BootstrapInstallation {
             }
             self.effects
                 .units
-                .unlink(node_path::from_native(&path))
+                .unlink(native_path::from_native(&path))
                 .await
                 .map_err(|_| IvyError::internal())?;
         }
@@ -481,13 +484,10 @@ fn valid_name(name: &JsString) -> bool {
             .all(|u| matches!(*u, 48..=57|97..=102))
 }
 fn unit_path(name: &JsString) -> PathBuf {
-    node_path::to_native(&super::concat(&[
-        "/etc/systemd/system/".into(),
-        name.clone(),
-    ]))
+    PathBuf::from("/etc/systemd/system").join(native_path::to_native(name))
 }
 async fn read_unit(path: PathBuf, files: &dyn SystemdHost) -> IvyResult<Option<JsString>> {
-    match files.read(node_path::from_native(&path)).await {
+    match files.read(native_path::from_native(&path)).await {
         Ok(bytes) => Ok(Some(JsString(
             Utf8Decoder::preserving_bom().decode(&bytes, true),
         ))),
@@ -497,7 +497,7 @@ async fn read_unit(path: PathBuf, files: &dyn SystemdHost) -> IvyResult<Option<J
 }
 async fn create_unit(path: PathBuf, content: JsString, files: &dyn SystemdHost) -> IvyResult<()> {
     let mut file = files
-        .open(node_path::from_native(&path), true)
+        .open(native_path::from_native(&path), true)
         .await
         .map_err(|_| IvyError::internal())?;
     let written = file

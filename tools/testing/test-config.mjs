@@ -476,6 +476,12 @@ export const rustTests = {
     "filter": "signals::",
     "testThreads": 1
   },
+  "tests/fixtures/task-board-turn-evidence.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-evidence",
+    "filter": "turn_evidence::actual_snapshot_and_transcript_reopen_without_io_or_writes_and_refuse_corrupt_receipts",
+    "testThreads": 1
+  },
   "tests/fixtures/task-board-native-policies.rs": {
     "package": "ivy-task-board",
     "test": "task-board-output",
