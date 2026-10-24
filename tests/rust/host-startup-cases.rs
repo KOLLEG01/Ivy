@@ -8,9 +8,8 @@ use ivy_host_runtime::{
 use std::{
     collections::BTreeMap,
     fs,
-    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
 };
 
 struct Root(PathBuf);
@@ -37,39 +36,6 @@ fn result(value: IvyResult<J>) -> J {
         Ok(v) => J::object([("ok", true.into()), ("value", v)]),
         Err(e) => J::object([("ok", false.into()), ("error", e.to_wire())]),
     }
-}
-fn repo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
-}
-fn oracle(input: &J, home: &Path) -> J {
-    let mut child = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/host-startup-oracle.mjs",
-        ])
-        .current_dir(repo())
-        .env("HOME", home)
-        .env("USERPROFILE", home)
-        .env_remove("CODEX_HOME")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(json::stringify(input, usize::MAX).unwrap().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    json::parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
 }
 fn context(home: &Path) -> HostContext {
     let home = node_path::from_native(home);
@@ -1031,9 +997,8 @@ async fn production_host_loader_uses_the_executing_account_and_bounded_json_file
 }
 
 #[tokio::test]
-async fn runtime_maintenance_markers_match_node_lstat_and_path_semantics() {
+async fn native_runtime_maintenance_markers_preserve_paths_and_read_only_state() {
     let root = Root::new();
-    let mut cases = Vec::new();
     for (i, kind) in [
         "missing",
         "file",
@@ -1046,7 +1011,7 @@ async fn runtime_maintenance_markers_match_node_lstat_and_path_semantics() {
     .iter()
     .enumerate()
     {
-        let r = root.0.join(i.to_string());
+        let r = root.0.join(format!("{i}-ü-空-😀"));
         let mut config = J::object([("runtimeRoot", val(&r, "runtime"))]);
         if *kind == "ivy-root" {
             config.insert("ivyRoot", val(&r, "ivy"));
@@ -1054,7 +1019,12 @@ async fn runtime_maintenance_markers_match_node_lstat_and_path_semantics() {
         if *kind == "null-ivy" {
             config.insert("ivyRoot", J::Null);
         }
-        let marker = runtime_maintenance::runtime_reset_marker(&config).unwrap();
+        let marker_root = if *kind == "ivy-root" {
+            r.join("ivy")
+        } else {
+            r.clone()
+        };
+        let marker = marker_root.join("reset").join("maintenance.json");
         let mut actions = Vec::new();
         match *kind {
             "file" | "ivy-root" | "null-ivy" => actions.push(file(jp(&marker), "{}")),
@@ -1066,44 +1036,130 @@ async fn runtime_maintenance_markers_match_node_lstat_and_path_semantics() {
             "parent-file" => actions.push(file(jp(marker.parent().unwrap()), "file")),
             _ => (),
         }
-        cases.push(J::object([
-            ("id", kind.to_string().into()),
-            ("config", config),
-            ("dataRoot", val(&r, "data")),
-            ("setup", J::Array(actions)),
-        ]));
+        setup(&J::Array(actions));
+        let before = tree(&r);
+        assert_eq!(
+            runtime_maintenance::runtime_reset_marker(&config).unwrap(),
+            marker,
+            "{kind}"
+        );
+        let active = runtime_maintenance::runtime_reset_active(&config).await;
+        if *kind == "parent-file" {
+            #[cfg(windows)]
+            assert!(!active.unwrap());
+            #[cfg(unix)]
+            assert_eq!(active.unwrap_err().code, "internal_error");
+            assert_eq!(fs::read(marker.parent().unwrap()).unwrap(), b"file");
+        } else {
+            let expected = matches!(*kind, "file" | "ivy-root" | "null-ivy");
+            assert_eq!(active.unwrap(), expected, "{kind}");
+            if expected {
+                assert_eq!(fs::read(&marker).unwrap(), b"{}");
+            }
+        }
+        assert_eq!(
+            runtime_maintenance::hive_reset_bootstrap_marker(&r.join("data")),
+            r.join("data").join("runtime-reset-bootstrap.json")
+        );
+        assert_eq!(tree(&r), before, "{kind}: marker queries changed entries");
     }
-    let expected = oracle(
-        &J::object([
-            ("kind", "maintenance".into()),
-            ("cases", J::Array(cases.clone())),
-        ]),
-        &root.0,
+    let relative = PathBuf::from("reset").join("maintenance.json");
+    for config in [
+        J::object([("ivyRoot", "".into())]),
+        J::object([("runtimeRoot", "".into())]),
+        J::object([("runtimeRoot", "runtime".into())]),
+        J::object([("runtimeRoot", "runtime".into()), ("ivyRoot", J::Null)]),
+    ] {
+        assert_eq!(
+            runtime_maintenance::runtime_reset_marker(&config).unwrap(),
+            relative
+        );
+    }
+    for (config, code) in [
+        (J::object([] as [(&str, J); 0]), "invalid_arguments"),
+        (J::object([("runtimeRoot", J::Null)]), "internal_error"),
+        (J::object([("runtimeRoot", true.into())]), "internal_error"),
+        (
+            J::object([
+                ("runtimeRoot", val(&root.0, "runtime")),
+                ("ivyRoot", false.into()),
+            ]),
+            "internal_error",
+        ),
+    ] {
+        assert_eq!(
+            runtime_maintenance::runtime_reset_marker(&config)
+                .unwrap_err()
+                .code,
+            code
+        );
+        assert_eq!(
+            runtime_maintenance::runtime_reset_active(&config)
+                .await
+                .unwrap_err()
+                .code,
+            code
+        );
+    }
+    let normalized_root = root.0.join("normalized");
+    let marker = normalized_root.join("reset").join("maintenance.json");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, b"keep").unwrap();
+    let alias = normalized_root.join("absent").join("..").join(".");
+    for config in [
+        J::object([("ivyRoot", jp(&alias))]),
+        J::object([("runtimeRoot", jp(&alias.join("runtime")))]),
+    ] {
+        assert_eq!(
+            runtime_maintenance::runtime_reset_marker(&config).unwrap(),
+            marker
+        );
+        assert!(
+            runtime_maintenance::runtime_reset_active(&config)
+                .await
+                .unwrap()
+        );
+    }
+    assert_eq!(
+        runtime_maintenance::hive_reset_bootstrap_marker(&alias),
+        normalized_root.join("runtime-reset-bootstrap.json")
     );
-    for (c, e) in cases.iter().zip(expected.as_array().unwrap()) {
-        let config = c.required("config").unwrap();
-        let actual = J::object([
-            ("id", c.required("id").unwrap().clone()),
-            (
-                "marker",
-                result(runtime_maintenance::runtime_reset_marker(config).map(|v| jp(&v))),
-            ),
-            (
-                "active",
-                result(
-                    runtime_maintenance::runtime_reset_active(config)
-                        .await
-                        .map(J::from),
-                ),
-            ),
-            (
-                "hive",
-                result(Ok(jp(&runtime_maintenance::hive_reset_bootstrap_marker(
-                    &node_path::to_native(c.required("dataRoot").unwrap().as_js_string().unwrap()),
-                )))),
-            ),
-        ]);
-        super::assert_json_eq_with_context(&actual, e, c);
+    assert_eq!(fs::read(&marker).unwrap(), b"keep");
+    assert!(!normalized_root.join("absent").exists());
+    #[cfg(windows)]
+    let opaque = {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+        root.0.join(OsString::from_wide(&[0xd800]))
+    };
+    #[cfg(unix)]
+    let opaque = {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+        root.0.join(OsString::from_vec(vec![0xff]))
+    };
+    fs::create_dir(&opaque).unwrap();
+    let bootstrap = opaque.join("runtime-reset-bootstrap.json");
+    fs::write(&bootstrap, b"opaque").unwrap();
+    assert_eq!(
+        runtime_maintenance::hive_reset_bootstrap_marker(&opaque),
+        bootstrap
+    );
+    assert_eq!(fs::read(&bootstrap).unwrap(), b"opaque");
+    #[cfg(windows)]
+    {
+        let marker = opaque.join("reset").join("maintenance.json");
+        fs::create_dir(marker.parent().unwrap()).unwrap();
+        fs::write(&marker, b"opaque-reset").unwrap();
+        let config = J::object([("ivyRoot", jp(&opaque))]);
+        assert_eq!(
+            runtime_maintenance::runtime_reset_marker(&config).unwrap(),
+            marker
+        );
+        assert!(
+            runtime_maintenance::runtime_reset_active(&config)
+                .await
+                .unwrap()
+        );
+        assert_eq!(fs::read(marker).unwrap(), b"opaque-reset");
     }
     #[cfg(unix)]
     {

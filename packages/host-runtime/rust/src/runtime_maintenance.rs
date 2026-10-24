@@ -1,49 +1,38 @@
 //! Read-only maintenance markers shared by bootstrap and service startup.
-use crate::{
-    IvyError, IvyJson, IvyResult,
-    node_path::{self, Style},
-};
-use ivy_contracts::JsString;
+use crate::{IvyError, IvyJson, IvyResult, config, native_path};
 use std::path::{Path, PathBuf};
 
 pub fn runtime_reset_marker(config: &IvyJson) -> IvyResult<PathBuf> {
-    let root = config
-        .get("ivyRoot")
-        .filter(|v| !v.is_null())
-        .map(|v| v.as_js_string().cloned().ok_or_else(IvyError::internal))
-        .unwrap_or_else(|| {
-            Ok(node_path::dirname(
-                Style::native(),
-                config
-                    .required("runtimeRoot")?
-                    .as_js_string()
-                    .ok_or_else(IvyError::internal)?,
-            ))
-        })?;
-    Ok(node_path::to_native(&node_path::join(
-        Style::native(),
-        &[root, "reset".into(), "maintenance.json".into()],
-    )))
+    let root = match config.get("ivyRoot").filter(|value| !value.is_null()) {
+        Some(value) => config::path_value(value)?,
+        None => {
+            let runtime = config::path_value(config.required("runtimeRoot")?)?;
+            runtime
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| {
+                    if runtime.has_root() {
+                        runtime
+                    } else {
+                        PathBuf::from(".")
+                    }
+                })
+        }
+    };
+    Ok(native_path::lexical(
+        &root.join("reset").join("maintenance.json"),
+    ))
 }
 pub fn hive_reset_bootstrap_marker(data_root: &Path) -> PathBuf {
-    node_path::to_native(&node_path::join(
-        Style::native(),
-        &[
-            node_path::from_native(data_root),
-            JsString::from("runtime-reset-bootstrap.json"),
-        ],
-    ))
+    native_path::lexical(&data_root.join("runtime-reset-bootstrap.json"))
 }
 pub async fn runtime_reset_active(config: &IvyJson) -> IvyResult<bool> {
     let marker = runtime_reset_marker(config)?;
-    tokio::task::spawn_blocking(move || {
-        match std::fs::symlink_metadata(node_path::filesystem_path(&node_path::from_native(
-            &marker,
-        ))) {
-            Ok(metadata) => Ok(metadata.is_file()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(_) => Err(IvyError::internal()),
-        }
+    tokio::task::spawn_blocking(move || match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(IvyError::internal()),
     })
     .await
     .map_err(|_| IvyError::internal())?
