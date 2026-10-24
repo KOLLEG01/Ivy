@@ -174,15 +174,6 @@ fn field<'a>(v: &'a Json, k: &str) -> &'a Json {
 fn s<'a>(v: &'a Json, k: &str) -> IvyResult<&'a JsString> {
     v.required(k)?.as_js_string().ok_or_else(IvyError::internal)
 }
-fn truthy(v: &Json) -> bool {
-    match v {
-        Json::Null => false,
-        Json::Bool(v) => *v,
-        Json::String(v) => !v.0.is_empty(),
-        Json::Number(v) => *v != 0.0 && !v.is_nan(),
-        _ => true,
-    }
-}
 fn eq(v: &Json, k: &str, t: &str) -> bool {
     v.get(k) == Some(&Json::from(t))
 }
@@ -289,7 +280,10 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                 && status.get("hostId") == registration.get("hostId")
                 && status.get("nativeVersion") == registration.get("nativeVersion")
                 && eq(&status, "state", "ready")
-                && truthy(field(&status, "epoch")),
+                && status
+                    .get("epoch")
+                    .and_then(Json::as_js_string)
+                    .is_some_and(|epoch| !epoch.0.is_empty()),
             "task_board_native_unavailable",
             "The native owner must be ready before changing its ticket context.",
         )?;

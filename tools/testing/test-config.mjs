@@ -464,6 +464,12 @@ export const rustTests = {
     "test": "task-board-output",
     "filter": "categories::"
   },
+  "tests/fixtures/task-board-inspector.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-output",
+    "filter": "inspector::",
+    "testThreads": 1
+  },
   "tests/fixtures/task-board-native-policies.rs": {
     "package": "ivy-task-board",
     "test": "task-board-output",

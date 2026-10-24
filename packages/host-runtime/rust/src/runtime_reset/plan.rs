@@ -31,9 +31,6 @@ fn field(value: &J, key: &str) -> IvyResult<JsString> {
 fn array(value: &J) -> IvyResult<&[J]> {
     value.as_array().ok_or_else(IvyError::internal)
 }
-fn native(value: &JsString) -> IvyResult<PathBuf> {
-    internal(node_path::node_filesystem_path(value))
-}
 fn deployment<'a>(config: &'a J, storage: &StorageContext) -> IvyResult<&'a J> {
     let selected = config.get("deployment").filter(|v| !v.is_null());
     let hosts = selected.and_then(|v| v.get("hosts")).and_then(J::as_array);
@@ -80,9 +77,11 @@ async fn future(value: PathBuf) -> IvyResult<PathBuf> {
     internal(tokio::task::spawn_blocking(move || crate::paths::future_native_path(&value)).await)?
 }
 pub async fn tree_hash(path: JsString, storage: Arc<StorageContext>) -> IvyResult<J> {
+    native_tree_hash(native_path::to_native(&path), storage).await
+}
+async fn native_tree_hash(path: PathBuf, storage: Arc<StorageContext>) -> IvyResult<J> {
     internal(
         tokio::task::spawn_blocking(move || {
-            let path = native(&path)?;
             fn walk(
                 path: &Path,
                 local: JsString,
@@ -150,14 +149,12 @@ pub async fn tree_hash(path: JsString, storage: Arc<StorageContext>) -> IvyResul
     )?
 }
 
-fn inside(storage: &StorageContext, a: &JsString, b: &JsString) -> bool {
-    storage.paths.inside(a, b)
+fn separate(a: &Path, b: &Path) -> bool {
+    !native_path::within(a, b) && !native_path::within(b, a)
 }
-fn separate(storage: &StorageContext, a: &JsString, b: &JsString) -> bool {
-    a != b && !inside(storage, a, b) && !inside(storage, b, a)
-}
-fn resolve(storage: &StorageContext, parts: &[JsString]) -> JsString {
-    storage.paths.resolve(parts)
+fn resolve(base: &Path, path: &Path) -> PathBuf {
+    let path = base.join(path);
+    crate::paths::absolute(&path).unwrap_or_else(|_| native_path::lexical(&path))
 }
 
 /// Resolve fixed component declarations and preserved-tree hashes without
@@ -172,9 +169,13 @@ pub async fn local_runtime_reset_plan(
     let selected = deployment(&config, &storage)?.clone();
     let journal = HostJournal::open(config.clone()).await?;
     let result = async {
+        let cwd = native_path::to_native(&storage.paths.cwd);
         let mut deleting = Vec::new();
         let mut preserving = Vec::new();
         let mut markers = Vec::new();
+        let mut delete_paths = Vec::new();
+        let mut preserve_paths = Vec::new();
+        let mut marker_paths = Vec::new();
         for instance in array(config.required("instances")?)? {
             let component = field(instance, "componentId")?;
             let manifest = match journal
@@ -218,26 +219,26 @@ pub async fn local_runtime_reset_plan(
                     let area = field(entry, "area")?;
                     let member = field(entry, "path")?;
                     let root = resolve(
-                        &storage,
-                        &[if area == JsString::from("host") {
+                        &cwd,
+                        &native_path::to_native(&if area == JsString::from("host") {
                             field(&config, "runtimeRoot")?
                         } else {
                             field(&layout::service_paths(&config, instance)?, &area.to_utf8()?)?
-                        }],
+                        }),
                     );
-                    let target = resolve(&storage, &[root.clone(), member.clone()]);
+                    let target = resolve(&root, &native_path::to_native(&member));
                     require(
                         if target == root {
                             member == JsString::from(".")
                                 && ["work", "logs"].iter().any(|v| area == JsString::from(*v))
                         } else {
-                            inside(&storage, &root, &target)
+                            native_path::within(&root, &target)
                         },
                         "target_conflict",
                         "Runtime reset target leaves its declared component area.",
                     )?;
-                    let actual_root = future(native(&root)?).await?;
-                    let actual = future(native(&target)?).await?;
+                    let actual_root = future(root.clone()).await?;
+                    let actual = future(target.clone()).await?;
                     require(
                         if actual == actual_root {
                             target == root
@@ -252,12 +253,17 @@ pub async fn local_runtime_reset_plan(
                         ("componentId", instance.required("componentId")?.clone()),
                         ("area", J::String(area)),
                         ("path", J::String(member)),
-                        ("absolutePath", J::String(target.clone())),
+                        ("absolutePath", J::String(native_path::from_native(&target))),
                     ]);
                     if kind == "delete" {
+                        delete_paths.push(target);
                         deleting.push(value);
                     } else {
-                        value.insert("checksum", tree_hash(target, storage.clone()).await?);
+                        value.insert(
+                            "checksum",
+                            native_tree_hash(target.clone(), storage.clone()).await?,
+                        );
+                        preserve_paths.push(target);
                         preserving.push(value);
                     }
                 }
@@ -267,20 +273,20 @@ pub async fn local_runtime_reset_plan(
                 .filter(|v| v.as_js_string().is_some_and(|text| !text.0.is_empty()))
             {
                 let root = resolve(
-                    &storage,
-                    &[field(&layout::service_paths(&config, instance)?, "data")?],
+                    &cwd,
+                    &native_path::to_native(&field(
+                        &layout::service_paths(&config, instance)?,
+                        "data",
+                    )?),
                 );
-                let target = resolve(&storage, &[root.clone(), text(marker)?]);
+                let target = resolve(&root, &native_path::to_native(&text(marker)?));
                 require(
-                    target != root && inside(&storage, &root, &target),
+                    target != root && native_path::within(&root, &target),
                     "target_conflict",
                     "Runtime reset completion marker leaves its instance data.",
                 )?;
                 require(
-                    native_path::within(
-                        &future(native(&root)?).await?,
-                        &future(native(&target)?).await?,
-                    ),
+                    native_path::within(&future(root).await?, &future(target.clone()).await?),
                     "target_conflict",
                     "Runtime reset completion marker traverses a filesystem link.",
                 )?;
@@ -288,14 +294,21 @@ pub async fn local_runtime_reset_plan(
                     ("instanceId", instance.required("instanceId")?.clone()),
                     ("componentId", instance.required("componentId")?.clone()),
                     ("path", marker.clone()),
-                    ("absolutePath", J::String(target)),
+                    ("absolutePath", J::String(native_path::from_native(&target))),
                 ]));
+                marker_paths.push(target);
             }
         }
-        let config_file = resolve(&storage, &[config_path]);
+        let config_file = resolve(&cwd, &native_path::to_native(&config_path));
         let mut protected = vec![
-            field(&config, "artifactRoot")?,
-            field(&config, "stagingRoot")?,
+            resolve(
+                &cwd,
+                &native_path::to_native(&field(&config, "artifactRoot")?),
+            ),
+            resolve(
+                &cwd,
+                &native_path::to_native(&field(&config, "stagingRoot")?),
+            ),
             config_file.clone(),
         ];
         for instance in array(config.required("instances")?)?
@@ -308,44 +321,38 @@ pub async fn local_runtime_reset_plan(
                     .get(key)
                     .and_then(J::as_js_string)
                 {
-                    protected.push(resolve(&storage, &[path.clone()]));
+                    protected.push(resolve(&cwd, &native_path::to_native(path)));
                 }
             }
         }
-        let paths = |values: &[J]| -> IvyResult<Vec<JsString>> {
-            values.iter().map(|v| field(v, "absolutePath")).collect()
-        };
-        let delete_paths = paths(&deleting)?;
-        let preserve_paths = paths(&preserving)?;
         require(
             delete_paths
                 .iter()
-                .all(|path| protected.iter().all(|root| separate(&storage, path, root))),
+                .all(|path| protected.iter().all(|root| separate(path, root))),
             "target_conflict",
             "Runtime reset target overlaps configuration, software, source or project storage.",
         )?;
         require(
-            delete_paths.iter().all(|path| {
-                preserve_paths
-                    .iter()
-                    .all(|saved| separate(&storage, path, saved))
-            }),
+            delete_paths
+                .iter()
+                .all(|path| preserve_paths.iter().all(|saved| separate(path, saved))),
             "target_conflict",
             "A preserved component setting overlaps a deletion target.",
         )?;
-        let distinct = |values: Vec<JsString>| {
+        let distinct = |values: &[PathBuf]| {
             let mut seen = BTreeSet::new();
+            // Preserve the public duplicate-identity folding policy.
             values
-                .into_iter()
-                .all(|path| seen.insert(node_path::lowercase(&path)))
+                .iter()
+                .all(|path| seen.insert(node_path::lowercase(&native_path::from_native(path))))
         };
         require(
-            distinct(delete_paths),
+            distinct(&delete_paths),
             "target_conflict",
             "Runtime reset deletion targets overlap between component declarations.",
         )?;
         require(
-            distinct(paths(&markers)?),
+            distinct(&marker_paths),
             "target_conflict",
             "Runtime reset completion markers overlap between component declarations.",
         )?;
@@ -363,7 +370,10 @@ pub async fn local_runtime_reset_plan(
             ("schemaVersion", J::Number(1.0)),
             ("deploymentIdentity", selected.required("identity")?.clone()),
             ("hostId", config.required("hostId")?.clone()),
-            ("configPath", J::String(config_file)),
+            (
+                "configPath",
+                J::String(native_path::from_native(&config_file)),
+            ),
             ("instances", J::Array(instances)),
             (
                 "scopeRootIds",

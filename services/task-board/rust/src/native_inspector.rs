@@ -91,14 +91,10 @@ fn text(v: &Json, k: &str) -> IvyResult<JsString> {
 fn equal(v: &Json, k: &str, s: &str) -> bool {
     v.get(k).and_then(Json::as_js_string) == Some(&s.into())
 }
-fn truthy(v: &Json) -> bool {
-    match v {
-        Json::Null => false,
-        Json::Bool(b) => *b,
-        Json::Number(n) => *n != 0.0 && !n.is_nan(),
-        Json::String(s) => !s.0.is_empty(),
-        _ => true,
-    }
+fn has_identity(v: &Json, key: &str) -> bool {
+    v.get(key)
+        .and_then(Json::as_js_string)
+        .is_some_and(|s| !s.0.is_empty())
 }
 fn array(v: &Json) -> &[Json] {
     v.as_array().unwrap_or(&[])
@@ -188,8 +184,8 @@ impl<S: InspectionStore> NativeInspector<'_, S> {
             equal(primary, "namespace", "codex")
                 && equal(primary, "kind", "thread")
                 && primary.get("serviceNodeId") == target.get("serviceNodeId")
-                && truthy(field(value, "turnId"))
-                && truthy(field(value, "nativeEpoch")),
+                && has_identity(value, "turnId")
+                && has_identity(value, "nativeEpoch"),
             "task_board_turn_mismatch",
             "Inspection requires an already saved original native primary and turn.",
         )?;
@@ -217,7 +213,7 @@ impl<S: InspectionStore> NativeInspector<'_, S> {
         })
     }
     pub async fn owner_stopped(&self, run: &Json) -> IvyResult<bool> {
-        if !truthy(field(run, "nativeEpoch")) {
+        if !has_identity(run, "nativeEpoch") {
             return Ok(false);
         }
         let status = self
@@ -234,10 +230,10 @@ impl<S: InspectionStore> NativeInspector<'_, S> {
         )?;
         let connection = field(&status, "connection");
         Ok(equal(&status, "state", "ready")
-            && truthy(field(&status, "epoch"))
+            && has_identity(&status, "epoch")
             && status.get("epoch") != run.get("nativeEpoch")
             && equal(connection, "mode", "owned-stdio")
-            && truthy(field(connection, "ownsServer"))
+            && connection.get("ownsServer").and_then(Json::as_bool) == Some(true)
             && array(field(&status, "processStops"))
                 .iter()
                 .any(|v| v.get("epoch") == run.get("nativeEpoch")))

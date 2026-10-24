@@ -41,6 +41,8 @@ async fn reset_local_plan_preserves_declared_trees_and_rejects_path_conflicts() 
         "duplicate-host",
         "remote-missing-cli",
         "native-future",
+        "relative-cwd",
+        "protected-relative",
     ] {
         let fixture = super::ServiceFixture::new();
         let root = fixture.0.join("reset-plan");
@@ -51,7 +53,7 @@ async fn reset_local_plan_preserves_declared_trees_and_rejects_path_conflicts() 
         let mut data = root.join("data");
         let mut work = root.join("work");
         let mut logs = root.join("logs");
-        if case == "native-future" {
+        if case == "native-future" || case == "relative-cwd" {
             let name = JsString::from("native area 中 🚀");
             #[cfg(windows)]
             let name = {
@@ -61,10 +63,14 @@ async fn reset_local_plan_preserves_declared_trees_and_rejects_path_conflicts() 
             };
             let actual = root.join(node_path::node_filesystem_path(&name).unwrap());
             fs::create_dir(&actual).unwrap();
-            data = root.join("data-link");
-            filesystem::directory_link(&actual, &data).unwrap();
-            work = data.join("missing-work");
-            logs = data.join("missing-logs");
+            if case == "native-future" {
+                data = root.join("data-link");
+                filesystem::directory_link(&actual, &data).unwrap();
+                work = data.join("missing-work");
+                logs = data.join("missing-logs");
+            } else {
+                data = actual;
+            }
         } else {
             fs::create_dir(&data).unwrap();
         }
@@ -87,6 +93,24 @@ async fn reset_local_plan_preserves_declared_trees_and_rejects_path_conflicts() 
                 ("logs", path_json(&logs)),
             ]),
         );
+        if case == "relative-cwd" {
+            instance.insert(
+                "paths",
+                J::object([
+                    (
+                        "data",
+                        path_json(
+                            &PathBuf::from(".")
+                                .join(data.file_name().unwrap())
+                                .join("unused")
+                                .join(".."),
+                        ),
+                    ),
+                    ("work", path_json(&PathBuf::from("work").join("."))),
+                    ("logs", path_json(&PathBuf::from(".").join("logs"))),
+                ]),
+            );
+        }
         config.insert(
             "deployment",
             J::object([
@@ -147,6 +171,16 @@ async fn reset_local_plan_preserves_declared_trees_and_rejects_path_conflicts() 
             "native-future" => {
                 deleting[1] = plan_declaration("work", "nested/leaf");
                 marker = "future/marker.json";
+            }
+            "relative-cwd" => {
+                deleting[0] = plan_declaration("data", "./journal.sqlite");
+                preserve_member = "./settings.json";
+            }
+            "protected-relative" => {
+                config.insert(
+                    "artifactRoot",
+                    path_json(&PathBuf::from("data").join("unused").join("..")),
+                );
             }
             _ => (),
         }
@@ -234,10 +268,17 @@ async fn reset_local_plan_preserves_declared_trees_and_rejects_path_conflicts() 
             data.join(marker),
             root.join("escaped"),
         ];
-        let host = HostContext::current().unwrap();
+        let mut host = HostContext::current().unwrap();
+        if case == "relative-cwd" || case == "protected-relative" {
+            host.paths.cwd = node_path::from_native(&root);
+        }
         let result = runtime_reset::local_runtime_reset_plan(
             config.clone(),
-            node_path::from_native(&config_path),
+            if case == "relative-cwd" {
+                "./config.json".into()
+            } else {
+                node_path::from_native(&config_path)
+            },
             distribution,
             Arc::new(StorageContext {
                 paths: host.paths,
@@ -246,7 +287,15 @@ async fn reset_local_plan_preserves_declared_trees_and_rejects_path_conflicts() 
             }),
         )
         .await;
-        if ["valid", "unicode-tree", "missing-preserve", "native-future"].contains(&case) {
+        if [
+            "valid",
+            "unicode-tree",
+            "missing-preserve",
+            "native-future",
+            "relative-cwd",
+        ]
+        .contains(&case)
+        {
             let row = |area: &str, member: &str, path: PathBuf| {
                 J::object([
                     ("instanceId", "worker".into()),
@@ -256,7 +305,15 @@ async fn reset_local_plan_preserves_declared_trees_and_rejects_path_conflicts() 
                     ("absolutePath", path_json(&path)),
                 ])
             };
-            let mut preserved = row("data", preserve_member, data.join(preserve_member));
+            let mut preserved = row(
+                "data",
+                preserve_member,
+                if case == "relative-cwd" {
+                    data.join("settings.json")
+                } else {
+                    data.join(preserve_member)
+                },
+            );
             preserved.insert(
                 "checksum",
                 if case == "missing-preserve" {
@@ -282,7 +339,15 @@ async fn reset_local_plan_preserves_declared_trees_and_rejects_path_conflicts() 
                 (
                     "delete",
                     J::Array(vec![
-                        row("data", "journal.sqlite", data.join("journal.sqlite")),
+                        row(
+                            "data",
+                            if case == "relative-cwd" {
+                                "./journal.sqlite"
+                            } else {
+                                "journal.sqlite"
+                            },
+                            data.join("journal.sqlite"),
+                        ),
                         if case == "native-future" {
                             row("work", "nested/leaf", work.join("nested").join("leaf"))
                         } else {
@@ -347,7 +412,7 @@ async fn reset_local_plan_preserves_declared_trees_and_rejects_path_conflicts() 
                     "target_conflict",
                     "Runtime reset completion marker traverses a filesystem link.",
                 ),
-                "protected-software" => (
+                "protected-software" | "protected-relative" => (
                     "target_conflict",
                     "Runtime reset target overlaps configuration, software, source or project storage.",
                 ),
