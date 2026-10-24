@@ -5,7 +5,6 @@ use ivy_contracts::{
     core_schema::{validate_host, validate_shared},
     json::stringify,
 };
-use ivy_host_runtime::node_path::{Style, from_native, is_absolute};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, backup::Backup, params};
 use std::{collections::BTreeSet, fs::OpenOptions, path::Path, time::Duration};
 
@@ -14,7 +13,7 @@ fn internal<T>(_: T) -> IvyError {
     IvyError::internal()
 }
 fn retained_path_exists(path: &Path) -> IvyResult<bool> {
-    match std::fs::symlink_metadata(crate::filesystem::path(path)?) {
+    match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(internal(error)),
@@ -205,7 +204,7 @@ pub fn storage_inspection(db: &Connection, requirements: &[IvyJson]) -> IvyResul
 }
 
 pub fn inspect_stopped_storage(path: &Path, requirements: &[IvyJson]) -> IvyResult<IvyJson> {
-    if !crate::filesystem::exists(path) {
+    if !path.exists() {
         if requirements
             .iter()
             .any(|value| matches!(value, IvyJson::Null))
@@ -234,8 +233,8 @@ pub fn snapshot_stopped_hive(source: &Path, destination: &Path) -> IvyResult<Ivy
     const CONFLICT: &str =
         "Offline Hive snapshot needs an existing source and a fresh destination.";
     require(
-        is_absolute(Style::native(), &from_native(source))
-            && is_absolute(Style::native(), &from_native(destination))
+        source.is_absolute()
+            && destination.is_absolute()
             && retained_path_exists(source)?
             && !retained_path_exists(destination)?,
         "target_conflict",
@@ -266,7 +265,7 @@ pub fn snapshot_stopped_hive(source: &Path, destination: &Path) -> IvyResult<Ivy
         .write(true)
         .read(true)
         .create_new(true)
-        .open(crate::filesystem::path(destination)?)
+        .open(destination)
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
                 IvyError::new("target_conflict", CONFLICT)

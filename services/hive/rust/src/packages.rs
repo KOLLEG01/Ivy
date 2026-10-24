@@ -1,8 +1,5 @@
 //! Package grants, private upload staging and authoritative catalog file collection.
-use crate::{
-    filesystem::path as fs_path, store::sql_error, worker_client::RequestOptions,
-    worker_runtime::StorageClient,
-};
+use crate::{store::sql_error, worker_client::RequestOptions, worker_runtime::StorageClient};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
@@ -123,7 +120,7 @@ fn incoming_name(name: &str) -> bool {
         })
 }
 fn entries(path: &Path) -> IvyResult<Vec<fs::DirEntry>> {
-    let values = match fs::read_dir(fs_path(path)?) {
+    let values = match fs::read_dir(path) {
         Ok(values) => values,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
         Err(e) => return Err(sql_error(e)),
@@ -134,7 +131,7 @@ fn entries(path: &Path) -> IvyResult<Vec<fs::DirEntry>> {
     Ok(values)
 }
 fn info(path: &Path) -> IvyResult<Option<fs::Metadata>> {
-    match fs::symlink_metadata(fs_path(path)?) {
+    match fs::symlink_metadata(path) {
         Ok(info) => Ok(Some(info)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(sql_error(e)),
@@ -161,18 +158,17 @@ fn remove(path: &Path, recursive: bool) -> IvyResult<()> {
     let Some(info) = info(path)? else {
         return Ok(());
     };
-    let native = fs_path(path)?;
     let result = if info.is_dir() && recursive {
-        fs::remove_dir_all(&native)
+        fs::remove_dir_all(path)
     } else {
         #[cfg(windows)]
         {
             use std::os::windows::fs::FileTypeExt;
             if info.file_type().is_symlink_dir() {
-                return fs::remove_dir(&native).map_err(sql_error);
+                return fs::remove_dir(path).map_err(sql_error);
             }
         }
-        fs::remove_file(&native)
+        fs::remove_file(path)
     };
     match result {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -326,7 +322,7 @@ impl PackageRegistry {
     }
     async fn initialize_owned(&self) -> IvyResult<()> {
         let worker = self.worker()?;
-        tokio::fs::create_dir_all(fs_path(&self.0.root)?)
+        tokio::fs::create_dir_all(&self.0.root)
             .await
             .map_err(sql_error)?;
         match worker
@@ -335,9 +331,7 @@ impl PackageRegistry {
         {
             Ok(_) => {}
             Err(e) if e.code == "service_unavailable" => {
-                let catalog = match tokio::fs::read(fs_path(self.0.root.join("catalog.json"))?)
-                    .await
-                {
+                let catalog = match tokio::fs::read(self.0.root.join("catalog.json")).await {
                     Ok(bytes) => validate_package_catalog(
                         &parse(&String::from_utf8_lossy(&bytes), usize::MAX).map_err(sql_error)?,
                     )?,
@@ -602,21 +596,21 @@ impl PackageRegistry {
                 "{}.tar.gz",
                 &text(string(grant, "archiveHash")?)[7..]
             ));
-        tokio::fs::create_dir_all(fs_path(target.parent().ok_or_else(IvyError::internal)?)?)
+        tokio::fs::create_dir_all(target.parent().ok_or_else(IvyError::internal)?)
             .await
             .map_err(sql_error)?;
         let marker = component.join(".package");
         match tokio::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(fs_path(&marker)?)
+            .open(&marker)
             .await
         {
             Ok(file) => drop(file),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(sql_error(error)),
         }
-        let metadata = tokio::fs::symlink_metadata(fs_path(marker)?)
+        let metadata = tokio::fs::symlink_metadata(marker)
             .await
             .map_err(sql_error)?;
         require(
@@ -624,7 +618,7 @@ impl PackageRegistry {
             "storage_invalid",
             "Package artifact marker is invalid.",
         )?;
-        let retained = match tokio::fs::symlink_metadata(fs_path(&target)?).await {
+        let retained = match tokio::fs::symlink_metadata(&target).await {
             Ok(info) => Some(info),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(sql_error(error)),
@@ -634,12 +628,12 @@ impl PackageRegistry {
                 retained.is_file()
                     && !retained.file_type().is_symlink()
                     && Some(retained.len() as f64) == grant.get("bytes").and_then(IvyJson::as_f64)
-                    && file_hash(fs_path(&target)?).await? == text(string(grant, "archiveHash")?),
+                    && file_hash(&target).await? == text(string(grant, "archiveHash")?),
                 "artifact_changed",
                 "Retained package archive differs from the authorized upload.",
             )?;
         } else {
-            tokio::fs::rename(fs_path(&staged.archive)?, fs_path(target)?)
+            tokio::fs::rename(&staged.archive, target)
                 .await
                 .map_err(sql_error)?;
         }
@@ -682,7 +676,7 @@ impl PackageRegistry {
                 "{}.tar.gz",
                 &text(string(entry, "archiveHash")?)[7..]
             ));
-        let info = tokio::fs::symlink_metadata(fs_path(&path)?)
+        let info = tokio::fs::symlink_metadata(&path)
             .await
             .map_err(sql_error)?;
         require(
@@ -793,7 +787,7 @@ impl PackageRegistry {
             {
                 remove(&directory.join(".app"), false)?;
                 remove(&directory.join(".package"), false)?;
-                fs::remove_dir(fs_path(directory)?).map_err(sql_error)?;
+                fs::remove_dir(directory).map_err(sql_error)?;
             }
         }
         Ok(())
@@ -822,7 +816,7 @@ impl PackageRegistry {
                 "storage_invalid",
                 "Incoming package path is invalid.",
             )?;
-            let modified = fs::symlink_metadata(fs_path(&target)?)
+            let modified = fs::symlink_metadata(&target)
                 .map_err(sql_error)?
                 .modified()
                 .map_err(sql_error)?;
@@ -867,7 +861,7 @@ async fn stage<R: AsyncRead + Unpin>(
     mut body: R,
 ) -> IvyResult<StagedPackageUpload> {
     let incoming = root.join("incoming");
-    tokio::fs::create_dir_all(fs_path(&incoming)?)
+    tokio::fs::create_dir_all(&incoming)
         .await
         .map_err(sql_error)?;
     let id = text(grant.upload_id());
@@ -883,7 +877,7 @@ async fn stage<R: AsyncRead + Unpin>(
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(fs_path(&staged.archive)?)
+        .open(&staged.archive)
         .await
         .map_err(sql_error)?;
     let mut buffer = [0; 64 * 1024];

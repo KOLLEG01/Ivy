@@ -1,4 +1,4 @@
-use crate::{IvyError, IvyResult, backup_files, node_path};
+use crate::{IvyError, IvyResult, backup_files};
 use ivy_store::{
     rusqlite::{
         Connection,
@@ -16,11 +16,6 @@ fn internal<T, E>(value: Result<T, E>) -> IvyResult<T> {
 pub async fn snapshot_journal(source: PathBuf, destination: PathBuf) -> IvyResult<()> {
     internal(
         tokio::task::spawn_blocking(move || {
-            let source = node_path::node_filesystem_path(&node_path::from_native(&source))
-                .map_err(|_| IvyError::internal())?;
-            let destination =
-                node_path::node_filesystem_path(&node_path::from_native(&destination))
-                    .map_err(|_| IvyError::internal())?;
             let db = internal(sqlite::open(
                 &source,
                 sqlite::OpenOptions {

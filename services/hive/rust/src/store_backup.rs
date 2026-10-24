@@ -6,7 +6,7 @@ use rusqlite::{
     backup::{Backup, StepResult},
 };
 use sha2::{Digest, Sha256};
-use std::{fmt::Write, future::Future, path::PathBuf, pin::Pin, time::Duration};
+use std::{fmt::Write, future::Future, pin::Pin, time::Duration};
 use tokio::io::AsyncReadExt;
 
 pub struct BackupSnapshot {
@@ -33,9 +33,8 @@ impl Store {
         F: FnMut() -> IvyResult<()> + 'static,
     {
         let source = self.db.clone();
-        // node:sqlite and the original file stream encode string paths as UTF-8,
-        // replacing unpaired UTF-16 units at that filesystem boundary.
-        let destination = PathBuf::from(String::from_utf16_lossy(&destination.0));
+        // Preserve native filename identity; SQLite rejects names it cannot open.
+        let destination = ivy_host_runtime::native_path::to_native(&destination);
         Box::pin(async move {
             let pages = {
                 let mut target = Connection::open_with_flags(
@@ -74,7 +73,7 @@ impl Store {
                 // Drop the backup and destination before opening the hash stream,
                 // just as Node finalizes sqlite3_backup before fulfilling backup().
             };
-            let mut input = tokio::fs::File::open(crate::filesystem::path(&destination)?)
+            let mut input = tokio::fs::File::open(&destination)
                 .await
                 .map_err(|_| IvyError::internal())?;
             let mut hash = Sha256::new();

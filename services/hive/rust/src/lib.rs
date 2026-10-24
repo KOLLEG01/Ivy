@@ -11,7 +11,6 @@ pub mod configurations;
 pub mod dashboard_image;
 pub mod discovery;
 pub mod events;
-mod filesystem;
 pub mod hive_settings;
 pub mod http_auth;
 pub mod http_body;

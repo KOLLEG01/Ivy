@@ -154,6 +154,12 @@ export const rustTests = {
     ],
     "testThreads": 1
   },
+  "tests/rust/host-private-backup-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "private_backup_cases::snapshot_uses_sqlite_read_transaction_and_rejects_corruption_before_destination",
+    "testThreads": 1
+  },
   "tests/rust/host-backup-files-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",
@@ -757,6 +763,24 @@ export const rustTests = {
   "tests/rust/host-filesystem-remove-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-filesystem-remove"
+  },
+  "tests/rust/hive_filesystem.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::ui_files::filesystem::native_",
+    "testThreads": 1
+  },
+  "tests/fixtures/hive-native-static.rs": {
+    "package": "ivy-hive",
+    "test": "hive-http",
+    "filter": "native_static::native_browser_assets_and_authenticated_console_files",
+    "testThreads": 1
+  },
+  "tests/rust/hive_packages.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::packages::package_registry_namespaced_root_preserves_logical_staging_cleanup_and_incoming_collection",
+    "testThreads": 1
   },
   "tests/rust/hive_ui_collection_causes.rs": {
     "package": "ivy-hive",

@@ -1,6 +1,5 @@
 //! Browser installation assets and authenticated console-file responses.
 use crate::{
-    filesystem::path as fs_path,
     http_response::{self, Response},
     store::sql_error,
     uis::asset_path,
@@ -105,7 +104,7 @@ impl Assets {
             let file = root
                 .join("icons")
                 .join(String::from_utf16_lossy(&path.0[5..]));
-            let bytes = tokio::fs::read(fs_path(file)?).await.map_err(sql_error)?;
+            let bytes = tokio::fs::read(file).await.map_err(sql_error)?;
             response.write_head(
                 200,
                 IvyJson::object([
@@ -179,9 +178,7 @@ impl Assets {
         if !node_path::from_native(&file).0.starts_with(&prefix.0) {
             return Err(not_found());
         }
-        let info = tokio::fs::metadata(fs_path(&file)?)
-            .await
-            .map_err(sql_error)?;
+        let info = tokio::fs::metadata(&file).await.map_err(sql_error)?;
         if !info.is_file() || info.len() > MANAGEMENT_FRAME_BYTES as u64 {
             return Err(not_found());
         }
@@ -196,7 +193,7 @@ impl Assets {
         .find(|(suffix, _)| path.0.ends_with(&suffix.encode_utf16().collect::<Vec<_>>()))
         .map_or("application/octet-stream", |(_, mime)| mime);
         response.write_head(200, IvyJson::object([("Content-Type", mime.into())]))?;
-        response.end_bytes(&tokio::fs::read(fs_path(&file)?).await.map_err(sql_error)?)?;
+        response.end_bytes(&tokio::fs::read(&file).await.map_err(sql_error)?)?;
         Ok(true)
     }
 }

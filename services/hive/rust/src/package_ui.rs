@@ -1,6 +1,5 @@
 //! App-package publication through the canonical CLI scanner and SDK RPC owner.
 use crate::{
-    filesystem::path as fs_path,
     packages::{PackageInstallation, PackageStorage, PackageUiInstallation, PackageUiInstaller},
     store::sql_error,
     ui_files::UiFiles,
@@ -43,7 +42,7 @@ impl UiPackageInstaller {
             node_path::from_native(&input.artifact_root),
             string(app, "dist")?.clone(),
         ]));
-        let bytes = tokio::fs::read(fs_path(directory.join("ivy-ui.json"))?)
+        let bytes = tokio::fs::read(directory.join("ivy-ui.json"))
             .await
             .map_err(sql_error)?;
         let definition = parse(&String::from_utf8_lossy(&bytes), usize::MAX).map_err(sql_error)?;

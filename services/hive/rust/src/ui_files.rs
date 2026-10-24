@@ -1,6 +1,5 @@
 //! Private immutable UI files, staging, collection and format-4 legacy conversion.
 use crate::{
-    filesystem::{exists, path as fs_path},
     store::{Store, sql_error},
     uis::asset_path,
 };
@@ -99,7 +98,7 @@ fn os_string(value: &OsStr) -> JsString {
     }
 }
 fn entries(path: &Path) -> IvyResult<Vec<fs::DirEntry>> {
-    let mut values = fs::read_dir(fs_path(path)?)
+    let mut values = fs::read_dir(path)
         .map_err(sql_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(sql_error)?;
@@ -112,20 +111,19 @@ fn entries(path: &Path) -> IvyResult<Vec<fs::DirEntry>> {
     Ok(values)
 }
 fn remove(path: &Path, recursive: bool) -> IvyResult<()> {
-    let path = fs_path(path)?;
     let result = (|| -> io::Result<()> {
-        let kind = fs::symlink_metadata(&path)?.file_type();
+        let kind = fs::symlink_metadata(path)?.file_type();
         if kind.is_dir() && recursive {
-            return fs::remove_dir_all(&path);
+            return fs::remove_dir_all(path);
         }
         #[cfg(windows)]
         {
             use std::os::windows::fs::FileTypeExt;
             if kind.is_symlink_dir() {
-                return fs::remove_dir(&path);
+                return fs::remove_dir(path);
             }
         }
-        fs::remove_file(&path)
+        fs::remove_file(path)
     })();
     match result {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -145,11 +143,11 @@ fn write_atomic(file: &Path, bytes: &[u8]) -> IvyResult<()> {
         fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(fs_path(&temporary)?)
+            .open(&temporary)
             .map_err(sql_error)?
             .write_all(bytes)
             .map_err(sql_error)?;
-        fs::rename(fs_path(&temporary)?, fs_path(file)?).map_err(sql_error)
+        fs::rename(&temporary, file).map_err(sql_error)
     })();
     remove(&temporary, false)?;
     result
@@ -206,14 +204,10 @@ impl UiFiles {
     pub fn available(&self, ui: &JsString, release: &JsString, asset: &IvyJson) -> bool {
         (|| -> IvyResult<bool> {
             let file = self.path(ui, release, string(asset, "path")?)?;
-            let directory =
-                fs::canonicalize(fs_path(self.directory(ui, release)?)?).map_err(sql_error)?;
-            let info = fs::symlink_metadata(fs_path(&file)?).map_err(sql_error)?;
+            let directory = fs::canonicalize(self.directory(ui, release)?).map_err(sql_error)?;
+            let info = fs::symlink_metadata(&file).map_err(sql_error)?;
             Ok(info.is_file()
-                && contained(
-                    &directory,
-                    &fs::canonicalize(fs_path(&file)?).map_err(sql_error)?,
-                )
+                && contained(&directory, &fs::canonicalize(&file).map_err(sql_error)?)
                 && asset.get("byteLength").and_then(IvyJson::as_f64) == Some(info.len() as f64))
         })()
         .unwrap_or(false)
@@ -225,8 +219,7 @@ impl UiFiles {
         Ok(asset.get("contentHash").and_then(IvyJson::as_js_string)
             == Some(
                 &digest(
-                    fs::read(fs_path(self.path(ui, release, string(asset, "path")?)?)?)
-                        .map_err(sql_error)?,
+                    fs::read(self.path(ui, release, string(asset, "path")?)?).map_err(sql_error)?,
                 )
                 .into(),
             ))
@@ -264,12 +257,11 @@ impl UiFiles {
             "invalid_arguments",
             "UI asset path is invalid.",
         )?;
-        fs::create_dir_all(fs_path(file.parent().ok_or_else(IvyError::internal)?)?)
-            .map_err(sql_error)?;
-        if exists(&file) {
+        fs::create_dir_all(file.parent().ok_or_else(IvyError::internal)?).map_err(sql_error)?;
+        if file.exists() {
             return require(
                 asset.get("contentHash").and_then(IvyJson::as_js_string)
-                    == Some(&digest(fs::read(fs_path(&file)?).map_err(sql_error)?).into()),
+                    == Some(&digest(fs::read(&file).map_err(sql_error)?).into()),
                 "mutation_conflict",
                 "Staged UI file already has other content.",
             );
@@ -293,24 +285,23 @@ impl UiFiles {
                 .map_err(sql_error)?;
             require(
                 contained(&source, &file)
-                    && exists(&file)
+                    && file.exists()
                     && asset.get("contentHash").and_then(IvyJson::as_js_string)
-                        == Some(&digest(fs::read(fs_path(&file)?).map_err(sql_error)?).into())
+                        == Some(&digest(fs::read(&file).map_err(sql_error)?).into())
                     && asset.get("byteLength").and_then(IvyJson::as_f64)
-                        == Some(fs::metadata(fs_path(&file)?).map_err(sql_error)?.len() as f64),
+                        == Some(fs::metadata(&file).map_err(sql_error)?.len() as f64),
                 "ui_release_invalid",
                 "Staged UI release is incomplete.",
             )?;
         }
         let target = self.directory(ui, release)?;
         require(
-            !exists(&target),
+            !target.exists(),
             "ui_release_invalid",
             "Existing UI release files are incomplete.",
         )?;
-        fs::create_dir_all(fs_path(target.parent().ok_or_else(IvyError::internal)?)?)
-            .map_err(sql_error)?;
-        fs::rename(fs_path(source)?, fs_path(target)?).map_err(sql_error)
+        fs::create_dir_all(target.parent().ok_or_else(IvyError::internal)?).map_err(sql_error)?;
+        fs::rename(source, target).map_err(sql_error)
     }
     pub async fn read(
         &self,
@@ -319,24 +310,22 @@ impl UiFiles {
         asset: &IvyJson,
     ) -> IvyResult<Vec<u8>> {
         let file = self.path(ui, release, string(asset, "path")?)?;
-        let directory = tokio::fs::canonicalize(fs_path(self.directory(ui, release)?)?)
+        let directory = tokio::fs::canonicalize(self.directory(ui, release)?)
             .await
             .map_err(sql_error)?;
         require(
-            tokio::fs::symlink_metadata(fs_path(&file)?)
+            tokio::fs::symlink_metadata(&file)
                 .await
                 .map_err(sql_error)?
                 .is_file()
                 && contained(
                     &directory,
-                    &tokio::fs::canonicalize(fs_path(&file)?)
-                        .await
-                        .map_err(sql_error)?,
+                    &tokio::fs::canonicalize(&file).await.map_err(sql_error)?,
                 ),
             "ui_release_invalid",
             "UI asset leaves its private release directory.",
         )?;
-        let bytes = tokio::fs::read(fs_path(&file)?).await.map_err(sql_error)?;
+        let bytes = tokio::fs::read(&file).await.map_err(sql_error)?;
         require(
             matches_bytes(asset, &bytes),
             "ui_release_invalid",
@@ -364,7 +353,7 @@ impl UiFiles {
             return Ok(());
         }
         require(
-            !exists(&target),
+            !target.exists(),
             "ui_release_invalid",
             "Existing UI release files are incomplete.",
         )?;
@@ -380,7 +369,7 @@ impl UiFiles {
             "invalid_arguments",
             "UI staging directory is invalid.",
         )?;
-        tokio::fs::create_dir_all(fs_path(&staging)?)
+        tokio::fs::create_dir_all(&staging)
             .await
             .map_err(sql_error)?;
         let result = async {
@@ -392,11 +381,10 @@ impl UiFiles {
                     "invalid_arguments",
                     "UI asset path is invalid.",
                 )?;
-                let mut bytes = tokio::fs::read(fs_path(
-                    absolute(&source.join(relative)).map_err(sql_error)?,
-                )?)
-                .await
-                .map_err(sql_error)?;
+                let mut bytes =
+                    tokio::fs::read(absolute(&source.join(relative)).map_err(sql_error)?)
+                        .await
+                        .map_err(sql_error)?;
                 if asset.get("mediaType").and_then(IvyJson::as_js_string)
                     == Some(&"application/json".into())
                 {
@@ -411,29 +399,27 @@ impl UiFiles {
                     "artifact_changed",
                     "UI bundle changed after validation.",
                 )?;
-                tokio::fs::create_dir_all(fs_path(file.parent().ok_or_else(IvyError::internal)?)?)
+                tokio::fs::create_dir_all(file.parent().ok_or_else(IvyError::internal)?)
                     .await
                     .map_err(sql_error)?;
                 tokio::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
-                    .open(fs_path(&file)?)
+                    .open(&file)
                     .await
                     .map_err(sql_error)?
                     .write_all(&bytes)
                     .await
                     .map_err(sql_error)?;
             }
-            tokio::fs::create_dir_all(fs_path(target.parent().ok_or_else(IvyError::internal)?)?)
+            tokio::fs::create_dir_all(target.parent().ok_or_else(IvyError::internal)?)
                 .await
                 .map_err(sql_error)?;
-            tokio::fs::rename(fs_path(&staging)?, fs_path(target)?)
-                .await
-                .map_err(sql_error)
+            tokio::fs::rename(&staging, target).await.map_err(sql_error)
         }
         .await;
         // Keep finally semantics: cleanup failure supersedes the operation's error.
-        match tokio::fs::remove_dir_all(fs_path(staging)?).await {
+        match tokio::fs::remove_dir_all(staging).await {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(sql_error(e)),
@@ -444,11 +430,11 @@ impl UiFiles {
         if store.metadata("ui_files_v1")?.as_deref() == Some("ready") {
             return Ok(());
         }
-        // Node mkdirSync('', {recursive:true}) fails; Rust treats it as a no-op.
+        // Private UI storage requires an explicit root.
         if self.root.as_os_str().is_empty() {
             return Err(IvyError::internal());
         }
-        fs::create_dir_all(fs_path(&self.root)?).map_err(sql_error)?;
+        fs::create_dir_all(&self.root).map_err(sql_error)?;
         let rows = store
             .connection()
             .prepare("SELECT app_id,release_id,release_json FROM app_releases")
@@ -550,9 +536,9 @@ impl UiFiles {
                     ("byteLength", IvyJson::Number(bytes.len() as f64)),
                 ]);
                 let file = self.path(&ui, &id, relative)?;
-                fs::create_dir_all(fs_path(file.parent().ok_or_else(IvyError::internal)?)?)
+                fs::create_dir_all(file.parent().ok_or_else(IvyError::internal)?)
                     .map_err(sql_error)?;
-                if exists(&file) {
+                if file.exists() {
                     require(
                         self.check(&ui, &id, &asset)?,
                         "storage_invalid",
@@ -569,7 +555,7 @@ impl UiFiles {
                         && name.0.starts_with(&prefix)
                         && stale_partial(&JsString(name.0[prefix.len()..].to_vec()))
                     {
-                        fs::remove_file(fs_path(entry.path())?).map_err(sql_error)?;
+                        fs::remove_file(entry.path()).map_err(sql_error)?;
                     }
                 }
                 assets.push(asset);
@@ -582,7 +568,7 @@ impl UiFiles {
                 }
             }
             require(
-                complete && exists(&target),
+                complete && target.exists(),
                 "storage_invalid",
                 "Migrated UI release is incomplete.",
             )?;

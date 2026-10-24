@@ -13,10 +13,8 @@ use ivy_hive::{
 };
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -189,56 +187,13 @@ fn contract(key: &str, foreign: bool) -> IvyJson {
     }
     value
 }
-fn node(input: &IvyJson) -> IvyJson {
-    let mut child =
-        Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
-            .args([
-                "--disable-warning=ExperimentalWarning",
-                "tests/fixtures/hive-package-ui-oracle.mjs",
-            ])
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(encode(input).as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    json(&String::from_utf8(output.stdout).unwrap())
-}
-fn record(value: &IvyJson) {
-    if let Some(path) = std::env::var_os("IVY_HIVE_PACKAGE_UI_CORPUS") {
-        let _guard = CORPUS.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let line = encode(value) + "\n";
-        fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .unwrap()
-            .write_all(line.as_bytes())
-            .unwrap();
-    }
-}
-static CORPUS: OnceLock<Mutex<()>> = OnceLock::new();
 async fn compare(mode: &str) {
     let root = Root::new();
     let mut selected = definition();
     let mut manifest = json(
         r#"{"kind":"app","componentId":"fixture-ui","app":{"appId":"fixture-ui","dist":"dist/ui","entryPath":"index.html"}}"#,
     );
-    let mut config = json(
-        r#"{"current":null,"fail":null,"change":null,"milliseconds":null,"invalidEpoch":false,"initialFiles":[]}"#,
-    );
+    let mut config = json(r#"{"current":null,"fail":null,"change":null,"invalidEpoch":false}"#);
     if matches!(
         mode,
         "contracts" | "foreign-owner" | "fail-register" | "fail-second-register"
@@ -252,9 +207,8 @@ async fn compare(mode: &str) {
         );
     }
     let native = root.0.join("native");
-    let reference = root.0.join("reference");
-    for artifact in [&native, &reference] {
-        let directory = artifact.join("dist/ui");
+    {
+        let directory = native.join("dist/ui");
         fs::create_dir_all(directory.join("sub")).unwrap();
         fs::write(directory.join("ivy-ui.json"), encode(&selected)).unwrap();
         for (path, bytes) in [
@@ -276,9 +230,7 @@ async fn compare(mode: &str) {
     }
     let directory = native.join("dist/ui");
     let files = root.0.join("native-files");
-    let source_files = root.0.join("reference-files");
     let bundle = read_ui_bundle(&directory, &selected).ok();
-    let mut initial = vec![];
     if let Some(bundle) = &bundle {
         if matches!(
             mode,
@@ -291,19 +243,6 @@ async fn compare(mode: &str) {
         }
         if matches!(mode, "same-release-incomplete" | "same-release-corrupt") {
             let path = format!("fixture-ui/{}/index.html", bundle.release_id);
-            initial.push(IvyJson::object([
-                ("path", path.clone().into()),
-                (
-                    "bytes",
-                    STANDARD
-                        .encode(if mode == "same-release-corrupt" {
-                            b"changed".as_slice()
-                        } else {
-                            b"<h1>Fixture</h1>".as_slice()
-                        })
-                        .into(),
-                ),
-            ]));
             fs::create_dir_all(files.join(&path).parent().unwrap()).unwrap();
             fs::write(
                 files.join(path),
@@ -316,7 +255,6 @@ async fn compare(mode: &str) {
             .unwrap();
         }
     }
-    config.insert("initialFiles", IvyJson::Array(initial));
     let failure = match mode {
         "fail-pointers" => Some("ui.pointers"),
         "fail-epoch" => Some("system.status"),
@@ -418,29 +356,192 @@ async fn compare(mode: &str) {
                         .unwrap()
                         .as_millis() as f64
         );
-        config.insert("milliseconds", IvyJson::Number(millis));
     }
-    config.insert("artifactRoot", reference.to_str().unwrap().into());
-    config.insert("filesRoot", source_files.to_str().unwrap().into());
-    config.insert("manifest", manifest);
-    config.insert("principal", IvyJson::String(principal));
-    config.insert("buildId", format!("sha256:{}", "a".repeat(64)).into());
-    let expected = node(&config);
-    let actual = IvyJson::object([
-        ("result", result),
-        ("trace", trace),
-        ("files", tree(&files)),
-    ]);
-    record(&IvyJson::object([
-        ("mode", mode.into()),
-        ("native", actual.clone()),
-        ("original", expected.clone()),
-    ]));
-    assert_eq!(encode(&actual), encode(&expected), "{mode}");
+    assert_native_case(
+        mode,
+        &result,
+        &trace,
+        &files,
+        bundle.as_ref(),
+        &principal,
+        &selected,
+        &config,
+    );
+}
+
+fn assert_native_case(
+    mode: &str,
+    result: &IvyJson,
+    trace: &IvyJson,
+    files: &Path,
+    bundle: Option<&ivy_cli::publish_ui::UiBundle>,
+    principal: &JsString,
+    definition: &IvyJson,
+    config: &IvyJson,
+) {
+    let admission = matches!(
+        mode,
+        "invalid-manifest"
+            | "manifest-id"
+            | "definition-id"
+            | "entry-path"
+            | "missing-definition"
+            | "malformed-definition"
+            | "invalid-definition"
+            | "missing-entry"
+            | "unsupported-extension"
+    );
+    let success = matches!(
+        mode,
+        "publish"
+            | "previous"
+            | "same-release"
+            | "contracts"
+            | "nested-dist"
+            | "principal-unicode"
+            | "equivalent-json"
+    );
+    assert_eq!(
+        result.get("ok"),
+        Some(&success.into()),
+        "{mode}: {}",
+        encode(result)
+    );
+    if !success {
+        assert!(result.get("error").is_some(), "{mode}");
+    }
+    let methods: Vec<_> = array(trace)
+        .iter()
+        .map(|row| {
+            let request = row.required("request").unwrap();
+            request
+                .get("request")
+                .and_then(|frame| frame.get("method"))
+                .or_else(|| request.get("action"))
+                .unwrap()
+                .as_str()
+                .unwrap()
+        })
+        .collect();
+    let expected = if admission {
+        vec![]
+    } else if matches!(
+        mode,
+        "same-release"
+            | "same-release-incomplete"
+            | "same-release-corrupt"
+            | "fail-pointers"
+            | "changed-asset"
+            | "changed-json"
+    ) {
+        vec!["ui.pointers"]
+    } else if matches!(mode, "fail-epoch" | "invalid-epoch") {
+        vec!["ui.pointers", "system.status"]
+    } else if matches!(mode, "fail-register" | "foreign-owner") {
+        vec!["ui.pointers", "system.status", "contracts.register"]
+    } else if mode == "fail-second-register" {
+        vec![
+            "ui.pointers",
+            "system.status",
+            "contracts.register",
+            "contracts.register",
+        ]
+    } else if mode == "contracts" {
+        vec![
+            "ui.pointers",
+            "system.status",
+            "contracts.register",
+            "contracts.register",
+            "uis.deploy",
+        ]
+    } else {
+        vec!["ui.pointers", "system.status", "uis.deploy"]
+    };
+    assert_eq!(methods, expected, "{mode} request order");
+    let installed = !admission
+        && !matches!(
+            mode,
+            "same-release-incomplete"
+                | "same-release-corrupt"
+                | "fail-pointers"
+                | "changed-asset"
+                | "changed-json"
+        );
+    if let Some(bundle) = bundle {
+        let directory = files.join("fixture-ui").join(&bundle.release_id);
+        if installed {
+            for (name, bytes) in [
+                ("index.html", b"<h1>Fixture</h1>".as_slice()),
+                ("main.js", "\u{feff}fixture();".as_bytes()),
+                ("data.json", br#"{"a":"\ud800","z":0}"#.as_slice()),
+                ("sub/é.txt", "é".as_bytes()),
+            ] {
+                assert_eq!(
+                    fs::read(directory.join(name)).unwrap(),
+                    bytes,
+                    "{mode}: {name}"
+                );
+            }
+        } else if mode == "same-release-incomplete" || mode == "same-release-corrupt" {
+            assert_eq!(
+                fs::read(directory.join("index.html")).unwrap(),
+                if mode == "same-release-corrupt" {
+                    b"changed".as_slice()
+                } else {
+                    b"<h1>Fixture</h1>".as_slice()
+                }
+            );
+            assert!(!directory.join("main.js").exists());
+        } else {
+            assert!(!directory.exists(), "{mode} must not publish private files");
+        }
+        for row in array(trace) {
+            let request = row.required("request").unwrap();
+            if let Some(frame) = request.get("request") {
+                assert_eq!(
+                    request.required("context").unwrap().get("principalId"),
+                    Some(&IvyJson::String(principal.clone()))
+                );
+                let published_files = array(row.required("files").unwrap())
+                    .iter()
+                    .filter(|file| file.get("kind") == Some(&"file".into()))
+                    .count();
+                assert_eq!(
+                    published_files, 4,
+                    "{mode}: files precede authenticated publication"
+                );
+                if frame.get("method") == Some(&"uis.deploy".into()) {
+                    let params = frame.required("params").unwrap();
+                    assert_eq!(params.get("expectedReleaseId"), config.get("current"));
+                    assert_eq!(params.get("metadata"), definition.get("metadata"));
+                    let release = params.required("release").unwrap();
+                    assert_eq!(
+                        release.get("releaseId"),
+                        Some(&bundle.release_id.clone().into())
+                    );
+                    assert_eq!(release.get("entryPath"), definition.get("entryPath"));
+                    assert_eq!(release.get("requirements"), definition.get("requirements"));
+                    assert_eq!(array(release.required("assets").unwrap()).len(), 4);
+                }
+            }
+        }
+    }
+    let incoming = files.join(".incoming");
+    if incoming.exists() {
+        assert!(
+            fs::read_dir(incoming).unwrap().next().is_none(),
+            "{mode} staging cleanup"
+        );
+    }
+    if mode.starts_with("fail-") {
+        let data = result.required("error").unwrap().required("data").unwrap();
+        assert_eq!(data.get("code"), Some(&"fixture_failure".into()));
+        assert_eq!(data.get("outcome"), Some(&"unknown".into()));
+    }
 }
 
 #[tokio::test]
-async fn original_package_ui_success_and_existing_release_order() {
+async fn native_package_ui_success_and_existing_release_order() {
     for mode in [
         "publish",
         "previous",
@@ -455,7 +556,7 @@ async fn original_package_ui_success_and_existing_release_order() {
     }
 }
 #[tokio::test]
-async fn original_package_ui_worker_failure_order_and_outcomes() {
+async fn native_package_ui_worker_failure_order_and_outcomes() {
     for mode in [
         "fail-pointers",
         "fail-epoch",
@@ -468,17 +569,17 @@ async fn original_package_ui_worker_failure_order_and_outcomes() {
     }
 }
 #[tokio::test]
-async fn original_package_ui_malformed_runtime_epoch() {
+async fn native_package_ui_malformed_runtime_epoch() {
     compare("invalid-epoch").await;
 }
 #[tokio::test]
-async fn original_package_ui_changes_after_scan_preserve_private_files() {
+async fn native_package_ui_changes_after_scan_preserve_private_files() {
     for mode in ["changed-asset", "equivalent-json", "changed-json"] {
         compare(mode).await;
     }
 }
 #[tokio::test]
-async fn original_package_ui_manifest_and_bundle_admission_order() {
+async fn native_package_ui_manifest_and_bundle_admission_order() {
     for mode in [
         "invalid-manifest",
         "manifest-id",

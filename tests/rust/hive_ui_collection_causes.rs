@@ -164,12 +164,34 @@ fn ui_collection_native_acl_and_sharing_errors_preserve_journal_boundaries() {
     {
         let denied = Denied(private.clone());
         denied.command(&["/deny", "*S-1-1-0:(RD)"]);
-        compare(
-            "root-acl-scandir",
-            &private,
-            "",
-            &fs::read_dir(&private).unwrap_err().to_string(),
-        );
+        match fs::read_dir(&private) {
+            Err(error) => compare("root-acl-scandir", &private, "", &error.to_string()),
+            Ok(entries) => {
+                // Access depends on the effective Windows token. When the OS
+                // grants enumeration, collection must succeed without inventing
+                // an access error or retaining an earlier handled SQL failure.
+                drop(entries);
+                let mut store = Store::open(Path::new(":memory:")).unwrap();
+                let previous_journal = store.metadata("retention_last_failure").unwrap();
+                let registry = Registry::default();
+                let files = UiFiles::new(&private);
+                let owner = Uis::new(&registry, &files);
+                let (result, cause) = store.capture_failure(|store| {
+                    let error = store
+                        .connection()
+                        .execute_batch("SELECT * FROM handled_before_acl")
+                        .unwrap_err();
+                    let _ = store.query_error(error);
+                    owner.collect_files(store, &|| 172800000.0)
+                });
+                result.unwrap();
+                assert!(cause.is_none());
+                assert_eq!(
+                    store.metadata("retention_last_failure").unwrap(),
+                    previous_journal
+                );
+            }
+        }
     }
     for directory in [
         private.join("sample-ui"),

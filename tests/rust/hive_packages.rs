@@ -544,41 +544,83 @@ fn upload(grant: usize, package: &Value) -> Value {
 #[cfg(windows)]
 #[test]
 fn package_registry_namespaced_root_preserves_logical_staging_cleanup_and_incoming_collection() {
-    let mut steps = setup();
-    let grant = push(
-        &mut steps,
-        authorize(authorization("fixture", "1.0.0", "service", b"abc")),
+    let root = Root::new();
+    let files = fs::canonicalize(&root.0).unwrap().join("native-files. ");
+    let clock = Arc::new(Clock {
+        now: AtomicI64::new(100000),
+        iso: [100000i64, 400000, 172800000, 173100000]
+            .into_iter()
+            .map(|at| (at, ivy_sdk::clock::date_to_iso(at as f64).unwrap()))
+            .collect(),
+    });
+    let (actor, task) = Actor::start(root.0.join("native.sqlite"), clock.clone());
+    let registry = PackageRegistry::new(
+        &files,
+        "/hive".into(),
+        clock.clone(),
+        Some(actor.clone() as Arc<dyn PackageStorage>),
+        PackageOptions::default(),
     );
-    let mut staged = headers("stage", grant);
-    staged["chunks"] = json!([STANDARD.encode(b"abc")]);
-    staged["label"] = "staged".into();
-    staged["requireSuccess"] = true.into();
-    let staged = push(&mut steps, staged);
-    let cleaned = push(
-        &mut steps,
-        json!({"method":"dropStage","label":"staged","requireSuccess":true}),
-    );
-    let old = "incoming/00000000-0000-4000-8000-000000000001.tar.gz";
-    steps.push(fixture(vec![
-        write(old, b"old"),
-        json!({"kind":"mtime","path":old,"ms":0}),
-    ]));
-    let collected = push(
-        &mut steps,
-        json!({"method":"collect","now":172800000,"requireSuccess":true}),
-    );
-    let result = compare_roots(&steps, true);
-    let staged_path = result["rows"][staged]["value"]["archive"].as_str().unwrap();
-    let has = |index: usize, path: &str| {
-        result["rows"][index]["fileTree"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["path"] == path)
-    };
-    assert!(has(staged, staged_path));
-    assert!(!has(cleaned, staged_path));
-    assert!(!has(collected, old));
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            registry.initialize().await.unwrap();
+            let input =
+                IvyJson::from_serde(&authorization("fixture", "1.0.0", "service", b"abc")).unwrap();
+            let reply = registry
+                .authorize(&"publisher".into(), &input)
+                .await
+                .unwrap();
+            let id = reply.required("uploadId").unwrap().as_js_string().unwrap();
+            let headers = IvyJson::object([
+                (
+                    "authorization",
+                    format!(
+                        "Bearer {}",
+                        reply.required("uploadToken").unwrap().as_str().unwrap()
+                    )
+                    .into(),
+                ),
+                ("content-length", "3".into()),
+            ]);
+            let grant = registry.admit_upload(id, &headers).unwrap();
+            assert!(
+                registry.admit_upload(id, &headers).is_err(),
+                "One-time grant remains consumed"
+            );
+            let staged = registry
+                .stage_upload(
+                    grant,
+                    Body {
+                        chunks: vec![b"a".to_vec(), b"bc".to_vec()],
+                        offset: 0,
+                        failure: false,
+                    },
+                )
+                .await
+                .unwrap();
+            let archive = staged.archive().to_path_buf();
+            assert!(archive.starts_with(&files));
+            assert_eq!(fs::read(&archive).unwrap(), b"abc");
+            staged.cleanup().await;
+            assert!(!archive.exists());
+            let old = files.join("incoming/00000000-0000-4000-8000-000000000001.tar.gz");
+            fs::create_dir_all(old.parent().unwrap()).unwrap();
+            fs::write(&old, b"old").unwrap();
+            ivy_host_runtime::filesystem::set_times_ms(&old, 0, 0).unwrap();
+            clock.now.store(172800000, Ordering::SeqCst);
+            registry.collect_artifacts().await.unwrap();
+            assert!(!old.exists());
+            assert!(
+                !root.0.join("native-files").exists(),
+                "No trimmed root alias"
+            );
+        });
+    drop(registry);
+    drop(actor);
+    task.join().unwrap();
 }
 
 #[test]

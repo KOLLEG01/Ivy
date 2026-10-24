@@ -8,7 +8,7 @@ struct Collector<'a> {
 }
 impl Collector<'_> {
     fn io<T>(&self, path: &Path, work: impl FnOnce(&Path) -> io::Result<T>) -> IvyResult<T> {
-        work(&fs_path(path)?).map_err(|error| self.failure(error))
+        work(path).map_err(|error| self.failure(error))
     }
     fn entries(&self, path: &Path) -> IvyResult<Vec<fs::DirEntry>> {
         let mut values = self.io(path, |path| {
@@ -42,11 +42,11 @@ impl Collector<'_> {
         sql_error(error)
     }
     fn remove(&self, path: &Path) -> IvyResult<()> {
-        filesystem::remove_force_sync(&fs_path(path)?).map_err(|error| self.failure(error))
+        filesystem::remove_force_sync(path).map_err(|error| self.failure(error))
     }
     fn collect(&self, ui: &JsString, retained: &HashSet<JsString>, now_ms: f64) -> IvyResult<()> {
         let directory = absolute(&self.files.root.join(component_id(ui)?)).map_err(sql_error)?;
-        if !exists(&directory) {
+        if !directory.exists() {
             return Ok(());
         }
         for entry in self.entries(&directory)? {
@@ -75,7 +75,7 @@ impl Collector<'_> {
         retained: &HashMap<JsString, HashSet<JsString>>,
         now_ms: &dyn Fn() -> f64,
     ) -> IvyResult<()> {
-        if !exists(&self.files.root) {
+        if !self.files.root.exists() {
             return Ok(());
         }
         for entry in self.entries(&self.files.root)? {
@@ -93,7 +93,7 @@ impl Collector<'_> {
         self.collect_temporary(now_ms())
     }
     fn sweep(&self, directory: &Path, depth: usize, cutoff: f64) -> IvyResult<()> {
-        if !exists(directory) {
+        if !directory.exists() {
             return Ok(());
         }
         for entry in self.entries(directory)? {

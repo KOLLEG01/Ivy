@@ -353,7 +353,9 @@ async fn snapshot_uses_sqlite_read_transaction_and_rejects_corruption_before_des
         ("malformed", ""),
     ] {
         let f = ServiceFixture::new();
-        let source = f.0.join("source.sqlite");
+        let root = f.0.join("space; quote' 日本語 e\u{301} 😀");
+        fs::create_dir_all(root.join("step")).unwrap();
+        let source = root.join("step/../source.sqlite");
         let db = if case == "malformed" {
             fs::write(&source, [0u8; 4096]).unwrap();
             None
@@ -362,59 +364,158 @@ async fn snapshot_uses_sqlite_read_transaction_and_rejects_corruption_before_des
             db.execute_batch(sql).unwrap();
             Some(db)
         };
-        let actual_path = f.0.join("rust.sqlite");
-        let expected_path = f.0.join("node.sqlite");
+        let actual_path = root.join("snapshot 日本語 😀.sqlite");
+        let before = fs::read(&source).unwrap();
+        let mut wal = source.as_os_str().to_owned();
+        wal.push("-wal");
+        let wal = PathBuf::from(wal);
+        let wal_before = fs::read(&wal).ok();
+        if case == "wal" {
+            assert!(!wal_before.as_ref().unwrap().is_empty());
+        }
+
         let result = private_backup::snapshot_journal(source.clone(), actual_path.clone()).await;
-        let mut input = request(&f, "snapshot");
-        input.insert("source", jp(&source));
-        input.insert("destination", jp(&expected_path));
-        compare(case, input, result.map(|_| J::Null));
-        if actual_path.exists() {
-            let actual = fs::read(&actual_path).unwrap();
-            let expected = fs::read(&expected_path).unwrap();
-            // Different SQLite releases write their own version header. Keep
-            // both byte identities; compare the actual contents independently.
-            let inspect = |path: &Path| {
-                let mut input = request(&f, "inspectSnapshot");
-                input.insert("source", jp(path));
-                oracle(&input)
-            };
-            let contents = inspect(&actual_path);
-            let expected_contents = inspect(&expected_path);
-            assert_json_eq(&contents, &expected_contents);
-            assert_json_eq(&contents, &inspect(&source));
-            retain(
-                "snapshot SQL contents",
-                case.into(),
-                contents,
-                expected_contents,
-            );
-            let identity = |bytes: &[u8]| {
-                J::object([
-                    ("bytes", J::Number(bytes.len() as f64)),
-                    ("hash", ivy_contracts::hash::digest(bytes).into()),
-                    (
-                        "writerVersion",
-                        if bytes.len() >= 100 {
-                            J::Number(u32::from_be_bytes(bytes[96..100].try_into().unwrap()) as f64)
-                        } else {
-                            J::Null
-                        },
-                    ),
-                ])
-            };
-            retain(
-                "snapshot file identities (observed, no byte-equality requirement)",
-                case.into(),
-                identity(&actual),
-                identity(&expected),
+        if case == "malformed" {
+            assert_eq!(result.expect_err(case), IvyError::internal());
+            assert!(
+                !actual_path.exists(),
+                "Corruption must refuse before creating the destination."
             );
         } else {
-            assert!(!expected_path.exists());
+            result.unwrap();
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                // The admitted snapshot has flushed and released its file handle.
+                drop(
+                    fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .share_mode(0)
+                        .open(&actual_path)
+                        .unwrap(),
+                );
+            }
+            let detached = root.join("detached.sqlite");
+            fs::copy(&actual_path, &detached).unwrap();
+            let snapshot = ivy_store::sqlite::open(
+                &detached,
+                ivy_store::sqlite::OpenOptions {
+                    read_only: true,
+                    busy_timeout: Duration::ZERO,
+                },
+            )
+            .unwrap();
+            if case != "ignored-check-constraint" {
+                assert_eq!(
+                    snapshot
+                        .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+                        .unwrap(),
+                    "ok"
+                );
+            }
+            let version = snapshot
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap();
+            assert_eq!(version, if case == "wal" { 1 } else { 0 });
+            match case {
+                "wal" => {
+                    let rows = snapshot
+                        .prepare("SELECT id,value FROM data ORDER BY id")
+                        .unwrap()
+                        .query_map([], |row| {
+                            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                        })
+                        .unwrap()
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap();
+                    assert_eq!(rows, [(1, "before".to_owned()), (2, "😀".to_owned())]);
+                }
+                "empty" => assert_eq!(
+                    snapshot
+                        .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                ),
+                "blob" => assert_eq!(
+                    snapshot
+                        .query_row("SELECT value FROM data", [], |row| row.get::<_, Vec<u8>>(0))
+                        .unwrap(),
+                    vec![0; 900_000]
+                ),
+                "ignored-check-constraint" => {
+                    // The native owner accepts this retained fixture; preserve
+                    // both its stored constraint and the deliberately inserted row.
+                    assert_eq!(
+                        snapshot
+                            .query_row("SELECT value FROM data", [], |row| row.get::<_, i64>(0))
+                            .unwrap(),
+                        -1
+                    );
+                    assert!(
+                        snapshot
+                            .query_row(
+                                "SELECT sql FROM sqlite_schema WHERE name='data'",
+                                [],
+                                |row| row.get::<_, String>(0)
+                            )
+                            .unwrap()
+                            .contains("CHECK(value>0)")
+                    );
+                }
+                _ => unreachable!(),
+            }
+            snapshot.close().map_err(|(_, error)| error).unwrap();
+        }
+        assert_eq!(fs::read(&source).unwrap(), before);
+        if let Some(wal_before) = wal_before {
+            assert_eq!(fs::read(&wal).unwrap(), wal_before);
         }
         if let Some(db) = db {
             assert!(db.is_autocommit());
+            // Writing after success or refusal also proves the read transaction was released.
             db.execute_batch("PRAGMA user_version=2").unwrap();
+            db.close().map_err(|(_, error)| error).unwrap();
+        }
+    }
+
+    #[cfg(windows)]
+    for unit in [0xd800, 0xdfff] {
+        use std::os::windows::ffi::OsStringExt;
+        for invalid_source in [true, false] {
+            let f = ServiceFixture::new();
+            let source = f.0.join("source.sqlite");
+            let db = Connection::open(&source).unwrap();
+            db.execute_batch("CREATE TABLE data(value INTEGER);INSERT INTO data VALUES(1);")
+                .unwrap();
+            db.close().map_err(|(_, error)| error).unwrap();
+            let name = std::ffi::OsString::from_wide(&[b'n' as u16, unit]);
+            let opaque = f.0.join(&name);
+            let alias = f.0.join(name.to_string_lossy().as_ref());
+            fs::copy(&source, &alias).unwrap();
+            let db = Connection::open(&alias).unwrap();
+            db.execute_batch("UPDATE data SET value=99").unwrap();
+            db.close().map_err(|(_, error)| error).unwrap();
+            let alias_before = fs::read(&alias).unwrap();
+            let (source, destination) = if invalid_source {
+                fs::copy(&source, &opaque).unwrap();
+                (opaque, f.0.join("snapshot.sqlite"))
+            } else {
+                (source, opaque)
+            };
+            let before = fs::read(&source).unwrap();
+            // SQLite's existing Windows path boundary refuses unpaired UTF16.
+            // It must never read or overwrite a different replacement filename.
+            assert_eq!(
+                private_backup::snapshot_journal(source.clone(), destination.clone())
+                    .await
+                    .unwrap_err(),
+                IvyError::internal()
+            );
+            assert_eq!(fs::read(&source).unwrap(), before);
+            assert_eq!(fs::read(&alias).unwrap(), alias_before);
+            assert!(!destination.exists());
         }
     }
 }
