@@ -1,6 +1,6 @@
 use super::{ServiceFixture, assert_json_eq, host_configuration};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use ivy_contracts::{IvyJson as J, IvyResult, JsString, json};
+use ivy_contracts::{IvyJson as J, JsString, json};
 use ivy_host_runtime::{
     config, exec_file, layout, node_path, process, runtime_maintenance,
     runtime_reset::{self, ResetHost},
@@ -8,18 +8,15 @@ use ivy_host_runtime::{
 use ivy_sdk::clock::{Clock, parse_date};
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicI64, Ordering},
     },
     time::{Duration, Instant},
 };
 
 const DATE: &str = "2026-10-20T12:00:00.000Z";
-static CORPUS: Mutex<()> = Mutex::new(());
 struct FixedClock;
 impl Clock for FixedClock {
     fn utc_millis(&self) -> i64 {
@@ -76,95 +73,6 @@ fn contents(file: &Path) -> J {
         Err(e) => panic!("fixture observation: {e}"),
     }
 }
-fn input(fixture: &ServiceFixture, config: &J, operation: &str, deadline: bool) -> J {
-    let marker = runtime_maintenance::runtime_reset_marker(config).unwrap();
-    J::object([
-        ("fixtureRoot", J::String(node_path::from_native(&fixture.0))),
-        ("config", config.clone()),
-        ("instance", instance(config)),
-        ("operation", operation.into()),
-        ("at", DATE.into()),
-        ("deadlineClock", deadline.into()),
-        ("healthBefore", contents(&data(config).join("health.json"))),
-        ("markerBefore", contents(&marker)),
-        (
-            "recordBefore",
-            contents(&marker.parent().unwrap().join("current.json")),
-        ),
-    ])
-}
-fn oracle(input: &J) -> J {
-    let mut child = Command::new(std::env::var_os("IVY_RESTORE_NODE").expect("pinned Node"))
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-        ])
-        .arg(root().join("tests/fixtures/host-reset-stop-oracle.mjs"))
-        // Inherit exactly the same cwd as the native dispatch under test.
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(json::stringify(input, usize::MAX).unwrap().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    json::parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
-}
-fn observed(input: &J) -> J {
-    let mut input = input.clone();
-    input.insert("kind", "observe".into());
-    oracle(&input)
-}
-fn wrap(result: IvyResult<J>) -> J {
-    match result {
-        Ok(value) => J::object([("ok", true.into()), ("value", value)]),
-        Err(error) => J::object([("ok", false.into()), ("error", error.to_wire())]),
-    }
-}
-fn bundle(outcome: J, input: &J) -> J {
-    J::object([("outcome", outcome), ("state", observed(input))])
-}
-fn compare(case: &str, setup: J, actual: J, expected: J) {
-    if let Some(file) = std::env::var_os("IVY_HOST_RESET_CORPUS") {
-        let _guard = CORPUS.lock().unwrap();
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(file)
-            .unwrap();
-        writeln!(
-            file,
-            "{}",
-            json::canonical(
-                &J::object([
-                    ("group", "host-stop".into()),
-                    ("case", case.into()),
-                    ("setup", setup),
-                    ("actual", actual.clone()),
-                    ("expected", expected.clone())
-                ]),
-                usize::MAX
-            )
-            .unwrap()
-        )
-        .unwrap();
-    }
-    assert_json_eq(
-        actual.get("outcome").unwrap(),
-        expected.get("outcome").unwrap(),
-    );
-    assert_json_eq(actual.get("state").unwrap(), expected.get("state").unwrap());
-}
 fn health(pid: f64) -> J {
     J::object([
         ("schemaVersion", J::Number(1.0)),
@@ -186,13 +94,28 @@ async fn save_health(config: &J, value: J) {
         .await
         .unwrap();
 }
-fn clear_control(config: &J) {
-    let control = data(config).join("control.json");
-    if control.is_dir() {
-        fs::remove_dir(control).unwrap();
-    } else if control.exists() {
-        fs::remove_file(control).unwrap();
-    }
+
+fn preimages(config: &J) -> [J; 4] {
+    let marker = runtime_maintenance::runtime_reset_marker(config).unwrap();
+    [
+        contents(&data(config).join("health.json")),
+        contents(&data(config).join("control.json")),
+        contents(&marker),
+        contents(&marker.parent().unwrap().join("current.json")),
+    ]
+}
+fn control() -> J {
+    J::object([
+        ("schemaVersion", J::Number(1.0)),
+        ("instanceId", "fixture".into()),
+        ("launchId", "fixture-launch".into()),
+        ("bootId", "fixture-boot".into()),
+        ("action", "shutdown".into()),
+        ("requestedAt", DATE.into()),
+    ])
+}
+fn path_json(path: &Path) -> J {
+    J::String(node_path::from_native(path))
 }
 
 #[tokio::test]
@@ -200,16 +123,15 @@ async fn actual_administrator_and_full_entrypoint_denials_preserve_all_preimages
     let fixture = ServiceFixture::new();
     let config = host_configuration(&fixture);
     let native = host(false);
-    let admin = input(&fixture, &config, "admin", false);
-    let expected = oracle(&admin);
-    let actual = wrap(native.require_administrator().await.map(|_| J::Null));
-    let denied = actual.get("ok") == Some(&false.into());
-    compare(
-        "actual-administrator",
-        admin.clone(),
-        bundle(actual, &admin),
-        expected,
-    );
+    let before = preimages(&config);
+    let denied = match native.require_administrator().await {
+        Ok(()) => false,
+        Err(error) => {
+            assert_eq!(error.code, "access_denied");
+            true
+        }
+    };
+    assert_eq!(preimages(&config), before);
     for (operation, digest) in [
         ("prepare", "invalid"),
         (
@@ -219,24 +141,18 @@ async fn actual_administrator_and_full_entrypoint_denials_preserve_all_preimages
         ("complete", "unused"),
         ("confirm", "unused"),
     ] {
-        // A genuinely elevated host may run the positive stages in a separate
-        // admitted fixture suite. Never replace admission to force this branch.
         if !denied && digest != "invalid" {
             continue;
         }
         let marker = runtime_maintenance::runtime_reset_marker(&config).unwrap();
         fs::create_dir_all(marker.parent().unwrap()).unwrap();
-        fs::write(&marker, "retained hold").unwrap();
+        fs::write(&marker, b"retained hold").unwrap();
         fs::write(
             marker.parent().unwrap().join("current.json"),
-            "retained record",
+            b"retained record",
         )
         .unwrap();
-        let mut setup = input(&fixture, &config, operation, false);
-        setup.insert("resetId", "fixture-reset".into());
-        setup.insert("runtimeEpoch", "fixture-epoch".into());
-        setup.insert("publisherDigest", digest.into());
-        setup.insert("plan", J::Null);
+        let before = preimages(&config);
         let result = match operation {
             "prepare" => {
                 native
@@ -268,22 +184,24 @@ async fn actual_administrator_and_full_entrypoint_denials_preserve_all_preimages
                     .await
             }
         };
-        let actual = bundle(wrap(result), &setup);
-        let expected = oracle(&setup);
         assert_eq!(
-            actual.get("state").unwrap().get("recordUnchanged"),
-            Some(&true.into())
+            result.unwrap_err().code,
+            if digest == "invalid" {
+                "invalid_arguments"
+            } else {
+                "access_denied"
+            }
         );
         assert_eq!(
-            actual.get("state").unwrap().get("markerUnchanged"),
-            Some(&true.into())
+            preimages(&config),
+            before,
+            "{operation}: admission changed preimages"
         );
-        compare(&format!("{operation}-{digest}"), setup, actual, expected);
     }
 }
 
 #[tokio::test]
-async fn health_validation_and_control_publication_match_the_unmodified_original() {
+async fn native_health_validation_and_control_publication_preserve_paths_and_preimages() {
     let native = host(false);
     for case in [
         "modern",
@@ -297,9 +215,38 @@ async fn health_validation_and_control_publication_match_the_unmodified_original
         "control-directory",
         "large-modern-pid",
         "large-legacy-pid",
+        "unicode-data",
+        "opaque-data",
+        "dot-alias",
     ] {
         let fixture = ServiceFixture::new();
-        let config = host_configuration(&fixture);
+        let mut config = host_configuration(&fixture);
+        let mut expected_data = data(&config);
+        if ["unicode-data", "opaque-data", "dot-alias"].contains(&case) {
+            expected_data = fixture.0.join("服务-é-🚀");
+            if case == "opaque-data" {
+                #[cfg(windows)]
+                {
+                    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+                    expected_data.push(OsString::from_wide(&[0xd800]));
+                }
+            }
+            let configured_data = if case == "dot-alias" {
+                expected_data.join("absent").join("..").join(".")
+            } else {
+                expected_data.clone()
+            };
+            let mut item = instance(&config);
+            item.insert(
+                "paths",
+                J::object([
+                    ("data", path_json(&configured_data)),
+                    ("work", path_json(&fixture.0.join("work"))),
+                    ("logs", path_json(&fixture.0.join("logs"))),
+                ]),
+            );
+            config.insert("instances", J::Array(vec![item]));
+        }
         let mut value = health(123.0);
         match case {
             "not-ready" => {
@@ -317,6 +264,7 @@ async fn health_validation_and_control_publication_match_the_unmodified_original
             }
             "empty-launch" => {
                 value.insert("launchId", "".into());
+                value.insert("pid", J::Number(9007199254740991.0));
             }
             "large-modern-pid" | "large-legacy-pid" => {
                 value.insert("pid", J::Number(9007199254740991.0));
@@ -327,39 +275,71 @@ async fn health_validation_and_control_publication_match_the_unmodified_original
             _ => {}
         }
         if case != "missing" {
-            save_health(&config, value).await;
+            config::atomic_json(expected_data.join("health.json"), value)
+                .await
+                .unwrap();
         }
         if case == "malformed" {
-            fs::write(data(&config).join("health.json"), "{").unwrap();
+            fs::write(expected_data.join("health.json"), b"{").unwrap();
         }
         if case == "control-directory" {
-            fs::create_dir(data(&config).join("control.json")).unwrap();
+            fs::create_dir(expected_data.join("control.json")).unwrap();
         }
-        let setup = input(&fixture, &config, "send", false);
-        let actual = bundle(
-            wrap(
-                native
-                    .send_stop(config.clone(), instance(&config))
-                    .await
-                    .map(|v| v.map(J::Number).unwrap_or(J::Null)),
-            ),
-            &setup,
+        let health_before = contents(&expected_data.join("health.json"));
+        let marker = runtime_maintenance::runtime_reset_marker(&config).unwrap();
+        let retained = (
+            contents(&marker),
+            contents(&marker.parent().unwrap().join("current.json")),
         );
-        let expected_pid = match case {
-            "modern" | "not-ready" | "stale-build" => J::Number(123.0),
-            "large-modern-pid" => J::Number(9007199254740991.0),
-            _ => J::Null,
+        let actual = native
+            .send_stop(config.clone(), instance(&config))
+            .await
+            .unwrap();
+        let expected = match case {
+            "modern" | "not-ready" | "stale-build" | "unicode-data" | "opaque-data"
+            | "dot-alias" => Some(123.0),
+            "large-modern-pid" => Some(9007199254740991.0),
+            _ => None,
         };
+        assert_eq!(actual, expected, "{case}");
         assert_eq!(
-            actual.get("outcome").unwrap().get("value"),
-            Some(&expected_pid),
+            contents(&expected_data.join("health.json")),
+            health_before,
             "{case}"
         );
-        if case != "control-directory" {
-            clear_control(&config);
+        assert_eq!(
+            (
+                contents(&marker),
+                contents(&marker.parent().unwrap().join("current.json"))
+            ),
+            retained,
+            "{case}"
+        );
+        if expected.is_some() {
+            assert_json_eq(
+                &config::json_file(
+                    expected_data.join("control.json"),
+                    config::CONFIGURATION_BYTES,
+                )
+                .await
+                .unwrap(),
+                &control(),
+            );
+            let expected_bytes =
+                format!("{}\n", json::canonical(&control(), usize::MAX).unwrap()).into_bytes();
+            assert_eq!(
+                fs::read(expected_data.join("control.json")).unwrap(),
+                expected_bytes
+            );
+        } else if case == "control-directory" {
+            assert!(expected_data.join("control.json").is_dir());
+        } else {
+            assert!(!expected_data.join("control.json").exists(), "{case}");
         }
-        let expected = oracle(&setup);
-        compare(case, setup, actual, expected);
+        assert!(
+            !expected_data.join("absent").exists(),
+            "{case}: path normalization created an alias"
+        );
     }
 }
 
@@ -381,8 +361,6 @@ async fn actor(fixture: &ServiceFixture, config: &J, label: &str, mode: &str, ho
         exec_file::SpawnCommand {
             executable: std::env::var_os("IVY_RESTORE_NODE").unwrap(),
             args: vec![
-                "--experimental-transform-types".into(),
-                "--disable-warning=ExperimentalWarning".into(),
                 root()
                     .join("tests/fixtures/host-reset-owned-process-fixture.mjs")
                     .into_os_string(),
@@ -441,55 +419,24 @@ async fn retire(actor: Actor) -> J {
         ),
     ])
 }
-fn normalize_owned_pid(result: &mut J, pid: f64) {
-    let mut outcome = result.remove("outcome").unwrap();
-    assert_eq!(outcome.get("value"), Some(&J::Number(pid)));
-    outcome.insert("value", "fixture-owned-pid".into());
-    result.insert("outcome", outcome);
-}
 
 #[tokio::test]
 async fn legacy_signal_uses_only_the_exact_owned_process_identity() {
     let fixture = ServiceFixture::new();
     let config = host_configuration(&fixture);
     let native = host(false);
-    let mut results = Vec::new();
-    let mut setups = Vec::new();
-    let mut receipts = Vec::new();
-    for label in ["native", "reference"] {
-        let child = actor(&fixture, &config, label, "legacy", false).await;
-        let mut value = health(child.pid);
-        value.remove("launchId");
-        save_health(&config, value).await;
-        let setup = input(&fixture, &config, "send", false);
-        let mut result = if label == "native" {
-            bundle(
-                wrap(
-                    native
-                        .send_stop(config.clone(), instance(&config))
-                        .await
-                        .map(|p| p.map(J::Number).unwrap_or(J::Null)),
-                ),
-                &setup,
-            )
-        } else {
-            oracle(&setup)
-        };
-        let pid = child.pid;
-        receipts.push(retire(child).await);
-        normalize_owned_pid(&mut result, pid);
-        results.push(result);
-        setups.push(setup);
-    }
-    compare(
-        "owned-legacy-sigterm",
-        J::object([
-            ("inputs", J::Array(setups)),
-            ("retirements", J::Array(receipts)),
-        ]),
-        results.remove(0),
-        results.remove(0),
-    );
+    let child = actor(&fixture, &config, "legacy-native", "legacy", false).await;
+    let pid = child.pid;
+    let mut value = health(pid);
+    value.remove("launchId");
+    save_health(&config, value).await;
+    let before = preimages(&config);
+    let result = native.send_stop(config.clone(), instance(&config)).await;
+    let receipt = retire(child).await;
+    assert_eq!(result.unwrap(), Some(pid));
+    assert_eq!(receipt.get("treeStopped"), Some(&true.into()));
+    assert_eq!(preimages(&config), before);
+    assert!(!runtime_reset::reset_process_alive(pid));
 }
 
 #[tokio::test]
@@ -497,65 +444,29 @@ async fn native_process_probe_and_deadline_wait_match_owned_kernel_state() {
     let fixture = ServiceFixture::new();
     let config = host_configuration(&fixture);
     let child = actor(&fixture, &config, "probe", "held", false).await;
-    for (case, pid) in [
-        ("live", child.pid),
-        ("current-process", 0.0),
-        ("fractional", 1.5),
-        ("too-large", 9007199254740991.0),
-    ] {
-        let mut setup = input(&fixture, &config, "alive", false);
-        setup.insert("pid", J::Number(pid));
-        let actual = bundle(
-            wrap(Ok(runtime_reset::reset_process_alive(pid).into())),
-            &setup,
-        );
-        let expected = oracle(&setup);
-        compare(case, setup, actual, expected);
-    }
-    let mut setup = input(&fixture, &config, "wait", true);
-    setup.insert("pids", J::Array(vec![J::Number(child.pid)]));
-    let actual = bundle(
-        wrap(
-            runtime_reset::wait_reset_processes_stopped(
-                vec![child.pid],
-                Arc::new(DeadlineClock(AtomicI64::new(0))),
-            )
-            .await
-            .map(|_| J::Null),
-        ),
-        &setup,
-    );
-    let expected = oracle(&setup);
     let pid = child.pid;
+    let probes = [
+        ("live", pid, true),
+        ("current-process", 0.0, true),
+        ("fractional", 1.5, false),
+        ("too-large", 9007199254740991.0, false),
+    ]
+    .map(|(case, pid, expected)| (case, runtime_reset::reset_process_alive(pid), expected));
+    let wait = runtime_reset::wait_reset_processes_stopped(
+        vec![pid],
+        Arc::new(DeadlineClock(AtomicI64::new(0))),
+    )
+    .await;
     let receipt = retire(child).await;
-    setup.insert("retirement", receipt);
-    compare("live-wait-rejected", setup, actual, expected);
-    let mut setup = input(&fixture, &config, "alive", false);
-    setup.insert("pid", J::Number(pid));
-    compare(
-        "retired",
-        setup.clone(),
-        bundle(
-            wrap(Ok(runtime_reset::reset_process_alive(pid).into())),
-            &setup,
-        ),
-        oracle(&setup),
-    );
-    let mut setup = input(&fixture, &config, "wait", false);
-    setup.insert("pids", J::Array(vec![]));
-    compare(
-        "empty-wait",
-        setup.clone(),
-        bundle(
-            wrap(
-                runtime_reset::wait_reset_processes_stopped(vec![], Arc::new(FixedClock))
-                    .await
-                    .map(|_| J::Null),
-            ),
-            &setup,
-        ),
-        oracle(&setup),
-    );
+    for (case, actual, expected) in probes {
+        assert_eq!(actual, expected, "{case}");
+    }
+    assert_eq!(wait.unwrap_err().code, "outcome_unknown");
+    assert_eq!(receipt.get("treeStopped"), Some(&true.into()));
+    assert!(!runtime_reset::reset_process_alive(pid));
+    runtime_reset::wait_reset_processes_stopped(vec![], Arc::new(FixedClock))
+        .await
+        .unwrap();
 }
 
 #[cfg(windows)]
@@ -577,75 +488,76 @@ async fn exited_259_is_gone_even_when_the_numeric_status_is_still_active() {
             child.pid as u32,
         )
     };
-    assert!(!retained.is_null());
     child.owner.completion.wait().await;
     let mut code = 0;
     let queried = unsafe { GetExitCodeProcess(retained, &mut code) };
-    let mut setup = input(&fixture, &config, "alive", false);
-    setup.insert("pid", J::Number(child.pid));
-    setup.insert("retainedExitCode", J::Number(code as f64));
-    let actual = bundle(
-        wrap(Ok(runtime_reset::reset_process_alive(child.pid).into())),
-        &setup,
-    );
-    let expected = oracle(&setup);
+    let alive = runtime_reset::reset_process_alive(child.pid);
     unsafe {
         CloseHandle(retained);
     }
-    setup.insert("retirement", retire(child).await);
+    let receipt = retire(child).await;
+    assert!(!retained.is_null());
     assert_ne!(queried, 0);
     assert_eq!(code, 259);
-    compare("exited-259-retained-handle", setup, actual, expected);
+    assert!(!alive);
+    assert_eq!(receipt.get("treeStopped"), Some(&true.into()));
 }
 
 #[cfg(not(target_os = "linux"))]
 #[tokio::test]
-async fn real_control_stop_wait_and_owner_lock_proof_match_the_original() {
+async fn real_control_stop_wait_and_owner_lock_proof_preserve_shutdown_fences() {
     for mode in ["cooperative", "unresponsive"] {
         let fixture = ServiceFixture::new();
         let config = host_configuration(&fixture);
-        let deadline = mode == "unresponsive";
-        let native = host(deadline);
-        let mut results = Vec::new();
-        let mut setups = Vec::new();
-        let mut receipts = Vec::new();
-        for label in ["native", "reference"] {
-            clear_control(&config);
-            let child = actor(&fixture, &config, label, mode, true).await;
-            save_health(&config, health(child.pid)).await;
-            let setup = input(&fixture, &config, "stop", deadline);
-            let result = if label == "native" {
-                bundle(
-                    wrap(native.stop(config.clone()).await.map(|_| J::Null)),
-                    &setup,
-                )
-            } else {
-                oracle(&setup)
-            };
-            if mode == "cooperative" {
-                child.owner.completion.wait().await;
-            }
-            let receipt = retire(child).await;
-            if mode == "cooperative" {
-                assert_eq!(
-                    receipt.get("exitCode"),
-                    Some(&J::Number(0.0)),
-                    "cooperative fixture must exit normally after control"
-                );
-            }
-            receipts.push(receipt);
-            results.push(result);
-            setups.push(setup);
+        let native = host(mode == "unresponsive");
+        let child = actor(&fixture, &config, "native-owner", mode, true).await;
+        save_health(&config, health(child.pid)).await;
+        let before = preimages(&config);
+        let result = native.stop(config.clone()).await;
+        let alive = runtime_reset::reset_process_alive(child.pid);
+        let owner_root = path(config.required("runtimeRoot").unwrap()).join("owners/fixture");
+        let lock = ivy_host_runtime::journal::ExecutorLock::acquire(owner_root, false).await;
+        let lock_held = lock.is_err();
+        if let Ok(lock) = lock {
+            lock.close().await.unwrap();
         }
-        compare(
-            &format!("real-owner-{mode}"),
-            J::object([
-                ("inputs", J::Array(setups)),
-                ("retirements", J::Array(receipts)),
-            ]),
-            results.remove(0),
-            results.remove(0),
+        let receipt = retire(child).await;
+        let after = preimages(&config);
+        assert_eq!(after[0], before[0], "{mode}: health changed");
+        assert_eq!(after[2..], before[2..], "{mode}: reset authority changed");
+        let mut expected_control = control();
+        if mode == "unresponsive" {
+            expected_control.insert("requestedAt", "1970-01-01T00:00:00.000Z".into());
+        }
+        assert_json_eq(
+            &config::json_file(
+                data(&config).join("control.json"),
+                config::CONFIGURATION_BYTES,
+            )
+            .await
+            .unwrap(),
+            &expected_control,
         );
+        assert_eq!(receipt.get("treeStopped"), Some(&true.into()));
+        if mode == "cooperative" {
+            result.unwrap();
+            assert!(!alive);
+            assert!(!lock_held);
+            assert_eq!(receipt.get("exitCode"), Some(&J::Number(0.0)));
+        } else {
+            assert_eq!(result.unwrap_err().code, "outcome_unknown");
+            assert!(alive);
+            assert!(lock_held, "live unresponsive writer lost its owner fence");
+        }
+        for member in ["executor", "owners/fixture"] {
+            let lock = ivy_host_runtime::journal::ExecutorLock::acquire(
+                path(config.required("runtimeRoot").unwrap()).join(member),
+                false,
+            )
+            .await
+            .unwrap();
+            lock.close().await.unwrap();
+        }
     }
 }
 
@@ -669,59 +581,75 @@ async fn configured_ssh_dispatch_preserves_literal_argv_and_response_envelopes()
         let fixture = ServiceFixture::new();
         let mut config = host_configuration(&fixture);
         let mut executables = config.remove("executables").unwrap();
-        executables.insert(
-            "ssh",
-            if case == "missing-executable" {
-                fixture
-                    .0
-                    .join("missing-ssh.exe")
-                    .to_string_lossy()
-                    .to_string()
-                    .into()
-            } else {
-                J::String(node_path::from_native(Path::new(
-                    &std::env::var_os("IVY_RESTORE_NODE").unwrap(),
-                )))
-            },
-        );
+        let executable = if case == "missing-executable" {
+            fixture.0.join("missing-ssh.exe")
+        } else {
+            PathBuf::from(std::env::var_os("IVY_RESTORE_NODE").unwrap())
+        };
+        executables.insert("ssh", path_json(&executable));
         config.insert("executables", executables);
+        let config_path = fixture.0.join("host config.json");
+        let receipt_path = fixture.0.join("ssh-receipt.json");
         let remote = J::object([
             ("ssh", "--no-warnings".into()),
             (
                 "cliPath",
-                J::String(node_path::from_native(
-                    &root().join("tests/fixtures/host-reset-ssh-fixture.mjs"),
-                )),
+                path_json(&root().join("tests/fixtures/host-reset-ssh-fixture.mjs")),
             ),
-            (
-                "configPath",
-                J::String(node_path::from_native(&fixture.0.join("host config.json"))),
-            ),
+            ("configPath", path_json(&config_path)),
         ]);
         let args: Vec<JsString> = vec![
             "--fixture-case".into(),
             case.into(),
+            "--fixture-receipt".into(),
+            node_path::from_native(&receipt_path),
             "--reset-id".into(),
-            "space ' quote \" $(literal) é 🚀".into(),
+            r#"space ' quote " $(literal) é 🚀"#.into(),
             "--runtime-epoch".into(),
             "exact-epoch".into(),
         ];
-        let mut setup = input(&fixture, &config, "remote", false);
-        setup.insert("host", remote.clone());
-        setup.insert(
-            "args",
-            J::Array(args.iter().cloned().map(J::String).collect()),
+        let mut expected_args = vec![
+            J::from("runtime-reset-host"),
+            "--config".into(),
+            path_json(&config_path),
+        ];
+        expected_args.extend(args.iter().cloned().map(J::String));
+        expected_args.push("--json".into());
+        let before = preimages(&config);
+        let result = native.remote(config.clone(), remote, args).await;
+        match case {
+            "success" => {
+                let value = result.unwrap().unwrap();
+                assert_json_eq(
+                    value.required("args").unwrap(),
+                    &J::Array(expected_args.clone()),
+                );
+                assert_eq!(
+                    path(value.required("cwd").unwrap()),
+                    std::env::current_dir().unwrap()
+                );
+            }
+            "undefined-data" => assert!(result.unwrap().is_none()),
+            "null-data" => assert_eq!(result.unwrap(), Some(J::Null)),
+            "denied" => assert_eq!(result.unwrap_err().code, "access_denied"),
+            "truthy-ok" | "missing-code" | "null-envelope" => {
+                assert_eq!(result.unwrap_err().code, "remote_reset_failed", "{case}")
+            }
+            "empty-code" => assert_eq!(result.unwrap_err().code, ""),
+            _ => assert_eq!(result.unwrap_err().code, "internal_error", "{case}"),
+        }
+        assert_eq!(
+            preimages(&config),
+            before,
+            "{case}: remote dispatch changed local reset state"
         );
-        let actual = bundle(
-            wrap(
-                native
-                    .remote(config.clone(), remote, args)
-                    .await
-                    .map(|v| v.unwrap_or_else(|| "fixture-undefined-data".into())),
-            ),
-            &setup,
-        );
-        let expected = oracle(&setup);
-        compare(&format!("ssh-{case}"), setup, actual, expected);
+        if case != "missing-executable" {
+            let receipt = config::json_file(&receipt_path, config::CONFIGURATION_BYTES)
+                .await
+                .unwrap();
+            assert_json_eq(receipt.required("args").unwrap(), &J::Array(expected_args));
+        } else {
+            assert!(!receipt_path.exists());
+        }
     }
 }

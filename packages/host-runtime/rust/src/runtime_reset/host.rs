@@ -4,14 +4,14 @@ use super::*;
 use crate::{
     config,
     docker::DockerAdapter,
-    exec_file, layout, node_path,
+    exec_file, layout, native_path, node_path,
     systemd::{SystemdAdapter, systemd_unit_name},
 };
 use ivy_contracts::{core_schema::validate_host, json};
 use ivy_sdk::clock::Clock;
 use std::{path::PathBuf, sync::Arc, time::Duration};
-mod phases;
 mod dispatch;
+mod phases;
 pub use dispatch::{
     CoordinatedReset, ResetHostPhase, ResetPhaseArguments, decode_scope_roots, encode_scope_roots,
     reset_phase_arguments,
@@ -198,20 +198,20 @@ impl Inner {
         }
     }
     async fn send_stop(&self, config: &J, instance: &J) -> IvyResult<Option<f64>> {
-        let data = field(&layout::service_paths(config, instance)?, "data")?;
+        let data = config::path_value(layout::service_paths(config, instance)?.required("data")?)?;
         let result: IvyResult<Option<f64>> = async {
-            let path = node_path::node_filesystem_path(&node_path::join(
-                node_path::Style::native(),
-                &[data.clone(), "health.json".into()],
-            ))
-            .map_err(|_| IvyError::internal())?;
+            let path = native_path::lexical(&data.join("health.json"));
             let health = config::json_file(path, config::CONFIGURATION_BYTES).await?;
             validate_host("Health", &health)?;
             if health.get("instanceId") != instance.get("instanceId") {
                 return Ok(None);
             }
             let pid = number(health.required("pid")?)?;
-            if health.get("launchId").and_then(J::as_js_string).is_some_and(|text| !text.0.is_empty()) {
+            if health
+                .get("launchId")
+                .and_then(J::as_js_string)
+                .is_some_and(|text| !text.0.is_empty())
+            {
                 let control = J::object([
                     ("schemaVersion", J::Number(1.0)),
                     ("instanceId", instance.required("instanceId")?.clone()),
@@ -220,11 +220,7 @@ impl Inner {
                     ("action", "shutdown".into()),
                     ("requestedAt", local::now(self.clock.as_ref())?),
                 ]);
-                let path = node_path::node_filesystem_path(&node_path::join(
-                    node_path::Style::native(),
-                    &[data, "control.json".into()],
-                ))
-                .map_err(|_| IvyError::internal())?;
+                let path = native_path::lexical(&data.join("control.json"));
                 config::atomic_json(path, control).await?;
             } else if !signal_pid(pid, true) {
                 return Ok(None);

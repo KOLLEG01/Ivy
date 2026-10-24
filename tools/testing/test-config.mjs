@@ -537,6 +537,15 @@ export const rustTests = {
     "package": "ivy-host-runtime",
     "test": "host-scheduler"
   },
+  "tests/rust/host-reset-stop-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "reset_stop_cases::",
+    "testThreads": 1,
+    "prerequisites": [
+      { "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }
+    ]
+  },
   "tests/rust/host-reset-release-cases.rs": {
     "package": "ivy-host-runtime",
     "lib": true,
