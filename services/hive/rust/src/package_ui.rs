@@ -9,7 +9,7 @@ use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, hash::digest, json::parse,
     operation::derive_operation_id_js,
 };
-use ivy_host_runtime::node_path::{self, Context};
+use ivy_host_runtime::{native_path, paths};
 use ivy_sdk::{
     operation_ids::new_operation_id,
     rpc::{RequestFuture, RequestOptions, RpcClient},
@@ -38,10 +38,12 @@ impl UiPackageInstaller {
         )?;
         let app = app.ok_or_else(IvyError::internal)?;
         let ui = string(app, "appId")?;
-        let directory = node_path::to_native(&Context::current().map_err(sql_error)?.resolve(&[
-            node_path::from_native(&input.artifact_root),
-            string(app, "dist")?.clone(),
-        ]));
+        let directory = paths::absolute(
+            &input
+                .artifact_root
+                .join(native_path::to_native(string(app, "dist")?)),
+        )
+        .map_err(sql_error)?;
         let bytes = tokio::fs::read(directory.join("ivy-ui.json"))
             .await
             .map_err(sql_error)?;

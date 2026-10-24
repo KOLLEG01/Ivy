@@ -206,7 +206,30 @@ async fn compare(mode: &str) {
             ]),
         );
     }
-    let native = root.0.join("native");
+    let mut native = root.0.join(if mode == "unicode-root" {
+        "native-漢字 space"
+    } else {
+        "native"
+    });
+    let mut aliases: Vec<PathBuf> = Vec::new();
+    #[cfg(windows)]
+    if mode.starts_with("opaque-root-") {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+        let base = fs::canonicalize(&root.0).unwrap();
+        let mut name: Vec<u16> = "native".encode_utf16().collect();
+        name.push(if mode.ends_with("high") {
+            0xd800
+        } else {
+            0xdfff
+        });
+        native = base.join(OsString::from_wide(&name));
+        for name in ["native�", "native. "] {
+            let alias = base.join(name);
+            fs::create_dir(&alias).unwrap();
+            fs::write(alias.join("sentinel"), b"retained native alias").unwrap();
+            aliases.push(alias);
+        }
+    }
     {
         let directory = native.join("dist/ui");
         fs::create_dir_all(directory.join("sub")).unwrap();
@@ -229,6 +252,12 @@ async fn compare(mode: &str) {
         }
     }
     let directory = native.join("dist/ui");
+    let source_before = (cfg!(windows)
+        && matches!(
+            mode,
+            "canonical-root" | "opaque-root-high" | "opaque-root-low"
+        ))
+    .then(|| tree(&directory));
     let files = root.0.join("native-files");
     let bundle = read_ui_bundle(&directory, &selected).ok();
     if let Some(bundle) = &bundle {
@@ -324,9 +353,27 @@ async fn compare(mode: &str) {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as f64;
+    let artifact_root = match mode {
+        "canonical-root" => fs::canonicalize(&native).unwrap(),
+        "relative-root" => {
+            let cwd = std::env::current_dir().unwrap();
+            let common = cwd
+                .ancestors()
+                .find(|base| native.starts_with(base))
+                .unwrap();
+            let mut relative = PathBuf::new();
+            for _ in cwd.strip_prefix(common).unwrap().components() {
+                relative.push("..");
+            }
+            relative.push(native.strip_prefix(common).unwrap());
+            assert!(relative.is_relative());
+            relative
+        }
+        _ => native,
+    };
     let future: PackageInstallation = options.install_ui.unwrap().install(PackageUiInstallation {
         manifest: manifest.clone(),
-        artifact_root: native,
+        artifact_root,
         publisher_principal_id: principal.clone(),
         build_id: format!("sha256:{}", "a".repeat(64)).into(),
     });
@@ -367,6 +414,15 @@ async fn compare(mode: &str) {
         &selected,
         &config,
     );
+    if let Some(before) = source_before {
+        assert_eq!(tree(&worker.directory), before, "{mode}: source authority");
+    }
+    for alias in aliases {
+        assert_eq!(
+            fs::read(alias.join("sentinel")).unwrap(),
+            b"retained native alias"
+        );
+    }
 }
 
 fn assert_native_case(
@@ -379,6 +435,11 @@ fn assert_native_case(
     definition: &IvyJson,
     config: &IvyJson,
 ) {
+    let root_refusal = cfg!(windows)
+        && matches!(
+            mode,
+            "canonical-root" | "opaque-root-high" | "opaque-root-low"
+        );
     let admission = matches!(
         mode,
         "invalid-manifest"
@@ -390,7 +451,7 @@ fn assert_native_case(
             | "invalid-definition"
             | "missing-entry"
             | "unsupported-extension"
-    );
+    ) || root_refusal;
     let success = matches!(
         mode,
         "publish"
@@ -400,7 +461,12 @@ fn assert_native_case(
             | "nested-dist"
             | "principal-unicode"
             | "equivalent-json"
-    );
+            | "unicode-root"
+            | "canonical-root"
+            | "relative-root"
+            | "opaque-root-high"
+            | "opaque-root-low"
+    ) && !root_refusal;
     assert_eq!(
         result.get("ok"),
         Some(&success.into()),
@@ -409,6 +475,27 @@ fn assert_native_case(
     );
     if !success {
         assert!(result.get("error").is_some(), "{mode}");
+    }
+    if root_refusal {
+        let error = result.required("error").unwrap();
+        assert_eq!(
+            error.required("data").unwrap().get("code"),
+            Some(
+                &if mode == "canonical-root" {
+                    "invalid_arguments"
+                } else {
+                    "internal_error"
+                }
+                .into()
+            )
+        );
+        assert!(!files.exists(), "{mode}: no private publication");
+        if mode == "canonical-root" {
+            assert_eq!(
+                error.get("message"),
+                Some(&"UI bundle must be an actual directory, not a link.".into())
+            );
+        }
     }
     let methods: Vec<_> = array(trace)
         .iter()
@@ -542,7 +629,7 @@ fn assert_native_case(
 
 #[tokio::test]
 async fn native_package_ui_success_and_existing_release_order() {
-    for mode in [
+    let mut modes = vec![
         "publish",
         "previous",
         "same-release",
@@ -551,7 +638,13 @@ async fn native_package_ui_success_and_existing_release_order() {
         "contracts",
         "nested-dist",
         "principal-unicode",
-    ] {
+        "unicode-root",
+        "canonical-root",
+        "relative-root",
+    ];
+    #[cfg(windows)]
+    modes.extend(["opaque-root-high", "opaque-root-low"]);
+    for mode in modes {
         compare(mode).await;
     }
 }
