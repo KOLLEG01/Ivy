@@ -1,8 +1,8 @@
 use super::*;
 use ivy_hive::kernel::{StartupOptions, StartupPorts};
 use ivy_hive::objects;
-use ivy_host_runtime::node_path;
-use rusqlite::{Connection, OpenFlags, types::ValueRef};
+use ivy_host_runtime::native_path;
+use rusqlite::{Connection, types::ValueRef};
 
 fn sql_rows(db: &Connection, sql: &str) -> Value {
     let mut statement = db.prepare(sql).unwrap();
@@ -93,139 +93,23 @@ pub(super) fn prepare(input: &Value) {
         fs::write(root, "root-file").unwrap();
     }
 }
-fn run_native(input: &mut Value, profile: &Value) -> Value {
-    prepare(input);
-    let filename = Path::new(input["filename"].as_str().unwrap()).to_path_buf();
-    let mut result = vec![];
-    for _ in 0..input["cycles"].as_u64().unwrap_or(1) {
-        let directory = JsString::from(input["temporaryDirectory"].as_str().unwrap());
-        let temporary = input["filename"] == ":memory:" && input.get("uiRoot").is_none();
-        let outcome = Kernel::open(
-            StartupOptions {
-                filename: node_path::from_native(&filename),
-                ui_root: input.get("uiRoot").map(|v| v.as_str().unwrap().into()),
-                credentials: credentials(input),
-                kernel: Options {
-                    validate_messages: true,
-                    ..options()
-                },
-            },
-            StartupPorts {
-                runtime: Rc::new(registry::ObservedRuntime::new(profile)),
-                query: Arc::new(registry::ObservedRuntime::new(profile)),
-                clock: Rc::new(|| 100000.0),
-                time_zones: Rc::new(|_: &JsString| {
-                    panic!("No Intl admission is performed by these startup/get cases")
-                }),
-                temporary_directory: Box::new(move || {
-                    assert!(temporary, "Unused temp-directory provider was called");
-                    Ok(directory)
-                }),
-            },
-        );
-        let (mut kernel, error) = match outcome {
-            Ok(kernel) => (Some(kernel), Value::Null),
-            Err(error) => (None, wire(error.to_wire())),
-        };
-        let root = kernel
-            .as_ref()
-            .map(|k| k.parts.ui_files.root.clone())
-            .unwrap_or_else(|| {
-                input
-                    .get("uiRoot")
-                    .map(|v| PathBuf::from(v.as_str().unwrap()))
-                    .unwrap_or_else(|| filename.parent().unwrap().join("ui-releases"))
-            });
-        if temporary {
-            let name = root.file_name().unwrap().to_str().unwrap();
-            let id = name.strip_prefix("ivy-ui-").unwrap();
-            assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 4);
-            input["temporaryUuid"] = id.into();
-        }
-        let state = if let Some(kernel) = kernel.as_ref() {
-            state(kernel.parts.store.connection())
-        } else if filename != Path::new(":memory:") && filename.exists() {
-            let db =
-                Connection::open_with_flags(&filename, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-            state(&db)
-        } else {
-            Value::Null
-        };
-        let mut requests = vec![];
-        if let Some(kernel) = kernel.as_mut() {
-            for method in ["settings.get", "openai.getConfiguration"] {
-                requests.push(wire(kernel.execute(&IvyJson::from_serde(&context("http")).unwrap(),&IvyJson::from_serde(&json!({"jsonrpc":"2.0","id":"request","method":method,"params":{}})).unwrap()).unwrap()));
-            }
-        }
-        let catalog_probe = if let Some(kernel) = kernel.as_mut() {
-            let actions =
-                ivy_hive::worker_actions::WorkerActions::new(kernel, &credentials(input)).unwrap();
-            match actions
-                .handle(
-                    kernel,
-                    &IvyJson::from_serde(
-                        &json!({"action":"package.catalog","after":0,"includeUis":false}),
-                    )
-                    .unwrap(),
-                )
-                .unwrap()
-            {
-                Ok(value) => json!({"value":wire(value),"error":null}),
-                Err(error) => json!({"value":null,"error":wire(error.to_wire())}),
-            }
-        } else {
-            Value::Null
-        };
-        let before = files(&root);
-        let close_error = kernel
-            .take()
-            .and_then(|k| k.close().err())
-            .map(|e| wire(e.to_wire()))
-            .unwrap_or(Value::Null);
-        // Generic post-configuration failures are inspected via a fresh read-only
-        // connection after Rust drops the partial owner. Their original lock
-        // lifetime is recorded separately, not asserted equivalent here.
-        result.push(json!({"error":error,"state":state,"requests":requests,"catalogProbe":catalog_probe,"root":root,"before":before,"after":files(&root),"closeError":close_error,"storeClosed":true}));
+fn relative_to_current(path: &Path) -> PathBuf {
+    let cwd = std::env::current_dir().unwrap();
+    let from: Vec<_> = cwd.components().collect();
+    let to: Vec<_> = path.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    assert!(common > 0);
+    let mut result: PathBuf = (common..from.len()).map(|_| "..").collect();
+    for part in &to[common..] {
+        result.push(part.as_os_str());
     }
-    json!({"rows":result})
+    result
 }
-fn original(input: &Value) -> Value {
-    let mut child =
-        Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
-            .arg(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../../tests/fixtures/hive-kernel-startup.mjs"),
-            )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.to_string().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).unwrap()
-}
+
 #[test]
-fn actual_constructor_preserves_initialization_order_legacy_reopen_credentials_and_ui_close() {
+fn native_constructor_preserves_initialization_order_legacy_reopen_credentials_and_ui_close() {
     let root = Root::new();
-    let profile = if let Some(path) = std::env::var_os("IVY_HIVE_STARTUP_PROFILE") {
-        let prior: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-        prior["original"]["registryRuntime"].clone()
-    } else {
-        oracle(&root.0.join("profile.sqlite"), &[op("constructor")])["registryRuntime"].clone()
-    };
-    let mut corpus = vec![];
-    for name in [
+    let mut names = vec![
         "fresh-disk",
         "explicit-disk",
         "memory-default",
@@ -236,11 +120,35 @@ fn actual_constructor_preserves_initialization_order_legacy_reopen_credentials_a
         "settings-contract-conflict",
         "legacy-reopen",
         "ready-root-file",
-    ] {
+        "relative-db",
+        "unicode-db",
+        "canonical-db",
+        "linked-db",
+        "provider-parent",
+        "provider-linked",
+        "provider-error",
+        "memory-empty-root",
+        "store-directory",
+    ];
+    #[cfg(windows)]
+    names.extend([
+        "opaque-ui-high",
+        "opaque-ui-low",
+        "trailing-ui",
+        "provider-opaque-high",
+        "provider-opaque-low",
+        "opaque-db-high",
+        "opaque-db-low",
+    ]);
+    assert_eq!(names.len(), if cfg!(windows) { 26 } else { 19 });
+    for name in names {
         let base = root.0.join(name);
         fs::create_dir(&base).unwrap();
-        let memory = name.starts_with("memory");
-        let mut input = json!({"case":name,"filename":if memory{PathBuf::from(":memory:")}else{base.join("hive.sqlite")},"temporaryDirectory":base.join("temp"),"credentials":[{"principalId":"alpha","digest":format!("sha256:{}","a".repeat(64))}]});
+        let memory = name.starts_with("memory") || name.starts_with("provider");
+        let mut input = json!({
+            "filename": if memory { PathBuf::from(":memory:") } else { base.join("hive.sqlite") },
+            "credentials": [{"principalId":"alpha","digest":format!("sha256:{}", "a".repeat(64))}]
+        });
         if matches!(
             name,
             "explicit-disk"
@@ -251,7 +159,7 @@ fn actual_constructor_preserves_initialization_order_legacy_reopen_credentials_a
         ) {
             input["uiRoot"] = json!(base.join("chosen"));
         }
-        if name == "empty-root" {
+        if matches!(name, "empty-root" | "memory-empty-root") {
             input["uiRoot"] = "".into();
         }
         if matches!(
@@ -260,88 +168,326 @@ fn actual_constructor_preserves_initialization_order_legacy_reopen_credentials_a
         ) {
             input["rootFile"] = true.into();
         }
-        if name == "bad-credential-before-ui" {
+        if matches!(name, "bad-credential-before-ui" | "provider-error") {
             input["credentials"][0]["digest"] = "invalid".into();
         }
         if name == "settings-contract-conflict" {
-            input["seed"] = json!([{"op":"register","owner":{"kind":"hive"},"definition":{"key":"ivy/settings","version":"1.0.0","owner":{"kind":"hive"},"mediaType":"application/json","retention":{"objects":{"mode":"retain"},"revisions":{"mode":"bounded","maximumCount":100}},"specMarkdown":"Different immutable contract.","jsonSchema":{"type":"object"}}}]);
+            input["seed"] = json!([{"op":"register","owner":{"kind":"hive"},"definition":{
+                "key":"ivy/settings","version":"1.0.0","owner":{"kind":"hive"},
+                "mediaType":"application/json","specMarkdown":"Different immutable contract.",
+                "retention":{"objects":{"mode":"retain"},"revisions":{"mode":"bounded","maximumCount":100}},
+                "jsonSchema":{"type":"object"}}}]);
         }
         if name == "legacy-reopen" {
             input["seed"] = json!(ui_files::legacy_seed());
-            input["cycles"] = 2.into();
         }
         if name == "ready-root-file" {
             input["seed"] =
                 json!([{"op":"sql","sql":"INSERT INTO metadata VALUES('ui_files_v1','ready');"}]);
         }
-        let actual = run_native(&mut input, &profile);
-        // Both runs receive the same root spelling; reset only this bounded
-        // fixture directory after the native owner and all observers close.
-        assert!(base.starts_with(&root.0));
-        fs::remove_dir_all(&base).unwrap();
-        fs::create_dir(&base).unwrap();
-        let expected = original(&input);
-        corpus.push(json!({"input":input,"native":actual,"original":expected}));
-    }
-    if let Some(path) = std::env::var_os("IVY_HIVE_STARTUP_CORPUS") {
-        fs::write(path, json!(corpus).to_string()).unwrap();
-    }
-    for case in &corpus {
-        let name = case["input"]["case"].as_str().unwrap();
-        assert_eq!(
-            case["native"]["rows"].as_array().unwrap().len(),
-            case["original"]["rows"].as_array().unwrap().len()
-        );
-        for (a, b) in case["native"]["rows"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .zip(case["original"]["rows"].as_array().unwrap())
+        prepare(&input);
+        let mut filename = PathBuf::from(input["filename"].as_str().unwrap());
+        let mut explicit = input
+            .get("uiRoot")
+            .map(|v| PathBuf::from(v.as_str().unwrap()));
+        let mut expected_root = explicit.clone().unwrap_or_else(|| base.join("ui-releases"));
+        let mut provider_directory = base.join("temp");
+        let mut expected_provider_directory = provider_directory.clone();
+        let mut alias: Option<PathBuf> = None;
+        let mut link = None;
+        if name == "relative-db" {
+            filename = relative_to_current(&filename);
+            expected_root = relative_to_current(&base.join("ui-releases"));
+        } else if name == "unicode-db" {
+            fs::create_dir(base.join("目录 space")).unwrap();
+            filename = base.join("目录 space/hive.sqlite");
+            expected_root = base.join("目录 space").join("ui-releases");
+        } else if name == "canonical-db" {
+            let canonical = fs::canonicalize(&base).unwrap();
+            filename = canonical.join("hive.sqlite");
+            expected_root = canonical.join("ui-releases");
+        } else if matches!(name, "linked-db" | "provider-linked") {
+            fs::create_dir(base.join("real")).unwrap();
+            let path = base.join("link");
+            ivy_host_runtime::filesystem::directory_link(Path::new("real"), &path).unwrap();
+            link = Some((path.clone(), fs::read_link(&path).unwrap()));
+            if name == "linked-db" {
+                filename = path.join("hive.sqlite");
+                expected_root = path.join("ui-releases");
+            } else {
+                provider_directory = path;
+                expected_provider_directory = provider_directory.clone();
+            }
+        } else if name == "provider-parent" {
+            provider_directory = base.join("absent").join("..").join("temp");
+        } else if name == "store-directory" {
+            filename = base.join("database-directory");
+            fs::create_dir(&filename).unwrap();
+        }
+        #[cfg(windows)]
+        if name.starts_with("opaque-")
+            || name.starts_with("provider-opaque")
+            || name == "trailing-ui"
         {
-            for key in [
-                "error",
-                "state",
-                "requests",
-                "catalogProbe",
-                "root",
-                "before",
-                "after",
-                "closeError",
-            ] {
-                assert_eq!(a[key], b[key], "Constructor {name}: {key}");
-            }
-            if matches!(name, "bad-credential-before-ui") {
-                assert_eq!(b["storeClosed"], true);
-            }
-            if !matches!(
-                name,
-                "ui-before-contracts" | "settings-contract-conflict" | "empty-root"
-            ) {
-                assert_eq!(a["storeClosed"], b["storeClosed"]);
+            use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+            let canonical = fs::canonicalize(&base).unwrap();
+            let mut units: Vec<_> = "chosen".encode_utf16().collect();
+            units.push(if name.ends_with("high") {
+                0xd800
+            } else {
+                0xdfff
+            });
+            let opaque = canonical.join(OsString::from_wide(&units));
+            let retained = canonical.join("chosen�");
+            fs::create_dir(&retained).unwrap();
+            let sentinel = retained.join("authority");
+            fs::write(&sentinel, b"unrelated native authority").unwrap();
+            alias = Some(sentinel);
+            if name.starts_with("opaque-db") {
+                filename = opaque;
+            } else if name.starts_with("provider-opaque") {
+                provider_directory = opaque;
+                expected_provider_directory = provider_directory.clone();
+            } else {
+                let selected = if name == "trailing-ui" {
+                    canonical.join("chosen. ")
+                } else {
+                    opaque
+                };
+                if name == "trailing-ui" {
+                    fs::create_dir(canonical.join("chosen")).unwrap();
+                    let sentinel = canonical.join("chosen/authority");
+                    fs::write(&sentinel, b"unrelated native authority").unwrap();
+                    alias = Some(sentinel);
+                }
+                explicit = Some(selected.clone());
+                expected_root = selected;
             }
         }
-    }
-    assert_eq!(corpus[2]["native"]["rows"][0]["after"]["kind"], "absent");
-    assert_eq!(corpus[3]["native"]["rows"][0]["after"]["kind"], "directory");
-    assert_eq!(
-        corpus[4]["native"]["rows"][0]["error"]["data"]["code"],
-        "internal_error"
-    );
-    assert_eq!(
-        corpus[5]["native"]["rows"][0]["error"]["data"]["code"],
-        "invalid_arguments"
-    );
-    assert_eq!(
-        corpus[6]["native"]["rows"][0]["error"]["data"]["code"],
-        "internal_error"
-    );
-    assert_eq!(
-        corpus[7]["native"]["rows"][0]["error"]["data"]["code"],
-        "contract_definition_conflict"
-    );
-    for i in [0, 1, 2, 3, 8, 9] {
-        for row in corpus[i]["native"]["rows"].as_array().unwrap() {
-            assert!(row["error"].is_null(), "{}", corpus[i]["input"]);
+        let provider_expected = usize::from(memory && explicit.is_none());
+        for cycle in 0..if name == "legacy-reopen" { 2 } else { 1 } {
+            let provider_calls = Rc::new(Cell::new(0));
+            let clocks = Rc::new(Cell::new(0));
+            let counted = provider_calls.clone();
+            let before_provider = clocks.clone();
+            let clock = clocks.clone();
+            let directory = provider_directory.clone();
+            let fail_provider = name == "provider-error";
+            let ports = StartupPorts {
+                clock: Rc::new(move || {
+                    clock.set(clock.get() + 1);
+                    100000.0
+                }),
+                temporary_directory: Box::new(move || {
+                    assert_eq!(
+                        before_provider.get(),
+                        0,
+                        "Provider precedes domain initialization"
+                    );
+                    counted.set(counted.get() + 1);
+                    if fail_provider {
+                        Err(ivy_contracts::IvyError::new(
+                            "fixture_temp",
+                            "Controlled provider refusal.",
+                        ))
+                    } else {
+                        Ok(native_path::from_native(&directory))
+                    }
+                }),
+                ..ivy_hive::native_runtime::startup_ports()
+            };
+            let outcome = Kernel::open_retained(
+                StartupOptions {
+                    filename: native_path::from_native(&filename),
+                    ui_root: explicit.as_ref().map(|path| native_path::from_native(path)),
+                    credentials: credentials(&input),
+                    kernel: Options {
+                        validate_messages: true,
+                        ..options()
+                    },
+                },
+                ports,
+            );
+            assert_eq!(provider_calls.get(), provider_expected, "{name}");
+            let expected_error = match name {
+                "bad-credential-before-ui" => Some("invalid_arguments"),
+                "empty-root"
+                | "memory-empty-root"
+                | "ui-before-contracts"
+                | "store-directory"
+                | "opaque-db-high"
+                | "opaque-db-low" => Some("internal_error"),
+                "settings-contract-conflict" => Some("contract_definition_conflict"),
+                "provider-error" => Some("fixture_temp"),
+                _ => None,
+            };
+            match outcome {
+                Err(failure) => {
+                    let error: &ivy_contracts::IvyError = std::borrow::Borrow::borrow(&failure);
+                    assert_eq!(Some(error.code.as_str()), expected_error, "{name}");
+                    if filename.is_file() {
+                        assert_eq!(
+                            super::worker_startup::locked(&filename),
+                            name != "bad-credential-before-ui",
+                            "{name}: retained owner"
+                        );
+                    }
+                    drop(failure.into_error());
+                    if filename.is_file() {
+                        assert!(
+                            !super::worker_startup::locked(&filename),
+                            "{name}: owner released"
+                        );
+                    }
+                    if matches!(name, "bad-credential-before-ui" | "ui-before-contracts") {
+                        assert_eq!(fs::read(&expected_root).unwrap(), b"root-file");
+                    }
+                    if name == "settings-contract-conflict" {
+                        assert!(clocks.get() > 0);
+                    } else {
+                        assert_eq!(
+                            clocks.get(),
+                            0,
+                            "{name}: failure before domain initialization"
+                        );
+                    }
+                    if name == "store-directory" || name.starts_with("opaque-db") {
+                        assert!(
+                            !expected_root.exists(),
+                            "{name}: no UI effect after store refusal"
+                        );
+                    }
+                }
+                Ok(mut kernel) => {
+                    assert_eq!(expected_error, None, "{name}");
+                    let actual_root = kernel.parts.ui_files.root.clone();
+                    let temporary = memory && explicit.is_none();
+                    if temporary {
+                        assert_eq!(
+                            actual_root.parent().unwrap().as_os_str(),
+                            expected_provider_directory.as_os_str(),
+                            "{name}"
+                        );
+                        let id = actual_root
+                            .file_name()
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .strip_prefix("ivy-ui-")
+                            .unwrap();
+                        assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 4);
+                    } else {
+                        assert_eq!(actual_root.as_os_str(), expected_root.as_os_str(), "{name}");
+                    }
+                    assert_eq!(
+                        kernel
+                            .parts
+                            .store
+                            .metadata("ui_files_v1")
+                            .unwrap()
+                            .as_deref(),
+                        Some("ready"),
+                        "{name}"
+                    );
+                    if filename.is_file() {
+                        assert!(
+                            super::worker_startup::locked(&filename),
+                            "{name}: live owner"
+                        );
+                    }
+                    for method in ["settings.get", "openai.getConfiguration"] {
+                        let response = kernel.execute(
+                            &IvyJson::from_serde(&context("http")).unwrap(),
+                            &IvyJson::from_serde(&json!({"jsonrpc":"2.0","id":"request","method":method,"params":{}})).unwrap(),
+                        ).unwrap();
+                        let expected = if method == "settings.get" {
+                            json!({"revision":0,"settings":{"schemaVersion":1,"quietHours":null}})
+                        } else {
+                            json!({"revision":0,"configuration":{"schemaVersion":1,"appId":null}})
+                        };
+                        assert_eq!(
+                            wire(response),
+                            json!({"kind":"result","value":expected}),
+                            "{name}: {method}"
+                        );
+                    }
+                    let actions = ivy_hive::worker_actions::WorkerActions::new(
+                        &mut kernel,
+                        &credentials(&input),
+                    )
+                    .unwrap();
+                    let catalog_error = actions
+                        .handle(
+                            &mut kernel,
+                            &IvyJson::from_serde(
+                                &json!({"action":"package.catalog","after":0,"includeUis":false}),
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap()
+                        .unwrap_err();
+                    assert_eq!(catalog_error.code, "service_unavailable", "{name}");
+                    drop(actions);
+                    if name == "legacy-reopen" {
+                        assert_eq!(
+                            fs::read(actual_root.join("sample-ui/r1/index.html")).unwrap(),
+                            b"<p>legacy</p>"
+                        );
+                        assert_eq!(
+                            fs::read(actual_root.join("sample-ui/r1/image.png")).unwrap(),
+                            [0, 1, 255]
+                        );
+                        let count: i64 = kernel.parts.store.connection().query_row(
+                            "SELECT count(*) FROM objects WHERE id IN ('owner','file','binary')", [],
+                            |row| row.get(0)).unwrap();
+                        assert_eq!(count, 0, "Legacy ownership retired on cycle {cycle}");
+                        let count: i64 = kernel
+                            .parts
+                            .store
+                            .connection()
+                            .query_row("SELECT count(*) FROM app_assets", [], |row| row.get(0))
+                            .unwrap();
+                        assert_eq!(count, 0);
+                    }
+                    let before = files(&actual_root);
+                    kernel.close().unwrap();
+                    if temporary {
+                        assert!(
+                            !actual_root.exists(),
+                            "{name}: temporary UI removed after storage close"
+                        );
+                    } else {
+                        assert_eq!(
+                            files(&actual_root),
+                            before,
+                            "{name}: caller-owned UI retained"
+                        );
+                    }
+                    if filename.is_file() {
+                        assert!(
+                            !super::worker_startup::locked(&filename),
+                            "{name}: close released storage"
+                        );
+                    }
+                    if name == "ready-root-file" {
+                        assert_eq!(fs::read(&actual_root).unwrap(), b"root-file");
+                    }
+                }
+            }
+        }
+        if let Some(alias) = alias {
+            assert_eq!(
+                fs::read(alias).unwrap(),
+                b"unrelated native authority",
+                "{name}"
+            );
+        }
+        if let Some((path, target)) = link {
+            assert_eq!(
+                fs::read_link(path).unwrap(),
+                target,
+                "{name}: caller link retained"
+            );
         }
     }
 }

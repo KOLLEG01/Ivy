@@ -14,7 +14,7 @@ use std::{
 };
 use tokio::{io::AsyncWrite, runtime::Builder, time::timeout};
 
-fn locked(filename: &Path) -> bool {
+pub(super) fn locked(filename: &Path) -> bool {
     let db = Connection::open_with_flags(filename, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     db.busy_timeout(Duration::ZERO).unwrap();
     match db.query_row("SELECT COUNT(*) FROM sqlite_schema", [], |r| {

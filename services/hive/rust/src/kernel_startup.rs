@@ -1,8 +1,8 @@
 //! Original Kernel constructor order, with runtime primitives supplied by its owner.
 use super::*;
 use crate::{hive_settings, package_kernel, store::Credential};
-use ivy_host_runtime::node_path::{self, Style};
-use std::sync::Arc;
+use ivy_host_runtime::native_path;
+use std::{path::Path, sync::Arc};
 
 pub struct StartupOptions {
     pub filename: JsString,
@@ -70,7 +70,8 @@ impl Kernel {
     ) -> Result<Self, StartupFailure> {
         let mut owner = None;
         let result = (|| {
-            let mut store = Store::open(&node_path::to_native(&options.filename))?;
+            let filename = native_path::to_native(&options.filename);
+            let mut store = Store::open(&filename)?;
             owner = Some(store.hold_startup_owner());
             let temporary_ui_root = options.filename == JsString::from(":memory:")
                 && options
@@ -78,23 +79,25 @@ impl Kernel {
                     .as_ref()
                     .is_none_or(|root| root.0.is_empty());
             let root = match options.ui_root {
-                Some(root) => root,
-                None => node_path::join(
-                    Style::native(),
-                    &if temporary_ui_root {
-                        vec![
-                            (ports.temporary_directory)()?,
-                            format!("ivy-ui-{}", uuid::Uuid::new_v4()).into(),
-                        ]
+                Some(root) => native_path::to_native(&root),
+                None => {
+                    let path = if temporary_ui_root {
+                        native_path::to_native(&(ports.temporary_directory)()?)
+                            .join(format!("ivy-ui-{}", uuid::Uuid::new_v4()))
                     } else {
-                        vec![
-                            node_path::dirname(Style::native(), &options.filename),
-                            "ui-releases".into(),
-                        ]
-                    },
-                ),
+                        filename
+                            .parent()
+                            .unwrap_or(if filename.has_root() {
+                                &filename
+                            } else {
+                                Path::new(".")
+                            })
+                            .join("ui-releases")
+                    };
+                    native_path::lexical(&path)
+                }
             };
-            let ui_files = UiFiles::new(node_path::to_native(&root));
+            let ui_files = UiFiles::new(root);
             if let Err(error) = store.configure_credentials(&options.credentials) {
                 // The explicit close can itself supersede the configuration error.
                 drop(owner.take());

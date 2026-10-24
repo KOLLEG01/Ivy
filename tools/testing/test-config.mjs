@@ -899,6 +899,12 @@ export const rustTests = {
     "filter": "store::kernel::worker_actions::",
     "testThreads": 1
   },
+  "tests/rust/hive_kernel_startup.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::kernel::startup::native_",
+    "testThreads": 1
+  },
   "tests/rust/hive_worker_startup.rs": {
     "package": "ivy-hive",
     "test": "hive-storage-worker",
