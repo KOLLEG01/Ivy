@@ -568,6 +568,12 @@ impl Owner {
             )
             .into_os_string(),
         );
+        if let Some(node) = &self.node {
+            environment.insert(
+                "IVY_NODE_EXECUTABLE".into(),
+                node.executable.clone().into_os_string(),
+            );
+        }
         Ok(LaunchContext {
             environment,
             job_launcher: Some(self.job_launcher.clone()),
