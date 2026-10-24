@@ -154,6 +154,12 @@ export const rustTests = {
     ],
     "testThreads": 1
   },
+  "tests/rust/host-backup-files-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "backup_files_cases::native_",
+    "testThreads": 1
+  },
   "tests/rust/host-native-catalog-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-native-paths",

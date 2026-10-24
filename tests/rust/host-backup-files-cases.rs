@@ -2,9 +2,10 @@ use super::{ServiceFixture, assert_json_eq};
 use ivy_contracts::{IvyError, IvyJson as J, IvyResult, JsString, hash::digest, json};
 use ivy_host_runtime::{
     backup_files::{self, BackupExclusion, BackupFile},
-    filesystem, node_path,
+    filesystem, native_path, node_path,
 };
 use std::{
+    ffi::OsString,
     fs,
     io::Write,
     path::Path,
@@ -14,6 +15,33 @@ use std::{
 };
 
 static CORPUS: Mutex<()> = Mutex::new(());
+fn native_name(prefix: &str, unit: u16) -> OsString {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        OsString::from_wide(&prefix.encode_utf16().chain([unit]).collect::<Vec<_>>())
+    }
+    #[cfg(not(windows))]
+    {
+        format!("{prefix}-日本語-{unit:x}").into()
+    }
+}
+fn file_mode(path: &Path) -> u32 {
+    let metadata = fs::metadata(path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        metadata.mode() & 0o777
+    }
+    #[cfg(windows)]
+    {
+        if metadata.permissions().readonly() {
+            0o444
+        } else {
+            0o666
+        }
+    }
+}
 fn p(path: &Path) -> J {
     J::String(node_path::from_native(path))
 }
@@ -259,9 +287,9 @@ fn inventory_input(
 }
 
 #[tokio::test]
-async fn inventory_sorts_utf16_hashes_bytes_and_excludes_before_observation() {
+async fn native_inventory_sorts_utf16_hashes_bytes_and_excludes_before_observation() {
     let fixture = ServiceFixture::new();
-    let root = fixture.0.join("tree");
+    let root = fixture.0.join(native_name("tree", 0xd800));
     fs::create_dir(&root).unwrap();
     for name in ["z", "A", "é", "中", "😀", "\u{e000}", "!", "empty"] {
         fs::write(
@@ -278,26 +306,91 @@ async fn inventory_sorts_utf16_hashes_bytes_and_excludes_before_observation() {
     fs::write(root.join("nested/deep/binary"), [0, 255, 1, 0]).unwrap();
     fs::create_dir(root.join("skip")).unwrap();
     fs::write(root.join("skip/hidden"), b"skip").unwrap();
-    for (excluded, throw) in [
-        (vec![], None),
-        (vec!["skip", "nested/deep/binary"], None),
-        (vec!["skip"], Some("nested")),
-    ] {
-        let actual = inventory(&fixture, &root, &excluded, throw).await;
-        compare(inventory_input(&fixture, &root, &excluded, throw), actual);
+    let files: Vec<_> = [
+        "!",
+        "A",
+        "empty",
+        "nested/deep/binary",
+        "skip/hidden",
+        "z",
+        "é",
+        "中",
+        "😀",
+        "\u{e000}",
+    ]
+    .into_iter()
+    .map(|name| {
+        let path = root.join(name);
+        BackupFile {
+            path: name.into(),
+            hash: digest(fs::read(&path).unwrap()),
+            bytes: fs::metadata(&path).unwrap().len(),
+            mode: file_mode(&path),
+        }
+    })
+    .collect();
+    let visits: Vec<JsString> = [
+        "!",
+        "A",
+        "empty",
+        "nested",
+        "nested/deep",
+        "nested/deep/binary",
+        "skip",
+        "skip/hidden",
+        "z",
+        "é",
+        "中",
+        "😀",
+        "\u{e000}",
+    ]
+    .into_iter()
+    .map(JsString::from)
+    .collect();
+    for excluded in [vec![], vec!["skip", "nested/deep/binary"]] {
+        let selected = files.iter().filter(|file| {
+            excluded.is_empty()
+                || (file.path != JsString::from("skip/hidden")
+                    && file.path != JsString::from("nested/deep/binary"))
+        });
+        let trace = visits
+            .iter()
+            .filter(|name| excluded.is_empty() || **name != JsString::from("skip/hidden"))
+            .cloned()
+            .collect();
+        let expected = report(
+            Ok(J::Array(selected.map(BackupFile::json).collect())),
+            trace,
+            None,
+        );
+        assert_json_eq(
+            &inventory(&fixture, &root, &excluded, None).await,
+            &expected,
+        );
     }
-    compare(
-        inventory_input(&fixture, &fixture.0.join("missing"), &[], None),
-        inventory(&fixture, &fixture.0.join("missing"), &[], None).await,
+    assert_json_eq(
+        &inventory(&fixture, &root, &["skip"], Some("nested")).await,
+        &report(
+            Err(IvyError::new("fixture_exclusion", "Exclusion failed.")),
+            visits[..4].to_vec(),
+            None,
+        ),
+    );
+    assert_json_eq(
+        &inventory(&fixture, &fixture.0.join("missing"), &[], None).await,
+        &report(Err(IvyError::internal()), vec![], None),
     );
     let default = backup_files::inventory_files(root.clone(), None)
         .await
         .unwrap();
-    assert_eq!(default.len(), 10);
+    assert_json_eq(
+        &J::Array(default.iter().map(BackupFile::json).collect()),
+        &J::Array(files.iter().map(BackupFile::json).collect()),
+    );
 }
 
 #[tokio::test]
-async fn inventory_rejects_links_unless_excluded_and_preserves_callback_errors() {
+async fn native_inventory_rejects_links_unless_excluded_and_preserves_callback_errors() {
     let fixture = ServiceFixture::new();
     let root = fixture.0.join("tree");
     fs::create_dir(&root).unwrap();
@@ -306,17 +399,47 @@ async fn inventory_rejects_links_unless_excluded_and_preserves_callback_errors()
     fs::create_dir(&outside).unwrap();
     fs::write(outside.join("secret"), b"private").unwrap();
     filesystem::directory_link(&outside, &root.join("link")).unwrap();
-    for excluded in [vec![], vec!["link"]] {
-        compare(
-            inventory_input(&fixture, &root, &excluded, None),
-            inventory(&fixture, &root, &excluded, None).await,
-        );
-    }
+    let visits = vec!["a".into(), "link".into()];
+    let refused = report(
+        Err(IvyError::new(
+            "target_conflict",
+            "Backup cannot follow filesystem links.",
+        )),
+        visits.clone(),
+        None,
+    );
+    assert_json_eq(&inventory(&fixture, &root, &[], None).await, &refused);
+    let file = BackupFile {
+        path: "a".into(),
+        hash: digest(b"ordinary"),
+        bytes: 8,
+        mode: file_mode(&root.join("a")),
+    };
+    let admitted = report(Ok(J::Array(vec![file.json()])), visits, None);
+    assert_json_eq(
+        &inventory(&fixture, &root, &["link"], None).await,
+        &admitted,
+    );
+    assert_json_eq(
+        &inventory(&fixture, &root, &[], Some("link")).await,
+        &report(
+            Err(IvyError::new("fixture_exclusion", "Exclusion failed.")),
+            vec!["a".into(), "link".into()],
+            None,
+        ),
+    );
     let linked_root = fixture.0.join("linked-root");
     filesystem::directory_link(&root, &linked_root).unwrap();
-    compare(
-        inventory_input(&fixture, &linked_root, &[], None),
-        inventory(&fixture, &linked_root, &[], None).await,
+    assert_json_eq(
+        &inventory(&fixture, &linked_root, &[], None).await,
+        &report(
+            Err(IvyError::new(
+                "target_conflict",
+                "Backup roots cannot be filesystem links.",
+            )),
+            vec![],
+            None,
+        ),
     );
 }
 
@@ -454,8 +577,49 @@ async fn compare_copy(
     ]);
     compare(input, actual);
 }
+async fn native_copy(
+    fixture: &ServiceFixture,
+    source: &Path,
+    expectation: Option<BackupFile>,
+    preserve: bool,
+    label: &str,
+) {
+    let destination = fixture
+        .0
+        .join(format!("copy-{label}"))
+        .join(native_name("result", 0xdfff));
+    let bytes = fs::read(source).unwrap();
+    let mode = expectation
+        .as_ref()
+        .map(|file| file.mode)
+        .unwrap_or_else(|| file_mode(source));
+    let result = backup_files::copy_verified(
+        source.to_owned(),
+        destination.clone(),
+        expectation,
+        preserve,
+    )
+    .await
+    .unwrap();
+    assert_json_eq(
+        &result.json(),
+        &BackupFile {
+            path: native_path::filesystem_name(destination.file_name().unwrap()),
+            hash: digest(&bytes),
+            bytes: bytes.len() as u64,
+            mode,
+        }
+        .json(),
+    );
+    assert_eq!(fs::read(&destination).unwrap(), bytes);
+    assert_eq!(fs::read(source).unwrap(), bytes);
+    #[cfg(unix)]
+    assert_eq!(file_mode(&destination), if preserve { mode } else { 0o600 });
+    #[cfg(windows)]
+    assert_eq!(file_mode(&destination), 0o666);
+}
 #[tokio::test]
-async fn verified_copy_matches_original_bytes_modes_and_expected_identity() {
+async fn native_verified_copy_preserves_bytes_modes_and_expected_identity() {
     let fixture = ServiceFixture::new();
     for (label, bytes) in [
         ("empty", Vec::new()),
@@ -463,7 +627,7 @@ async fn verified_copy_matches_original_bytes_modes_and_expected_identity() {
         ("large", vec![171; 2 * 1024 * 1024 + 3]),
         ("unicode", "é中😀".as_bytes().to_vec()),
     ] {
-        let source = fixture.0.join(label);
+        let source = fixture.0.join(native_name(label, 0xd800));
         fs::write(&source, bytes).unwrap();
         #[cfg(unix)]
         {
@@ -471,64 +635,141 @@ async fn verified_copy_matches_original_bytes_modes_and_expected_identity() {
             fs::set_permissions(&source, fs::Permissions::from_mode(0o740)).unwrap();
         }
         for preserve in [false, true] {
-            compare_copy(
+            native_copy(
                 &fixture,
                 &source,
                 None,
                 preserve,
                 &format!("{label}-{preserve}-none"),
-                "absent",
             )
             .await;
-            compare_copy(
+            native_copy(
                 &fixture,
                 &source,
                 Some(expected(&source)),
                 preserve,
                 &format!("{label}-{preserve}-expected"),
-                "absent",
             )
             .await;
         }
     }
 }
 #[tokio::test]
-async fn verified_copy_preserves_failures_and_never_overwrites_destinations() {
+async fn native_verified_copy_preserves_failures_and_never_overwrites_destinations() {
     let fixture = ServiceFixture::new();
     let source = fixture.0.join("source");
     fs::write(&source, b"source content").unwrap();
     let mut wrong_size = expected(&source);
     wrong_size.bytes += 1;
-    compare_copy(&fixture, &source, Some(wrong_size), false, "size", "absent").await;
+    let destination = fixture.0.join("size/result");
+    assert_eq!(
+        backup_files::copy_verified(source.clone(), destination.clone(), Some(wrong_size), false)
+            .await
+            .unwrap_err(),
+        IvyError::new("backup_changed", "Backup source size changed."),
+    );
+    assert!(!destination.parent().unwrap().exists());
     let mut wrong_hash = expected(&source);
     wrong_hash.hash = digest(b"other");
-    compare_copy(&fixture, &source, Some(wrong_hash), false, "hash", "absent").await;
+    let destination = fixture.0.join("hash/result");
+    assert_eq!(
+        backup_files::copy_verified(source.clone(), destination.clone(), Some(wrong_hash), false)
+            .await
+            .unwrap_err(),
+        IvyError::new(
+            "backup_changed",
+            "Backup source changed during its verified copy."
+        ),
+    );
+    assert_eq!(fs::read(&destination).unwrap(), b"source content");
     for initial in ["file", "directory", "ancestor-file", "link"] {
-        compare_copy(&fixture, &source, None, false, initial, initial).await;
+        let parent = fixture.0.join(initial);
+        fs::create_dir(&parent).unwrap();
+        let destination = parent.join("result");
+        match initial {
+            "file" => fs::write(&destination, b"preserved").unwrap(),
+            "directory" => fs::create_dir(&destination).unwrap(),
+            "ancestor-file" => (),
+            "link" => {
+                filesystem::directory_link(&fixture.0.join("artifact"), &destination).unwrap();
+            }
+            _ => unreachable!(),
+        };
+        let destination = if initial == "ancestor-file" {
+            let ancestor = parent.join("ancestor");
+            fs::write(&ancestor, b"preserved ancestor").unwrap();
+            ancestor.join("result")
+        } else {
+            destination
+        };
+        let before = observation(&destination);
+        assert_eq!(
+            backup_files::copy_verified(source.clone(), destination.clone(), None, false)
+                .await
+                .unwrap_err(),
+            IvyError::internal(),
+        );
+        assert_json_eq(&observation(&destination), &before);
+        if initial == "ancestor-file" {
+            assert_eq!(
+                fs::read(destination.parent().unwrap()).unwrap(),
+                b"preserved ancestor"
+            );
+        }
     }
-    for (label, source) in [
-        ("missing", fixture.0.join("missing")),
-        ("directory-source", fixture.0.join("artifact")),
+    for (label, source, expected_error) in [
+        ("missing", fixture.0.join("missing"), IvyError::internal()),
+        (
+            "directory-source",
+            fixture.0.join("artifact"),
+            IvyError::new("target_conflict", "Backup copies only regular files."),
+        ),
     ] {
-        compare_copy(&fixture, &source, None, false, label, "absent").await;
+        let destination = fixture.0.join(format!("copy-{label}/result"));
+        let error = backup_files::copy_verified(source.clone(), destination.clone(), None, false)
+            .await
+            .unwrap_err();
+        assert_eq!(error, expected_error);
+        assert!(!destination.parent().unwrap().exists());
     }
     let link = fixture.0.join("linked-source");
     filesystem::directory_link(&fixture.0.join("artifact"), &link).unwrap();
-    compare_copy(&fixture, &link, None, false, "linked-source", "absent").await;
+    let destination = fixture.0.join("linked-copy/result");
+    assert_eq!(
+        backup_files::copy_verified(link, destination.clone(), None, false)
+            .await
+            .unwrap_err(),
+        IvyError::new("target_conflict", "Backup copies only regular files."),
+    );
+    assert!(!destination.parent().unwrap().exists());
+    assert_eq!(fs::read(&source).unwrap(), b"source content");
 }
 
 #[tokio::test]
-async fn concurrent_copy_claims_one_destination_exclusively() {
+async fn native_concurrent_copy_claims_one_destination_exclusively() {
     let fixture = ServiceFixture::new();
-    let source = fixture.0.join("source");
+    let source = fixture.0.join(native_name("source", 0xd800));
     fs::write(&source, vec![41; 1024 * 1024]).unwrap();
-    let destination = fixture.0.join("result");
+    let destination = fixture.0.join(native_name("result", 0xdfff));
+    let alias = fixture
+        .0
+        .join(destination.file_name().unwrap().to_string_lossy().as_ref());
+    if alias != destination {
+        fs::write(&alias, b"preserved alias").unwrap();
+    }
     let (one, two) = tokio::join!(
         backup_files::copy_verified(source.clone(), destination.clone(), None, false),
         backup_files::copy_verified(source.clone(), destination.clone(), None, false)
     );
     assert_ne!(one.is_ok(), two.is_ok());
     assert_eq!(fs::read(&source).unwrap(), fs::read(&destination).unwrap());
+    assert_eq!(
+        one.as_ref().or(two.as_ref()).unwrap().path,
+        native_path::filesystem_name(destination.file_name().unwrap())
+    );
+    if alias != destination {
+        assert_eq!(fs::read(&alias).unwrap(), b"preserved alias");
+    }
     retain(&J::object([
         ("nativeOnly", "exclusive-destination".into()),
         ("one", wrap(one.map(|file| file.json()))),
@@ -537,7 +778,8 @@ async fn concurrent_copy_claims_one_destination_exclusively() {
     ]));
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn verified_copy_detects_replaced_source_identity_even_with_equal_bytes_and_timestamp() {
+async fn native_verified_copy_detects_replaced_source_identity_even_with_equal_bytes_and_timestamp()
+{
     let fixture = ServiceFixture::new();
     let source = fixture.0.join("source");
     let replacement = fixture.0.join("replacement");
@@ -588,7 +830,7 @@ async fn verified_copy_detects_replaced_source_identity_even_with_equal_bytes_an
     ]));
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn admitted_copy_finishes_flushing_after_its_observer_is_dropped() {
+async fn native_admitted_copy_finishes_flushing_after_its_observer_is_dropped() {
     let fixture = ServiceFixture::new();
     let source = fixture.0.join("source");
     let destination = fixture.0.join("result");

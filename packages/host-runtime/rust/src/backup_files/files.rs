@@ -1,5 +1,5 @@
 use super::require;
-use crate::{IvyError, IvyResult, node_path, paths, streaming_hash};
+use crate::{IvyError, IvyResult, native_path, paths, streaming_hash};
 use ivy_contracts::JsString;
 use sha2::{Digest, Sha256};
 use std::{
@@ -17,23 +17,17 @@ const MAXIMUM_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 fn internal<T, E>(result: Result<T, E>) -> IvyResult<T> {
     result.map_err(|_| IvyError::internal())
 }
-fn fs_path(path: &Path) -> IvyResult<PathBuf> {
-    internal(node_path::node_filesystem_path(&node_path::from_native(
-        path,
-    )))
-}
-
-/// Resolve a safe slash-separated backup member using Node's lexical path policy.
+/// Resolve a safe slash-separated backup member within its native root.
 pub fn relative_file(root: &JsString, member: &JsString) -> IvyResult<JsString> {
-    relative_file_with_context(root, member, &internal(node_path::Context::current())?)
+    relative_file_with_context(root, member, &internal(native_path::Context::current())?)
 }
 pub fn relative_file_with_context(
     root: &JsString,
     member: &JsString,
-    context: &node_path::Context,
+    context: &native_path::Context,
 ) -> IvyResult<JsString> {
     require(
-        !node_path::is_absolute(context.style, member)
+        !native_path::is_absolute(context.style, member)
             && member.0.split(|c| *c == 47).all(|part| {
                 !part.is_empty()
                     && part != [46]
@@ -62,12 +56,9 @@ pub async fn sync_directories(root: PathBuf) -> IvyResult<()> {
     #[cfg(unix)]
     {
         fn visit(directory: &Path) -> IvyResult<()> {
-            use std::os::unix::ffi::OsStrExt;
-            let mut entries = internal(
-                internal(fs::read_dir(fs_path(directory)?))?.collect::<io::Result<Vec<_>>>(),
-            )?;
-            // libuv scandir sorts native names before returning Dirents.
-            entries.sort_by(|a, b| a.file_name().as_bytes().cmp(b.file_name().as_bytes()));
+            let mut entries =
+                internal(internal(fs::read_dir(directory))?.collect::<io::Result<Vec<_>>>())?;
+            entries.sort_by_key(|entry| entry.file_name());
             for entry in entries {
                 let kind = internal(entry.file_type())?;
                 require(
@@ -76,17 +67,10 @@ pub async fn sync_directories(root: PathBuf) -> IvyResult<()> {
                     "Durable backup publication cannot follow directory links.",
                 )?;
                 if kind.is_dir() {
-                    let path = node_path::join(
-                        node_path::Style::native(),
-                        &[
-                            node_path::from_native(directory),
-                            node_path::node_utf8(&entry.file_name()),
-                        ],
-                    );
-                    visit(&node_path::to_native(&path))?;
+                    visit(&entry.path())?;
                 }
             }
-            sync_close(internal(File::open(fs_path(directory)?))?)
+            sync_close(internal(File::open(directory))?)
         }
         internal(tokio::task::spawn_blocking(move || visit(&root)).await)?
     }
@@ -106,10 +90,10 @@ pub async fn inventory_files(
                 "target_conflict",
                 "Backup roots cannot be filesystem links.",
             )?;
-            let context = internal(node_path::Context::current())?;
+            let context = internal(native_path::Context::current())?;
             let mut inventory = Inventory {
-                root: node_path::from_native(&root),
-                actual: node_path::from_native(&actual),
+                root: native_path::from_native(&root),
+                actual: native_path::from_native(&actual),
                 context,
                 exclude,
                 entries: Vec::new(),
@@ -125,7 +109,7 @@ pub async fn inventory_files(
 struct Inventory {
     root: JsString,
     actual: JsString,
-    context: node_path::Context,
+    context: native_path::Context,
     exclude: Option<BackupExclusion>,
     entries: Vec<BackupFile>,
     total: u64,
@@ -138,8 +122,8 @@ impl Inventory {
             "Backup directory nesting is too deep.",
         )?;
         let mut names = internal(
-            internal(fs::read_dir(fs_path(directory)?))?
-                .map(|entry| entry.map(|entry| node_path::node_utf8(&entry.file_name())))
+            internal(fs::read_dir(directory))?
+                .map(|entry| entry.map(|entry| native_path::filesystem_name(&entry.file_name())))
                 .collect::<io::Result<Vec<_>>>(),
         )?;
         names.sort();
@@ -154,7 +138,7 @@ impl Inventory {
             {
                 continue;
             }
-            let path = node_path::to_native(&relative_file_with_context(
+            let path = native_path::to_native(&relative_file_with_context(
                 &self.root,
                 &local,
                 &self.context,
@@ -165,7 +149,7 @@ impl Inventory {
                 !metadata.is_symlink
                     && self.context.inside(
                         &self.actual,
-                        &node_path::from_native(&internal(paths::realpath(&path))?),
+                        &native_path::from_native(&internal(paths::realpath(&path))?),
                     ),
                 "target_conflict",
                 "Backup cannot follow filesystem links.",
@@ -188,7 +172,7 @@ impl Inventory {
                 )?;
                 self.entries.push(BackupFile {
                     path: local,
-                    hash: streaming_hash::hash_file(&fs_path(&path)?)?,
+                    hash: streaming_hash::hash_file(&path)?,
                     bytes: metadata.bytes,
                     mode: metadata.mode,
                 });
@@ -222,8 +206,10 @@ pub async fn copy_verified(
                 "backup_changed",
                 "Backup source size changed.",
             )?;
-            let context = internal(node_path::Context::current())?;
-            let parent = node_path::dirname(context.style, &node_path::from_native(&destination));
+            let parent = destination
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
             let mut builder = fs::DirBuilder::new();
             builder.recursive(true);
             #[cfg(unix)]
@@ -231,10 +217,10 @@ pub async fn copy_verified(
                 use std::os::unix::fs::DirBuilderExt;
                 builder.mode(0o700);
             }
-            internal(builder.create(internal(node_path::node_filesystem_path(&parent))?))?;
-            // Both stream opens are admitted by pipeline before either open error
-            // is observed. In particular a failed read can leave an empty target.
-            let reader = File::open(fs_path(&source)?);
+            internal(builder.create(parent))?;
+            // Observe both opens before either error. A failed read can leave
+            // an empty destination, while create_new never replaces an entry.
+            let reader = File::open(&source);
             let mut options = OpenOptions::new();
             options.write(true).create_new(true);
             #[cfg(unix)]
@@ -242,7 +228,7 @@ pub async fn copy_verified(
                 use std::os::unix::fs::OpenOptionsExt;
                 options.mode(0o600);
             }
-            let writer = options.open(fs_path(&destination)?);
+            let writer = options.open(&destination);
             let mut writer = match writer {
                 Ok(writer) => writer,
                 Err(_) => {
@@ -265,7 +251,7 @@ pub async fn copy_verified(
                                 break;
                             }
                             bytes += count as u64;
-                            // The original Transform raises a plain Error here.
+                            // Reject growth before the final source observation.
                             if bytes > before.bytes {
                                 return Err(IvyError::internal());
                             }
@@ -278,7 +264,7 @@ pub async fn copy_verified(
                     result.and(closed)
                 }
             };
-            // flush:true also syncs and closes the destination on stream failure.
+            // Sync and close the destination even when copying fails.
             let flushed = sync_close(writer);
             copied.and(flushed)?;
             let after = observe(&source)?;
@@ -306,15 +292,15 @@ pub async fn copy_verified(
             if preserve_mode {
                 use std::os::unix::fs::PermissionsExt;
                 internal(fs::set_permissions(
-                    fs_path(&destination)?,
+                    &destination,
                     fs::Permissions::from_mode(mode),
                 ))?;
-                sync_close(internal(File::open(fs_path(&destination)?))?)?;
+                sync_close(internal(File::open(&destination))?)?;
             }
             #[cfg(windows)]
             let _ = preserve_mode;
             Ok(BackupFile {
-                path: node_path::basename(context.style, &node_path::from_native(&destination)),
+                path: native_path::filesystem_name(destination.file_name().unwrap_or_default()),
                 hash: digest,
                 bytes,
                 mode,
@@ -367,7 +353,6 @@ struct Observation {
     inode: f64,
 }
 fn observe(path: &Path) -> IvyResult<Observation> {
-    let path = fs_path(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
