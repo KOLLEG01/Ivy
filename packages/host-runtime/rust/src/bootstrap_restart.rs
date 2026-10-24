@@ -2,7 +2,8 @@
 //! suppress only the same still-live Windows boot for one minute; a later boot
 //! consumes the file without another scheduler action.
 use crate::{
-    IvyError, IvyJson, IvyResult, Outcome, bootstrap, config, exec_file, layout, node_path, process,
+    IvyError, IvyJson, IvyResult, Outcome, bootstrap, config, exec_file, layout, native_path,
+    process,
 };
 use futures_util::future::BoxFuture;
 use ivy_contracts::{JsString, core_schema::validate_host, json};
@@ -164,7 +165,7 @@ impl BootstrapRestartOs for NativeBootstrapRestartOs {
                 args: vec![
                     action.into(),
                     "/TN".into(),
-                    node_path::to_native(&name).into_os_string(),
+                    native_path::to_native(&name).into_os_string(),
                 ],
                 cwd: None,
                 timeout_ms: 30000,
@@ -336,7 +337,7 @@ async fn reconcile(
         if settings.get("hostConfigPath").is_none_or(IvyJson::is_null) {
             settings.insert(
                 "hostConfigPath",
-                layout::host_configuration_path_for_style(&host, node_path::Style::native())?,
+                layout::host_configuration_path_for_style(&host, native_path::Style::native())?,
             );
         }
         desired.insert("settings", settings);
@@ -367,10 +368,7 @@ async fn reconcile(
             "Bootstrap health belongs to another instance.",
         )?;
         let written_at = tokio::task::spawn_blocking(move || {
-            let metadata = std::fs::metadata(node_path::filesystem_path(&node_path::from_native(
-                &config_path,
-            )))
-            .map_err(|_| IvyError::internal())?;
+            let metadata = std::fs::metadata(&config_path).map_err(|_| IvyError::internal())?;
             let time = metadata.modified().map_err(|_| IvyError::internal())?;
             let millis = |value: Duration| {
                 value.as_secs() as f64 * 1000.0 + value.subsec_nanos() as f64 / 1_000_000.0
@@ -403,13 +401,12 @@ async fn reconcile(
                 .required("instanceId")?
                 .as_js_string()
                 .ok_or_else(IvyError::internal)?;
+            let mut filename = OsString::from("restart-");
+            filename.push(native_path::to_native(id));
+            filename.push(".json");
             let marker_path = config::path_value(host.required("runtimeRoot")?)?
                 .join("bootstrap")
-                .join(node_path::to_native(&concat(&[
-                    "restart-".into(),
-                    id.clone(),
-                    ".json".into(),
-                ])));
+                .join(filename);
             let marker =
                 config::json_file_if_present(marker_path.clone(), config::CONFIGURATION_BYTES)
                     .await?;
@@ -466,12 +463,4 @@ fn field<'a>(value: &'a IvyJson, key: &str) -> &'a IvyJson {
 }
 fn date(value: &IvyJson, key: &str) -> IvyResult<f64> {
     Ok(value.get(key).and_then(IvyJson::as_js_string).map_or(f64::NAN, parse_date))
-}
-fn concat(parts: &[JsString]) -> JsString {
-    JsString(
-        parts
-            .iter()
-            .flat_map(|part| part.0.iter().copied())
-            .collect(),
-    )
 }

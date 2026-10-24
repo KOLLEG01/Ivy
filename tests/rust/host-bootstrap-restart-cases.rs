@@ -186,6 +186,7 @@ struct Fixture {
     configs: Vec<J>,
     health: Vec<Option<J>>,
     seed_marker: Option<J>,
+    marker_path: PathBuf,
     fractional_mtime: bool,
 }
 impl Fixture {
@@ -331,6 +332,7 @@ impl Fixture {
         for value in health.iter().flatten() {
             ivy_contracts::core_schema::validate_host("Health", value).unwrap();
         }
+        let marker_path = root.0.join("state/bootstrap/restart-renamed-manager.json");
         Self {
             root,
             host,
@@ -338,6 +340,7 @@ impl Fixture {
             configs,
             health,
             seed_marker: None,
+            marker_path,
             fractional_mtime: false,
         }
     }
@@ -358,9 +361,7 @@ impl Fixture {
             .collect()
     }
     fn marker(&self) -> PathBuf {
-        self.root
-            .0
-            .join("state/bootstrap/restart-renamed-manager.json")
+        self.marker_path.clone()
     }
     async fn setup(&self) {
         let _ = fs::remove_dir_all(self.root.0.join("state"));
@@ -497,6 +498,7 @@ async fn bootstrap_restarts_match_identity_health_markers_and_current_files() {
         "marker-array-date",
         "marker-object-date",
         "fractional-mtime",
+        "native-paths",
     ] {
         let mut f = Fixture::new(
             ![
@@ -520,6 +522,69 @@ async fn bootstrap_restarts_match_identity_health_markers_and_current_files() {
         );
         let mut input = f.input();
         match mode {
+            "native-paths" => {
+                let name = std::ffi::OsString::from("manager-中-🚀-");
+                #[cfg(windows)]
+                let name = {
+                    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+                    let mut units: Vec<_> = name.encode_wide().collect();
+                    units.push(0xd800);
+                    std::ffi::OsString::from_wide(&units)
+                };
+                let id = file_value(&PathBuf::from(&name));
+                let mut instances = f
+                    .host
+                    .required("instances")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .to_vec();
+                instances[1].insert("instanceId", id.clone());
+                let paths = layout::service_paths(&f.host, &instances[1]).unwrap();
+                f.host.insert("instances", J::Array(instances));
+                f.configs[1].insert("instanceId", id.clone());
+                for (key, area) in [
+                    ("dataRoot", "data"),
+                    ("workRoot", "work"),
+                    ("logsRoot", "logs"),
+                ] {
+                    f.configs[1].insert(key, paths.required(area).unwrap().clone());
+                }
+                f.health[1]
+                    .as_mut()
+                    .unwrap()
+                    .insert("instanceId", id.clone());
+                let mut filename = name.clone();
+                filename.push(".json");
+                let config_path = f.config_paths()[1].parent().unwrap().join(filename);
+                let mut owners = f
+                    .plan
+                    .required("processes")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .to_vec();
+                owners[1].insert("instanceId", id.clone());
+                owners[1].insert(
+                    "name",
+                    format!(
+                        "{}-{}",
+                        installation_identity(&f.host).unwrap(),
+                        &hash_json(&id).unwrap()[7..19]
+                    )
+                    .into(),
+                );
+                owners[1].insert("configPath", file_value(&config_path));
+                f.plan.insert("processes", J::Array(owners));
+                f.plan
+                    .insert("configHash", hash_json(&f.host).unwrap().into());
+                let mut marker = std::ffi::OsString::from("restart-");
+                marker.push(name);
+                marker.push(".json");
+                f.marker_path = f.root.0.join("state/bootstrap").join(marker);
+                input = f.input();
+                input.insert("times", J::Number(2.0));
+            }
             "new-boot" => f.health[0].as_mut().unwrap().insert("startedAt", stamp(AT)),
             "process-newer" => input.insert("startedAt", J::Number(AT as f64)),
             "other-instance" => input.insert("own", "not-this-executor".into()),
@@ -634,6 +699,8 @@ async fn bootstrap_restarts_match_identity_health_markers_and_current_files() {
         }
         input.insert("config", f.host.clone());
         f.setup().await;
+        let native_config =
+            (mode == "native-paths").then(|| fs::read(&f.config_paths()[1]).unwrap());
         let clock = Arc::new(FixedClock(AtomicI64::new(AT)));
         let os = Arc::new(Os::new(&input, clock.clone()));
         let observed = actual(&f, &input, os, clock).await;
@@ -703,10 +770,31 @@ async fn bootstrap_restarts_match_identity_health_markers_and_current_files() {
             | "marker-number-date"
             | "marker-array-date"
             | "marker-object-date"
-            | "fractional-mtime" => 1,
+            | "fractional-mtime"
+            | "native-paths" => 1,
             _ => 0,
         };
         assert_eq!(commands, expected_commands, "{mode}");
+        if let Some(bytes) = native_config {
+            assert_eq!(fs::read(&f.config_paths()[1]).unwrap(), bytes);
+            assert_json_eq(
+                observed
+                    .required("value")
+                    .unwrap()
+                    .required("marker")
+                    .unwrap(),
+                &J::object([
+                    (
+                        "instanceId",
+                        f.configs[1].required("instanceId").unwrap().clone(),
+                    ),
+                    ("configWrittenAt", J::Number((AT - 1000) as f64)),
+                    ("priorBootId", "old-boot".into()),
+                    ("requestedAt", stamp(AT)),
+                ]),
+            );
+            assert!(f.marker().is_file());
+        }
         if mode == "changed-settings" {
             assert_eq!(
                 observed

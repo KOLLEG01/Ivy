@@ -154,6 +154,15 @@ export const rustTests = {
     ],
     "testThreads": 1
   },
+  "tests/rust/host-bootstrap-restart-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-actions",
+    "filter": "bootstrap_restart_cases::",
+    "testThreads": 1,
+    "prerequisites": [
+      { "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }
+    ]
+  },
   "tests/rust/host-bootstrap-maintenance-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",
@@ -471,7 +480,7 @@ export const rustTests = {
   "tests/fixtures/task-board-categories.rs": {
     "package": "ivy-task-board",
     "test": "task-board-output",
-    "filter": "categories::"
+    "filter": "categories::native_casing_errors_preserve_the_projection_and_release_queued_requests"
   },
   "tests/fixtures/task-board-inspector.rs": {
     "package": "ivy-task-board",

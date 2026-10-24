@@ -21,8 +21,8 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-/// Use the owning host's exact ECMAScript default locale. There is no English or
-/// ordinal fallback; allocation and category bindings should share this policy.
+/// Use the owning host's default locale for category casing and ordering.
+/// Allocation and category bindings share this policy, without an English fallback.
 pub trait CategoryLocale {
     fn lowercase_default(&self, value: &JsString) -> IvyResult<JsString>;
     fn compare_default(&self, left: &JsString, right: &JsString) -> Ordering;
@@ -66,7 +66,7 @@ struct Entry {
     archived: bool,
     category: Option<JsString>,
 }
-/// Keep JavaScript Map insertion order, including delete/reinsert, without a
+/// Keep deterministic insertion order, including delete/reinsert, without a
 /// linear lookup or accumulating deleted slots in this long-lived cache.
 #[derive(Default)]
 struct Entries {
@@ -188,15 +188,6 @@ fn number(v: &Json, k: &str) -> f64 {
 }
 fn array(v: &Json) -> &[Json] {
     v.as_array().unwrap_or(&[])
-}
-fn truthy(v: &Json) -> bool {
-    match v {
-        Json::Null => false,
-        Json::Bool(b) => *b,
-        Json::String(s) => !s.0.is_empty(),
-        Json::Number(n) => *n != 0.0 && !n.is_nan(),
-        _ => true,
-    }
 }
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
@@ -484,18 +475,27 @@ impl<S: CategoryStore> CategoryWorker<'_, S> {
     }
     async fn rebuild(&self) -> IvyResult<()> {
         let mut replacement = Entries::default();
-        let mut cursor = Json::Null;
+        let mut cursor: Option<JsString> = None;
         loop {
             let mut options = page_options(200.0);
-            if truthy(&cursor) {
-                options.insert("cursor", cursor.clone());
+            if let Some(cursor) = &cursor {
+                options.insert("cursor", Json::String(cursor.clone()));
             }
             let page = self.store.task_page(&options).await?;
             for item in array(f(&page, "items")) {
                 replacement.insert(s(item, "objectId")?.clone(), entry(item)?);
             }
-            cursor = f(&page, "nextCursor").clone();
-            if !truthy(&cursor) {
+            cursor = match f(&page, "nextCursor") {
+                Json::Null => None,
+                Json::String(value) if !value.0.is_empty() => Some(value.clone()),
+                _ => {
+                    return Err(IvyError::new(
+                        "task_board_category_projection_invalid",
+                        "A projected Task page needs a nullable nonempty cursor.",
+                    ));
+                }
+            };
+            if cursor.is_none() {
                 break;
             }
         }
@@ -505,7 +505,7 @@ impl<S: CategoryStore> CategoryWorker<'_, S> {
         Ok(())
     }
     async fn apply(&self, batch: &Json) -> IvyResult<()> {
-        if truthy(f(batch, "gap")) {
+        if f(batch, "gap").as_object().is_some() {
             self.state.borrow_mut().ready = false;
             self.rebuild().await?;
             return Ok(());
@@ -540,7 +540,7 @@ impl<S: CategoryStore> CategoryWorker<'_, S> {
             );
             let page = self.store.task_page(&options).await?;
             require(
-                !truthy(f(&page, "nextCursor")),
+                f(&page, "nextCursor").is_null(),
                 "task_board_category_projection_invalid",
                 "A bounded Task event lookup must fit one page.",
             )?;
@@ -580,7 +580,7 @@ impl<S: CategoryStore> CategoryWorker<'_, S> {
                                 .root_object_id()
                                 .map(Json::String)
                                 .unwrap_or(Json::Null)
-                        && truthy(f(&metadata, "effectivelyArchived"))
+                        && f(&metadata, "effectivelyArchived").as_bool() == Some(true)
                     {
                         let mut prior = state.entries.get(&id).unwrap().clone();
                         prior.revision = number(&metadata, "currentRevision");
@@ -616,22 +616,29 @@ impl<S: CategoryStore> CategoryWorker<'_, S> {
                 self.rpc("events.subscribe", self.subscription.clone())
                     .await?
             };
-            if truthy(f(&batch, "gap")) && !rebuild_gaps {
+            let gap = f(&batch, "gap");
+            require(
+                gap.is_null() || gap.as_object().is_some(),
+                "task_board_category_projection_invalid",
+                "A Task event batch needs a nullable gap object.",
+            )?;
+            let has_gap = !gap.is_null();
+            if has_gap && !rebuild_gaps {
                 return Err(pending(
                     "The Task category projection needs an out-of-gate rebuild.",
                 ));
             }
-            if !(count == 0 && snapshot_covers_gap && truthy(f(&batch, "gap"))) {
+            if !(count == 0 && snapshot_covers_gap && has_gap) {
                 self.apply(&batch).await?;
             }
             let mut args = Json::object([
                 ("name", f(&self.subscription, "name").clone()),
                 ("throughSequence", f(&batch, "throughSequence").clone()),
             ]);
-            if truthy(f(&batch, "gap")) {
+            if has_gap {
                 args.insert(
                     "gapThroughSequence",
-                    f(f(&batch, "gap"), "prunedThroughSequence").clone(),
+                    f(gap, "prunedThroughSequence").clone(),
                 );
             }
             self.rpc("events.ack", args).await?;

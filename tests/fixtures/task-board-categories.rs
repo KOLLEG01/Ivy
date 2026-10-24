@@ -1,5 +1,7 @@
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::parse,
+    IvyError, IvyJson as Json, IvyResult, JsString,
+    hash::{digest, hash_json},
+    json::parse,
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::{
@@ -379,6 +381,448 @@ async fn category_projection_matches_original_event_snapshot_cache_and_queued_wo
     }
 }
 
+const NATIVE_ID: &str = "00000000-0000-4000-8000-000000000001";
+const NATIVE_TIME: &str = "2026-01-02T03:04:05.006Z";
+fn native_subscription() -> Json {
+    let scope = digest("owner:root");
+    Json::object([
+        (
+            "name",
+            format!("task-board-categories-{}", &scope[7..31]).into(),
+        ),
+        (
+            "filter",
+            Json::object([("topics", Json::Array(vec!["hive.object.changed".into()]))]),
+        ),
+        ("initialSequence", 0.0.into()),
+        ("limit", 100.0.into()),
+    ])
+}
+fn native_rpc(method: &str, args: Json, value: Json) -> Json {
+    Json::object([
+        ("kind", "rpc".into()),
+        ("args", Json::Array(vec![method.into(), args])),
+        ("value", value),
+    ])
+}
+fn native_batch(sequence: u32, gap: Json, changed: bool) -> Json {
+    Json::object([
+        (
+            "items",
+            Json::Array(if changed {
+                vec![Json::object([
+                    ("sequence", f64::from(sequence).into()),
+                    ("topic", "hive.object.changed".into()),
+                    ("payload", Json::object([("objectId", NATIVE_ID.into())])),
+                ])]
+            } else {
+                vec![]
+            }),
+        ),
+        ("throughSequence", f64::from(sequence).into()),
+        ("hasMore", false.into()),
+        ("gap", gap),
+    ])
+}
+fn native_ack(batch: &Json) -> Json {
+    let mut args = Json::object([
+        ("name", f(&native_subscription(), "name").clone()),
+        ("throughSequence", f(batch, "throughSequence").clone()),
+    ]);
+    if f(batch, "gap").as_object().is_some() {
+        args.insert(
+            "gapThroughSequence",
+            f(f(batch, "gap"), "prunedThroughSequence").clone(),
+        );
+    }
+    native_rpc(
+        "events.ack",
+        args,
+        Json::object([("throughSequence", f(batch, "throughSequence").clone())]),
+    )
+}
+fn native_item(category: &str) -> Json {
+    Json::object([
+        ("objectId", NATIVE_ID.into()),
+        ("revision", 1.0.into()),
+        (
+            "values",
+            Json::object([
+                ("data:/fields/category", category.into()),
+                ("data:/createdAt", NATIVE_TIME.into()),
+            ]),
+        ),
+    ])
+}
+fn native_page(items: Vec<Json>, cursor: Json) -> Json {
+    Json::object([("items", Json::Array(items)), ("nextCursor", cursor)])
+}
+fn native_page_call(value: Json, cursor: Option<Json>, lookup: bool) -> Json {
+    let mut options = Json::object([
+        ("limit", if lookup { 1.0 } else { 200.0 }.into()),
+        (
+            "select",
+            Json::Array(vec![
+                "data:/fields/category".into(),
+                "data:/createdAt".into(),
+            ]),
+        ),
+        (
+            "orderBy",
+            Json::Array(vec![Json::object([
+                ("field", "object.id".into()),
+                ("direction", "asc".into()),
+            ])]),
+        ),
+    ]);
+    if let Some(cursor) = cursor {
+        options.insert("cursor", cursor);
+    }
+    if lookup {
+        options.insert(
+            "where",
+            Json::object([
+                ("op", "in".into()),
+                ("field", "object.id".into()),
+                ("value", Json::Array(vec![NATIVE_ID.into()])),
+            ]),
+        );
+    }
+    Json::object([
+        ("kind", "page".into()),
+        ("args", Json::Array(vec!["task-board/task".into(), options])),
+        ("value", value),
+    ])
+}
+fn native_world(name: &str, pages: Vec<Json>, first: Json) -> World {
+    let mut steps = VecDeque::from([native_rpc(
+        "events.subscribe",
+        native_subscription(),
+        first.clone(),
+    )]);
+    let mut cursor = Json::Null;
+    for page in pages {
+        let next = f(&page, "nextCursor").clone();
+        steps.push_back(native_page_call(
+            page,
+            (!cursor.is_null()).then_some(cursor),
+            false,
+        ));
+        cursor = next;
+    }
+    steps.push_back(native_rpc(
+        "events.head",
+        Json::object(Vec::<(&str, Json)>::new()),
+        Json::object([("throughSequence", f(&first, "throughSequence").clone())]),
+    ));
+    steps.push_back(native_ack(&first));
+    let replay = Arc::new(Replay {
+        steps: Mutex::new(steps),
+        name: name.into(),
+    });
+    World {
+        root: RefCell::new(Some("root".into())),
+        client: Client(replay.clone(), Arc::new(Gate::default())),
+        replay,
+    }
+}
+fn native_poll(world: &World, batch: Json) {
+    world.replay.steps.lock().unwrap().extend([
+        native_rpc(
+            "events.head",
+            Json::object(Vec::<(&str, Json)>::new()),
+            Json::object([("throughSequence", f(&batch, "throughSequence").clone())]),
+        ),
+        native_rpc("events.subscribe", native_subscription(), batch.clone()),
+        native_ack(&batch),
+    ]);
+}
+fn native_categories(value: Json, expected: &[&str]) {
+    assert_eq!(
+        value,
+        Json::object([(
+            "categories",
+            Json::Array(expected.iter().map(|value| Json::from(*value)).collect())
+        )])
+    );
+}
+async fn native_typed_inputs(locale: &LocaleComparator) {
+    let mut checked = 0;
+    let invalid_cursors = [
+        false.into(),
+        true.into(),
+        0.0.into(),
+        1.0.into(),
+        "".into(),
+        Json::Array(vec![]),
+        Json::object(Vec::<(&str, Json)>::new()),
+    ];
+    for cursor in &invalid_cursors {
+        let world = native_world(
+            "invalid snapshot cursor",
+            vec![native_page(vec![native_item("Work")], cursor.clone())],
+            native_batch(0, Json::Null, false),
+        );
+        world.replay.steps.lock().unwrap().truncate(2);
+        let executor = Executor::default();
+        let projection = CategoryProjection::new(&world, &"owner".into(), locale, &executor);
+        assert_eq!(
+            executor
+                .drive(projection.categories())
+                .await
+                .unwrap_err()
+                .code,
+            "task_board_category_projection_invalid"
+        );
+        assert!(
+            world.replay.steps.lock().unwrap().is_empty(),
+            "Invalid snapshot cursor must not advance or acknowledge"
+        );
+        checked += 1;
+    }
+    for page in [
+        native_page(vec![native_item("Work")], Json::Null),
+        Json::object([("items", Json::Array(vec![native_item("Work")]))]),
+    ] {
+        let world = native_world(
+            "snapshot end",
+            vec![page],
+            native_batch(0, Json::Null, false),
+        );
+        let executor = Executor::default();
+        let projection = CategoryProjection::new(&world, &"owner".into(), locale, &executor);
+        native_categories(
+            executor.drive(projection.categories()).await.unwrap(),
+            &["Work"],
+        );
+        assert!(world.replay.steps.lock().unwrap().is_empty());
+        checked += 1;
+    }
+    let cursor = Json::String(JsString(vec![0x63, 0, 0xd800, 0x4e2d]));
+    let world = native_world(
+        "lossless snapshot cursor",
+        vec![
+            native_page(vec![native_item("Work")], cursor),
+            native_page(vec![], Json::Null),
+        ],
+        native_batch(0, Json::Null, false),
+    );
+    let executor = Executor::default();
+    let projection = CategoryProjection::new(&world, &"owner".into(), locale, &executor);
+    native_categories(
+        executor.drive(projection.categories()).await.unwrap(),
+        &["Work"],
+    );
+    assert!(world.replay.steps.lock().unwrap().is_empty());
+    checked += 1;
+    for cursor in &invalid_cursors {
+        let world = native_world(
+            "bounded lookup cursor",
+            vec![native_page(vec![native_item("Work")], Json::Null)],
+            native_batch(0, Json::Null, false),
+        );
+        let executor = Executor::default();
+        let projection = CategoryProjection::new(&world, &"owner".into(), locale, &executor);
+        native_categories(
+            executor.drive(projection.categories()).await.unwrap(),
+            &["Work"],
+        );
+        native_poll(&world, native_batch(1, Json::Null, true));
+        {
+            let mut steps = world.replay.steps.lock().unwrap();
+            steps.pop_back();
+            steps.push_back(native_page_call(
+                native_page(vec![], cursor.clone()),
+                None,
+                true,
+            ));
+        }
+        assert_eq!(
+            executor
+                .drive(projection.categories())
+                .await
+                .unwrap_err()
+                .code,
+            "task_board_category_projection_invalid"
+        );
+        assert!(
+            world.replay.steps.lock().unwrap().is_empty(),
+            "Invalid bounded lookup must not read metadata or acknowledge"
+        );
+        native_poll(&world, native_batch(1, Json::Null, false));
+        native_categories(
+            executor.drive(projection.categories()).await.unwrap(),
+            &["Work"],
+        );
+        assert!(world.replay.steps.lock().unwrap().is_empty());
+        checked += 1;
+    }
+    for gap in [
+        false.into(),
+        true.into(),
+        0.0.into(),
+        1.0.into(),
+        "".into(),
+        "gap".into(),
+        Json::Array(vec![]),
+    ] {
+        let world = native_world(
+            "invalid event gap",
+            vec![native_page(vec![native_item("Work")], Json::Null)],
+            native_batch(0, gap, false),
+        );
+        world.replay.steps.lock().unwrap().pop_back();
+        let executor = Executor::default();
+        let projection = CategoryProjection::new(&world, &"owner".into(), locale, &executor);
+        assert_eq!(
+            executor
+                .drive(projection.categories())
+                .await
+                .unwrap_err()
+                .code,
+            "task_board_category_projection_invalid"
+        );
+        assert!(
+            world.replay.steps.lock().unwrap().is_empty(),
+            "Malformed gaps must not be acknowledged"
+        );
+        native_poll(&world, native_batch(0, Json::Null, false));
+        native_categories(
+            executor.drive(projection.categories()).await.unwrap(),
+            &["Work"],
+        );
+        assert!(world.replay.steps.lock().unwrap().is_empty());
+        checked += 1;
+    }
+    let gap = Json::object([
+        ("prunedThroughSequence", 5.0.into()),
+        ("resumeAfterSequence", 5.0.into()),
+    ]);
+    let world = native_world(
+        "initial gap covered by snapshot",
+        vec![native_page(vec![native_item("Work")], Json::Null)],
+        native_batch(5, gap.clone(), false),
+    );
+    let executor = Executor::default();
+    let projection = CategoryProjection::new(&world, &"owner".into(), locale, &executor);
+    native_categories(
+        executor.drive(projection.categories()).await.unwrap(),
+        &["Work"],
+    );
+    assert!(world.replay.steps.lock().unwrap().is_empty());
+    checked += 1;
+    let world = native_world(
+        "bounded gap and rebuild",
+        vec![native_page(vec![native_item("Work")], Json::Null)],
+        native_batch(0, Json::Null, false),
+    );
+    let executor = Executor::default();
+    let projection = CategoryProjection::new(&world, &"owner".into(), locale, &executor);
+    native_categories(
+        executor.drive(projection.categories()).await.unwrap(),
+        &["Work"],
+    );
+    native_poll(&world, native_batch(5, gap.clone(), false));
+    world.replay.steps.lock().unwrap().pop_back();
+    assert_eq!(
+        executor
+            .drive(projection.revalidate(&"changed".into()))
+            .await
+            .unwrap_err()
+            .code,
+        "task_board_category_projection_pending"
+    );
+    assert!(world.replay.steps.lock().unwrap().is_empty());
+    native_poll(&world, native_batch(5, gap, false));
+    {
+        let mut steps = world.replay.steps.lock().unwrap();
+        let before_ack = steps.len() - 1;
+        steps.insert(
+            before_ack,
+            native_page_call(
+                native_page(vec![native_item("Changed")], Json::Null),
+                None,
+                false,
+            ),
+        );
+    }
+    native_categories(
+        executor.drive(projection.categories()).await.unwrap(),
+        &["Changed"],
+    );
+    assert!(world.replay.steps.lock().unwrap().is_empty());
+    checked += 1;
+    for archived in [
+        None,
+        Some(Json::Null),
+        Some(false.into()),
+        Some(true.into()),
+        Some(0.0.into()),
+        Some(1.0.into()),
+        Some("".into()),
+        Some("yes".into()),
+        Some(Json::Array(vec![])),
+        Some(Json::object(Vec::<(&str, Json)>::new())),
+    ] {
+        let world = native_world(
+            "typed archive authority",
+            vec![native_page(vec![native_item("Work")], Json::Null)],
+            native_batch(0, Json::Null, false),
+        );
+        let executor = Executor::default();
+        let projection = CategoryProjection::new(&world, &"owner".into(), locale, &executor);
+        native_categories(
+            executor.drive(projection.categories()).await.unwrap(),
+            &["Work"],
+        );
+        let retained_archive = archived.as_ref() == Some(&Json::Bool(true));
+        let batch = native_batch(1, Json::Null, true);
+        native_poll(&world, batch.clone());
+        let mut metadata = Json::object([
+            ("contractKey", "task-board/task".into()),
+            ("parentId", "root".into()),
+            ("currentRevision", 4.0.into()),
+        ]);
+        if let Some(archived) = archived {
+            metadata.insert("effectivelyArchived", archived);
+        }
+        {
+            let mut steps = world.replay.steps.lock().unwrap();
+            steps.pop_back();
+            steps.extend([
+                native_page_call(native_page(vec![], Json::Null), None, true),
+                native_rpc(
+                    "objects.stat",
+                    Json::object([("objectId", NATIVE_ID.into())]),
+                    metadata,
+                ),
+                native_ack(&batch),
+            ]);
+        }
+        native_categories(executor.drive(projection.categories()).await.unwrap(), &[]);
+        let restored = Json::object([
+            ("createdAt", NATIVE_TIME.into()),
+            ("fields", Json::object([("category", "Restored".into())])),
+        ]);
+        projection.observe(&NATIVE_ID.into(), 2.0, &restored);
+        native_poll(&world, native_batch(1, Json::Null, false));
+        native_categories(
+            executor.drive(projection.categories()).await.unwrap(),
+            if retained_archive { &[] } else { &["Restored"] },
+        );
+        if retained_archive {
+            projection.observe(&NATIVE_ID.into(), 4.0, &restored);
+            native_poll(&world, native_batch(1, Json::Null, false));
+            native_categories(
+                executor.drive(projection.categories()).await.unwrap(),
+                &["Restored"],
+            );
+        }
+        assert!(world.replay.steps.lock().unwrap().is_empty());
+        checked += 1;
+    }
+    assert_eq!(checked, 36);
+}
 #[tokio::test(flavor = "current_thread")]
 async fn native_casing_errors_preserve_the_projection_and_release_queued_requests() {
     struct FaultLocale {
@@ -397,28 +841,15 @@ async fn native_casing_errors_preserve_the_projection_and_release_queued_request
             self.native.compare_default(left, right)
         }
     }
-    let row = data()
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| s(row, "name") == &JsString::from("warm current cache and normalize"))
-        .unwrap();
-    let replay = Arc::new(Replay {
-        steps: Mutex::new(
-            f(row, "boundaries")
-                .as_array()
-                .unwrap()
-                .iter()
-                .cloned()
-                .collect(),
-        ),
-        name: s(row, "name").clone(),
-    });
-    let world = World {
-        root: RefCell::new(Some("root".into())),
-        client: Client(replay.clone(), Arc::new(Gate::default())),
-        replay: replay.clone(),
-    };
+    let world = native_world(
+        "native casing errors",
+        vec![native_page(vec![native_item("Work")], Json::Null)],
+        native_batch(0, Json::Null, false),
+    );
+    let replay = world.replay.clone();
+    for _ in 0..3 {
+        native_poll(&world, native_batch(0, Json::Null, false));
+    }
     let failures: Vec<_> = [
         ("Work", "locale_unavailable"),
         ("work", "content_too_large"),
@@ -466,4 +897,5 @@ async fn native_casing_errors_preserve_the_projection_and_release_queued_request
     executor.drain(projection.settled()).await;
     assert!(locale.failures.borrow().is_empty());
     assert!(replay.steps.lock().unwrap().is_empty());
+    native_typed_inputs(&locale.native).await;
 }
