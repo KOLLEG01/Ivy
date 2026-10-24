@@ -4,7 +4,7 @@ use ivy_contracts::{JsString, core_schema::validate_host};
 use std::{ffi::OsString, fs, path::{Path, PathBuf}};
 pub use crate::protected_config::protected_json_file;
 
-pub use crate::config_file::{json_file, json_file_if_present, CONFIGURATION_BYTES};
+pub use crate::config_file::{json_file, cli_json_file, json_file_if_present, CONFIGURATION_BYTES};
 pub use crate::config_write::atomic_json;
 pub(crate) use crate::config_file::{FileError, read_json};
 pub(crate) use crate::config_write::write_json;

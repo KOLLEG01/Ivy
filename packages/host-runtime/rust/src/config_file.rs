@@ -31,6 +31,15 @@ pub async fn json_file(path: impl Into<PathBuf>, limit: usize) -> IvyResult<IvyJ
     tokio::task::spawn_blocking(move || read_json(&path, limit).map_err(FileError::error))
         .await.map_err(|_| IvyError::internal())?
 }
+/// The local CLI exposes malformed JSON as invalid arguments. Other runtime
+/// readers keep their existing error policy; both use this bounded file reader.
+pub async fn cli_json_file(path: impl Into<PathBuf>, limit: usize) -> IvyResult<IvyJson> {
+    let path = path.into();
+    tokio::task::spawn_blocking(move || read_json(&path, limit).map_err(|error| match error {
+        FileError::Syntax => IvyError::new("invalid_arguments", "Configuration contains malformed JSON."),
+        other => other.error(),
+    })).await.map_err(|_| IvyError::internal())?
+}
 /// Only ENOENT from stat or read is absent; present JSON null stays Some(Null).
 pub async fn json_file_if_present(path: impl Into<PathBuf>, limit: usize) -> IvyResult<Option<IvyJson>> {
     let path = path.into();

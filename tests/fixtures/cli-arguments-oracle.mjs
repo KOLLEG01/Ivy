@@ -2,7 +2,7 @@ import {readFileSync} from 'node:fs';
 import {stripTypeScriptTypes} from 'node:module';
 import {parseArgs} from 'node:util';
 import {IvyError, requireThat} from '../../packages/contracts/src/errors.ts';
-const source=readFileSync(new URL('../../packages/cli/src/main.ts',import.meta.url),'utf8');
+const source=readFileSync(new URL('./cli-admission-reference.txt',import.meta.url),'utf8');
 const start=source.indexOf('    let parsed:');
 const end=source.indexOf('    // Both source and compiled');
 if(start<0||end<start)throw Error('Original CLI admission boundary changed');

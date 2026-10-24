@@ -2,6 +2,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSy
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { rustBackendTargets } from './build-rust-backend.mjs';
 import { materializeNativePlan } from '../../packages/host-runtime/src/native-plan.mjs';
+import { stripTypeScriptTypes } from 'node:module';
 
 function within(root, path) {
   const child = relative(root, path);
@@ -22,11 +23,23 @@ function choices(value, fallback, allowed) {
 }
 
 function runtimeAssets(component, root, os) {
-  if (component === 'host-executor' && os.includes('win32')) {
-    return ['install-windows.ps1', 'bootstrap-maintenance-windows.ps1', 'windows-principal.ps1'].map(name => {
+  if (component === 'host-executor') {
+    const assets = (os.includes('win32') ? ['install-windows.ps1', 'bootstrap-maintenance-windows.ps1', 'windows-principal.ps1'] : []).map(name => {
       const path = 'packages/host-runtime/assets/' + name;
       return { path, bytes: readFileSync(regular(root, resolve(root, path))) };
     });
+    // Preserve the existing module/script entry without shipping the Node Host
+    // backend. This source only launches the colocated native ivy executable.
+    assets.push({ path: 'packages/cli/src/main.js', bytes: Buffer.from(stripTypeScriptTypes(
+      readFileSync(regular(root, resolve(root, 'packages/cli/src/main.ts')), 'utf8'))) });
+    // Reset also plans instances which are not installed yet. Retain the exact
+    // public declarations as data, without shipping other service backends.
+    for (const owner of ['services', 'ui']) for (const entry of readdirSync(resolve(root, owner), { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const path = `${owner}/${entry.name}/deploy.json`;
+      if (existsSync(resolve(root, path))) assets.push({ path: 'reset-plans/' + path, bytes: readFileSync(regular(root, resolve(root, path))) });
+    }
+    return assets;
   }
   if (!['agent-manager', 'service-manager', 'chat-bridge', 'task-board', 'phone-bridge', 'secretary'].includes(component)) return [];
   const assets = [];

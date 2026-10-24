@@ -2116,6 +2116,7 @@ dependencies = [
  "base64 0.23.1",
  "icu_normalizer",
  "ivy-contracts",
+ "ivy-host-runtime",
  "ivy-sdk",
  "serde_json",
  "tokio",
@@ -2213,6 +2214,7 @@ name = "ivy-host-executor"
 version = "0.2.40"
 dependencies = [
  "chrono",
+ "ivy-cli",
  "ivy-contracts",
  "ivy-hive",
  "ivy-host-runtime",

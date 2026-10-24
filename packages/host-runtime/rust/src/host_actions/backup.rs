@@ -19,6 +19,7 @@ use std::{path::PathBuf, sync::Arc, time::Instant};
 /// native relocation. Node and locale qualification belong to the caller.
 pub struct RestoreRuntime {
     node: Option<NodeRuntime>,
+    configured_node: bool,
     bindings: Arc<RestoreBindings>,
     native_policy: Arc<NativeBackupPolicy>,
     project_storage: Arc<StorageContext>,
@@ -45,6 +46,7 @@ impl RestoreRuntime {
         let storage = storage(&account, compare);
         Ok(Self {
             node: node.into(),
+            configured_node: false,
             bindings: Arc::new(RestoreBindings {
                 storage,
                 environment: account.environment,
@@ -53,6 +55,14 @@ impl RestoreRuntime {
             native_policy,
             project_storage,
         })
+    }
+
+    /// Discover the target's optional workload runtime only after the selected
+    /// backup has passed verification. A bad backup never reads the target.
+    pub fn from_configuration(compare: FileCompare) -> IvyResult<Self> {
+        let mut runtime = Self::native(None, compare)?;
+        runtime.configured_node = true;
+        Ok(runtime)
     }
 }
 
@@ -84,7 +94,7 @@ impl HostActions {
         config_path: PathBuf,
         backup_root: PathBuf,
         manifest_hash: JsString,
-        runtime: RestoreRuntime,
+        mut runtime: RestoreRuntime,
     ) -> IvyResult<J> {
         let this = self.clone();
         tokio::spawn(async move {
@@ -96,6 +106,16 @@ impl HostActions {
                 &runtime.bindings,
             )
             .await?;
+            if runtime.configured_node {
+                let input =
+                    config::cli_json_file(config_path.clone(), config::CONFIGURATION_BYTES).await?;
+                let configured = input
+                    .get("executables")
+                    .and_then(|v| v.get("node"))
+                    .and_then(J::as_js_string)
+                    .map(node_path::to_native);
+                runtime.node = NodeRuntime::discover_optional(configured.as_deref()).await?;
+            }
             restore::require_restore_platform(&manifest, runtime.node.as_ref())?;
             let config = restore::target_configuration(
                 node_path::from_native(&config_path),

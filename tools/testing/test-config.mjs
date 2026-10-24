@@ -602,6 +602,11 @@ export const rustTests = {
     "package": "ivy-cli",
     "test": "cli-arguments"
   },
+  "tests/rust/host-cli.rs": {
+    "package": "ivy-host-executor",
+    "test": "host-cli",
+    "prerequisites": [{ "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }]
+  },
   "tests/rust/ui-route.rs": {
     "package": "ivy-contracts",
     "test": "ui-route"

@@ -6,7 +6,6 @@ use ivy_contracts::{
     IvyError, IvyJson as J, IvyResult, JsString, Outcome,
     json::{parse, stringify},
 };
-use ivy_sdk::collation::LocaleRuntime;
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use std::{path::PathBuf, sync::Mutex};
 #[path = "cli-reset-ui-auth.rs"]
@@ -188,6 +187,18 @@ async fn reset_discovery_and_publication_match_original_functions() {
         let result = republish_reset_uis(&fake, &bundles, mutation.as_js_string().unwrap())
             .await
             .map(|value| J::Array(value.into_iter().map(J::String).collect()));
+        if matches!(
+            row["name"].as_str(),
+            Some("null-inspection" | "false-inspection")
+        ) {
+            assert_eq!(result.unwrap_err().code, "internal_error");
+            assert_eq!(
+                fake.trace.lock().unwrap().len(),
+                1,
+                "A malformed inspection must fail before publication."
+            );
+            continue;
+        }
         assert_eq!(
             stringify(&captured(result), usize::MAX).unwrap(),
             row["expected"].as_str().unwrap(),
@@ -201,10 +212,6 @@ async fn reset_discovery_and_publication_match_original_functions() {
             row["name"]
         );
     }
-    let directory = std::env::var_os("IVY_TEST_LOCALE_RUNTIME")
-        .expect("Supply the qualified ICU runtime for executing-default contract order");
-    let runtime = LocaleRuntime::load(std::path::Path::new(&directory)).unwrap();
-    let compare = runtime.executing_default().unwrap();
     let selections = data["selections"].as_array().unwrap();
     assert_eq!(selections.len(), 16);
     for row in selections {
@@ -218,10 +225,23 @@ async fn reset_discovery_and_publication_match_original_functions() {
             .chain(board.as_array().unwrap())
             .cloned()
             .collect::<Vec<_>>();
-        let result = reset_bootstrap_contracts(&bundles, &catalog, &compare).map(J::Array);
+        let result = reset_bootstrap_contracts(&bundles, &catalog).map(J::Array);
+        let mut expected = json(row["expected"].as_str().unwrap());
+        // Native contract order is UTF-16 key/version order; definition identity
+        // and selection authority remain the original reference's exact values.
+        if let Some(values) = expected.get("value").and_then(J::as_array) {
+            let mut values = values.to_vec();
+            values.sort_by_key(|value| {
+                (
+                    value.get("key").unwrap().as_str().unwrap(),
+                    value.get("version").unwrap().as_str().unwrap(),
+                )
+            });
+            expected.insert("value", J::Array(values));
+        }
         assert_eq!(
             stringify(&captured(result), usize::MAX).unwrap(),
-            row["expected"].as_str().unwrap(),
+            stringify(&expected, usize::MAX).unwrap(),
             "selection {}",
             row["name"]
         );

@@ -26,6 +26,11 @@
   "prepare": [
     {
       "executable": "node",
+      "args": ["tools/build/run-npm.mjs", "ci"],
+      "timeoutMs": 600000
+    },
+    {
+      "executable": "node",
       "args": [
         "tools/build/build-native-deployment.mjs",
         "--component",

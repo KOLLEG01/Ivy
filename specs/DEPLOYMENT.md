@@ -216,8 +216,15 @@ substitute a development build for an installed artifact.
 
 ## Local host operations
 
-Run the installed `ivy` CLI, or `node dist/packages/cli/src/main.js` from the checked
-distribution, on the owning host. Use `--config ABSOLUTE_PATH --json` for every command
+Run the installed `ivy` CLI on the owning host. The native HostExecutor package includes
+`dist/native/<os>-<arch>/ivy` (`ivy.exe` on Windows); add that directory to `PATH` or
+invoke the executable directly. Build it with `npm run build:deployment -- --component
+host-executor` (use `--target <Rust triple>` to select a supported target). Existing
+`node dist/packages/cli/src/main.js` callers use a thin launcher for the same executable.
+The Host package also carries the public UI bundles and component reset declarations
+used by runtime reset; its build runs the normal Web builder once. Reset admits the
+configured bundles from `dist/apps` (or an existing `dist/uis` layout) before stopping owners.
+Use `--config ABSOLUTE_PATH --json` for every command
 (or the installation's explicit `IVY_HOST_CONFIG`). First read `status` and confirm the
 host ID, instance IDs, installed builds and unfinished operations; do not change hosts
 because a call failed. The CLI works without Hive. Exact request and result shapes are in
@@ -232,6 +239,7 @@ the [host schema](schemas/host.schema.json).
 | `restart`, `enable`, `disable` with `--instance ID --operation-id ID`; `rollback --instance ID --to BUILD --operation-id ID`     | Change an instance through the executor.                                                         |
 | `install-bootstrap --candidate ID`; `inspect-bootstrap`; `update-bootstrap --request PATH`; `bootstrap-status --operation-id ID` | Install or maintain bootstrap-owned processes separately from ordinary deployment.               |
 | `backup --destination PATH`; `restore --backup PATH --backup-hash HASH`                                                          | Snapshot or restore an offline host.                                                             |
+| `runtime-reset [--apply --confirm ID]`; `runtime-reset-host --phase PHASE` with the coordinated reset identities                  | Preview or run the configured reset using the native Host phases, Hive storage and UI publisher. |
 
 Preserve the exact request, operation ID, candidate/build ID and returned deployment ID.
 After acceptance, read `status --deployment ID` until `data.record.phase` is terminal:
@@ -251,6 +259,6 @@ releases, targets and live observations, and disables every instance. Resolve an
 `needs_attention` history, then prepare, deploy and enable explicitly. Keep snapshots
 and credentials outside release artifacts.
 
-Recovery implementations and focused checks: [backup/restore](../packages/host-runtime/src/restore.ts),
-[runtime reset](../packages/host-runtime/src/runtime-reset.ts),
-[deployment tests](../tests/executor.test.ts), [package tests](../tests/package-deployment.test.ts).
+Recovery implementations and focused checks: [backup/restore](../packages/host-runtime/rust/src/host_actions/backup.rs),
+[runtime reset](../services/host-executor/rust/src/cli/reset.rs),
+[CLI checks](../tests/rust/host-cli.rs), [Host checks](../tests/rust/host-actions.rs).

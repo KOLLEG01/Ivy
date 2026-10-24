@@ -47,6 +47,35 @@ fn helpers() -> PathBuf {
         .unwrap()
         .to_owned()
 }
+fn equal(actual: &J, expected: &J) {
+    assert_eq!(
+        ivy_contracts::json::canonical(actual, usize::MAX).unwrap(),
+        ivy_contracts::json::canonical(expected, usize::MAX).unwrap()
+    );
+}
+fn cli(config: &Path, args: &[&str]) -> J {
+    let result = Command::new(
+        std::env::var_os("IVY_TEST_CLI").unwrap_or_else(|| env!("CARGO_BIN_EXE_ivy").into()),
+    )
+    .args(args)
+    .arg("--config")
+    .arg(config)
+    .arg("--json")
+    .env_remove("IVY_NODE_EXECUTABLE")
+    .output()
+    .unwrap();
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let value =
+        ivy_contracts::json::parse(std::str::from_utf8(&result.stdout).unwrap(), usize::MAX)
+            .unwrap();
+    validate_host("CliOutput", &value).unwrap();
+    value
+}
 async fn build(marker: PathBuf) {
     let count = fs::read_to_string(&marker)
         .ok()
@@ -516,21 +545,33 @@ async fn lifecycle() {
         );
     }
     let journal = HostJournal::open(host.clone()).await.unwrap();
-    journal
-        .accept(
-            J::object([
-                ("operationId", "native-deploy".into()),
-                ("instanceId", "fixture".into()),
-                ("action", "deploy".into()),
-                (
-                    "candidateId",
-                    candidate.required("candidateId").unwrap().clone(),
-                ),
-            ]),
-            None,
-        )
-        .await
-        .unwrap();
+    let admitted = cli(
+        &host_path,
+        &[
+            "deploy",
+            "--operation-id",
+            "native-deploy",
+            "--instance",
+            "fixture",
+            "--candidate",
+            &candidate.required("candidateId").unwrap().as_str().unwrap(),
+        ],
+    );
+    equal(
+        &admitted,
+        &cli(
+            &host_path,
+            &[
+                "deploy",
+                "--operation-id",
+                "native-deploy",
+                "--instance",
+                "fixture",
+                "--candidate",
+                &candidate.required("candidateId").unwrap().as_str().unwrap(),
+            ],
+        ),
+    );
     let mut run = Running::start(&f, &own_path);
     accepted(&mut run, &journal, "native-deploy").await;
     let target = journal.target("fixture").await.unwrap().unwrap();
@@ -553,18 +594,25 @@ async fn lifecycle() {
         ("native-disable", "disable"),
         ("native-enable", "enable"),
     ] {
-        journal
-            .accept(
-                J::object([
-                    ("operationId", operation.into()),
-                    ("instanceId", "fixture".into()),
-                    ("action", action.into()),
-                ]),
-                None,
-            )
-            .await
+        let requested = cli(
+            &host_path,
+            &[action, "--operation-id", operation, "--instance", "fixture"],
+        );
+        let result = accepted(&mut run, &journal, operation).await;
+        let id = requested
+            .required("deploymentId")
+            .unwrap()
+            .as_str()
             .unwrap();
-        accepted(&mut run, &journal, operation).await;
+        let readback = cli(&host_path, &["status", "--deployment", &id]);
+        equal(
+            readback
+                .required("data")
+                .unwrap()
+                .required("record")
+                .unwrap(),
+            result.required("record").unwrap(),
+        );
     }
     let last = ready(&mut run, &data.join("health.json")).await;
     assert_ne!(first.get("bootId"), last.get("bootId"));

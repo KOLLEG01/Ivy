@@ -1,0 +1,28 @@
+    let parsed: ReturnType<typeof parseArgs>;
+    try { parsed = parseArgs({ args, strict: true, allowPositionals: true, options: {
+      config: { type: 'string' }, json: { type: 'boolean' }, component: { type: 'string' }, source: { type: 'string' }, instance: { type: 'string' },
+      candidate: { type: 'string' }, 'operation-id': { type: 'string' }, deployment: { type: 'string' }, to: { type: 'string' }, 'wait-ms': { type: 'string' },
+      destination: { type: 'string' }, backup: { type: 'string' }, 'backup-hash': { type: 'string' }, request: { type: 'string' },
+      apply: { type: 'boolean' }, confirm: { type: 'string' }, phase: { type: 'string' }, 'reset-id': { type: 'string' }, 'runtime-epoch': { type: 'string' }, 'scope-roots': { type: 'string' }, 'publisher-digest': { type: 'string' },
+    } }); } catch { throw new IvyError('invalid_arguments', 'Invalid command options. See the Ivy local CLI contract.'); }
+    const values = parsed.values as Record<string, string | boolean | undefined>;
+    requireThat(parsed.positionals.length === 1, 'invalid_arguments', 'Select exactly one Ivy command.');
+    const command = parsed.positionals[0]!;
+    const supported: Record<string, string[]> = { prepare: ['component', 'source'], deploy: ['instance', 'candidate', 'source', 'operation-id', 'wait-ms'], rollback: ['instance', 'to', 'operation-id', 'wait-ms'], status: ['deployment'], restart: ['instance', 'operation-id', 'wait-ms'], enable: ['instance', 'operation-id', 'wait-ms'], disable: ['instance', 'operation-id', 'wait-ms'] };
+    supported['preparations'] = []; supported['compact-preparations'] = []; supported['collect-storage'] = [];
+    supported['backup'] = ['destination']; supported['restore'] = ['backup', 'backup-hash'];
+    supported['runtime-reset'] = ['apply', 'confirm'];
+    supported['runtime-reset-host'] = ['phase', 'reset-id', 'runtime-epoch', 'scope-roots', 'publisher-digest'];
+    supported['inspect-bootstrap'] = []; supported['update-bootstrap'] = ['request']; supported['bootstrap-status'] = ['operation-id']; supported['install-bootstrap'] = ['candidate'];
+    requireThat(Object.hasOwn(supported, command), 'invalid_arguments', 'Unknown Ivy command.');
+    requireThat(Object.keys(values).every(key => ['json', 'config', ...supported[command]!].includes(key)), 'invalid_arguments', 'This option does not belong to the selected command.');
+    const waitMs = values['wait-ms'] === undefined ? 0 : Number(values['wait-ms']);
+    requireThat(Number.isInteger(waitMs) && waitMs >= 0 && waitMs <= 600_000, 'invalid_arguments', '--wait-ms must be a finite integer from 0 to 600000.');
+    const configPath = values['config'] ?? environment['IVY_HOST_CONFIG'] ?? defaultHostConfigPath(environment);
+    requireThat(typeof configPath === 'string' && configPath.length > 0, 'invalid_arguments', 'Use --config PATH or IVY_HOST_CONFIG to select this host installation.');
+    // Both source and compiled
+    const failure = error instanceof SyntaxError ? new IvyError('invalid_arguments', 'Configuration contains malformed JSON.') : IvyError.from(error);
+    const output: Host.CliOutput = { schemaVersion: 1, ok: false, code: failure.code, ...(accepted ? { deploymentId: accepted.record.deploymentId } : {}),
+      data: { message: failure.message, outcome: failure.outcome, ...(failure.details === undefined ? {} : { details: failure.details }) } as Host.CliOutput['data'] };
+    return { exitCode: failure.code === 'needs_attention' ? 3 : failure.code === 'invalid_arguments' ? 2 : 1, output };
+  } finally

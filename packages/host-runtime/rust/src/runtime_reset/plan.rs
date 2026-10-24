@@ -188,9 +188,17 @@ pub async fn local_runtime_reset_plan(
                         .await?
                 }
                 None => {
+                    let packaged = distribution_root.join("dist/reset-plans");
+                    let plan_root = if tokio::fs::try_exists(&packaged)
+                        .await
+                        .map_err(|_| IvyError::internal())?
+                    {
+                        packaged
+                    } else {
+                        distribution_root.clone()
+                    };
                     let mut plan =
-                        source::source_build_plan(distribution_root.clone(), &component.to_utf8()?)
-                            .await?;
+                        source::source_build_plan(plan_root, &component.to_utf8()?).await?;
                     plan.insert(
                         "buildId",
                         digest(format!("uninstalled:{}", component.to_utf8()?)).into(),

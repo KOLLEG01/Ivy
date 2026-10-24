@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+ivy-cli.workspace = true
 ivy-contracts.workspace = true
 ivy-hive.workspace = true
 ivy-host-runtime.workspace = true
@@ -15,6 +16,14 @@ tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+
+[[bin]]
+name = "ivy"
+path = "src/bin/ivy.rs"
+
+[[test]]
+name = "host-cli"
+path = "../../../tests/rust/host-cli.rs"
 
 [[test]]
 name = "host-executor-entry"

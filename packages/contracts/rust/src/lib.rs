@@ -20,6 +20,7 @@ pub mod limits;
 mod native_catalog_path;
 pub mod native_contract;
 pub mod operation;
+pub mod published_contracts;
 pub mod re2;
 pub mod read_request;
 pub mod schema;

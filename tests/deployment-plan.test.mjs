@@ -108,11 +108,16 @@ for (const component of ['fixture', 'host-executor', 'task-board', 'secretary', 
     const path = join(root, 'packages/host-runtime/assets', name);
     mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, 'synthetic consumed asset');
   }
+  if (component === 'host-executor') {
+    const path = join(root, 'packages/cli/src/main.ts');
+    mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, readFileSync('packages/cli/src/main.ts'));
+    mkdirSync(join(root, 'ui'));
+  }
   const identity = { schemaVersion: 1, version: source.version, buildId: 'sha256:' + '2'.repeat(64) };
   const packages = [
     { id: 'fixture', name: `ivy-${component}`, manifest_path: serviceManifest, targets: [
       { name: `ivy-${component}`, kind: ['bin'] },
-      ...(component === 'host-executor' ? [{ name: 'ivy-bootstrap-auto-worker', kind: ['bin'] }] : []),
+      ...(component === 'host-executor' ? ['ivy', 'ivy-bootstrap-auto-worker'].map(name => ({ name, kind: ['bin'] })) : []),
     ] },
     { id: 'helpers', name: 'ivy-host-runtime', manifest_path: helperManifest, targets: ['ivy-health', 'ivy-job', 'ivy-host-job'].map(name => ({ name, kind: ['bin'] })) },
   ];
@@ -159,7 +164,10 @@ for (const component of ['fixture', 'host-executor', 'task-board', 'secretary', 
       const target=join(root,path);mkdirSync(dirname(target),{recursive:true});writeFileSync(target,readFileSync(path));
     }
   }
-  const built = buildNativeDeployment({ component, root, target: 'x86_64-pc-windows-msvc', identity, cargo });
+  let uiBuilds = 0;
+  const buildUi = selected => { assert.equal(selected, root); uiBuilds++; return []; };
+  const built = buildNativeDeployment({ component, root, target: 'x86_64-pc-windows-msvc', identity, cargo, buildUi });
+  assert.equal(uiBuilds, component === 'host-executor' ? 1 : 0);
   assert.deepEqual(built.platforms, ['win32-x64']);
   assert.equal(built.staged, true);
   const builds = calls.filter(args => args[0] === 'build');

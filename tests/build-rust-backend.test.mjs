@@ -97,6 +97,11 @@ for (const [os, target] of [['win32', 'x86_64-pc-windows-msvc'], ['linux', 'x86_
   test(`native Host deployment includes its automatic worker and consumed platform assets (${os})`, () => fixture(f => {
     const helpers = ['ivy-health', 'ivy-job', 'ivy-host-job'];
     f.targets.push({ name: 'ivy-bootstrap-auto-worker', kind: ['bin'] });
+    f.targets.push({ name: 'ivy', kind: ['bin'] });
+    const launcher = join(f.root, 'packages/cli/src/main.ts');
+    mkdirSync(dirname(launcher), { recursive: true });
+    writeFileSync(launcher, readFileSync(new URL('../packages/cli/src/main.ts', import.meta.url)));
+    mkdirSync(join(f.root, 'ui'));
     const manifest = join(f.root, 'packages/host-runtime/rust/Cargo.toml');
     mkdirSync(dirname(manifest), { recursive: true });
     writeFileSync(manifest, '[package]\nname="ivy-host-runtime"\nversion="0.0.0"\n');
@@ -132,7 +137,10 @@ for (const [os, target] of [['win32', 'x86_64-pc-windows-msvc'], ['linux', 'x86_
         return JSON.stringify({ reason: 'compiler-artifact', package_id: 'helpers', target: { name, kind: ['bin'] }, executable });
       }).join('\n');
     };
-    const result = buildNativeDeployment({ component: 'host-executor', target, root: f.root, identity: f.identity, cargo });
+    let uiBuilds = 0;
+    const result = buildNativeDeployment({ component: 'host-executor', target, root: f.root, identity: f.identity, cargo,
+      buildUi(root) { assert.equal(root, f.root); uiBuilds++; return []; } });
+    assert.equal(uiBuilds, 1);
     assert.deepEqual(helperCalls, [os === 'win32' ? helpers : ['ivy-health']]);
     assert.ok(f.calls.some(call => call.args[0] === 'build' && call.args.includes('ivy-bootstrap-auto-worker'))
       || helperCalls.some(names => names.includes('ivy-bootstrap-auto-worker')));
@@ -142,6 +150,11 @@ for (const [os, target] of [['win32', 'x86_64-pc-windows-msvc'], ['linux', 'x86_
     assert.deepEqual(result.platforms, [os + '-x64']);
     assert.equal(result.plan.entrypoint.executable, `dist/native/${os}-x64/ivy-host-executor${suffix}`);
     assert.equal(readFileSync(join(output, `native/${os}-x64/ivy-bootstrap-auto-worker${suffix}`), 'utf8'), 'fixture ivy-bootstrap-auto-worker');
+    assert.equal(readFileSync(join(output, `native/${os}-x64/ivy${suffix}`), 'utf8'), 'fixture ivy');
+    const compatibility = readFileSync(join(output, 'packages/cli/src/main.js'), 'utf8');
+    assert.match(compatibility, /spawn\(executable, args/);
+    assert.doesNotMatch(compatibility, /host-runtime|HostJournal/);
+    assert.deepEqual(JSON.parse(readFileSync(join(output, 'reset-plans/services/host-executor/deploy.json'), 'utf8')), plan);
     for (const name of assets) {
       const path = join(output, 'packages/host-runtime/assets', name);
       assert.equal(existsSync(path), os === 'win32');
