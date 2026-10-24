@@ -18,11 +18,11 @@ Call `wiki_read` to obtain the current object ID and revision. Then pass the exa
 
 ## Create and advance a TaskBoard task
 
-Select the TaskBoard `serviceNodeId` from the tool schema and read `task_configuration` before creating a ticket. Use its current defaults unless the user explicitly requests different settings. Creation defaults to Todo; `workflowState: "backlog"` records work without scheduling it. `priority` is 4 for highest and 0 for lowest. `executionRequirement: null` inherits the board default; `{ "kind": "automatic" }` selects any eligible host. Omitted `userContact` inherits the current board default on creation and preserves the ticket setting on edit. `control: "agent"` permits automatic scheduling; `control: "user"` never starts an agent, including in Todo or manual In Progress. Read the task after creation and use its current revision for later changes.
+Select the TaskBoard `serviceNodeId` from the tool schema and read `task_configuration` before creating a ticket. Use its current defaults unless the user explicitly requests different settings. Creation defaults to Todo; `workflowState: "backlog"` records work without scheduling it. `priority` is 4 for highest and 0 for lowest. `executionRequirement: null` inherits the board default; `{ "kind": "automatic" }` selects any eligible host. Omitted `userContact` inherits the current board default on creation and preserves the ticket setting on edit. `control: "agent"` permits automatic scheduling; `control: "user"` never schedules task work; new user comments are processed independently without reopening or completing that work. Read the task after creation and use its current revision for later changes.
 
 <!-- mcp-example: task_create -->
 ```json
-{"serviceNodeId":"task-board-node","input":{"action":"create","operationId":"epoch:1760000000000:task-create","fields":{"title":"Review the report","description":"Check the report and record findings.","acceptanceCriteria":["Findings are saved on the task."],"category":null,"control":"agent","priority":2,"executionRequirement":null,"workspaceRequirement":{"kind":"task_workspace"},"dependencies":[],"nextReviewAt":null,"dueAt":null}}}
+{"serviceNodeId":"task-board-node","input":{"action":"create","operationId":"epoch:1760000000000:task-create","fields":{"title":"Review the report","description":"Check the report and record findings.","acceptanceCriteria":["Findings are saved on the task."],"category":null,"control":"agent","priority":2,"executionRequirement":null,"workspaceRequirement":{"kind":"task_workspace"},"dueAt":null}}}
 ```
 
 For an existing Backlog task that is now ready, use the normal transition. A new Todo task does not need this second call.

@@ -142,6 +142,12 @@ export const rustTests = {
     "test": "chat-journal",
     "filter": "wa_socket::"
   },
+  "tests/rust/phone_voice_notices.rs": {
+    "package": "ivy-phone-bridge",
+    "lib": true,
+    "filter": "voice_notices::tests",
+    "testThreads": 1
+  },
   "tests/rust/host-journal-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",
@@ -1705,6 +1711,12 @@ export const rustTests = {
     "package": "ivy-phone-bridge",
     "lib": true,
     "filter": "voice_rpc::owner::tests::",
+    "testThreads": 1
+  },
+  "tests/rust/phone_voice_work.rs": {
+    "package": "ivy-phone-bridge",
+    "lib": true,
+    "filter": "voice_work::tests::",
     "testThreads": 1
   },
   "tests/rust/phone_voice_journal.rs": {

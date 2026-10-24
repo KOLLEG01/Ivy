@@ -124,7 +124,7 @@ impl PhoneFlowVoice for Voice {
     fn inputs(&self, _: &JsString) -> IvyResult<Vec<IvyJson>> {
         Ok(vec![])
     }
-    fn answer(&self, _: JsString, _: IvyJson, _: IvyJson) -> FlowFuture<()> {
+    fn answer(&self, _: JsString, _: IvyJson, _: IvyJson, _: JsString) -> FlowFuture<()> {
         Box::pin(async {
             Err(IvyError::new(
                 "phone_voice_input_missing",

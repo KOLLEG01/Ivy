@@ -203,8 +203,8 @@ impl PhoneJournal {
         self.request(move |db| {
             uuid(Some(&call_id.clone().into()))?;
             let call_id = call_id.to_utf8()?;
-            let row: Option<String> = db.db.query_row("SELECT value FROM commands WHERE call_id=? AND method='call.selectSpeakerVoice' AND phase='result' AND json_extract(value,'$.receipt.ok')=1 ORDER BY rowid DESC LIMIT 1", [&call_id], |row| row.get(0)).optional().map_err(error)?;
-            let row = match row {Some(row) => Some(row), None => db.db.query_row("SELECT value FROM receipt_archive WHERE kind='command' AND json_extract(value,'$.intent.callId')=? AND json_extract(value,'$.intent.method')='call.selectSpeakerVoice' AND json_extract(value,'$.receipt.ok')=1 ORDER BY rowid DESC LIMIT 1", [&call_id], |row| row.get(0)).optional().map_err(error)?};
+            let row: Option<String> = db.db.query_row("SELECT value FROM commands WHERE call_id=? AND method IN ('call.selectSpeakerVoice','call.selectVoice') AND json_extract(value,'$.intent.voiceId') IS NOT NULL AND phase='result' AND json_extract(value,'$.receipt.ok')=1 ORDER BY rowid DESC LIMIT 1", [&call_id], |row| row.get(0)).optional().map_err(error)?;
+            let row = match row {Some(row) => Some(row), None => db.db.query_row("SELECT value FROM receipt_archive WHERE kind='command' AND json_extract(value,'$.intent.callId')=? AND json_extract(value,'$.intent.method') IN ('call.selectSpeakerVoice','call.selectVoice') AND json_extract(value,'$.intent.voiceId') IS NOT NULL AND json_extract(value,'$.receipt.ok')=1 ORDER BY rowid DESC LIMIT 1", [&call_id], |row| row.get(0)).optional().map_err(error)?};
             match row {Some(row) => Ok(parse(&row, usize::MAX).map_err(|_| IvyError::internal())?.get("intent").and_then(|v| v.get("voiceId")).and_then(IvyJson::as_js_string).cloned()), None => Ok(None)}
         }).await
     }

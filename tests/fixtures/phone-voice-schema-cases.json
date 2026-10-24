@@ -35,6 +35,6 @@
   {"name":"UTF8 exact bound","schema":true,"maximumBytes":4,"value":"é","valid":true},
   {"name":"RE2 case fold","schema":{"type":"string","pattern":"(?i)^yes$"},"value":"YES","valid":true},
   {"name":"RE2 mismatch","schema":{"type":"string","pattern":"(?i)^yes$"},"value":"no","valid":false},
-  {"name":"corrected nullable uniqueness","schema":{"$schema":"https://json-schema.org/draft/2020-12/schema#/title","description":{"%78":true,"x":{"items":{"type":["string","null"],"nullable":true},"uniqueItems":true}},"$ref":"#/description/%78"},"value":[null,"null"],"valid":true},
-  {"name":"corrected duplicate null","schema":{"$schema":"https://json-schema.org/draft/2020-12/schema#/title","description":{"%78":true,"x":{"items":{"type":["string","null"],"nullable":true},"uniqueItems":true}},"$ref":"#/description/%78"},"value":[null,null],"valid":false}
+  {"name":"nullable uniqueness","schema":{"$defs":{"x":{"type":"array","items":{"type":["string","null"]},"uniqueItems":true}},"$ref":"#/$defs/x"},"value":[null,"null"],"valid":true},
+  {"name":"duplicate null","schema":{"$defs":{"x":{"type":"array","items":{"type":["string","null"]},"uniqueItems":true}},"$ref":"#/$defs/x"},"value":[null,null],"valid":false}
 ]

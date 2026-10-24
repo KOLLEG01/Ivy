@@ -19,9 +19,11 @@ fn public_descriptors_reachable_schemas_and_validation_bounds() {
             tool
         })
         .collect::<Vec<_>>();
-    assert_eq!(tools.len(), 23);
+    assert_eq!(tools.len(), 25);
     namespace.insert("tools", IvyJson::Array(tools));
     expected.insert("namespaces", IvyJson::Array(vec![namespace]));
+    let contracts=expected.required("contracts").unwrap().as_array().unwrap().iter().map(|contract| {let mut value=contract.clone();value.insert("jsonSchema",phone_service_schema(&contract.required("jsonSchema").unwrap().as_str().unwrap()).unwrap());value}).collect();
+    expected.insert("contracts",IvyJson::Array(contracts));
     assert_eq!(
         json::canonical(&phone_registry().unwrap(), 8 * 1024 * 1024).unwrap(),
         json::canonical(&expected, 8 * 1024 * 1024).unwrap()

@@ -8,6 +8,7 @@ export function phoneRegistry(): Wire.RegistrySync {
   const registry = structuredClone(protocol);
   return {
     ...registry,
+    contracts: registry.contracts.map(contract=>({...contract,jsonSchema:phoneServiceSchema(contract.jsonSchema)})),
     namespaces: registry.namespaces.map(namespace => ({
       ...namespace,
       tools: namespace.tools.map(tool => ({

@@ -388,7 +388,35 @@ impl Inner {
                             }
                         }),
                     )
-                    .map(|voice| Arc::new(voice) as Arc<dyn PhoneFlowVoice>)
+                    .and_then(|voice| {
+                        let owner = Arc::downgrade(self);
+                        let notices = crate::voice_notices::PhoneVoiceNotices::new(
+                            Arc::new(move || {
+                                let owner = owner.upgrade().ok_or_else(unavailable)?;
+                                let service = owner
+                                    .service
+                                    .lock()
+                                    .unwrap()
+                                    .clone()
+                                    .ok_or_else(unavailable)?;
+                                Ok(Arc::new(service.connection()?)
+                                    as Arc<dyn ivy_sdk::rpc::RpcClient>)
+                            }),
+                            self.journal.clone(),
+                            text(self.config.json(), "serviceNodeId")?,
+                        );
+                        voice.set_input_notice(Arc::new(move |work, input, current| {
+                            let notices = notices.clone();
+                            Box::pin(async move { notices.notify(work, input, current).await })
+                        }));
+                        let owner = Arc::downgrade(self);
+                        voice.set_work_observer(Arc::new(move |id, code| {
+                            if let Some(owner) = owner.upgrade() {
+                                owner.diagnostics.lock().unwrap().work_observed(&String::from_utf16_lossy(&id.0), code, &now());
+                            }
+                        }));
+                        Ok(Arc::new(voice) as Arc<dyn PhoneFlowVoice>)
+                    })
                 })
                 .transpose()?;
             let failed = Arc::downgrade(self);
@@ -419,6 +447,12 @@ impl Inner {
                     }
                 }),
             )?;
+            let owner = Arc::downgrade(self);
+            flow.set_cleanup_observer(Arc::new(move |id, code| {
+                if let Some(owner) = owner.upgrade() {
+                    owner.diagnostics.lock().unwrap().cleanup_observed(&String::from_utf16_lossy(&id.0), code, &now());
+                }
+            }));
             Ok::<_, IvyError>(Runtime {
                 bridge: PhoneBridge::new(flow.clone(), process.client.clone()),
                 flow,
@@ -695,6 +729,7 @@ impl Inner {
             self.check_voice();
         }
         if idle
+            && !current.flow.has_voice_work()
             && observed.get("call").is_none_or(IvyJson::is_null)
             && observed
                 .get("callIds")

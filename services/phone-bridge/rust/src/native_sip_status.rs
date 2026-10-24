@@ -74,7 +74,7 @@ pub fn call_json(call: &NativeSipCall) -> Result<String, NativeSipError> {
     };
     let error = call.error();
     Ok(format!(
-        "{{\"id\":{},\"direction\":{},\"state\":{},\"sipCallId\":{},\"error\":{},\"incoming\":{},\"features\":{}}}",
+        "{{\"id\":{},\"direction\":{},\"state\":{},\"sipCallId\":{},\"error\":{},\"incoming\":{},\"features\":{},\"endedAt\":{}}}",
         quote(&s.id)?,
         quote(if call.incoming().is_some() {
             "incoming"
@@ -85,7 +85,8 @@ pub fn call_json(call: &NativeSipCall) -> Result<String, NativeSipError> {
         quote(call.sip_call_id())?,
         optional(error)?,
         call.incoming().map_or("null".into(), |i| i.json()),
-        call.features().observation().json()
+        call.features().observation().json(),
+        optional(s.ended_at.and_then(chrono::DateTime::from_timestamp_millis).map(|at|at.to_rfc3339_opts(chrono::SecondsFormat::Millis,true)).as_deref())?
     ))
 }
 pub fn signalling_json(s: &SipSignallingObservation) -> Result<String, NativeSipError> {

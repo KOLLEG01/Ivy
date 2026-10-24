@@ -124,6 +124,7 @@ impl IncomingInvite {
             stopped: CancellationToken::new(),
         });
         let initial = CallObservation {
+            ended_at: None,
             outcome: None,
             phase: FinalPhase::Waiting,
             active: false,
@@ -184,7 +185,8 @@ impl IncomingInvite {
             actor.current.cleanup_confirmed = result.is_ok();
             actor.current.quiescent = result.is_ok();
             actor.current.closed = result.is_ok();
-            let ended = actor.current;
+            let mut ended = actor.current;
+            ended.ended_at=actor.observations.borrow().ended_at.or_else(||Some(chrono::Utc::now().timestamp_millis()));
             let observations = actor.observations.clone();
             if result.is_ok() {
                 drop(actor);
@@ -357,7 +359,9 @@ fn sdp(request: &Request) -> Option<&str> {
 }
 impl IncomingActor {
     fn publish(&self) {
-        self.observations.send_replace(self.current);
+        let mut current=self.current;
+        current.ended_at=self.observations.borrow().ended_at.or_else(||(current.ending||current.outcome.is_some()&&!current.active).then(||chrono::Utc::now().timestamp_millis()));
+        self.observations.send_replace(current);
     }
     fn end(&mut self) {
         self.control.stopped.cancel();

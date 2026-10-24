@@ -133,12 +133,19 @@ Implementation: [Codex client](../services/phone-bridge/rust/src/voice_rpc/owner
   generations and operations prevent another restart on replay.
 - Audio speaker voices are separate from model/reasoning selection.
   `phone_bridge_speaker_voices` uses native `thread/realtime/listVoices`, cached
-  for 60 seconds and cleared on reconnect. Native V3 uses the returned V1 group
-  and default; no fixed voice list is supplied by PhoneBridge. The explicit
+  for 60 seconds and cleared on reconnect. It selects the highest numeric `vN`
+  group whose voices and required startup parameters fit the pinned native start
+  contract. `catalogVersion` reports the group; `protocol` reports the independently
+  validated start version. The original V1 group remains usable with a V3 start;
+  V2 startup does not provide the required handoff behavior. Empty groups are
+  skipped and incompatible groups are never merged. Defaults must belong to the
+  chosen group; its `defaultVN` takes precedence over the existing `defaultV1`
+  fallback. New runtime contracts still require matching checked native artifacts;
+  discovery does not upgrade Codex or guarantee future protocol semantics. The explicit
   `codexVoice.voice` setting overrides the native `realtime.voice` configuration.
   With `callId`, the API reports selected/effective voice and `restartRequired`;
   active-call status also includes `speakerVoice` and discovery errors.
-  `phone_bridge_select_speaker_voice` takes `callId`, `voiceId` and `operationId`.
+  `phone_bridge_update` takes `callId`, `voiceId` and `operationId`.
   It retains a validated selection for that original call's next Voice session.
   It does not restart audio. An explicit `phone_bridge_restart_voice` applies the
   selection during the call, with its existing new-task/original-greeting behavior.
@@ -149,6 +156,38 @@ Implementation: [Codex client](../services/phone-bridge/rust/src/voice_rpc/owner
   stop and native peer disposal before releasing the admission. Lost transport
   requires reconnecting to the same runtime for cleanup. Service clients never
   terminate a shared daemon. Uncertain outcomes remain visible in the journal.
+  Read-only work reconciliation must not delay media cleanup. Retain its original
+  call/task/end-time identity across release and restart; late observations cannot
+  override newer native events or another live call. Resolve observation and cleanup
+  warnings only after their own confirmed recovery, independently of connection failures.
+- The native SIP owner records the first transport end time. A running backing
+  turn survives media cleanup for at most five minutes from that time; a missing
+  or uncertain end time grants no background allowance. Completion ends this
+  allowance immediately. Retain work, call and deadline identities separately.
+  An independent timer claims the original turn before requesting interruption;
+  an acknowledgement alone does not confirm a stop. Keep ambiguous external
+  effects as `outcome_unknown`, with no automatic repeat or new work.
+  The service cannot enforce a native time limit while its owner is unavailable,
+  or undo an already dispatched external action. On recovery reconcile the exact
+  turn and original deadline; a crashed connected session grants no new window.
+- A freshly admitted and authenticated incoming call with the same principal,
+  caller identity, policy and native configuration rejoins a still running turn
+  within that window. Reconnect uses a new media session without a readiness turn,
+  model update or assignment replay. Only confirmed media connection invalidates
+  the old deadline. A later disconnect gets its own end time. Expired, completed
+  or ambiguous work is not automatically restarted. Ordinary idle conversation
+  history remains separate from this work guarantee.
+- Retain active, paused and ambiguous work against prewarming, unsubscribe and
+  archive maintenance. Explicit Voice restart and orderly shutdown interrupt
+  outstanding work; SIP-owner maintenance waits for it to finish.
+- Route pending native user questions and approvals through the official
+  ChatBridge Main notification path with a retained `phone-bridge/question`
+  source and one operation per exact input. The five-minute deadline continues
+  during user waits. No timeout or notification implies consent. Read
+  `phone_bridge_status` with `callId` (work and inputs) before answering with the
+  exact `inputToken` through the owning PhoneBridge connection. Consumed inputs,
+  changed native epochs and elapsed deadlines reject stale replies. Delivery has
+  bounded retries; unavailable Main never causes a new conversation or callback.
 
 Checks: [call flow](../tests/rust/phone_service_flow.rs),
 [task lifecycle](../tests/rust/phone_voice_control.rs),

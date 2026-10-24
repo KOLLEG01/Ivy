@@ -10,7 +10,7 @@ const native = JSON.parse(JSON.stringify(Object.assign({}, ...[
   'phone-capture', 'phone-desktop-controls', 'phone-voice-lifetime', 'phone-runtime', 'phone-ipc',
 ].map(load))).replace(/phone-(?:runtime|launch|hotkey|desktop-controls|micro|voice-lifetime)\.schema\.json#\/\$defs\//g, '#/$defs/')) as Record<string, Schema>;
 const definitions = Object.assign(native, ...[
-  'codex-app-tools', 'phone-voice-archive', 'phone-journal', 'phone-admission', 'phone-service',
+  'codex-app-tools', 'phone-voice-archive', 'phone-journal', 'phone-admission', 'phone-service', 'phone-voice-work',
 ].map(load));
 const validators = new SchemaValidators();
 

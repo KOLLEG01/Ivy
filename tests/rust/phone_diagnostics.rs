@@ -2,6 +2,24 @@ use ivy_contracts::{IvyJson, json};
 use ivy_phone_bridge::diagnostics::PhoneDiagnostics;
 
 #[test]
+fn media_cleanup_and_work_reconciliation_recover_independently() {
+    let mut diagnostics = PhoneDiagnostics::new("fixture.phone".into());
+    let at = "2026-10-24T08:00:00.000Z";
+    diagnostics.cleanup_observed("original", Some("phone_stop_unknown"), at);
+    diagnostics.work_observed("original", Some("deadline_exceeded"), at);
+    diagnostics.call_succeeded();
+    let scopes = |diagnostics: &PhoneDiagnostics| diagnostics.snapshot().into_iter()
+        .map(|v| v.required("resource").unwrap().required("scope").unwrap().as_str().unwrap()).collect::<Vec<_>>();
+    assert_eq!(scopes(&diagnostics), ["call_cleanup", "work_observation"]);
+    diagnostics.cleanup_observed("another", None, at);
+    assert_eq!(diagnostics.snapshot().len(), 2);
+    diagnostics.cleanup_observed("original", None, at);
+    assert_eq!(scopes(&diagnostics), ["work_observation"]);
+    diagnostics.work_observed("original", None, at);
+    assert!(diagnostics.snapshot().is_empty());
+}
+
+#[test]
 fn diagnostics_preserve_recovery_order_bounds_and_redact_private_details() {
     let mut diagnostics = PhoneDiagnostics::new("phone".into());
     let mut at = "2026-01-01T00:00:00.000Z";

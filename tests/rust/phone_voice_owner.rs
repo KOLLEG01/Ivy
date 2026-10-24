@@ -788,8 +788,9 @@ async fn task_sessions_recovery_reservations_and_archival_preserve_receipts() {
                     })
                     .collect();
                 observations.push(observed("inputs", Ok(IvyJson::Array(inputs))));
+                let input_token=text(&voice.inputs(&call_id).unwrap()[0],"inputToken").unwrap();
                 assert!(
-                    matches!(voice.answer(call_id.clone(), "7".into(), IvyJson::Null),
+                    matches!(voice.answer(call_id.clone(), "7".into(), IvyJson::Null,input_token.clone()),
                     Err(error) if error.code == "phone_voice_input_missing"),
                     "A text request ID must not answer the numeric request 7"
                 );
@@ -818,6 +819,7 @@ async fn task_sessions_recovery_reservations_and_archival_preserve_receipts() {
                                     call_id.clone(),
                                     7.0.into(),
                                     value(r#"{"result":{"answers":{}}}"#),
+                                    input_token,
                                 )
                                 .unwrap()
                                 .wait(),

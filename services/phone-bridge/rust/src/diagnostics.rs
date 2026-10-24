@@ -5,6 +5,8 @@ use ivy_contracts::IvyJson;
 pub struct PhoneDiagnostics {
     service_node_id: String,
     calls: Vec<(String, IvyJson)>,
+    cleanups: Vec<(String, IvyJson)>,
+    observations: Vec<(String, IvyJson)>,
     poll: Option<IvyJson>,
     voice: Option<IvyJson>,
     registration: Option<IvyJson>,
@@ -15,6 +17,8 @@ impl PhoneDiagnostics {
         Self {
             service_node_id,
             calls: Vec::with_capacity(32),
+            cleanups: Vec::with_capacity(32),
+            observations: Vec::with_capacity(64),
             poll: None,
             voice: None,
             registration: None,
@@ -28,6 +32,8 @@ impl PhoneDiagnostics {
             .cloned()
             .unwrap_or_else(|| at.into());
         let message = match scope {
+            "call_cleanup" => "Phone media cleanup is unconfirmed. Inspect the original stop and release outcomes.",
+            "work_observation" => "The original Voice work status is awaiting reconciliation; call media cleanup is independent.",
             "call" => {
                 "The original Phone call needs attention. Inspect its retained command outcomes; do not repeat the call."
             }
@@ -75,6 +81,16 @@ impl PhoneDiagnostics {
     pub fn call_succeeded(&mut self) {
         self.calls.clear();
     }
+    pub fn cleanup_observed(&mut self, call_id: &str, code: Option<&str>, at: &str) {
+        let prior = self.cleanups.iter().find(|(id, _)| id == call_id).map(|(_, value)| value);
+        let next = code.map(|code| self.observation(code, prior, "call_cleanup", at));
+        update(&mut self.cleanups, call_id, next, 32);
+    }
+    pub fn work_observed(&mut self, call_id: &str, code: Option<&str>, at: &str) {
+        let prior = self.observations.iter().find(|(id, _)| id == call_id).map(|(_, value)| value);
+        let next = code.map(|code| self.observation(code, prior, "work_observation", at));
+        update(&mut self.observations, call_id, next, 64);
+    }
     pub fn poll_failed(&mut self, code: &str, at: &str) {
         self.poll = Some(self.observation(code, self.poll.as_ref(), "poll", at));
     }
@@ -113,10 +129,20 @@ impl PhoneDiagnostics {
         self.calls
             .iter()
             .map(|(_, value)| value)
+            .chain(self.cleanups.iter().map(|(_, value)| value))
+            .chain(self.observations.iter().map(|(_, value)| value))
             .chain(self.poll.iter())
             .chain(self.voice.iter())
             .chain(self.registration.iter())
             .cloned()
             .collect()
+    }
+}
+fn update(rows: &mut Vec<(String, IvyJson)>, id: &str, next: Option<IvyJson>, maximum: usize) {
+    match (rows.iter().position(|(key, _)| key == id), next) {
+        (Some(index), Some(value)) => rows[index].1 = value,
+        (Some(index), None) => { rows.remove(index); },
+        (None, Some(value)) => { if rows.len() == maximum { rows.remove(0); } rows.push((id.to_owned(), value)); },
+        (None, None) => (),
     }
 }

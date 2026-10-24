@@ -1,5 +1,4 @@
-//! Original V3 speaker discovery over the connection owner's advertised V1
-//! catalog. This does not start a Voice session or change a retained selection.
+//! Select the highest advertised catalog supported by the pinned start contract.
 use super::{VoiceModelControl, models::wall_time_ms};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_host_runtime::codex_rpc::RequestOptions;
@@ -173,25 +172,7 @@ async fn discover(owner: &Inner) -> IvyResult<IvyJson> {
         &result,
         64 * 1024,
     )?;
-    drop(rpc);
     let voices = result.get("voices").ok_or_else(IvyError::internal)?;
-    let ids = voices
-        .get("v1")
-        .and_then(IvyJson::as_array)
-        .ok_or_else(IvyError::internal)?
-        .iter()
-        .map(|id| id.as_js_string().cloned().ok_or_else(IvyError::internal))
-        .collect::<IvyResult<Vec<_>>>()?;
-    let default = voices.get("defaultV1").and_then(IvyJson::as_js_string);
-    if ids.is_empty()
-        || ids.iter().collect::<HashSet<_>>().len() != ids.len()
-        || !ids.iter().any(|id| Some(id) == default)
-    {
-        return Err(IvyError::new(
-            "phone_speaker_catalog_invalid",
-            "Native V3 speaker catalog is incomplete.",
-        ));
-    }
     let configuration = call(
         owner,
         "config/read",
@@ -210,35 +191,156 @@ async fn discover(owner: &Inner) -> IvyResult<IvyJson> {
         .get("realtime")
         .and_then(|value| value.get("voice"))
         .filter(|value| !value.is_null());
-    let selected = settings.voice.as_ref().or_else(|| match configured {
-        Some(value) => value.as_js_string(),
-        None => default,
-    });
-    let selected = selected
-        .filter(|selected| ids.contains(selected))
+    let configured = settings
+        .voice
+        .as_ref()
+        .map(|v| IvyJson::String(v.clone()))
+        .or_else(|| configured.cloned());
+    let start = rpc
+        .catalog
+        .required("clientRequests")?
+        .as_array()
+        .and_then(|defs| {
+            defs.iter()
+                .find(|d| d.get("method") == Some(&"thread/realtime/start".into()))
+        })
         .ok_or_else(|| {
             IvyError::new(
-                "phone_speaker_voice_invalid",
-                "Configured speaker voice is not supported by native V3.",
+                "native_method_unavailable",
+                "Native Voice startup is unavailable.",
             )
         })?;
-    Ok(IvyJson::object([
-        ("protocol", "v3".into()),
-        ("defaultVoiceId", IvyJson::String(selected.clone())),
-        (
-            "voices",
-            IvyJson::Array(
-                ids.iter()
-                    .map(|id| {
-                        Ok(IvyJson::object([
-                            ("id", IvyJson::String(id.clone())),
-                            ("displayName", IvyJson::String(display_name(id)?)),
-                        ]))
-                    })
-                    .collect::<IvyResult<Vec<_>>>()?,
+    select_catalog(voices, configured.as_ref(), |protocol, voice| {
+        let params = IvyJson::object([
+            ("threadId", "speaker-catalog-discovery".into()),
+            ("version", protocol.into()),
+            ("voice", voice.clone().into()),
+            ("outputModality", "audio".into()),
+            ("codexResponseHandoffMode", "commentary".into()),
+            ("clientManagedHandoffs", false.into()),
+            ("includeStartupContext", false.into()),
+            (
+                "transport",
+                IvyJson::object([
+                    ("type", "webrtc".into()),
+                    ("sdp", "speaker-catalog-discovery".into()),
+                ]),
             ),
-        ),
-    ]))
+            ("prompt", super::owner::instructions::INSTRUCTIONS.into()),
+            (
+                "initialItems",
+                IvyJson::Array(vec![IvyJson::object([
+                    ("role", "user".into()),
+                    ("text", "Speaker discovery.".into()),
+                ])]),
+            ),
+            ("realtimeStartInstructions", "Speaker discovery.".into()),
+        ]);
+        let schema = match start.required("inputSchema") {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let valid = rpc
+            .schemas
+            .validate(schema, &params, 6 * 1024 * 1024)
+            .is_ok();
+        let mut unsupported = params;
+        unsupported.insert("version", "unsupported-protocol".into());
+        valid
+            && rpc
+                .schemas
+                .validate(schema, &unsupported, 6 * 1024 * 1024)
+                .is_err()
+    })
+}
+fn select_catalog(
+    voices: &IvyJson,
+    configured: Option<&IvyJson>,
+    supports: impl Fn(&str, &JsString) -> bool,
+) -> IvyResult<IvyJson> {
+    let invalid = || {
+        IvyError::new(
+            "phone_speaker_catalog_invalid",
+            "No nonempty speaker catalog supports the required native Voice start contract.",
+        )
+    };
+    let mut versions = voices
+        .as_object()
+        .ok_or_else(invalid)?
+        .iter()
+        .filter_map(|(key, _)| key.to_utf8().ok())
+        .filter(|key| {
+            key.strip_prefix('v').is_some_and(|n| {
+                !n.starts_with('0') && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+            })
+        })
+        .collect::<Vec<_>>();
+    versions.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| b.cmp(a)));
+    for version in versions {
+        let values = voices
+            .required(&version)?
+            .as_array()
+            .filter(|ids| ids.len() <= 256)
+            .ok_or_else(invalid)?;
+        let ids = values
+            .iter()
+            .map(|id| {
+                id.as_js_string()
+                    .filter(|id| !id.0.is_empty() && id.0.len() <= 256)
+                    .cloned()
+                    .ok_or_else(invalid)
+            })
+            .collect::<IvyResult<Vec<_>>>()?;
+        if ids.iter().collect::<HashSet<_>>().len() != ids.len() {
+            return Err(invalid());
+        }
+        if ids.is_empty() || version == "v2" {
+            continue;
+        }
+        let protocol = if version == "v1" {
+            "v3"
+        } else {
+            version.as_str()
+        };
+        if !ids.iter().all(|id| supports(protocol, id)) {
+            continue;
+        }
+        let default = configured
+            .or_else(|| voices.get(format!("defaultV{}", &version[1..]).as_str()))
+            .or_else(|| voices.get("defaultV1"));
+        let selected = default
+            .and_then(IvyJson::as_js_string)
+            .filter(|id| ids.contains(id))
+            .ok_or_else(|| {
+                IvyError::new(
+                    if configured.is_some() {
+                        "phone_speaker_voice_invalid"
+                    } else {
+                        "phone_speaker_catalog_invalid"
+                    },
+                    "Default speaker voice is outside the selected native catalog.",
+                )
+            })?;
+        return Ok(IvyJson::object([
+            ("protocol", protocol.into()),
+            ("catalogVersion", version.as_str().into()),
+            ("defaultVoiceId", IvyJson::String(selected.clone())),
+            (
+                "voices",
+                IvyJson::Array(
+                    ids.iter()
+                        .map(|id| {
+                            Ok(IvyJson::object([
+                                ("id", IvyJson::String(id.clone())),
+                                ("displayName", IvyJson::String(display_name(id)?)),
+                            ]))
+                        })
+                        .collect::<IvyResult<Vec<_>>>()?,
+                ),
+            ),
+        ]));
+    }
+    Err(invalid())
 }
 
 fn display_name(id: &JsString) -> IvyResult<JsString> {

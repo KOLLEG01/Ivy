@@ -68,6 +68,7 @@ pub(super) fn intent_shape(intent: &IvyJson) -> IvyResult<()> {
             if let Some(sequence) = intent.get("commandSequence") {
                 arguments.insert("commandSequence", sequence.clone());
             }
+            if let Some(voice) = intent.get("voiceId") {arguments.insert("voiceId",voice.clone());}
             require(
                 hash_matches(&arguments, MANAGEMENT_FRAME_BYTES)?,
                 "phone_voice_selection_changed",

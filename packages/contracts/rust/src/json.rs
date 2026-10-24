@@ -212,7 +212,6 @@ impl IvyJson {
 fn invalid(message: &str) -> IvyError {
     IvyError::new("invalid_arguments", message)
 }
-
 fn complexity() -> IvyError {
     IvyError::new("limit_exceeded", "JSON structure is too complex.")
 }

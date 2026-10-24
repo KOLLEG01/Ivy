@@ -194,6 +194,7 @@ fn service() -> IvyResult<&'static Contracts> {
                 include_str!("../../../../specs/schemas/phone-journal.schema.json"),
                 include_str!("../../../../specs/schemas/phone-admission.schema.json"),
                 include_str!("../../../../specs/schemas/phone-service.schema.json"),
+                include_str!("../../../../specs/schemas/phone-voice-work.schema.json"),
             ] {
                 let document = parse(source, MANAGEMENT_FRAME_BYTES)?;
                 for (name, value) in field(&document, "$defs")?

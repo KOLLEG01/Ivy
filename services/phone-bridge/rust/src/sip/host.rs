@@ -162,6 +162,7 @@ pub enum SipHostCallPhase {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SipHostCallObservation {
+    pub ended_at: Option<i64>,
     pub id: String,
     pub phase: SipHostCallPhase,
     pub attempted: bool,
@@ -169,6 +170,7 @@ pub struct SipHostCallObservation {
     pub signalling: Option<CallObservation>,
 }
 struct CallState {
+    ended_at: Option<i64>,
     attempted: bool,
     ending: bool,
     failed_before_send: bool,
@@ -193,7 +195,7 @@ impl Call {
         }
     }
     fn observation(&self) -> SipHostCallObservation {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         let signalling = state
             .incoming
             .as_ref()
@@ -215,7 +217,10 @@ impl Call {
         } else {
             SipHostCallPhase::Prepared
         };
+        let ended_at=state.ended_at.into_iter().chain(signalling.and_then(|s|s.ended_at)).min().or_else(||(phase==SipHostCallPhase::LocalEnded).then(||chrono::Utc::now().timestamp_millis()));
+        state.ended_at=ended_at;
         SipHostCallObservation {
+            ended_at,
             id: self.id.clone(),
             phase,
             attempted: state.attempted,
@@ -226,6 +231,7 @@ impl Call {
     fn hangup(&self) {
         let mut state = self.state.lock().unwrap();
         state.ending = true;
+        state.ended_at.get_or_insert_with(||chrono::Utc::now().timestamp_millis());
         self.request_media_close();
         if let Some(invite) = &state.invite {
             invite.request_hangup();
@@ -537,6 +543,7 @@ impl SipHost {
             signalling_view,
             host: Arc::downgrade(self.shared()),
             state: Mutex::new(CallState {
+                ended_at: None,
                 attempted: false,
                 ending: false,
                 failed_before_send: false,
@@ -606,6 +613,7 @@ impl SipHost {
                 signalling_view: OnceLock::new(),
                 host: Arc::downgrade(self.shared()),
                 state: Mutex::new(CallState {
+                    ended_at: None,
                     attempted: false,
                     ending: false,
                     failed_before_send: false,

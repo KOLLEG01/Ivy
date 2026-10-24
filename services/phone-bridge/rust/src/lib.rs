@@ -49,3 +49,5 @@ mod service_test_support;
 pub mod sip;
 pub mod voice_rpc;
 pub mod voice_selection;
+pub mod voice_work;
+pub mod voice_notices;

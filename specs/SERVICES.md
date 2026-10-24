@@ -34,6 +34,9 @@ An isolated [Claude adapter option](CLAUDE-ADAPTER.md) uses the same AgentManage
   and immutable parameter revisions; changed defaults cannot redirect saved work.
 - Keep native resource ownership and connection epoch explicit. Inventory may expose stored
   tasks that the current connection cannot control. Failed enumeration preserves prior observations.
+- Expired observations release active request capacity without terminating accepted turns.
+  Late replies remain recognizable with bounded correlation state; explicit unresolved request
+  identities stay fenced and cannot be dispatched again as a timeout recovery.
 - Durable invocation saves intent before dispatch and outcome before acknowledgement. Direct
   interactions and read observations retain their distinct recovery contracts; losing a
   transient interaction cache does not authorize replay.
@@ -68,14 +71,32 @@ the original transport result or stays unknown. Transport retention and recovery
 `de` for ChatBridge-authored WhatsApp copy; omission uses English. It is a presentation setting,
 not part of the workspace `Definition` or the separate transcription-language setting.
 
+Explicit file delivery uses `chat_bridge_send_file` and the existing WhatsApp connection.
+Read `chat_bridge_read` with `{fileTarget:true}`, then submit its exact bridge/binding,
+one selected file's canonical base64 bytes, filename, MIME, byte length and SHA-256,
+an optional caption and a stable operation ID. Local paths and arbitrary download URLs
+are not accepted. PNG/JPEG use native image messages; other admitted formats retain their
+original bytes as named documents. MIME signatures and UTF-8 text are checked; unknown
+binary formats require `application/octet-stream`. Limits and request shapes are in the
+[Chat schema](schemas/chat.schema.json). Read `{fileOperationId:operationId}` for the
+original delivery: queued/sending does not prove delivery; sent requires WhatsApp server
+acknowledgement. Uncertain media sends are never repeated automatically. File intent and
+bytes share the ordered durable transport journal. A changed Main, account or recipient
+blocks dispatch. The file queue admits 32 unresolved deliveries and 64 MiB, expires files
+after seven days and retains at most 256 completed receipts with compact replay fences.
+Checks: [file delivery](../tests/chat-files.test.ts).
+
 ChatBridge observes unresolved Hive warning/error diagnostics. A problem lasting five minutes
 enters Main once; resolution must remain stable for five minutes before one recovery notice.
+Diagnostics with the same visible service, error code and dependent service form one incident,
+independently of internal resource IDs. Recovery requires the entire group to remain healthy.
 Hive's shared quiet hours govern operational notices without depending on an optional service.
 Quiet periods retain current failures without queuing resolved incidents or recoveries for later
 delivery. WhatsApp also gates notice replies queued before quiet hours, while explicit user
 replies can progress. Paused notices keep their original message IDs and receipts. Requests
 and deduplication state survive restarts in the existing journal. Incomplete diagnostic reads
-cannot imply recovery. Short reconnects remain quiet, and failures of the notice mechanism
+cannot imply recovery. Combining incidents preserves all unfinished original delivery receipts.
+Short reconnects remain quiet, and failures of the notice mechanism
 itself remain visible as a diagnostic without recursively generating notices.
 Receive receipts save immutable reply snapshots before changing delivery state. If retention
 prunes an offered reply revision, recovery verifies its current immutable content against that

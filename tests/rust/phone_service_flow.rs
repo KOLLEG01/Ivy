@@ -138,7 +138,7 @@ impl PhoneFlowVoice for Arc<Voice> {
     fn inputs(&self, _: &JsString) -> IvyResult<Vec<IvyJson>> {
         Ok(vec![])
     }
-    fn answer(&self, _: JsString, _: IvyJson, _: IvyJson) -> FlowFuture<()> {
+    fn answer(&self, _: JsString, _: IvyJson, _: IvyJson, _: JsString) -> FlowFuture<()> {
         self.event("answer".into());
         Box::pin(async { Ok(()) })
     }
@@ -228,10 +228,15 @@ impl PhoneFlowVoice for Arc<Voice> {
             if let VoiceSelectionCommand::Sequence(sequence) = &command {
                 args.insert("commandSequence", f64::from(*sequence).into());
             }
+            if let VoiceSelectionCommand::Update { voice_id, .. } = &command {
+                args.insert("voiceId", voice_id.clone().into());
+            }
             let hash = hash_json(&args)?;
             args.insert("requestHash", hash.into());
-            if let VoiceSelectionCommand::Operation(operation) = command {
-                args.insert("operationId", operation.into());
+            match command {
+                VoiceSelectionCommand::Operation(operation)
+                | VoiceSelectionCommand::Update { operation_id: operation, .. } => { args.insert("operationId", operation.into()); }
+                _ => {}
             }
             voice.finish("call.selectVoice", args).await
         })
@@ -682,6 +687,31 @@ async fn original_voice_controls_restart_feedback_and_cleanup() {
         fixture.close().await;
     }
 }
+#[tokio::test]
+async fn partial_voice_update_replays_its_original_defaults_after_a_newer_selection() {
+    let fixture = Fixture::new(&object([])).await;
+    let bridge = crate::service_bridge::PhoneBridge::new(fixture.flow.clone(), fixture.native.clone());
+    let signal = tokio_util::sync::CancellationToken::new();
+    let original = object([("operationId", id(30).into()), ("callId", id(3).into()),
+        ("reasoningEffort", "ultra".into()), ("voiceId", "ember".into())]);
+    let first = bridge.invoke("update", original.clone(), "other".into(), &signal).await.unwrap();
+    assert_eq!(first.required("intent").unwrap().get("model"), Some(&"gpt-6.1-sol".into()));
+    assert_eq!(fixture.journal.selected_speaker_voice(id(3)).await.unwrap(), Some("ember".into()));
+    bridge.invoke("update", object([("operationId", id(31).into()), ("callId", id(3).into()),
+        ("model", "gpt-6-sol".into())]), "other".into(), &signal).await.unwrap();
+    let events = fixture.voice.events.lock().unwrap().clone();
+    let replay = bridge.invoke("update", original.clone(), "other".into(), &signal).await.unwrap();
+    equal(&replay, &first, "original partial update");
+    assert_eq!(*fixture.voice.events.lock().unwrap(), events);
+    let selected = fixture.flow.voice_selection(&id(3)).await.unwrap();
+    assert_eq!(selected.model, JsString::from("gpt-6-sol"));
+    assert_eq!(selected.reasoning_effort, JsString::from("ultra"));
+    assert!(events.iter().all(|event| !event.starts_with("start:") && !event.starts_with("prepare:")));
+    let mut conflict = original; conflict.insert("voiceId", "cove".into());
+    assert_eq!(bridge.invoke("update", conflict, "other".into(), &signal).await.unwrap_err().code, "mutation_conflict");
+    fixture.close().await;
+}
+
 #[tokio::test]
 async fn control_observer_loss_retains_selection_and_close_revokes_before_voice_drains() {
     let fixture = Fixture::new(&object([])).await;

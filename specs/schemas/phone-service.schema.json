@@ -24,24 +24,59 @@
     "PhoneVoiceModel": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["model", "displayName", "description", "defaultReasoningEffort", "supportedReasoningEfforts", "isDefault"],
+      "required": [
+        "model",
+        "displayName",
+        "description",
+        "defaultReasoningEffort",
+        "supportedReasoningEfforts",
+        "isDefault"
+      ],
       "properties": {
-        "model": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "displayName": { "type": "string", "maxLength": 256 },
-        "description": { "type": "string", "maxLength": 4096 },
-        "defaultReasoningEffort": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "defaultReasoningEffort": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
         "supportedReasoningEfforts": {
-          "type": "array", "maxItems": 32,
+          "type": "array",
+          "maxItems": 32,
           "items": {
-            "type": "object", "additionalProperties": false,
-            "required": ["reasoningEffort", "description"],
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "reasoningEffort",
+              "description"
+            ],
             "properties": {
-              "reasoningEffort": { "type": "string", "minLength": 1, "maxLength": 64 },
-              "description": { "type": "string", "maxLength": 4096 }
+              "reasoningEffort": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "description": {
+                "type": "string",
+                "maxLength": 4096
+              }
             }
           }
         },
-        "isDefault": { "type": "boolean" }
+        "isDefault": {
+          "type": "boolean"
+        }
       }
     },
     "PhoneServiceSettings": {
@@ -331,11 +366,16 @@
           "description": "Picker-visible models and each model's reasoning options from the configured Codex home via model/list. Cached for up to 60 seconds; refreshed on reconnect. No fixed model allowlist.",
           "type": "array",
           "maxItems": 256,
-          "items": { "$ref": "#/$defs/PhoneVoiceModel" }
+          "items": {
+            "$ref": "#/$defs/PhoneVoiceModel"
+          }
         },
         "voiceModelsError": {
           "description": "Null after a successful model catalog read; otherwise its error code. An unavailable catalog is never replaced with a fixed model list.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "incoming": {
           "anyOf": [
@@ -617,7 +657,9 @@
       "required": [
         "call",
         "current",
-        "observation"
+        "observation",
+        "work",
+        "inputs"
       ],
       "properties": {
         "call": {
@@ -635,6 +677,23 @@
               "$ref": "#/$defs/SipCallObservation"
             }
           ]
+        },
+        "work": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/PhoneVoiceWorkView"
+            }
+          ]
+        },
+        "inputs": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/PhoneVoiceInput"
+          }
         }
       }
     },
@@ -1320,27 +1379,7 @@
           "type": "array",
           "maxItems": 4,
           "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "id",
-              "method",
-              "params",
-              "replySchema"
-            ],
-            "properties": {
-              "id": {
-                "type": [
-                  "string",
-                  "integer"
-                ]
-              },
-              "method": {
-                "type": "string"
-              },
-              "params": {},
-              "replySchema": {}
-            }
+            "$ref": "#/$defs/PhoneVoiceInput"
           }
         }
       }
@@ -1351,9 +1390,14 @@
       "required": [
         "callId",
         "id",
+        "inputToken",
         "reply"
       ],
       "properties": {
+        "inputToken": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
         "callId": {
           "$ref": "#/$defs/Uuid"
         },
@@ -1444,7 +1488,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 256,
-          "description": "Exact native V3 audio speaker ID from phone_bridge_speaker_voices. Applies to this call after an explicit Voice restart."
+          "description": "Exact speaker ID from the chosen phone_bridge_speaker_voices catalog. Applies to this call after an explicit Voice restart."
         }
       }
     },
@@ -1494,7 +1538,12 @@
       ],
       "properties": {
         "protocol": {
-          "const": "v3"
+          "type": "string",
+          "pattern": "^v[1-9][0-9]*$"
+        },
+        "catalogVersion": {
+          "type": "string",
+          "pattern": "^v[1-9][0-9]*$"
         },
         "voices": {
           "type": "array",
@@ -1537,6 +1586,57 @@
           ]
         }
       }
+    },
+    "PhoneUpdate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "operationId"
+      ],
+      "properties": {
+        "callId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "operationId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "model": {
+          "description": "Exact model ID from phone_bridge_status.voiceModels. Validated against the configured Codex runtime.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "reasoningEffort": {
+          "description": "One of the selected model's supportedReasoningEfforts from phone_bridge_status.voiceModels.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "voiceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Exact speaker ID from the chosen phone_bridge_speaker_voices catalog. Applies to this call after an explicit Voice restart."
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "model"
+          ]
+        },
+        {
+          "required": [
+            "reasoningEffort"
+          ]
+        },
+        {
+          "required": [
+            "voiceId"
+          ]
+        }
+      ]
     }
   }
 }

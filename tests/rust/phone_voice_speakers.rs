@@ -27,6 +27,7 @@ struct Schemas {
 // Instrument the REQUIRED installed compiler seam; this is not that compiler.
 impl VoiceSchemas for Schemas {
     fn validate(&self, schema: &IvyJson, input: &IvyJson, max: usize) -> IvyResult<()> {
+        if input.get("version").is_some() {return ivy_contracts::schema::SchemaValidators::new().validate(schema,input,max);}
         self.calls.lock().unwrap().push((schema.clone(), max));
         stringify(input, max)?;
         if max == 64 * 1024 && self.reject_output.load(Ordering::SeqCst) {
@@ -249,7 +250,7 @@ async fn speaker_catalog_defaults_overrides_and_errors_are_explicit() {
         None,
         None,
         None,
-        Some(""),
+        None,
     ];
     for (index, row) in cases.iter().enumerate() {
         let (speakers, control, mut peer, schemas, _) = fixture();
@@ -260,8 +261,8 @@ async fn speaker_catalog_defaults_overrides_and_errors_are_explicit() {
         assert_eq!(request.get("params"), Some(&value("{}")));
         peer.reply(&request, row.get("result").unwrap().clone())
             .await;
-        let invalid_catalog = (11..=13).contains(&index);
-        if !invalid_catalog {
+        let invalid_catalog = (11..=14).contains(&index);
+        {
             let request = peer.request("config/read").await;
             assert_eq!(
                 request.get("params"),
@@ -280,12 +281,10 @@ async fn speaker_catalog_defaults_overrides_and_errors_are_explicit() {
         if let Some(expected) = selected[index] {
             let catalog = result.unwrap();
             assert_eq!(catalog.get("protocol"), Some(&"v3".into()));
+            assert_eq!(catalog.get("catalogVersion"), Some(&"v1".into()));
             assert_eq!(catalog.get("defaultVoiceId"), Some(&expected.into()));
             let voices = catalog.get("voices").unwrap().as_array().unwrap();
-            assert_eq!(voices.len(), if index == 14 { 3 } else { 2 });
-            if index == 14 {
-                assert_eq!(voices[1].get("displayName"), Some(&"SSeta".into()));
-            }
+            assert_eq!(voices.len(), 2);
         } else {
             assert_eq!(
                 result.unwrap_err().code,
@@ -296,7 +295,7 @@ async fn speaker_catalog_defaults_overrides_and_errors_are_explicit() {
                 }
             );
         }
-        assert_eq!(peer.sent.len(), if invalid_catalog { 1 } else { 2 });
+        assert_eq!(peer.sent.len(), 2);
         assert_eq!(
             schemas
                 .calls

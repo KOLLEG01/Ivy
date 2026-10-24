@@ -82,7 +82,7 @@ impl PhoneBridge {
             .await
     }
     async fn view(&self, caller: JsString, id: JsString) -> IvyResult<IvyJson> {
-        let call = self.original(caller, id.clone()).await?;
+        let call = self.original(caller.clone(), id.clone()).await?;
         let journal = self.flow.calls().journal();
         let mut current = journal.current_call(Some(id.clone())).await?.is_some();
         let mut observation = IvyJson::Null;
@@ -93,7 +93,7 @@ impl PhoneBridge {
                 if let Ok(observed) = observed {
                     if let Some(call) = observed
                         .get("call")
-                        .filter(|c| c.get("id") == Some(&id.into()))
+                        .filter(|c| c.get("id") == Some(&id.clone().into()))
                     {
                         observation = call.clone();
                     }
@@ -104,6 +104,17 @@ impl PhoneBridge {
             ("call", call),
             ("current", current.into()),
             ("observation", observation),
+            (
+                "work",
+                self.flow
+                    .voice_work(caller.clone(), id.clone())
+                    .await?
+                    .unwrap_or(IvyJson::Null),
+            ),
+            (
+                "inputs",
+                IvyJson::Array(self.flow.voice_inputs(caller, id).await?),
+            ),
         ]))
     }
     async fn idle(&self, message: &str) -> IvyResult<()> {
@@ -158,6 +169,13 @@ impl PhoneBridge {
             .ok_or_else(|| IvyError::new("tool_unavailable", "Phone tool is unavailable."))?;
         validate_phone_service(tool.input, &args)?;
         let result = match name {
+            "voiceWork" => IvyJson::object([(
+                "work",
+                self.flow
+                    .voice_work(caller, text(&args, "callId")?)
+                    .await?
+                    .unwrap_or(IvyJson::Null),
+            )]),
             "speakerVoices" => {
                 let id = args.get("callId").and_then(IvyJson::as_js_string).cloned();
                 if let Some(id) = &id {
@@ -268,6 +286,60 @@ impl PhoneBridge {
                     .wait()
                     .await?
             }
+            "update" => {
+                let id = text(&args, "callId")?;
+                let operation = text(&args, "operationId")?;
+                if args.get("model").is_none() && args.get("reasoningEffort").is_none() {
+                    self.flow
+                        .select_speaker_voice(caller, id, operation, text(&args, "voiceId")?)
+                        .wait()
+                        .await?
+                } else {
+                    self.original(caller.clone(), id.clone()).await?;
+                    let prior = self
+                        .flow
+                        .calls()
+                        .journal()
+                        .operation(operation.clone())
+                        .await?;
+                    let base = if let Some(intent) = prior
+                        .as_ref()
+                        .and_then(|p| p.get("intent"))
+                        .filter(|i| i.get("method") == Some(&"call.selectVoice".into()))
+                    {
+                        intent.clone()
+                    } else {
+                        self.flow.voice_selection(&id).await?.to_wire()
+                    };
+                    let selection = VoiceSelection {
+                        model: args
+                            .get("model")
+                            .unwrap_or(base.required("model")?)
+                            .as_js_string()
+                            .cloned()
+                            .ok_or_else(IvyError::internal)?,
+                        reasoning_effort: args
+                            .get("reasoningEffort")
+                            .unwrap_or(base.required("reasoningEffort")?)
+                            .as_js_string()
+                            .cloned()
+                            .ok_or_else(IvyError::internal)?,
+                    };
+                    let control =
+                        if let Some(voice) = args.get("voiceId").and_then(IvyJson::as_js_string) {
+                            PhoneVoiceControl::Update {
+                                selection,
+                                voice_id: voice.clone(),
+                            }
+                        } else {
+                            PhoneVoiceControl::Select(selection)
+                        };
+                    self.flow
+                        .control_voice(caller, id, operation, control)
+                        .wait()
+                        .await?
+                }
+            }
             "history" => IvyJson::object([(
                 "calls",
                 IvyJson::Array(
@@ -328,6 +400,7 @@ impl PhoneBridge {
                         text(&args, "callId")?,
                         field(&args, "id")?.clone(),
                         field(&args, "reply")?.clone(),
+                        text(&args, "inputToken")?,
                     )
                     .wait()
                     .await?;

@@ -50,6 +50,8 @@ impl Inner {
         Ok(available && idle && self.journal.current_calls().await?.is_empty())
     }
     async fn archive_protected(&self, id: &JsString) -> IvyResult<bool> {
+        self.works.initialize().await?;
+        if self.works.protected(id)||self.works.observation(id).is_some() {return Ok(true);}
         let fingerprint = self.fingerprint()?;
         Ok(self
             .journal

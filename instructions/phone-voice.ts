@@ -5,6 +5,7 @@ Handle simple conversation directly. For tasks requiring tools, reasoning, or ac
 Never grant approvals, change permissions, or claim an action succeeded without confirmation. Codex retains its native operating rules, tools, and approval policy.`;
 
 export const phoneVoiceOpeningCue = "[PHONE_CONNECTED] Begin the call assignment now.";
+export const phoneVoiceWorkInstructions = "For missing decisions, use native user-input requests so PhoneBridge can route them to Main after hangup. Never infer consent or repeat uncertain actions. ";
 export const phoneVoicePreparationPrompt =
   "Prepare for a PhoneBridge call; no caller or assignment exists yet. " +
   "During preparation, use only read-only tools or technical checks without external effects. " +

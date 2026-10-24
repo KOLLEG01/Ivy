@@ -22,7 +22,8 @@ fn empty() -> IvyJson {
 #[derive(Default)]
 pub(crate) struct Schemas(Mutex<Vec<usize>>);
 impl VoiceSchemas for Schemas {
-    fn validate(&self, _: &IvyJson, input: &IvyJson, max: usize) -> IvyResult<()> {
+    fn validate(&self, schema: &IvyJson, input: &IvyJson, max: usize) -> IvyResult<()> {
+        if input.get("version").is_some() {return ivy_contracts::schema::SchemaValidators::new().validate(schema,input,max);}
         self.0.lock().unwrap().push(max);
         stringify(input, max)?;
         Ok(())

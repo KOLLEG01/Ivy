@@ -67,6 +67,7 @@ struct Inner {
 #[derive(Clone)]
 pub struct VoicePreparation(Arc<Inner>);
 impl VoicePreparation {
+    pub(super) fn is_preparing(&self, thread: &JsString) -> bool { self.0.state.lock().unwrap().pending.contains_key(thread) }
     pub fn new(control: VoiceControl, journal: Arc<dyn VoicePreparationJournal>) -> Self {
         Self(Arc::new(Inner {
             control,

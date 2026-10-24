@@ -22,7 +22,7 @@ pub use process::NativeVoiceConnector;
 mod preparation;
 pub use preparation::{VoiceJournalFuture, VoicePreparation, VoicePreparationJournal};
 mod owner;
-pub use owner::{PhoneCodexVoice, VoiceAsyncGuard, VoiceGuard, VoiceSelectionCommand};
+pub use owner::{PhoneCodexVoice, VoiceAsyncGuard, VoiceGuard, VoiceSelectionCommand, WorkObserver};
 
 /// Required compiler boundary for installed native schemas. Implementations must
 /// apply the catalog schema and the supplied serialized-value byte limit.

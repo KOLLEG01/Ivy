@@ -106,6 +106,7 @@ impl PreparedInvite {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CallObservation {
+    pub ended_at: Option<i64>,
     pub outcome: Option<CallOutcome>,
     pub phase: FinalPhase,
     pub active: bool,
@@ -213,6 +214,7 @@ impl DelayedInvite {
         let (commands, receiver) = mpsc::channel(8);
         let (identity, identity_rx) = watch::channel(None);
         let initial = CallObservation {
+            ended_at: None,
             outcome: None,
             phase: FinalPhase::Waiting,
             active: false,
@@ -458,6 +460,7 @@ async fn next(exchange: &mut Option<ClientExchange>) -> Result<Response, SipIoEr
 impl CallActor {
     fn observation(&self) -> CallObservation {
         CallObservation {
+            ended_at: self.observations.borrow().ended_at.or_else(||(self.lifecycle.is_ending() || self.lifecycle.outcome().is_some()&&!self.lifecycle.is_active()).then(||chrono::Utc::now().timestamp_millis())),
             outcome: self.lifecycle.outcome(),
             phase: self.lifecycle.phase(),
             active: self.lifecycle.is_active(),

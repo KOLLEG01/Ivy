@@ -54,14 +54,14 @@ const markEdited = () => { edited = true; };
 const stableListItemView = $view(listItemSchema.node, ctx => {
   const render = ctx.get(nodeViewCtx).find(([name]) => name === listItemSchema.node.id)![1];
   return (node, view, getPos, decorations, innerDecorations) => {
-  const mountedState = view.state;
-  const owner = new Proxy(view, { get(target, key, receiver) {
-    if (key !== 'dispatch') return Reflect.get(target, key, receiver);
-    return (transaction: Transaction) => {
-      if (!transaction.docChanged && transaction.selectionSet && target.state !== mountedState) return;
-      target.dispatch(transaction);
-    };
-  } });
+    const mountedState = view.state;
+    const owner = new Proxy(view, { get(target, key, receiver) {
+      if (key !== 'dispatch') return Reflect.get(target, key, receiver);
+      return (transaction: Transaction) => {
+        if (!transaction.docChanged && transaction.selectionSet && target.state !== mountedState) return;
+        target.dispatch(transaction);
+      };
+    } });
     return render(node, owner, getPos, decorations, innerDecorations);
   };
 });

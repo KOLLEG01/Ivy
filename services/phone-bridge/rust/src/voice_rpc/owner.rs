@@ -21,9 +21,10 @@ use std::{
 use tokio::{sync::watch, task::AbortHandle};
 
 mod archive;
-mod instructions;
+pub(super) mod instructions;
 mod sessions;
 mod tasks;
+mod work;
 
 #[cfg(test)]
 #[path = "../../../../../tests/rust/phone_voice_owner.rs"]
@@ -35,6 +36,10 @@ pub type VoiceAsyncGuard = Arc<dyn Fn() -> VoiceClose + Send + Sync>;
 pub enum VoiceSelectionCommand {
     Sequence(u32),
     Operation(JsString),
+    Update {
+        operation_id: JsString,
+        voice_id: JsString,
+    },
 }
 
 struct Session {
@@ -75,16 +80,28 @@ struct State {
     archiving: Option<VoiceControlOperation<()>>,
     archive_cursor: String,
     binding_cursor: String,
+    input_epoch: JsString,
+    rejoining: BTreeSet<JsString>,
+    interrupting: BTreeMap<JsString, VoiceControlOperation<()>>,
+    interrupted: BTreeSet<JsString>,
+    observation_retry_at: BTreeMap<JsString, i64>,
+    notified: BTreeSet<String>,
+    notifying: BTreeMap<String, VoiceControlOperation<()>>,
 }
 struct Inner {
+    work_observer: Mutex<Option<WorkObserver>>,
     control: VoiceControl,
     preparation: VoicePreparation,
     journal: PhoneJournal,
     on_error: Arc<dyn Fn(&str) + Send + Sync>,
     state: Mutex<State>,
+    works: crate::voice_work::PhoneVoiceWorks,
+    maintenance: tokio::sync::Mutex<()>,
+    notify_input: Mutex<Option<work::InputNotice>>,
 }
 #[derive(Clone)]
 pub struct PhoneCodexVoice(Arc<Inner>);
+pub type WorkObserver = Arc<dyn Fn(&JsString, Option<&str>) + Send + Sync>;
 
 fn operation<T: Clone + Send + Sync + 'static>(
     work: impl Future<Output = IvyResult<T>> + Send + 'static,
@@ -174,7 +191,7 @@ impl PhoneCodexVoice {
                         let owner = requests.lock().unwrap().upgrade();
                         Box::pin(async move {
                             if let Some(owner) = owner {
-                                owner.input(request)?;
+                                owner.input(request).await?;
                             }
                             Ok(())
                         })
@@ -183,7 +200,7 @@ impl PhoneCodexVoice {
                         let owner = notifications.lock().unwrap().upgrade();
                         Box::pin(async move {
                             if let Some(owner) = owner {
-                                owner.notification(notification)?;
+                                owner.notification(notification).await?;
                             }
                             Ok(())
                         })
@@ -202,13 +219,18 @@ impl PhoneCodexVoice {
         )?;
         let preparation = VoicePreparation::new(control.clone(), Arc::new(journal.clone()));
         let owner = Arc::new(Inner {
+            work_observer: Mutex::new(None),
             control,
             preparation,
+            works: crate::voice_work::PhoneVoiceWorks::new(journal.clone()),
             journal,
             on_error,
             state: Mutex::new(State::default()),
+            maintenance: tokio::sync::Mutex::new(()),
+            notify_input: Mutex::new(None),
         });
         *relay.lock().unwrap() = Arc::downgrade(&owner);
+        Inner::start_work_timer(&owner);
         Ok(Self(owner))
     }
     /// Same executing-account snapshot, submitted schemas and process owner as
@@ -259,7 +281,15 @@ impl PhoneCodexVoice {
     }
     pub fn inputs(&self, call_id: &JsString) -> IvyResult<Vec<IvyJson>> {
         let session = self.0.session(call_id);
-        let thread_id = session.map(|s| s.lock().unwrap().thread_id.clone());
+        let thread_id = session
+            .map(|s| s.lock().unwrap().thread_id.clone())
+            .or_else(|| {
+                self.0
+                    .works
+                    .for_call(call_id)
+                    .and_then(|w| text(&w, "threadId").ok())
+            });
+        let epoch = self.0.state.lock().unwrap().input_epoch.clone();
         let state = self.0.state.lock().unwrap();
         let rpc = self.0.control.current();
         state
@@ -283,6 +313,7 @@ impl PhoneCodexVoice {
                     .ok_or_else(IvyError::internal)?;
                 Ok(IvyJson::object([
                     ("id", r.id.clone()),
+                    ("inputToken", Inner::token_for(&epoch, r)?.into()),
                     ("method", r.method.clone().into()),
                     ("params", r.params.clone()),
                     ("replySchema", schema),
@@ -295,6 +326,7 @@ impl PhoneCodexVoice {
         call_id: JsString,
         id: IvyJson,
         reply: IvyJson,
+        input_token: JsString,
     ) -> IvyResult<VoiceControlOperation<()>> {
         let key = id.clone();
         let request = self
@@ -307,23 +339,38 @@ impl PhoneCodexVoice {
             .find(|(k, _)| k == &key)
             .map(|(_, r)| r.clone());
         let session = self.0.session(&call_id);
+        let work = self.0.works.for_call(&call_id);
+        let thread = session
+            .as_ref()
+            .map(|s| s.lock().unwrap().thread_id.clone())
+            .or_else(|| work.as_ref().and_then(|w| text(w, "threadId").ok()));
         require(
-            session.as_ref().is_some_and(|s| {
-                request.as_ref().is_some_and(|r| {
-                    r.params.get("threadId") == Some(&s.lock().unwrap().thread_id.clone().into())
-                })
+            request.as_ref().is_some_and(|r| {
+                self.0.input_token(r).ok().as_ref() == Some(&input_token)
+                    && r.params.get("threadId").and_then(IvyJson::as_js_string) == thread.as_ref()
             }),
             "phone_voice_input_missing",
             "Voice input no longer belongs to this call.",
         )?;
-        let session = session.unwrap();
-        let s = session.lock().unwrap();
         require(
-            !s.cancelled && !s.failed,
+            work.as_ref()
+                .map(|w| {
+                    self.0.works.can_answer(w)
+                        && request.as_ref().is_some_and(|r| {
+                            r.params
+                                .get("turnId")
+                                .is_none_or(|turn| turn.is_null() || Some(turn) == w.get("turnId"))
+                        })
+                })
+                .unwrap_or_else(|| {
+                    session.as_ref().is_some_and(|s| {
+                        let s = s.lock().unwrap();
+                        !s.cancelled && !s.failed
+                    })
+                }),
             "phone_call_cancelled",
             "Voice input belongs to an ended session.",
         )?;
-        drop(s);
         let request = request.unwrap();
         let rpc = self.0.rpc()?;
         if let Some(result) = reply.get("result") {
@@ -349,8 +396,35 @@ impl PhoneCodexVoice {
                     Arc::new(move |_| {
                         let owner = owner.clone();
                         let key = key.clone();
+                        let input_token = input_token.clone();
+                        let call_id = call_id.clone();
                         Box::pin(async move {
                             if let Some(owner) = owner.upgrade() {
+                                let current = owner
+                                    .state
+                                    .lock()
+                                    .unwrap()
+                                    .pending_inputs
+                                    .iter()
+                                    .find(|(k, _)| k == &key)
+                                    .map(|(_, r)| r.clone());
+                                require(
+                                    current.as_ref().is_some_and(|r| {
+                                        owner.input_token(r).ok().as_ref() == Some(&input_token)
+                                    }),
+                                    "phone_voice_input_missing",
+                                    "Native input was replaced before submission.",
+                                )?;
+                                if let Some(work) = owner.works.for_call(&call_id) {
+                                    require(
+                                        owner.works.can_answer(&work) && current.as_ref().is_some_and(|r| {
+                                            r.params.get("threadId") == work.get("threadId")
+                                                && r.params.get("turnId").is_none_or(|turn| turn.is_null() || Some(turn) == work.get("turnId"))
+                                        }),
+                                        "phone_call_cancelled",
+                                        "Original Voice deadline expired before submission.",
+                                    )?;
+                                }
                                 owner
                                     .state
                                     .lock()
@@ -368,6 +442,19 @@ impl PhoneCodexVoice {
     pub fn close(&self) -> VoiceControlOperation<()> {
         let owner = self.0.clone();
         self.0.control.close(Box::pin(async move {
+            let _maintenance = owner.maintenance.lock().await;
+            let halts = owner.claim_deadlines(true).await?;
+            let notices = owner
+                .state
+                .lock()
+                .unwrap()
+                .notifying
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            for notice in notices {
+                let _ = notice.wait().await;
+            }
             let preparing = owner
                 .state
                 .lock()
@@ -398,6 +485,20 @@ impl PhoneCodexVoice {
             }
             while let Some(result) = stops.join_next().await {
                 result.map_err(|_| IvyError::internal())??;
+            }
+            for halt in halts {
+                let _ = halt.wait().await;
+            }
+            let interrupting = owner
+                .state
+                .lock()
+                .unwrap()
+                .interrupting
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            for halt in interrupting {
+                let _ = halt.wait().await;
             }
             Ok(())
         }))
@@ -439,6 +540,7 @@ impl Inner {
         let mut s = self.state.lock().unwrap();
         s.reconciled.clear();
         s.prepared_selections.clear();
+        s.input_epoch = uuid();
     }
     fn connection_lost(&self, code: &str) {
         self.preparation.connection_lost(code);
@@ -456,27 +558,46 @@ impl Inner {
         state.prepared_selections.clear();
         state.pending_inputs.clear();
     }
-    fn input(&self, request: NativeRequest) -> IvyResult<()> {
-        let mut state = self.state.lock().unwrap();
-        if !state.sessions.iter().any(|(_, s)| {
-            request.params.get("threadId") == Some(&s.lock().unwrap().thread_id.clone().into())
-        }) {
-            return Ok(());
+    async fn input(&self, request: NativeRequest) -> IvyResult<()> {
+        self.works.initialize().await?;
+        let thread = request
+            .params
+            .get("threadId")
+            .and_then(IvyJson::as_js_string)
+            .cloned();
+        let retained = thread
+            .as_ref()
+            .is_some_and(|id| self.works.get(id).is_some());
+        {
+            let mut state = self.state.lock().unwrap();
+            if !retained
+                && !state.sessions.iter().any(|(_, s)| {
+                    request.params.get("threadId")
+                        == Some(&s.lock().unwrap().thread_id.clone().into())
+                })
+            {
+                return Ok(());
+            }
+            require(
+                state.pending_inputs.len() < 64,
+                "phone_voice_input_capacity",
+                "Too many pending Voice inputs.",
+            )?;
+            let key = request.id.clone();
+            if let Some((_, old)) = state.pending_inputs.iter_mut().find(|(k, _)| k == &key) {
+                *old = request;
+            } else {
+                state.pending_inputs.push((key, request));
+            }
         }
-        require(
-            state.pending_inputs.len() < 64,
-            "phone_voice_input_capacity",
-            "Too many pending Voice inputs.",
-        )?;
-        let key = request.id.clone();
-        if let Some((_, old)) = state.pending_inputs.iter_mut().find(|(k, _)| k == &key) {
-            *old = request;
-        } else {
-            state.pending_inputs.push((key, request));
+        if let Some(thread) = thread {
+            self.works.waiting(&thread).await?;
         }
         Ok(())
     }
-    fn notification(&self, notification: NativeNotification) -> IvyResult<()> {
+    async fn notification(&self, notification: NativeNotification) -> IvyResult<()> {
+        self.works.initialize().await?;
+        self.work_notification(&notification).await?;
         self.preparation.notification(&notification);
         let Some(thread_id) = notification
             .params

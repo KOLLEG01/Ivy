@@ -28,7 +28,25 @@ pub trait PhoneFlowVoice: Send + Sync {
     fn speaker_voice(&self, call_id: &JsString) -> Option<JsString>;
     fn failed(&self, call_id: &JsString) -> bool;
     fn inputs(&self, call_id: &JsString) -> IvyResult<Vec<IvyJson>>;
-    fn answer(&self, call_id: JsString, id: IvyJson, reply: IvyJson) -> FlowFuture<()>;
+    fn answer(
+        &self,
+        call_id: JsString,
+        id: IvyJson,
+        reply: IvyJson,
+        input_token: JsString,
+    ) -> FlowFuture<()>;
+    fn work(&self, _call_id: JsString) -> FlowFuture<Option<IvyJson>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn has_work(&self) -> bool {
+        false
+    }
+    fn disconnected(&self, _call_id: JsString, _ended: Option<i64>) -> FlowFuture<()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn detach(&self, call_id: JsString, _ended: Option<i64>) -> FlowFuture<()> {
+        self.stop(call_id, None)
+    }
     fn prewarm(&self, principal: JsString, selection: VoiceSelection) -> FlowFuture<()>;
     fn prepare(
         &self,
@@ -104,9 +122,30 @@ impl PhoneFlowVoice for PhoneCodexVoice {
     fn inputs(&self, call_id: &JsString) -> IvyResult<Vec<IvyJson>> {
         PhoneCodexVoice::inputs(self, call_id)
     }
-    fn answer(&self, call_id: JsString, id: IvyJson, reply: IvyJson) -> FlowFuture<()> {
-        let work = PhoneCodexVoice::answer(self, call_id, id, reply);
+    fn answer(
+        &self,
+        call_id: JsString,
+        id: IvyJson,
+        reply: IvyJson,
+        input_token: JsString,
+    ) -> FlowFuture<()> {
+        let work = PhoneCodexVoice::answer(self, call_id, id, reply, input_token);
         Box::pin(async move { work?.wait().await })
+    }
+    fn work(&self, call_id: JsString) -> FlowFuture<Option<IvyJson>> {
+        let owner = self.clone();
+        Box::pin(async move { PhoneCodexVoice::work(&owner, &call_id).await })
+    }
+    fn has_work(&self) -> bool {
+        PhoneCodexVoice::has_work(self)
+    }
+    fn disconnected(&self, call_id: JsString, ended: Option<i64>) -> FlowFuture<()> {
+        let owner = self.clone();
+        Box::pin(async move { PhoneCodexVoice::disconnected(&owner, &call_id, ended).await })
+    }
+    fn detach(&self, call_id: JsString, ended: Option<i64>) -> FlowFuture<()> {
+        let work = PhoneCodexVoice::detach(self, call_id, ended);
+        Box::pin(async move { work.wait().await })
     }
     fn prewarm(&self, principal: JsString, selection: VoiceSelection) -> FlowFuture<()> {
         let work = PhoneCodexVoice::prewarm(self, principal, selection);
@@ -187,6 +226,10 @@ fn work(action: impl Future<Output = IvyResult<IvyJson>> + Send + 'static) -> Ph
 #[derive(Clone)]
 pub enum PhoneVoiceControl {
     Select(VoiceSelection),
+    Update {
+        selection: VoiceSelection,
+        voice_id: JsString,
+    },
     Restart,
 }
 #[derive(Default)]
@@ -210,6 +253,7 @@ struct Inner {
     logs: Option<PhoneCallLogs>,
     on_error: Arc<dyn Fn(&JsString, &str) + Send + Sync>,
     on_connected: Arc<dyn Fn(&JsString) + Send + Sync>,
+    cleanup_observer: Mutex<Option<crate::voice_rpc::WorkObserver>>,
     commands: tokio::sync::Mutex<()>,
     state: Mutex<State>,
 }
@@ -290,6 +334,9 @@ fn route(settings: &IvyJson, call: &IvyJson) -> IvyJson {
         })
 }
 impl PhoneFlow {
+    pub fn set_cleanup_observer(&self, observer: crate::voice_rpc::WorkObserver) {
+        *self.0.cleanup_observer.lock().unwrap() = Some(observer);
+    }
     pub fn new(
         calls: PhoneCallCommands,
         native: PhoneNativeClient,
@@ -319,6 +366,7 @@ impl PhoneFlow {
             logs,
             on_error,
             on_connected,
+            cleanup_observer: Mutex::new(None),
             commands: tokio::sync::Mutex::new(()),
             state: Mutex::new(State::default()),
         })))
@@ -733,24 +781,42 @@ impl PhoneFlow {
             .map(|v| v.inputs(&id))
             .unwrap_or_else(|| Ok(vec![]))
     }
+    pub async fn voice_work(
+        &self,
+        principal: JsString,
+        id: JsString,
+    ) -> IvyResult<Option<IvyJson>> {
+        self.original(principal, id.clone(), "read").await?;
+        if let Some(voice) = &self.0.voice {
+            voice.work(id).await
+        } else {
+            Ok(None)
+        }
+    }
+    pub fn has_voice_work(&self) -> bool {
+        self.0.voice.as_ref().is_some_and(|v| v.has_work())
+    }
     pub fn answer_voice_input(
         &self,
         principal: JsString,
         id: JsString,
         input: IvyJson,
         reply: IvyJson,
+        input_token: JsString,
     ) -> PhoneFlowWork {
         let flow = self.clone();
         work(async move {
             let call = flow.original(principal, id.clone(), "connect").await?;
-            flow.continuing(&call).await?;
             let voice = flow.0.voice.as_ref().ok_or_else(|| {
                 IvyError::new(
                     "phone_voice_unavailable",
                     "Configured Voice cannot receive task inputs.",
                 )
             })?;
-            voice.answer(id, input, reply).await?;
+            if voice.work(id.clone()).await?.is_none() {
+                flow.continuing(&call).await?;
+            }
+            voice.answer(id, input, reply, input_token).await?;
             Ok(IvyJson::Null)
         })
     }
@@ -776,11 +842,18 @@ impl PhoneFlow {
                     PhoneVoiceControl::Restart => {
                         intent.get("method") == Some(&"call.restartVoice".into())
                     }
-                    PhoneVoiceControl::Select(selection) => {
+                    PhoneVoiceControl::Select(selection)
+                    | PhoneVoiceControl::Update { selection, .. } => {
                         intent.get("method") == Some(&"call.selectVoice".into())
                             && intent.get("model") == Some(&selection.model.clone().into())
                             && intent.get("reasoningEffort")
                                 == Some(&selection.reasoning_effort.clone().into())
+                            && match &control {
+                                PhoneVoiceControl::Update { voice_id, .. } => {
+                                    intent.get("voiceId") == Some(&voice_id.clone().into())
+                                }
+                                _ => intent.get("voiceId").is_none(),
+                            }
                     }
                 };
                 require(
@@ -807,6 +880,21 @@ impl PhoneFlow {
                                 .apply_selection(
                                     &call,
                                     VoiceSelectionCommand::Operation(action_operation),
+                                    selection,
+                                )
+                                .await?
+                        }
+                        PhoneVoiceControl::Update {
+                            selection,
+                            voice_id,
+                        } => {
+                            action_flow
+                                .apply_selection(
+                                    &call,
+                                    VoiceSelectionCommand::Update {
+                                        operation_id: action_operation,
+                                        voice_id,
+                                    },
                                     selection,
                                 )
                                 .await?
@@ -839,6 +927,17 @@ impl PhoneFlow {
         selection: VoiceSelection,
     ) -> IvyResult<()> {
         selection.validate(&self.voice_model_catalog().await?)?;
+        if let VoiceSelectionCommand::Update { voice_id, .. } = &command {
+            let catalog = self.speaker_voice_catalog().await?;
+            require(
+                catalog.required("voices")?.as_array().is_some_and(|vs| {
+                    vs.iter()
+                        .any(|v| v.get("id") == Some(&voice_id.clone().into()))
+                }),
+                "phone_speaker_voice_invalid",
+                "Select a speaker voice advertised by phone_bridge_speaker_voices.",
+            )?;
+        }
         self.confirm_connected(call).await?;
         let id = text(call, "callId")?;
         let generation = self
@@ -1129,10 +1228,10 @@ impl PhoneFlow {
                             id: action_id.clone(),
                             cleanup: true,
                         };
-                        action_flow
-                            .cleanup_core(principal, action_id)
-                            .await
-                            .map(|_| IvyJson::Null)
+                        let result = action_flow.cleanup_core(principal, action_id.clone()).await;
+                        let observer = action_flow.0.cleanup_observer.lock().unwrap().clone();
+                        if let Some(observer) = observer { observer(&action_id, result.as_ref().err().map(|e| e.code.as_str())); }
+                        result.map(|_| IvyJson::Null)
                     });
                     state.cleanups.insert(id, pending.clone());
                     pending
@@ -1174,17 +1273,27 @@ impl PhoneFlow {
             self.calls().cancel_unprepared(principal, id).wait().await?;
             return Ok(());
         }
-        self.call_result(
-            &call,
-            &self
-                .calls()
-                .hangup(principal.clone(), id.clone())
-                .wait()
-                .await?,
-            &["local_ended", "outcome_unknown"],
-        )?;
+        let hangup = self
+            .calls()
+            .hangup(principal.clone(), id.clone())
+            .wait()
+            .await?;
+        self.call_result(&call, &hangup, &["local_ended", "outcome_unknown"])?;
         if let Some(voice) = &self.0.voice {
-            voice.stop(id.clone(), None).await?;
+            let ended = hangup
+                .get("receipt")
+                .and_then(|r| r.get("result"))
+                .and_then(|r| r.get("call"))
+                .filter(|c| {
+                    c.get("id") == Some(&id.clone().into())
+                        && c.get("state") == Some(&"local_ended".into())
+                })
+                .and_then(|c| c.get("endedAt"))
+                .and_then(IvyJson::as_js_string)
+                .map(ivy_sdk::clock::parse_date)
+                .filter(|n| n.is_finite())
+                .map(|n| n as i64);
+            voice.detach(id.clone(), ended).await?;
         }
         for generation in (0..=128).rev() {
             if let Some(prepared) = self
@@ -1323,6 +1432,7 @@ impl PhoneFlow {
                         )
                         .await
                     }
+                    PhoneVoiceControl::Update { .. } => Err(IvyError::internal()),
                 };
                 if let Err(cause) = &result {
                     flow.report(&id, cause);
@@ -1370,6 +1480,16 @@ impl PhoneFlow {
                     }
                     (state.work.contains_key(&id), state.abandoned.contains(&id))
                 };
+                if ended && let Some(voice) = &self.0.voice {
+                    let ended = original
+                        .filter(|c| c.get("state") == Some(&"local_ended".into()))
+                        .and_then(|c| c.get("endedAt"))
+                        .and_then(IvyJson::as_js_string)
+                        .map(ivy_sdk::clock::parse_date)
+                        .filter(|n| n.is_finite())
+                        .map(|n| n as i64);
+                    voice.disconnected(id.clone(), ended).await?;
+                }
                 if busy {
                     return Ok(());
                 }

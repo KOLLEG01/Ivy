@@ -9,12 +9,17 @@ impl PhoneCodexVoice {
     ) -> VoiceControlOperation<()> {
         let owner = self.0.clone();
         operation(async move {
+            owner.works.initialize().await?;
             if !owner.state.lock().unwrap().sessions.is_empty()
                 || !owner.journal.current_calls().await?.is_empty()
             {
                 return Ok(());
             }
             owner.control.open().wait().await?;
+            if owner.works.has_work() {
+                owner.recover_works().await?;
+                return Ok(());
+            }
             if owner.settings().get("resumeIncomingConversation") == Some(&true.into())
                 && owner.state.lock().unwrap().sessions.is_empty()
                 && owner.journal.current_calls().await?.is_empty()
@@ -51,6 +56,7 @@ impl PhoneCodexVoice {
     ) -> VoiceControlOperation<JsString> {
         let owner = self.0.clone();
         operation(async move {
+            owner.works.initialize().await?;
             owner.owner(&call).await?;
             let call_id = text(&call, "callId")?;
             if let Some(existing) = owner
@@ -81,7 +87,46 @@ impl PhoneCodexVoice {
                 None
             };
             let mut thread_id = None;
-            if let Some(context) = context
+            let work = if generation == 0 && call.get("direction") == Some(&"incoming".into()) {
+                owner
+                    .works
+                    .rejoin(&call, &fingerprint, &party_key(&call)?)?
+            } else {
+                None
+            };
+            if let Some(work) = work {
+                let id = text(&work, "threadId")?;
+                owner.subscribe_work(&id).await?;
+                owner.observe_work(&id).await?;
+                require(
+                    owner
+                        .works
+                        .rejoin(&call, &fingerprint, &party_key(&call)?)?
+                        .as_ref()
+                        .and_then(|w| w.get("threadId"))
+                        == Some(&id.clone().into()),
+                    "phone_work_unavailable",
+                    "Original work completed or its reconnect window expired.",
+                )?;
+                owner
+                    .state
+                    .lock()
+                    .unwrap()
+                    .rejoining
+                    .insert(call_id.clone());
+                if let Some(context) = context
+                    .as_ref()
+                    .filter(|c| c.get("threadId") == Some(&id.clone().into()))
+                {
+                    owner
+                        .state
+                        .lock()
+                        .unwrap()
+                        .continuations
+                        .insert(call_id.clone(), context.clone());
+                }
+                thread_id = Some(id);
+            } else if let Some(context) = context
                 && context.get("partyKey") == Some(&party_key(&call)?.into())
             {
                 thread_id = owner
@@ -451,6 +496,9 @@ impl Inner {
         owner_id: Option<JsString>,
     ) -> IvyResult<Option<JsString>> {
         let id = text(&context, "threadId")?;
+        if self.works.protected(&id) || self.works.observation(&id).is_some() {
+            return Ok(None);
+        }
         let key = {
             let mut k = JsString::from("resume:");
             k.0.extend(&id.0);
@@ -468,11 +516,6 @@ impl Inner {
                     "phone_voice_task_busy",
                     "Previous Voice task still belongs to an original call.",
                 )?;
-                if state.reconciled.contains(&id)
-                    && state.prepared_selections.get(&id) == Some(&selection_key(&selection)?)
-                {
-                    return Ok(Some(id));
-                }
             }
             let (finished, receive) = watch::channel(None);
             let candidate = VoiceControlOperation::from_receiver(receive);
@@ -529,15 +572,19 @@ impl Inner {
             let reconciled = self.state.lock().unwrap().reconciled.contains(&id);
             if !reconciled {
                 self.resume_native(&id, &selection).await?;
-                self.call(
-                    "thread/realtime/stop",
-                    IvyJson::object([("threadId", id.clone().into())]),
-                    Default::default(),
-                )
-                .await?;
-                self.state.lock().unwrap().reconciled.insert(id.clone());
             }
-            self.update_selection(&id, &selection).await?;
+            self.call(
+                "thread/realtime/stop",
+                IvyJson::object([("threadId", id.clone().into())]),
+                Default::default(),
+            )
+            .await?;
+            self.state.lock().unwrap().reconciled.insert(id.clone());
+            let changed = self.state.lock().unwrap().prepared_selections.get(&id)
+                != Some(&selection_key(&selection)?);
+            if changed {
+                self.update_selection(&id, &selection).await?;
+            }
             self.state
                 .lock()
                 .unwrap()

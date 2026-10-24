@@ -36,6 +36,26 @@ fn parse_stored(value: &str) -> IvyResult<IvyJson> {
 }
 
 impl PhoneJournal {
+    pub(crate) async fn voice_work_records(&self) -> IvyResult<IvyJson> {
+        self.request(|db| Ok(IvyJson::object([
+            ("works", parse_stored(&db.meta("voiceWorks")?.unwrap_or_else(|| "[]".into()))?),
+            ("observations", parse_stored(&db.meta("voiceObservations")?.unwrap_or_else(|| "[]".into()))?),
+        ]))).await
+    }
+    pub(crate) async fn save_voice_work_records(&self, works: IvyJson, observations: IvyJson) -> IvyResult<()> {
+        self.request(move |db| db.transaction(|db| {
+            db.set_meta("voiceWorks", &canonical(&works, 256 * 1024)?)?;
+            db.set_meta("voiceObservations", &canonical(&observations, 64 * 1024)?)
+        })).await
+    }
+    pub(crate) async fn voice_notice(&self, token: &str) -> IvyResult<IvyJson> {
+        let key = format!("voiceNotice:{token}");
+        self.request(move |db| parse_stored(&db.meta(&key)?.unwrap_or_else(|| "null".into()))).await
+    }
+    pub(crate) async fn save_voice_notice(&self, token: &str, notice: IvyJson) -> IvyResult<()> {
+        let key = format!("voiceNotice:{token}");
+        self.request(move |db| db.set_meta(&key, &canonical(&notice, 512 * 1024)?)).await
+    }
     pub async fn voice_conversation(&self, fingerprint: &str) -> IvyResult<Option<IvyJson>> {
         let fingerprint = fingerprint.to_owned();
         self.request(move |db| {
