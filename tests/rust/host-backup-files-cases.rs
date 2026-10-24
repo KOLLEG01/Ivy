@@ -387,6 +387,89 @@ async fn native_inventory_sorts_utf16_hashes_bytes_and_excludes_before_observati
         &J::Array(default.iter().map(BackupFile::json).collect()),
         &J::Array(files.iter().map(BackupFile::json).collect()),
     );
+    assert_native_inventory_root_and_entry_paths().await;
+}
+
+async fn assert_native_inventory_root_and_entry_paths() {
+    let fixture = ServiceFixture::new();
+    let actual_parent = fixture.0.join("actual-parent");
+    let actual_root = actual_parent.join("tree Ω");
+    fs::create_dir_all(actual_parent.join("deep")).unwrap();
+    fs::create_dir(&actual_root).unwrap();
+    fs::write(actual_root.join("selected"), b"native selected bytes").unwrap();
+    let lexical_alias = fixture.0.join("tree Ω");
+    fs::create_dir(&lexical_alias).unwrap();
+    fs::write(lexical_alias.join("selected"), b"distinct lexical alias").unwrap();
+    let link = fixture.0.join("linked-parent");
+    filesystem::directory_link(&actual_parent.join("deep"), &link).unwrap();
+    let supplied_root = link.join("..").join("tree Ω");
+    for root in [supplied_root, fs::canonicalize(&actual_root).unwrap()] {
+        let path = root.join("selected");
+        let bytes = fs::read(&path).unwrap();
+        let file = BackupFile {
+            path: "selected".into(),
+            hash: digest(&bytes),
+            bytes: bytes.len() as u64,
+            mode: file_mode(&path),
+        };
+        assert_json_eq(
+            &inventory(&fixture, &root, &[], None).await,
+            &report(
+                Ok(J::Array(vec![file.json()])),
+                vec!["selected".into()],
+                None,
+            ),
+        );
+        assert_eq!(
+            fs::read(lexical_alias.join("selected")).unwrap(),
+            b"distinct lexical alias"
+        );
+        assert_eq!(
+            fs::read(actual_root.join("selected")).unwrap(),
+            b"native selected bytes"
+        );
+    }
+    #[cfg(windows)]
+    {
+        let root = fixture.0.join("native-entries");
+        fs::create_dir(&root).unwrap();
+        let actual = fs::canonicalize(&root).unwrap();
+        let names = [
+            OsString::from("name"),
+            OsString::from("name."),
+            OsString::from("name "),
+            native_name("opaque", 0xd800),
+            native_name("opaque", 0xdfff),
+            OsString::from("opaque\u{fffd}"),
+        ];
+        let mut expected = Vec::new();
+        for (index, name) in names.into_iter().enumerate() {
+            let bytes = vec![index as u8, 0, 255];
+            let path = actual.join(&name);
+            fs::write(&path, &bytes).unwrap();
+            expected.push(BackupFile {
+                path: native_path::filesystem_name(&name),
+                hash: digest(&bytes),
+                bytes: bytes.len() as u64,
+                mode: file_mode(&path),
+            });
+        }
+        expected.sort_by(|a, b| a.path.cmp(&b.path));
+        let trace = expected
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>();
+        for root in [root, actual] {
+            assert_json_eq(
+                &inventory(&fixture, &root, &[], None).await,
+                &report(
+                    Ok(J::Array(expected.iter().map(BackupFile::json).collect())),
+                    trace.clone(),
+                    None,
+                ),
+            );
+        }
+    }
 }
 
 #[tokio::test]

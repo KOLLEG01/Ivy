@@ -17,6 +17,19 @@ const MAXIMUM_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 fn internal<T, E>(result: Result<T, E>) -> IvyResult<T> {
     result.map_err(|_| IvyError::internal())
 }
+fn validate_member(member: &JsString, style: native_path::Style) -> IvyResult<()> {
+    require(
+        !native_path::is_absolute(style, member)
+            && member.0.split(|c| *c == 47).all(|part| {
+                !part.is_empty()
+                    && part != [46]
+                    && part != [46, 46]
+                    && !part.iter().any(|c| *c < 32 || *c == 92 || *c == 58)
+            }),
+        "backup_invalid",
+        "Backup members require safe relative file paths.",
+    )
+}
 /// Resolve a safe slash-separated backup member within its native root.
 pub fn relative_file(root: &JsString, member: &JsString) -> IvyResult<JsString> {
     relative_file_with_context(root, member, &internal(native_path::Context::current())?)
@@ -26,17 +39,7 @@ pub fn relative_file_with_context(
     member: &JsString,
     context: &native_path::Context,
 ) -> IvyResult<JsString> {
-    require(
-        !native_path::is_absolute(context.style, member)
-            && member.0.split(|c| *c == 47).all(|part| {
-                !part.is_empty()
-                    && part != [46]
-                    && part != [46, 46]
-                    && !part.iter().any(|c| *c < 32 || *c == 92 || *c == 58)
-            }),
-        "backup_invalid",
-        "Backup members require safe relative file paths.",
-    )?;
+    validate_member(member, context.style)?;
     let result = context.resolve(&[root.clone(), member.clone()]);
     require(
         context.inside(root, &result) && result != context.resolve(&[root.clone()]),
@@ -90,11 +93,8 @@ pub async fn inventory_files(
                 "target_conflict",
                 "Backup roots cannot be filesystem links.",
             )?;
-            let context = internal(native_path::Context::current())?;
             let mut inventory = Inventory {
-                root: native_path::from_native(&root),
-                actual: native_path::from_native(&actual),
-                context,
+                actual: actual.clone(),
                 exclude,
                 entries: Vec::new(),
                 total: 0,
@@ -107,9 +107,7 @@ pub async fn inventory_files(
     )?
 }
 struct Inventory {
-    root: JsString,
-    actual: JsString,
-    context: native_path::Context,
+    actual: PathBuf,
     exclude: Option<BackupExclusion>,
     entries: Vec<BackupFile>,
     total: u64,
@@ -121,13 +119,18 @@ impl Inventory {
             "limit_exceeded",
             "Backup directory nesting is too deep.",
         )?;
-        let mut names = internal(
+        let mut entries = internal(
             internal(fs::read_dir(directory))?
-                .map(|entry| entry.map(|entry| native_path::filesystem_name(&entry.file_name())))
+                .map(|entry| {
+                    entry.map(|entry| {
+                        let name = entry.file_name();
+                        (native_path::filesystem_name(&name), name)
+                    })
+                })
                 .collect::<io::Result<Vec<_>>>(),
         )?;
-        names.sort();
-        for name in names {
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, native_name) in entries {
             let local = JsString(prefix.0.iter().chain(&name.0).copied().collect());
             if self
                 .exclude
@@ -138,19 +141,13 @@ impl Inventory {
             {
                 continue;
             }
-            let path = native_path::to_native(&relative_file_with_context(
-                &self.root,
-                &local,
-                &self.context,
-            )?);
+            validate_member(&local, native_path::Style::native())?;
+            let path = directory.join(native_name);
             let metadata = observe(&path)?;
             // Preserve the short circuit: a link is rejected without realpath.
             require(
                 !metadata.is_symlink
-                    && self.context.inside(
-                        &self.actual,
-                        &native_path::from_native(&internal(paths::realpath(&path))?),
-                    ),
+                    && native_path::within(&self.actual, &internal(paths::realpath(&path))?),
                 "target_conflict",
                 "Backup cannot follow filesystem links.",
             )?;
