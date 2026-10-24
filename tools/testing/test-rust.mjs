@@ -75,13 +75,26 @@ for(const file of positionals){
   }
 }
 if(!groups.size && !libraries.size && !integrations.size)throw Error('Select at least one Cargo test file.');
-const filtered=[...integrations.values()];
+function retainThreads(covering,target){
+  if(target.testThreads===undefined)return;
+  if(covering.testThreads!==undefined && covering.testThreads!==target.testThreads)
+    throw Error('Conflicting Cargo test thread counts: '+target.package);
+  covering.testThreads=target.testThreads;
+}
+const filtered=[...integrations.values()].filter(target=>{
+  const group=groups.get(target.package);
+  if(!group?.tests.has(target.test))return true;
+  retainThreads(group,target);
+  return false;
+});
 for(const [index,target] of filtered.entries()){
-  if(groups.get(target.package)?.tests.has(target.test))
-    throw Error('Filtered Cargo integration tests overlap an unfiltered target: '+target.package+'/'+target.test);
   if(filtered.slice(0,index).some(prior=>prior.package===target.package && prior.test===target.test &&
       (prior.filter.includes(target.filter) || target.filter.includes(prior.filter))))
     throw Error('Overlapping Cargo integration-test filters: '+target.package+'/'+target.test);
+}
+for(const target of libraries.values()){
+  const group=groups.get(target.package);
+  if(group?.library)retainThreads(group,target);
 }
 const testedPackages=positionals.map(file=>rustTests[file].package);
 // Prerequisites include the selected packages. Compatible integration groups can

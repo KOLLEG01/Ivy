@@ -215,6 +215,21 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
   const failure = run(process.platform === "win32" ? "build" : "test");
   assert.equal(failure.result.status, 7, failure.result.stderr);
   assert.deepEqual(failure.commands, expected.slice(0, process.platform === "win32" ? 1 : 2));
+  for (const files of [
+    ["tests/rust/agent-skills-output.rs", "tests/rust/agent-instructions.rs"],
+    ["tests/rust/agent-instructions.rs", "tests/rust/agent-skills-output.rs"],
+  ]) {
+    const covered = run("", files);
+    assert.equal(covered.result.status, 0, covered.result.stderr);
+    assert.deepEqual(covered.commands, [[
+      "test", "--locked", "--package", "ivy-agent-manager", "--test", "agent-instructions",
+    ]]);
+  }
+  const threaded = run("", ["tests/rust/host-paths.rs", "tests/rust/host-bootstrap-updater-path-cases.rs"]);
+  assert.equal(threaded.result.status, 0, threaded.result.stderr);
+  assert.deepEqual(threaded.commands, [[
+    "test", "--locked", "--package", "ivy-host-runtime", "--test", "host-paths", "--", "--test-threads=1",
+  ]]);
 });
 
 test("reporter suppresses successful output and prints useful failures without writing reports", (t) => {
