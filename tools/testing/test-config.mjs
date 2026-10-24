@@ -154,6 +154,12 @@ export const rustTests = {
     ],
     "testThreads": 1
   },
+  "tests/rust/host-restore-journal-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "restore_cases::journal_cases::copied_journal_reconciliation_preserves_terminal_outcomes_and_rolls_back_failures",
+    "testThreads": 1
+  },
   "tests/rust/host-restore-publication-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",

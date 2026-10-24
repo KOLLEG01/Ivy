@@ -6,7 +6,8 @@ use ivy_store::rusqlite::{Connection, OptionalExtension, params};
 pub async fn reconcile_restored_journal(config: J, at: JsString) -> IvyResult<()> {
     internal(tokio::task::spawn_blocking(move || {
         let runtime=field(&config,"runtimeRoot")?;
-        let db=internal(Connection::open(native(&join(&[runtime.clone(),"deployments.sqlite".into()]))?))?;
+        let database = native(&runtime)?.join("deployments.sqlite");
+        let db = internal(Connection::open(database))?;
         let result: IvyResult<()>= (|| {
             internal(db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; BEGIN IMMEDIATE"))?;
             let version:i64=internal(db.query_row("PRAGMA user_version",[],|r|r.get(0)))?;

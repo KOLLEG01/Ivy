@@ -11,7 +11,7 @@ use std::{
 
 const AT: &str = "2026-10-20T00:00:00.000Z";
 
-fn captured_entry(root: &Path, n: usize, phase: &str) -> J {
+pub(super) fn captured_entry(root: &Path, n: usize, phase: &str) -> J {
     J::object([
         ("schemaVersion", J::Number(1.0)),
         (

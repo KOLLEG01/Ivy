@@ -245,41 +245,6 @@ fn ok(result: &J) -> bool {
 }
 
 #[tokio::test]
-async fn copied_journal_reconciliation_preserves_terminal_outcomes_and_rolls_back_failures() {
-    for case in [
-        "valid",
-        "wrong-host",
-        "wrong-version",
-        "malformed-entry",
-        "legacy-no-retirements",
-    ] {
-        let result = compare_case("journal", case).await;
-        assert_eq!(
-            ok(&result),
-            ["valid", "legacy-no-retirements"].contains(&case),
-            "{case}"
-        );
-        let state = result.get("state").unwrap();
-        assert_eq!(state.get("beforeImagePreserved"), Some(&true.into()));
-        if !ok(&result) {
-            assert_json_eq(state.get("after").unwrap(), state.get("before").unwrap());
-        } else {
-            let after = state.get("after").unwrap().get("tables").unwrap();
-            for name in ["candidates", "installed", "observations", "runtime_targets"] {
-                assert!(after.get(name).unwrap().as_array().unwrap().is_empty());
-            }
-            let rows = after.get("operations").unwrap().as_array().unwrap();
-            assert_eq!(rows.len(), 5);
-            assert_eq!(
-                rows.iter()
-                    .filter(|r| r.get("phase") == Some(&"needs_attention".into()))
-                    .count(),
-                2
-            );
-        }
-    }
-}
-#[tokio::test]
 async fn restored_bootstrap_holds_save_exact_before_images_without_os_replay() {
     for case in [
         "checking",
@@ -327,3 +292,6 @@ mod payload_cases;
 
 #[path = "host-restore-publication-cases.rs"]
 mod publication_cases;
+
+#[path = "host-restore-journal-cases.rs"]
+mod journal_cases;
