@@ -154,6 +154,12 @@ export const rustTests = {
     ],
     "testThreads": 1
   },
+  "tests/rust/host-restore-maintenance-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "restore_cases::maintenance_cases::restored_bootstrap_holds_save_exact_before_images_without_os_replay",
+    "testThreads": 1
+  },
   "tests/rust/host-restore-journal-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",

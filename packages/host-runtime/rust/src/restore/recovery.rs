@@ -48,16 +48,15 @@ pub async fn reconcile_restored_journal(config: J, at: JsString) -> IvyResult<()
 pub async fn hold_restored_bootstrap_maintenance(config: J, at: JsString) -> IvyResult<u64> {
     internal(
         tokio::spawn(async move {
-            let runtime = field(&config, "runtimeRoot")?;
-            let parent = join(&[runtime.clone(), "bootstrap-maintenance".into()]);
-            if !exists(&parent).await? {
+            let runtime = native(&field(&config, "runtimeRoot")?)?;
+            let parent = runtime.join("bootstrap-maintenance");
+            if !backup_files::exists(&parent).await? {
                 return Ok(0);
             }
-            let scan = native(&parent)?;
             let entries = internal(
                 tokio::task::spawn_blocking(move || {
                     let mut entries = internal(
-                        internal(std::fs::read_dir(scan))?.collect::<Result<Vec<_>, _>>(),
+                        internal(std::fs::read_dir(parent))?.collect::<Result<Vec<_>, _>>(),
                     )?;
                     entries.sort_by_key(|e| e.file_name());
                     Ok::<_, IvyError>(entries)
@@ -76,11 +75,12 @@ pub async fn hold_restored_bootstrap_maintenance(config: J, at: JsString) -> Ivy
                     "storage_invalid",
                     "Invalid restored bootstrap maintenance directory.",
                 )?;
-                let path = join(&[parent.clone(), name.clone(), "record.json".into()]);
-                if !exists(&path).await? {
+                let path = entry.path().join("record.json");
+                if !backup_files::exists(&path).await? {
                     continue;
                 }
-                let mut record = json_file(&path, config::CONFIGURATION_BYTES).await?;
+                let mut record =
+                    config::json_file(path.clone(), config::CONFIGURATION_BYTES).await?;
                 validate_host("BootstrapMaintenanceRecord", &record)?;
                 require(
                     JsString::from(&hash_json(record.required("operationId")?)?[7..]) == name
@@ -92,20 +92,18 @@ pub async fn hold_restored_bootstrap_maintenance(config: J, at: JsString) -> Ivy
                 if record.get("phase") == Some(&"succeeded".into()) {
                     continue;
                 }
-                let original = join(&[
-                    runtime.clone(),
-                    "recovery-original/bootstrap-maintenance".into(),
-                    name,
-                    "record.json".into(),
-                ]);
-                bytes +=
-                    backup_files::copy_verified(native(&path)?, native(&original)?, None, false)
-                        .await?
-                        .bytes;
+                let original = runtime
+                    .join("recovery-original")
+                    .join("bootstrap-maintenance")
+                    .join(entry.file_name())
+                    .join("record.json");
+                bytes += backup_files::copy_verified(path.clone(), original, None, false)
+                    .await?
+                    .bytes;
                 record.insert("phase", "needs_attention".into());
                 record.insert("errorCode", "restore_reconciliation_required".into());
                 record.insert("updatedAt", J::String(at.clone()));
-                config::atomic_json(native(&path)?, record).await?;
+                config::atomic_json(path, record).await?;
             }
             Ok(bytes)
         })

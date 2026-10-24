@@ -245,27 +245,6 @@ fn ok(result: &J) -> bool {
 }
 
 #[tokio::test]
-async fn restored_bootstrap_holds_save_exact_before_images_without_os_replay() {
-    for case in [
-        "checking",
-        "needs-attention",
-        "succeeded",
-        "invalid-identity",
-        "unexpected-entry",
-    ] {
-        let result = compare_case("maintenance", case).await;
-        assert_eq!(
-            ok(&result),
-            ["checking", "needs-attention", "succeeded"].contains(&case),
-            "{case}"
-        );
-        assert_eq!(
-            result.get("state").unwrap().get("originalBytesPreserved"),
-            Some(&true.into())
-        );
-    }
-}
-#[tokio::test]
 async fn project_restore_relocates_only_the_disposable_backup_index() {
     for case in ["valid", "malformed-index"] {
         let result = compare_case("projects", case).await;
@@ -295,3 +274,6 @@ mod publication_cases;
 
 #[path = "host-restore-journal-cases.rs"]
 mod journal_cases;
+
+#[path = "host-restore-maintenance-cases.rs"]
+mod maintenance_cases;
