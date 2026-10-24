@@ -84,6 +84,9 @@ impl RpcClient for RecoveryClient {
                             true,
                         ));
                     }
+                    if let Some(reply) = self.input.get("queryReply") {
+                        return Ok(reply.clone());
+                    }
                     Ok(Json::object([
                         (
                             "items",
@@ -448,8 +451,68 @@ async fn attachment_recovery_preserves_identity_bytes_and_failure_order() {
     }
 }
 
+// Retained responses must carry the public cursor and archival field types.
+// Wrong types and missing fields cannot stand in for null or false.
+async fn check_attachment_metadata_types() {
+    for cursor in [Json::Bool(false), Json::Number(0.0), "".into()] {
+        check_recovery(
+            Json::object([("cursor", cursor)]),
+            b"original",
+            Expected::Error("task_board_evidence_mismatch"),
+            &RECOVERY[..2],
+        )
+        .await;
+    }
+    check_recovery(
+        Json::object([(
+            "queryReply",
+            Json::object([(
+                "items",
+                Json::Array(vec![Json::object([("objectId", "original".into())])]),
+            )]),
+        )]),
+        b"original",
+        Expected::Error("task_board_evidence_mismatch"),
+        &RECOVERY[..2],
+    )
+    .await;
+    for archived in [
+        Json::Null,
+        Json::Number(0.0),
+        Json::Number(1.0),
+        "".into(),
+        "false".into(),
+        Json::Array(vec![]),
+        Json::object([] as [(&str, Json); 0]),
+    ] {
+        check_recovery(
+            changed("object", "effectivelyArchived", archived),
+            b"original",
+            Expected::Error("task_board_evidence_mismatch"),
+            RECOVERY,
+        )
+        .await;
+    }
+    let mut missing = saved(
+        &Json::object([] as [(&str, Json); 0]),
+        &"task".into(),
+        b"original",
+    );
+    let mut object = missing.required("object").unwrap().clone();
+    object.remove("effectivelyArchived");
+    missing.insert("object", object);
+    check_recovery(
+        Json::object([("saved", missing)]),
+        b"original",
+        Expected::Error("task_board_evidence_mismatch"),
+        RECOVERY,
+    )
+    .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn attachment_recovery_uses_native_base64_and_preserves_guard_order() {
+    check_attachment_metadata_types().await;
     let bytes = [0xfb, 0xff]; // Canonical +/8= exercises both alphabet characters and padding.
     for variant in ["no-padding", "url-safe", "whitespace", "ignored-junk"] {
         check_recovery(

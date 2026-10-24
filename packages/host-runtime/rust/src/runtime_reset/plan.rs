@@ -76,8 +76,8 @@ fn deployment<'a>(config: &'a J, storage: &StorageContext) -> IvyResult<&'a J> {
     }
     selected.ok_or_else(IvyError::internal)
 }
-async fn future(value: JsString) -> IvyResult<JsString> {
-    internal(tokio::task::spawn_blocking(move || crate::paths::future_path(&value)).await)?
+async fn future(value: PathBuf) -> IvyResult<PathBuf> {
+    internal(tokio::task::spawn_blocking(move || crate::paths::future_native_path(&value)).await)?
 }
 pub async fn tree_hash(path: JsString, storage: Arc<StorageContext>) -> IvyResult<J> {
     internal(
@@ -236,13 +236,13 @@ pub async fn local_runtime_reset_plan(
                         "target_conflict",
                         "Runtime reset target leaves its declared component area.",
                     )?;
-                    let actual_root = future(root.clone()).await?;
-                    let actual = future(target.clone()).await?;
+                    let actual_root = future(native(&root)?).await?;
+                    let actual = future(native(&target)?).await?;
                     require(
                         if actual == actual_root {
                             target == root
                         } else {
-                            inside(&storage, &actual_root, &actual)
+                            native_path::within(&actual_root, &actual)
                         },
                         "target_conflict",
                         "Runtime reset target traverses a filesystem link.",
@@ -277,10 +277,9 @@ pub async fn local_runtime_reset_plan(
                     "Runtime reset completion marker leaves its instance data.",
                 )?;
                 require(
-                    inside(
-                        &storage,
-                        &future(root).await?,
-                        &future(target.clone()).await?,
+                    native_path::within(
+                        &future(native(&root)?).await?,
+                        &future(native(&target)?).await?,
                     ),
                     "target_conflict",
                     "Runtime reset completion marker traverses a filesystem link.",

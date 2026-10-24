@@ -225,15 +225,6 @@ fn blob_error(failure: BlobError) -> IvyError {
     }
 }
 
-fn truthy(value: Option<&Json>) -> bool {
-    match value {
-        None | Some(Json::Null | Json::Bool(false)) => false,
-        Some(Json::Number(value)) => *value != 0.0 && !value.is_nan(),
-        Some(Json::String(value)) => !value.0.is_empty(),
-        _ => true,
-    }
-}
-
 fn attachment_content_matches(value: &Json, bytes: &[u8]) -> IvyResult<bool> {
     let value = value.as_js_string().ok_or_else(IvyError::internal)?;
     Ok(value
@@ -387,7 +378,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                     .as_array()
                     .ok_or_else(IvyError::internal)?;
                 require(
-                    items.len() == 1 && !truthy(found.get("nextCursor")),
+                    items.len() == 1 && found.get("nextCursor") == Some(&Json::Null),
                     "task_board_evidence_mismatch",
                     "The original attachment identity is unavailable.",
                 )?;
@@ -400,11 +391,12 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                     )
                     .await?;
                 let task = Json::String(task_id.clone());
-                // Keep property access and decoding inside the original short circuit.
+                // Check ownership and metadata before reading attachment bytes.
                 require(
                     existing.required("object")?.get("parentId") == Some(&task)
                         && existing.required("object")?.get("ownerObjectId") == Some(&task)
-                        && !truthy(existing.required("object")?.get("effectivelyArchived"))
+                        && existing.required("object")?.get("effectivelyArchived")
+                            == Some(&Json::Bool(false))
                         && existing.required("object")?.get("currentRevision")
                             == Some(&Json::Number(1.0))
                         && existing.required("revision")?.get("revision")

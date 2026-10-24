@@ -543,6 +543,12 @@ export const rustTests = {
     "package": "ivy-host-runtime",
     "test": "host-scheduler"
   },
+  "tests/rust/host-reset-coordinator-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "reset_coordinator_cases::reset_local_plan_preserves_declared_trees_and_rejects_path_conflicts",
+    "testThreads": 1
+  },
   "tests/rust/host-reset-local-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",
