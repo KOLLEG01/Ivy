@@ -253,10 +253,14 @@ impl AutomaticBootstrapWorker {
         .await
     }
     async fn run_owned(&self, config_path: PathBuf, request_path: PathBuf) -> IvyResult<()> {
-        let context = node_path::Context::current().map_err(|_| IvyError::internal())?;
-        let path = node_path::to_native(&context.resolve(&[node_path::from_native(&config_path)]));
-        let request_path =
-            node_path::to_native(&context.resolve(&[node_path::from_native(&request_path)]));
+        let cwd = std::env::current_dir().map_err(|_| IvyError::internal())?;
+        let resolve = |path: PathBuf| {
+            let path = cwd.join(path);
+            let absolute = std::path::absolute(&path).unwrap_or(path);
+            node_path::lexical(&absolute)
+        };
+        let path = resolve(config_path);
+        let request_path = resolve(request_path);
         let request = config::json_file(request_path, config::CONFIGURATION_BYTES).await?;
         validate_host("BootstrapMaintenanceRequest", &request)?;
         let mut config = host_config::host_config(path.clone()).await?;

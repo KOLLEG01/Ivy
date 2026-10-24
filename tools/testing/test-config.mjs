@@ -253,6 +253,12 @@ export const rustTests = {
       { "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }
     ]
   },
+  "tests/rust/host-bootstrap-worker-path-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "bootstrap_maintenance_cases::worker_path_cases::",
+    "testThreads": 1
+  },
   "tests/rust/host-bootstrap-maintenance-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",
