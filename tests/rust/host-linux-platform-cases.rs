@@ -1107,7 +1107,7 @@ async fn systemd_state_and_dynamic_units_retain_exact_launch_identity() {
         let mut native_config = config.clone();
         let mut executables = empty();
         if with_node {
-            executables.insert("node", "/fixture/unused-node".into());
+            executables.insert("node", "/fixture/workload % $ 😀/node".into());
         }
         native_config.insert("executables", executables);
         let rendered = systemd::render_systemd_unit(
@@ -1136,10 +1136,13 @@ async fn systemd_state_and_dynamic_units_retain_exact_launch_identity() {
                 "\nEnvironment=IVY_INSTANCE_CONFIG=\"/fixture/private %% config.json\"\n"
             )
         );
+        let workload = "Environment=IVY_NODE_EXECUTABLE=\"/fixture/workload %% $ 😀/node\"\n";
+        assert_eq!(content.contains(workload), with_node);
+        let native_unit = content.replace(workload, "");
         if let Some(prior) = prior {
-            assert_eq!(rendered.content, prior);
+            assert_eq!(native_unit, prior);
         }
-        prior = Some(rendered.content);
+        prior = Some(native_unit);
         if !with_node {
             let error = systemd::render_systemd_unit(
                 &native_config,

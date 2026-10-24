@@ -533,6 +533,16 @@ pub fn linux_unit(
             "\n".into(),
         ]);
     }
+    // Systemd does not inherit the Host's optional script-workload capability.
+    if crate::native_plan::is_native_plan(instance) {
+        if let Some(node) = selected(plan, "nodeExecutable") {
+            parts.extend([
+                "Environment=IVY_NODE_EXECUTABLE=".into(),
+                unit_arg(&string(node)?)?,
+                "\n".into(),
+            ]);
+        }
+    }
     if let Some(scope) = plan.get("linuxResources").filter(|value| value.as_object().is_some()) {
         parts.extend(["Slice=".into(), field(scope, "slice")?, "\n".into()]);
     }

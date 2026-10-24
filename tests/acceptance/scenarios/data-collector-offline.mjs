@@ -12,10 +12,9 @@ import {
 } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
-import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 // Exercise exact installed/prepared artifacts against a separate loopback Hive.
@@ -29,17 +28,31 @@ for (const key of ["collector", "hive", "report"])
   assert.ok(values[key], "Missing --" + key);
 const collector = resolve(values.collector),
   hive = resolve(values.hive);
-const load = (root, path) =>
-  import(pathToFileURL(join(root, "dist", path)).href);
-const { HiveServer } = await load(hive, "services/hive/src/server.js");
-const { HiveClient, serviceTools, newOperationId } = await load(
-  collector,
-  "packages/sdk/src/client.js",
-);
-const { digest } = await load(collector, "packages/contracts/src/canonical.js");
-const { atomicJson } = await load(
-  collector,
-  "packages/host-runtime/src/config.js",
+const json = async (path) => JSON.parse(await readFile(path, "utf8"));
+async function atomicJson(path, value) {
+  const temporary = path + "." + randomUUID();
+  await writeFile(temporary, JSON.stringify(value, null, 2) + "\n", {
+    mode: 0o600,
+  });
+  await rename(temporary, path);
+}
+const manifests = new Map(
+  await Promise.all(
+    [
+      [collector, "data-collector"],
+      [hive, "hive"],
+    ].map(async ([artifact, component]) => {
+      const manifest = await json(join(artifact, "manifest.json"));
+      assert.equal(manifest.componentId, component);
+      const executable = resolve(artifact, manifest.entrypoint.executable),
+        child = relative(artifact, executable);
+      assert.ok(
+        child && !isAbsolute(child) && child.split(/[\\/]/)[0] !== "..",
+      );
+      assert.match(executable, new RegExp("ivy-" + component + "(?:\\.exe)?$"));
+      return [component, { ...manifest.entrypoint, executable }];
+    }),
+  ),
 );
 const build = JSON.parse(
   await readFile(join(collector, "dist/build-info.json"), "utf8"),
@@ -47,7 +60,6 @@ const build = JSON.parse(
 const hiveBuild = JSON.parse(
   await readFile(join(hive, "dist/build-info.json"), "utf8"),
 );
-assert.equal(build.componentId, "data-collector");
 const parent = resolve(tmpdir()),
   root = await mkdtemp(join(parent, "ivy-collector-offline-"));
 const report = {
@@ -58,10 +70,16 @@ const report = {
   startedAt: new Date().toISOString(),
   checks: [],
   processes: [],
+  nativeProcesses: [],
+  operations: [],
 };
+const reportPath = resolve(values.report);
+await writeFile(reportPath, JSON.stringify(report) + "\n", {
+  flag: "wx",
+  mode: 0o600,
+});
 let server,
   child,
-  exited,
   db,
   client,
   childOutput = "";
@@ -86,6 +104,7 @@ const base = `http://127.0.0.1:${hivePort}/ivy`,
   dataRoot = join(root, "collector"),
   configPath = join(root, "collector.json");
 await mkdir(dataRoot);
+const common = { schemaVersion: 1, hostId: "acceptance", publicBaseUrl: base };
 await atomicJson(configPath, {
   schemaVersion: 1,
   componentId: "data-collector",
@@ -96,6 +115,7 @@ await atomicJson(configPath, {
   artifactRoot: collector,
   dataRoot,
   workRoot: join(root, "work"),
+  logsRoot: join(root, "collector-logs"),
   version: build.version,
   buildId: build.buildId,
   credential: token,
@@ -105,78 +125,144 @@ await atomicJson(configPath, {
     ingress: { host: "127.0.0.1", port: ingressPort },
   },
 });
-async function openHive() {
-  server = new HiveServer({
-    filename: join(root, "hive.sqlite"),
-    publicBaseUrl: base,
-    credentials: [{ principalId: "acceptance", digest: digest(token) }],
-    version: hiveBuild.version,
-    buildId: hiveBuild.buildId,
+const hiveData = join(root, "hive"),
+  hivePath = join(root, "hive.json");
+await atomicJson(hivePath, {
+  ...common,
+  componentId: "hive",
+  instanceId: "hive",
+  serviceNodeId: "acceptance.hive",
+  artifactRoot: hive,
+  dataRoot: hiveData,
+  workRoot: join(root, "hive-work"),
+  logsRoot: join(root, "hive-logs"),
+  version: hiveBuild.version,
+  buildId: hiveBuild.buildId,
+  settings: {
     listenHost: "127.0.0.1",
     listenPort: hivePort,
-  });
-  await server.start();
-  client = new HiveClient(base, { credential: token });
-}
-async function launch() {
-  child = spawn(
-    process.execPath,
-    [
-      join(collector, "dist/services/data-collector/src/main.js"),
-      "--config",
-      configPath,
-    ],
+    credentials: [{ principalId: "acceptance", token }],
+    backup: {
+      enabled: false,
+      directory: join(root, "backups"),
+      intervalHours: 24,
+      retain: 2,
+    },
+  },
+});
+const owned = [];
+async function startNative(component, path, data) {
+  const entry = manifests.get(component);
+  const launched = spawn(
+    entry.executable,
+    [...(entry.args ?? []), "--config", path],
     {
-      cwd: collector,
+      cwd: component === "hive" ? hive : collector,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, IVY_LAUNCH_ID: randomUUID() },
+      env: {
+        ...process.env,
+        IVY_LAUNCH_ID: randomUUID(),
+        IVY_NODE_EXECUTABLE: process.execPath,
+      },
     },
   );
-  childOutput = "";
-  child.stdout.on("data", (bytes) => {
-    childOutput = (childOutput + bytes).slice(-4000);
+  const state = { process: launched, data, component, logs: "" };
+  state.closed = new Promise((yes) => {
+    launched.once("error", (error) => {
+      state.error = error;
+    });
+    launched.once("close", (code, signal) => yes({ code, signal }));
   });
-  child.stderr.on("data", (bytes) => {
-    childOutput = (childOutput + bytes).slice(-4000);
-  });
-  exited = new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", (code, signal) => resolve({ code, signal }));
+  for (const stream of [launched.stdout, launched.stderr])
+    stream.on("data", (bytes) => {
+      state.logs = (state.logs + bytes).slice(-8000);
+      if (component === "data-collector") childOutput = state.logs;
+    });
+  owned.push(state);
+  report.nativeProcesses.push({
+    component,
+    pid: launched.pid,
+    executable: entry.executable,
   });
   await until(async () => {
+    if (state.error) throw state.error;
+    assert.equal(launched.exitCode, null, state.logs);
     try {
-      return (
-        JSON.parse(await readFile(join(dataRoot, "health.json"), "utf8"))
-          .pid === child.pid
-      );
+      return (await json(join(data, "health.json"))).pid === launched.pid;
     } catch {
       return false;
     }
-  }, "collector process startup");
-  report.processes.push(child.pid);
+  }, component + " native startup");
+  return state;
 }
-async function stop() {
-  if (!child || child.exitCode !== null) return;
-  const health = JSON.parse(
-    await readFile(join(dataRoot, "health.json"), "utf8"),
-  );
-  assert.equal(health.pid, child.pid);
-  await atomicJson(join(dataRoot, "control.json"), {
+async function stopNative(state) {
+  if (state.process.exitCode !== null) {
+    assert.deepEqual(await state.closed, { code: 0, signal: null }, state.logs);
+    return;
+  }
+  const health = await json(join(state.data, "health.json"));
+  assert.equal(health.pid, state.process.pid);
+  await atomicJson(join(state.data, "control.json"), {
     schemaVersion: 1,
-    instanceId: "acceptance",
+    instanceId: health.instanceId,
     launchId: health.launchId,
     bootId: health.bootId,
     action: "shutdown",
     requestedAt: new Date().toISOString(),
   });
-  const outcome = await Promise.race([
-    exited,
-    delay(20000).then(() => {
-      throw new Error("Collector shutdown did not finish.");
+  const result = await Promise.race([
+    state.closed,
+    delay(20000, null, { ref: false }).then(() => {
+      throw Error(state.component + " shutdown timed out: " + state.logs);
     }),
   ]);
-  assert.deepEqual(outcome, { code: 0, signal: null }, childOutput);
+  assert.deepEqual(result, { code: 0, signal: null }, state.logs);
+  assert.equal((await json(join(state.data, "health.json"))).ready, false);
+}
+async function openHive() {
+  const state = await startNative("hive", hivePath, hiveData);
+  server = { close: () => stopNative(state) };
+  client = {
+    async request(method, params = {}) {
+      const response = await fetch(base + "/api/v1/rpc", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer " + token,
+          "Content-Type": "application/json",
+          Connection: "close",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: randomUUID(),
+          method,
+          params,
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+      const value = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(value.error));
+      if (value.error)
+        throw Object.assign(Error(value.error.message), {
+          code: value.error.data?.code,
+        });
+      return value.result;
+    },
+  };
+  await until(
+    async () => (await json(join(hiveData, "health.json"))).ready,
+    "native Hive readiness",
+  );
+}
+async function launch() {
+  childOutput = "";
+  const state = await startNative("data-collector", configPath, dataRoot);
+  child = state.process;
+  report.processes.push(child.pid);
+}
+async function stop() {
+  if (!child || child.exitCode !== null) return;
+  await stopNative(owned.find((state) => state.process === child));
   child = null;
 }
 async function ready() {
@@ -214,15 +300,41 @@ async function markers(id) {
     throw e;
   }
 }
-const read = (input) =>
-  serviceTools(client, "acceptance.collector", [
-    { namespace: "data-collector", interfaceVersion: "1.0.0" },
-  ]).call("data-collector.read", input);
+async function call(name, input, operationId) {
+  const qualifiedName = "data-collector." + name;
+  const page = await client.request("tools.list", {
+    namespace: "data-collector",
+    namePrefix: name,
+    serviceNodeId: "acceptance.collector",
+  });
+  const binding = page.items.find(
+    (value) => value.qualifiedName === qualifiedName,
+  );
+  assert.ok(binding);
+  return client.request("tools.call", {
+    qualifiedName,
+    serviceNodeId: "acceptance.collector",
+    expectedDefinitionHash: binding.definitionHash,
+    arguments: input,
+    ...(operationId ? { operationId } : {}),
+  });
+}
+const read = (input) => call("read", input);
 async function update(input) {
-  const operationId = await newOperationId(client);
-  return serviceTools(client, "acceptance.collector", [
-    { namespace: "data-collector", interfaceVersion: "1.0.0" },
-  ]).call("data-collector.update", { ...input, operationId }, operationId);
+  const operationId =
+    (await client.request("system.status")).runtimeEpoch +
+    ":" +
+    Date.now() +
+    ":" +
+    randomUUID();
+  report.operations.push({
+    operationId,
+    action: input.action,
+    id: input.id,
+    jobId: input.jobId,
+  });
+  await atomicJson(reportPath, report);
+  return call("update", { ...input, operationId }, operationId);
 }
 async function push(sequence, key) {
   const response = await fetch(
@@ -507,7 +619,17 @@ try {
     process.exitCode = 1;
   }
   db?.close();
-  await server?.close();
+  try {
+    await server?.close();
+  } catch (error) {
+    report.cleanupError = error.message;
+    process.exitCode = 1;
+  }
+  for (const state of owned)
+    if (state.process.exitCode === null) {
+      state.process.kill();
+      await state.closed;
+    }
   if (report.status === "passed" && !report.cleanupError) {
     assert.equal(dirname(root), parent);
     assert.ok(root.startsWith(join(parent, "ivy-collector-offline-")));
@@ -519,10 +641,8 @@ try {
     });
   } else report.retainedFixture = root;
   report.completedAt = new Date().toISOString();
-  await writeFile(
-    resolve(values.report),
-    JSON.stringify(report, null, 2) + "\n",
-    { mode: 0o600 },
-  );
+  await writeFile(reportPath, JSON.stringify(report, null, 2) + "\n", {
+    mode: 0o600,
+  });
   console.log(JSON.stringify(report));
 }
