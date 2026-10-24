@@ -201,10 +201,20 @@ async fn native_ui_windows_namespace_root_keeps_logical_paths_without_creating_t
     }
     store.connection().execute_batch("UPDATE app_releases SET release_json=json_set(release_json,'$.entryPath','💡.html','$.assets[0].path','💡.html','$.assets[1].path','\u{e000}.png');").unwrap();
     let directory = files.directory(&"sample-ui".into(), &"r1".into()).unwrap();
-    let stale = directory.join("💡.html.00000000-0000-4000-8000-000000000001.partial");
-    fs::write(&stale, b"interrupted").unwrap();
+    let stale = [
+        "💡.html.00000000-0000-4000-8000-000000000001.partial",
+        "💡.html.ffffffff-ffff-ffff-ffff-ffffffffffff.partial",
+    ];
+    for name in stale {
+        fs::write(directory.join(name), b"interrupted").unwrap();
+    }
     let kept = [
         OsString::from("💡.html.A0000000-0000-4000-8000-000000000001.partial"),
+        OsString::from("💡.html.00000000_0000-4000-8000-000000000002.partial"),
+        OsString::from("💡.html.g0000000-0000-4000-8000-000000000003.partial"),
+        OsString::from("💡.html.00000000-0000-4000-8000-00000000004.partial"),
+        OsString::from("💡.html.00000000-0000-4000-8000-000000000005.PARTIAL"),
+        OsString::from("💡.html-extra.00000000-0000-4000-8000-000000000006.partial"),
         opaque_name("💡.html.", 0xd800),
         opaque_name("💡.html.", 0xdfff),
         OsString::from("💡.html.\u{fffd}"),
@@ -212,12 +222,21 @@ async fn native_ui_windows_namespace_root_keeps_logical_paths_without_creating_t
     for name in &kept {
         fs::write(directory.join(name), b"retained distinct sibling").unwrap();
     }
+    let partial_directory = directory.join("💡.html.00000000-0000-4000-8000-000000000007.partial");
+    fs::create_dir(&partial_directory).unwrap();
+    fs::write(partial_directory.join("sentinel"), b"retained directory").unwrap();
     files.migrate_legacy(&mut store).unwrap();
     assert_eq!(
         store.metadata("ui_files_v1").unwrap().as_deref(),
         Some("ready")
     );
-    assert!(!stale.exists());
+    for name in stale {
+        assert!(!directory.join(name).exists());
+    }
+    assert_eq!(
+        fs::read(partial_directory.join("sentinel")).unwrap(),
+        b"retained directory"
+    );
     for name in &kept {
         assert_eq!(
             fs::read(directory.join(name)).unwrap(),

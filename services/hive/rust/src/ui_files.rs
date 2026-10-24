@@ -137,19 +137,15 @@ fn write_atomic(file: &Path, bytes: &[u8]) -> IvyResult<()> {
     remove(&temporary, false)?;
     result
 }
-fn stale_partial(name: &JsString) -> bool {
-    if name.0.len() != 44
-        || !name
-            .0
-            .ends_with(&".partial".encode_utf16().collect::<Vec<_>>())
-    {
+fn stale_partial(name: &[u8]) -> bool {
+    if name.len() != 44 || !name.ends_with(b".partial") {
         return false;
     }
-    name.0[..36].iter().enumerate().all(|(i, c)| {
+    name[..36].iter().enumerate().all(|(i, c)| {
         if [8, 13, 18, 23].contains(&i) {
-            *c == b'-' as u16
+            *c == b'-'
         } else {
-            (b'0' as u16..=b'9' as u16).contains(c) || (b'a' as u16..=b'f' as u16).contains(c)
+            c.is_ascii_digit() || (b'a'..=b'f').contains(c)
         }
     })
 }
@@ -532,13 +528,18 @@ impl UiFiles {
                 } else {
                     write_atomic(&file, &bytes)?;
                 }
-                let mut prefix = os_string(file.file_name().ok_or_else(IvyError::internal)?).0;
-                prefix.push(b'.' as u16);
+                let mut prefix = file
+                    .file_name()
+                    .ok_or_else(IvyError::internal)?
+                    .to_os_string();
+                prefix.push(".");
                 for entry in entries(file.parent().ok_or_else(IvyError::internal)?)? {
-                    let name = os_string(&entry.file_name());
+                    let name = entry.file_name();
                     if entry.file_type().map_err(sql_error)?.is_file()
-                        && name.0.starts_with(&prefix)
-                        && stale_partial(&JsString(name.0[prefix.len()..].to_vec()))
+                        && name
+                            .as_encoded_bytes()
+                            .strip_prefix(prefix.as_encoded_bytes())
+                            .is_some_and(stale_partial)
                     {
                         fs::remove_file(entry.path()).map_err(sql_error)?;
                     }
