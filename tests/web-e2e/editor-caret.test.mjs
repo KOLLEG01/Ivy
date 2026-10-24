@@ -49,6 +49,14 @@ for (const width of [1440, 390]) test(`Wiki and task editors keep a steady reduc
       await expect(link).toHaveText(html ? 'Reference page' : 'https://example.test/reference');
       await expect(editor).toContainText((html ? 'Reference page' : 'https://example.test/reference') + ' following text');
     }
+    await editor.press('Control+End');
+    await editor.press('Enter');
+    await editor.pressSequentially('- First');
+    await editor.press('Enter');
+    await editor.pressSequentially('Second');
+    await expect(editor.locator('li')).toHaveCount(2);
+    await expect(editor.locator('li').nth(0)).toContainText('First');
+    await expect(editor.locator('li').nth(1)).toContainText('Second');
     assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   }
   assert.deepEqual(f.pageErrors, []);

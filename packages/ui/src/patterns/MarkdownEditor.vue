@@ -9,12 +9,14 @@ import { listItem } from '@milkdown/crepe/feature/list-item';
 import { placeholder as placeholderFeature } from '@milkdown/crepe/feature/placeholder';
 import { table } from '@milkdown/crepe/feature/table';
 import { toolbar } from '@milkdown/crepe/feature/toolbar';
-import { imageSchema, linkSchema } from '@milkdown/kit/preset/commonmark';
+import { imageSchema, linkSchema, listItemSchema } from '@milkdown/kit/preset/commonmark';
+import { listItemBlockView } from '@milkdown/kit/component/list-item-block';
 import { $view, insert, replaceAll } from '@milkdown/kit/utils';
 import { editorViewCtx } from '@milkdown/kit/core';
 import { uploadConfig } from '@milkdown/kit/plugin/upload';
 import { DOMSerializer, Fragment, Slice } from '@milkdown/kit/prose/model';
 import type { Node as ProseNode, Schema } from '@milkdown/kit/prose/model';
+import type { Transaction } from '@milkdown/kit/prose/state';
 import { Paperclip } from '@lucide/vue';
 import { languages } from '@codemirror/language-data';
 import { renderMermaidPreview } from './mermaid-preview';
@@ -47,6 +49,20 @@ const uploadError = ref<string | null>(null), uploading = ref(false), previewOpe
 let crepe: CrepeBuilder | null = null, lastPublished = props.modelValue, replacing = false, edited = false;
 // Only report formatting of supplied Markdown when no user input changed it in the meantime.
 const markEdited = () => { edited = true; };
+
+// Milkdown restores a list's mounted selection on the next animation frame.
+// A newer edit or caret move must keep its own selection instead.
+const stableListItemView = $view(listItemSchema.node, () => (node, view, getPos, decorations, innerDecorations) => {
+  const mountedState = view.state;
+  const owner = new Proxy(view, { get(target, key, receiver) {
+    if (key !== 'dispatch') return Reflect.get(target, key, receiver);
+    return (transaction: Transaction) => {
+      if (!transaction.docChanged && transaction.selectionSet && target.state !== mountedState) return;
+      target.dispatch(transaction);
+    };
+  } });
+  return listItemBlockView.view(node, owner, getPos, decorations, innerDecorations);
+});
 
 const publishCurrentMarkdown = () => {
   queueMicrotask(() => {
@@ -197,7 +213,7 @@ onMounted(async () => {
   }))).config(ctx => ctx.update(uploadConfig.key, previous => ({
     ...previous, enableHtmlFileUploader: true,
     uploader: async (files, schema) => uploadedNodes(Array.from(files), schema),
-  }))).use(safeImageView).use(attachmentLinkView);
+  }))).use(safeImageView).use(attachmentLinkView).use(stableListItemView);
   crepe.on(listener => listener.markdownUpdated((_ctx, markdown) => {
     if (replacing || markdown === lastPublished) return;
     lastPublished = markdown; emit('update:modelValue', markdown);
