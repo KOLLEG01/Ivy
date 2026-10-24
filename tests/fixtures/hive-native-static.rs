@@ -73,7 +73,7 @@ async fn native_browser_assets_and_authenticated_console_files() {
         }
         fs::create_dir_all(console.join("icons")).unwrap();
         fs::create_dir(console.join("directory")).unwrap();
-        let files: [(&str, &[u8], &str, &str); 8] = [
+        let files: [(&str, &[u8], &str, &str); 11] = [
             ("index.html", b"<html>fixture</html>", "/", "text/html"),
             (
                 "app.js",
@@ -83,6 +83,14 @@ async fn native_browser_assets_and_authenticated_console_files() {
             ),
             ("app.css", b"body{}", "/console/app.css", "text/css"),
             ("font.woff2", b"font", "/console/font.woff2", "font/woff2"),
+            (".html", b"dot html", "/console/.html", "text/html"),
+            (".js", b"dot js", "/console/.js", "text/javascript"),
+            (
+                "suffix.html.",
+                b"trailing dot",
+                "/console/suffix.html.",
+                "application/octet-stream",
+            ),
             (
                 "upper.JS",
                 b"upper",
@@ -119,6 +127,30 @@ async fn native_browser_assets_and_authenticated_console_files() {
         fs::create_dir(&outside).unwrap();
         fs::write(outside.join("secret"), b"outside").unwrap();
         filesystem::directory_link(&outside, &console.join("escape")).unwrap();
+        let mut neighbor_name = name.clone();
+        neighbor_name.push("-neighbor");
+        let neighbor = console.parent().unwrap().join(neighbor_name);
+        fs::create_dir(&neighbor).unwrap();
+        fs::write(neighbor.join("secret"), b"neighbor").unwrap();
+        filesystem::directory_link(&neighbor, &console.join("neighbor")).unwrap();
+        #[cfg(windows)]
+        let opaque_name = {
+            use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+            OsString::from_wide(&[111, 112, unit, 46, 99, 115, 115])
+        };
+        #[cfg(not(windows))]
+        let opaque_name = std::ffi::OsString::from(format!("opaque-{unit:x}.css"));
+        let opaque_file = console.join(&opaque_name);
+        fs::write(&opaque_file, b"opaque css").unwrap();
+        let opaque_alias = console.join(opaque_name.to_string_lossy().as_ref());
+        if opaque_file != opaque_alias {
+            fs::write(&opaque_alias, b"unrelated filename alias").unwrap();
+        }
+        let opaque_link = console.join("opaque-style.js");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&opaque_file, &opaque_link).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&opaque_file, &opaque_link).unwrap();
         let assets = Assets {
             console_root: Some(console.clone()),
         };
@@ -128,6 +160,21 @@ async fn native_browser_assets_and_authenticated_console_files() {
             response_head(&reply, 200, Some(mime));
             assert_eq!(response_bytes(&reply), bytes);
             assert!(reply.ended);
+        }
+        let mut reply = Reply::default();
+        assert!(
+            serve(&assets, "GET", "/console/opaque-style.js", &mut reply)
+                .await
+                .unwrap()
+        );
+        response_head(&reply, 200, Some("text/css"));
+        assert_eq!(response_bytes(&reply), b"opaque css");
+        assert!(reply.ended);
+        if opaque_file != opaque_alias {
+            assert_eq!(
+                fs::read(&opaque_alias).unwrap(),
+                b"unrelated filename alias"
+            );
         }
         for size in [180, 192, 512] {
             let bytes = [0, 255, 13, 10, size as u8];
@@ -192,6 +239,7 @@ async fn native_browser_assets_and_authenticated_console_files() {
             ("/console/absent", "not_found"),
             ("/console/too-large.bin", "not_found"),
             ("/console/escape/secret", "not_found"),
+            ("/console/neighbor/secret", "not_found"),
             ("/console/%252e%252e", "invalid_arguments"),
         ] {
             let mut reply = Reply::default();
@@ -259,6 +307,7 @@ async fn native_browser_assets_and_authenticated_console_files() {
         assert_eq!(reply.events.len(), 1);
         assert!(!reply.ended);
         assert_eq!(fs::read(outside.join("secret")).unwrap(), b"outside");
+        assert_eq!(fs::read(neighbor.join("secret")).unwrap(), b"neighbor");
         assert!(native_path::from_native(&console).0.contains(&unit) || !cfg!(windows));
         if cfg!(windows) {
             assert_eq!(

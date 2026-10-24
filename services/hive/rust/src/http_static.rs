@@ -7,7 +7,7 @@ use crate::{
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, json::stringify, limits::MANAGEMENT_FRAME_BYTES,
 };
-use ivy_host_runtime::{node_path, paths::realpath};
+use ivy_host_runtime::{native_path, paths::realpath};
 use std::path::PathBuf;
 
 pub trait AssetResponse: Response {
@@ -172,17 +172,21 @@ impl Assets {
         asset_path(&relative)?;
         let root = realpath(root).map_err(sql_error)?;
         let file =
-            realpath(&root.join(node_path::to_native(&relative))).map_err(|_| not_found())?;
-        let mut prefix = node_path::from_native(&root);
-        prefix.0.push(std::path::MAIN_SEPARATOR as u16);
-        if !node_path::from_native(&file).0.starts_with(&prefix.0) {
+            realpath(&root.join(native_path::to_native(&relative))).map_err(|_| not_found())?;
+        let mut prefix = root.as_os_str().to_os_string();
+        prefix.push(std::path::MAIN_SEPARATOR_STR);
+        if !file
+            .as_os_str()
+            .as_encoded_bytes()
+            .starts_with(prefix.as_encoded_bytes())
+        {
             return Err(not_found());
         }
         let info = tokio::fs::metadata(&file).await.map_err(sql_error)?;
         if !info.is_file() || info.len() > MANAGEMENT_FRAME_BYTES as u64 {
             return Err(not_found());
         }
-        let path = node_path::from_native(&file);
+        let path = file.as_os_str().as_encoded_bytes();
         let mime = [
             (".html", "text/html"),
             (".js", "text/javascript"),
@@ -190,7 +194,7 @@ impl Assets {
             (".woff2", "font/woff2"),
         ]
         .into_iter()
-        .find(|(suffix, _)| path.0.ends_with(&suffix.encode_utf16().collect::<Vec<_>>()))
+        .find(|(suffix, _)| path.ends_with(suffix.as_bytes()))
         .map_or("application/octet-stream", |(_, mime)| mime);
         response.write_head(200, IvyJson::object([("Content-Type", mime.into())]))?;
         response.end_bytes(&tokio::fs::read(&file).await.map_err(sql_error)?)?;
