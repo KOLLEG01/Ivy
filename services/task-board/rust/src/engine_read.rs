@@ -264,7 +264,10 @@ impl<S: LifecycleStore, C: Fn() -> String, R: EngineReadRuntime> EngineReads<'_,
                 )
             })?;
         if receipt_only {
-            let receipt = crate::operation_receipt::operation_receipt::<IvyError>(&operation)?;
+            let receipt =
+                crate::journal_store::persistent_reads::operation_receipt::operation_receipt::<
+                    IvyError,
+                >(&operation)?;
             self.runtime.validate("OperationReceipt", &receipt)?;
             Ok(receipt)
         } else {
