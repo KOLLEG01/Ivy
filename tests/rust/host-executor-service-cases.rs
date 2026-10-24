@@ -189,6 +189,7 @@ async fn service_health_control_closes_and_releases_the_actual_journal_and_lock(
         .unwrap()
         .unwrap();
     assert!(runtime.0.load(Ordering::SeqCst));
+    assert_eq!(health(&f).await.get("ready"), Some(&false.into()));
     let lock = ExecutorLock::acquire(f.0.join("state/executor"), false)
         .await
         .unwrap();

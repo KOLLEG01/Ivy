@@ -237,6 +237,11 @@ async fn serve_owned(
         }
     };
     let closed = executor.close().await;
+    if let Some(health) = &health {
+        let _ = health
+            .write(false, "HostExecutor stopped.".into(), None)
+            .await;
+    }
     result.and(closed)
 }
 
