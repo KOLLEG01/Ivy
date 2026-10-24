@@ -44,9 +44,7 @@ fn hive(config: &J, enabled: &BTreeSet<JsString>) -> IvyResult<Option<J>> {
         .cloned())
 }
 async fn exists(path: PathBuf) -> IvyResult<bool> {
-    match tokio::fs::symlink_metadata(node_path::filesystem_path(&node_path::from_native(&path)))
-        .await
-    {
+    match tokio::fs::symlink_metadata(path).await {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(_) => Err(IvyError::internal()),
@@ -74,19 +72,8 @@ async fn running_target(journal: &HostJournal, instance: &J, message: &str) -> I
     )?;
     target.ok_or_else(IvyError::internal)
 }
-async fn runtime(target: &J, node: Option<&NodeRuntime>) -> IvyResult<J> {
-    Ok(config::instance_config(
-        node_path::node_filesystem_path(
-            property(target, "configPath")?
-                .as_js_string()
-                .ok_or_else(IvyError::internal)?,
-        )
-        .map_err(|_| IvyError::internal())?,
-        node,
-    )
-    .await?
-    .json()
-    .clone())
+async fn runtime(target: &J, node: Option<&NodeRuntime>) -> IvyResult<config::InstanceConfig> {
+    config::instance_config(config::path_value(property(target, "configPath")?)?, node).await
 }
 
 impl ResetHost {
@@ -169,14 +156,7 @@ impl Inner {
                 )
                 .await?;
             config::atomic_json(
-                runtime_maintenance::hive_reset_bootstrap_marker(
-                    &node_path::node_filesystem_path(
-                        property(&runtime, "dataRoot")?
-                            .as_js_string()
-                            .ok_or_else(IvyError::internal)?,
-                    )
-                    .map_err(|_| IvyError::internal())?,
-                ),
+                runtime_maintenance::hive_reset_bootstrap_marker(runtime.data_root()),
                 J::object([
                     ("schemaVersion", J::Number(1.0)),
                     ("resetId", J::String(reset_id)),
@@ -192,7 +172,14 @@ impl Inner {
             let managed = self
                 .docker
                 .start_container(
-                    config, instance, target, runtime, candidate, manifest, true, None,
+                    config,
+                    instance,
+                    target,
+                    runtime.json().clone(),
+                    candidate,
+                    manifest,
+                    true,
+                    None,
                 )
                 .await?;
             managed.verify().await?;
@@ -238,14 +225,7 @@ impl Inner {
                     .manifest(&field(&target, "candidateId")?.to_utf8()?)
                     .await?;
                 let runtime = runtime(&target, node.as_ref()).await?;
-                let path = runtime_maintenance::hive_reset_bootstrap_marker(
-                    &node_path::node_filesystem_path(
-                        property(&runtime, "dataRoot")?
-                            .as_js_string()
-                            .ok_or_else(IvyError::internal)?,
-                    )
-                    .map_err(|_| IvyError::internal())?,
-                );
+                let path = runtime_maintenance::hive_reset_bootstrap_marker(runtime.data_root());
                 hive_bootstrap_path = Some(path.clone());
                 self.docker
                     .stop_container(
@@ -288,7 +268,7 @@ impl Inner {
                         config.clone(),
                         instance.clone(),
                         target,
-                        runtime,
+                        runtime.json().clone(),
                         candidate,
                         manifest,
                         true,

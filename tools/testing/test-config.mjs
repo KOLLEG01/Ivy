@@ -547,6 +547,15 @@ export const rustTests = {
     "package": "ivy-host-runtime",
     "test": "host-scheduler"
   },
+  "tests/rust/host-reset-release-cases.rs": {
+    "package": "ivy-host-runtime",
+    "lib": true,
+    "filter": "runtime_reset::host::release_cases::",
+    "testThreads": 1,
+    "prerequisites": [
+      { "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }
+    ]
+  },
   "tests/rust/host-build-identity.rs": {
     "package": "ivy-host-runtime",
     "test": "host-build-identity"
