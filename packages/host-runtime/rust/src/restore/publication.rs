@@ -1,6 +1,6 @@
 use super::*;
 use crate::{backup_files::BackupFile, node_runtime::NodeRuntime, storage_space};
-use std::time::Instant;
+use std::{path::Path, time::Instant};
 
 /// The original workload runtime is part of the immutable backup identity.
 pub fn require_restore_platform<'a>(manifest: &J, node: impl Into<Option<&'a NodeRuntime>>) -> IvyResult<()> {
@@ -50,12 +50,12 @@ fn total_bytes(manifest: &J) -> IvyResult<f64> {
         .iter()
         .try_fold(0.0, |sum, file| Ok(sum + number(file.required("bytes")?)?))
 }
-async fn directory(path: &JsString) -> IvyResult<()> {
+async fn directory(path: &Path) -> IvyResult<()> {
     let mut builder = tokio::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
     builder.mode(0o700);
-    internal(builder.create(native(path)?).await)
+    internal(builder.create(path).await)
 }
 
 /// Copy an already verified backup into its already admitted fresh target.
@@ -76,39 +76,45 @@ pub async fn copy_restore_payload(
                 &bindings.storage,
             )?;
             let total = total_bytes(&manifest)?;
-            let mut roots = areas
+            let roots = areas
                 .iter()
-                .map(|area| area.path.clone())
-                .collect::<Vec<_>>();
-            roots.extend([
-                field(&config, "artifactRoot")?,
-                field(&config, "stagingRoot")?,
-            ]);
-            for root in roots {
-                let mut ancestor = node_path::dirname(Style::native(), &root);
-                while !exists(&ancestor).await? {
-                    ancestor = node_path::dirname(Style::native(), &ancestor);
+                .map(|area| native(&area.path))
+                .collect::<IvyResult<Vec<_>>>()?;
+            let artifacts = native(&field(&config, "artifactRoot")?)?;
+            let staging = native(&field(&config, "stagingRoot")?)?;
+            let parent = |path: &Path| {
+                path.parent()
+                    .filter(|path| !path.as_os_str().is_empty())
+                    .unwrap_or_else(|| {
+                        if path.has_root() {
+                            path
+                        } else {
+                            Path::new(".")
+                        }
+                    })
+                    .to_owned()
+            };
+            for root in roots.iter().chain([&artifacts, &staging]) {
+                let mut ancestor = parent(root);
+                while !backup_files::exists(&ancestor).await? {
+                    ancestor = parent(&ancestor);
                 }
-                storage_space::require_storage_space(
-                    native(&ancestor)?,
-                    total + 64.0 * 1024.0 * 1024.0,
-                )
-                .await?;
+                storage_space::require_storage_space(ancestor, total + 64.0 * 1024.0 * 1024.0)
+                    .await?;
             }
-            let runtime = field(&config, "runtimeRoot")?;
-            for root in [
-                runtime.clone(),
-                field(&config, "artifactRoot")?,
-                field(&config, "stagingRoot")?,
-            ] {
-                backup_files::private_directory(native(&root)?, job_launcher.clone()).await?;
+            let runtime_path = field(&config, "runtimeRoot")?;
+            let runtime = native(&runtime_path)?;
+            for root in [&runtime, &artifacts, &staging] {
+                backup_files::private_directory(root.clone(), job_launcher.clone()).await?;
             }
-            for area in areas
+            for (_, root) in areas
                 .iter()
-                .filter(|area| area.key != JsString::from("state"))
+                .zip(&roots)
+                .filter(|(area, _)| area.key != JsString::from("state"))
             {
-                directory(&area.path).await?;
+                directory(root).await?;
             }
+            let backup = native(&backup_root)?;
             for file in array(manifest.required("files")?)? {
                 let path = field(file, "path")?;
                 let destination = if !starts(&path, "state/") {
@@ -120,7 +126,12 @@ pub async fn copy_restore_payload(
                     }) {
                         continue;
                     }
-                    layout::storage_file(&config, &path, Some(&areas), &bindings.storage)?
+                    native(&layout::storage_file(
+                        &config,
+                        &path,
+                        Some(&areas),
+                        &bindings.storage,
+                    )?)?
                 } else {
                     let mut local = JsString(path.0[6..].to_vec());
                     if [
@@ -142,10 +153,11 @@ pub async fn copy_restore_payload(
                         local = concat(&["previous-recovery/".into(), local]);
                     }
                     backup_files::relative_file_with_context(
-                        &runtime,
+                        &runtime_path,
                         &local,
                         &bindings.storage.paths,
-                    )?
+                    )?;
+                    runtime.join(native(&local)?)
                 };
                 let expected = BackupFile {
                     path: path.clone(),
@@ -153,35 +165,32 @@ pub async fn copy_restore_payload(
                     bytes: number(file.required("bytes")?)? as u64,
                     mode: number(file.required("mode")?)? as u32,
                 };
-                let source = backup_files::relative_file_with_context(
+                backup_files::relative_file_with_context(
                     &backup_root,
                     &path,
                     &bindings.storage.paths,
                 )?;
                 backup_files::copy_verified(
-                    native(&source)?,
-                    native(&destination)?,
+                    backup.join(native(&path)?),
+                    destination,
                     Some(expected),
                     true,
                 )
                 .await?;
             }
-            directory(&join(&[runtime.clone(), "recovery-original".into()])).await?;
+            let recovery = runtime.join("recovery-original");
+            directory(&recovery).await?;
             for (source, destination) in [
                 (
-                    join(&[runtime.clone(), "deployments.sqlite".into()]),
-                    join(&[
-                        runtime.clone(),
-                        "recovery-original/deployments.sqlite".into(),
-                    ]),
+                    runtime.join("deployments.sqlite"),
+                    recovery.join("deployments.sqlite"),
                 ),
                 (
-                    join(&[backup_root, "configuration.json".into()]),
-                    join(&[runtime, "recovery-original/configuration.json".into()]),
+                    backup.join("configuration.json"),
+                    recovery.join("configuration.json"),
                 ),
             ] {
-                backup_files::copy_verified(native(&source)?, native(&destination)?, None, false)
-                    .await?;
+                backup_files::copy_verified(source, destination, None, false).await?;
             }
             Ok(total)
         })

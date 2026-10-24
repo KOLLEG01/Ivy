@@ -309,14 +309,6 @@ async fn project_restore_relocates_only_the_disposable_backup_index() {
 }
 
 #[tokio::test]
-async fn restore_payload_copy_preserves_authority_and_reserves_old_recovery_names() {
-    for case in ["valid", "external-area", "legacy-areas", "changed-source", "missing-journal", "existing-root"] {
-        let result=compare_case("payload",case).await;
-        assert_eq!(ok(&result),["valid","external-area","legacy-areas"].contains(&case),"{case}");
-        assert_eq!(result.get("state").unwrap().get("publication"),Some(&J::Null));
-    }
-}
-#[tokio::test]
 async fn restore_final_publication_reconciles_only_working_state_and_stays_disabled() {
     for case in ["valid", "external-area", "report-accounting", "control-link", "health-directory", "config-publication-failure", "wrong-journal-host"] {
         let result=compare_case("publication",case).await;
@@ -345,3 +337,6 @@ mod target_cases;
 
 #[path = "host-restore-verification-cases.rs"]
 mod verification_cases;
+
+#[path = "host-restore-payload-cases.rs"]
+mod payload_cases;

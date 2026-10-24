@@ -154,6 +154,15 @@ export const rustTests = {
     ],
     "testThreads": 1
   },
+  "tests/rust/host-restore-payload-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "restore_cases::payload_cases::restore_payload_copy_preserves_authority_and_reserves_old_recovery_names",
+    "testThreads": 1,
+    "prerequisites": [
+      { "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }
+    ]
+  },
   "tests/rust/host-restore-verification-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",
