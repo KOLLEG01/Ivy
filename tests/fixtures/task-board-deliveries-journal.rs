@@ -116,6 +116,7 @@ struct Client {
     owner: std::sync::atomic::AtomicBool,
     lose: std::sync::atomic::AtomicBool,
     confirmed: std::sync::atomic::AtomicBool,
+    readiness: Mutex<Option<(&'static str, Json)>>,
     calls: Mutex<Vec<Json>>,
     target: Json,
     reply: Json,
@@ -209,7 +210,7 @@ impl RpcClient for Client {
                 )])),
                 "serviceNodes.get" => {
                     let own = f(&a, "serviceNodeId") == &Json::from("task-board-node");
-                    Ok(Json::object([
+                    let mut node = Json::object([
                         ("serviceNodeId", a.required("serviceNodeId")?.clone()),
                         (
                             "serviceName",
@@ -231,7 +232,13 @@ impl RpcClient for Client {
                         ("connected", true.into()),
                         ("synced", true.into()),
                         ("ready", true.into()),
-                    ]))
+                    ]);
+                    if !own {
+                        if let Some((key, value)) = &*self.readiness.lock().unwrap() {
+                            node.insert(*key, value.clone());
+                        }
+                    }
+                    Ok(node)
                 }
                 "tools.list" => {
                     assert_eq!(f(&a, "namespace"), &Json::from("chat"));
@@ -383,6 +390,85 @@ fn clock() -> String {
 fn fresh() -> JsString {
     uuid::Uuid::new_v4().to_string().into()
 }
+struct NativeFixture {
+    task: Json,
+    handoff: JsString,
+    target: Json,
+    reply: Json,
+    input: Json,
+}
+fn native_fixture() -> NativeFixture {
+    let json = |text: &str| parse(text, MANAGEMENT_FRAME_BYTES).unwrap();
+    let hash = Json::from(format!("sha256:{}", "a".repeat(64)));
+    let channel = json(r#"{"adapter":"whatsapp","accountId":"a","channelId":"main"}"#);
+    let mut expected = json(
+        r#"{"principalId":"chat-owner","callerPrincipalId":"caller","workspaceId":"workspace"}"#,
+    );
+    expected.insert("definitionHash", hash.clone());
+    let target = Json::object([
+        ("serviceNodeId", "chat-node".into()),
+        ("expectedBridge", expected),
+        ("channel", channel.clone()),
+    ]);
+    let mut handoff = JsString::from("Saved result");
+    handoff.0.push(0xd800);
+    let mut comment = json(
+        r#"{"commentId":"comment","authorKind":"agent","requests":[],"nativeInput":null,"purpose":"handoff"}"#,
+    );
+    comment.insert("body", Json::String(handoff.clone()));
+    comment.insert("delivery", pin(300));
+    let task = Json::object([
+        ("taskKey", "TASK-0123".into()),
+        ("lastHistory", pin(600)),
+        ("publication", Json::Null),
+        ("comments", Json::Array(vec![comment])),
+    ]);
+    let mut input = json(
+        r#"{"schemaVersion":1,"workspaceId":"workspace","operationId":"original","sequence":1,"payload":{"text":"Main handoff","images":[]},"state":"completed","nativeCalls":{"resume":null,"turn":null,"interrupt":null},"turnId":"turn","epoch":"epoch","error":null,"cancellation":null}"#,
+    );
+    input.insert("definitionHash", hash.clone());
+    input.insert("requestHash", hash.clone());
+    input.insert(
+        "identity",
+        Json::object([
+            ("channel", channel.clone()),
+            ("senderPrincipalId", "caller".into()),
+            ("messageId", "message".into()),
+        ]),
+    );
+    input.insert("binding", pin(802));
+    input.insert("result", pin(803));
+    for key in ["admittedAt", "updatedAt", "finishedAt"] {
+        input.insert(key, clock().into());
+    }
+    let mut reply = json(
+        r#"{"schemaVersion":1,"workspaceId":"workspace","sequence":1,"partIndex":0,"text":"Main response","artifacts":[],"state":"confirmed"}"#,
+    );
+    reply.insert("definitionHash", hash.clone());
+    reply.insert("immutableHash", hash);
+    reply.insert("channel", channel);
+    reply.insert(
+        "origin",
+        Json::object([
+            ("kind", "native".into()),
+            ("inputId", Json::String(id(801))),
+            ("binding", pin(802)),
+            ("result", pin(803)),
+        ]),
+    );
+    for key in ["createdAt", "firstOfferedAt", "confirmedAt"] {
+        reply.insert(key, clock().into());
+    }
+    validate_chat("Input", &input).unwrap();
+    validate_chat("Reply", &reply).unwrap();
+    NativeFixture {
+        task,
+        handoff,
+        target,
+        reply,
+        input,
+    }
+}
 #[tokio::test(flavor = "current_thread")]
 async fn real_publication_delivery_identity_survives_lost_reply_reopen_and_owner_replacement() {
     struct Temp(std::path::PathBuf);
@@ -395,40 +481,10 @@ async fn real_publication_delivery_identity_survives_lost_reply_reopen_and_owner
         "task-board-deliveries-{}.sqlite",
         uuid::Uuid::new_v4()
     )));
-    let row = data()
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| s(r, "name") == &JsString::from("confirm chat proof"))
-        .unwrap();
-    let initial = f(row, "initial");
-    let mut task = f(f(initial, "task"), "value").clone();
+    let fixture = native_fixture();
+    let mut task = fixture.task;
     let mut comment = f(&task, "comments").as_array().unwrap()[0].clone();
-    let handoff = f(f(f(initial, "current"), "value"), "chatRequest")
-        .required("text")
-        .unwrap()
-        .as_js_string()
-        .unwrap()
-        .clone();
-    let frames = f(row, "boundaries").as_array().unwrap();
-    let raw = |n: usize| {
-        frames
-            .iter()
-            .filter(|e| f(e, "kind") == &Json::from("rpc"))
-            .find(|e| {
-                let a = f(e, "args").as_array().unwrap();
-                a[0] == Json::from("objects.read") && f(&a[1], "objectId") == f(&pin(n), "objectId")
-            })
-            .unwrap()
-            .required("value")
-            .unwrap()
-            .required("content")
-            .unwrap()
-            .required("value")
-            .unwrap()
-            .clone()
-    };
-    let target = f(f(f(initial, "current"), "value"), "chatTarget").clone();
+    let handoff = fixture.handoff;
     let client = Arc::new(Client {
         path: temp.0.clone(),
         delivery: Mutex::new(None),
@@ -436,10 +492,11 @@ async fn real_publication_delivery_identity_survives_lost_reply_reopen_and_owner
         owner: std::sync::atomic::AtomicBool::new(true),
         lose: std::sync::atomic::AtomicBool::new(true),
         confirmed: std::sync::atomic::AtomicBool::new(false),
+        readiness: Mutex::new(None),
         calls: Mutex::default(),
-        target,
-        reply: raw(800),
-        input: raw(801),
+        target: fixture.target,
+        reply: fixture.reply,
+        input: fixture.input,
     });
     let mut delivery = None;
     let mut retained_request = None;
@@ -584,6 +641,55 @@ async fn real_publication_delivery_identity_survives_lost_reply_reopen_and_owner
                 4
             );
             retained_request = Some(saved);
+            let mut typed_readiness_checks = 0;
+            for key in ["connected", "synced", "ready"] {
+                for value in [
+                    Json::Null,
+                    false.into(),
+                    0.0.into(),
+                    1.0.into(),
+                    "".into(),
+                    "yes".into(),
+                    Json::Array(vec![]),
+                    Json::object(Vec::<(&str, Json)>::new()),
+                ] {
+                    *client.readiness.lock().unwrap() = Some((key, value));
+                    let calls_before = client.calls.lock().unwrap().len();
+                    let changes_before = db.total_changes();
+                    subject.step(delivery_id).await.unwrap();
+                    let saved = store
+                        .read(
+                            "task-board/delivery",
+                            &Json::String(delivery_id.clone()),
+                            true,
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(f(&saved.value, "state"), &Json::from("outcome_unknown"));
+                    assert_eq!(
+                        f(&saved.value, "code"),
+                        &Json::from("task_board_chat_unavailable")
+                    );
+                    assert_eq!(
+                        f(&saved.value, "chatRequest"),
+                        retained_request.as_ref().unwrap()
+                    );
+                    assert!(
+                        client.calls.lock().unwrap()[calls_before..]
+                            .iter()
+                            .all(|call| call.as_array().unwrap()[0]
+                                == Json::from("serviceNodes.get")),
+                        "A non-true readiness value must not discover or call a channel tool"
+                    );
+                    assert!(client.requests.lock().unwrap().is_empty());
+                    if typed_readiness_checks > 0 {
+                        assert_eq!(db.total_changes(), changes_before);
+                    }
+                    typed_readiness_checks += 1;
+                }
+            }
+            assert_eq!(typed_readiness_checks, 24);
+            *client.readiness.lock().unwrap() = None;
             subject.step(delivery_id).await.unwrap();
             let uncertain = store
                 .read(

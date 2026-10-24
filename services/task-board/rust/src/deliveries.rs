@@ -91,15 +91,6 @@ fn s<'a>(v: &'a Json, k: &str) -> IvyResult<&'a JsString> {
 fn eq(v: &Json, k: &str, t: &str) -> bool {
     f(v, k) == &Json::from(t)
 }
-fn truthy(v: &Json) -> bool {
-    match v {
-        Json::Null => false,
-        Json::Bool(b) => *b,
-        Json::Number(n) => *n != 0.0 && !n.is_nan(),
-        Json::String(s) => !s.0.is_empty(),
-        _ => true,
-    }
-}
 fn array(v: &Json) -> &[Json] {
     v.as_array().unwrap_or(&[])
 }
@@ -196,7 +187,7 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
             .find(|c| f(c, "commentId") == f(v, "commentId"))
             .cloned();
         require(
-            comment.is_some() && truthy(f(&task, "lastHistory")),
+            comment.is_some() && f(&task, "lastHistory").as_object().is_some(),
             "task_board_delivery_mismatch",
             "The routed Comment and its publication history are unavailable.",
         )?;
@@ -282,11 +273,12 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
             "task_board_delivery_mismatch",
             "Chat delivery cannot change to Phone.",
         )?;
-        if truthy(f(v, "phoneRequest")) {
+        if !f(v, "phoneRequest").is_null() {
             let p = v.required("phoneRequest")?;
             require(
-                eq(v, "requestedRoute", "phone")
-                    && truthy(f(v, "phoneTarget"))
+                p.as_object().is_some()
+                    && eq(v, "requestedRoute", "phone")
+                    && f(v, "phoneTarget").as_object().is_some()
                     && f(p, "recipientId") == f(f(v, "phoneTarget"), "recipientId")
                     && eq(p, "route", "voice")
                     && f(p, "voicePrompt")
@@ -295,10 +287,11 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
                 "Phone delivery must retain the exact Comment prompt and configured recipient.",
             )?;
         }
-        if truthy(f(v, "chatRequest")) {
+        if !f(v, "chatRequest").is_null() {
             let p = v.required("chatRequest")?;
             require(
-                truthy(f(v, "chatTarget"))
+                p.as_object().is_some()
+                    && f(v, "chatTarget").as_object().is_some()
                     && same(
                         f(p, "expectedBridge"),
                         f(f(v, "chatTarget"), "expectedBridge"),
@@ -311,7 +304,11 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
             )?;
         }
         require(
-            !truthy(f(v, "phoneCallId")) || truthy(f(v, "phoneRequest")),
+            f(v, "phoneCallId").is_null()
+                || f(v, "phoneCallId")
+                    .as_js_string()
+                    .is_some_and(|id| !id.0.is_empty())
+                    && !f(v, "phoneRequest").is_null(),
             "task_board_delivery_mismatch",
             "A Phone call identity requires its retained original request.",
         )?;
@@ -323,7 +320,6 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
                 "chatRequest"
             },
         );
-        // Optional chaining yields undefined for an absent request, distinct from saved null.
         require(
             eq(v, "state", "pending") || v.get("operationId") == request.get("operationId"),
             "task_board_delivery_mismatch",
@@ -395,7 +391,7 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
                 || f(&node, "principalId") == f(f(target, "expectedBridge"), "principalId"))
                 && ["connected", "synced", "ready"]
                     .iter()
-                    .all(|k| truthy(f(&node, k))),
+                    .all(|k| f(&node, k).as_bool() == Some(true)),
             if chat {
                 "task_board_chat_unavailable"
             } else {
@@ -451,7 +447,7 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
         let reply = raw.required("content")?.required("value")?;
         validate_chat("Reply", reply)?;
         require(
-            eq(f(reply, "origin"), "kind", "native") && truthy(f(v, "chatRequest")),
+            eq(f(reply, "origin"), "kind", "native") && f(v, "chatRequest").as_object().is_some(),
             "task_board_delivery_mismatch",
             "The service handoff must be written by current Main.",
         )?;
@@ -502,17 +498,17 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
     }
     async fn chat(&self, current: &Document) -> IvyResult<()> {
         let v = &current.value;
-        let target = if truthy(f(v, "chatRequest")) {
+        let target = if !f(v, "chatRequest").is_null() {
             f(v, "chatTarget").clone()
         } else {
             main_chat(self.engine.client().as_ref()).await?.to_json()
         };
         require(
-            truthy(&target),
+            target.as_object().is_some(),
             "task_board_delivery_mismatch",
             "The original service handoff must retain its owner.",
         )?;
-        if !truthy(f(v, "chatRequest")) {
+        if f(v, "chatRequest").is_null() {
             require(
                 f(f(&target, "expectedBridge"), "callerPrincipalId")
                     == &Json::String(self.engine.principal_id().clone()),
@@ -713,7 +709,7 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
                 None,
             )
             .await?;
-        if !truthy(&operation) {
+        if operation.is_null() {
             return Ok(None);
         }
         let intent = f(&operation, "intent");
@@ -734,12 +730,12 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
         } else {
             v.required("phoneTarget")?
         };
-        if !truthy(target) {
+        if target.is_null() {
             return self
                 .fallback(current, "task_board_phone_unconfigured".into())
                 .await;
         }
-        if !truthy(f(v, "phoneRequest")) {
+        if f(v, "phoneRequest").is_null() {
             let (task, comment) = self.comment(v).await?;
             let operation = self.engine.new_phone_operation()?;
             let request = Json::object([
@@ -769,7 +765,7 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
                 .await;
         }
         let request = v.required("phoneRequest")?;
-        if !truthy(f(v, "phoneCallId")) {
+        if f(v, "phoneCallId").is_null() {
             let result: IvyResult<()> = async {
                 let result = self
                     .channel_call(
@@ -855,7 +851,7 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
                 None,
             )
             .await?;
-        if !truthy(&dial) || eq(&dial, "phase", "submitted") {
+        if dial.is_null() || eq(&dial, "phase", "submitted") {
             if !eq(v, "code", "awaiting_phone") {
                 self.update(
                     current,
@@ -901,7 +897,7 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
                 None,
             )
             .await?;
-        if !truthy(&prompt) || eq(&prompt, "phase", "submitted") {
+        if prompt.is_null() || eq(&prompt, "phase", "submitted") {
             if !eq(v, "code", "awaiting_voice_prompt") {
                 self.update(
                     current,
@@ -994,8 +990,8 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
             return Ok(());
         }
         if eq(v, "state", "outcome_unknown")
-            && !(eq(v, "activeRoute", "phone") && truthy(f(v, "phoneRequest"))
-                || eq(v, "activeRoute", "chat") && truthy(f(v, "chatRequest")))
+            && !(eq(v, "activeRoute", "phone") && !f(v, "phoneRequest").is_null()
+                || eq(v, "activeRoute", "chat") && !f(v, "chatRequest").is_null())
         {
             return Ok(());
         }

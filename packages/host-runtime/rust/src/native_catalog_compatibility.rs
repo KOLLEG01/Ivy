@@ -1,5 +1,6 @@
 //! Read-only catalog checks before the host drains an existing service.
-use super::{concurrency::map_concurrent, native_path};
+use super::concurrency::map_concurrent;
+use crate::native_path::{from_native, to_native};
 use futures_util::{
     FutureExt,
     future::{BoxFuture, Shared},
@@ -38,20 +39,6 @@ fn field(value: &IvyJson, key: &str) -> IvyResult<JsString> {
 fn message(parts: &[JsString]) -> JsString {
     JsString(parts.iter().flat_map(|s| s.0.iter().copied()).collect())
 }
-fn path_text(path: &Path) -> JsString {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        JsString(path.as_os_str().encode_wide().collect())
-    }
-    #[cfg(not(windows))]
-    {
-        path.to_string_lossy().into_owned().into()
-    }
-}
-fn path(value: &JsString) -> PathBuf {
-    native_path::filesystem_path(value)
-}
 async fn catalog(path: &Path) -> IvyResult<IvyJson> {
     let bytes = tokio::fs::read(path)
         .await
@@ -70,13 +57,14 @@ pub async fn verify_configured_native_catalog(
 ) -> IvyResult<()> {
     let version = field(settings, "nativeVersion")?;
     let executable = field(settings, "nativeExecutableHash")?;
+    // The checked selector's public interface uses configuration path strings.
     let selected = native_catalog_path(
-        &path_text(&artifact_root.join("dist")),
+        &from_native(&artifact_root.join("dist")),
         &version,
         None,
         None,
     )?;
-    let value = catalog(&path(&selected)).await?;
+    let value = catalog(&to_native(&selected)).await?;
     let required_executable = field(&value, "nativeExecutableHash")?;
     if field(&value, "version")? != version || required_executable != executable {
         return Err(IvyError::new_js(

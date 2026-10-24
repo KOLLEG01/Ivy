@@ -154,6 +154,12 @@ export const rustTests = {
     ],
     "testThreads": 1
   },
+  "tests/rust/host-native-catalog-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-native-paths",
+    "filter": "native_catalog_cases::",
+    "testThreads": 1
+  },
   "tests/rust/host-bootstrap-restart-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-actions",
@@ -481,6 +487,12 @@ export const rustTests = {
     "package": "ivy-task-board",
     "test": "task-board-output",
     "filter": "categories::native_casing_errors_preserve_the_projection_and_release_queued_requests"
+  },
+  "tests/fixtures/task-board-deliveries-journal.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-operations",
+    "filter": "deliveries::journal::real_publication_delivery_identity_survives_lost_reply_reopen_and_owner_replacement",
+    "testThreads": 1
   },
   "tests/fixtures/task-board-inspector.rs": {
     "package": "ivy-task-board",

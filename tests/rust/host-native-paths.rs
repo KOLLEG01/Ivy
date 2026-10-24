@@ -9,6 +9,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "host-native-catalog-cases.rs"]
+mod native_catalog_cases;
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
