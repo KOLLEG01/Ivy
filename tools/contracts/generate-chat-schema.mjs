@@ -183,6 +183,32 @@ Object.assign(defs, {
 defs.AdmittedNotifyRequest = action("notify", {
   channel: ref("Channel"), source: ref("ObjectPin"), text: string(16384, 1),
 });
+// Explicit bytes cross host boundaries; paths and arbitrary download URLs are never admitted.
+defs.OutgoingFile = object({
+  filename: { ...string(255, 1), pattern: "^[^\\\\/\\x00-\\x1f\\x7f]+$" },
+  mediaType: { ...string(128, 3), pattern: "^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$" },
+  byteLength: integer(1, 8388608), contentHash: hash,
+});
+defs.SendFileRequest = action("sendFile", {
+  expectedBinding: ref("ObjectPin"),
+  file: object({ ...defs.OutgoingFile.properties, bytesBase64: string(11184812, 4) }),
+  caption: nullable(string(1024)),
+});
+defs.FileTarget = object({
+  expectedBridge: ref("ExpectedBridge"), expectedBinding: ref("ObjectPin"), channel: ref("Channel"),
+});
+defs.FileQuery = {
+  type: "object", properties: { fileTarget: { const: true }, fileOperationId: id },
+  additionalProperties: false,
+  oneOf: [{ required: ["fileTarget"] }, { required: ["fileOperationId"] }],
+};
+defs.FileDelivery = object({
+  operationId: id, binding: ref("ObjectPin"), channel: ref("Channel"), file: ref("OutgoingFile"),
+  kind: { enum: ["image", "document"] }, messageId: id,
+  state: { enum: ["queued", "sending", "sent", "outcome_unknown", "failed"] },
+  errorCode: nullable(id), createdAt: timestamp, updatedAt: timestamp,
+});
+defs.FileReadResult = { oneOf: [ref("FileTarget"), ref("FileDelivery")] };
 // Explicitly carry a previous configuration's Main into this definition.
 defs.CreateMainRequest.properties.resumeMain = ref("ObjectPin");
 defs.ActionRequest = {
@@ -660,6 +686,8 @@ operations.retryResult = {
   output: "#/$defs/Collection",
   mutation: true,
 };
+operations.sendFile = { input: "#/$defs/SendFileRequest", output: "#/$defs/FileDelivery", mutation: true };
+operations.file = { input: "#/$defs/FileQuery", output: "#/$defs/FileReadResult", mutation: false };
 const contracts = [
   "Conversation",
   "Main",

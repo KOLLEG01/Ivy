@@ -176,6 +176,16 @@
       "input": "#/$defs/RetryCollectionRequest",
       "output": "#/$defs/Collection",
       "mutation": true
+    },
+    "sendFile": {
+      "input": "#/$defs/SendFileRequest",
+      "output": "#/$defs/FileDelivery",
+      "mutation": true
+    },
+    "file": {
+      "input": "#/$defs/FileQuery",
+      "output": "#/$defs/FileReadResult",
+      "mutation": false
     }
   }
 }
