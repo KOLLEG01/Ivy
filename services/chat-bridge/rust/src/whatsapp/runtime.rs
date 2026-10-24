@@ -49,6 +49,7 @@ pub trait RuntimeSocket: Send + Sync {
 pub struct RuntimeCallbacks {
     pub wake: Arc<dyn Fn() + Send + Sync>,
     pub automatic_notifications: Arc<dyn Fn() -> BoolFuture<'static> + Send + Sync>,
+    pub file_workspace: Arc<dyn Fn(JsString) -> RequestFuture<'static> + Send + Sync>,
 }
 pub struct RuntimeResources {
     pub status: Arc<dyn Fn(Json) -> ServiceFuture<()> + Send + Sync>,
@@ -275,6 +276,7 @@ impl WhatsAppRuntime {
         }));
         let weak = Arc::downgrade(&runtime.0);
         let policy = weak.clone();
+        let files = weak.clone();
         runtime.0.socket.bind(RuntimeCallbacks {
             wake: Arc::new(move || {
                 if let Some(inner) = weak.upgrade() {
@@ -287,6 +289,15 @@ impl WhatsAppRuntime {
                     match selected {
                         Some(inner) => Self(inner).automatic_notifications().await,
                         None => Ok(false),
+                    }
+                })
+            }),
+            file_workspace: Arc::new(move |caller| {
+                let selected = files.upgrade().and_then(|inner| Self(inner).attached());
+                Box::pin(async move {
+                    match selected {
+                        Some(attached) => attached.file_workspace(&caller).await,
+                        None => Err(IvyError::new("service_not_ready", "The Main file transport is not attached.")),
                     }
                 })
             }),
@@ -806,6 +817,7 @@ impl WhatsAppRuntime {
         self.0.socket.presence().await
     }
     pub async fn retention(&self) -> IvyResult<()> {
+        crate::files::ChatFiles::with_clock(self.0.journal.clone(), self.0.config.clone(), self.0.clock.clone()).prune()?;
         self.0
             .journal
             .access(|j| j.prune(HistoryLimits::default()))?;
@@ -987,6 +999,9 @@ impl WhatsAppRuntime {
     }
 }
 impl crate::runtime::ChatTransport for WhatsAppRuntime {
+    fn files(&self) -> Option<crate::files::ChatFiles> {
+        Some(crate::files::ChatFiles::with_clock(self.0.journal.clone(), self.0.config.clone(), self.0.clock.clone()))
+    }
     fn start(&self) {
         WhatsAppRuntime::start(self)
     }

@@ -13,6 +13,7 @@ use ivy_contracts::{
     json::{parse, stringify},
 };
 use ivy_sdk::clock::Clock;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -177,6 +178,7 @@ async fn socket(
             count.fetch_add(1, Ordering::SeqCst);
         }),
         automatic_notifications: Arc::new(|| Box::pin(async { Ok(false) })),
+        file_workspace: Arc::new(|_| Box::pin(async { Err(ivy_contracts::IvyError::new("service_not_ready", "No Main in this socket fixture.")) })),
     });
     (socket, journal, backend, clock, network, wakes)
 }
@@ -207,6 +209,108 @@ fn count(journal: &Journal, table: &str) -> i64 {
                 .unwrap())
         })
         .unwrap()
+}
+
+fn file_workspace() -> Json {
+    parse(r#"{"expectedBridge":{"principalId":"chat","callerPrincipalId":"synthetic-principal","workspaceId":"main","definitionHash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"binding":{"object":{"objectId":"binding","revision":1}},"channels":[{"channel":{"accountId":"synthetic-account","adapter":"whatsapp","channelId":"synthetic-channel"}}]}"#, usize::MAX).unwrap()
+}
+fn bind_files(socket: &WhatsAppSocket, workspace: Json) {
+    socket.bind(RuntimeCallbacks {
+        wake: Arc::new(|| {}),
+        automatic_notifications: Arc::new(|| Box::pin(async { Ok(false) })),
+        file_workspace: Arc::new(move |caller| {
+            assert_eq!(caller, JsString::from("synthetic-principal"));
+            let workspace = workspace.clone();
+            Box::pin(async move { Ok(workspace) })
+        }),
+    });
+}
+fn queue_file(journal: &Journal, operation: &str, now: i64) -> String {
+    use ivy_contracts::hash::{digest, hash_json};
+    let caller: Json = "synthetic-principal".into();
+    let key = format!("file:{}", identity(&[caller.clone(), operation.into()]).unwrap());
+    let id = identity(&["file".into(), caller.clone(), operation.into()]).unwrap()[..32].to_ascii_uppercase();
+    let cfg = config();
+    let workspace = file_workspace();
+    let saved = Json::object([
+        ("caller", caller), ("expectedBridge", workspace.required("expectedBridge").unwrap().clone()),
+        ("requestHash", digest(b"request").into()),
+        ("transportHash", hash_json(&Json::object([
+            ("account", cfg.required("accountId").unwrap().clone()),
+            ("bot", cfg.required("botPhoneNumber").unwrap().clone()),
+            ("sender", cfg.required("senders").unwrap().as_array().unwrap()[0].clone())
+        ])).unwrap().into()),
+        ("bytesBase64", STANDARD.encode(b"original bytes").into()), ("caption", Json::Null),
+        ("delivery", Json::object([
+            ("operationId", operation.into()), ("binding", workspace.required("binding").unwrap().required("object").unwrap().clone()),
+            ("channel", workspace.required("channels").unwrap().as_array().unwrap()[0].required("channel").unwrap().clone()),
+            ("file", Json::object([("filename", "note.txt".into()), ("mediaType", "text/plain".into()), ("byteLength", 14.0.into()), ("contentHash", digest(b"original bytes").into())])),
+            ("kind", "document".into()), ("messageId", id.as_str().into()), ("state", "queued".into()), ("errorCode", Json::Null),
+            ("createdAt", ivy_sdk::clock::date_to_iso(now as f64).unwrap().into()), ("updatedAt", ivy_sdk::clock::date_to_iso(now as f64).unwrap().into())
+        ]))
+    ]);
+    journal.access(|j| {
+        j.enqueue_attachment(&id, "15555550101@s.whatsapp.net", "", now)?;
+        j.set(&key, &saved)?;
+        j.set(&format!("out-file:{id}"), &key.into())
+    }).unwrap();
+    id
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn file_dispatch_survives_cancel_without_resubmission_and_reconciles_recipient_ack() {
+    use ivy_chat_bridge::{files::ChatFiles, whatsapp::journal::OutputState};
+    let fixture = Fixture::new();
+    let (socket, journal, _, clock, network, _) = socket(&fixture.0).await;
+    bind_files(&socket, file_workspace());
+    let id = queue_file(&journal, "file-original", clock.utc_millis());
+    let files = ChatFiles::with_clock(journal.clone(), config(), clock.clone());
+    assert_eq!(files.payload(&id).unwrap().bytes, b"original bytes");
+    socket.observe(&Event::Connected(Connected::builder().build())).await.unwrap();
+    if let Ok(result) = tokio::time::timeout(Duration::from_millis(50), socket.flush()).await { result.unwrap(); }
+    let caller: JsString = "synthetic-principal".into();
+    let operation: JsString = "file-original".into();
+    let receipt = || files.read_operation(&caller, &operation);
+    // A cancelled upload is uncertain. Repeated flushes must never upload again.
+    for _ in 0..2 { socket.flush().await.unwrap(); }
+    assert_eq!(receipt().await.unwrap().required("state").unwrap(), &Json::from("outcome_unknown"));
+    let calls = network.calls.load(Ordering::SeqCst);
+    socket.observe(&Event::ServerAck(ServerAck::builder().id(id.clone()).class("message".into()).from("15555550109@s.whatsapp.net".parse().unwrap()).build())).await.unwrap();
+    assert_eq!(receipt().await.unwrap().required("state").unwrap(), &Json::from("outcome_unknown"));
+    socket.observe(&Event::ServerAck(ServerAck::builder().id(id.clone()).class("message".into()).from("15555550101:8@s.whatsapp.net".parse().unwrap()).build())).await.unwrap();
+    files.mark(&id, OutputState::Unknown, Some("late_observer")).unwrap();
+    assert_eq!(receipt().await.unwrap().required("state").unwrap(), &Json::from("sent"));
+    assert!(files.payload(&id).is_err());
+    assert_eq!(network.calls.load(Ordering::SeqCst), calls);
+    socket.close().await.unwrap();
+    journal.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn file_dispatch_refuses_changed_binding_and_corrupt_bytes_before_network() {
+    let fixture = Fixture::new();
+    let (socket, journal, _, clock, network, _) = socket(&fixture.0).await;
+    let changed = queue_file(&journal, "changed", clock.utc_millis());
+    let mut workspace = file_workspace();
+    workspace.insert("binding", parse(r#"{"object":{"objectId":"binding","revision":2}}"#, usize::MAX).unwrap());
+    bind_files(&socket, workspace);
+    socket.observe(&Event::Connected(Connected::builder().build())).await.unwrap();
+    socket.flush().await.unwrap();
+    let files = ivy_chat_bridge::files::ChatFiles::with_clock(journal.clone(), config(), clock.clone());
+    let receipt = files.read_operation(&"synthetic-principal".into(), &"changed".into()).await.unwrap();
+    assert_eq!(receipt.required("state").unwrap(), &Json::from("failed"));
+    assert_eq!(receipt.required("errorCode").unwrap(), &Json::from("chat_file_target_changed"));
+    assert!(files.payload(&changed).is_err());
+    bind_files(&socket, file_workspace());
+    let corrupt = queue_file(&journal, "corrupt", clock.utc_millis());
+    let key = journal.get(&format!("out-file:{corrupt}")).unwrap().as_str().unwrap();
+    let mut saved = journal.get(&key).unwrap(); saved.insert("bytesBase64", "Y29ycnVwdA==".into()); journal.set(&key, &saved).unwrap();
+    socket.flush().await.unwrap();
+    let receipt = files.read_operation(&"synthetic-principal".into(), &"corrupt".into()).await.unwrap();
+    assert_eq!(receipt.required("errorCode").unwrap(), &Json::from("chat_file_integrity"));
+    assert_eq!(network.calls.load(Ordering::SeqCst), 0);
+    socket.close().await.unwrap();
+    journal.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]

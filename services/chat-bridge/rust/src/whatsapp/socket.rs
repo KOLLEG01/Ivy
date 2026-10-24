@@ -157,6 +157,7 @@ impl Default for State {
 }
 struct Inner {
     config: Config,
+    file_config: Json,
     journal: Journal,
     backend: Arc<NativeAuthStore>,
     root: PathBuf,
@@ -230,6 +231,7 @@ impl WhatsAppSocket {
         transport: F,
         http: H,
     ) -> IvyResult<Self> {
+        let file_config = config.clone();
         let config = Config::read(&config)?;
         if backend
             .load()
@@ -242,6 +244,7 @@ impl WhatsAppSocket {
         }
         let owner = Self(Arc::new(Inner {
             config,
+            file_config,
             journal,
             backend: backend.clone(),
             root,
@@ -587,7 +590,8 @@ impl WhatsAppSocket {
         if matched {
             self.0
                 .journal
-                .access(|journal| journal.mark(id, OutputState::Sent))?;
+                .access(|journal| crate::files::mark(journal, id, OutputState::Sent, None, self.0.clock.utc_millis()))?;
+            self.0.journal.flush().await?;
         }
         Ok(())
     }
@@ -647,6 +651,10 @@ impl WhatsAppSocket {
         let mut blocked = HashSet::new();
         for row in rows {
             if blocked.contains(&row.jid) || !self.active() {
+                continue;
+            }
+            if !self.0.journal.get(&format!("out-file:{}", row.id))?.is_null() {
+                if self.flush_file(&row).await? { blocked.insert(row.jid); }
                 continue;
             }
             if self
@@ -741,6 +749,72 @@ impl WhatsAppSocket {
         if !unsettled {
             self.clear_error("whatsapp_delivery_unknown");
         }
+        Ok(())
+    }
+    async fn flush_file(&self, row: &Outgoing) -> IvyResult<bool> {
+        let files = crate::files::ChatFiles::with_clock(self.0.journal.clone(), self.file_config(), self.0.clock.clone());
+        if row.state == "sending" {
+            let submitted = self.0.journal.get(&format!("file-submitted:{}", row.id))?.as_f64();
+            if submitted.is_none_or(|at| self.0.clock.utc_millis() as f64 - at >= 60_000.0) {
+                files.mark(&row.id, OutputState::Unknown, Some("whatsapp_delivery_unknown"))?;
+                self.0.journal.flush().await?;
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+        let callback = self.0.callbacks.lock().unwrap().clone();
+        let Some(callback) = callback else { return Ok(true); };
+        let admitted: IvyResult<_> = async {
+            let caller = files.caller(&row.id)?;
+            let target = files.target(&(callback.file_workspace)(caller.clone()).await?)?;
+            files.admitted(&row.id, &target)?;
+            let payload = files.payload(&row.id)?;
+            let target = files.target(&(callback.file_workspace)(caller).await?)?;
+            files.admitted(&row.id, &target)?;
+            Ok(payload)
+        }.await;
+        let payload = match admitted {
+            Ok(payload) => payload,
+            Err(error) => {
+                if matches!(error.code.as_str(), "chat_file_target_changed" | "chat_file_integrity" | "chat_file_type" | "limit_exceeded") {
+                    files.mark(&row.id, OutputState::Failed, Some(error.code.as_str()))?;
+                    self.0.journal.flush().await?;
+                    return Ok(false);
+                }
+                return Ok(true);
+            }
+        };
+        if !self.active() { return Ok(true); }
+        // Persist dispatch before uploading. A lost reply or restart must never
+        // submit another media message under an uncertain original operation.
+        files.mark(&row.id, OutputState::Sending, None)?;
+        self.0.journal.flush().await?;
+        let started = self.0.clock.monotonic();
+        let result = self.send_file(row, payload).await;
+        if result.is_ok() {
+            self.0.state.lock().unwrap().last_send_ms = Some(self.0.clock.monotonic().saturating_duration_since(started).as_millis() as u64);
+            self.0.journal.set(&format!("file-submitted:{}", row.id), &Json::Number(self.0.clock.utc_millis() as f64))?;
+        } else {
+            files.mark(&row.id, OutputState::Unknown, Some("whatsapp_delivery_unknown"))?;
+            self.error("whatsapp_delivery_unknown");
+        }
+        self.0.journal.flush().await?;
+        // Only the original recipient's server acknowledgement makes it sent.
+        Ok(!self.0.journal.access(|j| j.sent(&[row.id.clone()]))?)
+    }
+    fn file_config(&self) -> Json { self.0.file_config.clone() }
+    async fn send_file(&self, row: &Outgoing, payload: crate::files::FilePayload) -> IvyResult<()> {
+        use whatsapp_rust::{media::{self, ImageOptions, DocumentOptions}, upload::UploadOptions};
+        let mime = payload.file.required("mediaType")?.as_str()?;
+        let filename = payload.file.required("filename")?.as_str()?;
+        let upload = self.client().upload(payload.bytes, if payload.image { wacore::download::MediaType::Image } else { wacore::download::MediaType::Document }, UploadOptions::default()).await.map_err(|_| protocol_error("whatsapp_delivery_unknown"))?;
+        let message = if payload.image {
+            media::image_message(upload, ImageOptions { caption: payload.caption, mimetype: Some(mime), ..Default::default() })
+        } else {
+            media::document_message(upload, DocumentOptions { caption: payload.caption, file_name: Some(filename), mimetype: Some(mime), ..Default::default() })
+        };
+        let jid = row.jid.parse::<Jid>().map_err(|_| protocol_error("whatsapp_recipient_invalid"))?;
+        self.client().send_message_with_options(jid, message, SendOptions::default().with_message_id(row.id.clone())).await.map_err(|_| protocol_error("whatsapp_delivery_unknown"))?;
         Ok(())
     }
     async fn send_read_receipts(&self) -> IvyResult<()> {

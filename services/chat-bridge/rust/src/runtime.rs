@@ -89,6 +89,7 @@ pub struct WhatsAppServiceParts {
 /// Every accepted transport operation that uses Main must retain its generation
 /// lease; settled/close retain the transport's own journal and socket work.
 pub trait ChatTransport: Send + Sync {
+    fn files(&self) -> Option<crate::files::ChatFiles> { None }
     fn start(&self);
     fn attach(&self, generation: Option<Arc<ChatGeneration>>) -> IvyResult<()>;
     fn changed(&self);
@@ -800,7 +801,8 @@ impl ChatService {
                     Box::pin(async move {
                         let result = {
                             let lease = lease?;
-                            lease.invoke(&name, &args, &context).await?
+                            let files = core.transport.as_ref().and_then(|t| t.files());
+                            lease.invoke_with_files(&name, &args, &context, files.as_ref()).await?
                         };
                         if let Some(t) = &core.transport {
                             if name == "createMain"

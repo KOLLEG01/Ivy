@@ -317,6 +317,7 @@ impl<'a> DiagnosticNotifications<'a> {
         )?;
         let label = string(entry, "label")?;
         let code = string(entry, "code")?;
+        let storage_warning = code == &JsString::from("storage_pressure") && label == &JsString::from("hive");
         let text = if self.language == JsString::from("de") {
             if recovery {
                 concat(&[
@@ -326,6 +327,8 @@ impl<'a> DiagnosticNotifications<'a> {
                     code,
                     &" nicht mehr.".into(),
                 ])
+            } else if storage_warning {
+                "[Ivy] Speicherwarnung: Der freie Speicher von Hive liegt unter der Betriebsreserve. Hive arbeitet weiter.".into()
             } else {
                 concat(&[&"[Ivy] Anhaltender Fehler bei ".into(), label, &": ".into(), code, &". Der Dienst oder ein abhängiger Abruf kann blockiert sein; gespeicherte Daten können veraltet sein.".into()])
             }
@@ -337,6 +340,8 @@ impl<'a> DiagnosticNotifications<'a> {
                 code,
                 &".".into(),
             ])
+        } else if storage_warning {
+            "[Ivy] Storage warning: Hive has less free disk space than its operating reserve. Hive continues processing requests.".into()
         } else {
             concat(&[
                 &"[Ivy] Persistent failure at ".into(),

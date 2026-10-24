@@ -24,6 +24,9 @@ use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 
 pub type BoolFuture<'a> = Pin<Box<dyn Future<Output = IvyResult<bool>> + Send + 'a>>;
 pub trait RuntimeAttached: Send + Sync {
+    fn file_workspace<'a>(&'a self, _caller: &'a JsString) -> RequestFuture<'a> {
+        Box::pin(async { Err(IvyError::new("service_not_ready", "The Main file transport is not attached.")) })
+    }
     fn definition(&self) -> &Json;
     fn expected(&self, sender: &JsString) -> Json;
     fn invalidate(&self, connection_changed: bool);
@@ -126,6 +129,7 @@ impl Attached {
     }
 }
 impl RuntimeAttached for Attached {
+    fn file_workspace<'a>(&'a self, caller: &'a JsString) -> RequestFuture<'a> { Box::pin(self.lease.workspace(caller)) }
     fn definition(&self) -> &Json {
         self.lease.config().admission.definition()
     }

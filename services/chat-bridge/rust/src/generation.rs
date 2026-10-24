@@ -242,6 +242,9 @@ impl ChatGenerationLease {
         args: &Json,
         context: &InvocationContext,
     ) -> IvyResult<Json> {
+        self.invoke_with_files(name, args, context, None).await
+    }
+    pub async fn workspace(&self, caller: &JsString) -> IvyResult<Json> {
         let native = self.native()?;
         let operations = self.operations()?;
         let main = ChatMain::new(&operations, &native, &self.config.notice_instructions)?;
@@ -250,8 +253,26 @@ impl ChatGenerationLease {
         let collector =
             ChatCollector::new(&operations, &evidence, &delivery, &self.config.catalogs);
         ChatBridge::new(&delivery, &collector, self.connection.generation())?
-            .invoke(name, args, context)
+            .workspace(caller)
             .await
+    }
+    pub async fn invoke_with_files(
+        &self,
+        name: &str,
+        args: &Json,
+        context: &InvocationContext,
+        files: Option<&crate::files::ChatFiles>,
+    ) -> IvyResult<Json> {
+        let native = self.native()?;
+        let operations = self.operations()?;
+        let main = ChatMain::new(&operations, &native, &self.config.notice_instructions)?;
+        let delivery = ChatDelivery::new(&main);
+        let evidence = native.evidence()?;
+        let collector =
+            ChatCollector::new(&operations, &evidence, &delivery, &self.config.catalogs);
+        let mut bridge = ChatBridge::new(&delivery, &collector, self.connection.generation())?;
+        bridge.files = files;
+        bridge.invoke(name, args, context).await
     }
     pub async fn verify_owner(&self) -> IvyResult<()> {
         self.native()?.verify_owner().await

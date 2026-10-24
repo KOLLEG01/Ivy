@@ -65,6 +65,7 @@ pub enum OutputState {
     Sending,
     Sent,
     Unknown,
+    Failed,
 }
 
 impl JournalIo {
@@ -301,6 +302,18 @@ impl JournalIo {
             .query_row("SELECT text FROM outgoing WHERE id=?", [&id], |r| r.get(0))
             .optional())
     }
+    pub fn enqueue_attachment(&mut self, id: &str, jid: &str, caption: &str, now: i64) -> IvyResult<()> {
+        if sql(self.connection().query_row("SELECT 1 FROM outgoing WHERE id=? UNION ALL SELECT 1 FROM retired_outgoing WHERE id=?", [id,id], |_| Ok(())).optional())?.is_some() {
+            return Err(conflict("A file must retain its original transport identity."));
+        }
+        self.write("INSERT INTO outgoing(id,jid,text) VALUES(?,?,?)", vec![text(id),text(jid),text(caption)])?;
+        self.set(&format!("out-created:{id}"), &IvyJson::Number(now as f64))
+    }
+    pub fn retire_attachment(&mut self, id: &str, request_hash: &str) -> IvyResult<()> {
+        self.write("INSERT OR IGNORE INTO retired_outgoing VALUES(?,?)", vec![text(id),text(format!("file:{request_hash}"))])?;
+        self.write("UPDATE outgoing SET text='',state=CASE WHEN state='sent' THEN 'sent' ELSE 'failed' END WHERE id=?", vec![text(id)])?;
+        self.set(&format!("out-created:{id}"), &IvyJson::Null)
+    }
     pub fn outgoing(&self) -> IvyResult<Vec<Outgoing>> {
         let mut query = sql(self.connection().prepare("SELECT id,jid,text,state,sequence FROM outgoing WHERE state<>'sent' ORDER BY sequence LIMIT 16"))?;
         sql(sql(query.query_map([], |r| {
@@ -319,6 +332,7 @@ impl JournalIo {
             OutputState::Sending => "sending",
             OutputState::Sent => "sent",
             OutputState::Unknown => "unknown",
+            OutputState::Failed => "failed",
         };
         self.write(
             "UPDATE outgoing SET state=? WHERE id=? AND state<>'sent'",
@@ -332,7 +346,7 @@ impl JournalIo {
         }
         Ok(true)
     }
-    fn kv_rows(&self, statement: &str) -> IvyResult<Vec<(String, IvyJson)>> {
+    pub(crate) fn kv_rows(&self, statement: &str) -> IvyResult<Vec<(String, IvyJson)>> {
         let mut query = sql(self.connection().prepare(statement))?;
         let rows: Vec<(String, String)> =
             sql(sql(query.query_map([], |r| Ok((r.get(0)?, r.get(1)?))))?.collect())?;
@@ -374,7 +388,7 @@ impl JournalIo {
             ] {
                 let mut query = sql(journal.connection().prepare(statement))?;
                 let rows = sql(query.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))))?;
-                for row in rows { let (id,at,size) = sql(row)?; if kind==0 || !protected_outputs.contains(&id) { candidates.push((kind,id,at as f64,size)); } }
+                for row in rows { let (id,at,size) = sql(row)?; if kind==0 || !protected_outputs.contains(&id) && journal.get(&format!("out-file:{id}"))?.is_null() { candidates.push((kind,id,at as f64,size)); } }
             }
             for (key,value) in journal.kv_rows("SELECT key,value FROM kv WHERE key LIKE 'message:%'")? {
                 if !protected_messages.iter().any(|p| key.starts_with(p)) && journal.sent(&string_ids(value.required("ids")?)?)? {

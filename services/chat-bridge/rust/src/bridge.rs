@@ -37,6 +37,7 @@ pub struct ChatBridge<'a> {
     pub worker: ChatWorker<'a>,
     /// Immutable generation of the connection that owns Main and its store.
     pub generation: u64,
+    pub files: Option<&'a crate::files::ChatFiles>,
 }
 impl<'a> ChatBridge<'a> {
     pub fn new(
@@ -52,6 +53,7 @@ impl<'a> ChatBridge<'a> {
             cancellation: ChatCancellation::new(main.operations, main, main.notice_instructions()),
             worker: ChatWorker::new(delivery, collector)?,
             generation,
+            files: None,
         })
     }
     pub async fn workspace(&self, caller: &JsString) -> IvyResult<Json> {
@@ -154,9 +156,27 @@ impl<'a> ChatBridge<'a> {
             )?;
             let operation_id = operation_id.unwrap();
             let retained = self.main.operations.find(caller, operation_id).await?;
-            let retained_action = retained.as_ref().is_some_and(|r| {
-                r.value.get("request").and_then(|r| r.get("action")) == Some(&Json::from(name))
-            });
+            let file_exists = self
+                .files
+                .map(|files| files.has(caller, operation_id))
+                .transpose()?
+                .unwrap_or(false);
+            require(
+                if name == "sendFile" {
+                    retained.is_none()
+                } else {
+                    !file_exists
+                },
+                "chat_identity_conflict",
+                "One ChatBridge operation identity cannot be reused for file and conversation actions.",
+            )?;
+            let retained_action = if name == "sendFile" {
+                file_exists
+            } else {
+                retained.as_ref().is_some_and(|r| {
+                    r.value.get("request").and_then(|r| r.get("action")) == Some(&Json::from(name))
+                })
+            };
             self.main
                 .store()
                 .validate_operation_id(operation_id, None, retained_action)
@@ -164,6 +184,19 @@ impl<'a> ChatBridge<'a> {
                 .map_err(|e| e.into_ivy())?;
         }
         let result = match name {
+            "sendFile" | "file" => {
+                let files = self.files.ok_or_else(|| {
+                    IvyError::new(
+                        "service_not_ready",
+                        "The WhatsApp file transport is unavailable.",
+                    )
+                })?;
+                if name == "sendFile" {
+                    files.send(self, caller, args).await?
+                } else {
+                    files.read(self, caller, args).await?
+                }
+            }
             "retryResult" => self.worker.collector.fresh().retry(caller, args).await?,
             "workspace" => self.workspace(caller).await?,
             "operation" => {

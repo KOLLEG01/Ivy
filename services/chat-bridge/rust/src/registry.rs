@@ -8,6 +8,12 @@ fn description(name: &str) -> IvyResult<&'static str> {
             "Retry reading the result of the original turn after a failed collection; does not start another turn."
         }
         "workspace" => "Check the WhatsApp transport and the shared Main conversation binding.",
+        "sendFile" => {
+            "Send one explicitly selected file through the current Main WhatsApp connection. Read chat_bridge_read with fileTarget=true first. Supply exact base64 bytes, filename, verified MIME, byte length and SHA-256 (at most 8 MiB; PNG/JPEG images at most 4 MiB). PNG/JPEG use native chat images; other formats are original named documents. Retain operationId: queued/sending is not sent. Read with fileOperationId after a lost reply; never blindly resend an unknown delivery."
+        }
+        "file" => {
+            "Read the current Main file target with fileTarget=true, or this caller's original file delivery with fileOperationId. Reading never sends a file."
+        }
         "createMain" => "Create or replace the shared Main conversation at its observed revision.",
         "send" => {
             "Queue input for Main to process. This does not send the supplied text directly to WhatsApp. Main must answer normally and must never use this tool to send its own answer or forward a notice to itself. Set expectedBinding=null only when creating the first Main."
@@ -46,7 +52,8 @@ pub fn chat_tools() -> IvyResult<Vec<Json>> {
             if !matches!(name.as_str(), "receive" | "acknowledge") {
                 let (mcp, surface) = match name.as_str() {
                     "send" | "notify" => ("chat_bridge_send".to_owned(), "ivy"),
-                    "history" | "input" | "notice" | "operation" => {
+                    "sendFile" => ("chat_bridge_send_file".to_owned(), "ivy"),
+                    "history" | "input" | "notice" | "operation" | "file" => {
                         ("chat_bridge_read".to_owned(), "ivy")
                     }
                     "workspace" => ("chat_bridge_status".to_owned(), "ivy_dev"),
@@ -74,6 +81,8 @@ pub fn chat_tools() -> IvyResult<Vec<Json>> {
                 strings(match name.as_str() {
                     "workspace" | "history" => &["WhatsApp"],
                     "send" => &["WhatsApp", "message"],
+                    "sendFile" => &["WhatsApp", "file", "image", "attachment"],
+                    "file" => &["file", "attachment", "delivery"],
                     "notify" => &["WhatsApp", "send", "message", "notification"],
                     "notice" => &["notification"],
                     _ => &[],
@@ -152,7 +161,8 @@ pub fn chat_registry() -> IvyResult<Json> {
             ("guideMarkdown", concat!(
                 "Use chat_bridge_send to give Main user input or authenticated service notifications. It queues an input; it is not direct WhatsApp delivery. Main answers normally, and the configured channel automatically delivers that answer. Main must never call chat_bridge_send to deliver its own answer or forward a notice to itself. ",
                 "If no Main exists, send with expectedBinding=null. Keep operationId and messageId for the same message. A successful send means queued, not delivered; use chat_bridge_read for the original operation, input, notice or channel history after an uncertain reply. ",
-                "Service notifications supply only operationId, source and text; Main selects WhatsApp. Native pending inputs belong to the owning AgentManager."
+                "Service notifications supply only operationId, source and text; Main selects WhatsApp. Native pending inputs belong to the owning AgentManager. ",
+                "For an explicitly requested file, read chat_bridge_read with {fileTarget:true}, then use chat_bridge_send_file with that exact expectedBridge and expectedBinding, canonical base64 bytes, filename, verified MIME, byte length, SHA-256 and optional caption. Files are limited to 8 MiB; native PNG/JPEG images to 4 MiB. Other formats, including WebP/GIF/SVG, are original named documents. No arbitrary paths, URLs or recipients are accepted. Keep operationId; queued/sending is not sent. Read {fileOperationId:operationId} after uncertainty and never blindly resend. File bytes expire after seven days; the queue holds at most 32 unresolved files and 64 MiB. Sent means WhatsApp server acknowledgement, not a recipient read receipt."
             ).into()),
             ("tools", Json::Array(chat_tools()?)), ("topics", Json::Array(vec![])), ("inventoryKinds", Json::Array(vec![])),
         ])])),

@@ -30,7 +30,7 @@ fn complete_registry_matches_original_typescript_bytes_and_wire_contract() {
             .as_array()
             .unwrap()
             .len(),
-        12
+        14
     );
     assert_eq!(
         registry.get("contracts").unwrap().as_array().unwrap().len(),
