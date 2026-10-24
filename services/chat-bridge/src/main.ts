@@ -121,7 +121,7 @@ export async function startChatBridge(path: string) {
   const monitorDiagnostics = () => {
     if (closed || !runtime || !service.ready || diagnosticWork) return;
     const selected = runtime, connection = service.connection;
-    diagnosticWork = new DiagnosticNotifications(selected.main, settings.language ?? 'en').tick(connection.signal).then(() => {
+    diagnosticWork = new DiagnosticNotifications(selected.main, settings).tick(connection.signal).then(() => {
       if (runtime === selected) { diagnosticNoticeError = null; kick(); }
     }, error => {
       if (runtime !== selected || connection.signal.aborted) return;

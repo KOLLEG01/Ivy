@@ -94,7 +94,7 @@ test("ChatBridge contracts fit unchanged Hive validation limits and retain stric
   }
 });
 
-test("ChatBridge language is optional, bounded to supported locales and outside the Definition", () => {
+test("ChatBridge presentation and diagnostic opt-in are optional and outside the Definition", () => {
   const settings = {
     definition: {
       workspaceId: "workspace",
@@ -121,6 +121,13 @@ test("ChatBridge language is optional, bounded to supported locales and outside 
     pollMs: 1000,
   };
   assert.doesNotThrow(() => validateChat("Settings", settings));
+  for (const diagnosticNotifications of [false, true])
+    assert.doesNotThrow(() => validateChat("Settings", { ...settings, diagnosticNotifications }));
+  for (const diagnosticNotifications of [null, "false", 0])
+    assert.throws(() => validateChat("Settings", { ...settings, diagnosticNotifications }));
+  assert.throws(() => validateChat("Settings", {
+    ...settings, definition: { ...settings.definition, diagnosticNotifications: true },
+  }));
   assert.doesNotThrow(() =>
     validateChat("Settings", { ...settings, language: "en" }),
   );

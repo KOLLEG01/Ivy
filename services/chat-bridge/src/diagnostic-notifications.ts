@@ -55,9 +55,11 @@ function groupedNoticeState(saved: Record<string, DiagnosticNoticeState>): Recor
 
 /** Shared operational notices use the existing Main queue and its original receipts. */
 export class DiagnosticNotifications {
-  constructor(private readonly main: ChatMain, private readonly language = 'en', private readonly now = Date.now) {}
+  constructor(private readonly main: ChatMain,
+    private readonly settings: Pick<Chat.Settings, 'diagnosticNotifications' | 'language'> = {}, private readonly now = Date.now) {}
   private get scope(): string { return hashJson([this.main.admission.definition.principalId, this.main.admission.definition.workspaceId]); }
   async tick(signal: AbortSignal): Promise<void> {
+    if (this.settings.diagnosticNotifications !== true) return;
     const current = new Map<string, Pick<DiagnosticNoticeState, 'code' | 'label'>>();
     let cursor: string | undefined;
     do {
@@ -134,7 +136,7 @@ export class DiagnosticNotifications {
     const main = await this.main.find();
     requireThat(main, 'chat_main_missing', 'Operational notifications need the configured Main conversation.');
     const storageWarning = entry.code === 'storage_pressure' && entry.label === 'hive';
-    const text = this.language === 'de'
+    const text = this.settings.language === 'de'
       ? recovery ? `[Ivy] Erholung festgestellt: ${entry.label} meldet den Fehler ${entry.code} nicht mehr.`
         : storageWarning ? '[Ivy] Speicherwarnung: Der freie Speicher von Hive liegt unter der Betriebsreserve. Hive arbeitet weiter.'
         : `[Ivy] Anhaltender Fehler bei ${entry.label}: ${entry.code}. Der Dienst oder ein abhängiger Abruf kann blockiert sein; gespeicherte Daten können veraltet sein.`

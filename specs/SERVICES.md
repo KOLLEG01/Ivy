@@ -86,7 +86,11 @@ blocks dispatch. The file queue admits 32 unresolved deliveries and 64 MiB, expi
 after seven days and retains at most 256 completed receipts with compact replay fences.
 Checks: [file delivery](../tests/chat-files.test.ts).
 
-ChatBridge observes unresolved Hive warning/error diagnostics. A problem lasting five minutes
+`Chat.Settings.diagnosticNotifications` is an optional boolean, defaulting to `false`.
+It controls only automatic diagnostic failure/warning and recovery notices; user messages,
+service notices and ticket questions retain their existing delivery behavior. Disabling it
+does not delete or cancel notices already admitted to Main or their delivery receipts.
+When explicitly enabled, ChatBridge observes unresolved Hive warning/error diagnostics. A problem lasting five minutes
 enters Main once; resolution must remain stable for five minutes before one recovery notice.
 Diagnostics with the same visible service, error code and dependent service form one incident,
 independently of internal resource IDs. Recovery requires the entire group to remain healthy.

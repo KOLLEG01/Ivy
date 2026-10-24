@@ -14,11 +14,38 @@ async function fixture(t: Parameters<typeof chatNativeFixture>[0]) {
   const diagnostic: Wire.Diagnostic = { code: 'tool_definition_changed', source: 'service:fixture.reader', resource: null,
     severity: 'warning', status: 'current', firstObservedAt: at, lastObservedAt: at, message: 'Private request contents must not appear in notices.' };
   const signal = new AbortController().signal;
-  const monitor = () => new DiagnosticNotifications(f.first, 'de', () => now);
+  const monitor = () => new DiagnosticNotifications(f.first, { language: 'de', diagnosticNotifications: true }, () => now);
   const queue = async () => { await new ChatNotices(f.first).recoverPending(); return (await f.first.queue.main()).value.queue; };
   return { ...f, diagnostic, signal, monitor, queue, now: () => now,
     setNow: (at: string) => { now = Date.parse(at); }, advance: (ms = diagnosticNotificationDelayMs) => { now += ms; } };
 }
+
+test('diagnostic notices default off, explicit opt-in controls failures and recoveries without blocking service notices', async t => {
+  const f = await fixture(t);
+  const disabled = () => new DiagnosticNotifications(f.first, { diagnosticNotifications: false }, f.now);
+  f.kernel.registry.diagnostic(f.diagnostic);
+  await new DiagnosticNotifications(f.first).tick(f.signal);
+  await disabled().tick(f.signal); f.advance();
+  await new DiagnosticNotifications(f.second).tick(f.signal);
+  await disabled().tick(f.signal);
+  assert.equal((await f.queue()).length, 0);
+  const scope = hashJson([f.admission.definition.principalId, f.admission.definition.workspaceId]);
+  assert.deepEqual(f.first.store.diagnosticNoticeState(scope), {});
+  await new ChatNotices(f.first).notify(f.admission.definition.principalId, {
+    action: 'notify', operationId: f.operation('ordinary-ticket-question'),
+    source: (await f.first.find())!.value.conversation, text: 'Ordinary ticket question remains available.',
+  });
+  assert.equal((await f.queue()).length, 1);
+  await f.monitor().tick(f.signal); f.advance(); await f.monitor().tick(f.signal);
+  assert.equal((await f.queue()).length, 2);
+  const saved = f.first.store.diagnosticNoticeState(scope);
+  f.kernel.registry.diagnostic({ ...f.diagnostic, status: 'resolved' });
+  f.advance(); await disabled().tick(f.signal);
+  assert.equal((await f.queue()).length, 2);
+  assert.deepEqual(f.first.store.diagnosticNoticeState(scope), saved, 'Disabled monitoring preserves original receipts.');
+  await f.monitor().tick(f.signal); f.advance(); await f.monitor().tick(f.signal);
+  assert.equal((await f.queue()).length, 3);
+});
 
 test('operational notices follow live Hive quiet hours without Secretary and discard resolved overnight incidents', async t => {
   const f = await fixture(t);
@@ -54,7 +81,7 @@ test('persistent diagnostics create one durable Main notice, recover once and re
   const originalId = entry.alert!.request.operationId;
   // Crash after ChatBridge admission but before persisting its successful acknowledgement.
   entry.alert!.queued = false; f.first.store.saveDiagnosticNoticeState(scope, state);
-  await new DiagnosticNotifications(f.second, 'de').tick(f.signal);
+  await new DiagnosticNotifications(f.second, { language: 'de', diagnosticNotifications: true }).tick(f.signal);
   assert.equal((await f.queue()).length, 1);
   assert.equal(Object.values(f.second.store.diagnosticNoticeState(scope))[0]!.alert!.request.operationId, originalId);
   f.kernel.registry.diagnostic({ ...f.diagnostic, status: 'resolved' });
@@ -63,7 +90,7 @@ test('persistent diagnostics create one durable Main notice, recover once and re
   f.advance(); await f.monitor().tick(f.signal);
   queue = await f.queue(); assert.equal(queue.length, 2);
   assert.match((await f.first.store.read('chat-bridge/input', queue[1]!.inputId)).value.payload.text, /Erholung festgestellt/u);
-  await new DiagnosticNotifications(f.second, 'de').tick(f.signal);
+  await new DiagnosticNotifications(f.second, { language: 'de', diagnosticNotifications: true }).tick(f.signal);
   assert.equal((await f.queue()).length, 2);
 });
 
@@ -91,7 +118,7 @@ test('resource failures share one notice and recover only after the whole group 
   const next = { ...f.diagnostic, resource: { objectId: 'signals:replacement-run' } };
   f.kernel.registry.diagnostic(next);
   f.kernel.registry.diagnostic({ ...members[3]!, status: 'resolved' });
-  await new DiagnosticNotifications(f.second, 'de', f.now).tick(f.signal);
+  await new DiagnosticNotifications(f.second, { language: 'de', diagnosticNotifications: true }, f.now).tick(f.signal);
   f.advance(); await f.monitor().tick(f.signal);
   assert.equal((await f.queue()).length, 1, 'Changing member identities must preserve the ongoing incident.');
   f.kernel.registry.diagnostic({ ...next, status: 'resolved' });
@@ -132,7 +159,7 @@ test('grouping saved resource incidents keeps every original pending receipt wit
     'resource-one': { ...entry, alert: { ...entry.alert!, queued: false } },
     'resource-two': { ...entry, alert: { request: secondRequest, queued: false, confirmed: false } },
   });
-  await new DiagnosticNotifications(f.second, 'de', f.now).tick(f.signal);
+  await new DiagnosticNotifications(f.second, { language: 'de', diagnosticNotifications: true }, f.now).tick(f.signal);
   assert.equal((await f.queue()).length, 2);
   const saved = Object.values(f.second.store.diagnosticNoticeState(scope));
   assert.equal(saved.filter(value => !value.receiptOnly).length, 1);
@@ -152,7 +179,7 @@ test('a brief healthy interval across restart keeps the original incident until 
   const originalId = Object.values(f.first.store.diagnosticNoticeState(scope))[0]!.alert!.request.operationId;
   f.kernel.registry.diagnostic({ ...f.diagnostic, status: 'resolved' });
   await f.monitor().tick(f.signal); f.advance(30_000);
-  await new DiagnosticNotifications(f.second, 'de', f.now).tick(f.signal);
+  await new DiagnosticNotifications(f.second, { language: 'de', diagnosticNotifications: true }, f.now).tick(f.signal);
   f.kernel.registry.diagnostic(f.diagnostic); await f.monitor().tick(f.signal);
   f.advance(); await f.monitor().tick(f.signal);
   assert.equal((await f.queue()).length, 1);

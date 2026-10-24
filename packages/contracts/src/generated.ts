@@ -557,7 +557,7 @@ export namespace Chat {
   export type Channel = { "adapter": Wire.Identifier; "accountId": Wire.Identifier; "channelId": Wire.Identifier; };
   export type ChannelConfiguration = { "channel": Chat.Channel; "displayName": string; };
   export type Definition = { "workspaceId": Wire.Identifier; "principalId": Wire.Identifier; "rootObjectId": (Wire.Identifier) | (null); "project": Wire.ResourceRef; "nativePlan": Chat.NativePlan; "channels": Array<Chat.WhatsAppChannelConfiguration>; };
-  export type Settings = { "definition": Chat.Definition; "pollMs": number; "whatsappConfigPath"?: string; "language"?: "en" | "de"; };
+  export type Settings = { "definition": Chat.Definition; "pollMs": number; "whatsappConfigPath"?: string; "language"?: "en" | "de"; "diagnosticNotifications"?: boolean; };
   export type ExpectedBridge = { "principalId": Wire.Identifier; "callerPrincipalId": Wire.Identifier; "workspaceId": Wire.Identifier; "definitionHash": Wire.Hash; };
   export type Artifact = { "object": Chat.ObjectPin; "contentHash": Wire.Hash; "byteLength": number; "mediaType": string; "label": string; };
   export type Image = { "object": Chat.ObjectPin; "contentHash": Wire.Hash; "byteLength": number; "mediaType": "image/png" | "image/jpeg" | "image/webp"; "label": string; };
