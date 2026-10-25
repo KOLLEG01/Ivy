@@ -24,12 +24,22 @@ mkdirSync(join(destination, "dist"), { recursive: true });
 cpSync("LICENSE", join(destination, "LICENSE"));
 // Generate declarations from these exact source inputs. SDK packaging needs no native or UI build.
 const typesRoot = join(destination, "declarations");
+const entries = ["client", "service", "node", "host", "codex-app-tools"];
+const declarationProject = join(destination, "tsconfig.json");
+writeFileSync(
+  declarationProject,
+  JSON.stringify({
+    extends: resolve("tsconfig.json"),
+    files: entries.map((name) => resolve(`packages/sdk/src/${name}.ts`)),
+    include: [],
+  }),
+);
 const types = spawnSync(
   process.execPath,
   [
     "node_modules/typescript/bin/tsc",
     "-p",
-    "tsconfig.json",
+    declarationProject,
     "--emitDeclarationOnly",
     "--outDir",
     typesRoot,
@@ -40,10 +50,7 @@ if (types.error || types.status !== 0)
   throw types.error ?? new Error("SDK declaration generation failed.");
 await build({
   entryPoints: Object.fromEntries(
-    ["client", "service", "node", "host", "codex-app-tools"].map((name) => [
-      name,
-      `packages/sdk/src/${name}.ts`,
-    ]),
+    entries.map((name) => [name, `packages/sdk/src/${name}.ts`]),
   ),
   outdir: join(destination, "dist"),
   platform: "node",
