@@ -53,6 +53,28 @@ pub fn host_storage_areas(
     });
     for instance in instances {
         let id = text(instance.required("instanceId")?)?;
+        let mut roots = instance
+            .get("storageRoots")
+            .map(|value| value.as_object().ok_or_else(IvyError::internal))
+            .transpose()?
+            .unwrap_or(&[])
+            .iter()
+            .collect::<Vec<_>>();
+        roots.sort_by(|(a, _), (b, _)| (context.compare)(a, b));
+        for (name, value) in roots {
+            let path = text(value)?;
+            if !areas.iter().any(|a| contains(context, &a.path, &path)) {
+                areas.push(StorageArea {
+                    key: concat(&[
+                        "services/".into(),
+                        id.clone(),
+                        "/storage/".into(),
+                        name.clone(),
+                    ]),
+                    path,
+                });
+            }
+        }
         for (kind, value) in service_paths_for_style(config, instance, context.paths.style)?
             .as_object()
             .ok_or_else(IvyError::internal)?

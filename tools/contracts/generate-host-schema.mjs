@@ -138,6 +138,14 @@ const defs = {
         credential: str(4096),
         secretPaths: { ...list(secretPointer, 64), uniqueItems: true },
         paths: obj({ data: path, work: path, logs: path }),
+        storageRoots: {
+          type: "object",
+          maxProperties: 16,
+          propertyNames: { pattern: "^[a-z][a-z0-9-]{0,63}$" },
+          additionalProperties: path,
+          description:
+            "Named additional owned directories captured by offline backup and explicitly mapped during isolated restore. A root may contain this instance's data/work/logs, but cannot lie within them or overlap another owner's storage, host state, software, staging or central configuration. These declarations do not extend runtime reset deletion areas.",
+        },
         settings: { type: "object", additionalProperties: shared("Json") },
         process: obj({ allowWindowsBreakaway: bool }),
         docker: obj({

@@ -28,6 +28,10 @@ pub(crate) fn storage_overlap_roots(config: &IvyJson, account_home: impl Fn() ->
     for instance in config.required("instances")?.as_array().ok_or_else(IvyError::internal)? {
         roots.extend(service_paths(config, instance)?.as_object().ok_or_else(IvyError::internal)?.iter()
             .map(|(_, value)| text(value)).collect::<IvyResult<Vec<_>>>()?);
+        if let Some(storage) = instance.get("storageRoots") {
+            roots.extend(storage.as_object().ok_or_else(IvyError::internal)?.iter()
+                .map(|(_, value)| text(value)).collect::<IvyResult<Vec<_>>>()?);
+        }
         if instance.get("componentId") == Some(&"agent-manager".into()) {
             roots.push(match instance.required("settings")?.get("internalProjectRoot").and_then(IvyJson::as_js_string) {
                 Some(root) => root.clone(),

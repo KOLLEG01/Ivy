@@ -225,6 +225,14 @@ export function hostStorageAreas(
   for (const instance of [...config.instances].sort((a, b) =>
     a.instanceId.localeCompare(b.instanceId),
   )) {
+    for (const [name, path] of Object.entries(instance.storageRoots ?? {}).sort(
+      ([a], [b]) => a.localeCompare(b),
+    ))
+      if (!areas.some((area) => contains(area.path, path)))
+        areas.push({
+          key: "services/" + instance.instanceId + "/storage/" + name,
+          path,
+        });
     for (const [kind, path] of Object.entries(servicePaths(config, instance)))
       if (!areas.some((area) => contains(area.path, path)))
         areas.push({

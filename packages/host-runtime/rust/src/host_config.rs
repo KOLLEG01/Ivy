@@ -130,6 +130,32 @@ fn instance_paths(config: &IvyJson, instance: &IvyJson) -> IvyResult<Vec<PathBuf
         .collect()
 }
 
+fn additional_storage_admitted(
+    storage: &[(usize, PathBuf)],
+    services: &[Vec<PathBuf>],
+    roots: &[PathBuf],
+    configuration: &Path,
+) -> bool {
+    storage.iter().enumerate().all(|(index, (owner, path))| {
+        path.is_absolute()
+            && roots.iter().all(|root| separate(root, path))
+            && !inside(path, configuration)
+            && storage
+                .iter()
+                .enumerate()
+                .all(|(other, (_, root))| index == other || separate(root, path))
+            && services.iter().enumerate().all(|(other, paths)| {
+                paths.iter().all(|root| {
+                    if *owner == other {
+                        !inside(root, path)
+                    } else {
+                        separate(root, path)
+                    }
+                })
+            })
+    })
+}
+
 /// Only overlap coverage is used here, never storage keys or iteration order.
 /// hostStorageAreas removes descendants already covered by earlier roots. The
 /// unreduced union has the same bidirectional overlap coverage without locale
@@ -231,13 +257,24 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
         "invalid_arguments",
         "Private host configuration cannot live inside artifacts or source staging.",
     )?;
-    let services: Vec<_> = instances
+    let service_groups = instances
         .iter()
         .map(|i| instance_paths(&config, i))
-        .collect::<IvyResult<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect();
+        .collect::<IvyResult<Vec<_>>>()?;
+    let services = service_groups.iter().flatten().cloned().collect::<Vec<_>>();
+    let mut storage = Vec::new();
+    for (owner, instance) in instances.iter().enumerate() {
+        if let Some(values) = instance.get("storageRoots") {
+            for (_, value) in values.as_object().ok_or_else(IvyError::internal)? {
+                storage.push((owner, config::path_value(value)?));
+            }
+        }
+    }
+    require(
+        additional_storage_admitted(&storage, &service_groups, &roots, &configuration_path),
+        "target_conflict",
+        "Additional storage roots must be absolute, disjoint and outside other owners, host state, software, staging and central configuration.",
+    )?;
     require(
         services.iter().all(|v| v.is_absolute()) && disjoint(&services),
         "target_conflict",
@@ -266,10 +303,16 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
         "invalid_arguments",
         "Host roots overlap through filesystem links.",
     )?;
-    let actual_services = services
+    let actual_groups = service_groups
         .iter()
-        .map(|path| future(path))
+        .map(|paths| {
+            paths
+                .iter()
+                .map(|path| future(path))
+                .collect::<IvyResult<Vec<_>>>()
+        })
         .collect::<IvyResult<Vec<_>>>()?;
+    let actual_services = actual_groups.iter().flatten().cloned().collect::<Vec<_>>();
     require(
         disjoint(&actual_services)
             && actual_services.iter().all(|v| {
@@ -279,6 +322,20 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
             }),
         "target_conflict",
         "Service storage overlaps through filesystem links.",
+    )?;
+    let actual_storage = storage
+        .iter()
+        .map(|(owner, path)| future(path).map(|path| (*owner, path)))
+        .collect::<IvyResult<Vec<_>>>()?;
+    require(
+        additional_storage_admitted(
+            &actual_storage,
+            &actual_groups,
+            &actual_roots,
+            &future(&configuration_path)?,
+        ),
+        "target_conflict",
+        "Additional storage roots overlap through filesystem links.",
     )?;
     let mut internal = Vec::new();
     let mut seen = BTreeSet::new();
@@ -315,6 +372,7 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
                 actual_roots
                     .iter()
                     .chain(&actual_services)
+                    .chain(actual_storage.iter().map(|(_, path)| path))
                     .chain(&shared)
                     .all(|r| separate(r, v))
                     && !inside(v, &configuration)
@@ -340,6 +398,7 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
                 actual_roots
                     .iter()
                     .chain(&actual_services)
+                    .chain(actual_storage.iter().map(|(_, path)| path))
                     .chain(&shared)
                     .chain(&internal)
                     .all(|r| !inside(r, &normal)),
@@ -348,10 +407,14 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
             )?;
         }
     }
-    for directory in &services {
+    for directory in services.iter().chain(storage.iter().map(|(_, path)| path)) {
         fs::create_dir_all(directory).map_err(|_| IvyError::internal())?;
     }
-    for directory in roots.iter().chain(&services) {
+    for directory in roots
+        .iter()
+        .chain(&services)
+        .chain(storage.iter().map(|(_, path)| path))
+    {
         writable(directory).map_err(|_| IvyError::internal())?;
     }
     for home in shared_home_paths(&config, context)? {
@@ -360,6 +423,7 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
             actual_roots
                 .iter()
                 .chain(&actual_services)
+                .chain(actual_storage.iter().map(|(_, path)| path))
                 .all(|r| separate(r, &actual)),
             "target_conflict",
             "Shared Codex homes cannot overlap owned runtime, service, artifact or staging storage through filesystem links.",

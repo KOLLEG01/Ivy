@@ -1438,6 +1438,19 @@
           ],
           "additionalProperties": false
         },
+        "storageRoots": {
+          "type": "object",
+          "maxProperties": 16,
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9-]{0,63}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "description": "Named additional owned directories captured by offline backup and explicitly mapped during isolated restore. A root may contain this instance's data/work/logs, but cannot lie within them or overlap another owner's storage, host state, software, staging or central configuration. These declarations do not extend runtime reset deletion areas."
+        },
         "settings": {
           "type": "object",
           "additionalProperties": {

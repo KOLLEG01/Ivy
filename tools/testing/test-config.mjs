@@ -517,6 +517,15 @@ export const rustTests = {
       }
     ]
   },
+  "tests/rust/host-backup-storage-cases.rs": {
+    "package": "ivy-host-executor",
+    "test": "host-executor-service",
+    "filter": "backup_storage_cases::",
+    "testThreads": 1,
+    "prerequisites": [
+      { "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }
+    ]
+  },
   "tests/rust/sdk-fetch-response.rs": {
     "package": "ivy-sdk",
     "test": "sdk-fetch-response"
