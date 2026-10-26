@@ -12,6 +12,7 @@ import type { ServiceConnection } from "../../../packages/sdk/src/service.js";
 import {
   readEnvironmentDocument,
   selectEnvironmentDocument,
+  resolveMcpServer,
 } from "./environment.js";
 
 /** Project the existing Hive MCP document into the pinned Claude SDK adapter. */
@@ -25,6 +26,7 @@ export class ClaudeMcpConfigurationManager {
     readonly hiveUrl: string,
     readonly credential: string,
     readonly defaults: Agent.McpDocument,
+    readonly credentials: Record<string, Agent.McpCredential> = {},
   ) {
     requireThat(
       isAbsolute(target),
@@ -99,25 +101,7 @@ export class ClaudeMcpConfigurationManager {
     if (desired.document.enabled)
       for (const server of desired.document.servers) {
         if (!server.enabled) continue;
-        const url = new URL(server.url);
-        const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(
-          url.hostname,
-        );
-        requireThat(
-          (url.protocol === "https:" ||
-            (url.protocol === "http:" && loopback)) &&
-            !url.username &&
-            !url.password &&
-            !url.hash,
-          "invalid_arguments",
-          "Managed remote MCP URLs require HTTPS.",
-        );
-        if (server.authentication === "agent-manager")
-          requireThat(
-            allowed.has(url.href),
-            "access_denied",
-            "AgentManager credentials may only reach this Hive MCP resource.",
-          );
+        const resolved = resolveMcpServer(server, allowed, this.credential, this.credentials);
         requireThat(
           !Object.hasOwn(servers, server.name),
           "invalid_arguments",
@@ -125,9 +109,9 @@ export class ClaudeMcpConfigurationManager {
         );
         servers[server.name] = {
           type: "http",
-          url: url.href,
-          ...(server.authentication === "agent-manager"
-            ? { headers: { Authorization: "Bearer " + this.credential } }
+          url: resolved.url,
+          ...(Object.keys(resolved.headers).length
+            ? { headers: resolved.headers }
             : {}),
         };
       }

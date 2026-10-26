@@ -8,6 +8,7 @@ import {
   McpConfigurationManager,
   SkillsManager,
   environmentName,
+  resolveMcpServer,
 } from "../services/agent-manager/src/environment.js";
 import { loadEnvironmentDefaults } from "../services/agent-manager/src/environment-defaults.js";
 import { digest } from "../packages/contracts/src/canonical.js";
@@ -53,7 +54,7 @@ async function fixture(t: TestContext) {
         object,
         revision: {
           revision: value.revision,
-          contractVersion: "1.0.0",
+          contractVersion: value.contractKey === "agent/mcp-configuration" ? "1.1.0" : "1.0.0",
           contentHash: digest(JSON.stringify(value.document)),
         },
         content: { encoding: "json", value: value.document },
@@ -149,6 +150,34 @@ test("AgentManager patches an isolated MCP block with its local key and preserve
   await manager.synchronize(f.connection);
   assert.equal(manager.status.state, "conflict");
   assert.match(await readFile(config, "utf8"), /tool_timeout_sec = 21/);
+});
+
+test("External MCP credentials are scoped to an exact endpoint and never use the Hive token", async (t) => {
+  const f = await fixture(t), defaults = await loadEnvironmentDefaults('', 'https://hive.example');
+  const server: Agent.McpServer = { name: 'external', url: 'https://tools.example/mcp', enabled: true,
+    authentication: 'bearer', credentialId: 'tools', startupTimeoutSeconds: 15, toolTimeoutSeconds: 45 };
+  const credentials = { tools: { url: server.url, bearerToken: 'synthetic-external-token' } };
+  f.put('mcp', { ...defaults.mcp, servers: [...defaults.mcp.servers, server] });
+  const manager = new McpConfigurationManager(f.home, 'host-a', 'https://hive.example', 'synthetic-hive-token', defaults.mcp, credentials);
+  await manager.synchronize(f.connection);
+  assert.equal(manager.status.state, 'applied');
+  const first = await readFile(join(f.home, 'config.toml'), 'utf8');
+  assert.match(first, /mcp_servers\."external"[^]*?Bearer synthetic-external-token/);
+  assert.doesNotMatch(JSON.stringify(manager.status), /synthetic-external-token/);
+  assert.doesNotMatch(JSON.stringify(defaults), /synthetic-external-token/);
+  credentials.tools.bearerToken = 'rotated-external-token';
+  await manager.synchronize(f.connection);
+  const rotated = await readFile(join(f.home, 'config.toml'), 'utf8');
+  assert.ok(rotated.includes('Bearer rotated-external-token'));
+  assert.ok(!rotated.includes('synthetic-external-token'));
+  f.put('mcp', { ...defaults.mcp, servers: [{ ...server, url: 'https://other.example/mcp' }] });
+  await manager.synchronize(f.connection);
+  assert.equal(manager.status.code, 'access_denied');
+  assert.equal(await readFile(join(f.home, 'config.toml'), 'utf8'), rotated);
+  const allowed = new Set(['https://hive.example/mcp']);
+  assert.throws(() => resolveMcpServer(server, allowed, 'hive', {}), { code: 'access_denied' });
+  assert.throws(() => resolveMcpServer(server, allowed, 'hive', { tools: { ...credentials.tools, bearerToken: 'bad\r\nheader' } }), { code: 'invalid_arguments' });
+  assert.throws(() => resolveMcpServer({ ...server, authentication: 'agent-manager', credentialId: undefined }, allowed, 'hive', credentials), { code: 'access_denied' });
 });
 
 test("AgentManager enables ivy_dev by default and allows a host override to disable it", async (t) => {

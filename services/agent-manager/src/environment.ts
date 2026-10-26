@@ -25,7 +25,7 @@ export async function readEnvironmentDocument<T extends { hostId: string | null 
   });
   if (!object || object.effectivelyArchived) return null;
   const value = await connection.request('objects.read', { objectId: object.id, revision: object.currentRevision });
-  requireThat(value.object.contractKey === (kind === 'mcp' ? mcpContract : skillsContract) && value.revision.contractVersion === '1.0.0' && value.content.encoding === 'json',
+  requireThat(value.object.contractKey === (kind === 'mcp' ? mcpContract : skillsContract) && value.revision.contractVersion === (kind === 'mcp' ? '1.1.0' : '1.0.0') && value.content.encoding === 'json',
     'contract_mismatch', 'Managed environment path contains a different document contract.');
   validateAgent(schema, value.content.value);
   const document = value.content.value as unknown as T;
@@ -112,17 +112,35 @@ function codexBlock(source: string, acceptedHashes: ReadonlySet<string>): { bloc
   throw new IvyError('target_conflict', 'The Ivy-managed Codex block has local changes.');
 }
 const tomlString = (value: string) => JSON.stringify(value);
-function renderMcpSections(document: Agent.McpDocument, hiveMcpUrls: ReadonlySet<string>, credential: string, appId: string | null): string[] | null {
+export function resolveMcpServer(server: Agent.McpServer, hiveMcpUrls: ReadonlySet<string>, credential: string,
+  credentials: Record<string, Agent.McpCredential> = {}): { url: string; headers: Record<string, string> } {
+  const url = new URL(server.url), loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  requireThat((url.protocol === 'https:' || url.protocol === 'http:' && loopback) && !url.username && !url.password && !url.hash,
+    'invalid_arguments', 'Managed remote MCP URLs require HTTPS.');
+  if (server.authentication === 'bearer') {
+    requireThat(Boolean(server.credentialId) && Object.hasOwn(credentials, server.credentialId!), 'access_denied', 'External MCP credential is not provisioned on this host.');
+    const selected = credentials[server.credentialId!]!;
+    requireThat(url.href === new URL(selected.url).href, 'access_denied', 'External MCP credential is bound to another endpoint.');
+    requireThat(/^[A-Za-z0-9._~+/-]+=*$/.test(selected.bearerToken) && selected.bearerToken.length <= 16384,
+      'invalid_arguments', 'External MCP bearer token is invalid.');
+    return { url: url.href, headers: { Authorization: 'Bearer ' + selected.bearerToken } };
+  }
+  requireThat(server.credentialId === undefined, 'invalid_arguments', 'Only bearer authentication may reference an external credential.');
+  if (server.authentication === 'agent-manager') {
+    requireThat(hiveMcpUrls.has(url.href), 'access_denied', 'AgentManager credentials can only be sent to this Hive MCP resource.');
+    return { url: url.href, headers: { Authorization: 'Bearer ' + credential } };
+  }
+  return { url: url.href, headers: {} };
+}
+function renderMcpSections(document: Agent.McpDocument, hiveMcpUrls: ReadonlySet<string>, credential: string, appId: string | null,
+  credentials: Record<string, Agent.McpCredential>): string[] | null {
   if (!document.enabled) return null;
   const names = new Set<string>();
   const blocks = document.servers.map(server => {
     requireThat(!names.has(server.name), 'invalid_arguments', 'Managed MCP server names must be unique.'); names.add(server.name);
-    const url = new URL(server.url), loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
-    requireThat((url.protocol === 'https:' || url.protocol === 'http:' && loopback) && !url.username && !url.password && !url.hash,
-      'invalid_arguments', 'Managed remote MCP URLs require HTTPS.');
-    if (server.authentication === 'agent-manager') requireThat(hiveMcpUrls.has(url.href), 'access_denied', 'AgentManager credentials can only be sent to this Hive MCP resource.');
-    return [`[mcp_servers.${tomlString(server.name)}]`, `url = ${tomlString(url.href)}`,
-      ...(server.authentication === 'agent-manager' ? [`http_headers = { Authorization = ${tomlString('Bearer ' + credential)} }`] : []),
+    const resolved = resolveMcpServer(server, hiveMcpUrls, credential, credentials);
+    return [`[mcp_servers.${tomlString(server.name)}]`, `url = ${tomlString(resolved.url)}`,
+      ...(Object.keys(resolved.headers).length ? [`http_headers = { Authorization = ${tomlString(resolved.headers.Authorization!)} }`] : []),
       `enabled = ${server.enabled}`, `startup_timeout_sec = ${server.startupTimeoutSeconds}`, `tool_timeout_sec = ${server.toolTimeoutSeconds}`].join('\n');
   });
   return [...(appId ? [`[apps.${tomlString(appId)}]`, 'enabled = false', ''] : []), ...blocks];
@@ -183,7 +201,7 @@ export class McpConfigurationManager {
   status: Agent.ManagedOutputStatus;
   private running: Promise<void> | null = null;
   constructor(readonly home: string, readonly hostId: string, readonly hiveUrl: string, readonly credential: string,
-    readonly defaults: Agent.McpDocument) {
+    readonly defaults: Agent.McpDocument, readonly credentials: Record<string, Agent.McpCredential> = {}) {
     this.status = { state: 'pending', target: join(home, 'config.toml'), desiredVersion: null, appliedVersion: null,
       observedAt: new Date().toISOString(), code: null, bytes: 0 };
   }
@@ -210,12 +228,12 @@ export class McpConfigurationManager {
     const openai = await connection.request('openai.getConfiguration', {}) as Operation.OpenaiConfigurationSnapshot;
     validateOutput('openai.getConfiguration', openai);
     const hostedIvyAppId = openai.configuration.appId;
-    const sections = renderMcpSections(desired.document, hiveMcpUrls, this.credential, hostedIvyAppId);
+    const sections = renderMcpSections(desired.document, hiveMcpUrls, this.credential, hostedIvyAppId, this.credentials);
     const block = renderCodex(sections), blockHash = block === null ? null : digest(block);
     const legacyMcpBlock = sections === null ? null : [beginMcp, ...sections, endMcp].join('\n');
     const legacyPermissionsBlock = sections === null ? null : [beginPermissions,
       `approval_policy = ${tomlString(approvalPolicy)}`, `default_permissions = ${tomlString(defaultPermissions)}`, endPermissions].join('\n');
-    const desiredVersion = hashJson({ document: desired.version, approvalPolicy, defaultPermissions, openai });
+    const desiredVersion = hashJson({ document: desired.version, approvalPolicy, defaultPermissions, openai, credentials: hashJson(this.credentials) });
     await mkdir(stateRoot, { recursive: true, mode: 0o700 });
     const rootInfo = await lstat(stateRoot);
     requireThat(rootInfo.isDirectory() && !rootInfo.isSymbolicLink(), 'target_conflict', 'Managed MCP state must be a real directory.');

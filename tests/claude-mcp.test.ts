@@ -14,6 +14,27 @@ const absent = {
   },
 } as unknown as Pick<ServiceConnection, "request">;
 
+test("Claude projects a provisioned external bearer credential and refuses an endpoint change", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'ivy-claude-external-mcp-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const defaults = await loadEnvironmentDefaults('', 'https://hive.example');
+  defaults.mcp.servers.push({ name: 'external', url: 'https://tools.example/mcp', enabled: true,
+    authentication: 'bearer', credentialId: 'tools', startupTimeoutSeconds: 15, toolTimeoutSeconds: 45 });
+  const path = join(root, 'mcp.json');
+  const manager = new ClaudeMcpConfigurationManager(path, 'host-test', 'https://hive.example', 'hive-token', defaults.mcp,
+    { tools: { url: 'https://tools.example/mcp', bearerToken: 'external-token' } });
+  await manager.synchronize(absent);
+  assert.equal(manager.status.state, 'applied');
+  const before = await readFile(path, 'utf8'), projected = JSON.parse(before);
+  assert.equal(projected.external.headers.Authorization, 'Bearer external-token');
+  assert.equal(projected.ivy.headers.Authorization, 'Bearer hive-token');
+  assert.doesNotMatch(JSON.stringify(manager.status), /external-token/);
+  defaults.mcp.servers.find(server => server.name === 'external')!.url = 'https://other.example/mcp';
+  await manager.synchronize(absent);
+  assert.equal(manager.status.code, 'access_denied');
+  assert.equal(await readFile(path, 'utf8'), before);
+});
+
 test("Claude MCP projection keeps the Hive credential on its own endpoint and detects edits", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "ivy-claude-mcp-"));
   t.after(() => rm(root, { recursive: true, force: true }));

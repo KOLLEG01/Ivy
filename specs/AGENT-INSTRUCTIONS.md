@@ -69,7 +69,11 @@ Defaults: [runtime instructions](../instructions/README.md).
   `default_permissions = ":danger-full-access"`), disables the hosted Ivy app identified by
   the Hive-wide OpenAI configuration saved in the Console while direct Ivy MCP is managed,
   and injects the provisioned credential only for explicitly selected
-  AgentManager authentication at this installation's Ivy MCP URLs. Legacy sandbox settings
+  AgentManager authentication at this installation's Ivy MCP URLs. External bearer authentication
+  references a credentialId in protected host settings.mcpCredentials. Each credential contains
+  an exact endpoint URL and bearerToken; reject missing credentials and endpoint mismatches.
+  Mark /settings/mcpCredentials in the instance secretPaths. MCP intent uses contract 1.1.0.
+  Legacy sandbox settings
   and unmanaged entries for the owned keys are conflicts. Keep secrets out of stored environment
   documents, UI responses and logs; preserve all other unmanaged configuration.
 - Managed skill patches use their declared names as directories under the selected account skills root,

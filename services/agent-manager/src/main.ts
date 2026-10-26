@@ -192,6 +192,7 @@ export async function startAgentManager(
           config.publicBaseUrl,
           config.credential!,
           defaults,
+          settings.mcpCredentials,
         )
       : new McpConfigurationManager(
           nativeHome,
@@ -199,6 +200,7 @@ export async function startAgentManager(
           config.publicBaseUrl,
           config.credential!,
           defaults,
+          settings.mcpCredentials,
         );
   journal.onTerminal = (identity) => {
     if (identity.callerPrincipalId !== nativeClockPrincipal)

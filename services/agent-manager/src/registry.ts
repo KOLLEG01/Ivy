@@ -120,9 +120,9 @@ export function agentRegistry(catalog: Agent.Catalog): Wire.RegistrySync {
   { key: 'agent/instructions', version: '1.0.0', owner: { kind: 'service', serviceName: 'agent-manager' },
     mediaType: 'application/json', retention: { objects: { mode: 'retain' }, revisions: { mode: 'bounded', maximumCount: 100 } }, jsonSchema: agentSchema('InstructionsDocument'),
     specMarkdown: 'Versioned user-authored instruction documents, not runtime configuration or credentials. Hive-wide hostId=null; host documents bind an exact hostId. AgentUI writes with the user permissions and object CAS. Enabled host instructions follow enabled Hive instructions and take precedence. A disabled host document suppresses central instructions on that host; removing it inherits Hive again. See specs/AGENT-INSTRUCTIONS.md.' },
-  { key: 'agent/mcp-configuration', version: '1.0.0', owner: { kind: 'service', serviceName: 'agent-manager' },
+  { key: 'agent/mcp-configuration', version: '1.1.0', owner: { kind: 'service', serviceName: 'agent-manager' },
     mediaType: 'application/json', retention: { objects: { mode: 'retain' }, revisions: { mode: 'bounded', maximumCount: 100 } }, jsonSchema: agentSchema('McpDocument'),
-    specMarkdown: 'Versioned secret-free MCP intent. AgentManager injects only its own host credential and only for its exact Hive MCP resource.' },
+    specMarkdown: 'Versioned secret-free MCP intent. AgentManager injects its host credential only for its exact Hive MCP resource. Bearer authentication references a credentialId provisioned in protected host settings.mcpCredentials; each credential binds an exact endpoint URL. Include /settings/mcpCredentials in the instance secretPaths.' },
   { key: 'agent/skills', version: '1.0.0', owner: { kind: 'service', serviceName: 'agent-manager' },
     mediaType: 'application/json', retention: { objects: { mode: 'retain' }, revisions: { mode: 'bounded', maximumCount: 100 } }, jsonSchema: agentSchema('SkillsDocument'),
     specMarkdown: 'Versioned UTF-8 skill files installed into Ivy-owned user skill directories. Other user skills remain outside AgentManager ownership.' }], requiredContracts: [] };
