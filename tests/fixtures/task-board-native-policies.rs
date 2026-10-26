@@ -236,6 +236,7 @@ async fn native_policy_factory_runs_the_empty_graph_with_actual_journal_and_loca
         let catalogs =
             CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
         let factory = EngineFactory {
+            maintenance: None,
             contracts: &contracts,
             catalogs: &catalogs,
             policies: &probe,

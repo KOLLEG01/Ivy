@@ -86,7 +86,9 @@ impl<P: TaskPrompts> NativeRuntime<P> {
             .as_js_string()
             .cloned()
             .ok_or_else(IvyError::internal)?;
+        let maintenance = crate::maintenance::MaintenanceContext::from_config(&host.config)?;
         let factory = EngineFactory {
+            maintenance: Some(&maintenance),
             contracts: &contracts,
             catalogs: &catalogs,
             policies: &policies,

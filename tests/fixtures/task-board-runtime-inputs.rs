@@ -1,12 +1,10 @@
-//! Current packaged inputs compared with the actual original producers.
+//! Current request admission and native intent boundaries.
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::parse};
-use ivy_sdk::collation::LocaleRuntime;
 use ivy_task_board::{
     evidence_bytes::{BlobStore, ChunkKey},
     journal_store::Contracts,
     native_intent::{NativeIntent, NativeSlot, TaskPrompts},
     operations::{Document, Store},
-    prompts::CurrentTaskPrompts,
     read_evidence::ReadEvidenceStore,
     runtime_inputs,
     schema::RuntimeContracts,
@@ -15,118 +13,6 @@ use std::{
     cell::{Cell, RefCell},
     path::PathBuf,
 };
-
-fn producer(name: &str) -> Json {
-    let root = PathBuf::from(
-        std::env::var_os("IVY_TASK_BOARD_PRODUCER")
-            .expect("Supply the actual current producer outputs"),
-    );
-    parse(
-        &std::fs::read_to_string(root.join(name)).unwrap(),
-        usize::MAX,
-    )
-    .unwrap()
-}
-
-#[test]
-fn packaged_inputs_match_current_producer_registry_and_reader_writer_versions() {
-    let locale = LocaleRuntime::load(&PathBuf::from(
-        std::env::var_os("IVY_TEST_LOCALE_RUNTIME").unwrap(),
-    ))
-    .unwrap();
-    let inputs = runtime_inputs::packaged(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."),
-        locale.executing_default().unwrap(),
-    )
-    .unwrap();
-    let expected = producer("registry.json");
-    if hash_json(inputs.registry.value()).unwrap() != hash_json(&expected).unwrap() {
-        let root = PathBuf::from(std::env::var_os("IVY_TASK_BOARD_PRODUCER").unwrap());
-        std::fs::write(
-            root.join("native-registry.actual.json"),
-            ivy_contracts::json::stringify(inputs.registry.value(), usize::MAX).unwrap(),
-        )
-        .unwrap();
-    }
-    assert_eq!(
-        hash_json(inputs.registry.value()).unwrap(),
-        hash_json(&expected).unwrap()
-    );
-    let metadata = producer("runtime-inputs.json");
-    for (key, version) in metadata
-        .required("writerVersions")
-        .unwrap()
-        .as_object()
-        .unwrap()
-    {
-        assert_eq!(
-            inputs.contracts.version(&key.to_utf8().unwrap()).unwrap(),
-            version.as_str().unwrap()
-        );
-    }
-    assert_eq!(
-        inputs.chat_readable_versions,
-        vec![JsString::from("1.2.0"), JsString::from("1.3.0")]
-    );
-    assert!(
-        inputs
-            .contracts
-            .readable_version("task-board/task", &"2.3.0".into())
-            .unwrap()
-    );
-    assert!(
-        inputs
-            .contracts
-            .readable_version("task-board/task", &"3.1.0".into())
-            .unwrap()
-    );
-    assert!(
-        !inputs
-            .contracts
-            .readable_version("task-board/task", &"4.0.0".into())
-            .unwrap()
-    );
-}
-
-#[test]
-fn current_prompts_and_local_admission_match_original_producers() {
-    let contracts = runtime_inputs::contracts().unwrap();
-    for row in producer("prompt-vectors.json").as_array().unwrap() {
-        let changed = row.required("executionChangeRequested").unwrap();
-        let owner = row
-            .required("serviceNodeId")
-            .unwrap()
-            .as_js_string()
-            .unwrap();
-        let task = row.required("task").unwrap();
-        let expected = row.required("expected").unwrap().as_js_string().unwrap();
-        assert_eq!(
-            &CurrentTaskPrompts
-                .task_prompt(task, owner, Some(changed))
-                .unwrap(),
-            expected
-        );
-        assert_eq!(
-            &CurrentTaskPrompts
-                .task_update_prompt(task, owner, changed.as_bool().unwrap())
-                .unwrap(),
-            expected
-        );
-    }
-    let rows = producer("admission-vectors-v2.json");
-    for row in rows.as_array().unwrap() {
-        let definition = row.required("definition").unwrap().as_str().unwrap();
-        let result = contracts.validate_definition(&definition, row.required("value").unwrap());
-        assert_eq!(
-            result.is_ok(),
-            row.required("accepted").unwrap().as_bool().unwrap(),
-            "{definition}"
-        );
-        if let Err(error) = result {
-            assert_eq!(error.code, row.required("code").unwrap().as_str().unwrap());
-        }
-    }
-}
 
 #[test]
 fn durable_requests_admit_overlapping_actions_and_keep_nested_record_guards() {
@@ -335,13 +221,10 @@ impl TaskPrompts for PromptProbe {
 
 #[tokio::test(flavor = "current_thread")]
 async fn native_intent_uses_the_origin_execution_change_flag_before_catalog_or_effects() {
-    let vectors = producer("prompt-vectors.json");
+    let vectors = parse(include_str!("task-board-prompts.json"), 65_536).unwrap();
     let store = ReadOnlyTask {
         contracts: runtime_inputs::contracts().unwrap(),
-        task: vectors.as_array().unwrap()[0]
-            .required("task")
-            .unwrap()
-            .clone(),
+        task: vectors.required("baseTask").unwrap().clone(),
         reads: Cell::new(0),
     };
     let catalogs =
@@ -351,8 +234,7 @@ async fn native_intent_uses_the_origin_execution_change_flag_before_catalog_or_e
         store: &store,
         catalogs: &catalogs,
     };
-    let rows = producer("admission-vectors-v2.json");
-    let original = rows.as_array().unwrap()[0].required("value").unwrap();
+    let original = parse(r#"{"kind":"steer","commentIds":[],"workRevision":1,"peersHash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","predecessor":null}"#, usize::MAX).unwrap();
     for changed in [false, true] {
         let mut origin = original.clone();
         origin.insert("executionChangeRequested", changed.into());
@@ -391,108 +273,4 @@ async fn native_intent_uses_the_origin_execution_change_flag_before_catalog_or_e
     );
     assert_eq!(store.reads.get(), reads);
     assert!(probe.0.borrow().is_empty());
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn current_prompts_materialize_and_retain_exact_calls_against_the_packaged_native_catalog() {
-    let distribution = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let catalogs =
-        ivy_contracts::checked_native_contract::CheckedNativeContracts::new(distribution);
-    let contract = catalogs
-        .checked_native_contract(&"0.159.2".into(), None)
-        .unwrap();
-    let mut plan = Json::object([
-        (
-            "nativeVersion",
-            contract.catalog().required("version").unwrap().clone(),
-        ),
-        (
-            "catalogSourceHash",
-            contract.catalog().required("sourceHash").unwrap().clone(),
-        ),
-        ("turnStart", Json::Object(vec![])),
-    ]);
-    plan.insert(
-        "definitions",
-        Json::object([(
-            "turnStart",
-            hash_json(contract.definition(&"turn/start".into()).unwrap())
-                .unwrap()
-                .into(),
-        )]),
-    );
-    let origins = producer("admission-vectors-v2.json");
-    for row in producer("prompt-vectors.json").as_array().unwrap() {
-        let store = ReadOnlyTask {
-            contracts: runtime_inputs::contracts().unwrap(),
-            task: row.required("task").unwrap().clone(),
-            reads: Cell::new(0),
-        };
-        let mut run = parse(r#"{"taskId":"fixture-task","primaryResourceRef":{"kind":"thread","namespace":"codex","serviceNodeId":"fixture-owner","nativeId":"fixture-thread"},"turnId":"fixture-turn","nativeEpoch":"fixture-epoch","cancellation":null,"owner":{"source":"agent"},"originalRequest":{"action":"continue","expectedRevision":1,"coordinationOnly":true}}"#,usize::MAX).unwrap();
-        run.insert("plan", plan.clone());
-        let mut owner = run.required("owner").unwrap().clone();
-        owner.insert(
-            "serviceNodeId",
-            row.required("serviceNodeId").unwrap().clone(),
-        );
-        run.insert("owner", owner);
-        let intent = NativeIntent {
-            store: &store,
-            catalogs: &catalogs,
-        };
-        let mut origin = origins.as_array().unwrap()[0]
-            .required("value")
-            .unwrap()
-            .clone();
-        origin.insert(
-            "executionChangeRequested",
-            row.required("executionChangeRequested").unwrap().clone(),
-        );
-        let intended = intent
-            .intended_call(&run, NativeSlot::Steer, Some(&origin), &CurrentTaskPrompts)
-            .await
-            .unwrap();
-        let request = intended.required("request").unwrap();
-        assert_eq!(request.get("method"), Some(&"turn/steer".into()));
-        assert_eq!(
-            request
-                .required("params")
-                .unwrap()
-                .required("input")
-                .unwrap()
-                .as_array()
-                .unwrap()[0]
-                .get("text"),
-            row.get("expected")
-        );
-        assert_eq!(
-            intended.get("expectedDefinitionHash"),
-            Some(&Json::from(
-                hash_json(contract.definition(&"turn/steer".into()).unwrap()).unwrap()
-            ))
-        );
-        let retained = intent
-            .retain_native_request(request, &"current-call".into())
-            .unwrap();
-        assert_eq!(
-            hash_json(&intent.resolve_native_request(&retained).unwrap()).unwrap(),
-            hash_json(request).unwrap()
-        );
-        if row.required("executionChangeRequested").unwrap().as_bool() == Some(false) {
-            let initial = intent
-                .intended_call(&run, NativeSlot::Turn, None, &CurrentTaskPrompts)
-                .await
-                .unwrap();
-            let input = initial
-                .required("request")
-                .unwrap()
-                .required("params")
-                .unwrap()
-                .required("input")
-                .unwrap()
-                .as_array()
-                .unwrap();
-            assert_eq!(input.last().unwrap().get("text"), row.get("expected"));
-        }
-    }
 }

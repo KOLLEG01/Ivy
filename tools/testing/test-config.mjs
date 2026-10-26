@@ -754,6 +754,17 @@ export const rustTests = {
     "package": "ivy-task-board",
     "test": "task-board-host-runtime"
   },
+  "tests/rust/task-board-maintenance.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-maintenance",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-generation.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-output",
+    "filter": "reconciler::generation::",
+    "testThreads": 1
+  },
   "tests/fixtures/task-board-native-journal.rs": {
     "package": "ivy-task-board",
     "test": "task-board-blobs",

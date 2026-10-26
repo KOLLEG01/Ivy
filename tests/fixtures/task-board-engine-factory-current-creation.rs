@@ -184,6 +184,7 @@ async fn current_contract_creation_recovers_reads_and_retires_the_actual_factory
     let catalogs =
         CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
     let factory = EngineFactory {
+        maintenance: None,
         contracts: &contracts,
         catalogs: &catalogs,
         policies: &fixture,

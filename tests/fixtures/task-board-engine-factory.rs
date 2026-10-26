@@ -582,6 +582,7 @@ fn make_factory<'a>(
     retention::FactoryClock,
 > {
     EngineFactory {
+        maintenance: None,
         contracts,
         catalogs,
         policies: fixture,

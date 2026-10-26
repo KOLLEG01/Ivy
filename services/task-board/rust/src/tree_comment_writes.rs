@@ -161,7 +161,7 @@ fn references(node: &Value) -> std::result::Result<Value, IvyError> {
             .collect::<std::result::Result<Vec<_>, IvyError>>()?,
     ))
 }
-async fn save_node<C, S, I, E, Fut>(
+pub(crate) async fn save_node<C, S, I, E, Fut>(
     source: &S,
     identity: &I,
     comments: &CommentPort<'_, C, WriteFailure<E>>,

@@ -4,6 +4,16 @@ Contracts: [schema](schemas/task-board.schema.json), [operations](schemas/task-b
 Implementation: [runtime](../services/task-board/rust/src).
 UI requirements: [UI](UI.md).
 
+## Export maintenance
+
+Stop the owning TaskBoard instance, then run its packaged `ivy-task-board-maintenance`
+with `--config ABSOLUTE_PATH --plan ABSOLUTE_PATH --stopped-pid PID`.
+The [export plan and job records](../services/task-board/rust/src/maintenance/records.rs)
+retain the exact host, service, scope, hashes, revision pins and local archive paths.
+The operator verifies the local export before retiring references; `--comments`
+admits a verified generated-comment archive job. Startup resumes both cleanup jobs.
+Ordinary comments, delivery receipts, unexported files and live Run source pins remain protected.
+
 ## Work and allocation
 
 - Model, reasoning and speed remain editable during execution. Save the desired settings

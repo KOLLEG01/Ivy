@@ -54,6 +54,7 @@ impl<S: Store, E: OrchestrationEngine, V: OrchestrationServices> NativeNotificat
 pub struct ReconcilerRuntime<'r, 'a, 'x, S, E, X, N> {
     pub reconciler: &'r Reconciler<'a, 'x, S, E, X>,
     pub native: &'r N,
+    pub maintenance: Option<&'r dyn crate::maintenance::MaintenanceTick>,
 }
 impl<
     'a,
@@ -69,6 +70,9 @@ impl<
     fn diagnostics(&self) -> IvyResult<Vec<Json>> {
         let mut diagnostics = self.reconciler.diagnostics();
         diagnostics.extend(self.native.diagnostics()?);
+        if let Some(maintenance) = self.maintenance {
+            diagnostics.extend(maintenance.diagnostics());
+        }
         Ok(diagnostics)
     }
     fn task_changed(&self) {
@@ -83,6 +87,9 @@ impl<
     }
     async fn tick(&self) {
         self.reconciler.tick().await;
+        if let Some(maintenance) = self.maintenance {
+            maintenance.tick().await;
+        }
     }
     fn stop_admissions(&self) {
         self.reconciler.stop_admissions();

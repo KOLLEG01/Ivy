@@ -14,13 +14,19 @@ base64.workspace = true
 chrono.workspace = true
 tokio.workspace = true
 futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 flate2.workspace = true
-serde_json.workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[[test]]
+name = "task-board-maintenance"
+path = "../../../tests/rust/task-board-maintenance.rs"
 
 [[example]]
 name = "task-board-policy-probe"

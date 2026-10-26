@@ -29,6 +29,7 @@ pub mod local_journal;
 pub mod local_pages;
 pub mod local_retention;
 pub mod local_workspaces;
+pub mod maintenance;
 pub mod native_adoption;
 pub mod native_collector;
 pub mod native_comments;

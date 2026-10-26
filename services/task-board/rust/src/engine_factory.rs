@@ -190,6 +190,7 @@ pub trait PolicyFactory<V, C, I, K> {
 }
 
 pub struct EngineFactory<'a, V, B, J, C, I, K> {
+    pub maintenance: Option<&'a crate::maintenance::MaintenanceContext>,
     pub contracts: &'a V,
     pub catalogs: &'a CheckedNativeContracts,
     pub policies: &'a B,
@@ -439,6 +440,9 @@ impl<
             new_id: &self.new_id,
             cache: Some(scopes.cache()),
         };
+        let maintenance = self
+            .maintenance
+            .map(|context| crate::maintenance::Maintenance::new(&journal, context.clone()));
         let owner = EngineOwner {
             service_node_id: self.service_node_id.clone(),
             generation: connection.generation() as f64,
@@ -905,6 +909,9 @@ impl<
         runtime = ReconcilerRuntime {
             reconciler: &reconciler,
             native: &native,
+            maintenance: maintenance
+                .as_ref()
+                .map(|value| value as &dyn crate::maintenance::MaintenanceTick),
         };
         service_runtime = GenerationServiceRuntime {
             runtime: &runtime,
@@ -1015,6 +1022,9 @@ impl<
         // All accepted read producers and their generation have retired. A
         // failed range can still own immutable sibling requests in the SDK.
         current_comments.settled().await;
+        if let Some(maintenance) = &maintenance {
+            maintenance.retention.settled().await;
+        }
         result
     }
 }

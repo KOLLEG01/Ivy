@@ -176,6 +176,7 @@ async fn generation_retires_pending_page_public_call_and_reconciler_before_final
     let reconciler = Reconciler::new(&world, &world, &tasks);
     let native = Native::default();
     let runtime = ReconcilerRuntime {
+        maintenance: None,
         reconciler: &reconciler,
         native: &native,
     };
@@ -337,6 +338,7 @@ async fn generation_control_loss_and_readiness_failure_drain_without_success_fab
         let reconciler = Reconciler::new(&world, &world, &tasks);
         let native = Native::default();
         let runtime = ReconcilerRuntime {
+            maintenance: None,
             reconciler: &reconciler,
             native: &native,
         };

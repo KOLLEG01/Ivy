@@ -2359,7 +2359,9 @@ dependencies = [
  "ivy-host-runtime",
  "ivy-sdk",
  "ivy-store",
+ "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tokio",
  "uuid",
 ]
