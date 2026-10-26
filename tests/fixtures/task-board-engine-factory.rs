@@ -247,6 +247,9 @@ impl<V: Contracts> TaskPrompts for Policies<'_, V> {
         owner: &JsString,
         coordination: Option<&Json>,
     ) -> IvyResult<JsString> {
+        if let Some(steering) = &self.fixture.steering {
+            return steering.prompt(task, owner, coordination == Some(&Json::Bool(true)));
+        }
         if let Some(driver) = &self.fixture.driver {
             return driver.prompt(task, owner, coordination);
         }

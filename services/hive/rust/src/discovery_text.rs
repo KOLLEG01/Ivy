@@ -54,7 +54,7 @@ pub(crate) fn collapse_whitespace(value: &JsString) -> JsString {
     let mut normalized = vec![];
     let mut space = false;
     for c in &value.0 {
-        if JsString(vec![*c]).trim().0.is_empty() {
+        if JsString::trim_ecmascript_units(&[*c]).is_empty() {
             space = !normalized.is_empty();
         } else {
             if space {

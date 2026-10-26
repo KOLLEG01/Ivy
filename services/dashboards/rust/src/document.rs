@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 
 static TEMPLATE: LazyLock<Vec<JsString>> = LazyLock::new(|| {
     parse(
-        include_str!("../../src/document-template.json"),
+        include_str!("../../../../packages/ui-client/src/dashboard/document-template.json"),
         MANAGEMENT_FRAME_BYTES,
     )
     .expect("embedded document template is JSON")

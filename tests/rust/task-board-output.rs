@@ -1,6 +1,9 @@
 // The composed factory fixture instantiates the complete borrowed engine graph.
 #![recursion_limit = "256"]
 
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
+
 use ivy_contracts::{
     IvyJson as Json, hash::hash_json, json::parse, limits::MANAGEMENT_FRAME_BYTES,
 };
@@ -56,22 +59,9 @@ mod local_executor;
 
 #[test]
 fn native_output_helpers_match_original_typescript() {
-    let result = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-output-oracle.mjs",
-        ])
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
+    let result = reference_data::read(include_bytes!("../fixtures/task-board-output-cases.json.gz"));
     let cases = parse(
-        std::str::from_utf8(&result.stdout).unwrap(),
+        std::str::from_utf8(&result).unwrap(),
         MANAGEMENT_FRAME_BYTES,
     )
     .unwrap();

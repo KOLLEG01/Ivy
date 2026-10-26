@@ -356,46 +356,205 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
     json!({"rows":observations,"definitions":rows(store,"SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name"),
         "metadata":rows(store,"SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),"topics":rows(store,"SELECT * FROM topics ORDER BY topic,version")})
 }
+fn object_request(request: &Value) -> Value {
+    let params = &request["params"];
+    match request["method"].as_str().unwrap() {
+        "wiki.create" => {
+            json!({"method":"objects.write","params":{"mutationId":params["mutationId"],"contractVersion":"1.0.0","references":{},"create":{"contractKey":"wiki/page","name":params["title"],"parentId":params.get("parentId").cloned().unwrap_or(Value::Null),"ownerObjectId":null},"content":{"encoding":"text","value":params["markdown"]}}})
+        }
+        "wiki.update" => {
+            json!({"method":"objects.updateContent","params":{"mutationId":params["mutationId"],"objectId":params["objectId"],"expectedRevision":params["expectedRevision"],"contractVersion":"1.0.0","references":{},"content":{"encoding":"text","value":params["markdown"]}}})
+        }
+        "wiki.move" | "wiki.archive" | "wiki.history" => {
+            json!({"method":format!("objects.{}",request["method"].as_str().unwrap().strip_prefix("wiki.").unwrap()),"params":params})
+        }
+        "wiki.search" => {
+            let mut params = params.clone();
+            params["contractKey"] = "wiki/page".into();
+            json!({"method":"objects.search","params":params})
+        }
+        "wiki.list" => {
+            let mut query = params.clone();
+            query.as_object_mut().unwrap().remove("parentId");
+            query["contractKey"] = "wiki/page".into();
+            query["where"] = if params["parentId"].as_str().is_some_and(|id| !id.is_empty()) {
+                json!({"op":"eq","field":"object.parentId","value":params["parentId"]})
+            } else {
+                json!({"op":"isNull","field":"object.parentId"})
+            };
+            query["select"] = json!(["object.name", "object.path", "object.effectivelyArchived"]);
+            query["orderBy"] = json!([{"field":"object.name","direction":"asc"}]);
+            json!({"method":"objects.query","params":query})
+        }
+        _ => request.clone(),
+    }
+}
+fn receipt_hash(request: &Value, step: &Value) -> String {
+    let mut request = IvyJson::from_serde(request).unwrap();
+    object_write::apply_units(&mut request, step);
+    let mut arguments = request.get("params").unwrap().clone();
+    arguments.remove("mutationId");
+    ivy_contracts::hash::hash_json(&IvyJson::object([
+        ("method", request.get("method").unwrap().clone()),
+        ("arguments", arguments),
+    ]))
+    .unwrap()
+}
 fn compare(steps: &[Value]) -> Value {
+    use super::object_create::{normalized, substitute};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use std::collections::BTreeMap;
     let root = Root::new();
-    let observed = oracle(&root.0.join("observed.sqlite"), steps);
+    let expected = reference(&root.0.join("original.sqlite"), steps);
+    let mut expanded = steps.to_vec();
+    for step in &mut expanded {
+        step["identityTables"] = true.into();
+    }
     let actual = native(
         &root.0.join("native.sqlite"),
-        steps,
-        &observed["registryRuntime"],
+        &expanded,
+        &expected["registryRuntime"],
     );
-    let mut bound = steps.to_vec();
-    for (i, step) in bound.iter_mut().enumerate() {
-        if step["request"]["params"]["create"].is_object()
-            || step["request"]["method"] == "hostConfigurations.put"
-            || step["request"]["method"] == "wiki.create"
-        {
-            let value = &actual["rows"][i]["value"]["value"];
-            let id = value["object"]["id"]
-                .as_str()
-                .or_else(|| value["objectId"].as_str())
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("00000000-0000-4000-8000-{i:012}"));
-            assert_eq!(uuid::Uuid::parse_str(&id).unwrap().get_version_num(), 4);
-            step["createdId"] = id.into();
+    let actual_rows = actual["rows"].as_array().unwrap();
+    let original_rows = expected["rows"].as_array().unwrap();
+    assert_eq!(actual_rows.len(), steps.len());
+    assert_eq!(original_rows.len(), steps.len());
+    let mut aliases = BTreeMap::new();
+    for (index, step) in steps.iter().enumerate() {
+        if step["payload"]["action"] == "session.create" {
+            if let Some(token) = actual_rows[index]["value"]["sessionToken"].as_str() {
+                assert_eq!(token.len(), 43);
+                assert_eq!(URL_SAFE_NO_PAD.decode(token).unwrap().len(), 32);
+                let mut fixed = [0u8; 32];
+                fixed[..8].copy_from_slice(&(index as u64).to_le_bytes());
+                let fixed = URL_SAFE_NO_PAD.encode(fixed);
+                assert_eq!(original_rows[index]["value"]["sessionToken"], fixed);
+                assert!(aliases.insert(token.to_owned(), fixed.clone()).is_none());
+                assert!(
+                    aliases
+                        .insert(
+                            ivy_contracts::hash::digest(token),
+                            ivy_contracts::hash::digest(&fixed)
+                        )
+                        .is_none()
+                );
+            }
+        }
+        if step["op"] != "kernel" && step["payload"]["action"] != "execute" {
+            continue;
+        }
+        let prior = if index == 0 {
+            &[][..]
+        } else {
+            actual_rows[index - 1]["state"]["objects"]
+                .as_array()
+                .unwrap()
+                .as_slice()
+        };
+        let fresh = actual_rows[index]["state"]["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| !prior.iter().any(|previous| previous["id"] == row["id"]))
+            .collect::<Vec<_>>();
+        if !fresh.is_empty() {
+            assert_eq!(fresh.len(), 1, "One original creation per kernel step");
+            let id = fresh[0]["id"].as_str().unwrap();
+            assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 4);
+            assert!(
+                aliases
+                    .insert(
+                        id.to_owned(),
+                        format!("00000000-0000-4000-8000-{index:012x}")
+                    )
+                    .is_none()
+            );
         }
     }
-    let expected = oracle(&root.0.join("reference.sqlite"), &bound);
-    assert_eq!(actual["rows"].as_array().unwrap().len(), steps.len());
-    for (i, (a, b)) in actual["rows"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .zip(expected["rows"].as_array().unwrap())
-        .enumerate()
-    {
-        assert_eq!(a, b, "Kernel step{i}: {}", steps[i]);
+    let no_aliases = BTreeMap::new();
+    for (index, step) in steps.iter().enumerate() {
+        if let Some(cursor) = actual_rows[index]["value"]["value"]["nextCursor"].as_str() {
+            if !matches!(
+                step["request"]["method"].as_str(),
+                Some(
+                    "wiki.list"
+                        | "wiki.history"
+                        | "wiki.search"
+                        | "objects.history"
+                        | "objects.query"
+                        | "objects.search"
+                )
+            ) {
+                continue;
+            }
+            let mut bound = step.clone();
+            if bound["identityBindings"].is_array() {
+                identity::bind(&mut bound, actual_rows);
+            }
+            let request = object_request(&bound["request"]);
+            let fixed = super::wiki::cursor_alias(cursor, &request, &aliases);
+            let mut original = step.clone();
+            if original["identityBindings"].is_array() {
+                identity::bind(&mut original, original_rows);
+            }
+            let original_cursor = original_rows[index]["value"]["value"]["nextCursor"]
+                .as_str()
+                .unwrap();
+            assert_eq!(
+                super::wiki::cursor_alias(
+                    original_cursor,
+                    &object_request(&original["request"]),
+                    &no_aliases
+                ),
+                original_cursor
+            );
+            assert_eq!(fixed, original_cursor);
+            aliases.insert(cursor.to_owned(), fixed);
+        }
+    }
+    let mut requests = BTreeMap::new();
+    super::package_catalog::catalog_receipts(steps, actual_rows, &mut aliases, &mut requests);
+    for (index, step) in steps.iter().enumerate() {
+        let request = if step["payload"]["action"] == "execute" {
+            &step["payload"]["request"]
+        } else {
+            &step["request"]
+        };
+        if actual_rows[index]["error"].is_null() && request["params"]["mutationId"].is_string() {
+            let mut bound = step.clone();
+            if bound["identityBindings"].is_array() {
+                identity::bind(&mut bound, actual_rows);
+            }
+            let request = object_request(if bound["payload"]["action"] == "execute" {
+                &bound["payload"]["request"]
+            } else {
+                &bound["request"]
+            });
+            let hashes = (
+                receipt_hash(&request, &bound),
+                receipt_hash(&substitute(&request, &aliases), &bound),
+            );
+            if let Some(previous) = requests.insert(
+                request["params"]["mutationId"].as_str().unwrap().to_owned(),
+                hashes.clone(),
+            ) {
+                assert_eq!(previous, hashes, "Receipt replay must preserve its request");
+            }
+        }
+    }
+    for (index, (a, b)) in actual_rows.iter().zip(original_rows).enumerate() {
+        assert_eq!(
+            normalized(a, &aliases, &requests, false),
+            normalized(b, &no_aliases, &requests, true),
+            "Kernel step {index}: {}",
+            steps[index]
+        );
         if matches!(
-            steps[i]["op"].as_str(),
+            steps[index]["op"].as_str(),
             Some("configure" | "sql" | "register")
-        ) || steps[i]["requireSuccess"] == true
+        ) || steps[index]["requireSuccess"] == true
         {
-            assert!(a["error"].is_null(), "Fixture step{i}: {}", a["error"]);
+            assert!(a["error"].is_null(), "Fixture step {index}: {}", a["error"]);
         }
     }
     for key in ["definitions", "metadata", "topics"] {

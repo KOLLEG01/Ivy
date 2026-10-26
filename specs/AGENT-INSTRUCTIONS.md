@@ -1,8 +1,8 @@
 # Native homes and agent environments
 
 Contracts: [agent schema](schemas/agent.schema.json).
-Implementation: [environment](../services/agent-manager/src/environment.ts),
-[instructions](../services/agent-manager/src/instructions.ts), [daemon](../services/agent-manager/src/daemon.ts).
+Implementation: [environment](../services/agent-manager/rust/src/environment.rs),
+[instructions](../services/agent-manager/rust/src/instructions.rs), [daemon](../services/agent-manager/rust/src).
 Defaults: [runtime instructions](../instructions/README.md).
 
 - The connected Codex instance is the sole project authority. Read `project/list` and

@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     builtin_schema::SchemaBundle,
@@ -279,22 +281,9 @@ fn identity(value: &Json) -> EvidenceIdentity {
 #[test]
 fn scoped_native_operation_evidence_matches_original_typescript() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-native-evidence-oracle.mjs",
-        ])
-        .current_dir(&root)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("task-board-native-evidence-cases.json.gz"));
     let data = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         MANAGEMENT_FRAME_BYTES,
     )
     .unwrap();

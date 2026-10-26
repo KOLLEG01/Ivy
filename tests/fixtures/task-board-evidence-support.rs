@@ -1,24 +1,41 @@
 use serde_json::Value;
-use std::{path::Path, process::Command};
+use std::path::Path;
 
-pub fn oracle(mode: &str, path: Option<&Path>) -> Value {
-    let mut command = Command::new("node");
-    command
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-evidence-oracle.mjs",
-            mode,
-        ])
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-    if let Some(path) = path {
-        command.arg(path);
-    }
-    let result = command.output().unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    serde_json::from_slice(&result.stdout).unwrap()
+#[path = "reference-data.rs"]
+mod reference_data;
+
+#[allow(dead_code)]
+pub fn cases(mode: &str) -> Value {
+    let bytes: &[u8] = match mode {
+        "cases" => include_bytes!("task-board-evidence-cases.json.gz"),
+        "decode" => include_bytes!("task-board-evidence-decode-cases.json.gz"),
+        _ => panic!("Unknown evidence cases: {mode}"),
+    };
+    serde_json::from_slice(&reference_data::read(bytes)).unwrap()
+}
+
+#[allow(dead_code)]
+pub fn original_blobs(path: &Path) -> Value {
+    std::fs::write(
+        path,
+        reference_data::read(include_bytes!("task-board-original-blobs.sqlite.gz")),
+    )
+    .unwrap();
+    serde_json::from_slice(&reference_data::read(include_bytes!(
+        "task-board-original-blobs.json.gz"
+    )))
+    .unwrap()
+}
+
+#[allow(dead_code)]
+pub fn original_gates(path: &Path) -> Value {
+    std::fs::write(
+        path,
+        reference_data::read(include_bytes!("task-board-original-gates.sqlite.gz")),
+    )
+    .unwrap();
+    serde_json::from_slice(&reference_data::read(include_bytes!(
+        "task-board-original-gates.json.gz"
+    )))
+    .unwrap()
 }

@@ -281,11 +281,8 @@ impl Drop for Connection {
 }
 impl Inner {
     fn admit_authentication(&self, key: &JsString) -> IvyResult<RequestLease> {
-        self.state
-            .lock()
-            .unwrap()
-            .arrivals
-            .admit(key, std::time::Instant::now())?;
+        let now = (self.clock)();
+        self.state.lock().unwrap().arrivals.admit_at_ms(key, now)?;
         self.authentication.acquire(key, None)
     }
     fn same_origin(&self, headers: &Headers) -> IvyResult<()> {
@@ -306,7 +303,7 @@ impl Inner {
                                 // Reuse the canonical ECMAScript whitespace set. Printable
                                 // ASCII needs no temporary string/Unicode conversion.
                                 !matches!(unit, 0x21..=0x7e)
-                                    && JsString(vec![*unit]).trim().0.is_empty()
+                                    && JsString(vec![*unit]).trim_ecmascript().0.is_empty()
                             })
                     }),
                     "unauthenticated",
@@ -434,7 +431,7 @@ pub fn session_token(cookie: Option<&JsString>) -> Option<JsString> {
     let prefix = JsString::from("ivy_session=");
     let mut token = None;
     for part in cookie.0.split(|unit| *unit == b';' as u16) {
-        let part = JsString(part.to_vec()).trim();
+        let part = JsString(part.to_vec()).trim_ecmascript();
         if let Some(value) = part.0.strip_prefix(prefix.0.as_slice()) {
             if token.is_some() {
                 return None;

@@ -51,6 +51,105 @@ fn dispatch_is_eager_releases_completed_slots_and_retains_work_without_receivers
             input.send(42).unwrap();
             flush().await;
             assert_eq!(gate.run(|| async { Ok(11) }).await.unwrap().unwrap(), 11);
+
+            struct Stalled {
+                executions: AtomicUsize,
+                released: tokio::sync::watch::Receiver<bool>,
+            }
+            impl ivy_hive::server_rpc::Storage for Stalled {
+                fn request(
+                    &self,
+                    _: ivy_contracts::IvyJson,
+                    _: ivy_hive::worker_client::RequestOptions,
+                ) -> ivy_hive::server_rpc::Reply {
+                    self.executions.fetch_add(1, Ordering::SeqCst);
+                    let mut released = self.released.clone();
+                    Box::pin(async move {
+                        released
+                            .wait_for(|ready| *ready)
+                            .await
+                            .map_err(|_| IvyError::internal())?;
+                        Ok(ivy_contracts::IvyJson::object([(
+                            "value",
+                            "original".into(),
+                        )]))
+                    })
+                }
+            }
+            let (release, released) = tokio::sync::watch::channel(false);
+            let storage = Arc::new(Stalled {
+                executions: AtomicUsize::new(0),
+                released,
+            });
+            let invocation = ivy_hive::server_rpc::Invocation::new(
+                storage.clone(),
+                Arc::new(|_, _| Ok(None)),
+                Arc::new(|| 100000.0),
+                ivy_hive::admission::RequestBudget::default(),
+                DispatchGate::default(),
+                ivy_hive::server_rpc::Options::default(),
+            );
+            for bytes in [usize::MAX - 1024, usize::MAX - 1023, usize::MAX] {
+                let error = invocation
+                    .invoke(
+                        ivy_contracts::IvyJson::object([("credentialDigest", "overflow".into())]),
+                        ivy_contracts::IvyJson::Null,
+                        bytes,
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.code, "limit_exceeded");
+                assert_eq!(error.outcome, ivy_contracts::Outcome::NotExecuted);
+            }
+            assert_eq!(storage.executions.load(Ordering::SeqCst), 0);
+            let calls = (0..2100)
+                .map(|index| {
+                    invocation.invoke(
+                        ivy_contracts::IvyJson::object([
+                            ("credentialDigest", format!("consumer-{index}").into()),
+                            ("principalId", format!("consumer-{index}").into()),
+                            ("transport", "http".into()),
+                        ]),
+                        ivy_contracts::IvyJson::object([(
+                            "id",
+                            ivy_contracts::IvyJson::Number(index as f64),
+                        )]),
+                        0,
+                    )
+                })
+                .collect::<Vec<_>>();
+            flush().await;
+            assert_eq!(storage.executions.load(Ordering::SeqCst), 1);
+            release.send(true).unwrap();
+            let (mut completed, mut requests, mut dispatches) = (0, 0, 0);
+            for call in calls {
+                match call.await {
+                    Ok(value) => {
+                        assert_eq!(value, "original".into());
+                        completed += 1;
+                    }
+                    Err(error) => {
+                        assert_eq!(error.code, "limit_exceeded");
+                        assert_eq!(error.outcome, ivy_contracts::Outcome::NotExecuted);
+                        match error
+                            .details
+                            .unwrap()
+                            .get("budget")
+                            .and_then(ivy_contracts::IvyJson::as_js_string)
+                            .unwrap()
+                            .to_utf8()
+                            .unwrap()
+                            .as_str()
+                        {
+                            "request" => requests += 1,
+                            "dispatch" => dispatches += 1,
+                            value => panic!("Unexpected refusal budget {value}"),
+                        }
+                    }
+                }
+            }
+            assert_eq!((completed, requests, dispatches), (1024, 52, 1024));
+            assert_eq!(storage.executions.load(Ordering::SeqCst), 1024);
         });
 }
 
@@ -123,10 +222,9 @@ fn dispatch_drops_expired_captures_and_retains_queue_after_gate_handles_are_drop
             flush().await;
             tokio::time::advance(Duration::from_millis(2)).await;
             flush().await;
-            assert_eq!(
-                expired.await.unwrap().unwrap_err().code,
-                "deadline_exceeded"
-            );
+            let expired = expired.await.unwrap().unwrap_err();
+            assert_eq!(expired.code, "deadline_exceeded");
+            assert_eq!(expired.outcome, ivy_contracts::Outcome::NotExecuted);
             assert_eq!(released.load(Ordering::SeqCst), 1);
             let accepted = gate.run(|| async { Ok(37) });
             drop(gate);

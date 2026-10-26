@@ -1,25 +1,14 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use ivy_contracts::{IvyJson as Json, json::parse, limits::MANAGEMENT_FRAME_BYTES};
 use ivy_store::rusqlite::{Connection, params};
 use ivy_task_board::local_journal::{self, LocalJournal};
 use std::{path::Path, process::Command};
 #[test]
 fn immutable_artifact_pins_preserve_original_bytes_hashes_and_precedence() {
-    let output = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-artifact-oracle.mjs",
-        ])
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("task-board-artifact-cases.json.gz"));
     let rows = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         MANAGEMENT_FRAME_BYTES,
     )
     .unwrap();

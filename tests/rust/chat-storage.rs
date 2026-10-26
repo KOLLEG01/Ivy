@@ -1,12 +1,6 @@
 use ivy_chat_bridge::whatsapp::auth::{AuthAccount, AuthMutation, AuthStore};
 use ivy_chat_bridge::whatsapp::journal_io::{JournalIo, StorageUnavailable};
 use rusqlite::{Connection, types::Value};
-#[path = "chat-auth-compat-cases.rs"]
-mod auth_compat;
-#[path = "chat-auth-native-cases.rs"]
-mod auth_native;
-#[path = "chat-auth-backend-cases.rs"]
-mod auth_backend;
 #[path = "chat-store-cases.rs"]
 mod chat_store;
 #[path = "chat-store-hive-cases.rs"]
@@ -166,10 +160,9 @@ fn node_rust_node_preserves_the_existing_non_strict_auth_database() {
     let path = fixture.0.join("auth.sqlite");
     node(
         r#"
-      import { DatabaseSync } from 'node:sqlite'; import { readFileSync } from 'node:fs';
-      const source = readFileSync('services/chat-bridge/src/whatsapp/auth.ts', 'utf8');
-      const schema = source.match(/this\.db\.exec\(`([^`]+)`\)/)[1];
-      const db = new DatabaseSync(process.argv[1]); db.exec(schema);
+      import { DatabaseSync } from 'node:sqlite';
+      const db = new DatabaseSync(process.argv[1]);
+      db.exec('CREATE TABLE auth(category TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(category,id));');
       const raw = '{ "unknown":"\\ud800", "key":{"type":"Buffer","data":"AAH/"}, "counter":1 }';
       const categories = ['creds','pre-key','session','sender-key','sender-key-memory','app-state-sync-key','app-state-sync-version','lid-mapping','device-list','identity-key','tctoken','future-category'];
       for (const category of categories) db.prepare('INSERT INTO auth VALUES(?,?,?)').run(category,'fixture',raw);

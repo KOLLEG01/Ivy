@@ -15,7 +15,7 @@ for (const [target, platform] of [
   try {
     for (const file of ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'services/chat-bridge/deploy.json',
       'services/chat-bridge/rust/Cargo.toml', 'packages/host-runtime/rust/Cargo.toml',
-      'services/chat-bridge/src/main-context.ts', 'services/chat-bridge/src/notice-input.ts']) {
+      'instructions/chat-main-instructions.ts', 'instructions/chat-notice-prompt.ts']) {
       const destination = join(root, file);
       mkdirSync(dirname(destination), { recursive: true });
       writeFileSync(destination, readFileSync(file));
@@ -28,7 +28,8 @@ for (const [target, platform] of [
     const cargo = (args, options) => {
       const helper = args[0] === 'metadata' ? args.includes(join(root, 'packages/host-runtime/rust/Cargo.toml')) : args.includes('ivy-host-runtime');
       const name = helper ? 'ivy-host-runtime' : 'ivy-chat-bridge';
-      const targets = (helper ? ['ivy-health', 'ivy-job'] : ['ivy-chat-bridge']).map(name => ({ name, kind: ['bin'] }));
+      const targets = (helper ? ['ivy-health', 'ivy-job'] : ['ivy-chat-bridge']).map(name => ({ name, kind: ['bin'],
+        src_path: join(root, helper ? 'packages/host-runtime/rust/src' : 'services/chat-bridge/rust/src', name + '.rs') }));
       if (args[0] === 'metadata') return JSON.stringify({ workspace_members: [name], packages: [{ id: name, name,
         manifest_path: join(root, helper ? 'packages/host-runtime/rust/Cargo.toml' : 'services/chat-bridge/rust/Cargo.toml'), targets }] });
       return targets.filter(binary => args.includes(binary.name)).map(binary => {

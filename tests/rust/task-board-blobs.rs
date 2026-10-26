@@ -28,7 +28,7 @@ mod retention;
 mod support;
 #[path = "../fixtures/task-board-workspaces.rs"]
 mod workspaces;
-use support::oracle;
+use support::{original_blobs, original_gates};
 
 struct Temporary(PathBuf);
 impl Temporary {
@@ -52,10 +52,10 @@ fn domain(error: BlobError) -> (String, String) {
 }
 
 #[test]
-fn journal_cross_open_identity_ownership_and_rollback() {
+fn original_journal_blobs_keep_identity_ownership_and_rollback() {
     let temp = Temporary::new();
     let path = temp.0.join("task-board.sqlite");
-    let created = oracle("create", Some(&path));
+    let created = original_blobs(&path);
     let mut db = Connection::open(&path).unwrap();
     let store = LocalBlobs::new(&db);
     let parent = JsString("parent".encode_utf16().chain([0xdfff]).collect());
@@ -143,20 +143,58 @@ fn journal_cross_open_identity_ownership_and_rollback() {
         2
     );
     drop(db);
-    let reopened = oracle("inspect", Some(&path));
+    let reopened = Connection::open(&path).unwrap();
     assert_eq!(
-        reopened["pin"]["objectId"],
-        pin.object_id.to_utf8().unwrap()
+        LocalBlobs::new(&reopened)
+            .save_blob(
+                &"rust-key".into(),
+                &"rust-name".into(),
+                &"rust-parent".into(),
+                b"from rust"
+            )
+            .unwrap(),
+        pin
     );
-    assert_eq!(reopened["text"], "from rust");
-    assert_eq!(reopened["usage"], json!({"rows":2,"bytes":18}));
+    let saved: (String, String, String, Vec<u8>, String) = reopened
+        .query_row(
+            "SELECT id,name,parent_id,bytes,typeof(bytes) FROM blobs WHERE key='rust-key'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        saved,
+        (
+            pin.object_id.to_utf8().unwrap(),
+            "rust-name".into(),
+            "rust-parent".into(),
+            b"from rust".to_vec(),
+            "blob".into()
+        )
+    );
+    let usage: (i64, i64) = reopened
+        .query_row(
+            "SELECT rows,bytes FROM storage_usage WHERE kind='blobs'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(usage, (2, 18));
 }
 
 #[test]
-fn partial_chunk_save_replays_original_pins_and_preserves_usage() {
+fn original_journal_partial_chunk_save_replays_pins_and_preserves_usage() {
     let temp = Temporary::new();
     let path = temp.0.join("task-board.sqlite");
-    oracle("create", Some(&path));
+    original_blobs(&path);
     let db = Connection::open(&path).unwrap();
     db.execute_batch("CREATE TRIGGER interrupt_chunk BEFORE INSERT ON blobs WHEN NEW.key='task-board/native-evidence-chunk' AND EXISTS(SELECT 1 FROM blobs WHERE key=NEW.key) BEGIN SELECT RAISE(ABORT,'fixture interruption'); END;").unwrap();
     let store = LocalBlobs::new(&db);
@@ -200,30 +238,11 @@ fn partial_chunk_save_replays_original_pins_and_preserves_usage() {
 }
 
 #[test]
-fn retained_gate_indexes_preserve_sql_order_and_transaction_boundaries() {
+fn original_journal_gates_preserve_sql_order_and_transaction_boundaries() {
     use ivy_task_board::local_gates::LocalGates;
-    use std::process::Command;
     let temp = Temporary::new();
     let path = temp.0.join("gates.sqlite");
-    let oracle = |action: &str| {
-        let output = Command::new("node")
-            .args([
-                "--disable-warning=ExperimentalWarning",
-                "tests/fixtures/task-board-gates-oracle.mjs",
-                action,
-            ])
-            .arg(&path)
-            .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
-    };
-    let expected = oracle("create");
+    let expected = original_gates(&path);
     let db = Connection::open(&path).unwrap();
     let gates = LocalGates::new(&db);
     let operation = JsString("op".encode_utf16().chain([0xdfff]).collect());
@@ -317,12 +336,33 @@ fn retained_gate_indexes_preserve_sql_order_and_transaction_boundaries() {
         )
         .unwrap();
     drop(db);
-    let reopened = oracle("inspect");
-    assert_eq!(reopened["pending"], expected["pending"]);
-    assert_eq!(reopened["gates"], expected["gates"]);
-    let rows = reopened["rows"]
-        .as_array()
-        .unwrap()
+    let reopened = Connection::open(&path).unwrap();
+    let gates = LocalGates::new(&reopened);
+    assert_eq!(
+        gates
+            .pending_coordination()
+            .unwrap()
+            .unwrap()
+            .to_utf8()
+            .unwrap(),
+        expected["pending"]["objectId"]
+    );
+    assert_eq!(
+        json!(strings(gates.operation_gates(&operation).unwrap())),
+        expected["gates"]
+    );
+    let rows = reopened.prepare("SELECT operation_id,gate_name FROM operation_gates ORDER BY operation_id,gate_name").unwrap()
+        .query_map([], |row| Ok(json!({"operation_id":row.get::<_, String>(0)?,"gate_name":row.get::<_, String>(1)?}))).unwrap()
+        .collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(
+        json!(
+            rows.iter()
+                .filter(|row| row["operation_id"] != "rust-operation")
+                .collect::<Vec<_>>()
+        ),
+        expected["rows"]
+    );
+    let rows = rows
         .iter()
         .filter(|row| row["operation_id"] == "rust-operation")
         .collect::<Vec<_>>();

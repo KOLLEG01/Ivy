@@ -6,7 +6,7 @@ import { choose, options } from './fixtures/select.mjs';
 
 const fields = title => ({ title, description: '', acceptanceCriteria: [], category: null, control: 'user',
   priority: 2, executionRequirement: null, workspaceRequirement: { kind: 'task_workspace' },
-  dependencies: [], userContact: 'ticket', nextReviewAt: null, dueAt: null });
+  allowParallel: false, userContact: 'ticket', dueAt: null });
 const savedId = page => new URLSearchParams(new URL(page.url()).hash.split('?')[1]).get('id');
 
 for (const width of [1440, 390]) test(`creation keeps explicit waiting and manual Review state through drafts at ${width}px`, { timeout: 120000 }, async t => {

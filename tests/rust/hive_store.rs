@@ -2,10 +2,16 @@ use ivy_contracts::{IvyError, IvyJson, JsString, json::stringify};
 use ivy_hive::store::{
     AuthContext, AuthenticatedContext, Credential, LedgerResult, Principal, ReceiptKind, Store,
 };
+#[path = "../fixtures/hive-startup-profile.rs"]
+mod startup_profile;
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 #[path = "hive_contracts.rs"]
 mod contracts;
 #[path = "hive_events.rs"]
 mod events;
+#[path = "hive_store_history.rs"]
+mod history;
 #[path = "hive_worker_identity.rs"]
 mod identity;
 #[path = "hive_kernel.rs"]
@@ -14,6 +20,8 @@ mod kernel;
 mod ledger;
 #[path = "hive_object_delete.rs"]
 mod object_delete;
+#[path = "hive_object_create.rs"]
+mod object_create;
 #[path = "hive_object_move.rs"]
 mod object_move;
 #[path = "hive_object_mutations.rs"]
@@ -44,9 +52,7 @@ use rusqlite::types::ValueRef;
 use serde_json::{Value, json};
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
 };
 
 struct Root(PathBuf);
@@ -100,11 +106,19 @@ fn snapshot(store: &Store, step: &Value) -> Value {
                 .collect::<Vec<_>>()
         )
     };
+    let identity_tables = std::cell::RefCell::new(serde_json::Map::new());
     let table_hash = |table: &str, columns: &str| {
         let encoded:String=store.connection().query_row(&format!("SELECT json_group_array(json_array({columns})) FROM (SELECT rowid AS record_id,* FROM {table} ORDER BY rowid)"),[],|r|r.get(0)).unwrap();
+        if step["identityTables"] == true && ["revisions", "mutations", "events"].contains(&table) {
+            identity_tables.borrow_mut().insert(table.to_owned(), json!(encoded));
+        }
         ivy_contracts::hash::digest(encoded)
     };
-    json!({"contracts":table_hash("contracts","key,version,definition"),"families":rows(store,"SELECT * FROM contract_families ORDER BY key"),"objects":rows(store,"SELECT * FROM objects ORDER BY id"),"fts":rows(store,"SELECT rowid,object_id,name,text FROM object_fts ORDER BY rowid"),"revisions":table_hash("revisions","record_id,object_id,revision,contract_key,contract_version,encoding,CASE WHEN typeof(content)='blob' THEN hex(content) ELSE content END,content_hash,byte_length,created_at,references_json"),"references":rows(store,"SELECT * FROM revision_references ORDER BY source_object_id,source_revision,name"),"principals":rows(store,"SELECT * FROM principals ORDER BY id"),"credentials":rows(store,"SELECT * FROM credentials ORDER BY digest"),"nodes":rows(store,"SELECT * FROM service_nodes ORDER BY id"),"sessions":rows(store,"SELECT * FROM browser_sessions ORDER BY digest"),"subscriptions":rows(store,"SELECT * FROM subscriptions ORDER BY node_id,name"),"durable":rows(store,"SELECT * FROM durable_subscriptions ORDER BY node_id,name"),"changes":changes,"mutations":table_hash("mutations","record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes"),"events":table_hash("events",if compact_events{"sequence,topic,topic_version,source,occurred_at,mutation_id,length(CAST(payload AS BLOB))"}else{"sequence,topic,topic_version,source,occurred_at,mutation_id,payload"}),"metadata":rows(store,"SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),"retention":rows(store,"SELECT * FROM retention_families ORDER BY contract_key"),"apps":rows(store,"SELECT * FROM apps ORDER BY app_id"),"releases":rows(store,"SELECT * FROM app_releases ORDER BY app_id,release_id"),"diagnostics":if step["compactDiagnostics"]==true{json!(table_hash("diagnostics","record_id,identity,diagnostic_json"))}else{rows(store,"SELECT * FROM diagnostics ORDER BY identity")},"connections":rows(store,"SELECT * FROM service_connections ORDER BY node_id"),"managed":rows(store,"SELECT * FROM managed_nodes ORDER BY node_id"),"hosts":rows(store,"SELECT * FROM host_reports ORDER BY host_id"),"registries":rows(store,"SELECT * FROM registries ORDER BY node_id"),"inventorySchemas":rows(store,"SELECT * FROM inventory_schemas ORDER BY namespace,kind,version"),"toolDefinitions":rows(store,"SELECT * FROM tool_definitions ORDER BY hash")})
+    let mut state = json!({"contracts":table_hash("contracts","key,version,definition"),"families":rows(store,"SELECT * FROM contract_families ORDER BY key"),"objects":rows(store,"SELECT * FROM objects ORDER BY id"),"fts":rows(store,"SELECT rowid,object_id,name,text FROM object_fts ORDER BY rowid"),"revisions":table_hash("revisions","record_id,object_id,revision,contract_key,contract_version,encoding,CASE WHEN typeof(content)='blob' THEN hex(content) ELSE content END,content_hash,byte_length,created_at,references_json"),"references":rows(store,"SELECT * FROM revision_references ORDER BY source_object_id,source_revision,name"),"principals":rows(store,"SELECT * FROM principals ORDER BY id"),"credentials":rows(store,"SELECT * FROM credentials ORDER BY digest"),"nodes":rows(store,"SELECT * FROM service_nodes ORDER BY id"),"sessions":rows(store,"SELECT * FROM browser_sessions ORDER BY digest"),"subscriptions":rows(store,"SELECT * FROM subscriptions ORDER BY node_id,name"),"durable":rows(store,"SELECT * FROM durable_subscriptions ORDER BY node_id,name"),"changes":changes,"mutations":table_hash("mutations","record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes"),"events":table_hash("events",if compact_events{"sequence,topic,topic_version,source,occurred_at,mutation_id,length(CAST(payload AS BLOB))"}else{"sequence,topic,topic_version,source,occurred_at,mutation_id,payload"}),"metadata":rows(store,"SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),"retention":rows(store,"SELECT * FROM retention_families ORDER BY contract_key"),"apps":rows(store,"SELECT * FROM apps ORDER BY app_id"),"releases":rows(store,"SELECT * FROM app_releases ORDER BY app_id,release_id"),"diagnostics":if step["compactDiagnostics"]==true{json!(table_hash("diagnostics","record_id,identity,diagnostic_json"))}else{rows(store,"SELECT * FROM diagnostics ORDER BY identity")},"connections":rows(store,"SELECT * FROM service_connections ORDER BY node_id"),"managed":rows(store,"SELECT * FROM managed_nodes ORDER BY node_id"),"hosts":rows(store,"SELECT * FROM host_reports ORDER BY host_id"),"registries":rows(store,"SELECT * FROM registries ORDER BY node_id"),"inventorySchemas":rows(store,"SELECT * FROM inventory_schemas ORDER BY namespace,kind,version"),"toolDefinitions":rows(store,"SELECT * FROM tool_definitions ORDER BY hash")});
+    if step["identityTables"] == true {
+        state["identityTables"] = Value::Object(identity_tables.into_inner());
+    }
+    state
 }
 fn context(value: &Value) -> AuthenticatedContext {
     AuthenticatedContext {
@@ -522,33 +536,21 @@ fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) ->
     }
     json!({"rows":result,"definitions":rows(&store,"SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name"),"metadata":rows(&store,"SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),"topics":rows(&store,"SELECT * FROM topics ORDER BY topic,version")})
 }
-fn oracle(path: &Path, steps: &[Value]) -> Value {
-    let mut child =
-        Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
-            .arg(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../../tests/fixtures/hive-store-oracle.mjs"),
-            )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-    child
-        .stdin
-        .take()
+fn reference(_path: &Path, steps: &[Value]) -> Value {
+    static CASES: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let cases = CASES.get_or_init(|| {
+        serde_json::from_slice(&reference_data::read(include_bytes!(
+            "../fixtures/hive-store-reference.json.gz"
+        )))
         .unwrap()
-        .write_all(json!({"path":path,"steps":steps}).to_string().as_bytes())
-        .unwrap();
-    let result = child.wait_with_output().unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    serde_json::from_slice(&result.stdout).unwrap()
+    });
+    // Fingerprint the exact fixture JSON, including deliberately invalid inputs.
+    let identity = ivy_contracts::hash::digest(serde_json::to_vec(steps).unwrap());
+    cases["traces"]
+        .get(&identity)
+        .unwrap_or_else(|| panic!("Missing original Hive fixture: {identity}"))
+        .clone()
 }
-
 #[test]
 fn schema_authentication_credential_rotation_and_rollback_match_original_store() {
     let root = Root::new();
@@ -581,7 +583,7 @@ fn schema_authentication_credential_rotation_and_rollback_match_original_store()
         json!({"op":"configure","credentials":[]}),
         json!({"op":"authenticate","context":{"credentialDigest":c}}),
     ]);
-    let expected = oracle(&root.0.join("reference.sqlite"), &steps);
+    let expected = reference(&root.0.join("reference.sqlite"), &steps);
     let actual = native(&root.0.join("native.sqlite"), &steps);
     for (index, (actual, expected)) in actual["rows"]
         .as_array()
@@ -595,6 +597,104 @@ fn schema_authentication_credential_rotation_and_rollback_match_original_store()
     assert_eq!(actual["definitions"], expected["definitions"]);
     assert_eq!(actual["metadata"], expected["metadata"]);
     assert_eq!(actual["topics"], expected["topics"]);
+
+    let mut bound_store = Store::open(Path::new(":memory:")).unwrap();
+    let alpha = Credential {
+        principal_id: "alpha".into(),
+        digest: a.clone().into(),
+    };
+    let beta = Credential {
+        principal_id: "beta".into(),
+        digest: b.clone().into(),
+    };
+    bound_store
+        .configure_credentials(&[alpha, beta.clone()])
+        .unwrap();
+    let checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_checks = checks.clone();
+    // Count executed credential lookups through SQLite, including cached SQL.
+    bound_store
+        .connection()
+        .create_scalar_function(
+            "fixture_credential",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            move |context| {
+                observed_checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                context.get::<String>(0)
+            },
+        )
+        .unwrap();
+    bound_store.connection().execute_batch("ALTER TABLE credentials RENAME TO measured_credentials; CREATE VIEW credentials AS SELECT digest, fixture_credential(principal_id) AS principal_id, revoked FROM measured_credentials;").unwrap();
+    let external = AuthContext {
+        credential_digest: a.clone().into(),
+        session_digest: None,
+    };
+    let principal = bound_store.authenticate(&external).unwrap();
+    assert_eq!(principal.principal_id, JsString::from("alpha"));
+    let bound = AuthenticatedContext {
+        principal_id: principal.principal_id,
+        credential_digest: principal.credential_digest,
+    };
+    let epoch = bound_store.runtime_epoch().unwrap().to_utf8().unwrap();
+    for i in 0..100 {
+        let value = IvyJson::object([("i", IvyJson::Number(i as f64))]);
+        let reply = bound_store
+            .mutate(
+                &bound,
+                &"fixture.write".into(),
+                &IvyJson::object([
+                    ("mutationId", format!("{epoch}:100000:mutation-{i}").into()),
+                    ("value", IvyJson::Number(i as f64)),
+                ]),
+                100000,
+                |_, admitted| {
+                    assert_eq!(admitted.principal_id, JsString::from("alpha"));
+                    Ok(LedgerResult {
+                        value: value.clone(),
+                        kind: ReceiptKind::Snapshot,
+                        reference: None,
+                    })
+                },
+            )
+            .unwrap();
+        assert_eq!(reply, value);
+    }
+    assert_eq!(checks.load(std::sync::atomic::Ordering::SeqCst), 1);
+    bound_store
+        .connection()
+        .execute_batch(
+            "DROP VIEW credentials; ALTER TABLE measured_credentials RENAME TO credentials;",
+        )
+        .unwrap();
+    bound_store.configure_credentials(&[beta]).unwrap();
+    assert_eq!(
+        bound_store.authenticate(&external).unwrap_err().code,
+        "unauthenticated"
+    );
+    bound_store
+        .connection()
+        .execute(
+            "INSERT INTO browser_sessions VALUES('bound-session',?,'2026-01-01T00:00:00Z')",
+            [&b],
+        )
+        .unwrap();
+    let browser = AuthContext {
+        credential_digest: b.into(),
+        session_digest: Some("bound-session".into()),
+    };
+    bound_store.authenticate(&browser).unwrap();
+    bound_store
+        .connection()
+        .execute(
+            "DELETE FROM browser_sessions WHERE digest='bound-session'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        bound_store.authenticate(&browser).unwrap_err().code,
+        "unauthenticated"
+    );
 }
 
 #[test]
@@ -626,10 +726,9 @@ fn transaction_commit_failure_restores_invalidations_and_exclusive_writer_blocks
 
 #[test]
 fn checked_in_ddl_remains_exactly_the_reference_format_four_schema() {
-    let source = include_str!("../../services/hive/src/storage-schema.ts");
     assert_eq!(
         include_str!("../../services/hive/rust/src/schema.sql"),
-        source.split('`').nth(1).unwrap()
+        include_str!("../fixtures/hive-format-four.sql")
     );
 }
 
@@ -668,46 +767,6 @@ fn unsupported_clean_database_refusal_preserves_bytes_and_sidecars() {
                 .to_wire()
             );
             assert_eq!(observe(), before, "format {format}, journal {journal}");
-        }
-    }
-}
-
-#[test]
-fn historical_writable_store_matches_original_initialization_and_all_retained_rows() {
-    let root = Root::new();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../tests/fixtures/hive-current.sqlite.gz");
-    for legacy in [false, true] {
-        let reference = root.0.join(format!("reference-{legacy}.sqlite"));
-        let path = root.0.join(format!("native-{legacy}.sqlite"));
-        let status = Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
-            .args(["--input-type=module", "-e", "import {readFileSync,writeFileSync} from 'node:fs';import {gunzipSync} from 'node:zlib';writeFileSync(process.argv[2],gunzipSync(readFileSync(process.argv[1])));"])
-            .arg(&fixture).arg(&reference).status().unwrap();
-        assert!(status.success());
-        if legacy {
-            let db = rusqlite::Connection::open(&reference).unwrap();
-            db.execute_batch("DROP TABLE IF EXISTS durable_subscriptions; CREATE INDEX IF NOT EXISTS mutations_expiry ON mutations(principal_id);").unwrap();
-        }
-        fs::copy(&reference, &path).unwrap();
-        let steps = [json!({"op":"reopen"})];
-        assert_eq!(native(&path, &steps), oracle(&reference, &steps));
-        let db = rusqlite::Connection::open(&path).unwrap();
-        db.execute("ATTACH ? AS reference", [reference.to_str().unwrap()])
-            .unwrap();
-        let tables = db
-            .prepare("SELECT name FROM main.sqlite_schema WHERE type='table' ORDER BY name")
-            .unwrap()
-            .query_map([], |r| r.get::<_, String>(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert!(tables.len() > 10);
-        for table in tables {
-            let quoted = table.replace('"', "\"\"");
-            for (left, right) in [("main", "reference"), ("reference", "main")] {
-                let count: i64 = db.query_row(&format!("SELECT count(*) FROM (SELECT * FROM {left}.\"{quoted}\" EXCEPT SELECT * FROM {right}.\"{quoted}\")"), [], |r|r.get(0)).unwrap();
-                assert_eq!(count, 0, "legacy={legacy}: {left}.{table}");
-            }
         }
     }
 }

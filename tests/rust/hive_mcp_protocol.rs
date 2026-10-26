@@ -2,45 +2,23 @@ use super::*;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_hive::mcp_protocol::{self as codec, Encoding, Reply};
 
-pub(super) fn oracle(input: &IvyJson) -> IvyJson {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let modules = std::env::var_os("IVY_MCP_FIXTURE_NODE_MODULES")
-        .unwrap_or_else(|| root.join("node_modules").into_os_string());
-    let mut child =
-        Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
-            .current_dir(root)
-            .env("IVY_MCP_FIXTURE_NODE_MODULES", modules)
-            .args([
-                "--disable-warning=ExperimentalWarning",
-                "tests/fixtures/hive-mcp-http-oracle.mjs",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-    child
-        .stdin
-        .take()
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
+pub(super) fn reference(input: &IvyJson) -> IvyJson {
+    static CASES: std::sync::OnceLock<IvyJson> = std::sync::OnceLock::new();
+    let cases = CASES.get_or_init(|| {
+        let bytes = reference_data::read(include_bytes!(
+            "../fixtures/hive-mcp-http-reference.json.gz"
+        ));
+        json(std::str::from_utf8(&bytes).unwrap())
+    });
+    let key = digest(encode(input));
+    cases
+        .get("traces")
         .unwrap()
-        .write_all(encode(input).as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "Original MCP fixture failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    json(&String::from_utf8(output.stdout).unwrap())
-}
-fn save(suffix: &str, value: &IvyJson) {
-    if let Some(prefix) = std::env::var_os("IVY_HIVE_MCP_FRAMING_CORPUS") {
-        std::fs::write(
-            format!("{}-{suffix}.json", prefix.to_string_lossy()),
-            encode(value),
-        )
-        .unwrap();
-    }
+        .get(&key)
+        .unwrap_or_else(|| panic!("Missing original MCP input: {key}"))
+        .clone()
 }
 fn row(name: impl Into<JsString>, body: IvyJson) -> IvyJson {
     obj([("name", IvyJson::String(name.into())), ("body", body)])
@@ -174,7 +152,7 @@ fn message_shapes_match_pinned_sdk() {
         json(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"failure"},"extra":true}"#),
         IvyJson::Null, json("[]"), json(r#"{"jsonrpc":"2.0","method":"ping","params":{"extra":{"nested":[null,true]}}}"#),
     ].into_iter().enumerate() { cases.push(row(format!("shape-{index}"), body)); }
-    let original = oracle(&obj([
+    let original = reference(&obj([
         ("mode", "message-shapes".into()),
         ("cases", IvyJson::Array(cases.clone())),
     ]));
@@ -193,14 +171,6 @@ fn message_shapes_match_pinned_sdk() {
             ])
         })
         .collect();
-    save(
-        "shapes",
-        &obj([
-            ("cases", IvyJson::Array(cases)),
-            ("original", original.clone()),
-            ("native", IvyJson::Array(native.clone())),
-        ]),
-    );
     assert_eq!(
         &native, expected,
         "Strict JSON-RPC shapes differ from pinned SDK"
@@ -215,18 +185,10 @@ fn reply_value(reply: Reply) -> IvyJson {
 }
 #[test]
 fn framing_and_rejection_correlation_match_original_http() {
-    let original = if let Some(path) = std::env::var_os("IVY_HIVE_MCP_HTTP_REFERENCE") {
-        json(&std::fs::read_to_string(path).unwrap())
-    } else {
-        oracle(&obj([
-            ("mode", "baseline".into()),
-            ("client", false.into()),
-        ]))
-    };
+    let original = super::mcp_inbound::reference();
     let cases = original.required("cases").unwrap().as_array().unwrap();
     let wire = original.required("wire").unwrap().as_array().unwrap();
     assert_eq!(cases.len(), wire.len());
-    let mut comparisons = Vec::new();
     for (input, observed) in cases.iter().zip(wire) {
         if input.get("method").is_some_and(|v| v != &"POST".into()) {
             continue;
@@ -287,12 +249,6 @@ fn framing_and_rejection_correlation_match_original_http() {
             ),
         ]);
         let actual = reply_value(native);
-        comparisons.push(obj([
-            ("name", input.required("name").unwrap().clone()),
-            ("input", input.clone()),
-            ("original", expected.clone()),
-            ("native", actual.clone()),
-        ]));
         assert_eq!(
             actual,
             expected,
@@ -300,5 +256,4 @@ fn framing_and_rejection_correlation_match_original_http() {
             text(input, "name")
         );
     }
-    save("wire", &IvyJson::Array(comparisons));
 }

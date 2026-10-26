@@ -5,15 +5,34 @@ use ivy_contracts::{
     json::{parse, stringify},
     limits::MANAGEMENT_FRAME_BYTES,
 };
-use ivy_host_runtime::{config::InstanceConfig, health::HealthFile, node_runtime::NodeRuntime};
+use ivy_host_runtime::{config::InstanceConfig, health::HealthFile};
 use ivy_task_board::host_service;
 use ivy_task_board::journal_store::Contracts;
 use std::{
     cell::Cell,
     path::{Path, PathBuf},
-    process::Command,
-    sync::{Arc, OnceLock},
+    sync::Arc,
 };
+
+#[path = "reference-data.rs"]
+mod reference_data;
+
+fn bind_root(value: &mut Json, root: &Path) {
+    match value {
+        Json::String(text) => {
+            if let Ok(path) = text.to_utf8() {
+                if path.contains("$ROOT") {
+                    *text = path.replace("$ROOT", root.to_str().unwrap()).into();
+                }
+            }
+        }
+        Json::Array(values) => values.iter_mut().for_each(|value| bind_root(value, root)),
+        Json::Object(values) => values
+            .iter_mut()
+            .for_each(|(_, value)| bind_root(value, root)),
+        _ => {}
+    }
+}
 
 #[derive(Default)]
 struct StartupContracts {
@@ -49,38 +68,15 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let root = std::env::temp_dir().join(format!("task-board-host-{}", uuid::Uuid::new_v4()));
-        let distribution = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        static NODE: OnceLock<PathBuf> = OnceLock::new();
-        let executable = NODE.get_or_init(|| {
-            let output = Command::new("node")
-                .args(["-p", "process.execPath"])
-                .output()
-                .unwrap();
-            assert!(output.status.success());
-            PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
-        });
-        let node = NodeRuntime::discover(Some(executable)).await.unwrap();
-        let output = Command::new(&node.executable)
-            .args([
-                "--experimental-transform-types",
-                "--disable-warning=ExperimentalWarning",
-                "tests/fixtures/task-board-host-service-oracle.mjs",
-            ])
-            .arg(&root)
-            .env("IVY_LAUNCH_ID", "fixture-launch")
-            .current_dir(distribution)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let oracle = parse(
-            std::str::from_utf8(&output.stdout).unwrap(),
-            MANAGEMENT_FRAME_BYTES,
-        )
-        .unwrap();
+        let bytes: &[u8] = if cfg!(windows) {
+            include_bytes!("task-board-host-service-win32-cases.json.gz")
+        } else {
+            include_bytes!("task-board-host-service-linux-cases.json.gz")
+        };
+        let data = reference_data::read(bytes);
+        let mut oracle =
+            parse(std::str::from_utf8(&data).unwrap(), MANAGEMENT_FRAME_BYTES).unwrap();
+        bind_root(&mut oracle, &root);
         Self { root, oracle }
     }
     fn prepare(&self, row: &Json) -> PathBuf {
@@ -158,7 +154,7 @@ async fn instance_configuration_and_taskboard_service_admission_match_original_b
                 hash_json(p.config.json()).unwrap(),
                 hash_json(row.required("config").unwrap()).unwrap()
             );
-            Json::from(hash_json(p.config.json()).unwrap())
+            Json::Bool(true)
         }) {
             Ok(value) => Json::object([("ok", value)]),
             Err(e) => {

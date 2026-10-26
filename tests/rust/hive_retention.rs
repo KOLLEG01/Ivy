@@ -1,6 +1,6 @@
 use super::{
     AuthContext, AuthenticatedContext, IvyError, IvyJson, JsString, Root, Store,
-    native_with_runtime, oracle,
+    native_with_runtime, reference as oracle,
 };
 use ivy_contracts::IvyResult;
 use ivy_hive::retention::{self, Runtime};

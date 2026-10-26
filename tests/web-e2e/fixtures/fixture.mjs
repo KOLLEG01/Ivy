@@ -1,12 +1,9 @@
 import { chromium } from '@playwright/test';
-import { createServer } from 'node:net';
-import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { after } from 'node:test';
-import { randomUUID } from 'node:crypto';
-import { resolve, sep } from 'node:path';
-import { HiveServer } from '../../../dist/services/hive/src/server.js';
+import { resolve } from 'node:path';
+import { startTestHive } from '../../../tools/testing/native-service.mjs';
 import { HiveClient, newOperationId } from '../../../dist/packages/sdk/src/client.js';
 import { ServiceClient } from '../../../dist/packages/sdk/src/service.js';
 import { digest } from '../../../dist/packages/contracts/src/canonical.js';
@@ -14,16 +11,13 @@ import { digest } from '../../../dist/packages/contracts/src/canonical.js';
 export const fixtureToken = 'isolated-browser-contract-fixture';
 const roots = [];
 after(async () => { for (const root of roots) await rm(root, { recursive: true, force: true, maxRetries: 3 }); });
-export async function fixture(t, populated = false, viewport = { width: 1440, height: 1000 }, serverOptions = {}) {
+export async function fixture(t, populated = false, viewport = { width: 1440, height: 1000 }, serverOptions = {}, startHive = startTestHive) {
   const root = await mkdtemp(resolve(tmpdir(), 'ivy-browser-')); roots.push(root);
-  const reservation = createServer(); reservation.listen(0, '127.0.0.1'); await once(reservation, 'listening');
-  const port = reservation.address().port; await new Promise((resolve, reject) => reservation.close(error => error ? reject(error) : resolve()));
-  const base = `http://127.0.0.1:${port}/ivy`, origin = new URL(base).origin;
-  const server = new HiveServer({ filename: resolve(root, 'hive.sqlite'), publicBaseUrl: base, version: '0.1.0-browser-fixture', buildId: digest('browser-fixture'),
-    credentials: [{ principalId: 'browser-fixture', digest: digest(fixtureToken) }], listenHost: '127.0.0.1', listenPort: port, consoleRoot: resolve('dist/console'), ...serverOptions });
+  const server = await startHive({ root, credentials: [{ principalId: 'browser-fixture', token: fixtureToken }],
+    consoleRoot: resolve('dist/console'), settings: serverOptions });
+  const base = server.config.publicBaseUrl, origin = new URL(base).origin;
   let browser, service;
   t.after(async () => { await browser?.close(); await service?.stop(); await server.close(); });
-  await server.start();
   const client = new HiveClient(base, { credential: fixtureToken });
   let firstObjectId, firstContent;
   if (populated) {
@@ -58,10 +52,11 @@ export async function fixture(t, populated = false, viewport = { width: 1440, he
     try { await Promise.race([readyPromise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Fixture SDK readiness timed out.')), 15000); })]); }
     finally { clearTimeout(timer); }
     const now = new Date().toISOString();
-    await server.worker.request({ action: 'diagnostic', value: { code: 'browser_fixture_observation', source: 'browser-fixture', severity: 'info', status: 'resolved',
-      message: 'A retained, resolved browser fixture diagnostic.', resource: { serviceNodeId: 'browser-fixture-service' }, firstObservedAt: now, lastObservedAt: now } });
+    await service.connection.request('service.heartbeat', { ready: true, diagnostics: [{ code: 'browser_fixture_observation', source: 'browser-fixture', severity: 'info', status: 'active',
+      message: 'A retained, resolved browser fixture diagnostic.', resource: { serviceNodeId: 'browser-fixture-service' }, firstObservedAt: now, lastObservedAt: now }] });
+    await service.connection.request('service.heartbeat', { ready: true, diagnostics: [] });
   }
-  browser = await chromium.launch({ ...(process.platform === 'win32' ? { channel: 'msedge' } : {}), headless: true, timeout: 20000 });
+  browser = await chromium.launch({ ...(process.platform === 'win32' ? { channel: 'msedge' } : {}), args: ['--enable-automation'], headless: true, timeout: 20000 });
   const context = await browser.newContext({ viewport, acceptDownloads: true, colorScheme: 'light', locale: 'en-US' });
   const page = await context.newPage(), pageErrors = [], externalRequests = [];
   page.on('pageerror', error => pageErrors.push(error.message));

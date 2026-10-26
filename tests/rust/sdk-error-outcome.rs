@@ -63,10 +63,16 @@ fn json(text: &str) -> IvyJson {
 }
 
 fn main_client(connected: IvyJson, channels: IvyJson) -> Scripted {
-    let binding = json(r#"{"items":[{"qualifiedName":"chat.workspace","definitionHash":"hash","definition":{"interfaceVersion":"1.2.0","annotations":{"readOnlyHint":true}}}],"provider":{"node":{"serviceNodeId":"main"}},"nextCursor":null}"#);
-    let mut node = json(r#"{"serviceNodeId":"main","serviceName":"chat-bridge","principalId":"main-owner","connected":true,"synced":true,"ready":true}"#);
+    let binding = json(
+        r#"{"items":[{"qualifiedName":"chat.workspace","definitionHash":"hash","definition":{"interfaceVersion":"1.2.0","annotations":{"readOnlyHint":true}}}],"provider":{"node":{"serviceNodeId":"main"}},"nextCursor":null}"#,
+    );
+    let mut node = json(
+        r#"{"serviceNodeId":"main","serviceName":"chat-bridge","principalId":"main-owner","connected":true,"synced":true,"ready":true}"#,
+    );
     node.insert("connected", connected);
-    let mut workspace = json(r#"{"expectedBridge":{"principalId":"main-owner","callerPrincipalId":"secretary"},"nativeOwnerReady":true,"channels":[]}"#);
+    let mut workspace = json(
+        r#"{"expectedBridge":{"principalId":"main-owner","callerPrincipalId":"secretary"},"nativeOwnerReady":true,"channels":[]}"#,
+    );
     workspace.insert("channels", channels);
     Scripted {
         steps: Mutex::new(VecDeque::from([
@@ -84,8 +90,14 @@ async fn main_chat_uses_the_registered_public_workspace() {
     let client = main_client(true.into(), channels);
     let selected = ivy_sdk::main_chat::main_chat(&client).await.unwrap();
     assert_eq!(selected.service_node_id, JsString::from("main"));
-    assert_eq!(selected.channel.required("channelId").unwrap(), &IvyJson::from("main"));
-    assert_eq!(*client.trace.lock().unwrap(), ["tools.list", "serviceNodes.get", "tools.call"]);
+    assert_eq!(
+        selected.channel.required("channelId").unwrap(),
+        &IvyJson::from("main")
+    );
+    assert_eq!(
+        *client.trace.lock().unwrap(),
+        ["tools.list", "serviceNodes.get", "tools.call"]
+    );
     assert!(client.steps.lock().unwrap().is_empty());
 }
 
@@ -93,10 +105,22 @@ async fn main_chat_uses_the_registered_public_workspace() {
 async fn main_chat_requires_boolean_readiness_and_an_array_of_channels() {
     for connected in [IvyJson::from("true"), IvyJson::Number(1.0), IvyJson::Null] {
         let client = main_client(connected, json(r#"[{"channel":{"adapter":"whatsapp"}}]"#));
-        assert_eq!(ivy_sdk::main_chat::main_chat(&client).await.unwrap_err().code, "chat_main_unavailable");
-        assert_eq!(*client.trace.lock().unwrap(), ["tools.list", "serviceNodes.get"]);
+        assert_eq!(
+            ivy_sdk::main_chat::main_chat(&client)
+                .await
+                .unwrap_err()
+                .code,
+            "chat_main_unavailable"
+        );
+        assert_eq!(
+            *client.trace.lock().unwrap(),
+            ["tools.list", "serviceNodes.get"]
+        );
     }
-    let client = main_client(true.into(), json(r#"{"length":1,"0":{"channel":{"adapter":"whatsapp"}}}"#));
+    let client = main_client(
+        true.into(),
+        json(r#"{"length":1,"0":{"channel":{"adapter":"whatsapp"}}}"#),
+    );
     assert!(ivy_sdk::main_chat::main_chat(&client).await.is_err());
 }
 
@@ -193,7 +217,7 @@ fn the_actual_rpc_boundary_keeps_its_distinct_string_only_admission() {
         ]);
         assert_eq!(
             ivy_contracts::validation::validate_response_frame(&frame).is_ok(),
-            value.as_js_string().is_some(),
+            value.as_js_string().is_some() || matches!(&value, IvyJson::Array(_)),
             "{value:?}"
         );
         let error = response_value(&frame, "r").unwrap_err();

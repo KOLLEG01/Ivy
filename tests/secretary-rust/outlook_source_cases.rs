@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::microsoft_store_cases::{normalize, retained, seed};
 use super::*;
 use ivy_contracts::{JsString, json::canonical};
@@ -132,25 +134,9 @@ fn core(journal: &Journal) -> IvyJson {
 
 #[tokio::test]
 async fn original_outlook_source_captures_checkpoint_recovery_and_ack_order() {
-    let mut command = Command::new("node");
-    command
-        .arg("tests/secretary-rust/outlook-source-oracle.mjs")
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command
-        .output()
-        .expect("Original Outlook source oracle required");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("outlook-source-cases.json.gz"));
     let corpus = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         32 * 1024 * 1024,
     )
     .unwrap();

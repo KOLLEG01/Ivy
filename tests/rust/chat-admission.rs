@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_chat_bridge::admission::ChatAdmission;
 use ivy_contracts::{IvyJson as Json, IvyResult, json::parse};
 use std::process::Command;
@@ -6,17 +8,8 @@ mod operations;
 
 #[test]
 fn admission_order_limits_and_original_request_hashes_match_typescript() {
-    let output = Command::new("node")
-        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .arg("tests/rust/fixtures/chat-admission-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let rows = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let output = reference_data::read(include_bytes!("fixtures/chat-admission-cases.json.gz"));
+    let rows = parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap();
     for (index, row) in rows.as_array().unwrap().iter().enumerate() {
         let run = || -> IvyResult<Json> {
             let definition = row.required("definition")?;

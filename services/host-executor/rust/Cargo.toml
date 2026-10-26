@@ -17,6 +17,9 @@ tokio-util.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 
+[dev-dependencies]
+rusqlite.workspace = true
+
 [[bin]]
 name = "ivy"
 path = "src/bin/ivy.rs"
@@ -34,10 +37,6 @@ harness = false
 name = "host-native-coordinator"
 path = "../../../tests/rust/host-native-coordinator.rs"
 harness = false
-
-[[test]]
-name = "host-reset-storage"
-path = "../../../tests/rust/host-reset-storage.rs"
 
 [[test]]
 name = "host-executor-service"

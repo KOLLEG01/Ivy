@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { basename, isAbsolute, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { buildIdentity } from '../../packages/host-runtime/src/build-identity.mjs';
 import { buildInstructions } from './build-instructions.mjs';
@@ -21,7 +21,13 @@ function runCargo(args, options) {
     ...options, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, windowsHide: true,
   });
   if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(((result.stderr ?? '') + (result.stdout ?? '')).slice(-64 * 1024) || `Cargo exited with ${result.status}.`);
+  if (result.status !== 0) {
+    const diagnostics = (result.stdout ?? '').split('\n').flatMap(line => {
+      try { const value = JSON.parse(line); return value.reason === 'compiler-message' ? [value.message.rendered ?? value.message.message] : []; }
+      catch { return [line]; }
+    }).join('\n');
+    throw new Error(((result.stderr ?? '') + diagnostics).slice(-64 * 1024) || `Cargo exited with ${result.status}.`);
+  }
   return result.stdout;
 }
 
@@ -83,7 +89,7 @@ function compileRustBinaries({ component, target, root = process.cwd(), identity
     const matches = declared.filter(binary => binary.name === name);
     if (matches.length !== 1) throw new Error(`Register the exact native helper bin: ${name}.`);
     return matches[0];
-  }) : declared;
+  }) : declared.filter(binary => typeof binary.src_path === 'string' && within(dirname(manifest), resolve(binary.src_path)));
   if (!helperNames && !binaries.some(t => t.name === `ivy-${component}`)) throw new Error('The component has no native service executable; a library is not a backend.');
   for (const binary of binaries) if (!/^[A-Za-z0-9_-]+$/.test(binary.name)) throw new Error('Invalid native executable name.');
   const features = [...new Set(binaries.flatMap(t => t['required-features'] ?? []))];

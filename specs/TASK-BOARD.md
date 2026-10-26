@@ -1,7 +1,7 @@
 # TaskBoard requirements
 
 Contracts: [schema](schemas/task-board.schema.json), [operations](schemas/task-board.operations.json).
-Implementation: [runtime](../services/task-board/src/runtime).
+Implementation: [runtime](../services/task-board/rust/src).
 UI requirements: [UI](UI.md).
 
 ## Work and allocation
@@ -141,9 +141,9 @@ UI requirements: [UI](UI.md).
   TaskBoard and AgentManager do not silently clone, switch branches or alter repositories.
   Completed workspace directories are retained.
 
-Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
-[workspace resolution](../services/agent-manager/src/projects.ts),
-[conditions](../services/task-board/src/runtime/condition.ts).
+Sources: [allocation](../services/task-board/rust/src/scheduler.rs),
+[workspace resolution](../services/agent-manager/rust/src),
+[conditions](../services/task-board/rust/src/condition.rs).
 
 ## Execution and conversation
 

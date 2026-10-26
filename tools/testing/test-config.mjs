@@ -148,12 +148,6 @@ export const rustTests = {
     "filter": "voice_notices::tests",
     "testThreads": 1
   },
-  "tests/rust/host-journal-cases.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-paths",
-    "filter": "journal_cases::",
-    "testThreads": 1
-  },
   "tests/rust/host-storage-retention-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-actions",
@@ -165,16 +159,58 @@ export const rustTests = {
     "test": "hive-storage-compaction",
     "testThreads": 1
   },
-  "tests/rust/hive_uis.rs": {
+  "tests/rust/hive_ui_files.rs": {
     "package": "ivy-hive",
     "test": "hive-storage-worker",
-    "filter": "store::registry::uis::",
+    "filter": "store::ui_files::ui_",
     "testThreads": 1
   },
   "tests/rust/hive_object_delete.rs": {
     "package": "ivy-hive",
     "test": "hive-storage-worker",
     "filter": "store::object_delete::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_object_move.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::object_move::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_object_mutations.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::object_mutations::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_object_write.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::object_write::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_object_create.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::object_create::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_store.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::schema_authentication_",
+    "testThreads": 1
+  },
+  "tests/rust/hive_store_history.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::history::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_worker_identity.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::identity::",
     "testThreads": 1
   },
   "tests/rust/hive_mcp_request.rs": {
@@ -187,6 +223,12 @@ export const rustTests = {
     "package": "ivy-hive",
     "test": "hive-storage-worker",
     "filter": "store::package_catalog::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_package_kernel.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::package_kernel::",
     "testThreads": 1
   },
   "tests/rust/agent-native-rpc.rs": {
@@ -203,9 +245,48 @@ export const rustTests = {
     "test": "delivery",
     "filter": "assignment_windows_cases::"
   },
+  "tests/secretary-rust/notices_cases.rs": {
+    "package": "ivy-secretary",
+    "test": "delivery",
+    "filter": "notices_cases::"
+  },
+  "tests/rust/contracts-json-utf16.rs": {
+    "package": "ivy-contracts",
+    "test": "json-utf16"
+  },
+  "tests/secretary-rust/assignment_delivery_cases.rs": {
+    "package": "ivy-secretary",
+    "test": "delivery",
+    "filter": "assignment_delivery_cases::"
+  },
+  "tests/secretary-rust/browser_notice_cases.rs": {
+    "package": "ivy-secretary",
+    "test": "delivery",
+    "filter": "browser_notice_cases::"
+  },
+  "tests/secretary-rust/notice_evidence_cases.rs": {
+    "package": "ivy-secretary",
+    "test": "delivery",
+    "filter": "notice_evidence_cases::"
+  },
+  "tests/secretary-rust/notice_scan_cases.rs": {
+    "package": "ivy-secretary",
+    "test": "delivery",
+    "filter": "notice_scan_cases::"
+  },
   "tests/secretary-rust/error-outcome.rs": {
     "package": "ivy-secretary",
     "test": "error-outcome"
+  },
+  "tests/secretary-rust/triage_workflow_cases.rs": {
+    "package": "ivy-secretary",
+    "test": "delivery",
+    "filter": "triage_workflow_cases::"
+  },
+  "tests/secretary-rust/triage_prompt_cases.rs": {
+    "package": "ivy-secretary",
+    "test": "delivery",
+    "filter": "triage_prompt_cases::"
   },
   "tests/secretary-rust/native-service.rs": {
     "package": "ivy-secretary",
@@ -235,12 +316,6 @@ export const rustTests = {
     "package": "ivy-host-runtime",
     "test": "host-paths",
     "filter": "codex_cases::job_path_cases::",
-    "testThreads": 1
-  },
-  "tests/rust/host-local-action-path-cases.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-paths",
-    "filter": "action_cases::source_path_cases::",
     "testThreads": 1
   },
   "tests/rust/host-bootstrap-updater-path-cases.rs": {
@@ -273,78 +348,6 @@ export const rustTests = {
     "filter": "package_archive_cases::",
     "testThreads": 1
   },
-  "tests/rust/host-restore-cases.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-paths",
-    "filter": "restore_cases::restore_requires_the_exact_captured_platform_and_node_workload",
-    "testThreads": 1
-  },
-  "tests/rust/host-project-storage-cases.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-paths",
-    "filter": "private_backup_cases::project_storage_cases::retained_projects_follow_cached_owned_inventory_and_restored_identity",
-    "testThreads": 1
-  },
-  "tests/rust/host-restore-projects-cases.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-paths",
-    "filter": "restore_cases::projects_cases::project_restore_relocates_only_the_disposable_backup_index",
-    "testThreads": 1
-  },
-  "tests/rust/host-restore-maintenance-cases.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-paths",
-    "filter": "restore_cases::maintenance_cases::restored_bootstrap_holds_save_exact_before_images_without_os_replay",
-    "testThreads": 1
-  },
-  "tests/rust/host-restore-journal-cases.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-paths",
-    "filter": "restore_cases::journal_cases::copied_journal_reconciliation_preserves_terminal_outcomes_and_rolls_back_failures",
-    "testThreads": 1
-  },
-  "tests/rust/host-restore-publication-cases.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-paths",
-    "filter": "restore_cases::publication_cases::restore_final_publication_reconciles_only_working_state_and_stays_disabled",
-    "testThreads": 1
-  },
-  "tests/rust/host-restore-payload-cases.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-paths",
-    "filter": "restore_cases::payload_cases::restore_payload_copy_preserves_authority_and_reserves_old_recovery_names",
-    "testThreads": 1,
-    "prerequisites": [
-      { "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }
-    ]
-  },
-  "tests/rust/host-restore-verification-cases.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-paths",
-    "filter": "restore_cases::verification_cases::immutable_backup_and_captured_ownership_checks_match_original",
-    "testThreads": 1
-  },
-  "tests/rust/host-restore-target-cases.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-paths",
-    "filter": "restore_cases::target_cases::fresh_disabled_restore_targets_preserve_source_and_layout_boundaries",
-    "testThreads": 1
-  },
-  "tests/rust/host-private-backup-host-cases.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-paths",
-    "filter": "private_backup_cases::host_cases::",
-    "testThreads": 1,
-    "prerequisites": [
-      { "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }
-    ]
-  },
-  "tests/rust/host-private-backup-cases.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-paths",
-    "filter": "private_backup_cases::snapshot_uses_sqlite_read_transaction_and_rejects_corruption_before_destination",
-    "testThreads": 1
-  },
   "tests/rust/host-backup-files-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",
@@ -363,7 +366,11 @@ export const rustTests = {
     "filter": "bootstrap_restart_cases::",
     "testThreads": 1,
     "prerequisites": [
-      { "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }
+      {
+        "package": "ivy-host-runtime",
+        "bin": "ivy-job",
+        "platform": "win32"
+      }
     ]
   },
   "tests/rust/host-bootstrap-worker-path-cases.rs": {
@@ -378,7 +385,11 @@ export const rustTests = {
     "filter": "bootstrap_maintenance_cases::bootstrap_maintenance_dropped_waiter_retains_transaction_locks_and_unrelated_owner",
     "testThreads": 1,
     "prerequisites": [
-      { "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }
+      {
+        "package": "ivy-host-runtime",
+        "bin": "ivy-job",
+        "platform": "win32"
+      }
     ]
   },
   "tests/rust/host-bootstrap-installation-cases.rs": {
@@ -498,14 +509,6 @@ export const rustTests = {
     "package": "ivy-sdk",
     "test": "sdk-error-outcome"
   },
-  "tests/rust/cli-error-outcome.rs": {
-    "package": "ivy-cli",
-    "test": "cli-error-outcome"
-  },
-  "tests/rust/host-reset-storage.rs": {
-    "package": "ivy-host-executor",
-    "test": "host-reset-storage"
-  },
   "tests/rust/host-executor-service.rs": {
     "package": "ivy-host-executor",
     "test": "host-executor-service",
@@ -523,7 +526,11 @@ export const rustTests = {
     "filter": "backup_storage_cases::",
     "testThreads": 1,
     "prerequisites": [
-      { "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }
+      {
+        "package": "ivy-host-runtime",
+        "bin": "ivy-job",
+        "platform": "win32"
+      }
     ]
   },
   "tests/rust/sdk-fetch-response.rs": {
@@ -542,17 +549,6 @@ export const rustTests = {
     "package": "ivy-sdk",
     "lib": true,
     "filter": "collation::casing_tests"
-  },
-  "tests/rust/agent-projects.rs": {
-    "package": "ivy-agent-manager",
-    "test": "agent-projects",
-    "prerequisites": [
-      {
-        "platform": "win32",
-        "package": "ivy-host-runtime",
-        "bin": "ivy-job"
-      }
-    ]
   },
   "tests/rust/contracts-native-urls.rs": {
     "package": "ivy-contracts",
@@ -599,10 +595,6 @@ export const rustTests = {
     "package": "ivy-contracts",
     "test": "native-catalog-path"
   },
-  "tests/rust/cli-publish-ui.rs": {
-    "package": "ivy-cli",
-    "test": "cli-publish-ui"
-  },
   "tests/rust/cli-reset-ui.rs": {
     "package": "ivy-cli",
     "test": "cli-reset-ui"
@@ -614,7 +606,13 @@ export const rustTests = {
   "tests/rust/host-cli.rs": {
     "package": "ivy-host-executor",
     "test": "host-cli",
-    "prerequisites": [{ "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }]
+    "prerequisites": [
+      {
+        "package": "ivy-host-runtime",
+        "bin": "ivy-job",
+        "platform": "win32"
+      }
+    ]
   },
   "tests/rust/ui-route.rs": {
     "package": "ivy-contracts",
@@ -656,6 +654,89 @@ export const rustTests = {
   "tests/rust/task-board-operations.rs": {
     "package": "ivy-task-board",
     "test": "task-board-operations"
+  },
+  "tests/fixtures/task-board-lifecycle.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-operations",
+    "filter": "lifecycle::"
+  },
+  "tests/fixtures/task-board-engine-factory-lifecycle.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-output",
+    "filter": "service::factory::lifecycle::",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-engine-factory-retention.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-output",
+    "filter": "service::factory::retention::",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-engine-factory-delivery.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-output",
+    "filter": "service::factory::delivery::",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-engine-factory-steering.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-output",
+    "filter": "service::factory::steering::",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-current-history.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-operations",
+    "filter": "current_history::",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-retention.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-blobs",
+    "filter": "retention::",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-evidence-support.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-blobs",
+    "filter": "original_journal_",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-host-service.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-output",
+    "filter": "host_service::",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-native-advance.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-blobs",
+    "filter": "native_driver::advance::",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-native-preparation.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-blobs",
+    "filter": "native_preparation::",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-native-driver.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-blobs",
+    "filter": "native_driver::durable_preparation_matches_original",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-native-resume.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-blobs",
+    "filter": "native_driver::resume::",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-journal-store.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-blobs",
+    "filter": "journal_store::inspection_owner_and_saved_primary_guards_use_the_journal_connection",
+    "testThreads": 1
   },
   "tests/rust/task-board-blobs.rs": {
     "package": "ivy-task-board",
@@ -819,25 +900,17 @@ export const rustTests = {
     "package": "ivy-host-runtime",
     "test": "host-scheduler"
   },
-  "tests/rust/host-reset-coordinator-cases.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-paths",
-    "filter": "reset_coordinator_cases::reset_local_plan_preserves_declared_trees_and_rejects_path_conflicts",
-    "testThreads": 1
-  },
-  "tests/rust/host-reset-local-cases.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-paths",
-    "filter": "reset_local_cases::reset_local_lock_proof_requires_executor_and_every_instance_owner",
-    "testThreads": 1
-  },
   "tests/rust/host-reset-stop-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",
     "filter": "reset_stop_cases::",
     "testThreads": 1,
     "prerequisites": [
-      { "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }
+      {
+        "package": "ivy-host-runtime",
+        "bin": "ivy-job",
+        "platform": "win32"
+      }
     ]
   },
   "tests/rust/host-reset-release-cases.rs": {
@@ -846,7 +919,11 @@ export const rustTests = {
     "filter": "runtime_reset::host::release_cases::",
     "testThreads": 1,
     "prerequisites": [
-      { "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }
+      {
+        "package": "ivy-host-runtime",
+        "bin": "ivy-job",
+        "platform": "win32"
+      }
     ]
   },
   "tests/rust/host-build-identity.rs": {
@@ -856,16 +933,6 @@ export const rustTests = {
   "tests/rust/host-build-input-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-build-inputs"
-  },
-  "tests/rust/host-native-recovery-cases.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-native-recovery"
-  },
-  "tests/rust/host-executor-runtime-cases.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-paths",
-    "filter": "executor_runtime_cases::native_windows_process_reconciliation_keeps_the_external_runtime_owner_authority",
-    "testThreads": 1
   },
   "tests/rust/host-target-storage-cases.rs": {
     "package": "ivy-host-runtime",
@@ -880,17 +947,6 @@ export const rustTests = {
   "tests/rust/host-emitted-runtime-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-emitted-runtime",
-    "prerequisites": [
-      {
-        "package": "ivy-host-runtime",
-        "bin": "ivy-job",
-        "platform": "win32"
-      }
-    ]
-  },
-  "tests/rust/host-javascript-preparation.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-javascript-preparation",
     "prerequisites": [
       {
         "package": "ivy-host-runtime",
@@ -925,10 +981,6 @@ export const rustTests = {
       }
     ]
   },
-  "tests/rust/host-preparation-files.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-preparation-files"
-  },
   "tests/rust/host-protected-config.rs": {
     "package": "ivy-host-runtime",
     "test": "host-protected-config"
@@ -936,10 +988,6 @@ export const rustTests = {
   "tests/rust/host-preparation-links.rs": {
     "package": "ivy-host-runtime",
     "test": "host-preparation-links"
-  },
-  "tests/rust/host-portable-dependencies.rs": {
-    "package": "ivy-host-runtime",
-    "test": "host-portable-dependencies"
   },
   "tests/rust/host-native-paths.rs": {
     "package": "ivy-host-runtime",
@@ -980,6 +1028,24 @@ export const rustTests = {
     "package": "ivy-host-runtime",
     "test": "host-filesystem-remove"
   },
+  "tests/rust/hive_online_backup.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::online_backup::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_reset_storage.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "reset_storage::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_storage_read.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "storage_read::",
+    "testThreads": 1
+  },
   "tests/rust/hive_storage_inspector.rs": {
     "package": "ivy-hive",
     "test": "hive-storage-worker",
@@ -1001,7 +1067,7 @@ export const rustTests = {
   "tests/rust/hive_packages.rs": {
     "package": "ivy-hive",
     "test": "hive-storage-worker",
-    "filter": "store::packages::package_registry_namespaced_root_preserves_logical_staging_cleanup_and_incoming_collection",
+    "filter": "store::packages::",
     "testThreads": 1
   },
   "tests/rust/hive_ui_collection_causes.rs": {
@@ -1025,6 +1091,12 @@ export const rustTests = {
     "filter": "store::ledger::",
     "testThreads": 1
   },
+  "tests/rust/hive_contracts.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::contracts::",
+    "testThreads": 1
+  },
   "tests/rust/hive_events.rs": {
     "package": "ivy-hive",
     "test": "hive-storage-worker",
@@ -1041,6 +1113,78 @@ export const rustTests = {
     "package": "ivy-hive",
     "test": "hive-storage-worker",
     "filter": "store::registry::registry_",
+    "testThreads": 1
+  },
+  "tests/rust/hive_search.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::search::search_",
+    "testThreads": 1
+  },
+  "tests/rust/hive_kernel.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::kernel::kernel_",
+    "testThreads": 1
+  },
+  "tests/rust/hive_kernel_settings.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::kernel::settings::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_kernel_content.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::kernel::content::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_kernel_domains.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::kernel::domains::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_wiki.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::wiki::wiki_",
+    "testThreads": 1
+  },
+  "tests/rust/hive_discovery.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::registry::discovery::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_configurations.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::registry::configurations::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_uis.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::registry::uis::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_inventory.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::registry::inventory::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_mcp.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "store::registry::mcp::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_worker_kernel.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "::worker_kernel::kernel_worker_",
     "testThreads": 1
   },
   "tests/rust/hive_worker_actions.rs": {
@@ -1061,16 +1205,59 @@ export const rustTests = {
     "filter": "store::kernel::worker_startup::",
     "testThreads": 1
   },
+  "tests/fixtures/hive-startup-profile.rs": {
+    "package": "ivy-hive",
+    "test": "hive-worker-client",
+    "filter": "worker_process::initialized_kernel_",
+    "testThreads": 1,
+    "prerequisites": [
+      {
+        "platform": "win32",
+        "package": "ivy-host-runtime",
+        "bin": "ivy-job"
+      }
+    ]
+  },
   "tests/rust/hive_browser_push_sender.rs": {
     "package": "ivy-hive",
     "test": "hive-storage-worker",
     "filter": "::push_sender::browser_push_sender_",
     "testThreads": 1
   },
+  "tests/rust/hive_http_auth.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "::authentication::http_auth_",
+    "testThreads": 1
+  },
+  "tests/rust/hive_browser_session.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "::browser_session::browser_session_",
+    "testThreads": 1
+  },
+  "tests/rust/hive_auth_pages.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "::auth_pages::",
+    "testThreads": 1
+  },
   "tests/rust/hive_oauth.rs": {
     "package": "ivy-hive",
     "test": "hive-storage-worker",
-    "filter": "::oauth::",
+    "filter": "::oauth::oauth_native_",
+    "testThreads": 1
+  },
+  "tests/rust/hive_oauth_http.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "::oauth_http::oauth_http_",
+    "testThreads": 1
+  },
+  "tests/rust/hive_browser_push_http.rs": {
+    "package": "ivy-hive",
+    "test": "hive-storage-worker",
+    "filter": "::http::push_http_",
     "testThreads": 1
   },
   "tests/rust/hive_query.rs": {
@@ -1082,13 +1269,79 @@ export const rustTests = {
   "tests/rust/hive_server_peers.rs": {
     "package": "ivy-hive",
     "test": "hive-network",
-    "filter": "native_provider_",
+    "filter": "server_peers::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_server_direct.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "server_peers::direct::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_server_composition.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "server_peers::composition::",
     "testThreads": 1
   },
   "tests/rust/hive_server_constructor.rs": {
     "package": "ivy-hive",
     "test": "hive-network",
     "filter": "native_constructor",
+    "testThreads": 1
+  },
+  "tests/rust/hive_server_constructor_cases.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "server_constructor::constructor_cases::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_server_options.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "server_options::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_core_calls.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "core_calls::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_mcp_protocol.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "mcp_protocol::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_mcp_inbound.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "mcp_inbound::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_mcp_parameters.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "mcp_parameters::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_mcp_dispatch.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "mcp_dispatch::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_mcp_subscription.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "mcp_subscription::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_mcp_owner.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "server_constructor::mcp_owner::",
     "testThreads": 1
   },
   "tests/rust/host-storage-space-cases.rs": {
@@ -1209,7 +1462,11 @@ export const rustTests = {
     "filter": "native_owner_cases::",
     "testThreads": 1,
     "prerequisites": [
-      { "platform": "win32", "package": "ivy-host-runtime", "bin": "ivy-job" }
+      {
+        "platform": "win32",
+        "package": "ivy-host-runtime",
+        "bin": "ivy-job"
+      }
     ]
   },
   "tests/rust/agent-claude-events.rs": {
@@ -1241,8 +1498,30 @@ export const rustTests = {
   },
   "tests/rust/agent-instructions.rs": {
     "package": "ivy-agent-manager",
+    "test": "agent-instructions"
+  },
+  "tests/fixtures/agent-instructions-cases.json.gz": {
+    "package": "ivy-agent-manager",
     "test": "agent-instructions",
-    "originalBackend": "agent-manager"
+    "filter": "inheritance_local_bytes_and_version_identities_match_original"
+  },
+  "tests/rust/agent-instructions-files.rs": {
+    "package": "ivy-agent-manager",
+    "test": "agent-instructions",
+    "filter": "instruction_file_cases::",
+    "testThreads": 1
+  },
+  "tests/rust/agent-environment.rs": {
+    "package": "ivy-agent-manager",
+    "test": "agent-instructions",
+    "filter": "environment_cases::",
+    "testThreads": 1
+  },
+  "tests/rust/agent-instructions-source.rs": {
+    "package": "ivy-agent-manager",
+    "test": "agent-instructions",
+    "filter": "instruction_source_cases::",
+    "testThreads": 1
   },
   "tests/rust/agent-environment-text.rs": {
     "package": "ivy-agent-manager",
@@ -1265,15 +1544,15 @@ export const rustTests = {
     "filter": "mcp_file_cases::"
   },
   "tests/rust/agent-staged-files.rs": {
+    "test": "agent-interactions",
     "package": "ivy-agent-manager",
-    "test": "agent-projects",
-    "filter": "staged_file_storage_preserves_bytes_expiry_limits_and_native_names"
+    "filter": "service_kernel::staged_files::",
+    "testThreads": 1
   },
   "tests/rust/agent-skills-output.rs": {
     "package": "ivy-agent-manager",
     "test": "agent-instructions",
-    "filter": "skills_output_cases::",
-    "originalBackend": "agent-manager"
+    "filter": "skills_output_cases::"
   },
   "tests/rust/agent-native-restore.rs": {
     "package": "ivy-agent-manager",
@@ -1357,7 +1636,8 @@ export const rustTests = {
   },
   "tests/rust/hive_http.rs": {
     "package": "ivy-hive",
-    "test": "hive-http"
+    "test": "hive-http",
+    "filter": "original_"
   },
   "tests/rust/hive_dashboard_image.rs": {
     "package": "ivy-hive",
@@ -1366,6 +1646,54 @@ export const rustTests = {
   "tests/rust/hive_network.rs": {
     "package": "ivy-hive",
     "test": "hive-network"
+  },
+  "tests/rust/hive_network_cases.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "network_cases::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_server_lifecycle.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "server_lifecycle::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_server_authentication.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "server_constructor::authentication::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_server_http.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "server_constructor::http::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_server_http_rpc.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "server_constructor::http::rpc::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_server_mcp.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "server_constructor::http::mcp::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_ws_socket_io.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "ws_socket_io::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_server_rpc.rs": {
+    "package": "ivy-hive",
+    "test": "hive-network",
+    "filter": "server_rpc::",
+    "testThreads": 1
   },
   "tests/rust/hive_dispatch_gate.rs": {
     "package": "ivy-hive",
@@ -1392,6 +1720,18 @@ export const rustTests = {
       }
     ]
   },
+  "tests/rust/hive_worker_online_backup.rs": {
+    "package": "ivy-hive",
+    "test": "hive-worker-client",
+    "filter": "worker_process::online_backup::",
+    "prerequisites": [
+      {
+        "platform": "win32",
+        "package": "ivy-host-runtime",
+        "bin": "ivy-job"
+      }
+    ]
+  },
   "tests/secretary-rust/document.rs": {
     "package": "ivy-secretary",
     "test": "document"
@@ -1403,10 +1743,6 @@ export const rustTests = {
   "tests/secretary-rust/schedule-policy.rs": {
     "package": "ivy-secretary",
     "test": "schedule-policy"
-  },
-  "tests/secretary-rust/spool.rs": {
-    "package": "ivy-secretary",
-    "test": "spool"
   },
   "tests/secretary-rust/media-input.rs": {
     "package": "ivy-secretary",
@@ -1675,7 +2011,10 @@ export const rustTests = {
   "tests/rust/phone_executables.rs": {
     "package": "ivy-phone-bridge",
     "test": "phone_executables",
-    "platforms": ["win32", "linux"],
+    "platforms": [
+      "win32",
+      "linux"
+    ],
     "architectures": [
       "x64"
     ],
@@ -1816,7 +2155,10 @@ export const rustTests = {
     "package": "ivy-phone-bridge",
     "lib": true,
     "filter": "media::realtime::tests::protocol_tests::",
-    "platforms": ["win32", "linux"],
+    "platforms": [
+      "win32",
+      "linux"
+    ],
     "architectures": [
       "x64",
       "arm64"
@@ -1827,7 +2169,10 @@ export const rustTests = {
     "package": "ivy-phone-bridge",
     "lib": true,
     "filter": "media::realtime::tests::route_tests::native_tests::",
-    "platforms": ["win32", "linux"],
+    "platforms": [
+      "win32",
+      "linux"
+    ],
     "architectures": [
       "x64",
       "arm64"
@@ -2437,6 +2782,11 @@ export const rustTests = {
     "package": "ivy-chat-bridge",
     "test": "chat-native-driver"
   },
+  "tests/rust/chat-service-active-cases.rs": {
+    "package": "ivy-chat-bridge",
+    "test": "chat-native-driver",
+    "filter": "runtime::active::"
+  },
   "tests/rust/chat-registry.rs": {
     "package": "ivy-chat-bridge",
     "test": "chat-registry"
@@ -2499,9 +2849,39 @@ export const rustTests = {
   "tests/rust/chat-sender.rs": {
     "package": "ivy-chat-bridge",
     "test": "chat-sender"
+  },
+  "tests/rust/agent-service-kernel.rs": {
+    "test": "agent-interactions",
+    "package": "ivy-agent-manager",
+    "filter": "service_kernel::",
+    "testThreads": 1
+  },
+  "tests/rust/agent-inventory-manager.rs": {
+    "test": "agent-interactions",
+    "package": "ivy-agent-manager",
+    "filter": "inventory_manager::",
+    "testThreads": 1
+  },
+  "tests/rust/agent-environment-defaults.rs": {
+    "test": "agent-interactions",
+    "package": "ivy-agent-manager",
+    "filter": "environment_defaults::",
+    "testThreads": 1
+  },
+  "tests/rust/host-artifact-inventory-cases.rs": {
+    "test": "host-paths",
+    "package": "ivy-host-runtime",
+    "filter": "artifact_inventory_cases::",
+    "testThreads": 1
+  },
+  "tests/rust/chat-desktop-host-cases.rs": {
+    "test": "chat-journal",
+    "testThreads": 1,
+    "package": "ivy-chat-bridge",
+    "filter": "desktop_host::"
   }
 };
 
 // Only reviewed, isolated tests may reuse a successful result. Integration tests always run.
 export const cacheable = (file) =>
-  ["tests/build-cache.test.mjs", "tests/chat-contracts.test.ts"].includes(file);
+  ["tests/build-cache.test.mjs"].includes(file);

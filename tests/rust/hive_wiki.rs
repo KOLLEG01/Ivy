@@ -1,6 +1,6 @@
 use super::{
     AuthContext, AuthenticatedContext, IvyError, IvyJson, JsString, Root, Store,
-    native_with_runtime, object_write, oracle,
+    native_with_runtime, object_write, reference,
 };
 use ivy_contracts::{
     IvyResult,
@@ -12,7 +12,10 @@ use ivy_hive::{
     wiki::{self, Action, Requests},
 };
 use serde_json::{Value, json};
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
 
 struct Backend<'a> {
     store: &'a mut Store,
@@ -229,26 +232,106 @@ fn bind(step: &mut Value, from: usize, at: &str) {
 fn raw_create(nonce: &str, name: &str, key: &str, version: &str) -> Value {
     json!({"op":"write","params":{"mutationId":format!("epoch:100000:{nonce}"),"contractVersion":version,"references":{},"create":{"contractKey":key,"parentId":null,"ownerObjectId":null,"name":name},"content":{"encoding":"text","value":"Synthetic reference target"}},"context":{"credentialDigest":format!("sha256:{}","a".repeat(64))},"now":100000,"nowText":"1970-01-01T00:01:40.000Z"})
 }
+pub(super) fn cursor_alias(cursor: &str, call: &Value, aliases: &BTreeMap<String, String>) -> String {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use ivy_contracts::hash::{hash_json, hmac_sha256};
+    let mut identity = call["params"].clone();
+    identity.as_object_mut().unwrap().remove("cursor");
+    identity["method"] = call["method"].clone();
+    let mut data: Value = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(cursor.split_once('.').unwrap().0)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        data["query"],
+        hash_json(&IvyJson::from_serde(&identity).unwrap()).unwrap()
+    );
+    let signed = |data: &Value| {
+        let body = URL_SAFE_NO_PAD.encode(serde_json::to_vec(data).unwrap());
+        let tag = hmac_sha256(
+            b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            body.as_bytes(),
+        );
+        format!("{body}.{}", URL_SAFE_NO_PAD.encode(tag))
+    };
+    // Authenticate the complete actual token before aliasing its query and boundary IDs.
+    assert_eq!(cursor, signed(&data));
+    data["query"] = hash_json(
+        &IvyJson::from_serde(&super::object_create::substitute(&identity, aliases)).unwrap(),
+    )
+    .unwrap()
+    .into();
+    signed(&super::object_create::substitute(&data, aliases))
+}
+fn receipt_request(step: &Value, row: &Value) -> Value {
+    if step["op"] == "write" {
+        return step.clone();
+    }
+    let call = row["wikiCalls"].as_array().unwrap().last().unwrap();
+    if call["method"] == "wiki.updateContent" {
+        let params = &call["params"];
+        json!({"op":"write","mode":"preserve","params":{"mutationId":params["mutationId"],"objectId":params["objectId"],"expectedRevision":params["expectedRevision"],"contractVersion":"1.0.0","references":{},"content":{"encoding":"text","value":params["markdown"]}}})
+    } else {
+        json!({"op":call["method"].as_str().unwrap().strip_prefix("objects.").unwrap(),"params":call["params"]})
+    }
+}
 fn compare(steps: &[Value]) -> Value {
+    use super::object_create::{normalized, request_hash, substitute};
     let root = Root::new();
-    // Only the Unicode predicate is observed; native policy computes the search.
-    let observed = oracle(&root.0.join("observed.sqlite"), steps);
+    let expected = reference(&root.0.join("original.sqlite"), steps);
+    let mut expanded = steps.to_vec();
+    for step in &mut expanded {
+        step["identityTables"] = true.into();
+    }
     let actual = native_with_runtime(
         &root.0.join("native.sqlite"),
-        steps,
-        Some(&observed["searchRuntime"]),
+        &expanded,
+        Some(&expected["searchRuntime"]),
     );
-    let mut reference = steps.to_vec();
-    for (index, step) in reference.iter_mut().enumerate() {
-        if step["op"] == "write" || step["method"] == "wiki.create" {
+    let mut aliases = BTreeMap::new();
+    for (index, step) in steps.iter().enumerate() {
+        if (step["op"] == "write" || step["method"] == "wiki.create")
+            && actual["rows"][index]["error"].is_null()
+        {
             if let Some(id) = actual["rows"][index]["value"]["object"]["id"].as_str() {
                 assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 4);
-                step["createdId"] = id.into();
+                aliases
+                    .entry(id.to_owned())
+                    .or_insert_with(|| format!("00000000-0000-4000-8000-{index:012x}"));
             }
         }
     }
-    let expected = oracle(&root.0.join("original.sqlite"), &reference);
+    for row in actual["rows"].as_array().unwrap() {
+        if let Some(cursor) = row["value"]["nextCursor"].as_str() {
+            let call = row["wikiCalls"].as_array().unwrap().last().unwrap();
+            aliases.insert(cursor.to_owned(), cursor_alias(cursor, call, &aliases));
+        }
+    }
+    let mut requests = BTreeMap::new();
+    for (index, step) in steps.iter().enumerate() {
+        if actual["rows"][index]["error"].is_null() && step["params"]["mutationId"].is_string() {
+            let mut bound = step.clone();
+            if bound["identityBindings"].is_array() {
+                super::identity::bind(&mut bound, actual["rows"].as_array().unwrap());
+            }
+            let request = receipt_request(&bound, &actual["rows"][index]);
+            let hashes = (
+                request_hash(&request),
+                request_hash(&substitute(&request, &aliases)),
+            );
+            if let Some(previous) = requests.insert(
+                step["params"]["mutationId"].as_str().unwrap().to_owned(),
+                hashes.clone(),
+            ) {
+                assert_eq!(previous, hashes, "Receipt replay must preserve its request");
+            }
+        }
+    }
+    let no_aliases = BTreeMap::new();
     assert_eq!(actual["rows"].as_array().unwrap().len(), steps.len());
+    assert_eq!(expected["rows"].as_array().unwrap().len(), steps.len());
     for (index, (a, b)) in actual["rows"]
         .as_array()
         .unwrap()
@@ -256,8 +339,29 @@ fn compare(steps: &[Value]) -> Value {
         .zip(expected["rows"].as_array().unwrap())
         .enumerate()
     {
+        let mut left = normalized(a, &aliases, &requests, false);
+        let mut right = normalized(b, &no_aliases, &requests, true);
+        if steps[index]["method"] == "wiki.search" && b["error"].is_null() {
+            for (raw, projected) in [(a, &mut left), (b, &mut right)] {
+                // Real UUID order is checked before comparing complete aliased result sets.
+                assert!(raw["value"]["nextCursor"].is_null());
+                assert!(
+                    raw["value"]["items"]
+                        .as_array()
+                        .unwrap()
+                        .windows(2)
+                        .all(|pair| {
+                            pair[0]["id"].as_str().unwrap() < pair[1]["id"].as_str().unwrap()
+                        })
+                );
+                projected["value"]["items"]
+                    .as_array_mut()
+                    .unwrap()
+                    .sort_by(|a, b| a["id"].as_str().unwrap().cmp(b["id"].as_str().unwrap()));
+            }
+        }
         assert_eq!(
-            a, b,
+            left, right,
             "Wiki trace {index} ({}/{})",
             steps[index]["op"], steps[index]["method"]
         );
@@ -272,7 +376,7 @@ fn compare(steps: &[Value]) -> Value {
     for key in ["definitions", "metadata", "topics"] {
         assert_eq!(actual[key], expected[key]);
     }
-    expected
+    actual
 }
 fn value(result: &Value, index: usize) -> &Value {
     &result["rows"][index]["value"]

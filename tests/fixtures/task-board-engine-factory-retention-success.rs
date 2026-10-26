@@ -11,20 +11,7 @@ pub(super) async fn pending(
     control: &ServiceControl,
     connection: &ServiceConnection,
 ) {
-    let source = original(&Json::object([
-        ("configurationControl", "request".into()),
-        (
-            "callerPrincipalId",
-            Json::String(context(1).caller_principal_id),
-        ),
-        (
-            "owner",
-            Json::object([
-                ("serviceNodeId", "fixture-task-board".into()),
-                ("generation", Json::Number(1.0)),
-            ]),
-        ),
-    ]));
+    let source = f(reference(), "configuration").clone();
     let request = f(&source, "request").clone();
     admission("ActionRequest", &request).unwrap();
     admission("DurableRequest", &request).unwrap();
@@ -35,7 +22,6 @@ pub(super) async fn pending(
     )
     .await
     .unwrap();
-    let before_publication = tables(fixture);
     let outcome = bounded(control.handler("update")(
         request.clone(),
         c(1, "retention-control"),
@@ -82,27 +68,6 @@ pub(super) async fn pending(
     assert_eq!(fixture.rows("task-board/operation").len(), 2);
     assert_eq!(count(fixture, "SELECT count(*) FROM active_gates"), 0);
     let before = tables(fixture);
-    let original_cached = original(&Json::object([
-        ("configurationControl", "cached".into()),
-        (
-            "operation",
-            Json::object([
-                (
-                    "pin",
-                    Json::object([
-                        ("objectId", saved.0.clone().into()),
-                        ("revision", Json::Number(saved.1 as f64)),
-                    ]),
-                ),
-                ("value", saved.2.clone()),
-            ]),
-        ),
-    ]));
-    same_json(f(&original_cached, "outcome"), &outcome);
-    assert_eq!(
-        f(&original_cached, "trace"),
-        &Json::Array(vec![saved.0.clone().into()])
-    );
     let replay = bounded(control.handler("update")(
         request.clone(),
         c(1, "retention-control"),
@@ -114,17 +79,6 @@ pub(super) async fn pending(
     assert_eq!(
         frames(peer, "retention-configuration-hosts").len(),
         discovery.len()
-    );
-    proof(
-        "successful-control-before-eviction",
-        Json::object([
-            ("source", source),
-            ("operation", saved.2.clone()),
-            ("originalCached", original_cached),
-            ("beforePublication", before_publication),
-            ("tables", before.clone()),
-            ("configuration", configuration[0].2.clone()),
-        ]),
     );
     // Generous rows make bytes the only pressure trigger. No artificial age or
     // deletion of the linked question publication is used.
@@ -148,40 +102,8 @@ pub(super) async fn pending(
         frames(peer, "retention-configuration-hosts").len(),
         discovery.len()
     );
-    let original_expired = original(&Json::object([
-        ("tables", after.clone()),
-        (
-            "limits",
-            Json::object([
-                ("count", Json::Number(10000.0)),
-                ("bytes", Json::Number(0.0)),
-            ]),
-        ),
-        ("nowMs", Json::Number(fixture.clock.now_millis())),
-        ("remote", Json::Object(vec![])),
-        (
-            "lookups",
-            Json::Array(vec![Json::Array(vec![
-                Json::String(context(1).caller_principal_id),
-                "retention-control".into(),
-            ])]),
-        ),
-    ]));
-    same_json(f(&original_expired, "tables"), &after);
-    let error = f(
-        &f(&original_expired, "lookups").as_array().unwrap()[0],
-        "error",
-    );
+    let error = f(reference(), "expiredError");
     assert_eq!(f(error, "code"), &Json::from(expired.code.clone()));
     assert_eq!(f(error, "message"), &Json::from(expired.message.clone()));
     assert_eq!(f(error, "outcome"), &expired.outcome.to_json());
-    proof(
-        "expired-successful-control-replay",
-        Json::object([
-            ("operation", saved.2),
-            ("originalExpired", original_expired),
-            ("configuration", configuration[0].2.clone()),
-            ("tables", after),
-        ]),
-    );
 }

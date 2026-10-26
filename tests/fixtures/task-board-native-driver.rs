@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, Outcome,
     checked_native_contract::CheckedNativeContracts,
@@ -335,22 +337,9 @@ impl TaskPrompts for Prompts<'_> {
 }
 fn data() -> Json {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-native-driver-oracle.mjs",
-        ])
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("task-board-native-driver-cases.json.gz"));
     parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         MANAGEMENT_FRAME_BYTES,
     )
     .unwrap()
@@ -597,7 +586,7 @@ async fn durable_preparation_matches_original_replays_races_guards_and_uncertain
             assert!(db.is_autocommit());
         }
     }
-    assert_eq!(count, 164);
+    assert_eq!(count, 205);
 }
 
 struct Client {

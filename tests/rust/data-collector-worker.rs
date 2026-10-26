@@ -7,20 +7,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-#[test]
-fn adapter_stays_byte_equal_to_the_existing_workload_capability() {
-    let source = include_str!("../../services/data-collector/src/runner.ts").replace("\r\n", "\n");
-    let template = source
-        .split_once("const worker = `")
-        .unwrap()
-        .1
-        .split_once("`;\n")
-        .unwrap()
-        .0;
-    let expected = template.replace("${JSON.stringify(taskErrorCodes)}", r#"["authentication_required","interaction_required","configuration_invalid","provider_unavailable"]"#);
-    assert_eq!(WORKER.replace("\r\n", "\n"), expected);
-}
-
 fn execute(script: &str, input: &str) -> (i32, Option<String>) {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(

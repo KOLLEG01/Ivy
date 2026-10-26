@@ -30,6 +30,9 @@ waproto = "=0.7.0"
 whatsapp-rust = { version = "=0.7.0", default-features = false, features = ["tokio-native", "tokio-transport", "ureq-client", "legacy-session-interop"] }
 wacore-libsignal = { version = "=0.7.0", default-features = false, features = ["legacy-session-interop"] }
 
+[dev-dependencies]
+flate2.workspace = true
+
 [[test]]
 name = "chat-native-driver"
 path = "../../../tests/rust/chat-native-driver.rs"

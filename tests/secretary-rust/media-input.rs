@@ -1,33 +1,15 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{IvyJson, json::parse};
 use ivy_secretary::media_input::{Source, prepare};
-use std::process::Command;
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 
-fn oracle(script: &str) -> IvyJson {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut command = Command::new("node");
-    command.arg(script).current_dir(root);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command.output().expect("Node oracle must be available");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
-        4 * 1024 * 1024,
-    )
-    .unwrap()
+fn corpus(bytes: &[u8]) -> IvyJson {
+    parse(std::str::from_utf8(&reference_data::read(bytes)).unwrap(), 4 * 1024 * 1024).unwrap()
 }
-
 #[test]
 fn original_media_signature_encoding_integrity_and_exact_budget_differential() {
-    let corpus = oracle("tests/secretary-rust/media-input-oracle.mjs");
+    let corpus = corpus(include_bytes!("media-input-cases.json.gz"));
     let cases = corpus.as_array().unwrap();
     assert!(
         cases.len() > 300,
@@ -60,7 +42,7 @@ fn original_media_signature_encoding_integrity_and_exact_budget_differential() {
 
 #[test]
 fn catalogue_identity_preserves_exact_observed_account_differential() {
-    let corpus = oracle("tests/secretary-rust/source-identity-oracle.mjs");
+    let corpus = corpus(include_bytes!("source-identity-cases.json.gz"));
     for case in corpus.as_array().unwrap() {
         let actual = match ivy_secretary::source_identity::catalogue_account_hash(
             case.required("value").unwrap(),
@@ -75,7 +57,7 @@ fn catalogue_identity_preserves_exact_observed_account_differential() {
 #[test]
 fn original_triage_final_assessment_and_turn_identity_differential() {
     use ivy_secretary::triage_results::{result_items, triage_result, triage_turn};
-    let corpus = oracle("tests/secretary-rust/triage-results-oracle.mjs");
+    let corpus = corpus(include_bytes!("triage-results-cases.json.gz"));
     let cases = corpus.as_array().unwrap();
     assert!(
         cases.len() >= 182,
@@ -130,7 +112,7 @@ fn original_triage_media_order_gaps_video_offsets_and_budget_differential() {
         future::{Future, ready},
         task::{Context as PollContext, Poll, Waker},
     };
-    let corpus = oracle("tests/secretary-rust/triage-media-oracle.mjs");
+    let corpus = corpus(include_bytes!("triage-media-cases.json.gz"));
     for case in corpus.as_array().unwrap() {
         let mode = case.required("mode").unwrap().as_str().unwrap();
         let item = Pin {

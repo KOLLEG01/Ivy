@@ -2065,6 +2065,7 @@ version = "0.2.40"
 dependencies = [
  "base64 0.23.1",
  "chrono",
+ "flate2",
  "futures-util",
  "ivy-contracts",
  "ivy-host-runtime",
@@ -2087,6 +2088,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "bytes",
+ "flate2",
  "infer",
  "ivy-contracts",
  "ivy-host-runtime",
@@ -2143,6 +2145,7 @@ dependencies = [
  "base64 0.23.1",
  "chromiumoxide",
  "chrono",
+ "flate2",
  "futures-util",
  "ivy-contracts",
  "ivy-host-runtime",
@@ -2187,6 +2190,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "chrono-tz",
+ "flate2",
  "futures-util",
  "getrandom 0.4.3",
  "http-body-util",
@@ -2219,6 +2223,7 @@ dependencies = [
  "ivy-hive",
  "ivy-host-runtime",
  "ivy-sdk",
+ "rusqlite",
  "tokio",
  "tokio-util",
  "uuid",
@@ -2303,6 +2308,7 @@ name = "ivy-secretary"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "flate2",
  "futures-util",
  "html5ever",
  "ivy-contracts",
@@ -2347,6 +2353,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
+ "flate2",
  "futures-util",
  "ivy-contracts",
  "ivy-host-runtime",

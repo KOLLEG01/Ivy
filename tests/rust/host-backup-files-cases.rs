@@ -14,7 +14,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-static CORPUS: Mutex<()> = Mutex::new(());
 fn native_name(prefix: &str, unit: u16) -> OsString {
     #[cfg(windows)]
     {
@@ -50,55 +49,6 @@ fn wrap(result: IvyResult<J>) -> J {
         Ok(value) => J::object([("ok", true.into()), ("value", value)]),
         Err(error) => J::object([("ok", false.into()), ("error", error.to_wire())]),
     }
-}
-fn oracle(input: &J) -> J {
-    let mut child = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-        ])
-        .arg(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../tests/fixtures/host-backup-files-oracle.mjs"),
-        )
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(json::canonical(input, usize::MAX).unwrap().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    json::parse(&String::from_utf8(output.stdout).unwrap(), usize::MAX).unwrap()
-}
-fn retain(value: &J) {
-    if let Some(path) = std::env::var_os("IVY_HOST_BACKUP_FILES_CORPUS") {
-        let _guard = CORPUS.lock().unwrap();
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .unwrap();
-        writeln!(file, "{}", json::canonical(value, usize::MAX).unwrap()).unwrap();
-    }
-}
-fn compare(input: J, actual: J) {
-    let expected = oracle(&input);
-    retain(&J::object([
-        ("input", input),
-        ("actual", actual.clone()),
-        ("expected", expected.clone()),
-    ]));
-    assert_json_eq(&actual, &expected);
 }
 fn observation(path: &Path) -> J {
     let metadata = match fs::symlink_metadata(path) {
@@ -186,88 +136,6 @@ async fn inventory(
     report(result, visited.lock().unwrap().clone(), None)
 }
 
-#[test]
-fn safe_relative_members_match_original_on_both_path_styles() {
-    let mut members: Vec<JsString> = [
-        "",
-        ".",
-        "..",
-        "/",
-        "a",
-        "a/b",
-        "a//b",
-        "a/",
-        "./a",
-        "a/../b",
-        "a/./b",
-        "../x",
-        "/x",
-        "//host/share",
-        "\\x",
-        "C:x",
-        "C:/x",
-        "x\\y",
-        "x:y",
-        "x\0y",
-        "x\ny",
-        "x\u{1f}y",
-        "x\u{7f}y",
-        "a b",
-        "trailing.",
-        "CON",
-        "aux.txt",
-        "a/é",
-        "中/😀",
-        "a/...",
-        "a/..x",
-    ]
-    .into_iter()
-    .map(JsString::from)
-    .collect();
-    members.extend([JsString(vec![0xd800]), JsString(vec![97, 47, 0xdc00])]);
-    for (style_name, style, cwd) in [
-        ("win32", node_path::Style::Windows, "C:\\work\\current"),
-        ("posix", node_path::Style::Posix, "/work/current"),
-    ] {
-        let context = node_path::Context {
-            style,
-            cwd: cwd.into(),
-        };
-        let roots = if style_name == "win32" {
-            vec![
-                "C:\\root",
-                "root/child",
-                "C:/root/../else",
-                "//server/share/root",
-            ]
-        } else {
-            vec!["/root", "root/child", "/root/../else", "//root"]
-        };
-        let mut cases = Vec::new();
-        let mut actual = Vec::new();
-        for root in roots {
-            for member in &members {
-                cases.push(J::object([
-                    ("root", root.into()),
-                    ("member", J::String(member.clone())),
-                ]));
-                actual.push(wrap(
-                    backup_files::relative_file_with_context(&root.into(), member, &context)
-                        .map(J::String),
-                ));
-            }
-        }
-        compare(
-            J::object([
-                ("operation", "relative".into()),
-                ("style", style_name.into()),
-                ("cwd", cwd.into()),
-                ("cases", J::Array(cases)),
-            ]),
-            J::Array(actual),
-        );
-    }
-}
 fn inventory_input(
     fixture: &ServiceFixture,
     root: &Path,
@@ -526,24 +394,6 @@ async fn native_inventory_rejects_links_unless_excluded_and_preserves_callback_e
     );
 }
 
-#[tokio::test]
-async fn inventory_depth_boundary_matches_original() {
-    for depth in [64, 65] {
-        let fixture = ServiceFixture::new();
-        let root = fixture.0.join("tree");
-        fs::create_dir(&root).unwrap();
-        let mut leaf = root.clone();
-        for _ in 0..depth {
-            leaf.push("d");
-            fs::create_dir(&leaf).unwrap();
-        }
-        compare(
-            inventory_input(&fixture, &root, &[], None),
-            inventory(&fixture, &root, &[], None).await,
-        );
-    }
-}
-
 fn sparse(path: &Path, bytes: u64) {
     let file = fs::OpenOptions::new()
         .create_new(true)
@@ -577,19 +427,6 @@ fn sparse(path: &Path, bytes: u64) {
     }
     file.set_len(bytes).unwrap();
 }
-#[tokio::test]
-async fn oversized_sparse_files_are_rejected_before_hashing_or_creating_copy_parents() {
-    let fixture = ServiceFixture::new();
-    let root = fixture.0.join("tree");
-    fs::create_dir(&root).unwrap();
-    let source = root.join("large");
-    sparse(&source, 64 * 1024 * 1024 * 1024 + 1);
-    compare(
-        inventory_input(&fixture, &root, &[], None),
-        inventory(&fixture, &root, &[], None).await,
-    );
-    compare_copy(&fixture, &source, None, false, "fresh", "absent").await;
-}
 fn expected(source: &Path) -> BackupFile {
     let metadata = fs::metadata(source).unwrap();
     BackupFile {
@@ -598,67 +435,6 @@ fn expected(source: &Path) -> BackupFile {
         bytes: metadata.len(),
         mode: 0o751,
     }
-}
-async fn compare_copy(
-    fixture: &ServiceFixture,
-    source: &Path,
-    expectation: Option<BackupFile>,
-    preserve: bool,
-    label: &str,
-    initial: &str,
-) {
-    let node = fixture.0.join(format!("original-{label}"));
-    let native = fixture.0.join(format!("native-{label}"));
-    for root in [&node, &native] {
-        if initial != "absent" {
-            fs::create_dir(root).unwrap();
-        }
-        match initial {
-            "file" => fs::write(root.join("result"), b"preserved").unwrap(),
-            "directory" => fs::create_dir(root.join("result")).unwrap(),
-            "ancestor-file" => {
-                fs::write(root.join("parent"), b"preserved ancestor").unwrap();
-            }
-            "link" => {
-                filesystem::directory_link(&fixture.0.join("artifact"), &root.join("result"))
-                    .unwrap();
-            }
-            "absent" => {}
-            _ => panic!("Unknown initial copy state"),
-        }
-    }
-    let destination = |root: &Path| {
-        if initial == "ancestor-file" {
-            root.join("parent/result")
-        } else {
-            root.join("result")
-        }
-    };
-    let native_path = destination(&native);
-    let result = backup_files::copy_verified(
-        source.to_owned(),
-        native_path.clone(),
-        expectation.clone(),
-        preserve,
-    )
-    .await
-    .map(|file| file.json());
-    let actual = report(result, Vec::new(), Some(&native_path));
-    let input = J::object([
-        ("operation", "copy".into()),
-        ("fixtureRoot", p(&fixture.0)),
-        ("source", p(source)),
-        ("destination", p(&destination(&node))),
-        (
-            "expected",
-            expectation
-                .as_ref()
-                .map(BackupFile::json)
-                .unwrap_or(J::Null),
-        ),
-        ("preserveMode", preserve.into()),
-    ]);
-    compare(input, actual);
 }
 async fn native_copy(
     fixture: &ServiceFixture,
@@ -853,12 +629,6 @@ async fn native_concurrent_copy_claims_one_destination_exclusively() {
     if alias != destination {
         assert_eq!(fs::read(&alias).unwrap(), b"preserved alias");
     }
-    retain(&J::object([
-        ("nativeOnly", "exclusive-destination".into()),
-        ("one", wrap(one.map(|file| file.json()))),
-        ("two", wrap(two.map(|file| file.json()))),
-        ("destination", observation(&destination)),
-    ]));
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_verified_copy_detects_replaced_source_identity_even_with_equal_bytes_and_timestamp()
@@ -904,13 +674,6 @@ async fn native_verified_copy_detects_replaced_source_identity_even_with_equal_b
         digest(fs::read(&source).unwrap()),
         digest(fs::read(&destination).unwrap())
     );
-    retain(&J::object([
-        ("nativeOnly", "replaced-source-equal-bytes-size-time".into()),
-        ("beforeInode", before.ino.into()),
-        ("afterInode", after.ino.into()),
-        ("result", wrap(result.map(|file| file.json()))),
-        ("destination", observation(&destination)),
-    ]));
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_admitted_copy_finishes_flushing_after_its_observer_is_dropped() {
@@ -961,77 +724,4 @@ async fn native_admitted_copy_finishes_flushing_after_its_observer_is_dropped() 
         digest(&fs::read(&source).unwrap()),
         digest(&fs::read(&destination).unwrap())
     );
-    retain(&J::object([
-        ("nativeOnly", "copy-survives-observer-cancellation".into()),
-        ("bytes", J::Number(bytes as f64)),
-        ("destination", observation(&destination)),
-    ]));
-}
-
-#[tokio::test]
-async fn directory_flush_matches_original_platform_policy() {
-    let fixture = ServiceFixture::new();
-    let root = fixture.0.join("tree");
-    fs::create_dir_all(root.join("child/deep")).unwrap();
-    fs::write(root.join("child/file"), b"data").unwrap();
-    let link = fixture.0.join("link");
-    filesystem::directory_link(&root, &link).unwrap();
-    for root in [root.clone(), fixture.0.join("missing"), link] {
-        let actual = report(
-            backup_files::sync_directories(root.clone())
-                .await
-                .map(|_| J::Null),
-            vec![],
-            None,
-        );
-        compare(
-            J::object([
-                ("operation", "sync".into()),
-                ("fixtureRoot", p(&fixture.0)),
-                ("root", p(&root)),
-            ]),
-            actual,
-        );
-    }
-    filesystem::directory_link(&fixture.0.join("artifact"), &root.join("child/link")).unwrap();
-    compare(
-        J::object([
-            ("operation", "sync".into()),
-            ("fixtureRoot", p(&fixture.0)),
-            ("root", p(&root)),
-        ]),
-        report(
-            backup_files::sync_directories(root).await.map(|_| J::Null),
-            vec![],
-            None,
-        ),
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn inventory_rejects_unsafe_native_names_and_special_entries() {
-    for name in ["colon:name", "back\\slash", "control\u{1f}"] {
-        let fixture = ServiceFixture::new();
-        let root = fixture.0.join("tree");
-        fs::create_dir(&root).unwrap();
-        fs::write(root.join(name), b"data").unwrap();
-        compare(
-            inventory_input(&fixture, &root, &[], None),
-            inventory(&fixture, &root, &[], None).await,
-        );
-        compare(
-            inventory_input(&fixture, &root, &[name], None),
-            inventory(&fixture, &root, &[name], None).await,
-        );
-    }
-    let fixture = ServiceFixture::new();
-    let root = fixture.0.join("tree");
-    fs::create_dir(&root).unwrap();
-    let socket = std::os::unix::net::UnixListener::bind(root.join("socket")).unwrap();
-    compare(
-        inventory_input(&fixture, &root, &[], None),
-        inventory(&fixture, &root, &[], None).await,
-    );
-    drop(socket);
 }

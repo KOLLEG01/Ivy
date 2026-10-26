@@ -14,7 +14,6 @@ use ivy_contracts::{
 use ivy_sdk::clock::Clock;
 use std::{
     path::{Path, PathBuf},
-    process::Command,
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
@@ -35,20 +34,14 @@ fn array(value: Vec<Json>) -> Json {
     Json::Array(value)
 }
 fn oracle() -> Json {
-    let out = Command::new("node")
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .args(["tests/rust/fixtures/chat-service-active-peer.mjs", "oracle"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    if let Some(p) = std::env::var_os("IVY_CHAT_ACTIVE_RUNTIME_ORACLE_CAPTURE") {
-        std::fs::write(p, &out.stdout).unwrap();
-    }
-    parse(std::str::from_utf8(&out.stdout).unwrap(), usize::MAX).unwrap()
+    parse(
+        std::str::from_utf8(&super::reference_data::read(include_bytes!(
+            "fixtures/chat-service-active-cases.json.gz"
+        )))
+        .unwrap(),
+        usize::MAX,
+    )
+    .unwrap()
 }
 fn generation(row: &Json, corpus: &Json, root: PathBuf) -> Arc<ChatGenerationConfig> {
     Arc::new(ChatGenerationConfig {
@@ -75,6 +68,7 @@ fn generation(row: &Json, corpus: &Json, root: PathBuf) -> Arc<ChatGenerationCon
         service_node_id: "chat-provider".into(),
         data_root: Some(root),
         language: "en".into(),
+        diagnostic_notifications: true,
     })
 }
 async fn invoke(peer: &mut Peer, name: &str, args: &Json) -> Json {

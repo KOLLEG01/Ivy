@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_agent_manager::mcp_manager::{McpManager, McpSettings};
 use ivy_contracts::{IvyError, IvyJson, Outcome, hash::digest, json::parse};
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
@@ -27,13 +29,8 @@ impl Drop for Root {
 fn oracle() -> &'static IvyJson {
     static DATA: OnceLock<IvyJson> = OnceLock::new();
     DATA.get_or_init(|| {
-        let o = Command::new("node")
-            .arg("tests/fixtures/agent-mcp-manager-oracle.mjs")
-            .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .output()
-            .unwrap();
-        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-        parse(std::str::from_utf8(&o.stdout).unwrap(), 2 * 1024 * 1024).unwrap()
+        let o = reference_data::read(include_bytes!("../fixtures/agent-mcp-manager-cases.json.gz"));
+        parse(std::str::from_utf8(&o).unwrap(), 2 * 1024 * 1024).unwrap()
     })
 }
 fn manager(home: PathBuf, enabled: bool) -> McpManager {

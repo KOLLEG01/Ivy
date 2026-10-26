@@ -21,7 +21,7 @@ function buildHostUis(root) {
 
 /** Build and stage only the selected host. A prepared plan never advertises
  * binaries from other targets, and normal preparation needs no retained matrix. */
-export function buildNativeDeployment({ component, target, root = process.cwd(), identity, cargo, buildUi = buildHostUis } = {}) {
+export function buildNativeDeployment({ component, target, root = process.cwd(), outputRoot, identity, cargo, buildUi = buildHostUis } = {}) {
   if (!/^[a-z][a-z0-9-]*$/.test(component ?? '')) throw Error('A component name is required.');
   const source = JSON.parse(readFileSync(resolve(root, 'services', component, 'deploy.json'), 'utf8'));
   const platform = target === undefined ? `${process.platform}-${process.arch}`
@@ -35,12 +35,12 @@ export function buildNativeDeployment({ component, target, root = process.cwd(),
   const runtimeFiles = componentBuildInputs({ root, component, platform });
   const binaries = ['ivy-health', ...(os === 'win32'
     ? ['ivy-job', ...(component === 'host-executor' ? ['ivy-host-job'] : [])] : [])];
-  const requiredBinaries = [...binaries, ...(component === 'host-executor' ? ['ivy', 'ivy-bootstrap-auto-worker'] : [])];
+  const requiredBinaries = [...binaries, ...(component === 'host-executor' ? ['ivy', 'ivy-bootstrap-auto-worker', 'ivy-publish-ui'] : [])];
   const payloads = [
     compileRustBackend({ component, target, root, identity, cargo, runtimeFiles }),
     compileRustHelpers({ component: 'host-executor', target, binaries, root, identity, cargo }),
   ];
-  const result = stageNativePayloads({ component, root, identity: payloads[0].identity, payloads, plan,
+  const result = stageNativePayloads({ component, root, outputRoot, identity: payloads[0].identity, payloads, plan,
     requiredBinaries: { [os]: requiredBinaries } });
   // Runtime reset republishes checked UI bytes after clearing Hive. They are
   // native CLI data dependencies, produced once by the regular Web builder.

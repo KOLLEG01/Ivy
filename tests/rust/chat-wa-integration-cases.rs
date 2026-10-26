@@ -45,7 +45,7 @@ use tokio::sync::watch;
 
 fn oracle() -> &'static Json {
     static CORPUS: OnceLock<Json> = OnceLock::new();
-    CORPUS.get_or_init(|| read_oracle("whatsapp-oracle", "IVY_CHAT_WA_RUNTIME_ORACLE_CAPTURE"))
+    CORPUS.get_or_init(|| read_oracle("whatsapp-oracle"))
 }
 
 #[derive(Default)]
@@ -675,6 +675,7 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
         service_node_id: "chat-provider".into(),
         data_root: Some(root.clone()),
         language: "en".into(),
+        diagnostic_notifications: true,
     });
     let clock = Arc::new(Fixed(
         field(corpus, "now").as_f64().unwrap() as i64,
@@ -1087,6 +1088,7 @@ async fn remote_image_sdk_publication_reuses_immutable_mutation_after_reply_loss
         service_node_id: "chat-provider".into(),
         data_root: Some(root.clone()),
         language: "en".into(),
+        diagnostic_notifications: true,
     });
     let c = ServiceConnection::connect(
         &peer.url,

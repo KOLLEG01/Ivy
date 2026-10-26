@@ -1,12 +1,14 @@
 use ivy_agent_manager::instructions::compose_instructions;
-#[path = "agent-instructions-files.rs"]
-mod instruction_file_cases;
+#[path = "agent-instructions-source.rs"]
+mod instruction_source_cases;
 #[path = "agent-environment.rs"]
 mod environment_cases;
 #[path = "agent-environment-conflicts.rs"]
 mod environment_conflict_cases;
 #[path = "agent-environment-text.rs"]
 mod environment_text_cases;
+#[path = "agent-instructions-files.rs"]
+mod instruction_file_cases;
 #[path = "agent-mcp-files.rs"]
 mod mcp_file_cases;
 #[path = "agent-mcp-manager.rs"]
@@ -21,15 +23,9 @@ mod mcp_render_cases;
 mod skills_cases;
 #[path = "agent-skills-output.rs"]
 mod skills_output_cases;
-use ivy_contracts::{
-    IvyJson, JsString,
-    hash::hash_json,
-    json::{parse, stringify},
-};
-use std::{
-    io::Write,
-    process::{Command, Stdio},
-};
+use ivy_contracts::{IvyJson, JsString, hash::hash_json, json::parse};
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 
 fn document(host: bool, enabled: IvyJson, include_local: bool) -> IvyJson {
     IvyJson::object([
@@ -72,7 +68,7 @@ fn option(value: &IvyJson) -> Option<&IvyJson> {
 }
 
 #[test]
-fn inheritance_local_bytes_and_version_identities_match_unchanged_typescript() {
+fn inheritance_local_bytes_and_version_identities_match_original() {
     let mut cases = Vec::new();
     let mut results = Vec::new();
     for global_mode in 0..4 {
@@ -139,37 +135,12 @@ fn inheritance_local_bytes_and_version_identities_match_unchanged_typescript() {
             }
         }
     }
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut child = Command::new("node")
-        .arg("tests/fixtures/agent-instructions-oracle.mjs")
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(
-            stringify(&IvyJson::Array(cases), 8 * 1024 * 1024)
-                .unwrap()
-                .as_bytes(),
-        )
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let oracle = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
-        8 * 1024 * 1024,
-    )
-    .unwrap();
-    assert_eq!(IvyJson::Array(results), oracle);
+    let output = reference_data::read(include_bytes!(
+        "../fixtures/agent-instructions-cases.json.gz"
+    ));
+    let oracle = parse(std::str::from_utf8(&output).unwrap(), 8 * 1024 * 1024).unwrap();
+    assert_eq!(&IvyJson::Array(cases), oracle.required("input").unwrap());
+    assert_eq!(&IvyJson::Array(results), oracle.required("output").unwrap());
 }
 
 #[test]

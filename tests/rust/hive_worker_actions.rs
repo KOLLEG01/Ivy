@@ -1,8 +1,4 @@
 use super::*;
-use base64::{
-    Engine,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-};
 
 fn credential(value: &str) -> String {
     format!("sha256:{}", value.repeat(64))
@@ -34,77 +30,7 @@ fn ok(steps: &mut Vec<Value>, mut step: Value) -> usize {
     push(steps, step)
 }
 fn compare(steps: &[Value]) -> Value {
-    let root = Root::new();
-    let observed = oracle(&root.0.join("observed.sqlite"), steps);
-    // The reference supplies only finite Date/Intl/string primitive observations.
-    let actual = native(
-        &root.0.join("native.sqlite"),
-        steps,
-        &observed["registryRuntime"],
-    );
-    let mut bound = steps.to_vec();
-    let mut prior = 0;
-    for (index, step) in bound.iter_mut().enumerate() {
-        if step["payload"]["action"] == "session.create" {
-            if let Some(token) = actual["rows"][index]["value"]["sessionToken"].as_str() {
-                let bytes = URL_SAFE_NO_PAD.decode(token).unwrap();
-                assert_eq!(bytes.len(), 32);
-                assert_eq!(token.len(), 43);
-                step["sessionBytes"] = STANDARD.encode(bytes).into();
-            }
-        }
-        let mutations = actual["rows"][index]["catalogMutations"]
-            .as_array()
-            .unwrap();
-        if matches!(
-            step["payload"]["action"].as_str(),
-            Some("package.seed" | "package.prune" | "package.publish")
-        ) {
-            let mut ids = vec![];
-            if mutations.len() > prior {
-                assert_eq!(mutations.len(), prior + 1);
-                let nonce = mutations.last().unwrap()["mutation_id"]
-                    .as_str()
-                    .unwrap()
-                    .rsplit(':')
-                    .next()
-                    .unwrap();
-                assert_eq!(uuid::Uuid::parse_str(nonce).unwrap().get_version_num(), 4);
-                ids.push(nonce.to_owned());
-                if step["payload"]["action"] == "package.seed" {
-                    let id = actual["rows"][index]["value"]["objectId"].as_str().unwrap();
-                    assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 4);
-                    ids.push(id.to_owned());
-                }
-            } else {
-                ids.push(format!("00000000-0000-4000-8000-{index:012}"));
-                ids.push(format!("00000000-0001-4000-8000-{index:012}"));
-            }
-            step["uuids"] = json!(ids);
-        }
-        prior = mutations.len();
-    }
-    let expected = oracle(&root.0.join("reference.sqlite"), &bound);
-    for (i, (a, b)) in actual["rows"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .zip(expected["rows"].as_array().unwrap())
-        .enumerate()
-    {
-        assert_eq!(a, b, "Worker step {i}: {}", steps[i]);
-        if matches!(
-            steps[i]["op"].as_str(),
-            Some("sql" | "configure" | "register")
-        ) || steps[i]["requireSuccess"] == true
-        {
-            assert!(a["error"].is_null(), "Fixture step {i}: {}", a["error"]);
-        }
-    }
-    for key in ["definitions", "metadata", "topics"] {
-        assert_eq!(actual[key], expected[key]);
-    }
-    actual
+    super::compare(steps)
 }
 fn notifications(result: &Value, index: usize) -> &[Value] {
     result["rows"][index]["notifications"].as_array().unwrap()
@@ -162,38 +88,7 @@ fn worker_retention_keeps_cleanup_order_partial_commits_and_failure_journal() {
     ));
     let recovered = ok(&mut s, collect());
 
-    // No entropy-producing operation is present: one original observation is
-    // sufficient. Native policy consumes only its finite language observations.
-    let root = Root::new();
-    let expected = oracle(&root.0.join("original.sqlite"), &s);
-    let actual = native(
-        &root.0.join("native.sqlite"),
-        &s,
-        &expected["registryRuntime"],
-    );
-    if let Some(path) = std::env::var_os("IVY_HIVE_WORKER_RETENTION_CORPUS") {
-        fs::write(
-            path,
-            json!({"steps":s,"original":expected,"native":actual}).to_string(),
-        )
-        .unwrap();
-    }
-    for (i, (a, b)) in actual["rows"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .zip(expected["rows"].as_array().unwrap())
-        .enumerate()
-    {
-        assert_eq!(a, b, "Worker retention step {i}: {}", s[i]);
-        if s[i]["requireSuccess"] == true || s[i]["op"] == "sql" {
-            assert!(a["error"].is_null(), "Fixture step {i}: {}", a["error"]);
-        }
-    }
-    assert_eq!(actual["rows"].as_array().unwrap().len(), s.len());
-    for key in ["definitions", "metadata", "topics"] {
-        assert_eq!(actual[key], expected[key]);
-    }
+    let actual = compare(&s);
     let metadata = |index: usize, key: &str| {
         actual["rows"][index]["state"]["metadata"]
             .as_array()

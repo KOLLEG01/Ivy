@@ -77,7 +77,8 @@ async fn native_cli_version_uses_the_owned_process_and_refuses_another_pinned_ve
         format!("\n\n\n\n{}\n{{}}\n0.154.0\n", marker.display()),
     )
     .unwrap();
-    let artifact = std::env::var_os("IVY_TEST_AGENT_ARTIFACT")
+    let artifact = std::env::var_os("IVY_TEST_AGENT_MANAGER_ARTIFACT")
+        .or_else(|| std::env::var_os("IVY_TEST_AGENT_ARTIFACT"))
         .map(PathBuf::from)
         .unwrap_or(repository);
     let launcher = artifact.join("dist/native/win32-x64/ivy-job.exe");

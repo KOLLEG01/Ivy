@@ -14,21 +14,10 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-#[path = "data-collector-provider.inc.rs"]
-mod provider;
-
 #[path = "data-collector-engine.inc.rs"]
 mod engine;
-#[path = "data-collector-definition-journal.inc.rs"]
-mod definition_journal;
-#[path = "data-collector-definitions.inc.rs"]
-mod definitions;
 #[path = "data-collector-http.inc.rs"]
 mod http;
-#[path = "data-collector-native.inc.rs"]
-mod native;
-#[path = "data-collector-lifecycle.inc.rs"]
-mod lifecycle;
 
 fn json(s: &str) -> IvyJson {
     parse(s, usize::MAX).unwrap()

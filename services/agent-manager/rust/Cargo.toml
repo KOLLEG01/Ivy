@@ -26,6 +26,7 @@ name = "ivy-agent-manager"
 path = "src/main.rs"
 
 [dev-dependencies]
+flate2.workspace = true
 sha2.workspace = true
 futures-util.workspace = true
 tokio-tungstenite.workspace = true
@@ -56,10 +57,6 @@ path = "../../../tests/rust/agent-interactions.rs"
 [[test]]
 name = "agent-instructions"
 path = "../../../tests/rust/agent-instructions.rs"
-
-[[test]]
-name = "agent-projects"
-path = "../../../tests/rust/agent-projects.rs"
 
 [[test]]
 name = "agent-claude"

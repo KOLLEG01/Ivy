@@ -67,25 +67,6 @@ fn input(html: &IvyJson, data: &IvyJson, mode: ColorMode) -> RenderInput {
     RenderInput::new(html.as_js_string().unwrap(), data, 120, 100, mode).unwrap()
 }
 
-fn pixels(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
-    let mut decoder = png::Decoder::new(Cursor::new(bytes));
-    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = decoder.read_info().unwrap();
-    let mut buffer = vec![0; reader.output_buffer_size().unwrap()];
-    let info = reader.next_frame(&mut buffer).unwrap();
-    let rgba = buffer[..info.buffer_size()]
-        .chunks_exact(info.color_type.samples())
-        .flat_map(|p| match info.color_type {
-            png::ColorType::Rgb => [p[0], p[1], p[2], 255],
-            png::ColorType::Rgba => [p[0], p[1], p[2], p[3]],
-            png::ColorType::Grayscale => [p[0], p[0], p[0], 255],
-            png::ColorType::GrayscaleAlpha => [p[0], p[0], p[0], p[1]],
-            _ => panic!("unexpected palette output"),
-        })
-        .collect();
-    (info.width, info.height, rgba)
-}
-
 #[test]
 fn callback_wire_errors_keep_lone_surrogates_and_existing_error_codes() {
     let error = RenderError::Callback(ivy_contracts::JsString(vec![0xd800])).into_ivy();
@@ -111,82 +92,6 @@ fn callback_wire_errors_keep_lone_surrogates_and_existing_error_codes() {
         RenderError::Timeout.into_ivy().outcome,
         ivy_contracts::Outcome::Unknown
     );
-}
-
-#[tokio::test]
-#[ignore = "requires pinned Chromium, Windows job launcher and TypeScript test dependencies"]
-async fn matches_playwright_pixels_for_async_assets_sandbox_animations_and_carets() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut oracle_command = tokio::process::Command::new("node");
-    if let Some(bundle) = std::env::var_os("DASHBOARDS_TEST_ORACLE") {
-        oracle_command.arg(bundle);
-    } else {
-        oracle_command
-            .args(["--import", "tsx"])
-            .arg(root.join("tests/fixtures/dashboards-render-oracle.mjs"));
-    }
-    let output = oracle_command.current_dir(&root).output().await.unwrap();
-    assert!(
-        output.status.success(),
-        "oracle: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let oracle: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let fixtures = parse(
-        include_str!("../fixtures/dashboards/render.json"),
-        MANAGEMENT_FRAME_BYTES,
-    )
-    .unwrap();
-    let profile_root =
-        std::env::temp_dir().join(format!("ivy-dashboards-pixels-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&profile_root).unwrap();
-    let runtime =
-        ivy_dashboards::browser::BrowserOwner::new(ivy_dashboards::browser::BrowserOptions {
-            executable: std::env::var_os("DASHBOARDS_TEST_BROWSER").unwrap().into(),
-            artifact_root: profile_root.clone(),
-            temporary_root: profile_root.clone(),
-            job_launcher: std::env::var_os("DASHBOARDS_TEST_JOB").map(Into::into),
-        });
-    runtime.start().await.unwrap();
-    let renderer = runtime.clone();
-    let cancel = CancellationToken::new();
-    for fixture in fixtures.as_array().unwrap() {
-        let name = fixture.required("name").unwrap().as_str().unwrap();
-        for (mode, text) in [
-            (ColorMode::Color, "color"),
-            (ColorMode::Grayscale, "grayscale"),
-            (ColorMode::Monochrome, "monochrome"),
-        ] {
-            let request = input(
-                fixture.required("html").unwrap(),
-                fixture.required("data").unwrap(),
-                mode,
-            );
-            let actual = renderer.render(request, cancel.clone()).await.expect(&name);
-            let expected = oracle
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|v| v["name"] == name && v["colorMode"] == text)
-                .unwrap();
-            let expected = BASE64_STANDARD
-                .decode(expected["data"].as_str().unwrap())
-                .unwrap();
-            let actual_pixels = pixels(&actual);
-            let expected_pixels = pixels(&expected);
-            if actual_pixels != expected_pixels {
-                let first = actual_pixels
-                    .2
-                    .iter()
-                    .zip(&expected_pixels.2)
-                    .position(|(a, b)| a != b);
-                runtime.close().await.unwrap();
-                panic!("pixel mismatch {name}/{text}: first differing byte {first:?}");
-            }
-        }
-    }
-    runtime.close().await.unwrap();
-    std::fs::remove_dir(profile_root).unwrap();
 }
 
 #[tokio::test]

@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_agent_manager::{skills_output::inspect_ownership, skills_prepare::prepare_skills};
 use ivy_contracts::{
     IvyError, IvyJson, JsString, Outcome,
@@ -15,18 +17,9 @@ use std::{
 fn oracle() -> &'static IvyJson {
     static DATA: OnceLock<IvyJson> = OnceLock::new();
     DATA.get_or_init(|| {
-        let output = Command::new("node")
-            .arg("tests/fixtures/agent-skills-output-oracle.mjs")
-            .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let output = reference_data::read(include_bytes!("../fixtures/agent-skills-output-cases.json.gz"));
         parse(
-            std::str::from_utf8(&output.stdout).unwrap(),
+            std::str::from_utf8(&output).unwrap(),
             4 * 1024 * 1024,
         )
         .unwrap()

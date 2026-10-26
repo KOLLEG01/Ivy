@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_chat_bridge::store::{ChatStore, Destination, Reference, local::Limits};
 use ivy_contracts::{
     IvyError, IvyJson as Json,
@@ -47,17 +49,8 @@ fn error(e: IvyError) -> Json {
 }
 #[tokio::test]
 async fn facade_dates_and_terminal_input_cleanup_match_original() {
-    let output = Command::new("node")
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .arg("tests/rust/fixtures/chat-store-integration-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let fixture = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let output = reference_data::read(include_bytes!("fixtures/chat-store-integration-cases.json.gz"));
+    let fixture = parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap();
     let path = super::Fixture::new();
     for case in fixture.required("dates").unwrap().as_array().unwrap() {
         let time = case.required("time").unwrap().as_f64().unwrap() as i64;

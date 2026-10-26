@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_secretary::{policy::*, schedule::*};
 
 #[test]
@@ -6,23 +8,9 @@ fn original_object_and_message_event_policy_differential() {
     use ivy_secretary::{assignment_message::*, assignment_object::*};
     use std::process::Command;
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut command = Command::new("node");
-    command
-        .arg("tests/secretary-rust/assignment-events-oracle.mjs")
-        .current_dir(root);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command.output().expect("Original Node oracle required");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("assignment-events-cases.json.gz"));
     let corpus = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         4 * 1024 * 1024,
     )
     .unwrap();
@@ -116,23 +104,9 @@ fn original_assignment_rules_triggers_and_names_differential() {
     use ivy_secretary::assignment_schema::*;
     use std::process::Command;
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut command = Command::new("node");
-    command
-        .arg("tests/secretary-rust/assignment-schema-oracle.mjs")
-        .current_dir(root);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command.output().expect("Original Node oracle required");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("assignment-schema-cases.json.gz"));
     let corpus = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         4 * 1024 * 1024,
     )
     .unwrap();

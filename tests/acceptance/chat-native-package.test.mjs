@@ -11,7 +11,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 // Explicit built artifacts and a synthetic definition only. No account, pairing,
 // message dispatch, native model execution or configured installation is used.
-test('prepared native Chat registers its public tools with Hive, serves history and restarts without Node', { timeout: 180000 }, async () => {
+test('prepared native Chat accepts absent, false and true diagnostic settings, serves history and restarts without Node', { timeout: 180000 }, async () => {
   for (const name of ['IVY_CHAT_PACKAGE_ARTIFACT', 'IVY_HIVE_REFERENCE_ARTIFACT', 'IVY_CHAT_PACKAGE_DEFINITION'])
     assert.ok(process.env[name] && isAbsolute(process.env[name]), `Supply ${name}.`);
   const source = await realpath(resolve(process.env.IVY_CHAT_PACKAGE_ARTIFACT));
@@ -95,8 +95,9 @@ test('prepared native Chat registers its public tools with Hive, serves history 
       : Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
     const expectedBridge = { principalId: definition.principalId, callerPrincipalId: 'reference-user', workspaceId: definition.workspaceId,
       definitionHash: 'sha256:' + createHash('sha256').update(JSON.stringify(canonical(definition))).digest('hex') };
-    let chat = await start(config, native(artifact, 'ivy-chat-bridge'));
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (const enabled of [undefined, false, true]) {
+      config.settings = { definition, pollMs: 60000, ...(enabled === undefined ? {} : { diagnosticNotifications: enabled }) };
+      const chat = await start(config, native(artifact, 'ivy-chat-bridge'));
       const registration = await poll(async () => { const node = await rpc('serviceNodes.get', { serviceNodeId: config.serviceNodeId }); report.lastRegistration = node; return node.ready && node.synced && node.connected ? node : null; });
       assert.equal(registration.buildId, identity.buildId); report.registrations.push(registration);
       const health = await run(native(artifact, 'ivy-health'), ['--config', chat.path]);
@@ -115,7 +116,6 @@ test('prepared native Chat registers its public tools with Hive, serves history 
       report.history = page; report.tools = catalog.items.map(tool => tool.qualifiedName); report.mcpTools = tools;
       await stop(chat);
       const stopped = await run(native(artifact, 'ivy-health'), ['--config', chat.path]); assert.notEqual(stopped.code, 0);
-      if (attempt === 0) chat = await start(config, native(artifact, 'ivy-chat-bridge'));
     }
     await stop(hiveState); report.completed = true;
   } catch (error) {

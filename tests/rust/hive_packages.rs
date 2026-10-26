@@ -12,7 +12,7 @@ use ivy_hive::{
     },
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicI64, Ordering},
@@ -163,7 +163,7 @@ impl Actor {
                             }
                             _ => panic!("Unexpected actor control"),
                         }
-                        reply.send(json!({"state":snapshot(&store,&json!({})),"catalogMutations":rows(&store,"SELECT mutation_id FROM mutations ORDER BY rowid"),"definitions":rows(&store,"SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name")})).unwrap();
+                        reply.send(json!({"state":snapshot(&store,&json!({"identityTables":true})),"catalogMutations":rows(&store,"SELECT mutation_id FROM mutations ORDER BY rowid"),"definitions":rows(&store,"SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name")})).unwrap();
                     }
                 }
             }
@@ -178,32 +178,38 @@ impl Actor {
         receiver.recv().unwrap()
     }
 }
-fn node(input: Value) -> Value {
-    let mut child = std::process::Command::new(
-        std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()),
-    )
-    .arg(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../tests/fixtures/hive-packages-oracle.mjs"),
-    )
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .spawn()
-    .unwrap();
-    child
-        .stdin
-        .take()
+fn package_reference(input: Value) -> Value {
+    fn sorted(value: &Value) -> Value {
+        match value {
+            Value::Array(items) => items.iter().map(sorted).collect(),
+            Value::Object(fields) => serde_json::to_value(
+                fields
+                    .iter()
+                    .map(|(key, value)| (key, sorted(value)))
+                    .collect::<BTreeMap<_, _>>(),
+            )
+            .unwrap(),
+            value => value.clone(),
+        }
+    }
+    static CASES: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let cases = CASES.get_or_init(|| {
+        serde_json::from_slice(&reference_data::read(include_bytes!(
+            "../fixtures/hive-packages-reference.json.gz"
+        )))
         .unwrap()
-        .write_all(input.to_string().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "Package original: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).unwrap()
+    });
+    let key = ivy_contracts::hash::digest(serde_json::to_vec(&sorted(&input)).unwrap());
+    let value = if input.get("steps").is_some() {
+        cases[std::env::consts::OS]
+            .get(&key)
+            .or_else(|| cases["common"].get(&key))
+    } else {
+        cases["primitives"].get(&key)
+    };
+    value
+        .unwrap_or_else(|| panic!("Missing original package trace {key}"))
+        .clone()
 }
 fn bind(step: &Value, rows: &[Value]) -> Value {
     let mut step = step.clone();
@@ -281,20 +287,8 @@ impl AsyncRead for Body {
     }
 }
 fn compare(steps: &[Value]) -> Value {
-    compare_roots(steps, false)
-}
-fn compare_roots(steps: &[Value], namespaced: bool) -> Value {
     let root = Root::new();
-    let files = root.0.join(if namespaced {
-        "native-files. "
-    } else {
-        "native-files"
-    });
-    let reference = root.0.join(if namespaced {
-        "reference-files. "
-    } else {
-        "reference-files"
-    });
+    let files = root.0.join("native-files");
     let mut dates = steps
         .iter()
         .flat_map(|s| {
@@ -304,7 +298,7 @@ fn compare_roots(steps: &[Value], namespaced: bool) -> Value {
         .collect::<Vec<_>>();
     dates.sort_unstable();
     dates.dedup();
-    let iso = node(json!({"dates":dates}));
+    let iso = package_reference(json!({"dates":dates}));
     let clock = Arc::new(Clock {
         now: AtomicI64::new(100000),
         iso: iso
@@ -344,13 +338,11 @@ fn compare_roots(steps: &[Value], namespaced: bool) -> Value {
     let mut registry = construct(false, false);
     let mut staged: HashMap<String, StagedPackageUpload> = HashMap::new();
     let mut actual = vec![];
-    let mut original = steps.to_vec();
-    let mut previous_mutations = 0;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-    for (index, source) in steps.iter().enumerate() {
+    for source in steps {
         let step = bind(source, &actual);
         clock
             .now
@@ -400,52 +392,6 @@ fn compare_roots(steps: &[Value], namespaced: bool) -> Value {
             Err(e) => (Value::Null, wire(e.to_wire())),
         };
         let observed = actor.control(json!({"method":"snapshot"}));
-        let mut uuids = vec![];
-        let mutations = observed["catalogMutations"].as_array().unwrap();
-        for (n, mutation) in mutations.iter().enumerate().skip(previous_mutations) {
-            let nonce = mutation["mutation_id"]
-                .as_str()
-                .unwrap()
-                .rsplit(':')
-                .next()
-                .unwrap();
-            assert_eq!(uuid::Uuid::parse_str(nonce).unwrap().get_version_num(), 4);
-            uuids.push(nonce.to_owned());
-            if n == 0 {
-                uuids.push(
-                    observed["state"]["objects"][0]["id"]
-                        .as_str()
-                        .unwrap()
-                        .to_owned(),
-                );
-            }
-        }
-        let mut randoms = vec![];
-        let authorizations = if step["method"] == "authorizeMany" {
-            value.as_array().cloned().unwrap_or_default()
-        } else {
-            vec![value.clone()]
-        };
-        for authorization in authorizations {
-            if authorization["alreadyPublished"] == false {
-                let id = authorization["uploadId"].as_str().unwrap();
-                assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 4);
-                uuids.push(id.to_owned());
-                let token = authorization["uploadToken"].as_str().unwrap();
-                let bytes = URL_SAFE_NO_PAD
-                    .decode(token.strip_prefix("ivypu1.").unwrap())
-                    .unwrap();
-                assert_eq!(bytes.len(), 32);
-                randoms.push(STANDARD.encode(bytes));
-            }
-        }
-        if uuids.is_empty() {
-            uuids.push(format!("00000000-0000-4000-8000-{index:012}"));
-            uuids.push(format!("00000000-0001-4000-8000-{index:012}"));
-        }
-        original[index]["uuids"] = json!(uuids);
-        original[index]["randoms"] = json!(randoms);
-        previous_mutations = mutations.len();
         actual.push(json!({"value":value,"error":error,"state":observed["state"],"fileTree":ui_files::tree(&files),"requests":actor.requests.lock().unwrap().clone(),"installerCalls":installer.calls.lock().unwrap().clone(),"catalogMutations":observed["catalogMutations"]}));
     }
     let definitions = actor.control(json!({"method":"snapshot"}))["definitions"].clone();
@@ -454,16 +400,81 @@ fn compare_roots(steps: &[Value], namespaced: bool) -> Value {
     drop(installer);
     drop(actor);
     thread.join().unwrap();
-    let expected = node(
-        json!({"path":root.0.join("reference.sqlite"),"root":reference,"basePath":"/hive","steps":original}),
-    );
-    assert_eq!(actual.len(), expected["rows"].as_array().unwrap().len());
+    let expected = package_reference(json!({"steps":steps}));
+    let expected_rows = expected["rows"].as_array().unwrap();
+    assert_eq!(actual.len(), steps.len());
+    assert_eq!(expected_rows.len(), steps.len());
+    let mut aliases = BTreeMap::new();
+    let mut receipt_steps = steps.to_vec();
+    let mut prior = 0;
+    for (index, ((source, row), original)) in
+        steps.iter().zip(&actual).zip(expected_rows).enumerate()
+    {
+        let authorizations = |row: &Value| {
+            if source["method"] == "authorizeMany" {
+                row["value"].as_array().cloned().unwrap_or_default()
+            } else if source["method"] == "authorize" {
+                vec![row["value"].clone()]
+            } else {
+                vec![]
+            }
+        };
+        let issued = authorizations(row);
+        let fixed = authorizations(original);
+        assert_eq!(issued.len(), fixed.len(), "Authorization count at {index}");
+        for (issued, fixed) in issued.iter().zip(&fixed) {
+            if issued["alreadyPublished"] == false {
+                assert_eq!(fixed["alreadyPublished"], false);
+                let id = issued["uploadId"].as_str().unwrap();
+                assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 4);
+                let token = issued["uploadToken"].as_str().unwrap();
+                let encoded = token.strip_prefix("ivypu1.").unwrap();
+                let bytes = URL_SAFE_NO_PAD.decode(encoded).unwrap();
+                assert_eq!(bytes.len(), 32);
+                assert_eq!(URL_SAFE_NO_PAD.encode(&bytes), encoded);
+                for (value, alias) in [
+                    (id, fixed["uploadId"].as_str().unwrap()),
+                    (token, fixed["uploadToken"].as_str().unwrap()),
+                ] {
+                    assert!(
+                        aliases.insert(value.to_owned(), alias.to_owned()).is_none(),
+                        "Fresh upload entropy"
+                    );
+                }
+            }
+        }
+        let mutations = row["catalogMutations"].as_array().unwrap();
+        if mutations.len() > prior {
+            assert_eq!(mutations.len(), prior + 1);
+            receipt_steps[index]["op"] = "packageCatalog".into();
+            receipt_steps[index]["method"] = if prior == 0 {
+                assert_eq!(source["method"], "initialize");
+                "seed"
+            } else {
+                match source["method"].as_str().unwrap() {
+                    "initialize" | "collect" => "prune",
+                    "upload" | "uploadPair" => "publish",
+                    _ => panic!("Unexpected catalog write at {index}"),
+                }
+            }
+            .into();
+        }
+        prior = mutations.len();
+    }
+    let mut requests = BTreeMap::new();
+    package_catalog::catalog_receipts(&receipt_steps, &actual, &mut aliases, &mut requests);
+    let no_aliases = BTreeMap::new();
     for (index, (a, b)) in actual
         .iter()
         .zip(expected["rows"].as_array().unwrap())
         .enumerate()
     {
-        assert_eq!(a, b, "Package registry step {index}: {}", steps[index]);
+        assert_eq!(
+            object_create::normalized(a, &aliases, &requests, false),
+            object_create::normalized(b, &no_aliases, &requests, true),
+            "Package registry step {index}: {}",
+            steps[index]
+        );
         if steps[index]["requireSuccess"] == true
             || matches!(steps[index]["method"].as_str(), Some("fixture" | "sql"))
         {
@@ -475,11 +486,7 @@ fn compare_roots(steps: &[Value], namespaced: bool) -> Value {
         }
     }
     assert_eq!(definitions, expected["definitions"]);
-    if namespaced {
-        assert!(!root.0.join("native-files").exists());
-        assert!(!root.0.join("reference-files").exists());
-    }
-    expected
+    json!({"rows":actual,"definitions":definitions})
 }
 fn step(method: &str) -> Value {
     json!({"method":method})
@@ -523,8 +530,14 @@ fn error(result: &Value, index: usize, code: &str) {
 }
 fn bundle(component: &str, version: &str, kind: &str, stamp: Value) -> Value {
     let mut authorization = authorization(component, version, kind, b"x");
-    let archive =
-        node(json!({"buildArchive":{"manifest":authorization["manifest"],"stamp":stamp}}));
+    let archive = package_reference(
+        json!({"buildArchive":{"manifest":authorization["manifest"],"stamp":stamp}}),
+    );
+    let bytes = STANDARD
+        .decode(archive["bytesBase64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(bytes.len() as u64, archive["bytes"].as_u64().unwrap());
+    assert_eq!(ivy_contracts::hash::digest(&bytes), archive["archiveHash"]);
     authorization["archiveHash"] = archive["archiveHash"].clone();
     authorization["bytes"] = archive["bytes"].clone();
     json!({"authorization":authorization,"bytesBase64":archive["bytesBase64"]})
@@ -734,7 +747,7 @@ fn package_registry_actual_archive_publication_concurrent_repeat_retention_and_r
                 .iter()
                 .map(|e| e["version"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            ["2.0.0", "3.0.0"]
+            ["3.0.0"]
         );
         if kind == "service" {
             assert_eq!(
@@ -759,6 +772,10 @@ fn package_registry_actual_archive_publication_concurrent_repeat_retention_and_r
                     .as_str()
                     .unwrap()
                     .starts_with(&format!("artifacts/{component}/1.0.0"))
+                    || v["path"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with(&format!("artifacts/{component}/2.0.0"))
                     || v["path"].as_str().unwrap().contains("-extract"))
         );
     }

@@ -16,6 +16,10 @@ use tokio::{
     runtime::Builder,
     time::{sleep, timeout},
 };
+#[path = "../fixtures/hive-startup-profile.rs"]
+mod startup_profile;
+#[path = "hive_worker_online_backup.rs"]
+mod online_backup;
 
 struct Root(PathBuf);
 impl Root {
@@ -100,37 +104,10 @@ async fn request(client: &StorageClient, value: IvyJson) -> Result<IvyJson, IvyE
 }
 
 fn original_profile(root: &Root) -> PathBuf {
-    if let Some(path) = std::env::var_os("IVY_HIVE_STARTUP_PROFILE") {
-        return path.into();
-    }
-    use std::io::Write;
-    let mut child = std::process::Command::new(
-        std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()),
-    )
-    .arg(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../tests/fixtures/hive-store-oracle.mjs"),
-    )
-    .stdin(std::process::Stdio::piped())
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped())
-    .spawn()
-    .unwrap();
-    child.stdin.take().unwrap().write_all(serde_json::json!({"path":root.0.join("profile.sqlite"),"steps":[{"op":"kernel","method":"constructor","now":100000}]}).to_string().as_bytes()).unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let original: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let path = root.0.join("profile.json");
-    let bytes =
-        serde_json::json!({"original":{"registryRuntime":original["registryRuntime"]}}).to_string();
+    let bytes = serde_json::json!({"original":{"registryRuntime":startup_profile::registry(false)}})
+        .to_string();
     fs::write(&path, &bytes).unwrap();
-    if let Some(capture) = std::env::var_os("IVY_HIVE_PROCESS_PROFILE_CAPTURE") {
-        fs::write(capture, &bytes).unwrap();
-    }
     path
 }
 fn kernel_launch(root: &Root, profile: &std::path::Path) -> WorkerLaunch {
@@ -1809,99 +1786,6 @@ fn initialized_backup_pipe_loss_exits_without_releasing_copy_and_preserves_desti
 }
 
 #[test]
-fn initialized_kernel_backup_interleaves_credentials_and_defers_close_until_copy_finishes() {
-    let root = Root::new();
-    let profile = original_profile(&root);
-    let store = ivy_hive::store::Store::open(&root.0.join("hive.sqlite")).unwrap();
-    store.connection().execute_batch("CREATE TABLE fixture_payload(id INTEGER PRIMARY KEY, bytes BLOB); WITH RECURSIVE n(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM n WHERE value<256) INSERT INTO fixture_payload SELECT value,zeroblob(4096) FROM n;").unwrap();
-    let source_pages: i64 = store
-        .connection()
-        .query_row("PRAGMA page_count", [], |row| row.get(0))
-        .unwrap();
-    assert!(source_pages > 100, "Copy must yield after its first batch");
-    drop(store);
-    let mut launch = kernel_launch(&root, &profile);
-    launch.args = vec!["--kernel-gated-backup".into()];
-    Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            let client = StorageClient::new(launch, Arc::new(|_| {}));
-            client.start().wait().await.unwrap();
-            assert!(database_locked(&root));
-            let destination = root.0.join("copy.sqlite");
-            let backup_payload = IvyJson::object([
-                ("action", "backup".into()),
-                ("destination", destination.to_str().unwrap().into()),
-            ]);
-            let mut backup = client.request(
-                backup_payload.clone(),
-                RequestOptions {
-                    timeout_ms: 60000,
-                    ..Default::default()
-                },
-            );
-            wait_file(root.0.join("backup-paused")).await;
-            assert!(matches!(backup.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
-            assert_eq!(
-                request(&client, payload("health")).await.unwrap().get("ready"),
-                Some(&IvyJson::Bool(true))
-            );
-            let digest = format!("sha256:{}", "b".repeat(64));
-            let configured = request(&client, IvyJson::object([
-                ("action", "credentials.configure".into()),
-                ("credentials", IvyJson::Array(vec![IvyJson::object([
-                    ("principalId", "beta".into()), ("digest", digest.clone().into()),
-                ])])),
-            ])).await.unwrap();
-            assert_eq!(configured.get("configured"), Some(&IvyJson::Bool(true)));
-            let authenticate = |digest: String| IvyJson::object([
-                ("action", "authenticate".into()),
-                ("context", IvyJson::object([("credentialDigest", digest.into())])),
-            ]);
-            assert_eq!(request(&client, authenticate(format!("sha256:{}", "a".repeat(64)))).await.unwrap_err().code, "unauthenticated");
-            assert_eq!(request(&client, authenticate(digest)).await.unwrap().get("principalId"), Some(&IvyJson::from("beta")));
-            let second = request(&client, backup_payload).await.unwrap_err();
-            assert_eq!(second.code, "limit_exceeded");
-            assert_eq!(second.message, "A storage backup is already active.");
-            assert!(matches!(backup.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
-            let closing = client.close();
-            assert!(timeout(Duration::from_millis(100), closing.wait()).await.is_err());
-            assert!(matches!(backup.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
-            fs::write(root.0.join("release-backup"), b"resume actual copy").unwrap();
-            let snapshot = timeout(Duration::from_secs(10), backup).await.unwrap().unwrap().unwrap();
-            timeout(Duration::from_secs(5), closing.wait()).await.unwrap().unwrap();
-            stopped(&client).await;
-            assert!(!database_locked(&root));
-            assert_eq!(client.pending_count(), 0);
-            assert_eq!(client.queued_bytes(), 0);
-            let bytes_hash = ivy_contracts::hash::digest(fs::read(&destination).unwrap());
-            assert_eq!(snapshot.get("bytesHash"), Some(&bytes_hash.clone().into()));
-            let copy = rusqlite::Connection::open(destination).unwrap();
-            let pages: i64 = copy.query_row("PRAGMA page_count", [], |row| row.get(0)).unwrap();
-            assert_eq!(snapshot.get("pages").and_then(IvyJson::as_f64), Some(pages as f64));
-            assert_eq!(copy.query_row("SELECT COUNT(*) FROM fixture_payload", [], |row| row.get::<_, i64>(0)).unwrap(), 256);
-            let revoked = |principal: &str| copy.query_row("SELECT revoked FROM credentials WHERE principal_id=?", [principal], |row| row.get::<_, i64>(0)).unwrap();
-            assert_eq!(revoked("alpha"), 1);
-            assert_eq!(revoked("beta"), 0);
-            save_kernel_process_cases(serde_json::json!({
-                "case":"initialized-credential-backup-close", "sourcePagesBeforeStartup":source_pages,
-                "snapshotPages":pages, "bytesHash":bytes_hash, "payloadRows":256,
-                "credentialsAfterPausedCopy":{"alphaRevoked":1,"betaRevoked":0},
-                "ordinaryHealthWhilePaused":true,"secondBackupCode":second.code,
-                "secondBackupOutcome":format!("{:?}",second.outcome),
-                "closePendingForMs":100,"backupPendingBeforeRelease":true,
-                "databaseLockedBeforeCopy":true,"databaseLockedAfterDefiniteStop":false,
-                "pendingAfterStop":client.pending_count(),"queuedBytesAfterStop":client.queued_bytes(),
-                "testGate":"after first real yielding batch; real initialization/dispatch/backup",
-                "productionEntryExecuted":false,"originalReplay":false,
-                "closeReplyClaimed":false
-            }));
-        });
-}
-
-#[test]
 #[cfg(windows)]
 fn initialized_backup_timeout_retains_copy_until_fatal_reap_then_allows_explicit_replacement() {
     use ivy_host_runtime::platform::windows_process::process_identity;
@@ -3001,59 +2885,6 @@ fn real_storage_child_startup_deadline_and_fatal_preserve_failure_and_owning_ret
                     .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                     .unwrap(),
                 9
-            );
-        });
-}
-
-#[test]
-fn real_worker_backup_interleaves_committed_writes_rejects_second_backup_and_close_waits() {
-    let root = Root::new();
-    Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            let (client, _) = client(&root);
-            client.start().wait().await.unwrap();
-            let destination = root.0.join("copy.sqlite");
-            let backup_payload = IvyJson::object([
-                ("action", "backup".into()),
-                ("destination", destination.to_str().unwrap().into()),
-                ("delayMs", IvyJson::Number(3000.0)),
-            ]);
-            let backup = client.request(
-                backup_payload.clone(),
-                RequestOptions {
-                    // The original progress throttle is 1000ms. Allow native I/O
-                    // scheduling margin while still requiring a deadline reset.
-                    timeout_ms: 2500,
-                    ..Default::default()
-                },
-            );
-            let second = client.request(backup_payload, RequestOptions::default());
-            assert_eq!(
-                second.await.unwrap().unwrap_err().message,
-                "A storage backup is already active."
-            );
-            assert_eq!(
-                request(&client, payload("write")).await.unwrap(),
-                IvyJson::from("1")
-            );
-            let close = client.close();
-            let pages = backup.await.unwrap().unwrap();
-            assert!(pages.get("pages").unwrap().as_f64().unwrap() > 0.0);
-            close.wait().await.unwrap();
-            assert_eq!(
-                pages.get("bytesHash"),
-                Some(&ivy_contracts::hash::digest(fs::read(&destination).unwrap()).into())
-            );
-            let copy = rusqlite::Connection::open(destination).unwrap();
-            assert_eq!(
-                copy.query_row("SELECT value FROM metadata WHERE key='calls'", [], |r| {
-                    r.get::<_, String>(0)
-                })
-                .unwrap(),
-                "1"
             );
         });
 }

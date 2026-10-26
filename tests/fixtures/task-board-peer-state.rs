@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use super::*;
 use ivy_task_board::{
     journal_store::ReadScopes,
@@ -35,22 +37,9 @@ impl OrchestrationPolicies for UnusedPolicies {
 
 #[tokio::test(flavor = "current_thread")]
 async fn peer_state_matches_original_paging_pins_paths_order_and_errors() {
-    let output = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-peer-state-oracle.mjs",
-        ])
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("task-board-peer-state-cases.json.gz"));
     let cases = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         MANAGEMENT_FRAME_BYTES,
     )
     .unwrap();

@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::*;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{
@@ -122,23 +124,9 @@ fn brief(value: &IvyJson) -> String {
 }
 #[tokio::test]
 async fn original_media_publication_admission_coverage_and_payload_recovery() {
-    let mut command = Command::new("node");
-    command
-        .arg("tests/secretary-rust/media-store-oracle.mjs")
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("media-store-cases.json.gz"));
     let corpus = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         32 * 1024 * 1024,
     )
     .unwrap();

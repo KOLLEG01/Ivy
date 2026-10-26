@@ -1,10 +1,11 @@
-//! Storage-owner feasibility checks. These qualify the native SQLite boundary,
-//! not the unfinished server. See worker-backup-online.test.ts for the wire cases.
+//! Native SQLite, storage-owner and local operator checks.
 
 #[path = "hive_storage_read.rs"]
 mod storage_read;
 #[path = "hive_reset_storage.rs"]
 mod reset_storage;
+#[path = "../fixtures/hive-storage-fixture.rs"]
+mod storage_fixture;
 #[path = "hive_store.rs"]
 mod store;
 

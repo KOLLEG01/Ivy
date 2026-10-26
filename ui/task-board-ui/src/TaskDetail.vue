@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { crossAgentComment, openQuestions } from '../../../services/task-board/src/runtime/conversation';
+import { crossAgentComment, openQuestions } from '../../../packages/ui-client/src/task-board';
 import {
   Alert,
   AlertDescription,

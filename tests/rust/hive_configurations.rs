@@ -1,5 +1,6 @@
 use super::*;
 use ivy_hive::{configurations::Configurations, objects};
+use std::collections::BTreeMap;
 
 fn text<'a>(value: &'a IvyJson, key: &str) -> IvyResult<&'a JsString> {
     value
@@ -129,27 +130,83 @@ fn mutation(
     }
     operation(method, params)
 }
+fn request_hash(step: &Value) -> String {
+    let mut arguments = IvyJson::from_serde(&step["params"]).unwrap();
+    super::super::object_write::apply_units(&mut arguments, step);
+    arguments.remove("mutationId");
+    ivy_contracts::hash::hash_json(&IvyJson::object([
+        (
+            "method",
+            format!("hostConfigurations.{}", step["method"].as_str().unwrap()).into(),
+        ),
+        ("arguments", arguments),
+    ]))
+    .unwrap()
+}
+fn history_cursor(row: &Value, step: &Value, boundary: &Value) -> String {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let mut identity =
+        json!({"method":"objects.history","objectId":row["value"]["items"][0]["objectId"]});
+    if let Some(limit) = step["params"].get("limit") {
+        identity["limit"] = limit.clone();
+    }
+    let query = ivy_contracts::hash::hash_json(&IvyJson::from_serde(&identity).unwrap()).unwrap();
+    let body = URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&json!({"boundary":boundary,"query":query})).unwrap());
+    let tag = ivy_contracts::hash::hmac_sha256(
+        b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        body.as_bytes(),
+    );
+    format!("{body}.{}", URL_SAFE_NO_PAD.encode(tag))
+}
 fn compare(steps: &[Value]) -> Value {
+    use super::super::object_create::{normalized, substitute};
     let root = Root::new();
-    // Obtain only language/date primitive observations in a warm-up store.
-    // Native UUIDv4 IDs are then bound into the unchanged original crypto API.
-    let observed = oracle(&root.0.join("observed.sqlite"), steps);
+    let expected = registry_reference(&root.0.join("reference.sqlite"), steps);
+    let mut expanded = steps.to_vec();
+    for step in &mut expanded {
+        step["identityTables"] = true.into();
+    }
     let actual = native_with_runtime(
         &root.0.join("native.sqlite"),
-        steps,
-        Some(&observed["registryRuntime"]),
+        &expanded,
+        Some(&expected["registryRuntime"]),
     );
-    let mut original = steps.to_vec();
-    for (index, step) in original.iter_mut().enumerate() {
-        if step["op"] == "configurations" && matches!(step["method"].as_str(), Some("put" | "save"))
+    assert_eq!(actual["rows"].as_array().unwrap().len(), steps.len());
+    assert_eq!(expected["rows"].as_array().unwrap().len(), steps.len());
+    let mut aliases = BTreeMap::new();
+    for (index, step) in steps.iter().enumerate() {
+        if step["op"] == "configurations"
+            && matches!(step["method"].as_str(), Some("put" | "save"))
+            && actual["rows"][index]["error"].is_null()
         {
-            if let Some(id) = actual["rows"][index]["value"]["objectId"].as_str() {
-                assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 4);
-                step["createdId"] = id.into();
+            let id = actual["rows"][index]["value"]["objectId"].as_str().unwrap();
+            assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 4);
+            aliases
+                .entry(id.to_owned())
+                .or_insert_with(|| format!("00000000-0000-4000-8000-{index:012x}"));
+        }
+    }
+    let mut requests = BTreeMap::new();
+    for (index, step) in steps.iter().enumerate() {
+        if actual["rows"][index]["error"].is_null() && step["params"]["mutationId"].is_string() {
+            let mut bound = step.clone();
+            if bound["identityBindings"].is_array() {
+                super::super::identity::bind(&mut bound, actual["rows"].as_array().unwrap());
+            }
+            let hashes = (
+                request_hash(&bound),
+                request_hash(&substitute(&bound, &aliases)),
+            );
+            if let Some(previous) = requests.insert(
+                bound["params"]["mutationId"].as_str().unwrap().to_owned(),
+                hashes.clone(),
+            ) {
+                assert_eq!(previous, hashes, "Receipt replay must preserve its request");
             }
         }
     }
-    let expected = oracle(&root.0.join("reference.sqlite"), &original);
+    let no_aliases = BTreeMap::new();
     for (index, (a, b)) in actual["rows"]
         .as_array()
         .unwrap()
@@ -157,10 +214,32 @@ fn compare(steps: &[Value]) -> Value {
         .zip(expected["rows"].as_array().unwrap())
         .enumerate()
     {
+        let mut a = a.clone();
+        if steps[index]["op"] == "configurations"
+            && steps[index]["method"] == "history"
+            && let Some(cursor) = b["value"]["nextCursor"].as_str()
+        {
+            use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+            let data: Value = serde_json::from_slice(
+                &URL_SAFE_NO_PAD
+                    .decode(cursor.split_once('.').unwrap().0)
+                    .unwrap(),
+            )
+            .unwrap();
+            // Authenticate the entire token against each real Object ID before aliasing it.
+            assert_eq!(cursor, history_cursor(b, &steps[index], &data["boundary"]));
+            assert_eq!(
+                a["value"]["nextCursor"],
+                history_cursor(&a, &steps[index], &data["boundary"])
+            );
+            a["value"]["nextCursor"] = cursor.into();
+        }
         assert_eq!(
-            a, b,
+            normalized(&a, &aliases, &requests, false),
+            normalized(b, &no_aliases, &requests, true),
             "Configuration trace {index} ({}/{})",
-            steps[index]["op"], steps[index]["method"]
+            steps[index]["op"],
+            steps[index]["method"]
         );
         if matches!(
             steps[index]["op"].as_str(),
@@ -178,7 +257,7 @@ fn compare(steps: &[Value]) -> Value {
     for key in ["definitions", "metadata", "topics"] {
         assert_eq!(actual[key], expected[key]);
     }
-    expected
+    actual
 }
 
 #[test]

@@ -1,8 +1,8 @@
 # Retention requirements
 
 Contract policy: [wire schema](schemas/hive-wire.schema.json).
-Implementation: [collector](../services/hive/src/retention.ts),
-[Object references](../services/hive/src/objects.ts), [mutation journal](../services/hive/src/store.ts).
+Implementation: [collector](../services/hive/rust/src/retention.rs),
+[Object references](../services/hive/rust/src/objects.rs), [mutation journal](../services/hive/rust/src/store.rs).
 Checks: [retention](../tests/retention.test.ts).
 
 - Each contract declares Object and revision retention. The latest registered family policy

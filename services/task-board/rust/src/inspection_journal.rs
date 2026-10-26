@@ -19,6 +19,16 @@ pub struct InspectionJournal<'a, 'db, R, P, C, I> {
     service_node_id: JsString,
 }
 
+fn owner_flag(value: Option<&Json>) -> bool {
+    match value {
+        Some(Json::Bool(value)) => *value,
+        Some(Json::Number(value)) => *value != 0.0 && !value.is_nan(),
+        Some(Json::String(value)) => !value.0.is_empty(),
+        Some(Json::Array(_) | Json::Object(_)) => true,
+        _ => false,
+    }
+}
+
 pub(crate) async fn verify_owner(
     client: &dyn RpcClient,
     principal_id: &JsString,
@@ -27,8 +37,8 @@ pub(crate) async fn verify_owner(
     let node = connection_owner(client, service_node_id).await?;
     if node.get("principalId").and_then(Json::as_js_string) == Some(principal_id)
         && node.get("serviceName") == Some(&Json::from("task-board"))
-        && node.get("connected").and_then(Json::as_bool) == Some(true)
-        && node.get("synced").and_then(Json::as_bool) == Some(true)
+        && owner_flag(node.get("connected"))
+        && owner_flag(node.get("synced"))
     {
         Ok(())
     } else {

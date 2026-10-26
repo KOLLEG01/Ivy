@@ -1,15 +1,17 @@
 # Hive settings backup and restore
 
 The Hive package includes a host-only offline command at
-`dist/services/hive/src/settings-recovery.js`. It is deliberately not an MCP
+`dist/native/<platform>/ivy-hive settings-recovery` (`ivy-hive.exe` on Windows). It is not an MCP
 operation. Stop the owning Hive process before using it. Keep every snapshot
 under a private directory: it contains the **entire Hive database, including
-secrets and non-settings data**. The command sets new snapshots to mode `0600`.
+secrets and non-settings data**. New snapshots use mode `0600` on POSIX hosts;
+Windows inherits the destination directory's access controls.
+Use absolute database paths.
 
 ```sh
-node dist/services/hive/src/settings-recovery.js backup STOPPED_HIVE.sqlite PRIVATE_BACKUP.sqlite
-node dist/services/hive/src/settings-recovery.js plan PRIVATE_BACKUP.sqlite STOPPED_HIVE.sqlite sha256:BACKUP_HASH
-node dist/services/hive/src/settings-recovery.js restore PRIVATE_BACKUP.sqlite STOPPED_HIVE.sqlite sha256:BACKUP_HASH PRIVATE_SAFETY.sqlite
+dist/native/linux-x64/ivy-hive settings-recovery backup STOPPED_HIVE.sqlite PRIVATE_BACKUP.sqlite
+dist/native/linux-x64/ivy-hive settings-recovery plan PRIVATE_BACKUP.sqlite STOPPED_HIVE.sqlite sha256:BACKUP_HASH
+dist/native/linux-x64/ivy-hive settings-recovery restore PRIVATE_BACKUP.sqlite STOPPED_HIVE.sqlite sha256:BACKUP_HASH PRIVATE_SAFETY.sqlite
 ```
 
 `backup` verifies format 4 and SQLite integrity, then prints the backup hash
@@ -20,6 +22,7 @@ snapshot of the target before changing it. It restores only missing Objects
 and all their revisions for these contracts:
 
 - `ivy/host-configuration`
+- `ivy/settings`
 - `agent/instructions`, `agent/mcp-configuration`, `agent/skills`
 - `secretary/configuration`, `secretary/assignment`
 

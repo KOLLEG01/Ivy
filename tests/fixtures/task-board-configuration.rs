@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use super::{Memory, Stored};
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, Outcome,
@@ -328,21 +330,8 @@ async fn configuration_and_discovery_match_original_defaults_guards_and_rpc_trac
     let bytes = if let Some(path) = std::env::var_os("IVY_TASK_BOARD_CONFIGURATION_FIXTURE") {
         std::fs::read(path).unwrap()
     } else {
-        let output = Command::new("node")
-            .args([
-                "--experimental-transform-types",
-                "--disable-warning=ExperimentalWarning",
-                "tests/fixtures/task-board-configuration-oracle.mjs",
-            ])
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        output.stdout
+        let output = reference_data::read(include_bytes!("task-board-configuration-cases.json.gz"));
+        output
     };
     let rows = parse(std::str::from_utf8(&bytes).unwrap(), MANAGEMENT_FRAME_BYTES).unwrap();
     for row in rows.as_array().unwrap() {

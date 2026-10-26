@@ -17,9 +17,10 @@ use ivy_sdk::{
     service::{ConnectionOptions, ServiceConnection},
 };
 use std::{
+    io::Read,
     path::PathBuf,
-    process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    process::Stdio,
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 use tokio::{
@@ -425,23 +426,20 @@ fn normalize(value: &Json) -> Json {
     replace(value, &ids)
 }
 
+fn corpus() -> &'static Json {
+    static DATA: OnceLock<Json> = OnceLock::new();
+    DATA.get_or_init(|| {
+        let mut text = String::new();
+        flate2::read::GzDecoder::new(include_bytes!("chat-diagnostic-cases.json.gz").as_slice())
+            .read_to_string(&mut text)
+            .unwrap();
+        parse(&text, usize::MAX).unwrap()
+    })
+}
+
 #[tokio::test]
-async fn diagnostic_tick_journal_and_failures_match_original_typescript() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = Command::new("node")
-        .current_dir(&root)
-        .arg("tests/rust/fixtures/chat-diagnostic-runtime-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    if let Some(path) = std::env::var_os("IVY_CHAT_DIAGNOSTIC_ORACLE_CAPTURE") {
-        std::fs::write(path, &output.stdout).unwrap();
-    }
-    let corpus = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+async fn diagnostic_tick_retains_grouping_localization_receipts_and_recovery() {
+    let corpus = corpus();
     let admission = ChatAdmission::new(corpus.required("definition").unwrap()).unwrap();
     let scope = text(&corpus, "scope");
     for case in array(&corpus, "cases") {
@@ -559,6 +557,7 @@ async fn diagnostic_tick_journal_and_failures_match_original_typescript() {
                     DiagnosticNotifications::with_clock(
                         &ops,
                         &main,
+                        true,
                         case.required("language")?.as_js_string().unwrap().clone(),
                         clock,
                     )
@@ -609,4 +608,77 @@ async fn diagnostic_tick_journal_and_failures_match_original_typescript() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn absent_and_false_settings_return_before_diagnostic_io_and_preserve_receipts() {
+    let corpus = corpus();
+    let admission = ChatAdmission::new(corpus.required("definition").unwrap()).unwrap();
+    let scope = text(corpus, "scope");
+    let case = array(corpus, "cases")
+        .iter()
+        .find(|case| text(case, "label") == "review-accepted")
+        .unwrap();
+    for enabled in [None, Some(false)] {
+        let mut settings = Json::object([
+            ("definition", admission.definition().clone()),
+            ("pollMs", Json::Number(1000.0)),
+        ]);
+        if let Some(enabled) = enabled {
+            settings.insert("diagnosticNotifications", enabled.into());
+        }
+        ivy_contracts::chat_schema::validate_chat("Settings", &settings).unwrap();
+        let fixture = Fixture::new(case.required("database").unwrap());
+        let client = Arc::new(Client {
+            control: Mutex::new(Control {
+                step: Json::Null,
+                calls: vec![],
+                page: 0,
+                options: RequestOptions::default(),
+            }),
+            connection: None,
+            close_reason: None,
+        });
+        let mut store = ChatStore::open(client.clone(), None, Some(fixture.0.clone()))
+            .await
+            .unwrap();
+        let state = store.diagnostic_notice_state(&scope).await.unwrap();
+        assert!(
+            !state.as_object().unwrap().is_empty(),
+            "Retained notice receipts must be present"
+        );
+        let operations = ChatOperations::new(&store, &admission).unwrap();
+        let notice_state = "pending".into();
+        let main = Main {
+            ops: &operations,
+            client: &client,
+            notice_state: &notice_state,
+        };
+        let options = RequestOptions::default();
+        options.cancellation.cancel();
+        DiagnosticNotifications::new(
+            &operations,
+            &main,
+            settings
+                .get("diagnosticNotifications")
+                .and_then(Json::as_bool)
+                == Some(true),
+        )
+        .tick(options)
+        .await
+        .unwrap();
+        assert!(client.control.lock().unwrap().calls.is_empty());
+        assert!(fixture.snapshots(&mut 0).is_empty());
+        assert_eq!(store.diagnostic_notice_state(&scope).await.unwrap(), state);
+        assert_eq!(fixture.operation_count(), 1);
+        store.close().await.unwrap();
+    }
+    let mut settings = Json::object([
+        ("definition", admission.definition().clone()),
+        ("pollMs", Json::Number(1000.0)),
+        ("diagnosticNotifications", true.into()),
+    ]);
+    ivy_contracts::chat_schema::validate_chat("Settings", &settings).unwrap();
+    settings.insert("diagnosticNotifications", "true".into());
+    assert!(ivy_contracts::chat_schema::validate_chat("Settings", &settings).is_err());
 }

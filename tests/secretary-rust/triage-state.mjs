@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
-import {load} from './inbox-fixtures.mjs';
-const {canonical,digest,hashJson,parseOperationId}=await load('packages/sdk/src/node.js');
+import {canonical,digest,hashJson,parseOperationId} from '../../dist/packages/sdk/src/node.js';
 const name=(kind,v)=>'triage-'+kind+'-'+hashJson(v).slice(7);
 export function normalizeTriage(state,input){
  for(const d of state.core)if(d.completedAt!==null){assert(Number.isSafeInteger(d.completedAt));assert(d.completedAt>=state.clockBounds[0]&&d.completedAt<=state.clockBounds[1]);d.completedAt='completed';}

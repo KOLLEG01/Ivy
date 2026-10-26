@@ -7,7 +7,7 @@ use std::cell::RefCell;
 mod contracts;
 #[path = "../fixtures/task-board-evidence-support.rs"]
 mod support;
-use support::oracle;
+use support::cases;
 
 #[path = "../fixtures/task-board-native-evidence.rs"]
 mod native_evidence;
@@ -52,8 +52,8 @@ impl BlobStore for Memory {
 }
 
 #[test]
-fn ordered_chunk_mechanics_match_original_typescript() {
-    let cases = oracle("cases", None);
+fn ordered_chunk_mechanics_match_original() {
+    let cases = cases("cases");
     for case in cases.as_array().unwrap() {
         let size = case["size"].as_u64().unwrap() as usize;
         let mutation = case["mutation"].as_str().unwrap();
@@ -110,7 +110,7 @@ fn ordered_chunk_mechanics_match_original_typescript() {
 
 #[test]
 fn canonical_decoding_matches_original_error_boundaries() {
-    for case in oracle("decode", None).as_array().unwrap() {
+    for case in cases("decode").as_array().unwrap() {
         let body: Vec<u8> = case["hex"]
             .as_str()
             .unwrap()

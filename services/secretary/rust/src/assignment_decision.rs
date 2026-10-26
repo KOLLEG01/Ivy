@@ -1,19 +1,10 @@
 //! Decode the retained assignment result without changing its UTF-16 text.
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse_utf16};
 fn whitespace(c: u16) -> bool {
-    char::from_u32(u32::from(c)).is_some_and(char::is_whitespace)
+    JsString::trim_ecmascript_units(&[c]).is_empty()
 }
 pub(crate) fn trimmed(text: &[u16]) -> &[u16] {
-    let start = text
-        .iter()
-        .position(|c| !whitespace(*c))
-        .unwrap_or(text.len());
-    let end = text
-        .iter()
-        .rposition(|c| !whitespace(*c))
-        .map(|i| i + 1)
-        .unwrap_or(start);
-    &text[start..end]
+    JsString::trim_ecmascript_units(text)
 }
 pub fn assignment_decision(answer: &JsString) -> IvyResult<IvyJson> {
     let mut units = trimmed(&answer.0);
@@ -34,10 +25,8 @@ pub fn assignment_decision(answer: &JsString) -> IvyResult<IvyJson> {
         }
     }
     let invalid = |message| IvyError::new("secretary_assignment_result_invalid", message);
-    let value = String::from_utf16(units)
-        .ok()
-        .and_then(|text| parse(&text, text.len()).ok())
-        .ok_or_else(|| invalid("The assignment did not return its required decision."))?;
+    let value = parse_utf16(units, usize::MAX)
+        .map_err(|_| invalid("The assignment did not return its required decision."))?;
     if value.as_object().is_none() {
         return Err(invalid("The assignment decision must be an object."));
     }

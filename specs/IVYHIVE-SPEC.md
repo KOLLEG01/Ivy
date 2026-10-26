@@ -24,8 +24,8 @@ MCP continues to use its standard single-message envelope.
 - Unsupported storage formats fail before readiness. SQLite transactions own consistency;
   services and UI code never open the Hive database.
 
-Sources: [server](../services/hive/src/server.ts), [OAuth](../services/hive/src/oauth.ts),
-[store](../services/hive/src/store.ts), [storage schema](../services/hive/src/storage-schema.ts).
+Sources: [server](../services/hive/rust/src), [OAuth](../services/hive/rust/src/oauth.rs),
+[store](../services/hive/rust/src/store.rs), [storage schema](../services/hive/rust/src).
 
 ## Contracts and Objects
 
@@ -51,7 +51,7 @@ Sources: [server](../services/hive/src/server.ts), [OAuth](../services/hive/src/
   is neither discoverable nor callable through MCP.
 - Multi-Object workflows require owner reconciliation; Hive is not a domain job engine.
 
-Sources: [Objects](../services/hive/src/objects.ts), [contract admission](../services/hive/src/registry.ts).
+Sources: [Objects](../services/hive/rust/src/objects.rs), [contract admission](../services/hive/rust/src/registry.rs).
 
 ## Reads and routing
 
@@ -63,7 +63,7 @@ Sources: [Objects](../services/hive/src/objects.ts), [contract admission](../ser
   cannot authorize contact. Explicit user interactions are unaffected.
 
 - Queries are bounded, typed and parameterized. Null/missing values, scalar comparisons and
-  literal substring matching follow the [query implementation](../services/hive/src/query.ts);
+  literal substring matching follow the [query implementation](../services/hive/rust/src/query.rs);
   no caller SQL, regex or implicit structured-value stringification is accepted.
   JSON queries may include complete documents at the selected revisions; their bytes count
   toward the same page bound and the cursor binds this option.
@@ -116,8 +116,8 @@ Sources: [Objects](../services/hive/src/objects.ts), [contract admission](../ser
   resource discovery and recovery rules. Service-specific search terms belong in its registry.
   Detail schemas include all reachable definitions, without unrelated definitions or truncation.
 
-Sources: [routing](../services/hive/src/live-routing.ts), [inventory](../services/hive/src/inventory.ts),
-[discovery](../services/hive/src/discovery.ts), [error contract](../packages/contracts/src/errors.ts).
+Sources: [routing](../services/hive/rust/src/live_routing.rs), [inventory](../services/hive/rust/src/inventory.rs),
+[discovery](../services/hive/rust/src/discovery.rs), [error contract](../packages/contracts/src/errors.ts).
 
 ## Events and apps
 
@@ -160,5 +160,5 @@ Sources: [routing](../services/hive/src/live-routing.ts), [inventory](../service
 - Console belongs to the Hive artifact and works without registered apps/providers.
   Host deployment reports are observations; the host journal remains authoritative.
 
-Sources: [events](../services/hive/src/events.ts), [apps](../services/hive/src/uis.ts),
+Sources: [events](../services/hive/rust/src/events.rs), [apps](../services/hive/rust/src/uis.rs),
 [transport checks](../tests/transports.test.ts), [storage checks](../tests/storage.test.ts).

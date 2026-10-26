@@ -20,9 +20,16 @@ fn native_urls_preserve_http_origins_forms_and_redirects() {
         ("https:", "example.com", "user", "pass", "#fragment")
     );
     let parts = url_components(&input).unwrap();
-    assert_eq!(parse_url(&"custom:opaque  ?q".into()).unwrap().href,"custom:opaque %20?q");
-    for (input,expected) in [("file://server/C:/base/","file://server/C:/base/"),("file://localhost/C:/base/","file:///C:/base/"),("file://C:/base/","file:///C:/base/")] {
-        assert_eq!(parse_url(&input.into()).unwrap().href,expected);
+    assert_eq!(
+        parse_url(&"custom:opaque  ?q".into()).unwrap().href,
+        "custom:opaque %20?q"
+    );
+    for (input, expected) in [
+        ("file://server/C:/base/", "file://server/C:/base/"),
+        ("file://localhost/C:/base/", "file:///C:/base/"),
+        ("file://C:/base/", "file:///C:/base/"),
+    ] {
+        assert_eq!(parse_url(&input.into()).unwrap().href, expected);
     }
     assert_eq!(
         (parts.origin.as_str(), parts.pathname.as_str()),
@@ -60,6 +67,26 @@ fn native_urls_preserve_http_origins_forms_and_redirects() {
     );
     assert!(parse_url(&"not an absolute url".into()).is_err());
     assert!(parse_url(&JsString(vec![0xd800])).is_err());
+    let mut surrogate = JsString::from("https://example.com/");
+    surrogate.0.push(0xd800);
+    assert_eq!(
+        parse_url(&surrogate).unwrap().href,
+        "https://example.com/%EF%BF%BD"
+    );
+    assert_eq!(
+        parse_url_with_base(&JsString(vec![0xd800]), &"https://example.com/".into())
+            .unwrap()
+            .href,
+        "https://example.com/%EF%BF%BD"
+    );
+    assert_eq!(
+        set_url_search_params(
+            &"https://example.com/".into(),
+            &[(JsString(vec![0xd800]), JsString(vec![0xdfff]))]
+        )
+        .unwrap(),
+        JsString::from("https://example.com/?%EF%BF%BD=%EF%BF%BD")
+    );
     for (input, expected) in [
         (
             "https://user%40example:secret@example.com/path?x=1#f",

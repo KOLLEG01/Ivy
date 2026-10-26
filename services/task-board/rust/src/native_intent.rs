@@ -89,11 +89,31 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
         Err(IvyError::new(code, message))
     }
 }
-fn parameters(value: &Json) -> IvyResult<Json> {
-    value
-        .as_object()
-        .map(|_| value.clone())
-        .ok_or_else(IvyError::internal)
+fn parameters(value: &Json) -> Json {
+    match value {
+        Json::Object(_) => value.clone(),
+        Json::Array(values) => Json::Object(
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| (index.to_string().into(), value.clone()))
+                .collect(),
+        ),
+        Json::String(value) => Json::Object(
+            value
+                .0
+                .iter()
+                .enumerate()
+                .map(|(index, unit)| {
+                    (
+                        index.to_string().into(),
+                        Json::String(JsString(vec![*unit])),
+                    )
+                })
+                .collect(),
+        ),
+        _ => Json::Object(vec![]),
+    }
 }
 fn task_input(text: JsString) -> Json {
     Json::object([
@@ -137,10 +157,10 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
             )?;
             let task =
                 Store::read(self.store, "task-board/task", run.required("taskId")?, true).await?;
-            let text = prompts.task_update_prompt(
+            let text = prompts.task_prompt(
                 &task.value,
                 string(run.required("owner")?, "serviceNodeId")?,
-                field(origin, "executionChangeRequested").as_bool() == Some(true),
+                origin.get("executionChangeRequested"),
             )?;
             (
                 "turn/steer",
@@ -160,7 +180,7 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
                 "Reattachment requires the saved primary thread on the selected native owner.",
             )?;
             definition = "threadResume";
-            let mut params = parameters(field(plan, "threadResume"))?;
+            let mut params = parameters(field(plan, "threadResume"));
             params.insert("threadId", primary.required("nativeId")?.clone());
             params.insert("excludeTurns", true.into());
             ("thread/resume", params)
@@ -178,7 +198,7 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
             )?;
             if primary.as_object().is_some() {
                 definition = "threadResume";
-                let mut params = parameters(field(plan, "threadResume"))?;
+                let mut params = parameters(field(plan, "threadResume"));
                 params.insert("threadId", primary.required("nativeId")?.clone());
                 params.insert("excludeTurns", true.into());
                 ("thread/resume", params)
@@ -207,7 +227,7 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
                     .to_vec()
             };
             input.push(task_input(text));
-            let mut params = parameters(field(plan, "turnStart"))?;
+            let mut params = parameters(field(plan, "turnStart"));
             params.insert("threadId", primary.required("nativeId")?.clone());
             params.insert("input", Json::Array(input));
             ("turn/start", params)

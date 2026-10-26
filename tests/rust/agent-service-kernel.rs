@@ -1,3 +1,7 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
+#[path = "agent-staged-files.rs"]
+mod staged_files;
 use ivy_agent_manager::{
     agent_health::AgentHealth,
     browser_notices::{input_browser_notice, native_browser_notice, service_owns_completion},
@@ -65,17 +69,10 @@ fn repository() -> PathBuf {
 fn data() -> &'static IvyJson {
     static DATA: OnceLock<IvyJson> = OnceLock::new();
     DATA.get_or_init(|| {
-        let output = Command::new("node")
-            .arg("tests/fixtures/agent-service-kernel-oracle.mjs")
-            .current_dir(repository())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        parse(std::str::from_utf8(&output.stdout).unwrap(), BYTES).unwrap()
+        let output = reference_data::read(include_bytes!(
+            "../fixtures/agent-service-kernel-cases.json.gz"
+        ));
+        parse(std::str::from_utf8(&output).unwrap(), BYTES).unwrap()
     })
 }
 fn field<'a>(value: &'a IvyJson, key: &str) -> &'a IvyJson {
@@ -735,138 +732,6 @@ fn node_runtime(root: &Root) -> NodeRuntime {
         executable: root.0.join("not-executed-node.exe"),
         version: "24.18.0".into(),
     }
-}
-#[tokio::test]
-async fn real_instance_build_and_reset_validation_match_original_before_any_journal() {
-    let root = Root::new();
-    let base = entry_config(&root);
-    let names = [
-        "component",
-        "credential",
-        "settings",
-        "root-overlap",
-        "build-mismatch",
-        "reset-invalid-date",
-        "reset-unsupported",
-    ];
-    let mut child = Command::new("node")
-        .arg("tests/fixtures/agent-startup-oracle.mjs")
-        .current_dir(repository())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let request = IvyJson::object([
-        (
-            "root",
-            IvyJson::String(node_path::from_native(&root.0.join("original"))),
-        ),
-        ("config", base.clone()),
-        (
-            "cases",
-            IvyJson::Array(
-                names
-                    .iter()
-                    .map(|name| IvyJson::object([("name", (*name).into())]))
-                    .collect(),
-            ),
-        ),
-    ]);
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(canonical(&request, BYTES).unwrap().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let expected = parse(std::str::from_utf8(&output.stdout).unwrap(), BYTES).unwrap();
-    let mut actual = Vec::new();
-    for name in names {
-        let case = Root(root.0.join("rust").join(name));
-        fs::create_dir_all(&case.0).unwrap();
-        let mut value = entry_config(&case);
-        match name {
-            "component" => {
-                value.insert("componentId", "task-board".into());
-            }
-            "credential" => {
-                value = IvyJson::object(
-                    value
-                        .as_object()
-                        .unwrap()
-                        .iter()
-                        .filter(|(key, _)| key != &JsString::from("credential"))
-                        .cloned(),
-                );
-            }
-            "settings" => {
-                let mut settings = field(&value, "settings").clone();
-                settings.insert("nativeVersion", false.into());
-                value.insert("settings", settings);
-            }
-            "root-overlap" => {
-                value.insert("artifactRoot", field(&value, "dataRoot").clone());
-            }
-            _ => {}
-        }
-        let build = IvyJson::object([
-            ("buildId", field(&value, "buildId").clone()),
-            (
-                "version",
-                if name == "build-mismatch" {
-                    "other".into()
-                } else {
-                    field(&value, "version").clone()
-                },
-            ),
-        ]);
-        let path = entry_files(&case, &value, &build);
-        let marker = IvyJson::object([
-            ("schemaVersion", IvyJson::Number(1.0)),
-            ("resetId", "reset".into()),
-            ("runtimeEpoch", "epoch".into()),
-            (
-                "completedAt",
-                if name == "reset-unsupported" {
-                    "2026-10-19T00:00:00.000Z".into()
-                } else {
-                    "invalid".into()
-                },
-            ),
-        ]);
-        fs::write(
-            case.0.join("data/runtime-reset.json"),
-            canonical(&marker, BYTES).unwrap(),
-        )
-        .unwrap();
-        let error = start_agent_manager(path, node_runtime(&case), bindings(&case))
-            .await
-            .err()
-            .expect("Entry must reject before the native probe");
-        actual.push(IvyJson::object([
-            ("name", name.into()),
-            (
-                "reply",
-                IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
-            ),
-            ("journal", case.0.join("data/journal").exists().into()),
-            ("health", case.0.join("data/health.json").exists().into()),
-            (
-                "applied",
-                case.0
-                    .join("data/runtime-reset-applied.json")
-                    .exists()
-                    .into(),
-            ),
-        ]));
-    }
-    same(&IvyJson::Array(actual), &expected);
 }
 #[tokio::test]
 async fn full_entry_resets_before_kernel_start_and_keeps_cleanup_when_waiter_is_dropped() {

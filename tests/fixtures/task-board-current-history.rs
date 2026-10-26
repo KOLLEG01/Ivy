@@ -48,6 +48,8 @@ struct Source {
     release: Notify,
     failure: Option<Failure>,
     recovery: bool,
+    receipt: Option<Result<Json, Failure>>,
+    reads: Cell<usize>,
 }
 impl Source {
     fn ready() -> Self {
@@ -57,6 +59,8 @@ impl Source {
             release: Notify::new(),
             failure: None,
             recovery: false,
+            receipt: None,
+            reads: Cell::new(0),
         }
     }
 }
@@ -85,8 +89,10 @@ impl HistoryQueries<Failure> for Source {
     }
 }
 impl ObjectReads<Failure> for Source {
-    async fn read(&self, _: Option<Json>) -> Result<Json, Failure> {
-        panic!("These closed graphs have no remote receipt or live task")
+    async fn read(&self, params: Option<Json>) -> Result<Json, Failure> {
+        assert_eq!(params, Some(Json::object([("objectId", "receipt".into())])));
+        self.reads.set(self.reads.get() + 1);
+        self.receipt.clone().expect("No remote receipt is bound")
     }
 }
 struct NoDocuments;
@@ -184,6 +190,122 @@ fn assert_released(db: &Connection) {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn current_history_delivery_veto_preserves_errors_and_receipts_under_row_and_byte_pressure() {
+    for bytes_only in [false, true] {
+        for state in [
+            "pending",
+            "outcome_unknown",
+            "confirmed",
+            "not_found",
+            "service_unavailable",
+        ] {
+            let db = Connection::open_in_memory().unwrap();
+            let mut operation = seed(&db);
+            operation.insert(
+                "writes",
+                Json::Array(vec![Json::object([
+                    ("contractKey", "task-board/delivery".into()),
+                    ("outcome", Json::object([("objectId", "receipt".into())])),
+                ])]),
+            );
+            db.execute(
+                "UPDATE revisions SET value_json=? WHERE id='closed'",
+                [canonical(&operation, usize::MAX).unwrap()],
+            )
+            .unwrap();
+            let reply = if ["not_found", "service_unavailable"].contains(&state) {
+                Err(Failure::from(IvyError::new(
+                    state,
+                    "Original remote receipt failure.",
+                )))
+            } else {
+                Ok(Json::object([
+                    (
+                        "object",
+                        Json::object([("contractKey", "task-board/delivery".into())]),
+                    ),
+                    (
+                        "content",
+                        Json::object([
+                            ("encoding", "json".into()),
+                            ("value", Json::object([("state", state.into())])),
+                        ]),
+                    ),
+                ]))
+            };
+            let source = Source {
+                receipt: Some(reply),
+                ..Source::ready()
+            };
+            let local = local(&db);
+            let collections = HistoryCollections::default();
+            let changes = db.total_changes();
+            LocalHistory::new(
+                &local,
+                &NoDocuments,
+                &source,
+                &collections,
+                HistoryLimits::default(),
+            )
+            .collect::<IvyError>(0, 0, None, None)
+            .await
+            .unwrap();
+            assert_eq!(db.total_changes(), changes);
+            assert_eq!(source.queries.get(), 0);
+            assert_eq!(source.reads.get(), 0);
+            let limits = if bytes_only {
+                HistoryLimits {
+                    count: 10000,
+                    bytes: 0,
+                }
+            } else {
+                HistoryLimits {
+                    count: 0,
+                    ..HistoryLimits::default()
+                }
+            };
+            let history = LocalHistory::new(&local, &NoDocuments, &source, &collections, limits);
+            let before = count(&db, "documents");
+            let result = history.collect::<IvyError>(0, 0, None, None).await;
+            if state == "service_unavailable" {
+                match result.unwrap_err().cause() {
+                    ReadCause::Ivy(error) => {
+                        assert_eq!(error.code, "service_unavailable");
+                        assert_eq!(error.message, "Original remote receipt failure.");
+                    }
+                    _ => panic!("Remote receipt failure was replaced"),
+                }
+            } else {
+                result.unwrap();
+            }
+            assert_eq!(source.reads.get(), 1);
+            let retired = ["confirmed", "not_found"].contains(&state);
+            assert_eq!(count(&db, "documents"), if retired { 0 } else { before });
+            assert_eq!(count(&db, "retired_operations"), i64::from(retired));
+            assert_eq!(count(&db, "retired_operation_receipts"), i64::from(retired));
+            if retired {
+                let receipt = local
+                    .retired_operation_receipt::<Failure>(
+                        Some(&"caller".into()),
+                        Some(&"original-id".into()),
+                    )
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    canonical(&receipt, usize::MAX).unwrap(),
+                    canonical(
+                        &operation_receipt::<IvyError>(&operation).unwrap(),
+                        usize::MAX
+                    )
+                    .unwrap()
+                );
+            }
+            assert_released(&db);
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn current_history_keeps_protected_graphs_and_retires_exact_receipts_atomically() {
     for mode in [
         "closed",
@@ -195,7 +317,7 @@ async fn current_history_keeps_protected_graphs_and_retires_exact_receipts_atomi
         "rollback",
     ] {
         let db = Connection::open_in_memory().unwrap();
-        let operation = seed(&db);
+        let mut operation = seed(&db);
         if mode == "completed-object" {
             let mut complete = operation.clone();
             complete.insert("phase", "succeeded".into());
@@ -209,6 +331,7 @@ async fn current_history_keeps_protected_graphs_and_retires_exact_receipts_atomi
                 [canonical(&complete, usize::MAX).unwrap()],
             )
             .unwrap();
+            operation = complete;
         }
         if mode == "unresolved" {
             row(
@@ -270,7 +393,7 @@ async fn current_history_keeps_protected_graphs_and_retires_exact_receipts_atomi
         } else {
             result.unwrap();
         }
-        if ["closed", "rollback"].contains(&mode) {
+        if ["closed", "completed-object", "rollback"].contains(&mode) {
             assert_eq!(count(&db, "documents"), 0);
             assert_eq!(count(&db, "retired_operations"), 1);
             assert_eq!(count(&db, "retired_operation_receipts"), 1);

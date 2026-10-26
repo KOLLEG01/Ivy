@@ -1,6 +1,6 @@
 use super::{
     AuthContext, AuthenticatedContext, IvyError, IvyJson, JsString, Root, Store,
-    native_with_runtime, oracle,
+    native_with_runtime,
 };
 use ivy_contracts::IvyResult;
 use ivy_hive::registry::{ConnectionContext, Registry};
@@ -461,27 +461,28 @@ fn heartbeat(id: &str, ready: bool, diagnostics: Vec<Value>) -> Value {
 fn diagnostic(code: &str, node: &str, status: &str, first: &str, last: &str) -> Value {
     json!({"code":code,"resource":{"serviceNodeId":node},"severity":"error","source":format!("service:{node}"),"firstObservedAt":first,"lastObservedAt":last,"status":status,"message":"Synthetic diagnostic."})
 }
+pub(super) fn registry_reference(_path: &std::path::Path, steps: &[Value]) -> Value {
+    static CASES: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let cases = CASES.get_or_init(|| {
+        serde_json::from_slice(&super::reference_data::read(include_bytes!(
+            "../fixtures/hive-registry-reference.json.gz"
+        )))
+        .unwrap()
+    });
+    let identity = ivy_contracts::hash::digest(serde_json::to_vec(steps).unwrap());
+    cases["traces"]
+        .get(&identity)
+        .unwrap_or_else(|| panic!("Missing original Hive registry fixture: {identity}"))
+        .clone()
+}
 fn compare(steps: &[Value]) -> Value {
     let root = Root::new();
-    let expected = oracle(&root.0.join("reference.sqlite"), steps);
+    let expected = registry_reference(&root.0.join("reference.sqlite"), steps);
     let actual = native_with_runtime(
         &root.0.join("native.sqlite"),
         steps,
         Some(&expected["registryRuntime"]),
     );
-    if let Some(path) = std::env::var_os("IVY_HIVE_REGISTRY_CORPUS") {
-        use std::io::Write;
-        writeln!(
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .unwrap(),
-            "{}",
-            json!({"steps": steps, "original": expected, "native": actual})
-        )
-        .unwrap();
-    }
     assert_eq!(actual["rows"].as_array().unwrap().len(), steps.len());
     for (index, (left, right)) in actual["rows"]
         .as_array()
@@ -1615,7 +1616,7 @@ fn registry_raw_utf16_identity_and_optional_catalog_boundaries() {
     // A null Diagnostic is outside the published schema. Keep native refusal,
     // rather than reproducing JavaScript's property access or healing coercion.
     let root = Root::new();
-    let observed = oracle(&root.0.join("reference.sqlite"), &steps);
+    let observed = registry_reference(&root.0.join("reference.sqlite"), &steps);
     let rows = native_with_runtime(
         &root.0.join("native.sqlite"),
         &steps,

@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_contracts::{
     IvyJson,
     json::{canonical, parse, stringify},
@@ -648,21 +650,8 @@ fn registry_requests_the_normative_host_and_wire_schema_roots() {
 #[test]
 fn bundled_tool_definitions_match_original_manager_exactly() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = std::process::Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/service-manager-registry-oracle.mjs",
-        ])
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let expected = json(std::str::from_utf8(&output.stdout).unwrap());
+    let output = reference_data::read(include_bytes!("../fixtures/service-manager-registry-cases.json.gz"));
+    let expected = json(std::str::from_utf8(&output).unwrap());
     let registry = registry::bundled_registry().unwrap();
     let actual = registry.required("namespaces").unwrap().as_array().unwrap()[0]
         .required("tools")

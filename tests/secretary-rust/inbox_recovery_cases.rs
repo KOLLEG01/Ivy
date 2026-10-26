@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::*;
 use ivy_contracts::{hash::hash_json, json::canonical};
 use ivy_secretary::{
@@ -47,23 +49,9 @@ impl RpcClient for RecoveryClient {
 
 #[tokio::test]
 async fn original_inbox_effect_recovery_and_bounded_scan() {
-    let mut command = std::process::Command::new("node");
-    command
-        .arg("tests/secretary-rust/inbox-recovery-oracle.mjs")
-        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command.output().expect("Original Node oracle required");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("inbox-recovery-cases.json.gz"));
     let corpus = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         32 * 1024 * 1024,
     )
     .unwrap();

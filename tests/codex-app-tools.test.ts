@@ -18,7 +18,7 @@ import {
   resolveAppToolsLaunch,
 } from "../packages/sdk/src/codex-app-tools.js";
 import { DatabaseSync } from "node:sqlite";
-import { preparePhoneVoiceArchive } from "../services/phone-bridge/src/runtime/desktop-voice-setup.js";
+import { preparePhoneVoiceArchive } from "../tools/operations/phone-voice-archive.js";
 
 const tools = [
   "list_projects",

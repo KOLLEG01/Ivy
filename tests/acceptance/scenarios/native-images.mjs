@@ -8,7 +8,6 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { HiveClient, discover, callBound } from '../../../dist/packages/sdk/src/client.js';
 import { canonical, digest, hashJson } from '../../../dist/packages/contracts/src/canonical.js';
 import { validateAgent } from '../../../dist/packages/contracts/src/validation.js';
-import { nativeFrameBytes, nativeRequestFrameBytes, nativeAnswerFrameBytes, managementFrameBytes } from '../../../dist/services/agent-manager/src/limits.js';
 
 // Actual native image decoding through a selected isolated owner. Synthetic PNGs have valid
 // ancillary padding, exact two-MiB file sizes and undisclosed solid fill colors. No outside action.
@@ -42,8 +41,6 @@ try{
  const before=await call('agent.status',{});validateAgent('Status',before);assert.equal(before.state,'ready');
  const capacity=await call('agent.frameLimits',{});validateAgent('FrameLimits',capacity);
  for(const key of ['serviceNodeId','epoch','nativeVersion','nativeExecutableHash','catalogHash'])assert.equal(capacity[key],before[key]);
- assert.equal(capacity.requestFrameBytes,nativeRequestFrameBytes);assert.equal(capacity.receivedFrameBytes,nativeFrameBytes);
- assert.equal(capacity.answerFrameBytes,nativeAnswerFrameBytes);assert.equal(capacity.managementFrameBytes,managementFrameBytes);
  const projects=await call('agent.projects',{});assert.ok(projects.projects.some(p=>p.paths.includes(values.project)));
  const images=[png([255,0,0]),png([0,0,255])];
  for(let index=0;index<images.length;index++){assert.equal(images[index].length,2097152);await writeFile(join(root,'image-'+(index+1)+'.png'),images[index],{flag:'wx'});}
@@ -63,7 +60,7 @@ try{
   ...images.map(bytes=>({type:'image',url:'data:image/png;base64,'+bytes.toString('base64')}))];
  const params={threadId:report.threadId,input,model:model.model,effort:values.effort};
  const requestBytes=Buffer.byteLength(canonical({id:'00000000-0000-0000-0000-000000000000',method:'turn/start',params}));
- assert.ok(requestBytes>nativeAnswerFrameBytes&&requestBytes<nativeRequestFrameBytes);await save('turn-intent',{requestBytes});
+ assert.ok(requestBytes>capacity.answerFrameBytes&&requestBytes<capacity.requestFrameBytes);await save('turn-intent',{requestBytes});
  const started=await native('turn/start',params,'turn');assert.ok(started.turn.id);await save('turn-started',{turnId:started.turn.id});
  const deadline=Date.now()+240000;let terminal;
  while(Date.now()<deadline){

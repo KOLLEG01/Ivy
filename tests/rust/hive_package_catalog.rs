@@ -1,6 +1,6 @@
 use super::*;
 use ivy_hive::package_catalog_object::PackageCatalogObject;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 type Protected = fn(&Store) -> ivy_contracts::IvyResult<HashSet<JsString>>;
 #[derive(Default)]
@@ -153,80 +153,145 @@ fn publish(component: &str, version: &str, kind: &str) -> Value {
         json!({"authorization":authorization(component,version,kind)}),
     )
 }
-fn compare(steps: &[Value]) -> Value {
-    let root = Root::new();
-    let observed = steps
-        .iter()
-        .any(|step| step["op"] == "retention")
-        .then(|| oracle(&root.0.join("observed.sqlite"), steps));
-    let actual = if let Some(observed) = observed.as_ref() {
-        // Only the existing Date/locale primitive observations cross this seam.
-        native_with_runtime(
-            &root.0.join("native.sqlite"),
-            steps,
-            Some(&observed["retentionRuntime"]),
-        )
-    } else {
-        native(&root.0.join("native.sqlite"), steps)
-    };
-    let mut original = steps.to_vec();
+pub(super) fn catalog_receipts(
+    steps: &[Value],
+    actual_rows: &[Value],
+    aliases: &mut BTreeMap<String, String>,
+    requests: &mut BTreeMap<String, (String, String)>,
+) {
+    use super::object_create::{request_hash, substitute};
     let mut prior = 0;
-    for (index, step) in original.iter_mut().enumerate() {
-        let mutations = actual["rows"][index]["catalogMutations"]
-            .as_array()
-            .unwrap();
-        if step["op"] == "packageCatalog" {
-            let mut ids = vec![];
-            if mutations.len() > prior {
-                assert_eq!(mutations.len(), prior + 1);
-                let nonce = mutations.last().unwrap()["mutation_id"]
-                    .as_str()
-                    .unwrap()
-                    .rsplit(':')
-                    .next()
-                    .unwrap();
-                assert_eq!(uuid::Uuid::parse_str(nonce).unwrap().get_version_num(), 4);
-                ids.push(nonce.to_owned());
-                if step["method"] == "seed" {
-                    let id = actual["rows"][index]["value"]["objectId"].as_str().unwrap();
-                    assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 4);
-                    ids.push(id.to_owned());
-                }
-            } else {
-                // Entropy from a rolled-back operation has no durable identity.
-                // Give the reference valid unique primitive values, not outcomes.
-                ids.push(format!("00000000-0000-4000-8000-{index:012}"));
-                ids.push(format!("00000000-0001-4000-8000-{index:012}"));
+    for (index, step) in steps.iter().enumerate() {
+        let row = &actual_rows[index];
+        let Some(mutations) = row["catalogMutations"].as_array() else {
+            continue;
+        };
+        let method = match step["op"].as_str() {
+            Some("packageCatalog") => step["method"].as_str(),
+            Some("packageKernel") => step["params"]["message"]["action"]
+                .as_str()
+                .and_then(|action| action.strip_prefix("package.")),
+            Some("worker") => step["payload"]["action"]
+                .as_str()
+                .and_then(|action| action.strip_prefix("package.")),
+            _ => None,
+        };
+        if mutations.len() > prior && matches!(method, Some("seed" | "publish" | "prune")) {
+            assert_eq!(mutations.len(), prior + 1);
+            let method = method.unwrap();
+            let id = mutations.last().unwrap()["mutation_id"].as_str().unwrap();
+            let nonce = id.rsplit(':').next().unwrap();
+            assert_eq!(uuid::Uuid::parse_str(nonce).unwrap().get_version_num(), 4);
+            assert!(
+                aliases
+                    .insert(
+                        nonce.to_owned(),
+                        format!("00000000-0000-4000-8000-{index:012x}")
+                    )
+                    .is_none()
+            );
+            let object = row["state"]["objects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|object| object["contract_key"] == "ivy/package-catalog")
+                .unwrap();
+            let object_id = object["id"].as_str().unwrap();
+            let revision = object["current_revision"].as_u64().unwrap();
+            if method == "seed" {
+                assert_eq!(revision, 1);
+                assert_eq!(
+                    uuid::Uuid::parse_str(object_id).unwrap().get_version_num(),
+                    4
+                );
+                assert!(
+                    aliases
+                        .insert(
+                            object_id.to_owned(),
+                            format!("00000000-0001-4000-8000-{index:012x}")
+                        )
+                        .is_none()
+                );
             }
-            step["uuids"] = json!(ids);
+            let revisions: Value = serde_json::from_str(
+                row["state"]["identityTables"]["revisions"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            let written = revisions
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|record| record[1] == object_id && record[2] == revision)
+                .unwrap();
+            assert_eq!(written[4], "1.0.3");
+            assert_eq!(written[5], "json");
+            let catalog: Value = serde_json::from_str(written[6].as_str().unwrap()).unwrap();
+            let mut params = json!({"mutationId":id,"contractVersion":"1.0.3","references":{},"content":{"encoding":"json","value":catalog}});
+            if method == "seed" {
+                params["create"] = json!({"contractKey":"ivy/package-catalog","parentId":null,"ownerObjectId":null,"name":"Ivy package catalog"});
+            } else {
+                params["objectId"] = object_id.into();
+                params["expectedRevision"] = (revision - 1).into();
+            }
+            // Reconstruct the committed write identity; both raw hashes are checked before aliasing.
+            let request = json!({"op":"write","mode":"hive","method":format!("packages.catalog.{method}"),"params":params});
+            let fixed = substitute(&request, &aliases);
+            let hashes = (request_hash(&request), request_hash(&fixed));
+            assert!(requests.insert(id.to_owned(), hashes.clone()).is_none());
+            assert!(
+                requests
+                    .insert(
+                        fixed["params"]["mutationId"].as_str().unwrap().to_owned(),
+                        hashes
+                    )
+                    .is_none()
+            );
         }
         prior = mutations.len();
     }
-    let expected = oracle(&root.0.join("reference.sqlite"), &original);
-    for (index, (a, b)) in actual["rows"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .zip(expected["rows"].as_array().unwrap())
-        .enumerate()
-    {
+}
+pub(super) fn compare(steps: &[Value]) -> Value {
+    use super::object_create::normalized;
+    let root = Root::new();
+    let expected = reference(&root.0.join("original.sqlite"), steps);
+    let mut expanded = steps.to_vec();
+    for step in &mut expanded {
+        step["identityTables"] = true.into();
+    }
+    let actual = native_with_runtime(
+        &root.0.join("native.sqlite"),
+        &expanded,
+        expected.get("retentionRuntime"),
+    );
+    let actual_rows = actual["rows"].as_array().unwrap();
+    let original_rows = expected["rows"].as_array().unwrap();
+    assert_eq!(actual_rows.len(), steps.len());
+    assert_eq!(original_rows.len(), steps.len());
+    let mut aliases = BTreeMap::new();
+    let mut requests = BTreeMap::new();
+    catalog_receipts(steps, actual_rows, &mut aliases, &mut requests);
+    let no_aliases = BTreeMap::new();
+    for (index, (a, b)) in actual_rows.iter().zip(original_rows).enumerate() {
         assert_eq!(
-            a, b,
-            "Package catalog trace {index} ({}/{})",
-            steps[index]["op"], steps[index]["method"]
+            normalized(a, &aliases, &requests, false),
+            normalized(b, &no_aliases, &requests, true),
+            "Package step {index}: {}",
+            steps[index]
         );
         if steps[index]["op"] == "sql" || steps[index]["requireSuccess"] == true {
             assert!(
-                b["error"].is_null(),
+                a["error"].is_null(),
                 "Fixture setup {index}: {}",
-                b["error"]
+                a["error"]
             );
         }
     }
     for key in ["definitions", "metadata", "topics"] {
         assert_eq!(actual[key], expected[key]);
     }
-    expected
+    actual
 }
 fn value(r: &Value, i: usize) -> &Value {
     &r["rows"][i]["value"]

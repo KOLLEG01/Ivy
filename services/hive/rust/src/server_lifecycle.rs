@@ -272,12 +272,12 @@ impl Lifecycle {
     }
     fn start_health(&self) {
         let this = self.clone();
-        let start = Instant::now() + Duration::from_secs(10);
+        let period = Duration::from_secs(10);
+        let mut deadline = Instant::now() + period;
         let task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval_at(start, Duration::from_secs(10));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                interval.tick().await;
+                tokio::time::sleep_until(deadline).await;
+                deadline = Instant::now() + period;
                 if let Err(error) = this.0.owners.peers.health() {
                     (this.0.owners.unhandled)(UnhandledKind::Callback, error);
                 }
@@ -361,7 +361,12 @@ impl Lifecycle {
                 self.0.owners.peers.changes(&scopes)
             }
             Event::Notification(Notification::EventsAvailable(value)) => {
-                self.events_available(value.as_f64().unwrap_or(f64::NAN));
+                self.events_available(
+                    value
+                        .get("throughSequence")
+                        .and_then(IvyJson::as_f64)
+                        .unwrap_or(f64::NAN),
+                );
                 Ok(())
             }
         };

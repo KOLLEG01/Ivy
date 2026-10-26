@@ -1,8 +1,16 @@
 # Deployment and configuration
 
 Contracts: [component manifest](schemas/component.schema.json), [host schema](schemas/host.schema.json).
-Implementation: [host runtime](../packages/host-runtime/src), [build tooling](../tools/build).
+Implementation: [host runtime](../packages/host-runtime/rust/src), [build tooling](../tools/build).
 Local commands and operating procedure: [host operations](#local-host-operations).
+
+`npm run build` prepares the native services, public Node SDK and Web apps.
+`npm run build:backend` and `npm run build:native` prepare all native services;
+`npm run build:deployment -- --all` also builds the Web apps. All use the same
+[native coordinator](../tools/build/build-native-deployment.mjs).
+For one component, use `npm run build:deployment -- --component chat-bridge` or
+`npm run dev -- --component chat-bridge` (the latter also runs its focused tests).
+Intentional Node SDK consumers and user scripts remain supported.
 
 ## Releases
 
@@ -93,14 +101,14 @@ their native executables directly.
   Markers bind instance ID and JSON Pointer; arrays are protected as complete values.
   Browser Object reads must not bypass this projection or expose secrets through queries.
 
-See [configuration reconciliation](../packages/host-runtime/src/configuration-updater.ts),
-[change hints](../services/service-manager/src/main.ts) and
-[browser projection](../services/hive/src/configurations.ts).
+See [configuration reconciliation](../packages/host-runtime/rust/src/configuration_updater.rs),
+[change hints](../services/service-manager/rust/src) and
+[browser projection](../services/hive/rust/src/configurations.rs).
 
 ### Service defaults
 
-The host [configuration resolver](../packages/host-runtime/src/layout.ts) applies
-[portable service settings](../packages/host-runtime/src/default-settings.ts) to
+The host [configuration resolver](../packages/host-runtime/rust/src/layout.rs) applies
+[portable service settings](../packages/host-runtime/rust/src/default_settings.rs) to
 omitted fields. Explicit values, including empty lists, `false` and `null`, win.
 Unknown extension settings pass through unchanged. Defaults do not add or enable
 instances. Use a separate account or explicit directories when sharing a host.

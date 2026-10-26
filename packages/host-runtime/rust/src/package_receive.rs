@@ -10,7 +10,15 @@ fn require(value:bool,code:&str,message:&str)->IvyResult<()>{if value{Ok(())}els
 fn archive_error(error: io::Error) -> IvyError {
     if error.kind() == io::ErrorKind::TimedOut {
         IvyError::new("deadline_exceeded", "Package archive exceeded its finite deadline.").with_outcome(crate::Outcome::Unknown)
-    } else { IvyError::new("artifact_changed", "Package archive headers are invalid.") }
+    } else {
+        // Preserve the v1 default extractor's malformed tar/gzip failure envelope.
+        IvyError::new("command_failed", "Command failed; bounded diagnostics record the outcome.")
+            .with_outcome(crate::Outcome::Unknown)
+            .with_details(IvyJson::object([
+                ("exitCode", IvyJson::Number(if cfg!(target_os = "linux") { 2.0 } else { 1.0 })),
+                ("signal", IvyJson::Null),
+            ]))
+    }
 }
 fn default_tar() -> PathBuf {
     if cfg!(windows) { PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into())).join("System32/tar.exe") }

@@ -20,10 +20,6 @@ use ivy_hive::{
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
-    fs::OpenOptions,
-    io::Write,
-    path::Path,
-    process::{Command, Stdio},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -132,7 +128,10 @@ impl Storage for Fixture {
                     IvyJson::object([
                         ("timeoutMs", IvyJson::Number(options.timeout_ms as f64)),
                         ("terminateOnTimeout", options.terminate_on_timeout.into()),
-                        ("reservedBytes", IvyJson::Number(options.reserved_bytes as f64)),
+                        (
+                            "reservedBytes",
+                            IvyJson::Number(options.reserved_bytes as f64),
+                        ),
                         ("backup", options.backup.into()),
                     ]),
                 ),
@@ -528,7 +527,7 @@ async fn native(trace: &Value) -> Value {
                     &step["value"],
                 )))),
                 "events" => worker_events(Event::Notification(Notification::EventsAvailable(
-                    wire(&step["through"]),
+                    IvyJson::object([("throughSequence", wire(&step["through"]))]),
                 ))),
                 "changes" => worker_events(Event::Notification(Notification::Changes(
                     step["scopes"]
@@ -611,34 +610,8 @@ async fn native(trace: &Value) -> Value {
     }
     Value::Array(rows)
 }
-fn original(traces: &[Value]) -> Vec<Value> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut child =
-        Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
-            .arg("tests/fixtures/hive-server-lifecycle-oracle.mjs")
-            .current_dir(root)
-            .env("NODE_NO_WARNINGS", "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(serde_json::to_string(traces).unwrap().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).unwrap()
-}
 fn compare(group: &str, traces: Vec<Value>) {
-    let old = original(&traces);
+    let old = super::lifetime_reference("lifecycle", &traces);
     assert_eq!(old.len(), traces.len());
     for (input, original) in traces.into_iter().zip(old) {
         let native = Builder::new_current_thread()
@@ -647,18 +620,9 @@ fn compare(group: &str, traces: Vec<Value>) {
             .build()
             .unwrap()
             .block_on(native(&input));
-        if let Some(path) = std::env::var_os("IVY_HIVE_LIFECYCLE_CORPUS") {
-            let line = json!({"group":group,"input":input,"original":original,"native":native});
-            writeln!(
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                    .unwrap(),
-                "{line}"
-            )
-            .unwrap();
-        }
+        let steps = input["steps"].as_array().unwrap().len();
+        assert_eq!(original.as_array().unwrap().len(), steps);
+        assert_eq!(native.as_array().unwrap().len(), steps);
         assert_eq!(native, original, "lifecycle group={group} input={input}");
     }
 }

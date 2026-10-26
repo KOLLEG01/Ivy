@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_chat_bridge::{admission::ChatAdmission, input_media::admitted_native_input};
 use ivy_contracts::{IvyError, IvyJson as Json, Outcome, json::parse};
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
@@ -37,17 +39,8 @@ impl RpcClient for Reader {
 }
 #[tokio::test]
 async fn original_image_pins_bytes_and_container_admission_match_typescript() {
-    let output = Command::new("node")
-        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .args(["tests/rust/fixtures/chat-admission-oracle.mjs", "media"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let rows = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let output = reference_data::read(include_bytes!("fixtures/chat-admission-media-cases.json.gz"));
+    let rows = parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap();
     for (index, row) in rows.as_array().unwrap().iter().enumerate() {
         let admission = ChatAdmission::new(row.get("definition").unwrap()).unwrap();
         let client = Reader {

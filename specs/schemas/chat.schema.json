@@ -133,6 +133,9 @@
             "en",
             "de"
           ]
+        },
+        "diagnosticNotifications": {
+          "type": "boolean"
         }
       },
       "required": [

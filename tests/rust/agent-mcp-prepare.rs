@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_agent_manager::mcp_prepare::prepare_mcp;
 use ivy_contracts::{
     IvyError, IvyJson, Outcome,
@@ -47,18 +49,9 @@ impl RpcClient for Client {
 }
 #[tokio::test]
 async fn preparation_order_failures_and_output_identity_match_original_manager() {
-    let output = Command::new("node")
-        .arg("tests/fixtures/agent-mcp-prepare-oracle.mjs")
-        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("../fixtures/agent-mcp-prepare-cases.json.gz"));
     let data = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         2 * 1024 * 1024,
     )
     .unwrap();

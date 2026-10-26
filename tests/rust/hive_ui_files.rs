@@ -5,6 +5,8 @@ use ivy_hive::{ui_files::UiFiles, ui_security, uis};
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
+    io::Write,
+    process::{Command, Stdio},
 };
 #[path = "hive_ui_collection_causes.rs"]
 mod collection_causes;
@@ -277,7 +279,9 @@ fn compare(steps: &[Value]) -> Value {
 }
 fn compare_at(native_path: &Path, reference_path: &Path, steps: &[Value]) -> Value {
     let actual = native(native_path, steps);
-    let expected = oracle(reference_path, steps);
+    let expected = registry::registry_reference(reference_path, steps);
+    assert_eq!(actual["rows"].as_array().unwrap().len(), steps.len());
+    assert_eq!(expected["rows"].as_array().unwrap().len(), steps.len());
     for (index, (a, b)) in actual["rows"]
         .as_array()
         .unwrap()

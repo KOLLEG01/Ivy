@@ -3,6 +3,8 @@ use ivy_contracts::{
     json::{canonical, parse},
     limits::MANAGEMENT_FRAME_BYTES,
 };
+#[path = "reference-data.rs"]
+mod reference_data;
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use ivy_store::rusqlite::{Connection, params, types::ValueRef};
 use ivy_task_board::{
@@ -10,8 +12,7 @@ use ivy_task_board::{
     local_retention::{HistoryLimits, LocalRetention},
 };
 use std::{
-    path::{Path, PathBuf},
-    process::Command,
+    path::PathBuf,
     sync::Mutex,
 };
 
@@ -192,22 +193,9 @@ fn snapshot(db: &Connection, tables: &Json) -> Json {
 
 #[tokio::test]
 async fn graph_collection_matches_original_retention_references_and_recovery() {
-    let output = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-retention-oracle.mjs",
-        ])
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("task-board-retention-cases.json.gz"));
     let fixtures = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         MANAGEMENT_FRAME_BYTES,
     )
     .unwrap();

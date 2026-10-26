@@ -59,6 +59,10 @@ impl Contracts for Policy {
             "task-board/task" => {
                 // The normative full current Task overlay remains an integration gate.
                 // Admit this fixture's unchanged static fields and finite lifecycle projections.
+                if v.get("runtimeWait").is_some() {
+                    assert!(v.get("waiting").is_none());
+                    assert!(f(v, "fields").get("nextReviewAt").is_none());
+                }
                 let dynamic = [
                     "primaryResourceRef",
                     "publication",
@@ -66,6 +70,7 @@ impl Contracts for Policy {
                     "lastHistory",
                     "workflowState",
                     "waiting",
+                    "runtimeWait",
                     "acceptedReview",
                     "fields",
                 ];
@@ -178,18 +183,27 @@ async fn retained_lifecycle_survives_actual_partial_publication_reopen_and_repla
         "task-board-lifecycle-{}.sqlite",
         uuid::Uuid::new_v4()
     )));
-    let group = data().as_array().unwrap().last().unwrap();
-    let row = group
-        .required("rows")
-        .unwrap()
+    let (group, row) = data()
         .as_array()
         .unwrap()
         .iter()
-        .find(|r| {
-            s(r, "name")
-                == &JsString::from("retained terminal call avoids preparation and inspection")
+        .rev()
+        .find_map(|group| {
+            let row = group
+                .required("rows")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| {
+                    s(r, "name")
+                        == &JsString::from(
+                            "retained terminal call avoids preparation and inspection",
+                        )
+                })?;
+            Some((group, row))
         })
-        .unwrap();
+        .expect("The retained original lifecycle case must be present.");
     let task = row
         .required("initial")
         .unwrap()

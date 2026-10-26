@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::snapshot;
 use ivy_chat_bridge::{
     generation::{ChatGeneration, ChatGenerationLease},
@@ -603,17 +605,8 @@ async fn apply(
 }
 #[tokio::test]
 async fn original_runtime_lanes_input_events_and_shutdown_match() {
-    let output = Command::new("node")
-        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .arg("tests/rust/fixtures/chat-whatsapp-runtime-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let oracle = json(&String::from_utf8(output.stdout).unwrap());
+    let output = reference_data::read(include_bytes!("fixtures/chat-whatsapp-runtime-cases.json.gz"));
+    let oracle = json(&String::from_utf8(output).unwrap());
     let mut rows = Vec::new();
     for spec in f(&oracle, "specs").as_array().unwrap() {
         let journal = Journal::new(JournalIo::open(":memory:").unwrap());

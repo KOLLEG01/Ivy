@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::*;
 use ivy_contracts::json::canonical;
 use ivy_sdk::clock::Clock;
@@ -89,23 +91,9 @@ fn poll_pending<T>(future: std::pin::Pin<&mut impl Future<Output = T>>) {
 #[tokio::test]
 async fn original_engine_constructor_fixed_epoch_and_independent_reads() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut command = std::process::Command::new("node");
-    command
-        .arg("tests/secretary-rust/engine-epoch-oracle.mjs")
-        .current_dir(root);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("engine-epoch-cases.json.gz"));
     let corpus = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         4 * 1024 * 1024,
     )
     .unwrap();

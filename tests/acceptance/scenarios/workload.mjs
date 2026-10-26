@@ -7,19 +7,20 @@ import { fork, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
 import { createReadStream } from 'node:fs';
-import { mkdir, readFile, writeFile, rename, readdir, copyFile, stat, statfs } from 'node:fs/promises';
-import { resolve, join, sep, relative } from 'node:path';
+import { mkdir, readFile, writeFile, rename, readdir, copyFile, stat, statfs, cp } from 'node:fs/promises';
+import { resolve, join, sep, relative, dirname } from 'node:path';
 import { hostname, cpus, totalmem, freemem, release } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { parseArgs } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from '@playwright/test';
-import { HiveClient } from '../../../dist/packages/sdk/src/client.js';
+import { HiveClient, deriveOperationId, newOperationId } from '../../../dist/packages/sdk/src/client.js';
 import { ServiceClient } from '../../../dist/packages/sdk/src/service.js';
 import { canonical, digest } from '../../../dist/packages/contracts/src/canonical.js';
 import { requestPacer } from '../support/request-pacing.mjs';
+import { artifactRoot, nativeExecutable } from '../../../tools/testing/native-service.mjs';
 
-const args = parseArgs({ options: { root: { type: 'string' }, smoke: { type: 'boolean' }, resume: { type: 'boolean' } }, strict: true }).values;
+const args = parseArgs({ options: { root: { type: 'string' }, 'hive-artifact': { type: 'string' }, smoke: { type: 'boolean' }, resume: { type: 'boolean' } }, strict: true }).values;
 assert.ok(args.root, 'An explicit isolated root is required.');
 const root = resolve(args.root), allowed = resolve('.local/workload');
 assert.ok(root.startsWith(allowed + sep) && root !== allowed, 'Workload data must stay under this checkout/.local/workload.');
@@ -37,7 +38,13 @@ async function inventory(dir) {
   }
   return entries.sort(([a], [b]) => a.localeCompare(b, 'en'));
 }
-const runtime = (await Promise.all(['dist/services/hive', 'dist/packages/contracts', 'dist/packages/sdk', 'dist/console'].map(path => inventory(resolve(path))))).flat();
+const hiveSource = artifactRoot('hive', args['hive-artifact']);
+const nativeNames = ['ivy-hive', 'ivy-health', ...(process.platform === 'win32' ? ['ivy-job'] : [])];
+const nativeFiles = nativeNames.map(name => nativeExecutable(hiveSource, name));
+const runtime = [
+  ...await Promise.all(nativeFiles.map(async path => [relative(resolve('.'), path).replaceAll('\\', '/'), await fileHash(path)])),
+  ...(await Promise.all([resolve(hiveSource, 'dist/console'), resolve('dist/packages/contracts'), resolve('dist/packages/sdk')].map(inventory))).flat(),
+];
 const identity = { runtimeHash: digest(canonical(runtime)), lockHash: await fileHash('package-lock.json'), runnerHash: await fileHash('tests/acceptance/scenarios/workload.mjs'), pacingHash: await fileHash('tests/acceptance/support/request-pacing.mjs'), childHash: await fileHash(childFile) };
 let seed;
 if (args.resume) {
@@ -50,16 +57,27 @@ if (args.resume) {
   seed = { id: randomUUID(), token: randomBytes(32).toString('base64url'), profile, identity, port, createdAt: now() };
   await atomic(join(root, 'seed.json'), seed);
 }
+// Runtime data and the immutable native artifact need disjoint roots.
+const hiveArtifact = join(root, 'artifact');
+if (!args.resume) {
+  for (const file of [...nativeFiles, join(hiveSource, 'dist/build-info.json')]) {
+    const destination = join(hiveArtifact, relative(hiveSource, file));
+    await mkdir(dirname(destination), { recursive: true }); await copyFile(file, destination, 1);
+  }
+  await cp(join(hiveSource, 'dist/console'), join(hiveArtifact, 'dist/console'), { recursive: true, errorOnExist: true, force: false });
+}
 const base = `http://127.0.0.1:${seed.port}/ivy`, origin = new URL(base).origin, principalId = 'isolated-workload';
 const attempt = randomUUID(), attemptRoot = join(root, 'attempts', attempt);
 await mkdir(attemptRoot, { recursive: true });
 const storage = await statfs(root);
+let sourceCommit = null;
+try { sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch {}
 const report = { schemaVersion: 1, kind: 'isolated-reference-workload', smoke: !!args.smoke, attempt, datasetId: seed.id, startedAt: now(), ok: false,
-  sourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), identity, build: JSON.parse(await readFile('dist/build-info.json', 'utf8')),
+  sourceCommit, identity, build: JSON.parse(await readFile(join(hiveArtifact, 'dist/build-info.json'), 'utf8')),
   profile, hardware: { host: hostname(), platform: process.platform, arch: process.arch, osRelease: release(), node: process.version,
     cpu: cpus()[0]?.model, logicalCpus: cpus().length, memoryBytes: totalmem(), freeMemoryBytes: freemem(), filesystemType: storage.type, freeDiskBytes: storage.bavail * storage.bsize },
   limitsUnchanged: true, transport: 'authenticated SDK WebSocket writes; four cookie-authenticated Chromium Console sessions',
-  measurement: 'server worker request dispatch to completion, including queue and IPC; client browser RPC latency recorded separately',
+  measurement: 'Native Hive browser RPC round trips, including transport, queue and storage worker processing; an upper bound on server latency',
   httpPacing: { sharedIntervalMs: 25, scope: 'SDK HTTP and browser RPC starts from the shared loopback address; pacing excluded from request latency; no retry', websocketWritesPaced: false },
   scope: 'Hive reference workload, abrupt owned Hive process loss and isolated SQLite online snapshot restore; not installed host recovery, remote latency or private integration acceptance' };
 await atomic(join(attemptRoot, 'runtime-files.json'), runtime);
@@ -81,16 +99,16 @@ function content(index, revision) {
 }
 function bytesOf(value) { return value.encoding === 'base64' ? Buffer.from(value.value, 'base64') : Buffer.from(value.encoding === 'json' ? canonical(value.value) : value.value); }
 function mutation(index, revision, objectId) {
-  return { mutationId: seed.id + '-' + index + '-' + revision, contractVersion: '1.0.0', content: content(index, revision),
-    ...(revision === 1 ? { create: { contractKey: key(index), parentId: null, name: name(index) } } : { objectId, expectedRevision: revision - 1 }) };
+  return { mutationId: deriveOperationId(seed.operationId, ['object', index, revision]), contractVersion: '1.0.0', content: content(index, revision), references: {},
+    ...(revision === 1 ? { create: { contractKey: key(index), parentId: null, ownerObjectId: null, name: name(index) } } : { objectId, expectedRevision: revision - 1 }) };
 }
 function stats(values) { assert.ok(values.length); const sorted = [...values].sort((a, b) => a - b); return { count: values.length, minMs: sorted[0], p50Ms: sorted[Math.ceil(sorted.length * .5) - 1], p95Ms: sorted[Math.ceil(sorted.length * .95) - 1], maxMs: sorted.at(-1) }; }
 async function until(check, timeout = 30_000) { const end = performance.now() + timeout; while (!(await check())) { assert.ok(performance.now() < end, 'Acceptance convergence deadline exceeded.'); await delay(50); } }
 let child, browser, sequence = 0;
 const pending = new Map();
 async function launch(filename, label) {
-  const config = { filename, publicBaseUrl: base, version: report.build.version, buildId: report.build.buildId,
-    credentials: [{ principalId, digest: digest(seed.token) }], listenHost: '127.0.0.1', listenPort: seed.port, consoleRoot: resolve('dist/console') };
+  const config = { filename, artifactRoot: hiveArtifact, publicBaseUrl: base,
+    credentials: [{ principalId, token: seed.token }], listenPort: seed.port, captureOnlineBackup: label === 'after-crash' };
   const configPath = join(attemptRoot, label + '-instance.json'); await atomic(configPath, config);
   child = fork(childFile, [configPath], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true });
   let tail = '';
@@ -119,7 +137,7 @@ async function control(action, values = {}) {
 async function stop(crash = false) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
   const exit = once(child, 'exit');
-  if (crash) child.kill('SIGKILL'); else await control('close');
+  await control(crash ? 'crash' : 'close');
   await exit;
 }
 const client = new HiveClient(base, { credential: seed.token });
@@ -145,36 +163,50 @@ async function browserRpc(page, method, params) {
   }, { method, params });
 }
 async function measure(label) {
-  await nodes(); await control('measure');
-  const clients = await Promise.all(pages.map(async page => {
+  await nodes();
+  const samples = await Promise.all(pages.map(async page => {
     const durations = { 'objects.list': [], 'objects.query': [] }, cursors = {};
+    let listPages = 0;
     for (let n = 0; n < 120; n++) {
       const method = n % 2 ? 'objects.query' : 'objects.list';
+      // The Console may create catalog/settings roots. Measure full fifty-item pages;
+      // verifyApi separately traverses every root, including the partial tail.
+      if (method === 'objects.list' && listPages === Math.floor(profile.objects / 50)) { delete cursors[method]; listPages = 0; }
       const params = method === 'objects.list' ? { parentId: null, limit: 50 } : { contractKey: 'acceptance/load-binary', select: ['object.name', 'object.path'], limit: 50 };
       if (cursors[method]) params.cursor = cursors[method];
       const { result, elapsedMs } = await browserRpc(page, method, params);
       assert.equal(result.items.length, 50); assert.notEqual(result.nextCursor, cursors[method] ?? undefined);
       cursors[method] = result.nextCursor; durations[method].push(elapsedMs);
+      if (method === 'objects.list') listPages++;
     }
-    return Object.fromEntries(Object.entries(durations).map(([method, values]) => [method, stats(values)]));
+    return durations;
   }));
   const observed = await control('samples');
-  report[label] = { server: Object.fromEntries(Object.entries(observed.samples).map(([method, values]) => [method, stats(values)])), clients, memory: observed.memory, usage: observed.usage, nodes: await nodes() };
+  const combined = Object.fromEntries(['objects.list', 'objects.query'].map(method => [method, samples.flatMap(sample => sample[method])]));
+  report[label] = { server: Object.fromEntries(Object.entries(combined).map(([method, values]) => [method, stats(values)])),
+    clients: samples.map(sample => Object.fromEntries(Object.entries(sample).map(([method, values]) => [method, stats(values)]))),
+    nativePid: observed.nativePid, coordinatorMemory: observed.coordinatorMemory, nodes: await nodes() };
   for (const method of ['objects.list', 'objects.query']) assert.ok(report[label].server[method].count >= 240);
-  await atomic(join(attemptRoot, label + '-server-samples.json'), observed.samples); await persist(); log(label, { server: report[label].server });
+  await atomic(join(attemptRoot, label + '-round-trip-samples.json'), combined); await persist(); log(label, { server: report[label].server });
 }
 async function verifyApi() {
   let cursor, count = 0; const seen = new Set();
   do {
     const page = await client.request('objects.list', { parentId: null, limit: 200, ...(cursor ? { cursor } : {}) });
-    for (const item of page.items) { assert.ok(!seen.has(item.id)); seen.add(item.id); assert.equal(item.currentRevision, perObject); count++; }
+    for (const item of page.items) {
+      if (!item.contractKey.startsWith('acceptance/load-')) continue;
+      assert.ok(!seen.has(item.id)); seen.add(item.id); assert.equal(item.currentRevision, perObject); count++;
+    }
     assert.notEqual(page.nextCursor, cursor); cursor = page.nextCursor;
   } while (cursor);
   assert.equal(count, profile.objects);
-  let through = 0, events = 0;
+  let through = 0, events = 0, previousSequence = 0;
   do {
     const batch = await client.request('events.read', { afterSequence: through, filter: { topics: ['hive.object.changed'] }, limit: 100 });
-    for (const event of batch.items) { assert.equal(event.sequence, ++events); assert.ok(seen.has(event.payload.objectId)); }
+    for (const event of batch.items) {
+      if (!seen.has(event.payload.objectId)) continue;
+      assert.ok(event.sequence > previousSequence); previousSequence = event.sequence; events++;
+    }
     assert.ok(batch.throughSequence > through || !batch.hasMore); through = batch.throughSequence;
     if (!batch.hasMore) break;
   } while (true);
@@ -196,29 +228,35 @@ function audit(filename) {
     db.exec('PRAGMA query_only=ON; BEGIN');
     assert.deepEqual(db.prepare('PRAGMA quick_check').all().map(row => Object.values(row)[0]), ['ok']);
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
-    assert.equal(db.prepare('SELECT count(*) AS n FROM objects').get().n, profile.objects);
-    assert.equal(db.prepare('SELECT count(*) AS n FROM events').get().n, profile.revisions);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM objects WHERE contract_key LIKE 'acceptance/load-%'").get().n, profile.objects);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM events e JOIN objects o ON o.id=json_extract(e.payload,'$.objectId') WHERE o.contract_key LIKE 'acceptance/load-%'").get().n, profile.revisions);
     const hash = createHash('sha256'); let count = 0, bytes = 0;
-    for (const row of db.prepare('SELECT o.name,r.*,e.sequence,e.mutation_id,e.payload FROM revisions r JOIN objects o ON o.id=r.object_id JOIN events e ON json_extract(e.payload,\'$.objectId\')=r.object_id AND json_extract(e.payload,\'$.revision\')=r.revision ORDER BY e.sequence').iterate()) {
+    let previousSequence = 0;
+    for (const row of db.prepare('SELECT o.name,r.*,e.sequence,e.mutation_id,e.payload FROM revisions r JOIN objects o ON o.id=r.object_id JOIN events e ON json_extract(e.payload,\'$.objectId\')=r.object_id AND json_extract(e.payload,\'$.revision\')=r.revision WHERE o.contract_key LIKE \'acceptance/load-%\' ORDER BY e.sequence').iterate()) {
       const index = Number(row.name.slice(5)), expected = bytesOf(content(index, row.revision));
       const actual = row.encoding === 'base64' ? Buffer.from(row.content) : Buffer.from(row.content);
       assert.equal(actual.compare(expected), 0); assert.equal(row.content_hash, digest(expected)); assert.equal(row.byte_length, expected.length);
-      assert.equal(row.mutation_id, seed.id + '-' + index + '-' + row.revision);
+      assert.equal(row.mutation_id, deriveOperationId(seed.operationId, ['object', index, row.revision]));
       assert.equal(JSON.parse(row.payload).revision, row.revision);
-      assert.equal(row.sequence, ++count); bytes += expected.length;
+      assert.ok(row.sequence > previousSequence); previousSequence = row.sequence; count++; bytes += expected.length;
       hash.update(canonical([row.object_id, row.revision, row.content_hash, row.sequence, row.mutation_id]) + '\n');
     }
     assert.equal(count, profile.revisions); assert.equal(bytes, profile.bytes);
-    assert.equal(db.prepare("SELECT count(*) AS n FROM mutations WHERE result_kind='snapshot'").get().n, profile.revisions);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM mutations m JOIN objects o ON o.id=json_extract(m.result_json,'$.object.id') WHERE m.result_kind='snapshot' AND o.contract_key LIKE 'acceptance/load-%'").get().n, profile.revisions);
     return { objects: profile.objects, revisions: count, events: count, contentBytes: bytes, logicalHash: 'sha256:' + hash.digest('hex'), elapsedMs: performance.now() - start };
   } finally { if (db.isTransaction) db.exec('ROLLBACK'); db.close(); }
 }
 try {
   assert.ok(report.hardware.freeDiskBytes >= profile.bytes * 6, 'Insufficient space for the isolated workload and retained copies.');
   log('starting', { root, profile }); const startup = performance.now();
-  await launch(join(root, 'hive.sqlite'), 'original'); report.startupMs = performance.now() - startup;
+  await launch(join(root, 'hive-data', 'hive.sqlite'), 'original'); report.startupMs = performance.now() - startup;
+  if (!seed.operationId) {
+    seed.operationId = await newOperationId(client, seed.id);
+    await atomic(join(root, 'seed.json'), seed);
+  }
   for (const [kind, mediaType] of [['binary', 'application/octet-stream'], ['text', 'text/plain'], ['json', 'application/json']]) {
-    await client.request('contracts.register', { mutationId: seed.id + '-contract-' + kind, definition: { key: 'acceptance/load-' + kind, version: '1.0.0', owner: { kind: 'agent' }, mediaType,
+    await client.request('contracts.register', { mutationId: deriveOperationId(seed.operationId, ['contract', kind]), definition: { key: 'acceptance/load-' + kind, version: '1.0.0', owner: { kind: 'agent' }, mediaType,
+      retention: { objects: { mode: 'retain' }, revisions: { mode: 'all' } },
       specMarkdown: 'Synthetic mixed-content M7 reference workload; no private data.', ...(kind === 'json' ? { jsonSchema: { type: 'object', properties: { index: { type: 'integer' }, revision: { type: 'integer' }, payload: { type: 'string' } }, required: ['index', 'revision', 'payload'], additionalProperties: false } } : {}) } });
   }
   for (let n = 0; n < 5; n++) {
@@ -235,7 +273,7 @@ try {
     await context.route('**/*', route => { if (new URL(route.request().url()).origin === origin) return route.continue(); externalRequests.push(route.request().url()); return route.abort(); });
     const page = await context.newPage(); page.on('pageerror', error => browserErrors.push(error.message));
     await page.goto(base + '/'); await page.getByLabel('Hive credential').fill(seed.token); await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-    await page.getByRole('heading', { name: 'Uis', exact: true }).waitFor(); pages.push(page);
+    await page.getByRole('heading', { name: 'UIs', exact: true }).waitFor(); pages.push(page);
   }
   const cookies = await Promise.all(pages.map(async page => (await page.context().cookies()).find(cookie => cookie.name === 'ivy_session')?.value));
   assert.ok(cookies.every(Boolean)); assert.equal(new Set(cookies).size, 4); report.distinctBrowserSessions = 4;
@@ -259,25 +297,35 @@ try {
   }));
   report.population = { completed, writes, elapsedMs: performance.now() - population }; await persist();
   report.initialApi = await verifyApi(); await measure('loadedReads');
-  await nodes(); const oldNodes = liveGenerations(), lost = performance.now(); await stop(true);
+  await nodes(); const oldNodes = liveGenerations(), oldConnections = services.map(service => service.connection), lost = performance.now(); await stop(true);
   await until(() => services.every(service => !service.ready));
-  const dependencyStart = performance.now(); await launch(join(root, 'hive.sqlite'), 'after-crash'); const dependencyReady = performance.now();
+  const dependencyStart = performance.now(); await launch(join(root, 'hive-data', 'hive.sqlite'), 'after-crash'); const dependencyReady = performance.now();
   await until(() => services.every(service => service.ready)); await nodes(); const recovered = liveGenerations();
-  for (const node of recovered) assert.ok(node.generation > oldNodes.find(old => old.serviceNodeId === node.serviceNodeId).generation);
+  // Generation numbers belong to one network owner and can restart at one.
+  // Prove replacement and a fresh accepted handshake on every SDK connection.
+  for (const [index, service] of services.entries()) {
+    assert.notEqual(service.connection, oldConnections[index]);
+    assert.equal(oldConnections[index].signal.aborted, true);
+    const heartbeat = await service.connection.request('service.heartbeat', { ready: true, diagnostics: [] });
+    assert.equal(heartbeat.generation, recovered[index].generation);
+    assert.ok(Number.isSafeInteger(heartbeat.generation) && heartbeat.generation > 0);
+  }
   report.recovery = { processLossToReadyMs: performance.now() - lost, hiveRestartMs: dependencyReady - dependencyStart,
-    dependenciesReadyToRegistryMs: performance.now() - dependencyReady, nodes: recovered, api: await verifyApi() };
-  for (const page of pages) { await page.reload(); await page.getByRole('heading', { name: 'Uis', exact: true }).waitFor(); }
+    dependenciesReadyToRegistryMs: performance.now() - dependencyReady, nodes: recovered, previousNodes: oldNodes,
+    replacedConnections: oldConnections.length, api: await verifyApi() };
+  for (const page of pages) { await page.reload(); await page.getByRole('heading', { name: 'UIs', exact: true }).waitFor(); }
   await measure('recoveredReads');
   const backupFile = join(attemptRoot, 'online-backup.sqlite'), backupStart = performance.now();
   report.backup = { ...(await control('backup', { destination: backupFile })), elapsedMs: performance.now() - backupStart };
   assert.equal(await fileHash(backupFile), report.backup.bytesHash); report.backup.bytes = (await stat(backupFile)).size;
   report.snapshotAudit = audit(backupFile); await persist();
   await Promise.all(services.map(service => service.stop())); await stop();
-  const restoreStart = performance.now(), restoredFile = join(attemptRoot, 'isolated-restore.sqlite');
+  const restoreStart = performance.now(), restoredFile = join(attemptRoot, 'restore-data', 'hive.sqlite');
+  await mkdir(dirname(restoredFile));
   await copyFile(backupFile, restoredFile, 1); assert.equal(await fileHash(restoredFile), report.backup.bytesHash);
   report.restoreAudit = audit(restoredFile); assert.equal(report.restoreAudit.logicalHash, report.snapshotAudit.logicalHash);
   await launch(restoredFile, 'restored'); report.restoredApi = await verifyApi();
-  for (const page of pages) { await page.reload(); await page.getByRole('heading', { name: 'Uis', exact: true }).waitFor(); }
+  for (const page of pages) { await page.reload(); await page.getByRole('heading', { name: 'UIs', exact: true }).waitFor(); }
   report.restore = { elapsedMs: performance.now() - restoreStart, sqliteBytes: report.backup.bytes, restoredContentBytes: report.restoreAudit.contentBytes, originalBrowserSessionsRecovered: 4 };
   assert.deepEqual(browserErrors, []); assert.deepEqual(externalRequests, []);
   report.targets = { fiftyItemReadP95Below250ms: ['loadedReads', 'recoveredReads'].every(phase => Object.values(report[phase].server).every(value => value.p95Ms < 250)),

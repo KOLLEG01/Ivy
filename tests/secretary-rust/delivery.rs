@@ -1,7 +1,6 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_contracts::{IvyError, IvyJson, Outcome, json::parse};
-#[cfg(windows)]
-mod document_resource_cases;
-mod packaging_cases;
 mod triage_workflow_cases;
 mod video_cases;
 mod video_codec_cases;
@@ -58,8 +57,6 @@ fn poison_legacy_record(journal: &ivy_secretary::journal::Journal, key: &str, na
 
 #[path = "assignment_delivery_cases.rs"]
 mod assignment_delivery_cases;
-#[path = "assignment_driver_cases.rs"]
-mod assignment_driver_cases;
 #[path = "assignment_events_cases.rs"]
 mod assignment_events_cases;
 #[path = "assignment_execution_cases.rs"]
@@ -68,8 +65,6 @@ mod assignment_execution_cases;
 mod assignment_import_cases;
 #[path = "assignment_native_cases.rs"]
 mod assignment_native_cases;
-#[path = "assignment_preflight_cases.rs"]
-mod assignment_preflight_cases;
 #[path = "assignment_progress_cases.rs"]
 mod assignment_progress_cases;
 #[path = "assignment_result_cases.rs"]
@@ -103,18 +98,12 @@ mod engine_inbox_cases;
 mod execution_import_cases;
 #[path = "follow_up_cases.rs"]
 mod follow_up_cases;
-#[path = "generation_cases.rs"]
-mod generation_cases;
-#[path = "import_admission_cases.rs"]
-mod import_admission_cases;
 #[path = "inbox_evidence_cases.rs"]
 mod inbox_evidence_cases;
 #[path = "inbox_recovery_cases.rs"]
 mod inbox_recovery_cases;
 #[path = "journal_import_cases.rs"]
 mod journal_import_cases;
-#[path = "media_document_cases.rs"]
-mod media_document_cases;
 #[path = "media_store_cases.rs"]
 mod media_store_cases;
 #[path = "microsoft_store_cases.rs"]
@@ -125,26 +114,12 @@ mod notice_evidence_cases;
 mod notice_scan_cases;
 #[path = "notices_cases.rs"]
 mod notices_cases;
-#[path = "outlook_media_native_cases.rs"]
-mod outlook_media_native_cases;
-#[path = "outlook_media_source_cases.rs"]
-mod outlook_media_source_cases;
-#[path = "outlook_native_cases.rs"]
-mod outlook_native_cases;
 #[path = "outlook_projection_cases.rs"]
 mod outlook_projection_cases;
 #[path = "outlook_source_cases.rs"]
 mod outlook_source_cases;
-#[path = "reconcile_cases.rs"]
-mod reconcile_cases;
 #[path = "registry_cases.rs"]
 mod registry_cases;
-#[path = "retained_import_cases.rs"]
-mod retained_import_cases;
-#[path = "retained_storage_cases.rs"]
-mod retained_storage_cases;
-#[path = "service_cases.rs"]
-mod service_cases;
 #[path = "service_handlers_cases.rs"]
 mod service_handlers_cases;
 #[path = "store_cases.rs"]
@@ -204,26 +179,8 @@ impl RpcClient for Scripted {
 async fn original_voice_discovery_and_message_unread_rpc_traces() {
     use ivy_secretary::{assignment_message::message_conversation_unread, voice_target::*};
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut command = std::process::Command::new("node");
-    command
-        .arg("tests/secretary-rust/delivery-oracle.mjs")
-        .current_dir(root);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command.output().expect("Original Node oracle required");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let corpus = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
-        4 * 1024 * 1024,
-    )
-    .unwrap();
+    let output = reference_data::read(include_bytes!("delivery-cases.json.gz"));
+    let corpus = parse(std::str::from_utf8(&output).unwrap(), 4 * 1024 * 1024).unwrap();
     for row in corpus.required("dates").unwrap().as_array().unwrap() {
         let pair = row.as_array().unwrap();
         let actual = ivy_sdk::clock::parse_date(pair[0].as_js_string().unwrap());
@@ -298,8 +255,6 @@ async fn original_voice_discovery_and_message_unread_rpc_traces() {
     }
 }
 
-#[path = "teams_native_cases.rs"]
-mod teams_native_cases;
 #[path = "teams_projection_cases.rs"]
 mod teams_projection_cases;
 #[path = "teams_source_cases.rs"]

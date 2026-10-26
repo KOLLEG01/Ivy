@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { dashboardDocument } from "../../../services/dashboards/src/document";
+import { dashboardDocument } from "../../../packages/ui-client/src/dashboard/document";
 import { base, call, tr } from "./runtime";
 import type { Row } from "./runtime";
 // `html` previews an unsaved draft; with an `id` it renders against that dashboard's live data.

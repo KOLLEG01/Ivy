@@ -53,6 +53,18 @@ fn field<'a>(value: &'a IvyJson, key: &str) -> IvyResult<&'a IvyJson> {
     value.get(key).ok_or_else(IvyError::internal)
 }
 
+// Managed documents, saved state and legacy discovery use JSON falsy values
+// for absence. Arrays and objects remain present, including empty collections.
+pub(crate) fn json_falsy(value: &IvyJson) -> bool {
+    match value {
+        IvyJson::Null => true,
+        IvyJson::Bool(value) => !value,
+        IvyJson::Number(value) => *value == 0.0 || value.is_nan(),
+        IvyJson::String(value) => value.0.is_empty(),
+        _ => false,
+    }
+}
+
 /// Pin the read to the stat revision. Only a missing stat or archived object is
 /// absence; a failed pinned read remains an error, never a default-policy fallback.
 pub async fn read_environment_document(
@@ -76,7 +88,11 @@ pub async fn read_environment_document(
         Err(error) => return Err(error),
     };
     let instructions = kind == EnvironmentKind::Instructions;
-    if object == IvyJson::Null || object.get("effectivelyArchived") == Some(&IvyJson::Bool(true)) {
+    if json_falsy(&object)
+        || object
+            .get("effectivelyArchived")
+            .is_some_and(|value| !json_falsy(value))
+    {
         return Ok(None);
     }
     let object_id = field(&object, "id")?;

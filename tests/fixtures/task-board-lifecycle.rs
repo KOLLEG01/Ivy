@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     checked_native_contract::CheckedNativeContracts,
@@ -78,21 +80,8 @@ fn data() -> &'static Json {
             )
             .unwrap();
         }
-        let o = Command::new("node")
-            .args([
-                "--experimental-transform-types",
-                "--disable-warning=ExperimentalWarning",
-                "tests/fixtures/task-board-lifecycle-oracle.mjs",
-            ])
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .output()
-            .unwrap();
-        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-        parse(
-            std::str::from_utf8(&o.stdout).unwrap(),
-            MANAGEMENT_FRAME_BYTES,
-        )
-        .unwrap()
+        let o = reference_data::read(include_bytes!("task-board-lifecycle-cases.json.gz"));
+        parse(std::str::from_utf8(&o).unwrap(), MANAGEMENT_FRAME_BYTES).unwrap()
     })
 }
 fn error(v: &Json) -> IvyError {
@@ -507,6 +496,11 @@ impl LifecyclePublication for Steps<'_, '_> {
         Ok(pin(300, 1.0))
     }
     async fn write(&mut self, k: &str, v: &Json, d: &Json) -> IvyResult<Json> {
+        if k == "task-board/task" {
+            assert!(v.get("waiting").is_none());
+            assert!(v.required("fields")?.get("nextReviewAt").is_none());
+            assert!(v.get("runtimeWait").is_some());
+        }
         event(
             &self.world.trace,
             ["step-write".into(), k.into(), v.clone(), d.clone()],
@@ -538,9 +532,20 @@ async fn native_lifecycle_matches_original_retained_operations_archive_context_a
  {
     let catalogs =
         CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    // Original trace hashes project task writes to the current writer fields.
+    let corpus = data().as_array().unwrap();
+    let expected_rows = corpus
+        .iter()
+        .map(|g| g.required("rows").unwrap().as_array().unwrap().len())
+        .sum::<usize>();
+    let expected_frames = corpus
+        .iter()
+        .flat_map(|g| g.required("rows").unwrap().as_array().unwrap())
+        .map(|r| r.required("rpcReplies").unwrap().as_array().unwrap().len())
+        .sum::<usize>();
     let mut rows = 0;
     let mut frames = 0;
-    for group in data().as_array().unwrap() {
+    for group in corpus {
         for row in group.required("rows").unwrap().as_array().unwrap() {
             let trace: Trace = Arc::default();
             let replies = row.required("rpcReplies").unwrap().as_array().unwrap();
@@ -634,6 +639,6 @@ async fn native_lifecycle_matches_original_retained_operations_archive_context_a
             rows += 1;
         }
     }
-    assert_eq!(rows, 118);
-    assert_eq!(frames, 625);
+    assert_eq!(rows, expected_rows);
+    assert_eq!(frames, expected_frames);
 }

@@ -1,8 +1,9 @@
-use super::super::{Root, native, oracle};
-use super::{Value, json};
+use super::{Root, native, reference_data};
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 fn create(nonce: &str, name: &str, key: &str) -> Value {
-    let mut step = super::write(
+    let mut step = super::object_write::write(
         nonce,
         "unused",
         1,
@@ -36,21 +37,151 @@ fn bind(step: &mut Value, pointer: &str, from: usize) {
         .unwrap()
         .push(json!({"at":pointer,"from":from}));
 }
+fn reference(steps: &[Value]) -> Value {
+    static CASES: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let cases = CASES.get_or_init(|| {
+        serde_json::from_slice(&reference_data::read(include_bytes!(
+            "../fixtures/hive-object-create-reference.json.gz"
+        )))
+        .unwrap()
+    });
+    let key = ivy_contracts::hash::digest(serde_json::to_vec(steps).unwrap());
+    cases["traces"]
+        .get(&key)
+        .unwrap_or_else(|| panic!("Missing original Hive creation trace: {key}"))
+        .clone()
+}
+pub(super) fn substitute(value: &Value, aliases: &BTreeMap<String, String>) -> Value {
+    match value {
+        Value::String(text) => Value::String(
+            aliases
+                .iter()
+                .fold(text.clone(), |text, (id, alias)| text.replace(id, alias)),
+        ),
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|item| substitute(item, aliases)).collect())
+        }
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), substitute(value, aliases)))
+                .collect(),
+        ),
+        value => value.clone(),
+    }
+}
+pub(super) fn request_hash(step: &Value) -> String {
+    let mut arguments = super::IvyJson::from_serde(&step["params"]).unwrap();
+    let method = match step["op"].as_str().unwrap() {
+        "write" => match step["mode"].as_str() {
+            Some("prepared" | "hive") => step["method"].as_str().unwrap().to_owned(),
+            Some("preserve") => "objects.updateContent".to_owned(),
+            _ => "objects.write".to_owned(),
+        },
+        op => format!("objects.{op}"),
+    };
+    if step["op"] == "write" && step["mode"] != "prepared" {
+        super::object_write::apply_units(&mut arguments, step);
+    }
+    arguments.remove("mutationId");
+    ivy_contracts::hash::hash_json(&super::IvyJson::object([
+        ("method", method.into()),
+        ("arguments", arguments),
+    ]))
+    .unwrap()
+}
+pub(super) fn normalized(
+    row: &Value,
+    aliases: &BTreeMap<String, String>,
+    requests: &BTreeMap<String, (String, String)>,
+    original: bool,
+) -> Value {
+    let mut row = row.clone();
+    let tables = row["state"]
+        .as_object_mut()
+        .unwrap()
+        .remove("identityTables")
+        .unwrap();
+    for (table, encoded) in tables.as_object().unwrap() {
+        let encoded = encoded.as_str().unwrap();
+        // Retain each original compact-table hash check before expanding it.
+        assert_eq!(row["state"][table], ivy_contracts::hash::digest(encoded));
+        let mut records: Value = serde_json::from_str(encoded).unwrap();
+        if table == "mutations" {
+            for record in records.as_array_mut().unwrap() {
+                let (actual, fixed) = requests
+                    .get(record[2].as_str().unwrap())
+                    .expect("Receipt must belong to an original successful request");
+                assert_eq!(record[3], if original { fixed } else { actual }.as_str());
+                record[3] = fixed.clone().into();
+            }
+        }
+        row["state"][table] = records;
+    }
+    let mut row = substitute(&row, aliases);
+    // The only unstable ordering is the SQL key order of generated Object IDs.
+    row["state"]["objects"]
+        .as_array_mut()
+        .unwrap()
+        .sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    row["state"]["references"]
+        .as_array_mut()
+        .unwrap()
+        .sort_by_key(|row| {
+            (
+                row["source_object_id"].as_str().unwrap().to_owned(),
+                row["source_revision"].as_u64().unwrap(),
+                row["name"].as_str().unwrap().to_owned(),
+            )
+        });
+    row
+}
 fn compare(steps: &[Value]) -> Value {
     let root = Root::new();
-    // Execute the real Rust UUID generator. Feed each successful generated ID
-    // into Node's original crypto binding so both stores see the same identity.
-    let actual = native(&root.0.join("native.sqlite"), steps);
-    let mut original = steps.to_vec();
-    for (index, step) in original.iter_mut().enumerate() {
-        if step["params"]["create"].is_object() || step["preparedParams"]["create"].is_object() {
-            if let Some(id) = actual["rows"][index]["value"]["object"]["id"].as_str() {
-                assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 4);
-                step["createdId"] = id.into();
+    let mut expanded = steps.to_vec();
+    for step in &mut expanded {
+        step["identityTables"] = true.into();
+    }
+    let actual = native(&root.0.join("native.sqlite"), &expanded);
+    let expected = reference(steps);
+    assert_eq!(actual["rows"].as_array().unwrap().len(), steps.len());
+    assert_eq!(expected["rows"].as_array().unwrap().len(), steps.len());
+    // Alias only successful real UUIDs, in their original creation-step order.
+    let mut aliases = BTreeMap::new();
+    for (index, step) in steps.iter().enumerate() {
+        if (step["params"]["create"].is_object() || step["preparedParams"]["create"].is_object())
+            && actual["rows"][index]["error"].is_null()
+        {
+            let id = actual["rows"][index]["value"]["object"]["id"]
+                .as_str()
+                .unwrap();
+            assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 4);
+            aliases
+                .entry(id.to_owned())
+                .or_insert_with(|| format!("00000000-0000-4000-8000-{index:012x}"));
+        }
+    }
+    let mut requests = BTreeMap::new();
+    for (index, step) in steps.iter().enumerate() {
+        if actual["rows"][index]["error"].is_null() && step["params"]["mutationId"].is_string() {
+            let mut bound = step.clone();
+            if bound["bindings"].is_array() {
+                super::object_write::bind(&mut bound, actual["rows"].as_array().unwrap());
+            }
+            let hashes = (
+                request_hash(&bound),
+                request_hash(&substitute(&bound, &aliases)),
+            );
+            let id = bound["params"]["mutationId"].as_str().unwrap().to_owned();
+            if let Some(previous) = requests.insert(id, hashes.clone()) {
+                assert_eq!(
+                    previous, hashes,
+                    "Successful receipt replay must preserve its request"
+                );
             }
         }
     }
-    let expected = oracle(&root.0.join("original.sqlite"), &original);
+    let no_aliases = BTreeMap::new();
     for (index, (left, right)) in actual["rows"]
         .as_array()
         .unwrap()
@@ -59,7 +190,8 @@ fn compare(steps: &[Value]) -> Value {
         .enumerate()
     {
         assert_eq!(
-            left, right,
+            normalized(left, &aliases, &requests, false),
+            normalized(right, &no_aliases, &requests, true),
             "Object creation/rename trace {index} ({})",
             steps[index]["op"]
         );
@@ -75,12 +207,13 @@ fn compare(steps: &[Value]) -> Value {
     actual
 }
 fn owned() -> Value {
-    let mut value = super::definition("fixture/owned", "1.0.0", "application/json", false);
+    let mut value =
+        super::object_write::definition("fixture/owned", "1.0.0", "application/json", false);
     value["definition"]["retention"]["objects"]["mode"] = "owned".into();
     value
 }
 fn code(result: &Value, index: usize) -> &Value {
-    super::code(result, index)
+    super::object_write::code(result, index)
 }
 fn error(result: &Value, index: usize, message: &str) {
     assert_eq!(result["rows"][index]["error"]["message"], message);
@@ -101,13 +234,13 @@ fn object<'a>(result: &'a Value, index: usize, id: &str) -> &'a Value {
 
 #[test]
 fn creation_uses_real_uuids_normalized_navigation_archive_inheritance_and_owned_lifetimes() {
-    let mut steps = super::setup();
+    let mut steps = super::object_write::setup();
     steps.push(owned());
     let root = steps.len();
     let mut parent = create("parent", "Cafe\u{301}", "fixture/json");
     parent["params"]["create"]["icon"] = json!("\u{feff} e\u{301} \u{2029}");
     steps.push(parent.clone());
-    let mut archive = super::super::object_mutations::action(
+    let mut archive = super::object_mutations::action(
         "archive",
         "archive-parent",
         json!({"objectId":"bound","expectedRevision":1,"archived":true}),
@@ -171,7 +304,7 @@ fn creation_uses_real_uuids_normalized_navigation_archive_inheritance_and_owned_
 
 #[test]
 fn names_and_icons_apply_nfc_before_utf16_bounds_and_only_ecmascript_trim() {
-    let mut steps = super::setup();
+    let mut steps = super::object_write::setup();
     let mut accepted = vec![];
     let mut refused = vec![];
     for (index, name) in [
@@ -263,7 +396,7 @@ fn names_and_icons_apply_nfc_before_utf16_bounds_and_only_ecmascript_trim() {
 
 #[test]
 fn creation_keeps_contract_name_parent_depth_owner_position_and_icon_error_order() {
-    let mut steps = super::setup();
+    let mut steps = super::object_write::setup();
     steps.push(owned());
     let mut failures = vec![];
     let owned_index = steps.len();
@@ -353,13 +486,13 @@ fn creation_keeps_contract_name_parent_depth_owner_position_and_icon_error_order
         parent = id;
     }
     chain.push_str("COMMIT;");
-    steps.push(super::sql(chain));
+    steps.push(super::object_write::sql(chain));
     let mut deep = create("too-deep", "deep", "fixture/json");
     deep["params"]["create"]["parentId"] = "depth64".into();
     deep["params"]["create"]["ownerObjectId"] = "missing".into();
     failures.push((steps.len(), "Object hierarchy exceeds its maximum depth."));
     steps.push(deep);
-    steps.push(super::sql(
+    steps.push(super::object_write::sql(
         "UPDATE objects SET position=9007199254740990 WHERE id='text';",
     ));
     let maximum = steps.len();
@@ -380,7 +513,7 @@ fn creation_keeps_contract_name_parent_depth_owner_position_and_icon_error_order
 
 #[test]
 fn renaming_refreshes_cross_contract_descendants_and_replays_saved_paths_after_later_edits() {
-    let mut steps = super::setup();
+    let mut steps = super::object_write::setup();
     let root = steps.len();
     steps.push(create("rename-root", "Cafe\u{301}", "fixture/json"));
     let child = steps.len();
@@ -393,13 +526,15 @@ fn renaming_refreshes_cross_contract_descendants_and_replays_saved_paths_after_l
     leaf["method"] = "fixture.internal".into();
     bind(&mut leaf, "/params/create/parentId", child);
     steps.push(leaf);
-    let mut same = super::write("same-name", "bound", 1, "json", json!({"n":2}), json!({}));
+    let mut same =
+        super::object_write::write("same-name", "bound", 1, "json", json!({"n":2}), json!({}));
     same["params"]["name"] = "Cafe\u{301}".into();
     same["overdue"] = true.into();
     bind(&mut same, "/params/objectId", root);
     let equal = steps.len();
     steps.push(same.clone());
-    let mut rename = super::write("rename", "bound", 2, "json", json!({"n":3}), json!({}));
+    let mut rename =
+        super::object_write::write("rename", "bound", 2, "json", json!({"n":3}), json!({}));
     rename["params"]["name"] = "Ne\u{301}w".into();
     bind(&mut rename, "/params/objectId", root);
     let renamed = steps.len();
@@ -407,7 +542,7 @@ fn renaming_refreshes_cross_contract_descendants_and_replays_saved_paths_after_l
     steps.push(json!({"op":"reopen"}));
     let replay = steps.len();
     steps.push(same);
-    let mut duplicate = super::write(
+    let mut duplicate = super::object_write::write(
         "rename-conflict",
         "bound",
         3,
@@ -419,7 +554,7 @@ fn renaming_refreshes_cross_contract_descendants_and_replays_saved_paths_after_l
     bind(&mut duplicate, "/params/objectId", root);
     let conflict = steps.len();
     steps.push(duplicate);
-    let mut timeout = super::write(
+    let mut timeout = super::object_write::write(
         "rename-timeout",
         "bound",
         3,
@@ -467,7 +602,7 @@ fn renaming_refreshes_cross_contract_descendants_and_replays_saved_paths_after_l
 
 #[test]
 fn creation_and_rename_failures_roll_back_all_rows_receipts_events_and_navigation() {
-    let mut steps = super::setup();
+    let mut steps = super::object_write::setup();
     let mut failed = vec![];
     let mut succeeded = vec![];
     for (index, (table, event)) in [
@@ -481,7 +616,7 @@ fn creation_and_rename_failures_roll_back_all_rows_receipts_events_and_navigatio
     .iter()
     .enumerate()
     {
-        steps.push(super::sql(format!("CREATE TRIGGER create_abort BEFORE {event} ON {table} BEGIN SELECT RAISE(ABORT,'fixture create rollback'); END;")));
+        steps.push(super::object_write::sql(format!("CREATE TRIGGER create_abort BEFORE {event} ON {table} BEGIN SELECT RAISE(ABORT,'fixture create rollback'); END;")));
         let mut action = create(
             &format!("create-rollback-{index}"),
             &format!("rollback-{index}"),
@@ -490,23 +625,23 @@ fn creation_and_rename_failures_roll_back_all_rows_receipts_events_and_navigatio
         action["params"]["references"] = json!({"text":{"objectId":"text","revision":1}});
         failed.push(steps.len());
         steps.push(action.clone());
-        steps.push(super::sql("DROP TRIGGER create_abort;"));
+        steps.push(super::object_write::sql("DROP TRIGGER create_abort;"));
         succeeded.push(steps.len());
         steps.push(action);
     }
-    steps.push(super::sql("CREATE TRIGGER create_commit AFTER INSERT ON mutations BEGIN UPDATE objects SET current_revision=2 WHERE id=json_extract(NEW.result_json,'$.object.id'); END;"));
+    steps.push(super::object_write::sql("CREATE TRIGGER create_commit AFTER INSERT ON mutations BEGIN UPDATE objects SET current_revision=2 WHERE id=json_extract(NEW.result_json,'$.object.id'); END;"));
     let action = create("create-commit", "commit", "fixture/json");
     failed.push(steps.len());
     steps.push(action.clone());
-    steps.push(super::sql("DROP TRIGGER create_commit;"));
+    steps.push(super::object_write::sql("DROP TRIGGER create_commit;"));
     let root = steps.len();
     succeeded.push(root);
     steps.push(action);
     let mut child = create("rename-failure-child", "child", "fixture/json");
     bind(&mut child, "/params/create/parentId", root);
     steps.push(child);
-    steps.push(super::sql("CREATE TRIGGER nav_abort BEFORE UPDATE OF path ON objects WHEN NEW.parent_id IS NOT NULL BEGIN SELECT RAISE(ABORT,'fixture navigation rollback'); END;"));
-    let mut rename = super::write(
+    steps.push(super::object_write::sql("CREATE TRIGGER nav_abort BEFORE UPDATE OF path ON objects WHEN NEW.parent_id IS NOT NULL BEGIN SELECT RAISE(ABORT,'fixture navigation rollback'); END;"));
+    let mut rename = super::object_write::write(
         "rename-failure",
         "bound",
         1,
@@ -518,7 +653,7 @@ fn creation_and_rename_failures_roll_back_all_rows_receipts_events_and_navigatio
     bind(&mut rename, "/params/objectId", root);
     failed.push(steps.len());
     steps.push(rename.clone());
-    steps.push(super::sql("DROP TRIGGER nav_abort;"));
+    steps.push(super::object_write::sql("DROP TRIGGER nav_abort;"));
     succeeded.push(steps.len());
     steps.push(rename);
     let result = compare(&steps);
@@ -537,12 +672,9 @@ fn creation_and_rename_failures_roll_back_all_rows_receipts_events_and_navigatio
 #[test]
 fn prepared_hive_creation_replay_precedes_preparation_and_contract_keys_keep_sql_utf16_replacement()
 {
-    let mut steps = super::setup();
-    let mut prepared = super::super::object_mutations::action(
-        "write",
-        "prepared-create",
-        json!({"action":"create"}),
-    );
+    let mut steps = super::object_write::setup();
+    let mut prepared =
+        super::object_mutations::action("write", "prepared-create", json!({"action":"create"}));
     prepared["mode"] = "prepared".into();
     prepared["method"] = "fixture.internal".into();
     prepared["preparedParams"] =
@@ -550,7 +682,7 @@ fn prepared_hive_creation_replay_precedes_preparation_and_contract_keys_keep_sql
     prepared["prepareSql"] = "INSERT INTO metadata VALUES('fixture_create_prepare','one');".into();
     let first = steps.len();
     steps.push(prepared.clone());
-    let mut edit = super::write(
+    let mut edit = super::object_write::write(
         "later-internal",
         "bound",
         1,
@@ -567,7 +699,8 @@ fn prepared_hive_creation_replay_precedes_preparation_and_contract_keys_keep_sql
     prepared["preparedParams"]["create"]["name"] = "changed prepared input".into();
     let replay = steps.len();
     steps.push(prepared);
-    let mut definition = super::definition("placeholder", "1.0.0", "application/json", false);
+    let mut definition =
+        super::object_write::definition("placeholder", "1.0.0", "application/json", false);
     definition["definitionUnits"] = json!({"key":[0xd800]});
     definition["lossless"] = true.into();
     steps.push(definition);
@@ -588,8 +721,12 @@ fn prepared_hive_creation_replay_precedes_preparation_and_contract_keys_keep_sql
     .enumerate()
     {
         let version = format!("{}.0.0", 20 + index);
-        let mut definition = super::definition("fixture/json", &version, "application/json", false)
-            ["definition"]
+        let mut definition = super::object_write::definition(
+            "fixture/json",
+            &version,
+            "application/json",
+            false,
+        )["definition"]
             .clone();
         match *member {
             "owner-missing" => {
@@ -609,7 +746,7 @@ fn prepared_hive_creation_replay_precedes_preparation_and_contract_keys_keep_sql
             "objects-null" => definition["retention"]["objects"] = Value::Null,
             _ => unreachable!(),
         }
-        steps.push(super::sql(format!(
+        steps.push(super::object_write::sql(format!(
             "INSERT INTO contracts VALUES('fixture/json','{version}','{}');",
             definition.to_string().replace('\'', "''")
         )));

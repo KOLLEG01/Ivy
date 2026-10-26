@@ -1,4 +1,4 @@
-use super::{Root, native, oracle};
+use super::{Root, native, reference as oracle};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 

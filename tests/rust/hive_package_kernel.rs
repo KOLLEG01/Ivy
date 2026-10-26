@@ -194,66 +194,7 @@ fn seed(entries: Vec<Value>) -> Value {
     )
 }
 fn compare(steps: &[Value]) -> Value {
-    let root = Root::new();
-    let observed = oracle(&root.0.join("observed.sqlite"), steps);
-    let actual = native_with_runtime(
-        &root.0.join("native.sqlite"),
-        steps,
-        Some(&observed["retentionRuntime"]),
-    );
-    let mut original = steps.to_vec();
-    let mut previous = 0;
-    for (i, step) in original.iter_mut().enumerate() {
-        let mutations = actual["rows"][i]["catalogMutations"].as_array().unwrap();
-        if step["op"] == "packageKernel" {
-            let mut ids = vec![];
-            if mutations.len() > previous {
-                assert_eq!(mutations.len(), previous + 1);
-                ids.push(
-                    mutations.last().unwrap()["mutation_id"]
-                        .as_str()
-                        .unwrap()
-                        .rsplit(':')
-                        .next()
-                        .unwrap()
-                        .to_owned(),
-                );
-                if step["params"]["message"]["action"] == "package.seed" {
-                    ids.push(
-                        actual["rows"][i]["value"]["objectId"]
-                            .as_str()
-                            .unwrap()
-                            .to_owned(),
-                    );
-                }
-            } else {
-                ids.push(format!("00000000-0000-4000-8000-{i:012}"));
-                ids.push(format!("00000000-0001-4000-8000-{i:012}"));
-            }
-            for id in &ids {
-                assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 4);
-            }
-            step["uuids"] = json!(ids);
-        }
-        previous = mutations.len();
-    }
-    let expected = oracle(&root.0.join("reference.sqlite"), &original);
-    for (i, (a, b)) in actual["rows"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .zip(expected["rows"].as_array().unwrap())
-        .enumerate()
-    {
-        assert_eq!(a, b, "Package kernel step{i}: {}", steps[i]);
-        if steps[i]["op"] == "sql" || steps[i]["requireSuccess"] == true {
-            assert!(a["error"].is_null(), "Fixture{i}: {}", a["error"]);
-        }
-    }
-    for key in ["definitions", "metadata", "topics"] {
-        assert_eq!(actual[key], expected[key]);
-    }
-    expected
+    package_catalog::compare(steps)
 }
 fn error(r: &Value, index: usize, code: &str) {
     assert_eq!(r["rows"][index]["error"]["data"]["code"], code);
@@ -366,6 +307,8 @@ fn package_kernel_live_registry_and_offline_host_observations_protect_each_build
     s[1]["buildId"] = builds[0].clone().into();
     s.push(insert_node(service_node("live", &builds[1], true)));
     s.push(insert_node(service_node("offline", &builds[2], false)));
+    // Keep the next live build pinned until its observation transfers below.
+    s.push(insert_node(service_node("next", &builds[8], true)));
     s.push(observation("host","offline",json!({"executor":{"buildId":builds[3]},"instances":[{"installedBuild":builds[4],"observedBuild":builds[5]}],"unfinished":[{"previousBuild":builds[6],"targetBuild":builds[7],"observedBuild":builds[0]}]})));
     let protected = push(&mut s, op("protected", json!({})));
     s.push(seed(
@@ -378,7 +321,7 @@ fn package_kernel_live_registry_and_offline_host_observations_protect_each_build
         worker("package.prune", json!({}), vec!["publisher"]),
     );
     s.push(sql(
-        "DELETE FROM host_reports; DELETE FROM service_nodes WHERE id='offline';",
+        "DELETE FROM host_reports; DELETE FROM service_nodes WHERE id IN ('offline','next');",
     ));
     s.push(op(
         "save",
@@ -398,7 +341,15 @@ fn package_kernel_live_registry_and_offline_host_observations_protect_each_build
         ),
     );
     let r = compare(&s);
-    assert_eq!(r["rows"][protected]["value"].as_array().unwrap().len(), 8);
+    assert_eq!(r["rows"][protected]["value"].as_array().unwrap().len(), 9);
+    for build in &builds[..9] {
+        assert!(
+            r["rows"][protected]["value"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(build))
+        );
+    }
     assert_eq!(r["rows"][retained]["value"], json!([]));
     assert_eq!(r["rows"][changed]["value"].as_array().unwrap().len(), 2);
     assert_eq!(r["rows"][removed]["value"].as_array().unwrap().len(), 7);

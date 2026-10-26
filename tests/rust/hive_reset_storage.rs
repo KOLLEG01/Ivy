@@ -1,4 +1,5 @@
 //! Original/native reset traces on separate disposable on-disk databases.
+use crate::storage_fixture;
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     json::{parse, stringify},
@@ -6,43 +7,13 @@ use ivy_contracts::{
 use ivy_hive::{objects, runtime_reset, store::Store};
 use rusqlite::{Connection, OpenFlags, types::ValueRef};
 use serde_json::{Value, json};
-use std::{
-    fs::OpenOptions,
-    io::Write,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-};
+use std::path::Path;
 
 fn ivy(value: &Value) -> IvyJson {
     parse(&value.to_string(), usize::MAX).unwrap()
 }
 fn json_value(value: &IvyJson) -> Value {
     serde_json::from_str(&stringify(value, usize::MAX).unwrap()).unwrap()
-}
-fn oracle(input: Value) -> Value {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut child =
-        Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
-            .arg(root.join("tests/fixtures/hive-reset-storage-oracle.mjs"))
-            .current_dir(root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.to_string().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "Original reset oracle: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).unwrap()
 }
 fn observe(db: &Connection, queries: &Value) -> Value {
     let mut state = serde_json::Map::new();
@@ -202,10 +173,7 @@ fn native(path: &Path, steps: &[Value], queries: &Value) -> Value {
 #[test]
 fn disposable_original_reset_capture_restore_bootstrap_and_failure_boundaries_match() {
     let root = super::TemporaryDirectory::new();
-    let original = oracle(json!({"root":root.0}));
-    if let Ok(path) = std::env::var("IVY_HIVE_RESET_CORPUS") {
-        std::fs::write(format!("{path}.oracle.json"), original.to_string()).unwrap();
-    }
+    let original = storage_fixture::reset();
     let queries: Value = serde_json::from_str(include_str!(
         "../fixtures/hive-reset-storage-observations.json"
     ))
@@ -213,7 +181,7 @@ fn disposable_original_reset_capture_restore_bootstrap_and_failure_boundaries_ma
     let traces = original["traces"].as_array().unwrap();
     assert_eq!(traces.len(), 29);
     let mut mismatches = vec![];
-    let mut pairs = vec![];
+
     for (index, trace) in traces.iter().enumerate() {
         let steps = trace["steps"].as_array().unwrap();
         let expected_codes: &[&str] = match trace["name"].as_str().unwrap() {
@@ -265,29 +233,37 @@ fn disposable_original_reset_capture_restore_bootstrap_and_failure_boundaries_ma
         }
         let native_path = root.0.join(format!("native-{index}.sqlite"));
         let actual = native(&native_path, steps, &queries);
-        let matched = trace["rows"] == actual;
-        pairs.push(json!({"name":trace["name"],"steps":steps,"original":trace["rows"],"native":actual,"originalDiagnostics":trace["diagnostics"],"execution":"completed","finding":{"conditionMet":matched}}));
-        if !matched {
-            mismatches.push(pairs.last().unwrap().clone());
+        assert_eq!(actual.as_array().unwrap().len(), steps.len());
+        assert_eq!(trace["rows"].as_array().unwrap().len(), steps.len());
+        if trace["rows"] != actual {
+            mismatches.push(json!({"name":trace["name"],"steps":steps,"original":trace["rows"],"native":actual}));
         }
-        // Cross-open each completed database with the opposite implementation.
-        if native_path.exists() {
-            let original_path = PathBuf::from(trace["path"].as_str().unwrap());
-            let from_native = oracle(json!({"cross":native_path}));
-            let from_original =
-                json_value(&runtime_reset::saved_instructions(&original_path).unwrap());
-            if from_native != from_original {
-                mismatches.push(json!({"name":trace["name"],"crossOriginal":from_native,"crossNative":from_original}));
+        // Each original image is opened natively; Node reads every native SQL row.
+        assert_eq!(
+            native_path.exists(),
+            trace.get("database").is_some(),
+            "{}",
+            trace["name"]
+        );
+        if let Some(image) = trace.get("database") {
+            let sql = storage_fixture::sqlite(json!({"path":native_path,"queries":queries}));
+            assert_eq!(
+                sql,
+                trace["rows"].as_array().unwrap().last().unwrap()["state"],
+                "Node cross-read {}",
+                trace["name"]
+            );
+            let original_path = root.0.join(format!("original-{index}.sqlite"));
+            storage_fixture::materialize(image, &original_path);
+            for path in [&original_path, &native_path] {
+                let captured = json_value(&runtime_reset::saved_instructions(path).unwrap());
+                assert_eq!(
+                    captured, trace["savedInstructions"],
+                    "Instruction cross-read {}",
+                    trace["name"]
+                );
             }
         }
-    }
-    if let Ok(path) = std::env::var("IVY_HIVE_RESET_CORPUS") {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(path)
-            .unwrap();
-        writeln!(file,"{}", json!({"originalNode":original["node"],"originalSqlite":original["sqlite"],"nativeSqlite":rusqlite::version(),"traces":pairs,"mismatches":mismatches})).unwrap();
     }
     assert!(
         mismatches.is_empty(),

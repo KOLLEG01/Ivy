@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_chat_bridge::store::{
     ChatStore, Destination, Document, Pin, Reference,
     hive::{HiveStore, WriteReceipt},
@@ -128,17 +130,8 @@ impl Store {
 #[tokio::test]
 async fn public_hive_persistence_matches_original_store_calls_and_errors() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = Command::new("node")
-        .current_dir(root)
-        .arg("tests/rust/fixtures/chat-store-hive-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let cases = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let output = reference_data::read(include_bytes!("fixtures/chat-store-hive-cases.json.gz"));
+    let cases = parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap();
     for complete in [false, true] {
         for case in cases.as_array().unwrap() {
             let client = Arc::new(Client {

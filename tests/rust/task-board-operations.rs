@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, Outcome,
     hash::hash_json,
@@ -308,22 +310,9 @@ fn retained_protocol_matches_original_outcomes_bytes_and_effect_order() {
         )
         .unwrap()
     } else {
-        let result = Command::new("node")
-            .args([
-                "--experimental-transform-types",
-                "--disable-warning=ExperimentalWarning",
-                "tests/fixtures/task-board-operations-oracle.mjs",
-            ])
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .output()
-            .unwrap();
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
+        let result = reference_data::read(include_bytes!("../fixtures/task-board-operations-cases.json.gz"));
         parse(
-            std::str::from_utf8(&result.stdout).unwrap(),
+            std::str::from_utf8(&result).unwrap(),
             MANAGEMENT_FRAME_BYTES,
         )
         .unwrap()

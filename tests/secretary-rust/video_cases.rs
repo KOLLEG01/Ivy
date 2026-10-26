@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::*;
 use ivy_contracts::{
     IvyResult,
@@ -80,22 +82,8 @@ fn normalize(value: &IvyJson, root: &Path) -> IvyJson {
 }
 #[tokio::test]
 async fn original_video_protected_configuration_and_both_executable_identities() {
-    let mut command = Command::new("node");
-    command
-        .arg("tests/secretary-rust/video-config-oracle.mjs")
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let rows = parse(std::str::from_utf8(&output.stdout).unwrap(), 1024 * 1024).unwrap();
+    let output = reference_data::read(include_bytes!("video-config-cases.json.gz"));
+    let rows = parse(std::str::from_utf8(&output).unwrap(), 1024 * 1024).unwrap();
     for row in rows.as_array().unwrap() {
         let root = Directory::new();
         let kind = row.required("kind").unwrap().as_str().unwrap();
@@ -545,22 +533,8 @@ fn observed(value: IvyResult<Prepared>, compact: bool) -> IvyJson {
     }
 }
 fn corpus() -> IvyJson {
-    let mut command = Command::new("node");
-    command
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .arg("tests/secretary-rust/video-oracle.mjs");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let out = command.output().unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    parse(std::str::from_utf8(&out.stdout).unwrap(), 32 * 1024 * 1024).unwrap()
+    let out = reference_data::read(include_bytes!("video-cases.json.gz"));
+    parse(std::str::from_utf8(&out).unwrap(), 32 * 1024 * 1024).unwrap()
 }
 #[tokio::test]
 async fn original_video_policy_projection_argv_scratch_and_cache() {

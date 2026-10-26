@@ -4,12 +4,17 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { gunzipSync } from 'node:zlib';
 import { expect } from '@playwright/test';
 import { ServiceClient, digest, deriveOperationId, IvyError, newOperationId } from '../../dist/packages/sdk/src/node.js';
-import { contractVersion, secretaryRegistry } from '../../dist/services/secretary/src/schema.js';
-import { defaultConfiguration } from '../../dist/services/secretary/src/assignment-schema.js';
 import { publishUi } from '../../dist/packages/cli/src/publish-ui.js';
 import { fixture, fixtureToken } from './fixtures/fixture.mjs';
+
+// This UI transport fixture supplies canned read/save responses using the same
+// fixed public registry corpus as the native registry contract cases.
+const registryTemplate = JSON.parse(gunzipSync(await readFile(new URL('../secretary-rust/registry-cases.json.gz', import.meta.url)))).baseline;
+const secretaryRegistry = () => structuredClone(registryTemplate);
+const contractVersion = key => registryTemplate.contracts.find(definition => definition.key === key).version;
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
   test(`Secretary loads complete document pages without individual reads at ${viewport.width}px`, { timeout: 90000 }, async t => {
@@ -57,7 +62,10 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
         create: { contractKey, parentId: root, ownerObjectId: null, name }, content: { encoding: 'json', value } });
       savedIds.add(saved.object.id); return { objectId: saved.object.id, revision: saved.revision.revision };
     };
-    const configuration = defaultConfiguration({ policy: { minimumMainUrgency: 'normal', silentTime: null, researchMaxMinutes: 5 } }, at);
+    const configuration = { schemaVersion: 1, execution: null, browserNotifications: true, updatedAt: at, rules: {
+      main: { enabled: true, minimumUrgency: 'normal', window: null },
+      whatsapp: { enabled: true, minimumUrgency: 'normal', window: null, questionsOnly: false },
+      voice: { enabled: true, minimumUrgency: 'critical', window: null, immediateOnly: true }, researchMaxMinutes: 5 } };
     await save('secretary/configuration', contractVersion('secretary/configuration'), 'configuration', configuration);
     await publishUi(f.client, { directory: resolve('dist/apps/secretary-ui'), definition: JSON.parse(await readFile('ui/secretary-ui/ui.json', 'utf8')),
       expectedReleaseId: null, mutationId: await newOperationId(f.client) });

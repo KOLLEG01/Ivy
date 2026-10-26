@@ -19,7 +19,7 @@ use std::{
 #[tokio::test]
 async fn staged_file_storage_preserves_bytes_expiry_limits_and_native_names() {
     let root = Root::new();
-    let directory = root.path.join("staged");
+    let directory = root.0.join("staged");
     let now = UNIX_EPOCH + Duration::from_millis(1_792_281_600_000);
     let calls = Arc::new(AtomicUsize::new(0));
     let owner = Arc::new(StagedFiles {
@@ -174,7 +174,7 @@ async fn staged_file_storage_preserves_bytes_expiry_limits_and_native_names() {
         }
     }
     fs::write(directory.join("ordinary-file"), b"retain").unwrap();
-    let outside = root.path.join("outside");
+    let outside = root.0.join("outside");
     fs::create_dir(&outside).unwrap();
     fs::write(outside.join("keep"), b"outside bytes").unwrap();
     filesystem::directory_link(&outside, &directory.join("outside-link")).unwrap();
@@ -206,7 +206,7 @@ async fn native_stage_paths(now: std::time::SystemTime) {
     let root = Root::new();
     let order = Arc::new(Mutex::new(Vec::new()));
     let mut owner = StagedFiles::new(
-        node_path::from_native(&root.path.join("invalid\0root")),
+        node_path::from_native(&root.0.join("invalid\0root")),
         Arc::new({
             let order = order.clone();
             move |value| {
@@ -236,7 +236,7 @@ async fn native_stage_paths(now: std::time::SystemTime) {
             ["clock", "decode"]
         );
     }
-    let blocked = root.path.join("blocked");
+    let blocked = root.0.join("blocked");
     fs::write(&blocked, b"retain blocker").unwrap();
     owner.root = node_path::from_native(&blocked.join("child"));
     assert_eq!(
@@ -253,18 +253,18 @@ async fn native_stage_paths(now: std::time::SystemTime) {
         ["clock", "decode"]
     );
 
-    let target = root.path.join("physical");
+    let target = root.0.join("physical");
     fs::create_dir(&target).unwrap();
-    let linked = root.path.join("linked");
+    let linked = root.0.join("linked");
     filesystem::directory_link(&target, &linked).unwrap();
-    let mut trailing = root.path.join("trailing").into_os_string();
+    let mut trailing = root.0.join("trailing").into_os_string();
     trailing.push(std::path::MAIN_SEPARATOR_STR);
     let mut variants = vec![
-        ("absolute", root.path.join("absolute")),
-        ("unicode-dot", root.path.join("中-🚀").join(".")),
+        ("absolute", root.0.join("absolute")),
+        ("unicode-dot", root.0.join("中-🚀").join(".")),
         (
             "canonical",
-            fs::canonicalize(&root.path).unwrap().join("canonical"),
+            fs::canonicalize(&root.0).unwrap().join("canonical"),
         ),
         ("linked", linked),
         ("trailing", PathBuf::from(trailing)),
@@ -273,8 +273,8 @@ async fn native_stage_paths(now: std::time::SystemTime) {
     let mut base = cwd.as_path();
     let mut relative = PathBuf::new();
     loop {
-        if root.path.starts_with(base) {
-            relative.push(root.path.strip_prefix(base).unwrap());
+        if root.0.starts_with(base) {
+            relative.push(root.0.strip_prefix(base).unwrap());
             relative.push("relative");
             variants.push(("relative", relative));
             break;
@@ -287,16 +287,16 @@ async fn native_stage_paths(now: std::time::SystemTime) {
     {
         variants.push((
             "parent-missing",
-            root.path.join("uncreated/../parent-missing"),
+            root.0.join("uncreated/../parent-missing"),
         ));
-        variants.push(("parent-link", root.path.join("linked/../parent-link")));
+        variants.push(("parent-link", root.0.join("linked/../parent-link")));
         variants.push((
             "opaque-high",
-            root.path.join(native_entry("root-high-", 0xd800)),
+            root.0.join(native_entry("root-high-", 0xd800)),
         ));
         variants.push((
             "opaque-low",
-            root.path.join(native_entry("root-low-", 0xdfff)),
+            root.0.join(native_entry("root-low-", 0xdfff)),
         ));
     }
     let mut stored = vec![];
@@ -351,7 +351,7 @@ async fn native_stage_paths(now: std::time::SystemTime) {
         assert_eq!(fs::read(path).unwrap(), bytes);
     }
 
-    let entries = root.path.join("native-entries");
+    let entries = root.0.join("native-entries");
     fs::create_dir(&entries).unwrap();
     owner.root = node_path::from_native(&entries);
     let mut expired = vec![];

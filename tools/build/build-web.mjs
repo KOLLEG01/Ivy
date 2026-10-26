@@ -152,7 +152,7 @@ export async function buildWeb({ uis = null } = {}) {
     }
     const inputs = [resolve(project, "ui", uiId)];
     if (uiId === "dashboards-ui")
-      inputs.push(resolve(project, "services/dashboards/src/document.ts"));
+      inputs.push(resolve(project, "packages/ui-client/src/dashboard/document.ts"));
     await cached(uiId, inputs, output, async () => {
       await build({
         configFile: false,

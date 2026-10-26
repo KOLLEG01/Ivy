@@ -6,8 +6,8 @@ const require = createRequire(import.meta.url);
 
 const texts = [
   { component: 'secretary', name: 'secretary-notification-policy', sourcePath: 'instructions/secretary-notification-policy.ts', exportName: 'secretaryNotificationPolicy' },
-  { component: 'chat-bridge', name: 'chat-main-instructions', sourcePath: 'services/chat-bridge/src/main-context.ts', exportName: 'mainInstructions' },
-  { component: 'chat-bridge', name: 'chat-notice-prompt', sourcePath: 'services/chat-bridge/src/notice-input.ts', exportName: 'noticePrompt', template: true },
+  { component: 'chat-bridge', name: 'chat-main-instructions', sourcePath: 'instructions/chat-main-instructions.ts', exportName: 'mainInstructions' },
+  { component: 'chat-bridge', name: 'chat-notice-prompt', sourcePath: 'instructions/chat-notice-prompt.ts', exportName: 'noticePrompt', template: true },
 ];
 
 function literalText(path, exportName, template) {

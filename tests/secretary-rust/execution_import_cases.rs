@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::*;
 use base64::Engine;
 use ivy_contracts::json::canonical;
@@ -159,23 +161,9 @@ fn result(value: Result<ImportedExecution, IvyError>) -> IvyJson {
 #[tokio::test]
 async fn explicit_delivery_import_retains_copied_core_history_and_original_admission() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut command = Command::new("node");
-    command
-        .arg("tests/secretary-rust/execution-import-oracle.mjs")
-        .current_dir(root);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("execution-import-cases.json.gz"));
     let corpus = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         32 * 1024 * 1024,
     )
     .unwrap();

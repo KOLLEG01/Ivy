@@ -23,6 +23,41 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     sync::{Notify, watch},
 };
+#[path = "../fixtures/reference-data.rs"]
+mod owner_reference_data;
+
+fn reference() -> &'static IvyJson {
+    static CASES: std::sync::OnceLock<IvyJson> = std::sync::OnceLock::new();
+    CASES.get_or_init(|| {
+        let bytes: &[u8] = if cfg!(windows) {
+            include_bytes!("../fixtures/agent-native-owner-win32-cases.json.gz")
+        } else {
+            include_bytes!("../fixtures/agent-native-owner-linux-cases.json.gz")
+        };
+        parse(
+            std::str::from_utf8(&owner_reference_data::read(bytes)).unwrap(),
+            usize::MAX,
+        )
+        .unwrap()
+    })
+}
+fn reference_root(value: &IvyJson, root: &str) -> IvyJson {
+    match value {
+        IvyJson::Array(values) => IvyJson::Array(
+            values
+                .iter()
+                .map(|value| reference_root(value, root))
+                .collect(),
+        ),
+        IvyJson::Object(values) => IvyJson::object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), reference_root(value, root))),
+        ),
+        IvyJson::String(value) => value.to_utf8().unwrap().replace("<ROOT>", root).into(),
+        value => value.clone(),
+    }
+}
 
 struct Root(PathBuf);
 impl Root {
@@ -74,16 +109,16 @@ fn repo() -> PathBuf {
 fn path(path: &Path) -> IvyJson {
     IvyJson::String(node_path::from_native(path))
 }
-fn original(input: IvyJson) -> IvyJson {
-    let mut child = Command::new("node")
-        .arg("--experimental-transform-types")
-        .arg("tests/fixtures/agent-native-owner-oracle.mjs")
-        .current_dir(repo())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+fn prepare_fixture(input: IvyJson) -> IvyJson {
+    let mut child =
+        Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
+            .arg("tests/fixtures/agent-native-owner-prepare.mjs")
+            .current_dir(repo())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
     child
         .stdin
         .take()
@@ -99,7 +134,7 @@ fn original(input: IvyJson) -> IvyJson {
     parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
 }
 fn prepared(root: &Root, name: &str) -> IvyJson {
-    original(IvyJson::object([
+    prepare_fixture(IvyJson::object([
         ("action", "prepare".into()),
         ("root", path(&root.0.join(name))),
         ("variant", name.into()),
@@ -170,9 +205,8 @@ async fn agent_prelaunch_admission_and_callback_match_original_without_a_native_
         "claude-null-settings",
         "claude-config-link",
     ] {
-        let mut prepared = prepared(&root, variant);
-        prepared.insert("action", "preflight".into());
-        let expected = original(prepared.clone());
+        let prepared = prepared(&root, variant);
+        let expected = field(field(reference(), "preflight"), variant);
         let before = Arc::new(Mutex::new(None));
         let observed = before.clone();
         let base = node_path::filesystem_path(&text(&prepared, "root"));
@@ -225,7 +259,7 @@ async fn agent_prelaunch_admission_and_callback_match_original_without_a_native_
         ]);
         assert_eq!(
             canonical(&actual, usize::MAX).unwrap(),
-            canonical(&expected, usize::MAX).unwrap(),
+            canonical(expected, usize::MAX).unwrap(),
             "{variant}"
         );
     }
@@ -324,10 +358,13 @@ async fn agent_handshake_modes_and_payload_match_original_over_real_rpc_streams(
             }
         }
     }
-    let oracle = original(IvyJson::object([
-        ("action", "handshake".into()),
-        ("rows", IvyJson::Array(rows.clone())),
-    ]));
+    let reference = reference_root(
+        field(reference(), "handshake"),
+        &node_path::from_native(&root.0).to_utf8().unwrap(),
+    );
+    same(&IvyJson::Array(rows.clone()), field(&reference, "input"));
+    let oracle = field(&reference, "output");
+    assert_eq!(rows.len(), field(oracle, "rows").as_array().unwrap().len());
     let mut catalog = parse(
         include_str!("../../specs/native/codex-0.142.3/catalog.json"),
         usize::MAX,
@@ -351,7 +388,7 @@ async fn agent_handshake_modes_and_payload_match_original_over_real_rpc_streams(
     }
     catalog.insert("serverRequests", IvyJson::Array(vec![]));
     catalog.insert("serverNotifications", IvyJson::Array(vec![]));
-    for (row, expected_row) in rows.iter().zip(field(&oracle, "rows").as_array().unwrap()) {
+    for (row, expected_row) in rows.iter().zip(field(oracle, "rows").as_array().unwrap()) {
         let mode = match text(row, "mode").to_utf8().unwrap().as_str() {
             "external" => NativeMode::ExternalProxy,
             "claude" => NativeMode::ClaudeAdapter,

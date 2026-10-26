@@ -1,6 +1,8 @@
 //! Authoritative instruction reads and bounded discovery guidance.
 use crate::{
-    environment::{EnvironmentKind, read_environment_document, select_environment_document},
+    environment::{
+        EnvironmentKind, json_falsy, read_environment_document, select_environment_document,
+    },
     instructions::{ComposedInstructions, compose_instructions},
     instructions_files::{InstructionsSource, regular_bytes},
 };
@@ -168,7 +170,7 @@ pub async fn discover_mcp_instructions(
             )
             .await
         {
-            Ok(value) if value.is_null() => return Ok(instruction_summary().clone()),
+            Ok(value) if json_falsy(&value) => return Ok(instruction_summary().clone()),
             Ok(value) => value,
             Err(error) if error.code == "not_found" => return Ok(instruction_summary().clone()),
             Err(error) => return Err(error),
@@ -198,8 +200,8 @@ pub async fn discover_mcp_instructions(
                 discovery_hint,
             });
         }
-        cursor = match page.get("nextCursor") {
-            None | Some(IvyJson::Null) => None,
+        cursor = match page.get("nextCursor").filter(|value| !json_falsy(value)) {
+            None => None,
             Some(IvyJson::String(value)) => (!value.0.is_empty()).then(|| value.clone()),
             _ => {
                 return Err(IvyError::new(

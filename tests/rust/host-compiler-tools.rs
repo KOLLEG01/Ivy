@@ -176,20 +176,6 @@ async fn probe() {
         "{}",
         String::from_utf8_lossy(&provided.stderr)
     );
-    let node = Child::new(tool("IVY_TEST_NODE"))
-        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .args([
-            "--no-warnings",
-            "tests/fixtures/host-compiler-tools-probe.mjs",
-        ])
-        .arg(&f.0)
-        .output()
-        .unwrap();
-    assert!(
-        node.status.success(),
-        "{}",
-        String::from_utf8_lossy(&node.stderr)
-    );
     let project = f.0.join("project");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(

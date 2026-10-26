@@ -89,7 +89,9 @@ pub struct WhatsAppServiceParts {
 /// Every accepted transport operation that uses Main must retain its generation
 /// lease; settled/close retain the transport's own journal and socket work.
 pub trait ChatTransport: Send + Sync {
-    fn files(&self) -> Option<crate::files::ChatFiles> { None }
+    fn files(&self) -> Option<crate::files::ChatFiles> {
+        None
+    }
     fn start(&self);
     fn attach(&self, generation: Option<Arc<ChatGeneration>>) -> IvyResult<()>;
     fn changed(&self);
@@ -535,6 +537,9 @@ impl Core {
         });
     }
     fn monitor_diagnostics(self: &Arc<Self>) {
+        if !self.config.diagnostic_notifications {
+            return;
+        }
         let (selected, lease, done) = {
             let mut s = self.state.lock().unwrap();
             if s.closed || !Self::ready(&s) || s.diagnostic_work.is_some() {
@@ -802,7 +807,9 @@ impl ChatService {
                         let result = {
                             let lease = lease?;
                             let files = core.transport.as_ref().and_then(|t| t.files());
-                            lease.invoke_with_files(&name, &args, &context, files.as_ref()).await?
+                            lease
+                                .invoke_with_files(&name, &args, &context, files.as_ref())
+                                .await?
                         };
                         if let Some(t) = &core.transport {
                             if name == "createMain"
@@ -905,6 +912,9 @@ impl ChatService {
         });
     }
     fn start_diagnostics(&self) {
+        if !self.0.core.config.diagnostic_notifications {
+            return;
+        }
         let owner = Arc::downgrade(&self.0.core);
         let mut stopped = self.0.core.stopped.subscribe();
         tokio::spawn(async move {

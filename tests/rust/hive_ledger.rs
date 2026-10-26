@@ -1,4 +1,4 @@
-use super::{AuthenticatedContext, LedgerResult, Root, Store, native, oracle};
+use super::{AuthenticatedContext, LedgerResult, Root, Store, native, reference as oracle};
 use ivy_contracts::{
     IvyJson,
     hash::hash_json,

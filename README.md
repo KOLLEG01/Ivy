@@ -178,6 +178,23 @@ Use the Node/npm versions and commands in [package.json](package.json), install 
 [tools/build](tools/build); component preparation uses each component's `deploy.json`.
 [Local host operations](specs/DEPLOYMENT.md#local-host-operations) cover deployment and recovery.
 
+Use `npm run build` for the native services, public Node SDK and Web apps;
+[deployment builds](specs/DEPLOYMENT.md#releases) also support selected components.
+Inspect a focused test selection with `npm test -- --files PATH --list`, then run
+the same command without `--list`. Process fixtures use native packages containing
+`dist/native/<os>-<arch>` and `dist/build-info.json`. Supply separate packages when
+the checkout contains only one component:
+
+```sh
+npm test -- --files tests/secretary-service.test.mjs --hive-artifact /path/to/hive-package --secretary-artifact /path/to/secretary-package
+```
+
+The runner also accepts `--agent-manager-artifact`, `--task-board-artifact`,
+`--chat-bridge-artifact`, `--dashboards-artifact` and `--data-collector-artifact`.
+Each defaults to the current distribution, or its
+`IVY_TEST_<COMPONENT>_ARTIFACT` variable (uppercase, underscores for hyphens).
+Tests own temporary data and processes; selecting an artifact does not install it.
+
 For a registered Rust component, `node tools/build/build-rust-backend.mjs --component
 <component> --target <triple>` compiles its executable targets with the pinned lockfile
 and stages them under `.local/build/rust`. These target payloads are inputs to package

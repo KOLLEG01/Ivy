@@ -21,6 +21,66 @@ fn require(condition: bool, code: &str, message: &str) -> IvyResult<()> {
         Err(IvyError::new(code, message))
     }
 }
+pub(crate) fn expiry_number(value: Option<&IvyJson>) -> IvyResult<f64> {
+    Ok(match value {
+        Some(IvyJson::Null) => 0.0,
+        Some(IvyJson::Bool(value)) => u8::from(*value) as f64,
+        Some(IvyJson::Number(value)) => *value,
+        Some(IvyJson::String(value)) => {
+            let Ok(value) = value.trim_ecmascript().to_utf8() else {
+                return Ok(f64::NAN);
+            };
+            match value.as_str() {
+                "" => 0.0,
+                "Infinity" | "+Infinity" => f64::INFINITY,
+                "-Infinity" => f64::NEG_INFINITY,
+                _ => {
+                    for (prefix, radix) in [("0x", 16), ("0b", 2), ("0o", 8)] {
+                        if value
+                            .get(..2)
+                            .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+                        {
+                            if value.len() == 2 {
+                                return Ok(f64::NAN);
+                            }
+                            return Ok(value[2..]
+                                .chars()
+                                .try_fold(0.0, |number, digit| {
+                                    digit
+                                        .to_digit(radix)
+                                        .map(|digit| number * radix as f64 + digit as f64)
+                                })
+                                .unwrap_or(f64::NAN));
+                        }
+                    }
+                    if value
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'e' | b'E' | b'.' | b'+' | b'-'))
+                    {
+                        value.parse().unwrap_or(f64::NAN)
+                    } else {
+                        f64::NAN
+                    }
+                }
+            }
+        }
+        Some(IvyJson::Array(values)) => match values.as_slice() {
+            [] => 0.0,
+            [IvyJson::Bool(_)] => f64::NAN,
+            [value] => expiry_number(Some(value))?,
+            _ => {
+                for value in values {
+                    expiry_number(Some(value))?;
+                }
+                f64::NAN
+            }
+        },
+        Some(value @ IvyJson::Object(_)) if value.get("toString").is_some() => {
+            return Err(IvyError::internal());
+        }
+        _ => f64::NAN,
+    })
+}
 fn counter(value: Option<&IvyJson>) -> IvyResult<u64> {
     value
         .and_then(IvyJson::as_f64)
@@ -133,7 +193,7 @@ pub fn collect_oauth_families(
                 .is_some_and(|v| values.contains(&v))
         });
         if state.get("revoked") == Some(&true.into())
-            || counter(state.get("expiresAt"))? <= now_ms
+            || expiry_number(state.get("expiresAt"))? <= now_ms as f64
             || inactive
         {
             store
@@ -162,7 +222,7 @@ pub fn create_oauth_family(
             .is_some_and(|v| active.contains(v))
             && state.get("generation") == Some(&IvyJson::Number(1.0))
             && state.get("revoked") != Some(&true.into())
-            && counter(state.get("expiresAt"))? > now_ms,
+            && expiry_number(state.get("expiresAt"))? > now_ms as f64,
         "unauthenticated",
         "OAuth refresh family binding is invalid.",
     )?;
@@ -197,14 +257,11 @@ pub fn rotate_oauth_family(
             return Ok(false);
         };
         let state = parse(&encoded, usize::MAX).map_err(|_| IvyError::internal())?;
-        if state.as_object().is_none() {
-            return Err(IvyError::new(
-                "storage_invalid",
-                "Retained OAuth family state is invalid.",
-            ));
+        if state.is_null() {
+            return Err(IvyError::internal());
         }
         let bound = state.get("revoked") != Some(&true.into())
-            && counter(state.get("expiresAt"))? > now_ms
+            && expiry_number(state.get("expiresAt"))? > now_ms as f64
             && ["credentialReference", "clientId", "resource", "scope"]
                 .iter()
                 .all(|key| {
@@ -226,7 +283,21 @@ pub fn rotate_oauth_family(
                             .get("presentedTokenDigest")
                             .and_then(IvyJson::as_js_string)
                 });
-        let mut next = state.clone();
+        let mut next = match &state {
+            IvyJson::Object(_) => state.clone(),
+            IvyJson::Array(values) => IvyJson::object(
+                values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| (index.to_string(), value.clone())),
+            ),
+            IvyJson::String(value) => {
+                IvyJson::object(value.0.iter().enumerate().map(|(index, unit)| {
+                    (index.to_string(), IvyJson::String(JsString(vec![*unit])))
+                }))
+            }
+            _ => IvyJson::object([] as [(&str, IvyJson); 0]),
+        };
         if !current {
             next.insert("revoked", true.into());
             store.set_metadata(&key, &canonical(&next, MANAGEMENT_FRAME_BYTES)?)?;
@@ -235,7 +306,7 @@ pub fn rotate_oauth_family(
         require(
             counter(state.get("generation"))?.checked_add(1)
                 == Some(counter(rotation.get("nextGeneration"))?)
-                && counter(rotation.get("nextExpiresAt"))? > now_ms,
+                && expiry_number(rotation.get("nextExpiresAt"))? > now_ms as f64,
             "invalid_arguments",
             "OAuth refresh successor is invalid.",
         )?;
@@ -355,10 +426,7 @@ pub fn check_access_expiry(context: &IvyJson, now_ms: u64) -> IvyResult<()> {
     }
     require(
         context.get("expiresAt").is_none()
-            || context
-                .get("expiresAt")
-                .and_then(IvyJson::as_f64)
-                .is_some_and(|expires| expires > now_ms as f64),
+            || expiry_number(context.get("expiresAt"))? > now_ms as f64,
         "unauthenticated",
         "OAuth access token has expired.",
     )

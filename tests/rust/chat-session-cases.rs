@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::snapshot;
 use ivy_chat_bridge::whatsapp::{
     command_native::{CommandOwner, RetryIdentity},
@@ -544,17 +546,8 @@ fn capture(rows: &[Json]) {
 #[tokio::test]
 async fn original_bound_session_direct_input_and_verified_history_match() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = Command::new("node")
-        .current_dir(&root)
-        .arg("tests/rust/fixtures/chat-whatsapp-session-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let corpus = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let output = reference_data::read(include_bytes!("fixtures/chat-whatsapp-session-cases.json.gz"));
+    let corpus = parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap();
     let catalogs = Arc::new(CheckedNativeContracts::new(&root));
     let mut actual_rows = vec![];
     for row in f(&corpus, "rows").as_array().unwrap() {
@@ -878,17 +871,8 @@ async fn real_sdk_session_keeps_disk_fence_and_rejects_changed_history_authority
     let corpus = if let Some(path) = corpus_path.filter(|p| std::path::Path::new(p).exists()) {
         parse(&std::fs::read_to_string(path).unwrap(), usize::MAX).unwrap()
     } else {
-        let output = Command::new("node")
-            .current_dir(&root)
-            .arg("tests/rust/fixtures/chat-whatsapp-session-oracle.mjs")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
+        let output = reference_data::read(include_bytes!("fixtures/chat-whatsapp-session-cases.json.gz"));
+        parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap()
     };
     let row = f(&corpus, "rows")
         .as_array()

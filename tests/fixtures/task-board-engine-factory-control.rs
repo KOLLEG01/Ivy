@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use super::*;
 use driver::{count, evidence as all_evidence, exact_evidence, frames, reached};
 use ivy_task_board::engine_invocations::InvocationRequest;
@@ -200,21 +202,8 @@ pub(super) fn assert_review_records(fixture: &Fixture, records: &[(&str, Json, &
     );
 }
 pub(super) fn data() -> Json {
-    let output = std::process::Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-native-advance-oracle.mjs",
-        ])
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    json(std::str::from_utf8(&output.stdout).unwrap())
+    let output = reference_data::read(include_bytes!("task-board-native-advance-cases.json.gz"));
+    json(std::str::from_utf8(&output).unwrap())
 }
 pub(super) fn signals(fixture: &Fixture) -> Vec<Json> {
     let db = fixture.database();

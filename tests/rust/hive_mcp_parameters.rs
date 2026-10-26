@@ -3,15 +3,6 @@ use super::*;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_hive::{mcp_inbound as inbound, mcp_legacy as legacy, mcp_parameters as parameters};
 
-fn save(suffix: &str, value: &IvyJson) {
-    if let Some(prefix) = std::env::var_os("IVY_HIVE_MCP_PARAMETERS_CORPUS") {
-        std::fs::write(
-            format!("{}-{suffix}.json", prefix.to_string_lossy()),
-            encode(value),
-        )
-        .unwrap();
-    }
-}
 fn legacy(method: &str) -> IvyJson {
     obj([
         ("name", method.into()),
@@ -303,11 +294,10 @@ fn parameter_cases() -> Vec<IvyJson> {
 #[test]
 fn registered_method_parameters_match_actual_sdk_projection_and_diagnostics() {
     let cases = parameter_cases();
-    let source = super::mcp_protocol::oracle(&obj([
+    let source = super::mcp_protocol::reference(&obj([
         ("mode", "parameter-projection".into()),
         ("cases", IvyJson::Array(cases.clone())),
     ]));
-    save("source", &source);
     let observations = source.required("observations").unwrap().as_array().unwrap();
     assert_eq!(cases.len(), observations.len());
     let mut outcomes = vec![];
@@ -341,14 +331,6 @@ fn registered_method_parameters_match_actual_sdk_projection_and_diagnostics() {
             ("source", observed.clone()),
         ]));
     }
-    save(
-        "comparison",
-        &obj([
-            ("cases", IvyJson::Array(cases.clone())),
-            ("source", source.clone()),
-            ("outcomes", IvyJson::Array(outcomes.clone())),
-        ]),
-    );
     for ((row, observed), outcome) in cases.iter().zip(observations).zip(&outcomes) {
         let wire = observed.required("wire").unwrap();
         let calls = observed.required("calls").unwrap().as_array().unwrap();
@@ -359,7 +341,7 @@ fn registered_method_parameters_match_actual_sdk_projection_and_diagnostics() {
         } else if let Some(request) = native.get("request") {
             assert_eq!(
                 calls,
-                &[request.clone()],
+                &[json(&encode(request))],
                 "Handler projection differs for {}",
                 text(row, "name")
             );
@@ -467,12 +449,11 @@ fn legacy_stateless_admission_matches_original_http() {
         );
         cases.push(named(row, format!("malformed-initialize-version-{index}")));
     }
-    let source = super::mcp_protocol::oracle(&obj([
+    let source = super::mcp_protocol::reference(&obj([
         ("mode", "baseline".into()),
         ("client", false.into()),
         ("cases", IvyJson::Array(cases.clone())),
     ]));
-    save("legacy-source", &source);
     let mut outcomes = vec![];
     for (row, wire) in cases
         .iter()
@@ -490,14 +471,6 @@ fn legacy_stateless_admission_matches_original_http() {
             ("original", expected.clone()),
         ]));
     }
-    save(
-        "legacy-comparison",
-        &obj([
-            ("cases", IvyJson::Array(cases.clone())),
-            ("source", source.clone()),
-            ("outcomes", IvyJson::Array(outcomes.clone())),
-        ]),
-    );
     for outcome in &outcomes {
         if let Some(native) = outcome.get("native").filter(|v| !v.is_null()) {
             assert_eq!(

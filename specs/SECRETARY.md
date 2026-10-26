@@ -57,9 +57,9 @@ Contracts: [inbox](schemas/secretary.schema.json), [triage](schemas/secretary-tr
 - The former automatic shared triage thread is not an execution path. It may only be retained to
   complete exact historical follow-ups created before this assignment engine.
 
-Sources: [assignment contracts](../services/secretary/src/assignment-schema.ts),
-[scheduler](../services/secretary/src/assignment-scheduler.ts),
-[execution owner](../services/secretary/src/assignment-runner.ts).
+Sources: [assignment contracts](../services/secretary/rust/src/assignment_schema.rs),
+[scheduler](../services/secretary/rust/src/assignment_scheduler.rs),
+[execution owner](../services/secretary/rust/src/assignment_runner.rs).
 
 ## Rules
 
@@ -98,10 +98,10 @@ Sources: [assignment contracts](../services/secretary/src/assignment-schema.ts),
   recovery contracts; they are not wired into the current service worker loop. Native Teams
   configuration admission rejects nonempty collectors.
 
-Sources: [engine](../services/secretary/src/engine.ts),
-[active composition](../services/secretary/src/main.ts),
-[Microsoft adapters](../services/secretary/src/outlook-source.ts),
-[Teams admission](../services/secretary/src/teams-config.ts).
+Sources: [engine](../services/secretary/rust/src/engine.rs),
+[active composition](../services/secretary/rust/src/main.rs),
+[Microsoft adapters](../services/secretary/rust/src/outlook_source.rs),
+[Teams admission](../services/secretary/rust/src).
 
 ## Assessment and contact
 
@@ -109,12 +109,12 @@ Sources: [engine](../services/secretary/src/engine.ts),
   The assessment may reference an existing TaskBoard task; it cannot invent or create one.
 - Historical triage evidence retains the exact task and turn that produced it, but new automatic
   assessment is admitted only as an assignment execution with its own task.
-- Use the [configured assessment policy](../services/secretary/src/triage-prompt.ts):
+- Use the [configured assessment policy](../services/secretary/rust/src/triage_prompt.rs):
   bounded read-only research may inform decisions, while source content grants no authority
   for external mutation. Completion must belong to the selected turn and validate before item CAS.
 - `none` suppresses contact, `main` requests an asynchronous notice, and `needs_attention`
   records uncertainty. Voice requires the configured exceptional urgency threshold and target.
-  Exact suppression and quiet-time rules live in [policy](../services/secretary/src/policy.ts).
+  Exact suppression and quiet-time rules live in [policy](../services/secretary/rust/src/policy.rs).
 - Preserve Teams/WhatsApp text in notices; summarize email faithfully. Keep useful researched
   facts separate from source text. Do not suggest replies or promise action on the user's behalf.
 - Save notice intent with the assessment. Minimum age and quiet time govern new dispatch,
@@ -128,9 +128,9 @@ Sources: [engine](../services/secretary/src/engine.ts),
   Phone operation. Admission/receipt states do not prove that the user heard or read a notice.
 - Follow-up accepts an item or execution reference and returns an asynchronous caller-owned operation. A separate read-only task receives the retained source snapshot; it cannot interfere with an active assignment task. Retain the original request, context and calls before dispatch; questions sharing a task wait for unresolved earlier questions. Poll the original operation for its answer and never recursively invoke follow-up within that task.
 
-Sources: [triage](../services/secretary/src/triage.ts),
-[native ownership](../services/secretary/src/triage-native.ts),
-[notices](../services/secretary/src/notices.ts), [follow-up](../services/secretary/src/follow-up.ts).
+Sources: [triage](../services/secretary/rust/src/triage.rs),
+[native ownership](../services/secretary/rust/src/triage_native.rs),
+[notices](../services/secretary/rust/src/notices.rs), [follow-up](../services/secretary/rust/src/follow_up.rs).
 
 ## Media
 
@@ -148,8 +148,8 @@ Sources: [triage](../services/secretary/src/triage.ts),
   payloads until source/account admission succeeds. Interrupted acquisition does not silently
   redownload. Complete spool archives remain required recovery data.
 
-Sources: [document projection](../services/secretary/src/media-document.ts),
-[video](../services/secretary/src/media-video.ts), [media spool](../services/secretary/src/media-spool.ts).
+Sources: [document projection](../services/secretary/rust/src/media_document.rs),
+[video](../services/secretary/rust/src/media_video.rs), [media spool](../services/secretary/rust/src/media_spool.rs).
 Exact media shapes are in [schemas](schemas); focused checks cover
 [inbox](../tests/secretary.test.mjs), [triage](../tests/secretary-triage.test.mjs),
 [media](../tests/secretary-media.test.mjs) and [video](../tests/secretary-video.test.mjs).

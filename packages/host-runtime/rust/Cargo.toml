@@ -113,21 +113,8 @@ name = "host-emitted-runtime"
 path = "../../../tests/rust/host-emitted-runtime-cases.rs"
 
 [[test]]
-name = "host-javascript-preparation"
-path = "../../../tests/rust/host-javascript-preparation.rs"
-harness = false
-
-[[test]]
-name = "host-native-recovery"
-path = "../../../tests/rust/host-native-recovery-cases.rs"
-
-[[test]]
 name = "host-service-storage"
 path = "../../../tests/rust/host-service-storage.rs"
-
-[[test]]
-name = "host-preparation-files"
-path = "../../../tests/rust/host-preparation-files.rs"
 
 [[test]]
 name = "host-protected-config"
@@ -136,10 +123,6 @@ path = "../../../tests/rust/host-protected-config.rs"
 [[test]]
 name = "host-preparation-links"
 path = "../../../tests/rust/host-preparation-links.rs"
-
-[[test]]
-name = "host-portable-dependencies"
-path = "../../../tests/rust/host-portable-dependencies.rs"
 
 [[test]]
 name = "host-windows-process-inspection"

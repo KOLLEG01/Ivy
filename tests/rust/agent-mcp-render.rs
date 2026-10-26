@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_agent_manager::mcp_render::{hive_mcp_urls, render_mcp_sections};
 use ivy_contracts::{IvyJson, IvyResult, JsString, json::parse};
 use std::{collections::HashSet, path::PathBuf, process::Command};
@@ -12,18 +14,9 @@ fn result(value: IvyResult<IvyJson>) -> IvyJson {
 }
 #[test]
 fn rendering_and_credential_destinations_match_original() {
-    let output = Command::new("node")
-        .arg("tests/fixtures/agent-mcp-render-oracle.mjs")
-        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("../fixtures/agent-mcp-render-cases.json.gz"));
     let data = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         2 * 1024 * 1024,
     )
     .unwrap();

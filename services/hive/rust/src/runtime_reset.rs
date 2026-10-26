@@ -61,7 +61,19 @@ fn captured(row: &Row<'_>) -> rusqlite::Result<IvyJson> {
             IvyJson::object([
                 ("contractVersion", string(row, "contract_version")?),
                 ("encoding", string(row, "encoding")?),
-                ("content", string(row, "content")?),
+                (
+                    "content",
+                    match row.get_ref("content")? {
+                        // Node's Uint8Array string conversion retains every decimal byte.
+                        ValueRef::Blob(bytes) => bytes
+                            .iter()
+                            .map(u8::to_string)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                            .into(),
+                        _ => string(row, "content")?,
+                    },
+                ),
                 ("contentHash", string(row, "content_hash")?),
                 ("byteLength", IvyJson::Number(row.get("byte_length")?)),
                 ("createdAt", string(row, "revision_created_at")?),
@@ -70,7 +82,6 @@ fn captured(row: &Row<'_>) -> rusqlite::Result<IvyJson> {
         ),
     ]))
 }
-
 /// Capture the original SavedInstruction[] shape without parsing/canonicalizing
 /// its raw owner, definition, content or references strings. Like the original,
 /// this opens the normal writable Store (including its startup normalization).

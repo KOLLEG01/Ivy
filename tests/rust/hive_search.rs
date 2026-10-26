@@ -1,4 +1,4 @@
-use super::{IvyError, IvyJson, Root, Store, native_with_runtime, object_write, oracle, query};
+use super::{IvyError, IvyJson, Root, Store, native_with_runtime, object_write, query, reference};
 use ivy_contracts::IvyResult;
 use ivy_hive::objects;
 use serde_json::{Value, json};
@@ -95,13 +95,14 @@ fn token(steps: &mut Vec<Value>, params: &Value, boundary: Value) -> usize {
 }
 fn compare(steps: &[Value]) -> Value {
     let root = Root::new();
-    let expected = oracle(&root.0.join("original.sqlite"), steps);
+    let expected = reference(&root.0.join("original.sqlite"), steps);
     let actual = native_with_runtime(
         &root.0.join("native.sqlite"),
         steps,
         Some(&expected["searchRuntime"]),
     );
     assert_eq!(actual["rows"].as_array().unwrap().len(), steps.len());
+    assert_eq!(expected["rows"].as_array().unwrap().len(), steps.len());
     for (index, (a, b)) in actual["rows"]
         .as_array()
         .unwrap()

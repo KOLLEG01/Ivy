@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::snapshot;
 use ivy_chat_bridge::whatsapp::{
     commands::DesktopCommands,
@@ -110,20 +112,11 @@ impl DesktopHost for Host {
 }
 #[tokio::test]
 async fn original_fixed_command_cache_and_attempts_match() {
-    let out = Command::new("node")
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .arg("tests/rust/fixtures/chat-desktop-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let out = reference_data::read(include_bytes!("fixtures/chat-desktop-cases.json.gz"));
     if let Some(p) = std::env::var_os("IVY_CHAT_DESKTOP_ORACLE_CAPTURE") {
-        std::fs::write(p, &out.stdout).unwrap();
+        std::fs::write(p, &out).unwrap();
     }
-    let corpus = parse(std::str::from_utf8(&out.stdout).unwrap(), usize::MAX).unwrap();
+    let corpus = parse(std::str::from_utf8(&out).unwrap(), usize::MAX).unwrap();
     let mut actual = vec![];
     for row in f(&corpus, "rows").as_array().unwrap() {
         let spec = f(row, "spec");

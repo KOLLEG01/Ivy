@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::*;
 use ivy_secretary::{
     assignment_prompt::{assignment_prompt, load_notification_policy},
@@ -74,23 +76,9 @@ fn outcome(result: ivy_contracts::IvyResult<IvyJson>) -> IvyJson {
 
 #[test]
 fn original_assignment_prompt_and_completion_policy() {
-    let mut command = std::process::Command::new("node");
-    command
-        .arg("tests/secretary-rust/assignment-result-oracle.mjs")
-        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command.output().expect("Original Node oracle required");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("assignment-result-cases.json.gz"));
     let corpus = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         32 * 1024 * 1024,
     )
     .unwrap();

@@ -9,9 +9,11 @@ const props = defineProps<{ compact?: boolean; input: Agent.PendingInput; epoch:
 const { base, client } = props;
 const emit = defineEmits<{ answered: [] }>();
 const identity = JSON.stringify(props.input.identity), key = 'ivy:agent-input:' + base.href + identity;
+// The exact scalar identity is immutable; the SDK snapshots plain wire values.
+const requestIdentity = { ...props.input.identity };
 const action = useNativeAction(client, key);
 watch(() => props.input.state, value => { if (value === 'answered' && action.saved.value?.phase === 'pending') void action.reconcile(); }, { immediate: true });
-const definition = useRemote(async signal => props.input.state === 'pending' && props.epoch === props.input.identity.epoch ? await nativeRead(client, props.input.identity.serviceNodeId, 'agent.inputDefinition', { identity: props.input.identity }, signal) as Agent.InputDefinition : null);
+const definition = useRemote(async signal => props.input.state === 'pending' && props.epoch === requestIdentity.epoch ? await nativeRead(client, requestIdentity.serviceNodeId, 'agent.inputDefinition', { identity: requestIdentity }, signal) as Agent.InputDefinition : null);
 const binding = useRemote(() => optionalTool(client, props.input.identity.serviceNodeId, 'agent.answer'));
 const params = computed(() => record(props.input.params)), fields = computed(() => record(schemaNode(definition.value.value?.responseSchema, definition.value.value?.responseSchema).properties));
 const questionMode = computed(() => props.input.method === 'item/tool/requestUserInput');
@@ -32,10 +34,10 @@ const pendingNow = computed(() => props.available && props.input.state === 'pend
 const canAnswer = computed(() => pendingNow.value && (questionMode.value ? !!fields.value.answers && questions.value.length > 0 && list(params.value.questions).length <= 32 && questions.value.every(q => typeof q.id === 'string' && answers.value[q.id]?.trim()) : decisions.value.includes(decision.value)));
 const send = async (reply: Wire.Json) => {
   if (!pendingNow.value || !binding.value.value) return;
-  const latest = await nativeRead(client, props.input.identity.serviceNodeId, 'agent.inputs', { identity: props.input.identity }) as Agent.PendingInputPage;
+  const latest = await nativeRead(client, requestIdentity.serviceNodeId, 'agent.inputs', { identity: requestIdentity }) as Agent.PendingInputPage;
   if (latest.epoch !== props.input.identity.epoch || latest.items[0]?.state !== 'pending') { action.error.value = 'This native request has been answered or expired. The response draft is retained.'; emit('answered'); return; }
-  if (secret.value && action.saved.value?.phase === 'not_found') await action.reenterSecret({ identity: props.input.identity, reply: { result: reply } });
-  else await action.start('Answer native request', binding.value.value, { identity: props.input.identity, reply: { result: reply } }, secret.value);
+  if (secret.value && action.saved.value?.phase === 'not_found') await action.reenterSecret({ identity: requestIdentity, reply: { result: reply } });
+  else await action.start('Answer native request', binding.value.value, { identity: requestIdentity, reply: { result: reply } }, secret.value);
   emit('answered');
 };
 const submit = async () => {

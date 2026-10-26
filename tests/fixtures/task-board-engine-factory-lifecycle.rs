@@ -1,4 +1,6 @@
 use super::*;
+#[path = "reference-data.rs"]
+mod reference_data;
 
 pub(super) struct Scenario {
     pub(super) creations: [Gate; 2],
@@ -153,21 +155,8 @@ fn snapshot(fixture: &Fixture, stage: &str) {
     );
 }
 fn original_lifecycle() -> Json {
-    let output = std::process::Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-service-lifecycle-oracle.mjs",
-        ])
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    json(std::str::from_utf8(&output.stdout).unwrap())
+    let output = reference_data::read(include_bytes!("task-board-service-lifecycle-cases.json.gz"));
+    json(std::str::from_utf8(&output).unwrap())
 }
 fn assert_error(error: IvyError, expected: &Json) {
     assert_eq!(

@@ -3,13 +3,87 @@ import assert from "node:assert/strict";
 import { createECDH, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { runInNewContext } from "node:vm";
 import { expect } from "@playwright/test";
-import { fixture } from "./fixtures/fixture.mjs";
+import { fixture, fixtureToken } from "./fixtures/fixture.mjs";
+import { startBrowserPushHive } from "../fixtures/native-browser-push.mjs";
 import { publishUi } from "../../dist/packages/cli/src/publish-ui.js";
 import { newOperationId } from "../../dist/packages/sdk/src/client.js";
+import { ServiceClient } from "../../dist/packages/sdk/src/service.js";
+import {
+  browserNoticeTopic,
+  publishBrowserNotice,
+} from "../../dist/packages/sdk/src/browser-notice.js";
+import { digest } from "../../dist/packages/contracts/src/canonical.js";
 
 const installBanner = (page) =>
   page.getByRole("region", { name: "Install Ivy", exact: true });
+
+async function workerScope(source, base) {
+  const handlers = new Map(),
+    shown = [],
+    opened = [],
+    navigated = [];
+  let windows = [],
+    focused = false;
+  runInNewContext(source, {
+    URL,
+    self: {
+      registration: {
+        scope: base,
+        showNotification: async (...args) => {
+          shown.push(args);
+        },
+      },
+      addEventListener: (name, handler) => handlers.set(name, handler),
+      clients: {
+        matchAll: async () => windows,
+        openWindow: async (url) => opened.push(url),
+      },
+    },
+  });
+  const dispatch = async (name, value) => {
+    let work;
+    handlers.get(name)({
+      ...value,
+      waitUntil: (promise) => {
+        work = promise;
+      },
+    });
+    await work;
+  };
+  const target = base + "ui/agent-ui/#/task?id=one";
+  await dispatch("push", {
+    data: { json: () => ({ title: "Result", body: "Finished", url: target }) },
+  });
+  assert.equal(shown.length, 1);
+  for (const url of [
+    "https://elsewhere.test/",
+    new URL("/ivy-other/", base).href,
+    "javascript:alert(1)",
+  ])
+    await dispatch("notificationclick", {
+      notification: { close() {}, data: { url } },
+    });
+  assert.deepEqual(opened, [base, base, base]);
+  windows = [
+    {
+      url: base,
+      navigate: async (url) => {
+        navigated.push(url);
+      },
+      focus: async () => {
+        focused = true;
+      },
+    },
+  ];
+  await dispatch("notificationclick", {
+    notification: { close() {}, data: { url: target } },
+  });
+  assert.deepEqual(navigated, [target]);
+  assert.equal(focused, true);
+  assert.equal(opened.length, 3, "existing Ivy window is reused");
+}
 
 async function openSettings(page, mobile = false) {
   if (mobile)
@@ -30,18 +104,9 @@ async function openSettings(page, mobile = false) {
 
 test(
   "one installable Ivy app and notification settings work across Console and published UIs on desktop and mobile",
-  { timeout: 90000 },
+  { timeout: 600000 },
   async (t) => {
-    const sent = [];
-    const deliveryEndpoints = [];
-    let deliveryFails = false;
-    const f = await fixture(t, false, undefined, {
-      sendBrowserPush: async (subscription, payload) => {
-        deliveryEndpoints.push(subscription.endpoint);
-        sent.push(JSON.parse(payload));
-        return { statusCode: deliveryFails ? 503 : 201, headers: {}, body: "" };
-      },
-    });
+    const f = await fixture(t, false, undefined, {}, startBrowserPushHive);
     const key = createECDH("prime256v1");
     key.generateKeys();
     const subscription = {
@@ -121,8 +186,15 @@ test(
       .getAttribute("href");
     assert.equal(manifestUrl, f.base + "/app/manifest.webmanifest");
     const manifest = await (await f.context.request.get(manifestUrl)).json();
+    assert.equal(manifest.id, "/ivy/");
     assert.equal(manifest.scope, "/ivy/");
+    assert.equal(manifest.start_url, "/ivy/");
     assert.equal(manifest.display, "standalone");
+    const worker = await f.context.request.get(f.base + "/app-worker.js");
+    assert.equal(worker.status(), 200);
+    assert.equal(worker.headers()["service-worker-allowed"], "/ivy/");
+    assert.equal(worker.headers()["cache-control"], "no-store");
+    await workerScope(await worker.text(), f.base + "/");
     for (const icon of manifest.icons) {
       const response = await f.context.request.get(
         new URL(icon.src, f.origin).href,
@@ -143,8 +215,10 @@ test(
     await dialog
       .getByRole("button", { name: "Send test notification" })
       .click();
-    await expect.poll(() => sent.length).toBe(1);
-    deliveryFails = true;
+    await expect
+      .poll(async () => (await f.server.pushDeliveries()).length)
+      .toBe(1);
+    await f.server.pushStatus(503);
     await dialog
       .getByRole("button", { name: "Send test notification" })
       .click();
@@ -172,7 +246,7 @@ test(
     await f.page.keyboard.press("Escape");
     dialog = await openSettings(f.page);
     await expect(dialog.getByText(/Push delivery failed/)).toBeVisible();
-    deliveryFails = false;
+    await f.server.pushStatus(201);
     await dialog.getByRole("button", { name: "Disable notifications" }).click();
     await expect(
       dialog.getByRole("button", { name: "Enable notifications" }),
@@ -221,12 +295,72 @@ test(
     await dialog
       .getByRole("button", { name: "Send test notification" })
       .click();
-    await expect.poll(() => sent.length).toBe(3);
-    assert.deepEqual(deliveryEndpoints, [
-      subscription.endpoint,
-      subscription.endpoint,
-      betaSubscription.endpoint,
-    ]);
+    await expect
+      .poll(async () => (await f.server.pushDeliveries()).length)
+      .toBe(3);
+    assert.deepEqual(
+      (await f.server.pushDeliveries()).map((delivery) => delivery.endpoint),
+      [subscription.endpoint, subscription.endpoint, betaSubscription.endpoint],
+    );
+    const endpoint = betaSubscription.endpoint;
+    const cookie = async (context) =>
+      (await context.cookies())
+        .map(({ name, value }) => `${name}=${value}`)
+        .join("; ");
+    const call = async (context, data, origin = f.origin, identity) =>
+      context.request.post(f.base + "/api/browser-push", {
+        headers: {
+          Origin: origin,
+          Cookie: identity ?? (await cookie(context)),
+        },
+        data,
+      });
+    const other = await f.browser.newContext();
+    t.after(() => other.close());
+    assert.equal(
+      (await call(other, { action: "test", endpoint })).status(),
+      401,
+    );
+    assert.equal(
+      (
+        await call(
+          f.context,
+          { action: "test", endpoint },
+          "https://elsewhere.test",
+        )
+      ).status(),
+      401,
+    );
+    const login = await other.request.post(f.base + "/login", {
+      headers: { Origin: f.origin },
+      form: { token: fixtureToken },
+      maxRedirects: 0,
+    });
+    assert.equal(login.status(), 303);
+    const otherCookie = login.headers()["set-cookie"].split(";")[0];
+    assert.equal(
+      (
+        await call(
+          other,
+          { action: "unsubscribe", endpoint },
+          f.origin,
+          otherCookie,
+        )
+      ).status(),
+      200,
+    );
+    const status = await (
+      await call(f.context, { action: "status", endpoint })
+    ).json();
+    assert.equal(status.subscribed, true);
+    assert.ok(status.publicKey);
+    assert.equal(status.privateKey, undefined);
+    assert.equal(
+      (
+        await call(other, { action: "test", endpoint }, f.origin, otherCookie)
+      ).status(),
+      404,
+    );
     assert.ok(
       await f.page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth + 1,
@@ -234,6 +368,76 @@ test(
     );
     assert.deepEqual(f.pageErrors, []);
     assert.deepEqual(f.externalRequests, []);
+    let ready = false;
+    const service = new ServiceClient({
+      publicBaseUrl: f.base,
+      credential: () => fixtureToken,
+      identity: {
+        serviceNodeId: "push-fixture",
+        hostId: "fixture",
+        serviceName: "push-fixture",
+        version: "1.0.0",
+        buildId: digest("push-fixture"),
+        hiveProtocol: 1,
+      },
+      registry: () => ({
+        namespaces: [
+          {
+            namespace: "fixture",
+            description: "Push fixture",
+            guideMarkdown: "",
+            tools: [],
+            inventoryKinds: [],
+            topics: [browserNoticeTopic("fixture")],
+          },
+        ],
+        contracts: [],
+        requiredContracts: [],
+      }),
+      handlers: {},
+      reconcile: async () => {},
+      onState: (value) => {
+        if (value.status === "ready") ready = true;
+      },
+    });
+    t.after(() => service.stop());
+    service.start();
+    await expect.poll(() => ready, { timeout: 15000 }).toBe(true);
+    await Promise.all(f.context.pages().map((page) => page.close()));
+    await publishBrowserNotice(service.connection, "fixture", {
+      title: "Result",
+      body: "Finished",
+      tag: "without-a-page",
+      target: { uiId: "agent-ui", fragment: "#/thread?id=thread+%26+one" },
+    });
+    await expect
+      .poll(async () => (await f.server.pushDeliveries()).length)
+      .toBe(4);
+    assert.match(
+      (await f.server.pushDeliveries())[3].payload.url,
+      /ui\/agent-ui/,
+    );
+    const logout = await f.context.request.post(f.base + "/logout", {
+      headers: { Origin: f.origin, Cookie: await cookie(f.context) },
+      maxRedirects: 0,
+    });
+    assert.equal(logout.status(), 303);
+    assert.equal(
+      (await call(f.context, { action: "test", endpoint })).status(),
+      401,
+    );
+    await service.stop();
+    await other.close();
+    assert.deepEqual(await f.server.close(), { code: 0, signal: null });
+    assert.equal(
+      JSON.parse(
+        await readFile(
+          resolve(f.server.config.dataRoot, "health.json"),
+          "utf8",
+        ),
+      ).ready,
+      false,
+    );
   },
 );
 

@@ -183,7 +183,7 @@ fn from_token(mut step: Value, from: usize) -> Value {
 }
 fn compare(steps: &[Value]) -> Value {
     let root = Root::new();
-    let expected = oracle(&root.0.join("reference.sqlite"), steps);
+    let expected = registry_reference(&root.0.join("reference.sqlite"), steps);
     let actual = native_with_runtime(
         &root.0.join("native.sqlite"),
         steps,

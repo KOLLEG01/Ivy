@@ -8,10 +8,6 @@ use ivy_hive::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, OpenOptions},
-    io::Write,
-    path::Path,
-    process::{Command, Stdio},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -134,41 +130,12 @@ async fn native(input: &Value) -> Value {
     }
     assert!(client_closed);
     let _ = observer;
-    if let Ok(root) = std::env::var("IVY_HIVE_WS_WIRES") {
-        fs::write(
-            Path::new(&root).join(format!("{}-native.bin", input["name"].as_str().unwrap())),
-            &received,
-        )
-        .unwrap();
-    }
     json!({"name":input["name"],"snapshots":snapshots,"wire":{"byteLength":received.len(),"sha256":digest(&received)},"closed":*closed.lock().unwrap(),"unhandled":unhandled.lock().unwrap().clone()})
 }
 #[test]
 fn actual_tcp_send_buffers_flush_and_close_match_original_ws() {
     let cases = traces();
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let node = std::env::var("IVY_TEST_NODE").unwrap_or_else(|_| "node".into());
-    let mut child = Command::new(node)
-        .arg(root.join("tests/fixtures/hive-ws-socket-oracle.mjs"))
-        .current_dir(&root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(serde_json::to_string(&cases).unwrap().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "Original WS oracle: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let original: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let original = super::lifetime_reference("socket", &cases);
     assert_eq!(original.len(), cases.len());
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -177,11 +144,15 @@ fn actual_tcp_send_buffers_flush_and_close_match_original_ws() {
     let mut mismatches = Vec::new();
     for (input, original) in cases.into_iter().zip(original) {
         let actual = runtime.block_on(native(&input));
-        let matched = original == actual;
-        if let Ok(path) = std::env::var("IVY_HIVE_WS_SOCKET_CORPUS") {
-            writeln!(OpenOptions::new().create(true).append(true).open(path).unwrap(),"{}",json!({"input":input,"original":original,"native":actual,"execution":"completed","finding":{"conditionMet":matched}})).unwrap();
-        }
-        if !matched {
+        let snapshots = input["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|step| step["op"] == "snapshot")
+            .count();
+        assert_eq!(original["snapshots"].as_array().unwrap().len(), snapshots);
+        assert_eq!(actual["snapshots"].as_array().unwrap().len(), snapshots);
+        if original != actual {
             mismatches.push(json!({"name":input["name"],"original":original,"native":actual}));
         }
     }

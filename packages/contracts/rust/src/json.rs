@@ -222,6 +222,41 @@ pub fn parse(text: &str, maximum_bytes: usize) -> IvyResult<IvyJson> {
     parse_with_options(text, maximum_bytes, ParseOptions::default())
 }
 
+/// Parse JavaScript source text without replacing raw unpaired UTF-16 units.
+/// Only string literals can contain them; the existing parser owns JSON grammar.
+pub fn parse_utf16(units: &[u16], maximum_bytes: usize) -> IvyResult<IvyJson> {
+    let text = match String::from_utf16(units) {
+        Ok(text) => text,
+        Err(_) => {
+            use std::fmt::Write;
+            let mut text = String::with_capacity(units.len());
+            let (mut quoted, mut escaped) = (false, false);
+            for character in char::decode_utf16(units.iter().copied()) {
+                match character {
+                    Ok(character) => {
+                        text.push(character);
+                        if escaped {
+                            escaped = false;
+                        } else if character == '\\' && quoted {
+                            escaped = true;
+                        } else if character == '"' {
+                            quoted = !quoted;
+                        }
+                    }
+                    Err(error) => {
+                        if !quoted || escaped {
+                            return Err(invalid("Invalid JSON string code unit."));
+                        }
+                        write!(text, "\\u{:04x}", error.unpaired_surrogate()).unwrap();
+                    }
+                }
+            }
+            text
+        }
+    };
+    parse(&text, maximum_bytes)
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ParseOptions {
     pub reject_duplicate_keys: bool,

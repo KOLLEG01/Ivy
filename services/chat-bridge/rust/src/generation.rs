@@ -34,6 +34,7 @@ pub struct ChatGenerationConfig {
     pub service_node_id: JsString,
     pub data_root: Option<PathBuf>,
     pub language: JsString,
+    pub diagnostic_notifications: bool,
 }
 
 pub struct ChatGeneration {
@@ -285,11 +286,17 @@ impl ChatGenerationLease {
         let native = self.native()?;
         let operations = self.operations()?;
         let main = ChatMain::new(&operations, &native, &self.config.notice_instructions)?;
-        DiagnosticNotifications::with_clock(&operations, &main, self.config.language.clone(), clock)
-            .tick(RequestOptions {
-                cancellation: self.connection.signal(),
-                ..Default::default()
-            })
-            .await
+        DiagnosticNotifications::with_clock(
+            &operations,
+            &main,
+            self.config.diagnostic_notifications,
+            self.config.language.clone(),
+            clock,
+        )
+        .tick(RequestOptions {
+            cancellation: self.connection.signal(),
+            ..Default::default()
+        })
+        .await
     }
 }

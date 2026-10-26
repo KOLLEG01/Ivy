@@ -9,70 +9,35 @@ use ivy_hive::{
 use rusqlite::{Connection, functions::FunctionFlags};
 use std::{
     future::poll_fn,
-    io::Write,
-    process::{Command, Stdio},
-    sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::atomic::{AtomicUsize, Ordering},
     task::Poll,
 };
 use tokio::{runtime::Builder, sync::Notify, time::timeout};
 
-static CORPUS: Mutex<()> = Mutex::new(());
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 fn json_value(value: &IvyJson) -> Value {
     serde_json::from_str(&stringify(value, usize::MAX).unwrap()).unwrap()
 }
 fn original(input: &Value) -> Value {
-    let mut child =
-        Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
-            .arg(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../../tests/fixtures/hive-worker-loop-oracle.mjs"),
-            )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-    child
-        .stdin
-        .take()
+    static CASES: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let cases = CASES.get_or_init(|| {
+        serde_json::from_slice(&reference_data::read(include_bytes!(
+            "../fixtures/hive-worker-loop-reference.json.gz"
+        )))
         .unwrap()
-        .write_all(input.to_string().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).unwrap()
-}
-fn record(case: &str, value: Value) {
-    if let Some(path) = std::env::var_os("IVY_HIVE_WORKER_KERNEL_CORPUS") {
-        let _guard = CORPUS.lock().unwrap();
-        writeln!(
-            fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .unwrap(),
-            "{}",
-            json!({"case":case,"value":value})
-        )
-        .unwrap();
-    }
+    });
+    let key = ivy_contracts::hash::digest(format!("worker-loop\n{input}"));
+    cases["traces"]
+        .get(&key)
+        .unwrap_or_else(|| panic!("Missing original Hive worker loop trace: {key}"))
+        .clone()
 }
 fn service(root: &Root, fail: usize) -> (KernelWorker, Arc<AtomicUsize>) {
-    // Reuse the original primitive profile and existing native kernel composer.
-    let profile = oracle(
-        &root.0.join("profile.sqlite"),
-        &[json!({"op":"worker","method":"constructor","now":100000,"credentials":[]})],
-    );
+    let profile = startup_profile::registry(true);
     let mut kernel = compose(
         &root.0.join("native.sqlite"),
-        &profile["registryRuntime"],
+        &profile,
         Rc::new(Cell::new(100000.0)),
     );
     let credentials = [Credential {
@@ -189,10 +154,6 @@ fn kernel_worker_matches_original_publication_retry_action_errors_and_partial_fa
             calls.load(Ordering::SeqCst),
             expected["sequenceCalls"].as_u64().unwrap() as usize
         );
-        record(
-            "publication",
-            json!({"fail":fail,"actionError":action_error,"original":expected,"nativeFrames":frames,"nativeRejected":rejected,"nativeSequenceCalls":calls.load(Ordering::SeqCst)}),
-        );
     }
 }
 
@@ -223,10 +184,6 @@ fn kernel_worker_preserves_original_close_failure_and_releases_actual_sqlite_own
         database
             .execute_batch("BEGIN EXCLUSIVE; CREATE TABLE after_close(value); COMMIT;")
             .unwrap();
-        record(
-            "close",
-            json!({"changes":changes,"original":expected,"nativeFrames":frames,"nativeRejected":rejected,"exclusiveReopen":true}),
-        );
     }
 }
 
@@ -287,10 +244,6 @@ fn kernel_worker_server_preserves_partial_publication_before_ending_without_repl
             assert!(served.is_err());
             assert_eq!(frames[0], json!({"ready":true}));
             assert_eq!(json!(frames[1..]), expected["frames"]);
-            record(
-                "framed-fatal",
-                json!({"original":expected,"nativeFrames":frames,"serverFailed":true}),
-            );
         });
 }
 
@@ -365,6 +318,5 @@ fn kernel_worker_online_backup_shares_live_domains_rejects_overlap_and_finishes_
         assert!(position("7","started")<position("1","value"));assert!(position("1","progress")<position("1","value"));assert!(!frames.iter().any(|v|v["id"]=="7"&&v.get("value").is_some()));
         let saved=Connection::open(&snapshot).unwrap();assert_eq!(saved.query_row("PRAGMA integrity_check",[],|r|r.get::<_,String>(0)).unwrap(),"ok");assert_eq!(saved.query_row("SELECT COUNT(*) FROM backup_payload",[],|r|r.get::<_,i64>(0)).unwrap(),512);assert_eq!(saved.query_row("SELECT revoked FROM credentials WHERE digest=?",[format!("sha256:{}","a".repeat(64))],|r|r.get::<_,i64>(0)).unwrap(),1);
         assert_eq!(reply("1")["value"]["bytesHash"],ivy_contracts::hash::digest(&fs::read(&snapshot).unwrap()));
-        record("framed-backup",json!({"nativeFrames":frames,"serverFailedAtOriginalClose":true,"snapshotIntegrity":true,"liveCredentialMutationIncluded":true}));
     });
 }

@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use super::*;
 use driver::{count, frames, reached};
 
@@ -37,21 +39,8 @@ fn publication(fixture: &Fixture) -> (String, u64, Json) {
 }
 impl Scenario {
     fn new(name: &str) -> Self {
-        let output = std::process::Command::new("node")
-            .args([
-                "--experimental-transform-types",
-                "--disable-warning=ExperimentalWarning",
-                "tests/fixtures/task-board-deliveries-oracle.mjs",
-            ])
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let rows = json(std::str::from_utf8(&output.stdout).unwrap());
+        let output = reference_data::read(include_bytes!("task-board-deliveries-cases.json.gz"));
+        let rows = json(std::str::from_utf8(&output).unwrap());
         let row = rows
             .as_array()
             .unwrap()
@@ -174,7 +163,7 @@ impl Scenario {
     }
     pub(super) fn tasks(&self, fixture: &Fixture, options: &Json) -> IvyResult<Json> {
         let expected = json(
-            r#"{"where":{"op":"and","args":[{"op":"eq","field":"data:/fields/control","value":"agent"},{"op":"in","field":"data:/workflowState","value":["todo","waiting","review"]}]},"limit":50,"orderBy":[{"field":"data:/fields/priority","direction":"desc"},{"field":"object.id","direction":"asc"}]}"#,
+            r#"{"where":{"op":"and","args":[{"op":"in","field":"data:/workflowState","value":["backlog","todo","in_progress","waiting","review","done","cancelled"]}]},"limit":50,"orderBy":[{"field":"data:/fields/priority","direction":"desc"},{"field":"object.id","direction":"asc"}]}"#,
         );
         assert_eq!(hash_json(options)?, hash_json(&expected)?);
         assert_eq!(fixture.rows("task-board/task").len(), 2);
@@ -228,6 +217,7 @@ impl Scenario {
             ("authorKind", "agent".into()),
             ("body", f(self.source_comment(), "body").clone()),
             ("purpose", "question".into()),
+            ("recipient", Json::object([("kind", "user".into())])),
             ("contactUser", true.into()),
             ("agentDelivery", "none".into()),
             ("requests", Json::Array(vec![])),
@@ -395,7 +385,7 @@ pub(super) async fn run_delivery_mode(name: &str, case: Option<super::retention:
         assert_eq!(f(&outcome, "task"), &pin("contact-task", 3));
         scenario.preserved(&fixture, &written_task);
         if retention {
-            super::retention::pending(&fixture, &peer, &service.control, &first, &original).await;
+            super::retention::pending(&fixture, &peer, &service.control, &first).await;
         }
         scenario.ready.release();
         if retention {
@@ -609,6 +599,7 @@ pub(super) async fn run_delivery_mode(name: &str, case: Option<super::retention:
         )
         .await
         .unwrap();
+        bounded(second.closed()).await;
         let third = bounded(service.client.wait_ready(None)).await.unwrap();
         assert_eq!(third.generation(), 3);
         let replay = bounded(service.control.handler("update")(

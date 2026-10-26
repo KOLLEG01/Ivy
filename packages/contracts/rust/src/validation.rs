@@ -15,6 +15,13 @@ pub fn validate_request(value:&IvyJson)->IvyResult<()> {
     require(text(value.get("method"),192),"Request method is outside its bounded JSON-RPC domain.")?;
     require(value.get("params").and_then(IvyJson::as_object).is_some(),"Request params must be an object.")
 }
+// String(outcome) admits an enum string through singleton arrays; keep the raw value.
+fn provider_outcome(value: Option<&IvyJson>) -> bool {
+    match value {
+        Some(IvyJson::Array(values)) if values.len() == 1 => provider_outcome(values.first()),
+        _ => ["not_executed", "unknown", "completed"].iter().any(|name| equal(value, name)),
+    }
+}
 pub fn validate_response_frame(value:&IvyJson)->IvyResult<()> {
     object(value,"Expected one provider response envelope.")?;
     require(equal(value.get("jsonrpc"),"2.0")&&text(value.get("id"),256),"Provider response correlation is invalid.")?;
@@ -25,7 +32,7 @@ pub fn validate_response_frame(value:&IvyJson)->IvyResult<()> {
         object(error,"Provider error must be an object.")?;
         require(exact_keys(error,&["code","message","data"])&&safe_integer(error.get("code"),-9_007_199_254_740_991.0)&&text(error.get("message"),2048)&&error.get("data").and_then(IvyJson::as_object).is_some(),"Provider error envelope is incomplete.")?;
         let data=error.get("data").unwrap();
-        require(exact_keys(data,&["code","outcome","details"])&&text(data.get("code"),128)&&["not_executed","unknown","completed"].iter().any(|s|equal(data.get("outcome"),s)),"Provider error outcome is invalid.")?;
+        require(exact_keys(data,&["code","outcome","details"])&&text(data.get("code"),128)&&provider_outcome(data.get("outcome")),"Provider error outcome is invalid.")?;
     }Ok(())
 }
 pub fn validate_provider_call_frame(value:&IvyJson)->IvyResult<()> {

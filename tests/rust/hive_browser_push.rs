@@ -89,21 +89,12 @@ fn ok(steps: &mut Vec<Value>, mut step: Value) -> usize {
 }
 fn compare(steps: &[Value]) -> Value {
     let root = Root::new();
-    let observed = oracle(&root.0.join("observed.sqlite"), steps);
-    let mut profile = observed["registryRuntime"].clone();
-    profile["browserPush"] = observed["browserPushRuntime"].clone();
+    let expected = reference(&root.0.join("original.sqlite"), steps);
+    let mut profile = expected["registryRuntime"].clone();
+    profile["browserPush"] = expected["browserPushRuntime"].clone();
     let actual = native(&root.0.join("native.sqlite"), steps, &profile);
-    let mut bound = steps.to_vec();
-    for step in &mut bound {
-        if let Some(keys) = observed["browserPushRuntime"]["vapid"]
-            .as_array()
-            .unwrap()
-            .first()
-        {
-            step["vapidKeys"] = keys.clone();
-        }
-    }
-    let expected = oracle(&root.0.join("reference.sqlite"), &bound);
+    assert_eq!(actual["rows"].as_array().unwrap().len(), steps.len());
+    assert_eq!(expected["rows"].as_array().unwrap().len(), steps.len());
     for (i, (a, b)) in actual["rows"]
         .as_array()
         .unwrap()
@@ -185,6 +176,8 @@ fn browser_push_subscription_guards_ownership_normalization_and_late_completion_
         "https://fcm.googleapis.com:8443/x",
         "https://u:p@fcm.googleapis.com/x",
         "https://fcm.googleapis.com.evil.test/x",
+        "https://jmt17.google.com.evil.test/x",
+        "https://other.google.com/fcm/send/token",
         "https://push.apple.com/x",
         "https://fcm.googleapis.com/x#hash",
         "https://127.0.0.1/x",
@@ -220,6 +213,8 @@ fn browser_push_subscription_guards_ownership_normalization_and_late_completion_
         "https://region.push.apple.com/x",
         "https://region.push.services.mozilla.com/x",
         "https://region.notify.windows.com/x",
+        "https://fcm.googleapis.com/wp/token",
+        "https://fcm.googleapis.com/preprod/wp/token",
     ]
     .iter()
     .enumerate()
@@ -677,7 +672,7 @@ fn browser_push_worker_rejects_non_integer_completion_without_mutation() {
         ),
     );
     let root = Root::new();
-    let observed = oracle(&root.0.join("observed.sqlite"), &steps);
+    let observed = reference(&root.0.join("original.sqlite"), &steps);
     let mut profile = observed["registryRuntime"].clone();
     profile["browserPush"] = observed["browserPushRuntime"].clone();
     let mut rejected = vec![];

@@ -67,7 +67,44 @@ fn protocol_error(
         error(code, message, data),
     )
 }
+fn ordered(value: &IvyJson, fields: &[&str]) -> IvyJson {
+    let mut result = IvyJson::object(
+        fields
+            .iter()
+            .filter_map(|name| value.get(name).map(|value| (*name, value.clone()))),
+    );
+    for (name, value) in value.as_object().unwrap_or(&[]) {
+        if result.get_key(name).is_none() {
+            result.insert(name.clone(), value.clone());
+        }
+    }
+    result
+}
 fn encode_result(method: &JsString, mut value: IvyJson, modern: bool, info: &IvyJson) -> IvyJson {
+    // The SDK projects application tool results through its declared schema order.
+    if method == &JsString::from("tools/call") {
+        if let Some(mut content) = value
+            .get("content")
+            .and_then(IvyJson::as_array)
+            .map(<[_]>::to_vec)
+        {
+            for item in &mut content {
+                *item = ordered(
+                    item,
+                    if item.get("type") == Some(&"image".into()) {
+                        &["type", "data", "mimeType", "annotations", "_meta"]
+                    } else {
+                        &["type", "text", "annotations", "_meta"]
+                    },
+                );
+            }
+            value.insert("content", IvyJson::Array(content));
+        }
+        value = ordered(
+            &value,
+            &["_meta", "content", "structuredContent", "isError"],
+        );
+    }
     if !modern {
         return value;
     }

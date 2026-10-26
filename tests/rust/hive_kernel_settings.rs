@@ -119,63 +119,7 @@ fn settings_and_openai_preserve_cas_receipts_quiet_validation_paths_and_reopen()
     let reopened = ok(&mut s, request("settings.get", json!({})));
     let app_reopened = ok(&mut s, request("openai.getConfiguration", json!({})));
 
-    let root = Root::new();
-    let observed = oracle(&root.0.join("observed.sqlite"), &s);
-    let actual = native(
-        &root.0.join("native.sqlite"),
-        &s,
-        &observed["registryRuntime"],
-    );
-    // Bind only actual fresh UUID identities; receipts, ordering, timestamps,
-    // hashes, content and SQL rows are not normalized.
-    let mut bound = s.clone();
-    for (i, step) in bound.iter_mut().enumerate() {
-        if step["op"] != "kernel" {
-            // Raw SQL setup has fixed fixture identities, not fresh entropy.
-            continue;
-        }
-        let objects = actual["rows"][i]["state"]["objects"].as_array().unwrap();
-        let prior = if i == 0 {
-            &[][..]
-        } else {
-            actual["rows"][i - 1]["state"]["objects"]
-                .as_array()
-                .unwrap()
-                .as_slice()
-        };
-        let fresh = objects
-            .iter()
-            .filter(|row| !prior.iter().any(|p| p["id"] == row["id"]))
-            .collect::<Vec<_>>();
-        if !fresh.is_empty() {
-            assert_eq!(fresh.len(), 1);
-            let id = fresh[0]["id"].as_str().unwrap();
-            assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 4);
-            step["createdId"] = id.into();
-        }
-    }
-    let expected = oracle(&root.0.join("expected.sqlite"), &bound);
-    if let Some(path) = std::env::var_os("IVY_HIVE_SETTINGS_CORPUS") {
-        fs::write(path,json!({"steps":s,"bound":bound,"observed":observed,"original":expected,"native":actual}).to_string()).unwrap();
-    }
-    assert_eq!(actual["rows"].as_array().unwrap().len(), s.len());
-    for (i, (a, b)) in actual["rows"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .zip(expected["rows"].as_array().unwrap())
-        .enumerate()
-    {
-        assert_eq!(a, b, "Settings step {i}: {}", s[i]);
-        if s[i]["requireSuccess"] == true
-            || matches!(s[i]["op"].as_str(), Some("configure" | "sql" | "register"))
-        {
-            success(&actual, i);
-        }
-    }
-    for key in ["definitions", "metadata", "topics"] {
-        assert_eq!(actual[key], expected[key]);
-    }
+    let actual = compare(&s);
     assert_eq!(
         value(&actual, initial),
         json!({"revision":0,"settings":{"schemaVersion":1,"quietHours":null}})

@@ -3,26 +3,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_hive::mcp_inbound::{self as inbound, Request as Inbound};
 
 fn original(input: &IvyJson) -> IvyJson {
-    super::mcp_protocol::oracle(input)
-}
-fn save(suffix: &str, value: &IvyJson) {
-    if let Some(prefix) = std::env::var_os("IVY_HIVE_MCP_INBOUND_CORPUS") {
-        std::fs::write(
-            format!("{}-{suffix}.json", prefix.to_string_lossy()),
-            encode(value),
-        )
-        .unwrap();
-    }
+    super::mcp_protocol::reference(input)
 }
 pub(super) fn reference() -> IvyJson {
-    if let Some(path) = std::env::var_os("IVY_HIVE_MCP_HTTP_REFERENCE") {
-        json(&std::fs::read_to_string(path).unwrap())
-    } else {
-        original(&obj([
-            ("mode", "baseline".into()),
-            ("client", false.into()),
-        ]))
-    }
+    original(&json(r#"{"mode":"baseline","clientModes":["auto","pin"]}"#))
 }
 fn headers() -> IvyJson {
     json(r#"{"accept":"application/json, text/event-stream","content-type":"application/json"}"#)
@@ -383,14 +367,6 @@ fn inbound_classification_matches_pinned_sdk() {
             ])
         })
         .collect();
-    save(
-        "classification",
-        &obj([
-            ("cases", IvyJson::Array(cases)),
-            ("original", observed.clone()),
-            ("native", IvyJson::Array(native.clone())),
-        ]),
-    );
     let expected = observed
         .required("classifications")
         .unwrap()
@@ -408,10 +384,9 @@ fn reply(reply: ivy_hive::mcp_protocol::Reply) -> IvyJson {
         ("bodyBase64", STANDARD.encode(reply.body.as_bytes()).into()),
     ])
 }
-fn observe(cases: Vec<IvyJson>, source: &IvyJson) -> Vec<IvyJson> {
+fn observe(cases: Vec<IvyJson>, source: &IvyJson) {
     let observations = source.required("wire").unwrap().as_array().unwrap();
     assert_eq!(cases.len(), observations.len());
-    let mut result = Vec::new();
     for (row, expected) in cases.iter().zip(observations) {
         if at(row).http_method != "POST" {
             continue;
@@ -456,15 +431,7 @@ fn observe(cases: Vec<IvyJson>, source: &IvyJson) -> Vec<IvyJson> {
                 }
             }
         }
-        result.push(obj([
-            ("name", row.required("name").unwrap().clone()),
-            ("input", row.clone()),
-            ("route", route.to_json(request.body)),
-            ("original", expected),
-            ("native", native.unwrap_or(IvyJson::Null)),
-        ]));
     }
-    result
 }
 fn header_cases() -> Vec<IvyJson> {
     let mut cases = Vec::new();
@@ -640,7 +607,7 @@ fn header_cases() -> Vec<IvyJson> {
 #[test]
 fn entry_headers_and_rejection_bytes_match_original_http() {
     let reference = reference();
-    let cached = observe(
+    observe(
         reference
             .required("cases")
             .unwrap()
@@ -655,14 +622,5 @@ fn entry_headers_and_rejection_bytes_match_original_http() {
         ("client", false.into()),
         ("cases", IvyJson::Array(cases.clone())),
     ]));
-    save("entry-source", &source);
-    let fresh = observe(cases, &source);
-    save(
-        "entry",
-        &obj([
-            ("cached", IvyJson::Array(cached)),
-            ("source", source),
-            ("fresh", IvyJson::Array(fresh)),
-        ]),
-    );
+    observe(cases, &source);
 }

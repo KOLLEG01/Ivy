@@ -1,16 +1,56 @@
-use super::{ServiceFixture,host_configuration,assert_json_eq};
-use ivy_contracts::{IvyJson,IvyResult,JsString,json,hash::hash_json};
-use ivy_host_runtime::{config,preparations,preparation_progress::{self,PreparationProgress,StepOptions},dependency_cache,executor_lock::ExecutorLock,journal::HostJournal,native_path};
+use super::{ServiceFixture, assert_json_eq, host_configuration};
+use ivy_contracts::{IvyJson, IvyResult, JsString, hash::hash_json, json};
+use ivy_host_runtime::{
+    config, dependency_cache,
+    executor_lock::ExecutorLock,
+    journal::HostJournal,
+    native_path,
+    preparation_progress::{self, PreparationProgress, StepOptions},
+    preparations,
+};
 use ivy_sdk::clock::Clock;
-use std::{collections::BTreeMap,ffi::OsString,fs,path::{Path,PathBuf},sync::{Arc,Mutex,atomic::{AtomicI64,Ordering}},time::{Duration,Instant}};
-const AT:i64=1_767_225_600_000;
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicI64, Ordering},
+    },
+    time::{Duration, Instant},
+};
+const AT: i64 = 1_767_225_600_000;
 struct Fixed(AtomicI64);
-impl Clock for Fixed{fn utc_millis(&self)->i64{self.0.load(Ordering::SeqCst)}fn monotonic(&self)->Instant{Instant::now()}}
-fn text(path:&Path)->IvyJson{IvyJson::String(native_path::from_native(path))}
-fn path(value:&IvyJson)->PathBuf{native_path::to_native(value.as_js_string().unwrap())}
-fn outcome(result:IvyResult<IvyJson>)->IvyJson{match result{Ok(value)=>IvyJson::object([("ok",true.into()),("value",value)]),Err(error)=>IvyJson::object([("ok",false.into()),("error",error.to_wire())])}}
-fn write(path:&Path,bytes:&[u8]){fs::create_dir_all(path.parent().unwrap()).unwrap();fs::write(path,bytes).unwrap();}
-fn load(path:&Path)->Option<IvyJson>{fs::read_to_string(path).ok().and_then(|s|json::parse(&s,usize::MAX).ok())}
+impl Clock for Fixed {
+    fn utc_millis(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
+    fn monotonic(&self) -> Instant {
+        Instant::now()
+    }
+}
+fn text(path: &Path) -> IvyJson {
+    IvyJson::String(native_path::from_native(path))
+}
+fn path(value: &IvyJson) -> PathBuf {
+    native_path::to_native(value.as_js_string().unwrap())
+}
+fn outcome(result: IvyResult<IvyJson>) -> IvyJson {
+    match result {
+        Ok(value) => IvyJson::object([("ok", true.into()), ("value", value)]),
+        Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
+    }
+}
+fn write(path: &Path, bytes: &[u8]) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, bytes).unwrap();
+}
+fn load(path: &Path) -> Option<IvyJson> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| json::parse(&s, usize::MAX).ok())
+}
 fn opaque_name() -> std::ffi::OsString {
     let mut name = std::ffi::OsString::from("native ü 空 😀; ' ");
     #[cfg(windows)]
@@ -422,7 +462,11 @@ impl Prepared {
         )
         .await
         .unwrap();
-        let mut plan = super::source_cases::build_plan();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let bytes =
+            std::fs::read_to_string(root.join("services/host-executor/deploy.json")).unwrap();
+        let mut plan = ivy_contracts::json::parse(&bytes, usize::MAX).unwrap();
+        plan.insert("componentId", "fixture".into());
         plan.insert("checks", IvyJson::Array(vec![]));
         for (key, executable) in [
             ("entrypoint", "dist/native/ivy-fixture"),

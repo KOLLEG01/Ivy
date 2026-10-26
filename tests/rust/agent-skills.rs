@@ -1,20 +1,13 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_agent_manager::skills::normalize_skills;
 use ivy_contracts::{IvyJson, JsString, hash::digest, json::parse};
 use std::{path::PathBuf, process::Command};
 
 #[test]
 fn skill_preflight_matches_original_path_order_and_utf8_byte_limits() {
-    let output = Command::new("node")
-        .arg("tests/fixtures/agent-skills-normalize-oracle.mjs")
-        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let oracle = parse(std::str::from_utf8(&output.stdout).unwrap(), 1024 * 1024).unwrap();
+    let output = reference_data::read(include_bytes!("../fixtures/agent-skills-normalize-cases.json.gz"));
+    let oracle = parse(std::str::from_utf8(&output).unwrap(), 1024 * 1024).unwrap();
     let rows = oracle.get("rows").unwrap().as_array().unwrap();
     assert_eq!(rows.len(), 41);
     for row in rows {

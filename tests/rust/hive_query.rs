@@ -1,4 +1,4 @@
-use super::Root;
+use super::{Root, reference_data};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ivy_contracts::{
     IvyJson, IvyResult,
@@ -13,41 +13,36 @@ use ivy_hive::{
 };
 use rusqlite::types::{Value as SqlValue, ValueRef};
 use serde_json::{Value, json};
-use std::{
-    fs,
-    io::Write,
-    path::Path,
-    process::{Command, Stdio},
-    time::Duration,
-};
+use std::{fs, path::Path, time::Duration};
 #[path = "hive_object_pages.rs"]
 mod object_pages;
 
 fn fixture(input: Value) -> Value {
-    let mut child =
-        Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
-            .arg(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../../tests/fixtures/hive-query-oracle.mjs"),
-            )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-    child
-        .stdin
-        .take()
+    static CASES: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let cases = CASES.get_or_init(|| {
+        serde_json::from_slice(&reference_data::read(include_bytes!(
+            "../fixtures/hive-query-reference.json.gz"
+        )))
         .unwrap()
-        .write_all(input.to_string().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).unwrap()
+    });
+    if input["mode"] == "retainedVectors" {
+        let fixture = include_bytes!("../fixtures/hive-current.sqlite.gz");
+        assert_eq!(
+            ivy_contracts::hash::digest(fixture),
+            format!("sha256:{}", cases["fixtureSha256"].as_str().unwrap())
+        );
+        let bytes = reference_data::read(fixture);
+        for path in input["copyTo"].as_array().unwrap() {
+            fs::write(path.as_str().unwrap(), &bytes).unwrap();
+        }
+        return cases["vectors"].clone();
+    }
+    let identity = json!({"steps":input["steps"],"retained":input["retained"] == true});
+    let key = ivy_contracts::hash::digest(serde_json::to_vec(&identity).unwrap());
+    cases["traces"]
+        .get(&key)
+        .unwrap_or_else(|| panic!("Missing original Hive query trace: {key}"))
+        .clone()
 }
 fn field(step: &Value, name: &str) -> IvyJson {
     match step.get(format!("{name}Json")) {

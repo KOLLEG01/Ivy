@@ -489,7 +489,7 @@ impl Discovery {
         let hint = catalog
             .get("discoveryHint")
             .and_then(IvyJson::as_js_string)
-            .map(JsString::trim)
+            .map(JsString::trim_ecmascript)
             .filter(|v| !v.0.is_empty());
         let descriptions = joined(&descriptions, "; ");
         let description = compact(&hint.unwrap_or_else(|| {
@@ -1000,7 +1000,9 @@ impl Discovery {
                                 None
                             }
                         });
-                    if let Some(v) = mcp.filter(|v| v.as_object().is_some()) {
+                    if let Some(v) =
+                        mcp.filter(|v| v.as_js_string().is_some_and(|s| !s.0.is_empty()))
+                    {
                         entry.insert("mcpName", v);
                     }
                     entry.insert("effect", tool.effect.into());
@@ -1359,7 +1361,7 @@ impl Discovery {
                 .as_ref()
                 .and_then(|v| v.get("discoveryHint"))
                 .and_then(IvyJson::as_js_string)
-                .map(JsString::trim)
+                .map(JsString::trim_ecmascript)
                 .filter(|v| !v.0.is_empty())
             else {
                 continue;
@@ -1377,7 +1379,7 @@ impl Discovery {
         let mut value = JsString::from(include_str!(
             "../../../../instructions/hive-mcp-instructions.md"
         ))
-        .trim();
+        .trim_ecmascript();
         if !hints.is_empty() {
             value = concat(&[
                 &value,
@@ -1433,7 +1435,7 @@ impl Discovery {
             JsString::from(include_str!(
                 "../../../../instructions/hive-mcp-examples.md"
             ))
-            .trim()
+            .trim_ecmascript()
         } else {
             string(
                 &self.instructions(store, registry, runtime, now)?,

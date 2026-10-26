@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use super::*;
 use ivy_sdk::{
     rpc::RequestOptions,
@@ -16,22 +18,9 @@ use std::future::poll_fn;
 
 #[test]
 fn generation_tick_schedule_matches_original_main_loop() {
-    let output = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-generation-oracle.mjs",
-        ])
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("task-board-generation-cases.json.gz"));
     let rows = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         MANAGEMENT_FRAME_BYTES,
     )
     .unwrap();

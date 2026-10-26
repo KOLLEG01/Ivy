@@ -6,7 +6,6 @@ use ivy_hive::{
     http_common, http_response, server_http,
 };
 use serde_json::{Value, json};
-use std::{fs::OpenOptions, process::Stdio};
 use tokio::sync::oneshot;
 
 type Log = Arc<Mutex<Vec<Value>>>;
@@ -98,7 +97,8 @@ impl StorageLifecycle for HttpWorker {
 }
 fn probe(budget: &RequestBudget, spec: &Value) -> Value {
     match budget.acquire(
-        &spec["key"].as_str().unwrap_or("probe").into(),(Some(spec["bytes"].as_f64().unwrap_or(0.0))).map(|bytes| bytes as usize),
+        &spec["key"].as_str().unwrap_or("probe").into(),
+        (Some(spec["bytes"].as_f64().unwrap_or(0.0))).map(|bytes| bytes as usize),
     ) {
         Ok(mut lease) => {
             lease.release();
@@ -394,7 +394,8 @@ async fn request(
                     scope
                         .invoke(
                             context,
-                            IvyJson::from_serde(&step["frame"]).unwrap(),(step["bytes"].as_f64().unwrap_or(0.0)) as usize,
+                            IvyJson::from_serde(&step["frame"]).unwrap(),
+                            (step["bytes"].as_f64().unwrap_or(0.0)) as usize,
                         )
                         .await?
                 }
@@ -475,7 +476,8 @@ async fn native(trace: &Value) -> Value {
     let budget = RequestBudget::new(RequestBudgetOptions {
         maximum: (number(0, 2048.0)) as usize,
         maximum_bytes: (number(1, 128.0 * 1024.0 * 1024.0)) as usize,
-        per_consumer: (number(2, ivy_contracts::limits::CONSUMER_IN_FLIGHT_REQUESTS as f64)) as usize,
+        per_consumer: (number(2, ivy_contracts::limits::CONSUMER_IN_FLIGHT_REQUESTS as f64))
+            as usize,
         per_consumer_bytes: (number(3, 64.0 * 1024.0 * 1024.0)) as usize,
         name: "request".into(),
     });
@@ -585,7 +587,8 @@ async fn native(trace: &Value) -> Value {
             "invoke" => {
                 let work = server.network.invocation.invoke(
                     IvyJson::from_serde(&step["context"]).unwrap(),
-                    IvyJson::from_serde(&step["frame"]).unwrap(),(step["bytes"].as_f64().unwrap_or(0.0)) as usize,
+                    IvyJson::from_serde(&step["frame"]).unwrap(),
+                    (step["bytes"].as_f64().unwrap_or(0.0)) as usize,
                 );
                 if step["discard"] == true {
                     drop(work);
@@ -634,28 +637,7 @@ async fn native(trace: &Value) -> Value {
     json!({"snapshots":snapshots})
 }
 fn compare(group: &str, traces: Vec<Value>) -> Vec<Value> {
-    let mut child =
-        Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
-            .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .arg("tests/fixtures/hive-server-http-oracle.mjs")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(&serde_json::to_vec(&traces).unwrap())
-        .unwrap();
-    let original = child.wait_with_output().unwrap();
-    assert!(
-        original.status.success(),
-        "{}",
-        String::from_utf8_lossy(&original.stderr)
-    );
-    let original: Vec<Value> = serde_json::from_slice(&original.stdout).unwrap();
+    let original = lifetime_reference("http", &traces);
     assert_eq!(original.len(), traces.len());
     let mut rows = vec![];
     for (input, original) in traces.into_iter().zip(original) {
@@ -665,18 +647,15 @@ fn compare(group: &str, traces: Vec<Value>) -> Vec<Value> {
             .build()
             .unwrap();
         let native = runtime.block_on(tokio::task::LocalSet::new().run_until(native(&input)));
-        if let Some(path) = std::env::var_os("IVY_HIVE_SERVER_HTTP_CORPUS") {
-            writeln!(
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                    .unwrap(),
-                "{}",
-                json!({"group":group,"input":input,"original":original,"native":native})
-            )
-            .unwrap();
-        }
+        let snapshots = input["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|step| step["op"] == "snapshot")
+            .count()
+            + 1;
+        assert_eq!(original["snapshots"].as_array().unwrap().len(), snapshots);
+        assert_eq!(native["snapshots"].as_array().unwrap().len(), snapshots);
         // Compare JSON objects semantically and arrays in order. JSON numbers
         // use the original binary64 domain, regardless of integer display form.
         assert_eq!(

@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::*;
 use ivy_contracts::{JsString, operation::parse_operation_id_js};
 use ivy_sdk::clock::Clock;
@@ -21,23 +23,9 @@ impl Clock for NoticeClock {
 }
 #[tokio::test]
 async fn original_browser_notice_publication_and_receipts() {
-    let mut command = std::process::Command::new("node");
-    command
-        .arg("tests/secretary-rust/browser-notice-oracle.mjs")
-        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command.output().expect("Original Node oracle required");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("browser-notice-cases.json.gz"));
     let corpus = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         8 * 1024 * 1024,
     )
     .unwrap();

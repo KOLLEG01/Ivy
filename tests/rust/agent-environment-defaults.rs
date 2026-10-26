@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_agent_manager::environment_defaults::load_environment_defaults;
 use ivy_contracts::{
     IvyJson, JsString,
@@ -33,21 +35,8 @@ fn projection(value: &IvyJson) -> IvyJson {
 }
 #[test]
 fn generated_defaults_match_actual_original_loader_and_return_independent_documents() {
-    let output = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/agent-environment-defaults-oracle.mjs",
-        ])
-        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let oracle = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let output = reference_data::read(include_bytes!("../fixtures/agent-environment-defaults-cases.json.gz"));
+    let oracle = parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap();
     let rows = oracle.required("rows").unwrap().as_array().unwrap();
     assert!(rows.len() > 700);
     for row in rows {
@@ -77,7 +66,7 @@ fn generated_defaults_match_actual_original_loader_and_return_independent_docume
     assert_eq!(projection(&second), expected);
     assert_eq!(oracle.get("isolated"), Some(&IvyJson::Bool(true)));
     let embedded = parse(
-        include_str!("../../services/agent-manager/src/environment-defaults.json"),
+        include_str!("../../services/agent-manager/rust/src/environment-defaults.json"),
         usize::MAX,
     )
     .unwrap();

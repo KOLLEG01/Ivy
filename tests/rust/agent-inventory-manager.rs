@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_agent_manager::{
     inventory::{InventoryRead, InventorySignal, NativeInventory},
     inventory_manager::{InventoryConnection, InventoryManager},
@@ -39,18 +41,9 @@ fn root() -> PathBuf {
 fn data() -> &'static IvyJson {
     static DATA: OnceLock<IvyJson> = OnceLock::new();
     DATA.get_or_init(|| {
-        let result = Command::new("node")
-            .arg("tests/fixtures/agent-inventory-manager-oracle.mjs")
-            .current_dir(root())
-            .output()
-            .unwrap();
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
+        let result = reference_data::read(include_bytes!("../fixtures/agent-inventory-manager-cases.json.gz"));
         parse(
-            std::str::from_utf8(&result.stdout).unwrap(),
+            std::str::from_utf8(&result).unwrap(),
             8 * 1024 * 1024,
         )
         .unwrap()

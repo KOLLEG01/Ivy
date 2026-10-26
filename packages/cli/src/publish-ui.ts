@@ -1,7 +1,7 @@
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
-import { extname, resolve, sep } from "node:path";
+import { extname, resolve, sep, basename, dirname } from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { parseArgs } from "node:util";
 import { canonical, digest, hashJson } from "../../contracts/src/canonical.js";
 import { IvyError, requireThat } from "../../contracts/src/errors.js";
 import { validateUiDefinition } from "../../contracts/src/core-validation.js";
@@ -10,7 +10,6 @@ import {
   parseOperationId,
 } from "../../contracts/src/operation-id.js";
 import type { Operation, Wire } from "../../contracts/src/generated.js";
-import { HiveClient } from "../../sdk/src/client.js";
 import type { RpcClient } from "../../sdk/src/client.js";
 
 const media: Record<string, string> = {
@@ -205,51 +204,17 @@ export async function publishUi(
   });
 }
 
-if (
-  process.argv[1] &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
-  try {
-    const { values } = parseArgs({
-      options: {
-        directory: { type: "string" },
-        base: { type: "string" },
-        "credential-env": { type: "string", default: "IVY_PUBLISH_CREDENTIAL" },
-        "mutation-id": { type: "string" },
-        "expected-release": { type: "string" },
-        initial: { type: "boolean" },
-      },
-    });
-    requireThat(
-      values.directory &&
-        values.base &&
-        values["mutation-id"] &&
-        !!values.initial !== (values["expected-release"] !== undefined),
-      "invalid_arguments",
-      "Use --directory, --base, --mutation-id and exactly one of --initial / --expected-release.",
-    );
-    const credential = process.env[values["credential-env"]!];
-    requireThat(
-      credential,
-      "unauthenticated",
-      "The selected credential environment variable is empty.",
-    );
-    const definition = JSON.parse(
-      await readFile(resolve(values.directory, "ivy-ui.json"), "utf8"),
-    ) as Operation.UiDefinition;
-    console.log(
-      JSON.stringify(
-        await publishUi(new HiveClient(values.base, { credential }), {
-          directory: values.directory,
-          definition,
-          mutationId: values["mutation-id"],
-          expectedReleaseId: values["expected-release"] ?? null,
-        }),
-      ),
-    );
-  } catch (error) {
-    const failure = IvyError.from(error);
-    console.error(JSON.stringify(failure.toWire()));
-    process.exitCode = 1;
+// Exported publication helpers serve intentional Node SDK/browser consumers.
+// The operator command uses the same native implementation as Host recovery.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const moduleRoot = fileURLToPath(new URL('../../../', import.meta.url));
+  const root = basename(moduleRoot) === 'dist' ? dirname(moduleRoot) : moduleRoot;
+  const executable = resolve(root, 'dist/native', `${process.platform}-${process.arch}`,
+    process.platform === 'win32' ? 'ivy-publish-ui.exe' : 'ivy-publish-ui');
+  const result = spawnSync(executable, process.argv.slice(2), { stdio: 'inherit', windowsHide: true });
+  if (result.error) {
+    console.error(JSON.stringify(new IvyError('unsupported_runtime',
+      'The native UI publication command is unavailable. Build or install the HostExecutor package.', 'not_executed').toWire()));
   }
+  process.exitCode = result.status ?? 1;
 }

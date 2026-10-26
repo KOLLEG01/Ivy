@@ -40,7 +40,8 @@ fn fixture_time(value: &IvyJson) -> f64 {
 impl Controls {
     fn advance_clock(&self) {
         if let Some(spec) = &self.observation {
-            *self.clock_ms.lock().unwrap() = fixture_time(&spec.get("clock").unwrap().as_array().unwrap()[1]);
+            *self.clock_ms.lock().unwrap() =
+                fixture_time(&spec.get("clock").unwrap().as_array().unwrap()[1]);
         }
     }
 }
@@ -53,7 +54,10 @@ impl Backend {
         self.trace.lock().unwrap().push(obj([
             ("kind", "worker".into()),
             ("payload", payload.clone()),
-            ("reservedBytes", IvyJson::Number(options.reserved_bytes as f64)),
+            (
+                "reservedBytes",
+                IvyJson::Number(options.reserved_bytes as f64),
+            ),
         ]));
         let action = payload.required("action").unwrap().as_str().unwrap();
         if let Some(spec) = self.controls.storage_failure.as_ref().filter(|spec| {
@@ -73,7 +77,9 @@ impl Backend {
             let catalogue = action == "mcp.catalog";
             return Box::pin(async move {
                 tokio::task::yield_now().await;
-                if catalogue { controls.advance_clock(); }
+                if catalogue {
+                    controls.advance_clock();
+                }
                 Err(error)
             });
         }
@@ -130,7 +136,9 @@ impl Backend {
                 gate.await.unwrap();
             }
             tokio::task::yield_now().await;
-            if catalogue { controls.advance_clock(); }
+            if catalogue {
+                controls.advance_clock();
+            }
             if fail {
                 Err(IvyError::new("instruction_failure", "Instructions failed."))
             } else {
@@ -316,7 +324,11 @@ impl server_mcp::Handler for Handler<'_> {
         app: &server_mcp::Application,
         response: &mut impl ResponsePort,
     ) -> mcp_request::Result<()> {
-        if self.controls.observation.is_some() { self.controls.clock_active.store(true, AtomicOrdering::SeqCst); }
+        if self.controls.observation.is_some() {
+            self.controls
+                .clock_active
+                .store(true, AtomicOrdering::SeqCst);
+        }
         self.trace
             .lock()
             .unwrap()
@@ -329,7 +341,9 @@ impl server_mcp::Handler for Handler<'_> {
             .unwrap()
             .push(obj([("kind", "close".into())]));
         self.inner.close().await?;
-        self.controls.clock_active.store(false, AtomicOrdering::SeqCst);
+        self.controls
+            .clock_active
+            .store(false, AtomicOrdering::SeqCst);
         self.controls
             .close_started
             .store(true, AtomicOrdering::SeqCst);
@@ -345,7 +359,7 @@ impl server_mcp::Handler for Handler<'_> {
 }
 fn available(budget: &RequestBudget) -> usize {
     let mut leases = vec![];
-    while let Ok(lease) = budget.acquire(&"probe".into(),Some(0)) {
+    while let Ok(lease) = budget.acquire(&"probe".into(), Some(0)) {
         leases.push(lease);
     }
     let count = leases.len();
@@ -374,27 +388,49 @@ async fn exchange(
     let record_ids = controls.observation.is_some();
     effects.ids = Arc::new(move || {
         let id: JsString = format!("owner-{}", count.fetch_add(1, AtomicOrdering::SeqCst)).into();
-        if record_ids { id_trace.lock().unwrap().push(obj([("kind", "id".into()), ("id", IvyJson::String(id.clone()))])); }
+        if record_ids {
+            id_trace.lock().unwrap().push(obj([
+                ("kind", "id".into()),
+                ("id", IvyJson::String(id.clone())),
+            ]));
+        }
         id
     });
     if let Some(spec) = &controls.observation {
-        *controls.clock_ms.lock().unwrap() = fixture_time(&spec.get("clock").unwrap().as_array().unwrap()[0]);
+        *controls.clock_ms.lock().unwrap() =
+            fixture_time(&spec.get("clock").unwrap().as_array().unwrap()[0]);
         let clock_controls = controls.clone();
         let clock_trace = trace.clone();
         effects.now = Arc::new(move || {
-            if !clock_controls.clock_active.load(AtomicOrdering::SeqCst) { return 100000.0; }
+            if !clock_controls.clock_active.load(AtomicOrdering::SeqCst) {
+                return 100000.0;
+            }
             let now = *clock_controls.clock_ms.lock().unwrap();
-            clock_trace.lock().unwrap().push(obj([("kind", "clock".into()), ("value", IvyJson::Number(now))]));
+            clock_trace.lock().unwrap().push(obj([
+                ("kind", "clock".into()),
+                ("value", IvyJson::Number(now)),
+            ]));
             now
         });
         let mode = spec.get("mode").unwrap().as_str().unwrap();
         if mode != "absent" {
             let observation_trace = trace.clone();
             effects.observe_mcp_call = Some(Arc::new(move |value| {
-                observation_trace.lock().unwrap().push(obj([("kind", "observe".into()), ("value", value.to_json())]));
+                observation_trace.lock().unwrap().push(obj([
+                    ("kind", "observe".into()),
+                    ("value", value.to_json()),
+                ]));
                 match mode.as_str() {
-                    "ivy-failure" => Err(IvyError::new("observer_failed", "Observer refused.").with_outcome(Outcome::Completed).into()),
-                    "protocol-failure" => Err(mcp_request::Error::Protocol(mcp_request::ProtocolError { code: -32602, message: "Observer protocol refusal.".into(), data: obj([("stage", "observer".into())]) })),
+                    "ivy-failure" => Err(IvyError::new("observer_failed", "Observer refused.")
+                        .with_outcome(Outcome::Completed)
+                        .into()),
+                    "protocol-failure" => {
+                        Err(mcp_request::Error::Protocol(mcp_request::ProtocolError {
+                            code: -32602,
+                            message: "Observer protocol refusal.".into(),
+                            data: obj([("stage", "observer".into())]),
+                        }))
+                    }
                     "ok" => Ok(()),
                     _ => panic!("Unknown fixture observer mode"),
                 }
@@ -560,23 +596,8 @@ async fn exchange(
     ]);
     output
 }
-fn save(suffix: &str, value: &IvyJson) {
-    if let Some(prefix) = std::env::var_os("IVY_HIVE_MCP_OWNER_CORPUS") {
-        std::fs::write(
-            format!("{}-{suffix}.json", prefix.to_string_lossy()),
-            crate::encode(value),
-        )
-        .unwrap();
-    }
-}
 fn baseline() -> IvyJson {
-    crate::json(
-        &std::fs::read_to_string(
-            std::env::var_os("IVY_HIVE_MCP_OWNER_REFERENCE")
-                .expect("Run the composed dispatch check first"),
-        )
-        .unwrap(),
-    )
+    crate::mcp_dispatch::reference()
 }
 fn kinds(row: &IvyJson) -> Vec<String> {
     row.get("events")
@@ -589,13 +610,7 @@ fn kinds(row: &IvyJson) -> Vec<String> {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn actual_owner_matches_frozen_original_protocol_baseline() {
-    let reference = crate::json(
-        &std::fs::read_to_string(
-            std::env::var_os("IVY_HIVE_MCP_HTTP_REFERENCE")
-                .expect("Run with the frozen original MCP reference"),
-        )
-        .unwrap(),
-    );
+    let reference = crate::mcp_inbound::reference();
     let cases = reference.get("cases").unwrap().as_array().unwrap();
     let original = reference.get("wire").unwrap().as_array().unwrap();
     assert_eq!(cases.len(), 57);
@@ -604,14 +619,6 @@ async fn actual_owner_matches_frozen_original_protocol_baseline() {
     for row in cases {
         rows.push(exchange(row.clone(), Arc::new(Controls::default()), None).await);
     }
-    save(
-        "integrated",
-        &obj([
-            ("cases", IvyJson::Array(cases.to_vec())),
-            ("source", IvyJson::Array(original.to_vec())),
-            ("native", IvyJson::Array(rows.clone())),
-        ]),
-    );
     for ((request, source), row) in cases.iter().zip(original).zip(&rows) {
         let name = request.get("name").unwrap().as_str().unwrap();
         assert_eq!(row.get("error"), Some(&IvyJson::Null), "{name}");
@@ -628,37 +635,75 @@ async fn actual_owner_matches_frozen_original_protocol_baseline() {
             ("bodyBase64", source.get("bodyBase64").unwrap().clone()),
         ]);
         assert_eq!(row.get("wire"), Some(&expected), "{name}");
-        assert_eq!(row.get("activeBeforeRelease"), Some(&IvyJson::Number(1.0)), "{name}");
-        assert_eq!(row.get("activeAfterRelease"), Some(&IvyJson::Number(0.0)), "{name}");
-        assert_eq!(row.get("availableAfterRelease"), Some(&IvyJson::Number(2.0)), "{name}");
+        assert_eq!(
+            row.get("activeBeforeRelease"),
+            Some(&IvyJson::Number(1.0)),
+            "{name}"
+        );
+        assert_eq!(
+            row.get("activeAfterRelease"),
+            Some(&IvyJson::Number(0.0)),
+            "{name}"
+        );
+        assert_eq!(
+            row.get("availableAfterRelease"),
+            Some(&IvyJson::Number(2.0)),
+            "{name}"
+        );
         let post = request.get("method").is_none();
-        assert_eq!(row.get("bodyConsumed"), Some(&IvyJson::Bool(post)), "{name}");
+        assert_eq!(
+            row.get("bodyConsumed"),
+            Some(&IvyJson::Bool(post)),
+            "{name}"
+        );
         let events = kinds(row);
         for stage in ["create", "handle", "close"] {
-            assert_eq!(events.iter().filter(|v| *v == stage).count(), usize::from(post), "{name}: {stage}");
+            assert_eq!(
+                events.iter().filter(|v| *v == stage).count(),
+                usize::from(post),
+                "{name}: {stage}"
+            );
         }
-        let worker: Vec<_> = row.get("events").unwrap().as_array().unwrap().iter()
+        let worker: Vec<_> = row
+            .get("events")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
             .filter(|v| v.get("kind") == Some(&"worker".into()))
-            .map(|v| v.get("payload").unwrap().get("action").unwrap().as_str().unwrap())
+            .map(|v| {
+                v.get("payload")
+                    .unwrap()
+                    .get("action")
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+            })
             .collect();
-        assert_eq!(worker.iter().filter(|v| *v == "authenticate").count(), 1, "{name}");
-        assert_eq!(worker.iter().filter(|v| *v == "disconnect").count(), 1, "{name}");
+        assert_eq!(
+            worker.iter().filter(|v| *v == "authenticate").count(),
+            1,
+            "{name}"
+        );
+        assert_eq!(
+            worker.iter().filter(|v| *v == "disconnect").count(),
+            1,
+            "{name}"
+        );
         if !post {
             assert_eq!(worker, ["authenticate", "disconnect"], "{name}");
             assert_eq!(row.get("rpcId"), Some(&IvyJson::Null), "{name}");
-            assert_eq!(events.iter().filter(|v| *v == "provider-send").count(), 0, "{name}");
+            assert_eq!(
+                events.iter().filter(|v| *v == "provider-send").count(),
+                0,
+                "{name}"
+            );
         }
     }
 }
 #[tokio::test(flavor = "current_thread")]
 async fn actual_owner_matches_frozen_sdk_client_exchanges() {
-    let reference = crate::json(
-        &std::fs::read_to_string(
-            std::env::var_os("IVY_HIVE_MCP_HTTP_REFERENCE")
-                .expect("Run with the frozen original MCP reference"),
-        )
-        .unwrap(),
-    );
+    let reference = crate::mcp_inbound::reference();
     let clients = reference.get("clients").unwrap();
     let mut cases = vec![];
     let mut sources = vec![];
@@ -684,14 +729,6 @@ async fn actual_owner_matches_frozen_sdk_client_exchanges() {
     for row in &cases {
         rows.push(exchange(row.clone(), Arc::new(Controls::default()), None).await);
     }
-    save(
-        "clients",
-        &obj([
-            ("cases", IvyJson::Array(cases.clone())),
-            ("source", IvyJson::Array(sources.clone())),
-            ("native", IvyJson::Array(rows.clone())),
-        ]),
-    );
     assert_eq!(rows.len(), 14);
     for ((request, source), row) in cases.iter().zip(&sources).zip(&rows) {
         let name = request.get("name").unwrap().as_str().unwrap();
@@ -708,22 +745,51 @@ async fn actual_owner_matches_frozen_sdk_client_exchanges() {
         );
         assert_eq!(
             wire.get("bodyBase64"),
-            Some(&source.get("responseBase64").cloned().unwrap_or_else(|| "".into())),
+            Some(
+                &source
+                    .get("responseBase64")
+                    .cloned()
+                    .unwrap_or_else(|| "".into())
+            ),
             "{name}"
         );
         let post = request.get("method") == Some(&"POST".into());
-        assert_eq!(row.get("bodyConsumed"), Some(&IvyJson::Bool(post)), "{name}");
-        assert_eq!(row.get("activeBeforeRelease"), Some(&IvyJson::Number(1.0)), "{name}");
-        assert_eq!(row.get("activeAfterRelease"), Some(&IvyJson::Number(0.0)), "{name}");
-        assert_eq!(row.get("availableAfterRelease"), Some(&IvyJson::Number(2.0)), "{name}");
+        assert_eq!(
+            row.get("bodyConsumed"),
+            Some(&IvyJson::Bool(post)),
+            "{name}"
+        );
+        assert_eq!(
+            row.get("activeBeforeRelease"),
+            Some(&IvyJson::Number(1.0)),
+            "{name}"
+        );
+        assert_eq!(
+            row.get("activeAfterRelease"),
+            Some(&IvyJson::Number(0.0)),
+            "{name}"
+        );
+        assert_eq!(
+            row.get("availableAfterRelease"),
+            Some(&IvyJson::Number(2.0)),
+            "{name}"
+        );
         let events = kinds(row);
         for stage in ["create", "handle", "close"] {
-            assert_eq!(events.iter().filter(|v| *v == stage).count(), usize::from(post), "{name}: {stage}");
+            assert_eq!(
+                events.iter().filter(|v| *v == stage).count(),
+                usize::from(post),
+                "{name}: {stage}"
+            );
         }
         if !post {
             assert_eq!(headers.get("allow"), Some(&"POST".into()), "{name}");
             assert_eq!(row.get("rpcId"), Some(&IvyJson::Null), "{name}");
-            assert_eq!(events.iter().filter(|v| *v == "provider-send").count(), 0, "{name}");
+            assert_eq!(
+                events.iter().filter(|v| *v == "provider-send").count(),
+                0,
+                "{name}"
+            );
         }
     }
 }
@@ -738,18 +804,11 @@ async fn prepared_owner_factory_matches_original_wire_and_releases_leases() {
         .unwrap()
         .as_array()
         .unwrap();
+    assert_eq!(cases.len(), original.len());
     let mut rows = vec![];
     for row in cases {
         rows.push(exchange(row.clone(), Arc::new(Controls::default()), None).await);
     }
-    save(
-        "comparison",
-        &obj([
-            ("cases", IvyJson::Array(cases.to_vec())),
-            ("source", reference.get("source").unwrap().clone()),
-            ("native", IvyJson::Array(rows.clone())),
-        ]),
-    );
     for (row, source) in rows.iter().zip(original) {
         assert_eq!(
             row.get("error"),
@@ -793,7 +852,6 @@ async fn actual_factory_failure_and_pending_close_keep_owner_precedence() {
         .run_until(async {
             let reference = baseline();
             let cases = reference.get("cases").unwrap().as_array().unwrap();
-            let mut rows = vec![];
             for (name, control, index, code, closes) in [
                 (
                     "create-error",
@@ -860,7 +918,6 @@ async fn actual_factory_failure_and_pending_close_keep_owner_precedence() {
                 let mut row = cases[index].clone();
                 row.insert("name", name.into());
                 let result = exchange(row, Arc::new(control), None).await;
-                save(name, &result);
                 assert_eq!(
                     result
                         .get("error")
@@ -878,7 +935,6 @@ async fn actual_factory_failure_and_pending_close_keep_owner_precedence() {
                     result.get("activeAfterRelease"),
                     Some(&IvyJson::Number(0.0))
                 );
-                rows.push(result);
             }
             for phase in ["catalogue", "close"] {
                 let controls = Arc::new(Controls::default());
@@ -902,36 +958,12 @@ async fn actual_factory_failure_and_pending_close_keep_owner_precedence() {
                 }
                 assert_eq!(connection.active_requests(), 1);
                 assert_eq!(available(&budget), 1);
-                let held = obj([
-                    (
-                        "active",
-                        IvyJson::Number(connection.active_requests() as f64),
-                    ),
-                    ("available", IvyJson::Number(available(&budget) as f64)),
-                    (
-                        "closeStarted",
-                        controls.close_started.load(AtomicOrdering::SeqCst).into(),
-                    ),
-                ]);
                 connection.close();
                 if phase == "catalogue" {
                     controls.destroyed.store(true, AtomicOrdering::SeqCst);
                 }
-                let after_socket_close = obj([
-                    (
-                        "active",
-                        IvyJson::Number(connection.active_requests() as f64),
-                    ),
-                    ("available", IvyJson::Number(available(&budget) as f64)),
-                    (
-                        "responseDestroyed",
-                        controls.destroyed.load(AtomicOrdering::SeqCst).into(),
-                    ),
-                ]);
                 release.send(()).unwrap();
-                let mut result = work.await.unwrap();
-                result.insert("held", held);
-                result.insert("afterSocketClose", after_socket_close);
+                let result = work.await.unwrap();
                 assert_eq!(result.get("error"), Some(&IvyJson::Null));
                 assert_eq!(connection.active_requests(), 0);
                 assert_eq!(available(&budget), 2);
@@ -939,9 +971,7 @@ async fn actual_factory_failure_and_pending_close_keep_owner_precedence() {
                 if phase == "catalogue" {
                     assert!(!kinds(&result).contains(&"response-head".to_owned()));
                 }
-                rows.push(result);
             }
-            save("lifetime", &IvyJson::Array(rows));
         })
         .await;
 }
@@ -1033,14 +1063,17 @@ fn error_cases() -> Vec<IvyJson> {
 async fn actual_owner_storage_errors_match_original_protocol_and_release_leases() {
     let cases = error_cases();
     assert_eq!(cases.len(), 46);
-    let source = crate::mcp_protocol::oracle(&obj([
+    let source = crate::mcp_protocol::reference(&obj([
         ("mode", "baseline".into()),
         ("client", false.into()),
         ("recordEffects", true.into()),
         ("recordStorageEffects", true.into()),
         ("cases", IvyJson::Array(cases.clone())),
     ]));
-    save("errors-source", &source);
+    assert_eq!(
+        source.get("wire").unwrap().as_array().unwrap().len(),
+        cases.len()
+    );
     let mut rows = vec![];
     for row in &cases {
         rows.push(
@@ -1055,14 +1088,6 @@ async fn actual_owner_storage_errors_match_original_protocol_and_release_leases(
             .await,
         );
     }
-    save(
-        "errors-comparison",
-        &obj([
-            ("cases", IvyJson::Array(cases)),
-            ("source", source.clone()),
-            ("native", IvyJson::Array(rows.clone())),
-        ]),
-    );
     for (actual, original) in rows
         .iter()
         .zip(source.get("wire").unwrap().as_array().unwrap())
@@ -1343,35 +1368,26 @@ fn provider_cases() -> Vec<IvyJson> {
 #[tokio::test(flavor = "current_thread")]
 async fn actual_owner_provider_responses_match_original_normalization_and_release_leases() {
     let cases = provider_cases();
-    let source = if let Some(path) = std::env::var_os("IVY_HIVE_MCP_PROVIDER_REFERENCE") {
-        crate::json(&std::fs::read_to_string(path).unwrap())
-    } else {
-        crate::mcp_protocol::oracle(&obj([
-            ("mode", "baseline".into()),
-            ("client", false.into()),
-            ("recordEffects", true.into()),
-            ("recordStorageEffects", true.into()),
-            ("cases", IvyJson::Array(cases.clone())),
-        ]))
-    };
+    let source = crate::mcp_protocol::reference(&obj([
+        ("mode", "baseline".into()),
+        ("client", false.into()),
+        ("recordEffects", true.into()),
+        ("recordStorageEffects", true.into()),
+        ("cases", IvyJson::Array(cases.clone())),
+    ]));
+    assert_eq!(
+        source.get("wire").unwrap().as_array().unwrap().len(),
+        cases.len()
+    );
     assert_eq!(
         crate::encode(source.get("cases").unwrap()),
         crate::encode(&IvyJson::Array(cases.clone())),
         "A reused original observation must cover the exact same corpus"
     );
-    save("provider-source", &source);
     let mut rows = vec![];
     for row in &cases {
         rows.push(exchange(row.clone(), Arc::new(Controls::default()), None).await);
     }
-    save(
-        "provider-comparison",
-        &obj([
-            ("cases", IvyJson::Array(cases)),
-            ("source", source.clone()),
-            ("native", IvyJson::Array(rows.clone())),
-        ]),
-    );
     for (index, actual) in rows.iter().enumerate() {
         let original = &source.get("wire").unwrap().as_array().unwrap()[index];
         let provider = &source.get("providerResults").unwrap().as_array().unwrap()[index];
@@ -1447,41 +1463,114 @@ fn observation_cases() -> Vec<IvyJson> {
     let reference = crate::mcp_inbound::reference();
     let mut cases = vec![];
     for template in ["legacy-tool-success", "modern-valid-tool"] {
-        let original = reference.get("cases").unwrap().as_array().unwrap().iter()
-            .find(|row| row.get("name") == Some(&template.into())).unwrap();
+        let original = reference
+            .get("cases")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row.get("name") == Some(&template.into()))
+            .unwrap();
         let mut add = |label: &str, mut row: IvyJson, mode: &str, clock: IvyJson| {
             row.insert("name", format!("{template}-observe-{label}").into());
-            row.insert("observation", obj([("mode", mode.into()), ("clock", clock)]));
+            row.insert(
+                "observation",
+                obj([("mode", mode.into()), ("clock", clock)]),
+            );
             cases.push(row);
         };
         for mode in ["ok", "absent", "ivy-failure", "protocol-failure"] {
-            for outcome in ["success", "invalid-arguments", "missing-tool", "catalogue-error", "provider-error"] {
+            for outcome in [
+                "success",
+                "invalid-arguments",
+                "missing-tool",
+                "catalogue-error",
+                "provider-error",
+            ] {
                 let mut row = original.clone();
                 match outcome {
-                    "invalid-arguments" => crate::mcp_inbound::set(&mut row, &["body", "params", "arguments", "input", "value"], number(3)),
+                    "invalid-arguments" => crate::mcp_inbound::set(
+                        &mut row,
+                        &["body", "params", "arguments", "input", "value"],
+                        number(3),
+                    ),
                     "missing-tool" => {
-                        crate::mcp_inbound::set(&mut row, &["body", "params", "name"], "missing".into());
-                        if template == "modern-valid-tool" { crate::mcp_inbound::set(&mut row, &["headers", "mcp-name"], "missing".into()); }
+                        crate::mcp_inbound::set(
+                            &mut row,
+                            &["body", "params", "name"],
+                            "missing".into(),
+                        );
+                        if template == "modern-valid-tool" {
+                            crate::mcp_inbound::set(
+                                &mut row,
+                                &["headers", "mcp-name"],
+                                "missing".into(),
+                            );
+                        }
                     }
-                    "catalogue-error" => { row.insert("storageError", crate::json(r#"{"action":"mcp.catalog","code":"storage_unavailable","message":"Observation catalog refused.","outcome":["unknown"],"details":{"posted":true}}"#)); }
-                    "provider-error" => { row.insert("providerReply", crate::json(r#"{"jsonrpc":"2.0","error":{"code":-32000,"message":"Observation provider refused.","data":{"code":"unauthenticated","outcome":["not_executed"],"details":{"posted":true}}}}"#)); }
+                    "catalogue-error" => {
+                        row.insert("storageError", crate::json(r#"{"action":"mcp.catalog","code":"storage_unavailable","message":"Observation catalog refused.","outcome":["unknown"],"details":{"posted":true}}"#));
+                    }
+                    "provider-error" => {
+                        row.insert("providerReply", crate::json(r#"{"jsonrpc":"2.0","error":{"code":-32000,"message":"Observation provider refused.","data":{"code":"unauthenticated","outcome":["not_executed"],"details":{"posted":true}}}}"#));
+                    }
                     "success" => {}
                     _ => unreachable!(),
                 }
-                add(&format!("{mode}-{outcome}"), row, mode, crate::json("[1000,1250]"));
+                add(
+                    &format!("{mode}-{outcome}"),
+                    row,
+                    mode,
+                    crate::json("[1000,1250]"),
+                );
             }
         }
         let mut unknown = original.clone();
         crate::mcp_inbound::set(&mut unknown, &["body", "params", "name"], "missing".into());
-        if template == "modern-valid-tool" { crate::mcp_inbound::set(&mut unknown, &["headers", "mcp-name"], "missing".into()); }
+        if template == "modern-valid-tool" {
+            crate::mcp_inbound::set(&mut unknown, &["headers", "mcp-name"], "missing".into());
+        }
         for (label, arguments) in [
-            ("empty-first", crate::json(r#"{"operationId":"","mutationId":"unused","input":{"operationId":"inner"}}"#)),
-            ("null-first", crate::json(r#"{"operationId":null,"mutationId":"mutation","input":{"operationId":"inner"}}"#)),
-            ("numeric-first", crate::json(r#"{"operationId":7,"mutationId":"unused","input":{"operationId":"inner"}}"#)),
-            ("false-first", crate::json(r#"{"operationId":false,"mutationId":"unused","input":{"operationId":"inner"}}"#)),
-            ("inner-last", crate::json(r#"{"operationId":null,"mutationId":null,"input":{"operationId":"inner"}}"#)),
-            ("inner-null-mutation", crate::json(r#"{"mutationId":null,"input":{"operationId":"nested"}}"#)),
-            ("outer-first", crate::json(r#"{"operationId":"outer","mutationId":"unused","input":{"operationId":"inner"}}"#)),
+            (
+                "empty-first",
+                crate::json(
+                    r#"{"operationId":"","mutationId":"unused","input":{"operationId":"inner"}}"#,
+                ),
+            ),
+            (
+                "null-first",
+                crate::json(
+                    r#"{"operationId":null,"mutationId":"mutation","input":{"operationId":"inner"}}"#,
+                ),
+            ),
+            (
+                "numeric-first",
+                crate::json(
+                    r#"{"operationId":7,"mutationId":"unused","input":{"operationId":"inner"}}"#,
+                ),
+            ),
+            (
+                "false-first",
+                crate::json(
+                    r#"{"operationId":false,"mutationId":"unused","input":{"operationId":"inner"}}"#,
+                ),
+            ),
+            (
+                "inner-last",
+                crate::json(
+                    r#"{"operationId":null,"mutationId":null,"input":{"operationId":"inner"}}"#,
+                ),
+            ),
+            (
+                "inner-null-mutation",
+                crate::json(r#"{"mutationId":null,"input":{"operationId":"nested"}}"#),
+            ),
+            (
+                "outer-first",
+                crate::json(
+                    r#"{"operationId":"outer","mutationId":"unused","input":{"operationId":"inner"}}"#,
+                ),
+            ),
         ] {
             let mut row = unknown.clone();
             crate::mcp_inbound::set(&mut row, &["body", "params", "arguments"], arguments);
@@ -1489,19 +1578,68 @@ fn observation_cases() -> Vec<IvyJson> {
         }
         let mut long = unknown.clone();
         let request: JsString = format!("{}😀tail", "r".repeat(127)).into();
-        let tool: JsString = if template == "modern-valid-tool" { format!("{}tail", "t".repeat(129)).into() } else { format!("{}😀tail", "t".repeat(127)).into() };
+        let tool: JsString = if template == "modern-valid-tool" {
+            format!("{}tail", "t".repeat(129)).into()
+        } else {
+            format!("{}😀tail", "t".repeat(127)).into()
+        };
         let operation: JsString = format!("{}😀tail", "o".repeat(511)).into();
         crate::mcp_inbound::set(&mut long, &["body", "id"], IvyJson::String(request));
-        crate::mcp_inbound::set(&mut long, &["body", "params", "name"], IvyJson::String(tool.clone()));
-        if template == "modern-valid-tool" { crate::mcp_inbound::set(&mut long, &["headers", "mcp-name"], IvyJson::String(tool)); }
-        crate::mcp_inbound::set(&mut long, &["body", "params", "arguments"], obj([("operationId", IvyJson::String(operation))]));
-        add("utf16-cut", long, "ok", crate::json("[1000,1250]"));
-        for (index, id) in [number(0), IvyJson::Number(-1.0), IvyJson::Number(9_007_199_254_740_991.0), IvyJson::Number(9_007_199_254_740_992.0), IvyJson::Number(1.25), "".into(), IvyJson::String(JsString(vec![0xd800])), "short".into(), IvyJson::Null, true.into()].into_iter().enumerate() {
-            let mut row = unknown.clone();crate::mcp_inbound::set(&mut row, &["body", "id"], id);
-            add(&format!("request-id-{index}"), row, "ok", crate::json("[1000,1250]"));
+        crate::mcp_inbound::set(
+            &mut long,
+            &["body", "params", "name"],
+            IvyJson::String(tool.clone()),
+        );
+        if template == "modern-valid-tool" {
+            crate::mcp_inbound::set(&mut long, &["headers", "mcp-name"], IvyJson::String(tool));
         }
-        for (index, clock) in ["[1000,900]", "[0,86400001]", "[1.25,3.75]", "[0,\"Infinity\"]", "[\"Infinity\",0]", "[0,\"NaN\"]"].into_iter().enumerate() {
-            add(&format!("clock-{index}"), unknown.clone(), "ok", crate::json(clock));
+        crate::mcp_inbound::set(
+            &mut long,
+            &["body", "params", "arguments"],
+            obj([("operationId", IvyJson::String(operation))]),
+        );
+        add("utf16-cut", long, "ok", crate::json("[1000,1250]"));
+        for (index, id) in [
+            number(0),
+            IvyJson::Number(-1.0),
+            IvyJson::Number(9_007_199_254_740_991.0),
+            IvyJson::Number(9_007_199_254_740_992.0),
+            IvyJson::Number(1.25),
+            "".into(),
+            IvyJson::String(JsString(vec![0xd800])),
+            "short".into(),
+            IvyJson::Null,
+            true.into(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut row = unknown.clone();
+            crate::mcp_inbound::set(&mut row, &["body", "id"], id);
+            add(
+                &format!("request-id-{index}"),
+                row,
+                "ok",
+                crate::json("[1000,1250]"),
+            );
+        }
+        for (index, clock) in [
+            "[1000,900]",
+            "[0,86400001]",
+            "[1.25,3.75]",
+            "[0,\"Infinity\"]",
+            "[\"Infinity\",0]",
+            "[0,\"NaN\"]",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            add(
+                &format!("clock-{index}"),
+                unknown.clone(),
+                "ok",
+                crate::json(clock),
+            );
         }
     }
     assert_eq!(cases.len(), 88);
@@ -1510,10 +1648,20 @@ fn observation_cases() -> Vec<IvyJson> {
 
 fn normalized_observation(value: &IvyJson, ids: &[IvyJson]) -> IvyJson {
     let mut value = value.clone();
-    let normalized = value.get("internalRequestIds").unwrap().as_array().unwrap().iter().map(|id| {
-        let index = ids.iter().position(|candidate| candidate == id).expect("Observation must reference an actual allocated/invoked ID");
-        format!("internal-{index}").into()
-    }).collect();
+    let normalized = value
+        .get("internalRequestIds")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| {
+            let index = ids
+                .iter()
+                .position(|candidate| candidate == id)
+                .expect("Observation must reference an actual allocated/invoked ID");
+            format!("internal-{index}").into()
+        })
+        .collect();
     value.insert("internalRequestIds", IvyJson::Array(normalized));
     value
 }
@@ -1521,38 +1669,111 @@ fn normalized_observation(value: &IvyJson, ids: &[IvyJson]) -> IvyJson {
 #[tokio::test(flavor = "current_thread")]
 async fn actual_owner_observations_match_original_finally_identity_and_clock_boundaries() {
     let cases = observation_cases();
-    let source = if let Some(path) = std::env::var_os("IVY_HIVE_MCP_OBSERVER_REFERENCE") {
-        crate::json(&std::fs::read_to_string(path).unwrap())
-    } else {
-        crate::mcp_protocol::oracle(&obj([("mode", "baseline".into()), ("client", false.into()), ("recordEffects", true.into()), ("recordStorageEffects", true.into()), ("recordObservations", true.into()), ("cases", IvyJson::Array(cases.clone()))]))
-    };
-    assert_eq!(crate::encode(source.get("cases").unwrap()), crate::encode(&IvyJson::Array(cases.clone())), "Reused original observations require the same complete corpus");
-    save("observer-source", &source);
+    let source = crate::mcp_protocol::reference(&obj([
+        ("mode", "baseline".into()),
+        ("client", false.into()),
+        ("recordEffects", true.into()),
+        ("recordStorageEffects", true.into()),
+        ("recordObservations", true.into()),
+        ("cases", IvyJson::Array(cases.clone())),
+    ]));
+    assert_eq!(
+        source.get("wire").unwrap().as_array().unwrap().len(),
+        cases.len()
+    );
+    assert_eq!(
+        crate::encode(source.get("cases").unwrap()),
+        crate::encode(&IvyJson::Array(cases.clone())),
+        "Reused original observations require the same complete corpus"
+    );
     let mut rows = vec![];
     for row in &cases {
-        let controls = Controls { observation: row.get("observation").cloned(), storage_failure: row.get("storageError").cloned(), ..Default::default() };
+        let controls = Controls {
+            observation: row.get("observation").cloned(),
+            storage_failure: row.get("storageError").cloned(),
+            ..Default::default()
+        };
         rows.push(exchange(row.clone(), Arc::new(controls), None).await);
     }
-    save("observer-comparison", &obj([("cases", IvyJson::Array(cases)), ("source", source.clone()), ("native", IvyJson::Array(rows.clone()))]));
     for (index, actual) in rows.iter().enumerate() {
         let original = &source.get("wire").unwrap().as_array().unwrap()[index];
         let name = actual.get("name").unwrap();
         let mut headers = original.get("headers").unwrap().clone();
-        if headers.get("cache-control").is_none() { headers.insert("cache-control", "no-store".into()); }
-        assert_eq!(actual.get("wire"), Some(&obj([("status", original.get("status").unwrap().clone()), ("headers", headers), ("bodyBase64", original.get("bodyBase64").unwrap().clone())])), "Wire {}", crate::encode(name));
+        if headers.get("cache-control").is_none() {
+            headers.insert("cache-control", "no-store".into());
+        }
+        assert_eq!(
+            actual.get("wire"),
+            Some(&obj([
+                ("status", original.get("status").unwrap().clone()),
+                ("headers", headers),
+                ("bodyBase64", original.get("bodyBase64").unwrap().clone())
+            ])),
+            "Wire {}",
+            crate::encode(name)
+        );
         assert_eq!(actual.get("error"), Some(&IvyJson::Null));
-        assert_eq!(actual.get("activeBeforeRelease"), Some(&number(1)));assert_eq!(actual.get("activeAfterRelease"), Some(&number(0)));assert_eq!(actual.get("availableAfterRelease"), Some(&number(2)));
+        assert_eq!(actual.get("activeBeforeRelease"), Some(&number(1)));
+        assert_eq!(actual.get("activeAfterRelease"), Some(&number(0)));
+        assert_eq!(actual.get("availableAfterRelease"), Some(&number(2)));
         let events = actual.get("events").unwrap().as_array().unwrap();
-        let original_ids = source.get("effects").unwrap().as_array().unwrap().iter().filter(|event| event.get("name") == Some(name) && event.get("kind") == Some(&"invoke".into())).map(|event| event.get("frame").unwrap().get("id").unwrap().clone()).collect::<Vec<_>>();
-        let native_ids = events.iter().filter(|event| event.get("kind") == Some(&"id".into())).map(|event| event.get("id").unwrap().clone()).collect::<Vec<_>>();
-        assert!(original_ids.len() <= 1);assert_eq!(native_ids.len(), original_ids.len() * 2);
-        let source_values = source.get("callObservations").unwrap().as_array().unwrap().iter().filter(|value| value.get("name") == Some(name)).map(|value| normalized_observation(value.get("value").unwrap(), &original_ids)).collect::<Vec<_>>();
-        let native_values = events.iter().filter(|value| value.get("kind") == Some(&"observe".into())).map(|value| normalized_observation(value.get("value").unwrap(), &native_ids)).collect::<Vec<_>>();
-        assert_eq!(crate::encode(&IvyJson::Array(native_values)), crate::encode(&IvyJson::Array(source_values.clone())), "Observation {}", crate::encode(name));
+        let original_ids = source
+            .get("effects")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                event.get("name") == Some(name) && event.get("kind") == Some(&"invoke".into())
+            })
+            .map(|event| event.get("frame").unwrap().get("id").unwrap().clone())
+            .collect::<Vec<_>>();
+        let native_ids = events
+            .iter()
+            .filter(|event| event.get("kind") == Some(&"id".into()))
+            .map(|event| event.get("id").unwrap().clone())
+            .collect::<Vec<_>>();
+        assert!(original_ids.len() <= 1);
+        assert_eq!(native_ids.len(), original_ids.len() * 2);
+        let source_values = source
+            .get("callObservations")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|value| value.get("name") == Some(name))
+            .map(|value| normalized_observation(value.get("value").unwrap(), &original_ids))
+            .collect::<Vec<_>>();
+        let native_values = events
+            .iter()
+            .filter(|value| value.get("kind") == Some(&"observe".into()))
+            .map(|value| normalized_observation(value.get("value").unwrap(), &native_ids))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            crate::encode(&IvyJson::Array(native_values)),
+            crate::encode(&IvyJson::Array(source_values.clone())),
+            "Observation {}",
+            crate::encode(name)
+        );
         assert!(source_values.len() <= 1);
         let phases = kinds(actual);
-        for phase in ["create", "handle", "response-head", "response-end", "close"] { assert_eq!(phases.iter().filter(|kind| *kind == phase).count(), 1, "{}", crate::encode(name)); }
-        if !source_values.is_empty() { assert!(phases.iter().position(|value| value == "observe") < phases.iter().position(|value| value == "response-head")); }
-        assert!(phases.iter().position(|value| value == "response-end") < phases.iter().position(|value| value == "close"));
+        for phase in ["create", "handle", "response-head", "response-end", "close"] {
+            assert_eq!(
+                phases.iter().filter(|kind| *kind == phase).count(),
+                1,
+                "{}",
+                crate::encode(name)
+            );
+        }
+        if !source_values.is_empty() {
+            assert!(
+                phases.iter().position(|value| value == "observe")
+                    < phases.iter().position(|value| value == "response-head")
+            );
+        }
+        assert!(
+            phases.iter().position(|value| value == "response-end")
+                < phases.iter().position(|value| value == "close")
+        );
     }
 }

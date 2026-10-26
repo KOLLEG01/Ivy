@@ -316,6 +316,279 @@ fn inventory(revision: u64, entries: Vec<Value>) -> Value {
         json!({"namespace":"fixture","kind":"item","schemaVersion":"1.0.0","mode":"snapshot","snapshotRevision":revision,"entries":entries}),
     )
 }
+
+fn measured_inventory_pages(steps: &[Value]) {
+    use rusqlite::{Connection, ffi};
+    use std::{
+        ffi::{CStr, c_int, c_void},
+        ptr,
+    };
+
+    #[derive(Clone, Debug)]
+    struct Statement {
+        address: usize,
+        sql: String,
+        expanded: String,
+        rows: usize,
+    }
+    struct Trace {
+        db: *mut ffi::sqlite3,
+        statements: Box<Vec<Statement>>,
+    }
+    unsafe extern "C" fn observe(
+        kind: u32,
+        context: *mut c_void,
+        statement: *mut c_void,
+        _: *mut c_void,
+    ) -> c_int {
+        // SQLite invokes this synchronously on this connection's test thread.
+        // The boxed records stay alive until Drop unregisters the callback.
+        let records = unsafe { &mut *context.cast::<Vec<Statement>>() };
+        let address = statement as usize;
+        if kind == ffi::SQLITE_TRACE_STMT as u32 {
+            let sql = unsafe { ffi::sqlite3_sql(statement.cast()) };
+            if !sql.is_null() {
+                let sql = unsafe { CStr::from_ptr(sql) }
+                    .to_string_lossy()
+                    .into_owned();
+                if sql.starts_with("SELECT") {
+                    let expanded = unsafe { ffi::sqlite3_expanded_sql(statement.cast()) };
+                    let text = if expanded.is_null() {
+                        String::new()
+                    } else {
+                        let text = unsafe { CStr::from_ptr(expanded) }
+                            .to_string_lossy()
+                            .into_owned();
+                        unsafe { ffi::sqlite3_free(expanded.cast()) };
+                        text
+                    };
+                    records.push(Statement {
+                        address,
+                        sql,
+                        expanded: text,
+                        rows: 0,
+                    });
+                }
+            }
+        } else if kind == ffi::SQLITE_TRACE_ROW as u32 {
+            if let Some(record) = records
+                .iter_mut()
+                .rev()
+                .find(|record| record.address == address)
+            {
+                record.rows += 1;
+            }
+        }
+        0
+    }
+    impl Trace {
+        fn new(db: &Connection) -> Self {
+            let mut trace = Self {
+                db: unsafe { db.handle() },
+                statements: Box::default(),
+            };
+            assert_eq!(
+                unsafe {
+                    ffi::sqlite3_trace_v2(
+                        trace.db,
+                        (ffi::SQLITE_TRACE_STMT | ffi::SQLITE_TRACE_ROW) as u32,
+                        Some(observe),
+                        trace.statements.as_mut() as *mut Vec<Statement> as *mut c_void,
+                    )
+                },
+                ffi::SQLITE_OK
+            );
+            trace
+        }
+    }
+    impl Drop for Trace {
+        fn drop(&mut self) {
+            unsafe {
+                ffi::sqlite3_trace_v2(self.db, 0, None, ptr::null_mut());
+            }
+        }
+    }
+    fn execute(kernel: &mut Kernel, step: Value) -> IvyJson {
+        let result = kernel
+            .execute(
+                &IvyJson::from_serde(&step["context"]).unwrap(),
+                &IvyJson::from_serde(&step["request"]).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(result.get("kind"), Some(&IvyJson::from("result")));
+        result.required("value").unwrap().clone()
+    }
+    fn measure(kernel: &mut Kernel) -> (IvyJson, Vec<Statement>) {
+        // Observe rows returned by the real statements rather than allocating
+        // another query implementation or a production instrumentation hook.
+        // inventory.list keeps this connection alive; unregister before return
+        // or unwinding, while the caller still owns the Kernel.
+        let trace = Trace::new(kernel.parts.store.connection());
+        let result = kernel.execute(&IvyJson::from_serde(&context("http")).unwrap(), &IvyJson::from_serde(&request("inventory.list", json!({"serviceNodeId":"node","namespace":"fixture","kind":"item","limit":7}))["request"]).unwrap()).unwrap();
+        assert_eq!(result.get("kind"), Some(&IvyJson::from("result")));
+        let records = trace.statements.as_ref().clone();
+        drop(trace);
+        (result.required("value").unwrap().clone(), records)
+    }
+    let root = Root::new();
+    let path = root.0.join("measured.sqlite");
+    let original = reference(&root.0.join("unused.sqlite"), steps);
+    let profile = &original["registryRuntime"];
+    native(&path, &steps[..setup().len()], profile);
+    let mut kernel = compose(&path, profile, Rc::new(Cell::new(100000.0)));
+    execute(&mut kernel, connect("node", Some(1.0)));
+    execute(
+        &mut kernel,
+        service_request("registry.sync", "node", catalog()),
+    );
+    execute(
+        &mut kernel,
+        service_request(
+            "service.heartbeat",
+            "node",
+            json!({"ready":true,"diagnostics":[]}),
+        ),
+    );
+    let seed = |revision, count| {
+        inventory(
+            revision,
+            (0..count)
+                .map(|index| entry(&format!("item-{index:05}"), &format!("Item {index}"), index))
+                .collect(),
+        )
+    };
+    execute(&mut kernel, seed(1, 10));
+    let (small_page, small) = measure(&mut kernel);
+    execute(&mut kernel, seed(2, 1200));
+    let (large_page, large) = measure(&mut kernel);
+    assert_eq!(
+        small_page
+            .required("items")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        7
+    );
+    assert_eq!(
+        large_page
+            .required("items")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        7
+    );
+    assert!(
+        large_page
+            .get("nextCursor")
+            .and_then(IvyJson::as_js_string)
+            .is_some()
+    );
+    let counts = |records: &[Statement]| {
+        (
+            records.len(),
+            records.iter().map(|record| record.rows).sum::<usize>(),
+            records.iter().map(|record| record.rows).max().unwrap(),
+        )
+    };
+    assert_eq!(counts(&large), counts(&small));
+    assert!(counts(&large).2 <= 8);
+    let query = large
+        .iter()
+        .find(|record| {
+            record
+                .sql
+                .starts_with("SELECT i.*,s.revision AS snapshot_revision")
+        })
+        .unwrap();
+    assert_eq!(query.rows, 8);
+    assert!(query.sql.contains("LIMIT ?"));
+    let plan = kernel
+        .parts
+        .store
+        .connection()
+        .prepare(&format!("EXPLAIN QUERY PLAN {}", query.expanded))
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|detail| detail.to_lowercase().contains("inventory"))
+    );
+    assert!(
+        plan.iter()
+            .any(|detail| detail.to_lowercase().contains("index"))
+    );
+
+    execute(
+        &mut kernel,
+        inventory(
+            3,
+            (0..3)
+                .map(|index| entry(&format!("large-{index}"), &"x".repeat(750_000), index))
+                .collect(),
+        ),
+    );
+    let first = execute(
+        &mut kernel,
+        request(
+            "inventory.list",
+            json!({"serviceNodeId":"node","namespace":"fixture","kind":"item","limit":10}),
+        ),
+    );
+    assert_eq!(
+        first.required("items").unwrap().as_array().unwrap().len(),
+        2
+    );
+    let cursor = first.required("nextCursor").unwrap();
+    let second = execute(
+        &mut kernel,
+        request(
+            "inventory.list",
+            json!({"serviceNodeId":"node","namespace":"fixture","kind":"item","limit":10,"cursor":cursor.to_serde().unwrap()}),
+        ),
+    );
+    let ids = first
+        .required("items")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(second.required("items").unwrap().as_array().unwrap())
+        .map(|item| {
+            item.required("resourceRef")
+                .unwrap()
+                .required("nativeId")
+                .unwrap()
+                .as_str()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["large-0", "large-1", "large-2"]);
+    assert!(second.get("nextCursor").is_none_or(IvyJson::is_null));
+    execute(
+        &mut kernel,
+        inventory(4, vec![entry("oversized", "Oversized", 0)]),
+    );
+    kernel.parts.store.connection().execute("UPDATE inventory SET summary=? WHERE node_id='node' AND namespace='fixture' AND kind='item' AND native_id='oversized'", [json!({"name":"x".repeat(2_200_000)}).to_string()]).unwrap();
+    let failure = kernel
+        .execute(
+            &IvyJson::from_serde(&context("http")).unwrap(),
+            &IvyJson::from_serde(
+                &request(
+                    "inventory.list",
+                    json!({"serviceNodeId":"node","namespace":"fixture","kind":"item","limit":10}),
+                )["request"],
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+    assert_eq!(failure.code, "result_too_large");
+}
+
 #[test]
 fn kernel_inventory_sync_search_paging_and_retry_preserve_actual_sql_and_reopen() {
     let mut s = setup();
@@ -420,6 +693,7 @@ fn kernel_inventory_sync_search_paging_and_retry_preserve_actual_sql_and_reopen(
         value(&result, reopened)["items"].as_array().unwrap().len(),
         2
     );
+    measured_inventory_pages(&s);
 }
 
 #[test]

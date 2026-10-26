@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_agent_manager::interactions::{Limits, NativeInteractions};
 use ivy_contracts::{
     IvyError, IvyJson, Outcome,
@@ -11,26 +13,22 @@ use tokio::sync::oneshot;
 
 // The native cache consumes this transport. Keep its stream/hook qualification
 // in the existing affected interaction target while host module wiring is owned upstream.
-#[path = "agent-app-tools-launch.rs"]
-mod app_tools_launch_cases;
-#[path = "agent-native-compatibility.rs"]
-mod native_compatibility_cases;
+#[path = "agent-environment-defaults.rs"]
+mod environment_defaults;
+#[path = "agent-inventory-manager.rs"]
+mod inventory_manager;
 #[path = "agent-native-connection.rs"]
 mod native_connection_cases;
-#[path = "agent-native-daemon.rs"]
-mod native_daemon_cases;
 #[path = "agent-native-executable.rs"]
 mod native_executable_cases;
-#[path = "agent-native-handshake.rs"]
-mod native_handshake_cases;
 #[path = "agent-native-home.rs"]
 mod native_home_cases;
-#[path = "agent-native-proxy.rs"]
-mod native_proxy_cases;
 #[path = "agent-native-rpc.rs"]
 mod native_rpc_cases;
 #[path = "agent-native-shell.rs"]
 mod native_shell_cases;
+#[path = "agent-service-kernel.rs"]
+mod service_kernel;
 
 fn json(s: &str) -> IvyJson {
     parse(s, 1024 * 1024).unwrap()
@@ -365,15 +363,8 @@ async fn unchanged_typescript_cache_matches_error_replay_ttl_and_fifo_trace() {
         ),
     ]);
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = std::process::Command::new("node")
-        .arg("tests/fixtures/agent-interactions-oracle.mjs")
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(rust, json(std::str::from_utf8(&output.stdout).unwrap()));
+    let output = reference_data::read(include_bytes!(
+        "../fixtures/agent-interactions-cases.json.gz"
+    ));
+    assert_eq!(rust, json(std::str::from_utf8(&output).unwrap()));
 }

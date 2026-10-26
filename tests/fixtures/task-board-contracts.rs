@@ -2,9 +2,29 @@ use ivy_contracts::{IvyJson, hash::digest, json::stringify, limits::MANAGEMENT_F
 use ivy_task_board::schema::task_board_contracts;
 use std::collections::HashSet;
 
-// Independent byte hashes from the original taskBoardContracts() returned array.
+// Independent byte hashes of the published current and original definitions.
 // Each hash includes the entire schema, spec, retention and owner declaration.
-const ORIGINAL: &[(&str, &str, &str)] = &[
+const PUBLISHED: &[(&str, &str, &str)] = &[
+    (
+        "task-board/task",
+        "3.1.0",
+        "sha256:b89978d227ef0e54270db7420f0efd52f7dbb597b63fc688852aa679a2fd1de5",
+    ),
+    (
+        "task-board/run",
+        "3.0.0",
+        "sha256:f315e5889ff8306f11c46ddad94ddcf7e9011d1d23387991cb6602c4d732836c",
+    ),
+    (
+        "task-board/comment-node",
+        "2.0.0",
+        "sha256:3d77cc8c965bb7910fe82954b0a67f1df4e18fcbaddb174f93e5659b06511ef4",
+    ),
+    (
+        "task-board/task",
+        "3.0.0",
+        "sha256:1c8141c10500c7d02bf52728357d19320a5ec8d537ed38c155ef64cc257e637f",
+    ),
     (
         "task-board/task",
         "2.3.0",
@@ -243,12 +263,12 @@ const ORIGINAL: &[(&str, &str, &str)] = &[
 ];
 
 #[test]
-fn complete_catalog_preserves_original_definitions_and_return_order() {
+fn complete_catalog_preserves_published_definitions_and_return_order() {
     let mut catalog = task_board_contracts().unwrap();
-    assert_eq!(catalog.len(), ORIGINAL.len());
+    assert_eq!(catalog.len(), PUBLISHED.len());
     let mut identities = HashSet::new();
     let mut keys = HashSet::new();
-    for (definition, (key, version, expected)) in catalog.iter().zip(ORIGINAL) {
+    for (definition, (key, version, expected)) in catalog.iter().zip(PUBLISHED) {
         assert_eq!(definition.get("key").unwrap().as_str().unwrap(), *key);
         assert_eq!(
             definition.get("version").unwrap().as_str().unwrap(),
@@ -261,10 +281,10 @@ fn complete_catalog_preserves_original_definitions_and_return_order() {
     }
     assert_eq!(keys.len(), 15);
     let serialized = stringify(&IvyJson::Array(catalog.clone()), MANAGEMENT_FRAME_BYTES).unwrap();
-    assert_eq!(serialized.len(), 598918);
+    assert_eq!(serialized.len(), 669218);
     assert_eq!(
         digest(serialized.as_bytes()),
-        "sha256:39d5c5e41f06496f031c4f7be00f0171c3400a99a90186d9e4aec49132e6b48e"
+        "sha256:d0fdb15dffbe9e0037ca884734f652cf456556de347718b7f5c2856ba45f41ba"
     );
     // The builder returns a new object graph on every call.
     catalog[0] = IvyJson::Null;
@@ -277,7 +297,7 @@ fn complete_catalog_preserves_original_definitions_and_return_order() {
     assert_eq!(fresh, serialized);
     println!(
         "catalog definitions={} keys={} bytes={} sha256={}",
-        ORIGINAL.len(),
+        PUBLISHED.len(),
         keys.len(),
         fresh.len(),
         digest(fresh.as_bytes())

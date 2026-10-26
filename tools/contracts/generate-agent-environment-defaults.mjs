@@ -46,7 +46,7 @@ const value = {
     })),
   },
 };
-const path = "services/agent-manager/src/environment-defaults.json",
+const path = "services/agent-manager/rust/src/environment-defaults.json",
   content = JSON.stringify(value, null, 2) + "\n";
 if (process.argv.includes("--check")) {
   if (readFileSync(path, "utf8") !== content)

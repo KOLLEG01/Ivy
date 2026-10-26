@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::{
     microsoft_store_cases::{retained, seed},
     *,
@@ -177,28 +179,21 @@ impl Drop for Directory {
 }
 #[tokio::test]
 async fn original_triage_workflow_native_completion_assessment_and_reopen() {
-    let output = node("tests/secretary-rust/triage-workflow-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(if cfg!(windows) {
+        include_bytes!("triage-workflow-cases.json.gz")
+    } else {
+        include_bytes!("triage-workflow-linux-cases.json.gz")
+    });
     let corpus = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         64 * 1024 * 1024,
     )
     .unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
     assert!(rows.len() >= 75);
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    // Both sides see the same retained distribution. A source-tree catalog
-    // would bypass the original reference distribution's live fallback reads.
-    let oracle_root = std::env::var_os("IVY_SECRETARY_ORACLE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| root.join(".local/build/secretary"));
-    let contracts = CheckedNativeContracts::new(oracle_root);
+    // The fixed corpus pins its exact retained native catalog identity.
+    let contracts = CheckedNativeContracts::new(root);
     let selected = IvyJson::object([
         ("objectId", "00000000-0000-4000-8000-000000000002".into()),
         ("revision", IvyJson::Number(1.0)),

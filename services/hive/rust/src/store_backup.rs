@@ -23,9 +23,58 @@ impl BackupSnapshot {
 }
 /// Not Send: copying and ordinary actions use one connection on its storage actor.
 pub type OnlineBackup = Pin<Box<dyn Future<Output = IvyResult<BackupSnapshot>>>>;
+fn checksum_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    #[cfg(not(windows))]
+    {
+        Ok(path.to_owned())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use std::path::{Component, Path, Prefix};
+        let first = path.components().next();
+        if matches!(first, Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Verbatim(_) | Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(_, _) | Prefix::DeviceNS(_)))
+        {
+            return Ok(path.to_owned());
+        }
+        // Resolve the directory without Win32 trimming the requested filename.
+        let absolute = if path.is_absolute() {
+            path.to_owned()
+        } else if let Some(Component::Prefix(prefix)) = first {
+            let drive = Path::new(prefix.as_os_str());
+            std::path::absolute(drive)?.join(path.strip_prefix(drive).unwrap())
+        } else {
+            std::env::current_dir()?.join(path)
+        };
+        let absolute = ivy_host_runtime::native_path::lexical(&absolute);
+        let units = absolute
+            .as_os_str()
+            .encode_wide()
+            .map(|unit| {
+                if unit == b'/' as u16 {
+                    std::path::MAIN_SEPARATOR as u16
+                } else {
+                    unit
+                }
+            })
+            .collect::<Vec<_>>();
+        // The original file stream retains trailing dots/spaces through a namespace.
+        let (prefix, suffix) = if matches!(absolute.components().next(), Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::UNC(_, _)))
+        {
+            (r"\\?\UNC\", &units[2..])
+        } else {
+            (r"\\?\", &units[..])
+        };
+        let mut result = std::ffi::OsString::from(prefix);
+        result.push(std::ffi::OsString::from_wide(suffix));
+        Ok(result.into())
+    }
+}
 struct BackupLease(std::rc::Rc<std::cell::Cell<usize>>);
 impl Drop for BackupLease {
-    fn drop(&mut self) { self.0.set(self.0.get().saturating_sub(1)); }
+    fn drop(&mut self) {
+        self.0.set(self.0.get().saturating_sub(1));
+    }
 }
 
 impl Store {
@@ -39,8 +88,8 @@ impl Store {
         let source = self.db.clone();
         self.active_backups.set(self.active_backups.get() + 1);
         let lease = BackupLease(self.active_backups.clone());
-        // Preserve native filename identity; SQLite rejects names it cannot open.
-        let destination = ivy_host_runtime::native_path::to_native(&destination);
+        // Node's SQLite filename boundary replaces unpaired UTF16 surrogates.
+        let destination = std::path::PathBuf::from(String::from_utf16_lossy(&destination.0));
         Box::pin(async move {
             let _lease = lease;
             let pages = {
@@ -80,9 +129,11 @@ impl Store {
                 // Drop the backup and destination before opening the hash stream,
                 // just as Node finalizes sqlite3_backup before fulfilling backup().
             };
-            let mut input = tokio::fs::File::open(&destination)
-                .await
-                .map_err(|_| IvyError::internal())?;
+            let mut input = tokio::fs::File::open(
+                checksum_path(&destination).map_err(|_| IvyError::internal())?,
+            )
+            .await
+            .map_err(|_| IvyError::internal())?;
             let mut hash = Sha256::new();
             let mut buffer = vec![0; 64 * 1024];
             loop {

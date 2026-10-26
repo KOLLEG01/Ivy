@@ -47,17 +47,16 @@ fn reference_name(name: &JsString) -> bool {
             .all(|unit| matches!(unit, 65..=90 | 97..=122 | 48..=57 | 95 | 46 | 45))
 }
 fn references(store: &Store, source: &JsString, value: &IvyJson) -> IvyResult<String> {
-    let entries = value.as_object().ok_or_else(|| {
-        IvyError::new(
-            "invalid_arguments",
-            "Revision references must be an object.",
-        )
-    })?;
+    if value == &IvyJson::Null {
+        return Err(IvyError::internal());
+    }
+    let entries = value.as_object();
     require(
-        entries.len() <= 256,
+        entries.is_some_and(|entries| entries.len() <= 256),
         "limit_exceeded",
         "A revision supports at most 256 exact references.",
     )?;
+    let entries = entries.unwrap();
     for (name, target) in entries {
         let id = target.get("objectId").and_then(IvyJson::as_js_string);
         let revision = target.get("revision").and_then(IvyJson::as_f64);

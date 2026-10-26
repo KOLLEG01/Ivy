@@ -1,8 +1,8 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_chat_bridge::{
     admission::ChatAdmission, native_driver::ChatNativeDriver, store::ChatStore,
 };
-#[path = "chat-native-driver-cases.rs"]
-mod durable;
 #[path = "chat-generation-cases.rs"]
 mod generation;
 #[path = "chat-service-runtime-cases.rs"]
@@ -15,10 +15,7 @@ use ivy_sdk::{
     rpc::{RequestFuture, RequestOptions, RpcClient},
     tools::ToolClients,
 };
-use std::{
-    process::Command,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 struct Client {
     row: Json,
@@ -89,17 +86,8 @@ impl RpcClient for Client {
 #[tokio::test]
 async fn configured_owner_readiness_and_rpc_order_match_original_driver() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = Command::new("node")
-        .current_dir(&root)
-        .arg("tests/rust/fixtures/chat-native-driver-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let rows = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let output = reference_data::read(include_bytes!("fixtures/chat-native-driver-cases.json.gz"));
+    let rows = parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap();
     let catalogs = CheckedNativeContracts::new(root);
     for row in rows.as_array().unwrap() {
         let client = Arc::new(Client {

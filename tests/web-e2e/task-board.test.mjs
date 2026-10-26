@@ -11,6 +11,7 @@ const fields = (title, category = null) => ({
   acceptanceCriteria: ["The requested state and material are retained."],
   category,
   control: "user",
+  allowParallel: false,
   priority: 2,
   executionRequirement: null,
   workspaceRequirement: { kind: "task_workspace" },
@@ -353,19 +354,16 @@ test("automatic native recovery stays in progress while user input stays blocked
   const created = await f.invoke({ action: "create", workflowState: "backlog", fields: { ...fields("Recover the original execution"), control: "agent",
     executionRequirement: { kind: "host", hostId: "isolated-agent-host" } } });
   await f.invoke({ action: "transition", taskId: created.task.objectId, expectedRevision: created.task.revision, workflowState: "todo", detail: null });
-  const runtime = f.taskBoard().runtime;
   await expect.poll(async () => (await f.task(created.task.objectId)).claim?.run?.objectId, { timeout: 30000 }).toBeTruthy();
   const admitted = await f.task(created.task.objectId);
   const runId = admitted.claim?.run?.objectId;
   assert.ok(runId, JSON.stringify({ state: admitted.workflowState, runtimeWait: admitted.runtimeWait }));
-  // Drive the following status changes explicitly after automatic admission.
-  await runtime.stop();
-  await runtime.native.drain(runId);
+  // The native scheduler observes changes through the real AgentManager protocol.
   await expect.poll(async () => (await f.task(created.task.objectId)).claim?.phase).toBe("running");
   const original = await f.task(created.task.objectId);
   const thread = f.threads.get(original.primaryResourceRef.nativeId);
   thread.status = { type: "notLoaded" };
-  await runtime.native.step(runId);
+  f.current().emit({ method: 'thread/status/changed', params: { threadId: thread.id, status: thread.status } });
   await expect.poll(async () => (await f.task(created.task.objectId)).claim?.phase).toBe("outcome_unknown");
   await f.page.addInitScript(() => Object.defineProperty(navigator, "language", { get: () => "de-DE" }));
   await f.open("#/tasks?node=browser-task-board");
@@ -378,7 +376,8 @@ test("automatic native recovery stays in progress while user input stays blocked
     assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   }
   thread.status = { type: "active", activeFlags: ["waitingOnUserInput"] };
-  await runtime.native.step(runId);
+  f.current().emit({ method: 'thread/status/changed', params: { threadId: thread.id, status: thread.status } });
+  await expect.poll(async () => (await f.task(created.task.objectId)).claim?.phase, { timeout: 45000 }).toBe('waiting_input');
   await expect(f.page.getByRole("region", { name: /^(Waiting|Wartend)$/, exact: true }).locator('[data-waiting-group=user]').getByRole("link", { name: /Recover the original execution/ })).toBeVisible();
   await expect(f.page.getByRole("region", { name: /^(Waiting|Wartend)$/, exact: true }).getByText("Needs you", { exact: true })).toHaveCount(0);
   const waiting = await f.task(created.task.objectId);
@@ -404,7 +403,7 @@ test("task project names resolve on their host with desktop and mobile layouts",
   await f.page.getByRole("button", { name: "Cancel", exact: true }).click();
   await f.page.setViewportSize({ width: 390, height: 844 });
   await expect(f.page.getByText("Isolated project", { exact: true })).toBeVisible();
-  assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await expect.poll(() => f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
   assert.deepEqual(f.pageErrors, []);
 });
 

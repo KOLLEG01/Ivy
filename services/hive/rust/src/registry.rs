@@ -395,7 +395,7 @@ impl Registry {
                 .optional(),
         )?
         .map(|v| {
-            let value = parse(&v, usize::MAX)?;
+            let value = parse(&v, usize::MAX).map_err(|_| IvyError::internal())?;
             if value.is_null() {
                 Ok(None)
             } else {

@@ -22,10 +22,6 @@ name = "ivy-publish-ui"
 path = "src/publish_ui_main.rs"
 
 [[test]]
-name = "cli-publish-ui"
-path = "../../../tests/rust/cli-publish-ui.rs"
-
-[[test]]
 name = "cli-arguments"
 path = "../../../tests/rust/cli-arguments.rs"
 

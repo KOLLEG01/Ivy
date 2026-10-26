@@ -9,12 +9,11 @@ import {
   writeFileSync,
   readFileSync,
 } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { createServer } from "node:net";
-import type { Worker } from "node:worker_threads";
 import { setTimeout as delay } from "node:timers/promises";
-import { HiveServer } from "../services/hive/src/server.js";
 import { digest } from "../packages/contracts/src/canonical.js";
 import {
   HiveClient,
@@ -36,8 +35,9 @@ import {
 } from "../packages/sdk/src/client.js";
 import type { Wire, RpcClient } from "../packages/sdk/src/client.js";
 import { ServiceClient, consumeEvents } from "../packages/sdk/src/service.js";
-import type { ServiceConnection } from "../packages/sdk/src/service.js";
+import { ServiceConnection } from "../packages/sdk/src/service.js";
 import { connectionOwner } from "../packages/sdk/src/connection-owner.js";
+const { startTestHive, crashStorageWorker } = await import(pathToFileURL(resolve("tools/testing/native-service.mjs")).href) as typeof import("../tools/testing/native-service.mjs");
 
 async function until(
   check: () => boolean | Promise<boolean>,
@@ -141,8 +141,7 @@ test("service and browser implementations depend on the public SDK boundary", ()
     [...directTransports].sort(),
     [
       "packages/ui-client/src/browser-app.ts:fetch",
-      "services/chat-bridge/src/whatsapp/media.ts:fetch",
-      "services/data-collector/src/runner.ts:fetch",
+      "services/data-collector/rust/assets/worker.mjs:fetch",
     ],
     "direct product transports must stay limited to the documented service-owned exceptions",
   );
@@ -531,7 +530,7 @@ test("browser notifications correlate versioned subscription setup and can resta
 
 test("connection ownership is read once and readiness waits for the Hive acknowledgement", async (t) => {
   const f = await fixture(t),
-    request = f.server.worker.request.bind(f.server.worker);
+    request = ServiceConnection.prototype.request;
   let release!: () => void,
     entered!: () => void,
     first = true,
@@ -539,21 +538,17 @@ test("connection ownership is read once and readiness waits for the Hive acknowl
   const held = new Promise<void>((resolve) => (release = resolve)),
     started = new Promise<void>((resolve) => (entered = resolve));
   t.mock.method(
-    f.server.worker,
+    ServiceConnection.prototype,
     "request",
-    async (...args: Parameters<typeof request>) => {
-      const action = args[0],
-        method =
-          action.action === "execute"
-            ? (action.request as { method: string }).method
-            : "";
+    async function (this: ServiceConnection, ...args: Parameters<typeof request>) {
+      const method = args[0];
       if (method === "service.heartbeat" && first) {
         first = false;
         entered();
         await held;
       }
       if (method === "serviceNodes.get") reads++;
-      return request(...args);
+      return request.apply(this, args);
     },
   );
   f.service.start();
@@ -690,7 +685,7 @@ test('cached read Tools recover definition updates but cannot retry mutations or
     assert.equal(f.invocations(), 3);
 });
 
-async function fixture(t: TestContext, start = true, callTimeoutMs = 1000) {
+async function fixture(t: TestContext, start = true) {
   const root = mkdtempSync(join(tmpdir(), "ivy-sdk-test-"));
   const reservation = createServer();
   await new Promise<void>((resolve) =>
@@ -699,18 +694,15 @@ async function fixture(t: TestContext, start = true, callTimeoutMs = 1000) {
   const port = (reservation.address() as { port: number }).port;
   await new Promise<void>((resolve) => reservation.close(() => resolve()));
   const base = `http://127.0.0.1:${port}/ivy`;
-  const server = new HiveServer({
-    filename: join(root, "hive.sqlite"),
-    publicBaseUrl: base,
-    version: "test",
-    buildId: digest("sdk-test"),
-    listenPort: port,
-    credentials: [
-      { principalId: "client", digest: digest("test-client") },
-      { principalId: "service", digest: digest("test-service") },
-    ],
-    callTimeoutMs,
-  });
+  let owner: Awaited<ReturnType<typeof startTestHive>> | undefined;
+  const server = {
+    async start() { owner = await startTestHive({ root, port, credentials: [
+      { principalId: "client", token: "test-client" },
+      { principalId: "service", token: "test-service" },
+    ] }); },
+    async close() { await owner?.close(); },
+    async crashStorage() { await crashStorageWorker(owner!); },
+  };
   if (start) await server.start();
   const client = new HiveClient(base, { credential: "test-client" });
   const states: string[] = [];
@@ -824,7 +816,7 @@ test(
   "HTTP and provider WebSocket carry complete fourteen-MiB management evidence and refuse oversized outgoing requests before invocation",
   { timeout: 30_000 },
   async (t) => {
-    const f = await fixture(t, true, 20000);
+    const f = await fixture(t);
     f.service.start();
     await f.service.waitReady();
     const binding = await discover(f.client, "example.echo"),
@@ -899,7 +891,7 @@ test(
 );
 
 test(
-  "storage worker death preserves mutations and SDK obtains a new reconciled generation",
+  "native storage worker death preserves mutations and SDK obtains a new reconciled generation",
   { timeout: 30_000 },
   async (t) => {
     const f = await fixture(t);
@@ -930,8 +922,7 @@ test(
     };
     const saved = await f.client.request("objects.write", request);
     const generation = f.service.connection.generation;
-    // Fault injection at the actual worker boundary, never exposed as a product API.
-    await (f.server.worker as unknown as { worker: Worker }).worker.terminate();
+    await f.server.crashStorage();
     await until(
       () => f.service.ready && f.service.connection.generation > generation,
       20_000,
@@ -1065,8 +1056,14 @@ test(
         specMarkdown: "Test.",
       },
     });
-    const connection = f.service.connection,
-      subscription = { name: "saved-results", filter: {} };
+    const connection = f.service.connection;
+    let initialSequence = 0, hasMore = false;
+    do {
+      const before = await connection.request("events.read", { afterSequence: initialSequence, filter: {}, limit: 100 });
+      initialSequence = before.throughSequence;
+      hasMore = before.hasMore;
+    } while (hasMore);
+    const subscription = { name: "saved-results", filter: { topics: ["hive.object.changed"] }, initialSequence };
     const idle = await connection.request("events.subscribe", subscription);
     assert.equal(idle.items.length, 0);
     await connection.request("events.ack", {

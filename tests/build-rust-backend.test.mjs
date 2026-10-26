@@ -24,7 +24,8 @@ function fixture(run, component = 'example') {
   const calls = [];
   const cargo = (args, options) => {
     calls.push({ args, options });
-    if (args[0] === 'metadata') return JSON.stringify({ workspace_members: ['selected'], packages: [{ id: 'selected', name: 'ivy-example', manifest_path: manifest, targets }] });
+    if (args[0] === 'metadata') return JSON.stringify({ workspace_members: ['selected'], packages: [{ id: 'selected', name: 'ivy-example', manifest_path: manifest,
+      targets: targets.map(target => ({ ...target, src_path: target.src_path ?? join(dirname(manifest), 'src', target.name + '.rs') })) }] });
     return targets.filter(t => t.kind.includes('bin')).map(target => {
       const triple = args[args.indexOf('--target') + 1];
       const executable = join(options.env.CARGO_TARGET_DIR, triple, 'release', target.name + (triple.includes('windows') ? '.exe' : ''));
@@ -60,6 +61,18 @@ test('libraries and unregistered crates never fall back to TypeScript', () => fi
   assert.throws(() => f.build(), /no native service executable/);
   assert.equal(f.calls.length, 1);
   assert.throws(() => f.build({ cargo: () => JSON.stringify({ packages: [], workspace_members: [] }) }), /Register/);
+}));
+
+test('component deployment excludes test executables outside its package and Cargo examples', () => fixture(f => {
+  f.targets.push({ name: 'ivy-process-fixture', kind: ['bin'], src_path: join(f.root, 'tests/fixtures/child.rs'), 'required-features': ['fixture-only'] });
+  f.targets.push({ name: 'ivy-browser-fixture', kind: ['example'], src_path: join(f.root, 'tests/fixtures/browser.rs') });
+  const result = f.build();
+  assert.equal(result.files.length, 2);
+  const args = f.calls[1].args;
+  assert.deepEqual(args.filter((_, index) => args[index - 1] === '--bin'), ['ivy-example', 'ivy-example-helper']);
+  assert.equal(args[args.indexOf('--features') + 1], 'browser');
+  assert.equal(existsSync(join(result.outputDirectory, 'ivy-process-fixture.exe')), false);
+  assert.equal(existsSync(join(result.outputDirectory, 'ivy-browser-fixture.exe')), false);
 }));
 
 test('library preparation keeps service features and emits no backend payload', () => fixture(f => {
@@ -98,6 +111,7 @@ for (const [os, target] of [['win32', 'x86_64-pc-windows-msvc'], ['linux', 'x86_
     const helpers = ['ivy-health', 'ivy-job', 'ivy-host-job'];
     f.targets.push({ name: 'ivy-bootstrap-auto-worker', kind: ['bin'] });
     f.targets.push({ name: 'ivy', kind: ['bin'] });
+    f.targets.push({ name: 'ivy-publish-ui', kind: ['bin'] });
     const launcher = join(f.root, 'packages/cli/src/main.ts');
     mkdirSync(dirname(launcher), { recursive: true });
     writeFileSync(launcher, readFileSync(new URL('../packages/cli/src/main.ts', import.meta.url)));
@@ -151,6 +165,7 @@ for (const [os, target] of [['win32', 'x86_64-pc-windows-msvc'], ['linux', 'x86_
     assert.equal(result.plan.entrypoint.executable, `dist/native/${os}-x64/ivy-host-executor${suffix}`);
     assert.equal(readFileSync(join(output, `native/${os}-x64/ivy-bootstrap-auto-worker${suffix}`), 'utf8'), 'fixture ivy-bootstrap-auto-worker');
     assert.equal(readFileSync(join(output, `native/${os}-x64/ivy${suffix}`), 'utf8'), 'fixture ivy');
+    assert.equal(readFileSync(join(output, `native/${os}-x64/ivy-publish-ui${suffix}`), 'utf8'), 'fixture ivy-publish-ui');
     const compatibility = readFileSync(join(output, 'packages/cli/src/main.js'), 'utf8');
     assert.match(compatibility, /spawn\(executable, args/);
     assert.doesNotMatch(compatibility, /host-runtime|HostJournal/);

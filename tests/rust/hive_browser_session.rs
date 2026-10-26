@@ -388,24 +388,10 @@ async fn native_session(input: &Value) -> Value {
     carrier(&IvyJson::from_serde(&output).unwrap())
 }
 async fn compare_session(name: &str, input: Value) -> Value {
-    let original = original_output("tests/fixtures/hive-browser-session-oracle.mjs", &input);
+    let original = auth_reference("browser-session", &input);
     let native = tokio::task::LocalSet::new()
         .run_until(native_session(&input))
         .await;
-    if let Ok(path) = std::env::var("IVY_HIVE_BROWSER_SESSION_CORPUS") {
-        let _guard = CORPUS.lock().unwrap();
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .unwrap();
-        writeln!(
-            f,
-            "{}",
-            json!({"name":name,"input":input,"original":original,"native":native})
-        )
-        .unwrap();
-    }
     assert_eq!(native, original, "Browser sessions: {name}");
     native
 }
@@ -597,6 +583,8 @@ async fn browser_session_logout_cookie_origin_peer_selection_and_live_iteration_
         Some("ivy_session=a;ivy_session=b"),
         Some("other=x"),
         Some(" ivy_session=raw-token\u{a0}"),
+        Some("\u{feff}ivy_session=bom-token\u{feff}"),
+        Some("\u{85}ivy_session=nel-token\u{85}"),
     ]
     .into_iter()
     .enumerate()

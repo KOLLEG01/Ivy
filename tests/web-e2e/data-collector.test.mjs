@@ -4,10 +4,9 @@ import { readFile, mkdir } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { expect } from "@playwright/test";
 import { fixture, fixtureToken } from "./fixtures/fixture.mjs";
-import { startDataCollector } from "../../dist/services/data-collector/src/main.js";
-import { atomicJson } from "../../dist/packages/host-runtime/src/config.js";
+import { startNativeService } from "../../tools/testing/native-service.mjs";
 import { publishUi } from "../../dist/packages/cli/src/publish-ui.js";
-import { newOperationId } from "../../dist/packages/sdk/src/client.js";
+import { newOperationId, discover, callBound } from "../../dist/packages/sdk/src/client.js";
 
 for (const viewport of [
   { width: 1440, height: 1000 },
@@ -17,8 +16,7 @@ for (const viewport of [
     `DataCollector edits a script, runs it and views retained results at ${viewport.width}px`,
     { timeout: 180000 },
     async (t) => {
-      const f = await fixture(t, false, viewport),
-        build = JSON.parse(await readFile("dist/build-info.json", "utf8"));
+      const f = await fixture(t, false, viewport);
       const german = viewport.width === 390;
       const label = (english, deutsch) => (german ? deutsch : english);
       await f.context.addInitScript(
@@ -38,19 +36,14 @@ for (const viewport of [
         serviceNodeId: "fixture.collector",
         componentId: "data-collector",
         publicBaseUrl: f.base,
-        artifactRoot: resolve("."),
         dataRoot,
         workRoot: join(f.root, "work"),
-        buildId: build.buildId,
-        version: build.version,
         credential: fixtureToken,
         settings: {},
       };
-      const configPath = join(f.root, "collector.json");
-      await atomicJson(configPath, config);
-      const runtime = await startDataCollector(configPath);
+      const runtime = await startNativeService(config);
       t.after(() => runtime.close());
-      await runtime.service.waitReady();
+      const readTask = async () => callBound(f.client, await discover(f.client, 'data-collector.read', { serviceNodeId: config.serviceNodeId }), { view: 'task', id: 'browser-fixture' });
       await publishUi(f.client, {
         directory: resolve("dist/apps/data-collector-ui"),
         definition: JSON.parse(
@@ -101,11 +94,8 @@ for (const viewport of [
           exact: true,
         }),
       ).toBeVisible();
-      assert.equal(
-        runtime.engine.store.get("browser-fixture"),
-        null,
-        "saving creates a draft",
-      );
+      assert.equal((await readTask()).status, 'draft', 'saving creates a draft');
+      assert.equal((await readTask()).adoptedRevision, null);
       await f.page
         .getByRole("button", {
           name: label("Apply revision", "Stand übernehmen"),
@@ -113,11 +103,11 @@ for (const viewport of [
         })
         .click();
       await expect
-        .poll(() => !!runtime.engine.store.get("browser-fixture"))
+        .poll(async () => { const task = await readTask(); return task.adoptedRevision === task.revision; })
         .toBe(true);
       for (let n = 0; n < 2; n++) {
         const previousRunId =
-          runtime.engine.store.get("browser-fixture").lastRunId;
+          (await readTask()).lastRunId;
         await f.page
           .getByRole("button", {
             name: label("Run now", "Jetzt ausführen"),
@@ -127,10 +117,7 @@ for (const viewport of [
         await expect
           .poll(
             async () => {
-              const current = await runtime.engine.read({
-                view: "task",
-                id: "browser-fixture",
-              });
+              const current = await readTask();
               return {
                 newRun: current.lastRunId !== previousRunId,
                 status: current.status,
@@ -143,7 +130,7 @@ for (const viewport of [
           .toEqual({ newRun: true, status: "succeeded" });
         await expect(f.page.getByText("21.5", { exact: true })).toBeVisible();
       }
-      const row = runtime.engine.store.get("browser-fixture");
+      const row = await readTask();
       await expect
         .poll(
           async () =>
@@ -158,6 +145,7 @@ for (const viewport of [
       await f.page
         .getByRole("button", { name: label("Edit", "Bearbeiten"), exact: true })
         .click();
+      await expect(f.page.getByLabel('JavaScript (ESM)', { exact: true })).toBeEditable();
       assert.ok(
         await f.page.evaluate(
           () => document.documentElement.scrollWidth <= innerWidth + 2,
@@ -172,13 +160,10 @@ for (const viewport of [
       await f.page
         .getByRole("button", { name: label("Save", "Speichern"), exact: true })
         .click();
-      assert.equal(
-        runtime.engine.store
-          .get("browser-fixture")
-          .task.script.includes("temperature"),
-        true,
-        "saved draft leaves accepted execution unchanged",
-      );
+      await expect.poll(async () => (await readTask()).revision).not.toBe(row.adoptedRevision);
+      const draft = await readTask();
+      assert.equal(draft.adoptedRevision, row.adoptedRevision, 'saved draft leaves accepted execution unchanged');
+      assert.notEqual(draft.revision, draft.adoptedRevision);
       await f.page
         .getByRole("button", {
           name: label("Apply revision", "Stand übernehmen"),

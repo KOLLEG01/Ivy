@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use base64::{Engine, engine::general_purpose::STANDARD};
 #[path = "chat-publication-cases.rs"]
 mod publication;
@@ -530,22 +532,13 @@ fn difference(actual: &Json, expected: &Json, path: &str) -> Option<String> {
 }
 #[tokio::test]
 async fn immutable_offers_history_and_authenticated_confirmation_match_original() {
-    let output = Command::new("node")
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .arg("tests/rust/fixtures/chat-outbox-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("fixtures/chat-outbox-cases.json.gz"));
     // Qualification can retain the exact synthetic SQLite/oracle bytes used by
     // this run without creating a persistent test output directory by default.
     if let Some(path) = std::env::var_os("IVY_CHAT_OUTBOX_ORACLE_CAPTURE") {
-        std::fs::write(path, &output.stdout).unwrap();
+        std::fs::write(path, &output).unwrap();
     }
-    let fixture = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let fixture = parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap();
     let now = number(&fixture, "now") as i64;
     for case in array(&fixture, "cases") {
         let path = Fixture::new(

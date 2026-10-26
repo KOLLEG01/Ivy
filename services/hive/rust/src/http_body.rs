@@ -51,12 +51,11 @@ impl BodyBuffers {
         mut lease: Option<&mut RequestLease>,
     ) -> IvyResult<Vec<u8>> {
         if let Some(declared) = declared {
-            let length = declared
-                .as_str()
-                .ok()
-                .filter(|value| !value.is_empty() && value.bytes().all(|v| v.is_ascii_digit()))
-                .and_then(|value| value.parse::<usize>().ok());
-            if !length.is_some_and(|length| length <= limit) {
+            let text = crate::json_text::value_text(Some(declared))?;
+            if text.0.is_empty()
+                || !text.0.iter().all(|unit| (48..=57).contains(unit))
+                || text.to_utf8()?.parse::<f64>().unwrap_or(f64::INFINITY) > limit as f64
+            {
                 return Err(too_large());
             }
         }

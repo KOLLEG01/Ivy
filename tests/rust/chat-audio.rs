@@ -83,53 +83,13 @@ fn malformed_decoded_audio_fails_before_allocation() {
 
 #[test]
 fn wav_bytes_match_the_existing_typescript_implementation() {
-    use std::process::Command;
-    let root = option_env!("CARGO_MANIFEST_DIR")
-        .map(|path| std::path::Path::new(path).join("../../.."))
-        .unwrap_or_else(|| std::env::current_dir().unwrap());
-    let oracle = root
-        .join("services/chat-bridge/src/whatsapp/audio-processing.ts")
-        .canonicalize()
-        .unwrap();
-    let url = format!(
-        "file:///{}",
-        oracle
-            .to_string_lossy()
-            .trim_start_matches(r"\\?\")
-            .replace('\\', "/")
-    );
-    let channel: Vec<f32> = (0..257).map(|i| (i as f32 * 0.17).sin() * 1.4).collect();
-    let other: Vec<f32> = channel.iter().rev().copied().take(253).collect();
-    let hex = |values: &[f32]| {
-        values
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
-    };
-    let code = format!(
-        r#"
-      import {{ encodeMonoPcm16Wav }} from '{}';
-      const channels = ['{}','{}'].map(h => new Float32Array(Uint8Array.from(Buffer.from(h,'hex')).buffer));
-      for (const rate of [8000, 44100, 48000, 96000]) {{
-        const wav = encodeMonoPcm16Wav({{ channelData:channels, sampleRate:rate }}, 16000);
-        const n = Buffer.alloc(4); n.writeUInt32LE(wav.length); process.stdout.write(n); process.stdout.write(wav);
-      }}
-    "#,
-        url,
-        hex(&channel),
-        hex(&other)
-    );
-    let output = Command::new("node")
-        .args(["--input-type=module", "-e", &code])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let mut bytes = output.stdout.as_slice();
+    // Fixed float32 channels and four WAVs captured from the original encoder.
+    let channels: Vec<f32> = include_bytes!("fixtures/chat-wav-input.f32")
+        .chunks_exact(4)
+        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        .collect();
+    let (channel, other) = channels.split_at(257);
+    let mut bytes = include_bytes!("fixtures/chat-wav-reference.bin").as_slice();
     for rate in [8000.0, 44100.0, 48000.0, 96000.0] {
         let length = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
         let audio = DecodedAudio {

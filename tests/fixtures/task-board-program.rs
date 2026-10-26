@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use super::{Memory, ready, s};
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult,
@@ -22,22 +24,9 @@ fn publication_program_matches_original_retained_steps_callbacks_and_restarts() 
         )
         .unwrap()
     } else {
-        let output = Command::new("node")
-            .args([
-                "--experimental-transform-types",
-                "--disable-warning=ExperimentalWarning",
-                "tests/fixtures/task-board-program-oracle.mjs",
-            ])
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let output = reference_data::read(include_bytes!("task-board-program-cases.json.gz"));
         parse(
-            std::str::from_utf8(&output.stdout).unwrap(),
+            std::str::from_utf8(&output).unwrap(),
             MANAGEMENT_FRAME_BYTES,
         )
         .unwrap()

@@ -14,12 +14,11 @@ mod authentication;
 mod http;
 #[path = "hive_oauth.rs"]
 mod oauth;
-#[path = "hive_push_original.rs"]
-mod original;
-use original::original_output;
+#[path = "hive_auth_reference.rs"]
+mod reference;
+use reference::auth_reference;
 
 type Posted = (IvyJson, oneshot::Sender<IvyResult<IvyJson>>);
-static CORPUS: Mutex<()> = Mutex::new(());
 fn carrier(value: &IvyJson) -> Value {
     serde_json::from_str(&stringify(value, usize::MAX).unwrap()).unwrap()
 }

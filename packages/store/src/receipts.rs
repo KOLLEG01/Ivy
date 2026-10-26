@@ -20,6 +20,16 @@ fn error_code(value: &IvyJson) -> bool {
 /// Inspect actual string markers throughout an opaque receipt. Null means no
 /// marker; malformed non-null status/code values conservatively stay retained.
 pub fn has_unresolved_outcome(value: &IvyJson) -> IvyResult<bool> {
+    unresolved_outcome(value, false)
+}
+
+/// Workflow records may hold a structured result in `outcome`. Inspect that
+/// document recursively while keeping status and error fields strictly typed.
+pub fn has_unresolved_workflow_outcome(value: &IvyJson) -> IvyResult<bool> {
+    unresolved_outcome(value, true)
+}
+
+fn unresolved_outcome(value: &IvyJson, structured_outcomes: bool) -> IvyResult<bool> {
     let mut pending = vec![value];
     while let Some(value) = pending.pop() {
         match value {
@@ -48,6 +58,7 @@ pub fn has_unresolved_outcome(value: &IvyJson) -> IvyResult<bool> {
                                 }
                             }
                             IvyJson::Number(_) if key != "error" && error && error_code(part) => {}
+                            IvyJson::Object(_) if key == "outcome" && structured_outcomes => {}
                             IvyJson::Object(_)
                                 if key == "error" && part.get("code").is_some_and(error_code) => {}
                             _ => return Ok(true),

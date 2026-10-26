@@ -9,14 +9,9 @@ use ivy_hive::{
     http_response::{self, Response},
     http_static::{AssetResponse, Assets},
 };
-use std::{
-    collections::BTreeMap,
-    fs,
-    io::Write,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::{Mutex, OnceLock},
-};
+use std::{collections::BTreeMap, fs, path::PathBuf, sync::OnceLock};
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 
 fn json(text: &str) -> IvyJson {
     parse(text, usize::MAX).unwrap()
@@ -373,58 +368,27 @@ fn admissions(input: &IvyJson) -> IvyJson {
     assert!(pending.is_empty());
     obj([("snapshots", IvyJson::Array(snapshots))])
 }
-fn oracle(inputs: &[IvyJson]) -> Vec<IvyJson> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut child =
-        Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
-            .arg(root.join("tests/fixtures/hive-http-oracle.mjs"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-    child
-        .stdin
-        .take()
+fn reference(inputs: &[IvyJson]) -> Vec<IvyJson> {
+    static CASES: OnceLock<IvyJson> = OnceLock::new();
+    let cases = CASES.get_or_init(|| {
+        let bytes = reference_data::read(include_bytes!("../fixtures/hive-http-reference.json.gz"));
+        parse(std::str::from_utf8(&bytes).unwrap(), usize::MAX).unwrap()
+    });
+    let key = ivy_contracts::hash::digest(encode(&IvyJson::Array(inputs.to_vec())));
+    cases
+        .get("traces")
         .unwrap()
-        .write_all(encode(&IvyJson::Array(inputs.to_vec())).as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX)
-        .unwrap()
+        .get(&key)
+        .unwrap_or_else(|| panic!("Missing original Hive HTTP trace: {key}"))
         .as_array()
         .unwrap()
         .to_vec()
 }
 async fn compare(name: &str, inputs: &[IvyJson]) {
-    let expected = oracle(inputs);
+    let expected = reference(inputs);
     assert_eq!(expected.len(), inputs.len());
     for (index, (input, expected)) in inputs.iter().zip(expected).enumerate() {
         let actual = native(input).await;
-        if let Some(path) = std::env::var_os("IVY_HIVE_HTTP_CORPUS") {
-            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-            let _lock = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-            let row = obj([
-                ("test", name.into()),
-                ("index", IvyJson::Number(index as f64)),
-                ("input", input.clone()),
-                ("expected", expected.clone()),
-                ("actual", actual.clone()),
-            ]);
-            let line = encode(&row) + "\n";
-            fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .unwrap()
-                .write_all(line.as_bytes())
-                .unwrap();
-        }
         // JSON.stringify also normalizes NaN/infinity and negative zero at this boundary.
         assert_eq!(
             json(&encode(&actual)),

@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_chat_bridge::whatsapp::{
     journal::Inbox,
     journal_io::JournalIo,
@@ -364,20 +366,14 @@ fn compare(actual: &Json, expected: &Json, label: &str, part: &str, failures: &m
 #[tokio::test]
 async fn original_media_payloads_files_failures_and_caches_match() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = Command::new("node")
-        .current_dir(&root)
-        .arg("tests/rust/fixtures/chat-whatsapp-media-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "Original media oracle failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-            .chars()
-            .take(1500)
-            .collect::<String>()
-    );
-    let corpus = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    // Node's basename and filesystem naming rules differ between these hosts.
+    let corpus: &[u8] = if cfg!(windows) {
+        include_bytes!("fixtures/chat-whatsapp-media-cases.json.gz")
+    } else {
+        include_bytes!("fixtures/chat-whatsapp-media-linux-cases.json.gz")
+    };
+    let output = reference_data::read(corpus);
+    let corpus = parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap();
     let rows = field(&corpus, "rows").as_array().unwrap();
     let temp = Temp::new();
     let mut completed = Vec::new();

@@ -11,7 +11,7 @@ pub fn load_environment_defaults(
     public_base_url: &JsString,
 ) -> IvyResult<IvyJson> {
     let mut value = parse(
-        include_str!("../../src/environment-defaults.json"),
+        include_str!("environment-defaults.json"),
         usize::MAX,
     )?;
     let base = url_components(public_base_url)?;

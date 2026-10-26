@@ -3,10 +3,25 @@ import {
   serviceTools,
 } from "../../../packages/sdk/src/client.js";
 import type { Operation, Wire } from "../../../packages/sdk/src/client.js";
-import type { Task } from "../../../services/data-collector/src/schema.js";
 import { client } from "./runtime";
 
-export type { Task };
+/** Collector task format from services/data-collector/rust/assets/schemas.json. */
+export interface Task {
+  id: string;
+  name: string;
+  enabled: boolean;
+  intervalSeconds: number;
+  timeoutSeconds: number;
+  memoryMb: number;
+  script: string;
+  dependencies: Record<string, string>;
+  config: Record<string, Wire.Json>;
+  secretNames: string[];
+  mcp?: { serviceNodeId: string; cwd: string; server: string; tools: string[] };
+  inputSecretName?: string | null;
+  allowUnauthenticatedInput?: boolean;
+  retention: { maximumCount: number; maximumAgeDays: number; maximumBytes: number };
+}
 export const tr = (de: string, en: string) =>
   navigator.language.toLowerCase().startsWith("de") ? de : en;
 

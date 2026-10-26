@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use super::*;
 use ivy_sdk::tools::ToolClients;
 use ivy_task_board::native_driver::NativeDriverConnection;
@@ -153,22 +155,9 @@ fn flag(v: &Json, k: &str) -> bool {
 #[tokio::test(flavor = "current_thread")]
 async fn uncertain_resume_matches_original_with_real_owner_transport_and_journal() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-native-resume-oracle.mjs",
-        ])
-        .current_dir(&root)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("task-board-native-resume-cases.json.gz"));
     let groups = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         MANAGEMENT_FRAME_BYTES,
     )
     .unwrap();
@@ -335,5 +324,5 @@ async fn uncertain_resume_matches_original_with_real_owner_transport_and_journal
             assert!(db.is_autocommit());
         }
     }
-    assert_eq!(count, 256);
+    assert_eq!(count, 320);
 }

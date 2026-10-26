@@ -65,22 +65,35 @@ fn concat(parts: &[&JsString]) -> JsString {
 pub struct DiagnosticNotifications<'a> {
     operations: &'a ChatOperations<'a>,
     main: &'a dyn DiagnosticMain,
+    enabled: bool,
     language: JsString,
     clock: Arc<dyn Clock>,
 }
 impl<'a> DiagnosticNotifications<'a> {
-    pub fn new(operations: &'a ChatOperations<'a>, main: &'a dyn DiagnosticMain) -> Self {
-        Self::with_clock(operations, main, "en".into(), Arc::new(SystemClock))
+    pub fn new(
+        operations: &'a ChatOperations<'a>,
+        main: &'a dyn DiagnosticMain,
+        enabled: bool,
+    ) -> Self {
+        Self::with_clock(
+            operations,
+            main,
+            enabled,
+            "en".into(),
+            Arc::new(SystemClock),
+        )
     }
     pub fn with_clock(
         operations: &'a ChatOperations<'a>,
         main: &'a dyn DiagnosticMain,
+        enabled: bool,
         language: JsString,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             operations,
             main,
+            enabled,
             language,
             clock,
         }
@@ -127,6 +140,9 @@ impl<'a> DiagnosticNotifications<'a> {
     /// Use the store's provider generation signal in production. Other callers
     /// supply the cancellation reason explicitly through `cancel_error`.
     pub async fn tick(&self, options: RequestOptions) -> IvyResult<()> {
+        if !self.enabled {
+            return Ok(());
+        }
         let store = self.operations.store;
         let mut current: Vec<(String, Json)> = Vec::new();
         let mut cursor = Json::Null;
@@ -317,7 +333,8 @@ impl<'a> DiagnosticNotifications<'a> {
         )?;
         let label = string(entry, "label")?;
         let code = string(entry, "code")?;
-        let storage_warning = code == &JsString::from("storage_pressure") && label == &JsString::from("hive");
+        let storage_warning =
+            code == &JsString::from("storage_pressure") && label == &JsString::from("hive");
         let text = if self.language == JsString::from("de") {
             if recovery {
                 concat(&[

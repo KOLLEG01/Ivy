@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_chat_bridge::{
     admission::ChatAdmission,
@@ -17,7 +19,7 @@ use ivy_sdk::{
 };
 use std::{
     path::Path,
-    process::{Command, Stdio},
+    process::Stdio,
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -59,20 +61,10 @@ fn result<T>(v: IvyResult<T>) -> Json {
 fn oracle() -> &'static Json {
     static CORPUS: OnceLock<Json> = OnceLock::new();
     CORPUS.get_or_init(|| {
-        let out = Command::new("node")
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .args(["tests/rust/fixtures/chat-generation-peer.mjs", "oracle"])
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        if let Some(path) = std::env::var_os("IVY_CHAT_GENERATION_ORACLE_CAPTURE") {
-            std::fs::write(path, &out.stdout).unwrap();
-        }
-        parse(std::str::from_utf8(&out.stdout).unwrap(), usize::MAX).unwrap()
+        let out = reference_data::read(include_bytes!(
+            "fixtures/chat-generation-oracle-cases.json.gz"
+        ));
+        parse(std::str::from_utf8(&out).unwrap(), usize::MAX).unwrap()
     })
 }
 struct Fixed(i64, Instant);
@@ -318,6 +310,7 @@ async fn actual_provider_generation_reconcile_and_retirement_match_original_main
             service_node_id: "chat-provider".into(),
             data_root: Some(dir.clone()),
             language: "en".into(),
+            diagnostic_notifications: true,
         });
         let fixed = || {
             Arc::new(Fixed(
@@ -487,7 +480,23 @@ async fn actual_provider_generation_reconcile_and_retirement_match_original_main
     eprintln!(
         "Generation: {successes} successful / {failures} refused original lifecycles; {rpcs} exact RPC comparisons; accepted handler retirement/reopen and all SQLite rows."
     );
-    assert_eq!((successes, failures, rpcs), (6, 10, 37));
+    let cases = field(oracle(), "cases").as_array().unwrap();
+    let expected_successes = cases
+        .iter()
+        .filter(|row| field(row, "reconciled").get("error").is_none())
+        .count();
+    let expected_rpcs: usize = cases
+        .iter()
+        .map(|row| field(row, "calls").as_array().unwrap().len())
+        .sum();
+    assert_eq!(
+        (successes, failures, rpcs),
+        (
+            expected_successes,
+            cases.len() - expected_successes,
+            expected_rpcs
+        )
+    );
     let absolute = std::fs::canonicalize(&root).unwrap();
     let temporary = std::fs::canonicalize(std::env::temp_dir()).unwrap();
     assert_eq!(absolute.parent(), Some(temporary.as_path()));

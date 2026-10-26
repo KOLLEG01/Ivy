@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, Outcome,
     hash::{digest, hash_json},
@@ -130,21 +132,8 @@ async fn attachment_and_remote_query_publication_match_original_scope_bytes_and_
     let bytes = if let Ok(path) = std::env::var("IVY_TASK_BOARD_PUBLICATION_FIXTURE") {
         std::fs::read(path).unwrap()
     } else {
-        let output = Command::new("node")
-            .args([
-                "--experimental-transform-types",
-                "--disable-warning=ExperimentalWarning",
-                "tests/fixtures/task-board-publication-oracle.mjs",
-            ])
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        output.stdout
+        let output = reference_data::read(include_bytes!("task-board-publication-cases.json.gz"));
+        output
     };
     let cases = parse(std::str::from_utf8(&bytes).unwrap(), MANAGEMENT_FRAME_BYTES).unwrap();
     verify_publication_cases(&cases).await;

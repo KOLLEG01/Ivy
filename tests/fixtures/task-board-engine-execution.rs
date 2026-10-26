@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, Outcome, hash::hash_json, json::parse,
     limits::MANAGEMENT_FRAME_BYTES,
@@ -40,18 +42,9 @@ fn data() -> &'static Json {
             )
             .unwrap();
         }
-        let p = Command::new("node")
-            .args([
-                "--experimental-transform-types",
-                "--disable-warning=ExperimentalWarning",
-                "tests/fixtures/task-board-engine-execution-oracle.mjs",
-            ])
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .output()
-            .unwrap();
-        assert!(p.status.success(), "{}", String::from_utf8_lossy(&p.stderr));
+        let p = reference_data::read(include_bytes!("task-board-engine-execution-cases.json.gz"));
         parse(
-            std::str::from_utf8(&p.stdout).unwrap(),
+            std::str::from_utf8(&p).unwrap(),
             MANAGEMENT_FRAME_BYTES,
         )
         .unwrap()

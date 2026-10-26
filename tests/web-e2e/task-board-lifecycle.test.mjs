@@ -10,7 +10,7 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
     const create = async (title, category = 'Batch', states = ['todo', 'in_progress', 'done']) => {
       let outcome = await f.invoke({ action: 'create', workflowState: 'backlog', fields: { title, description: '', acceptanceCriteria: [], category,
         control: 'user', priority: 2, executionRequirement: null, workspaceRequirement: { kind: 'task_workspace' },
-        dependencies: [], userContact: 'ticket', nextReviewAt: null, dueAt: null } });
+        allowParallel: false, userContact: 'ticket', dueAt: null } });
       for (const workflowState of states) outcome = await f.invoke({ action: 'transition', taskId: outcome.task.objectId,
         expectedRevision: outcome.task.revision, workflowState, detail: null });
       return outcome.task;
@@ -18,10 +18,8 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
     const batch = [];
     for (let index = 0; index < 21; index++) batch.push(await create('Bulk task ' + index));
     batch.push(await create('Cancelled task', 'Batch', ['cancelled']));
-    const linked = await create('Archive linked task'), store = f.taskBoard().runtime.engine.store;
-    const original = await store.read('task-board/task', linked);
-    await store.write('task-board/task', { ...original.value, primaryResourceRef: { serviceNodeId: 'browser-agent', namespace: 'codex', kind: 'thread', nativeId: 'saved-task' } },
-      randomUUID(), { objectId: linked.objectId, expectedRevision: linked.revision });
+    const linked = await create('Archive linked task');
+    await f.patchTask(linked, { primaryResourceRef: { serviceNodeId: 'browser-agent', namespace: 'codex', kind: 'thread', nativeId: 'saved-task' } });
     const excluded = await create('Other category', 'Other'), active = await create('Active task', 'Batch', ['todo']);
     await f.open('#/tasks?node=browser-task-board&category=Batch');
     const done = f.page.getByRole('region', { name: 'Done', exact: true });
@@ -65,15 +63,13 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
     const f = await taskBoardFixture(t, { native: true, scheduler: true, viewport });
     let outcome = await f.invoke({ action: 'create', workflowState: 'backlog', fields: { title: 'Explicit fresh Codex work', description: 'Keep this ticket and its comments.',
       acceptanceCriteria: [], category: null, control: 'user', priority: 2, executionRequirement: { kind: 'host', hostId: 'isolated-agent-host' },
-      workspaceRequirement: { kind: 'task_workspace' }, dependencies: [], userContact: 'ticket', nextReviewAt: null, dueAt: null } });
+      workspaceRequirement: { kind: 'task_workspace' }, allowParallel: false, userContact: 'ticket', dueAt: null } });
     for (const workflowState of ['todo', 'in_progress', 'done']) outcome = await f.invoke({ action: 'transition', taskId: outcome.task.objectId,
       expectedRevision: outcome.task.revision, workflowState, detail: null });
-    const id = outcome.task.objectId, store = f.taskBoard().runtime.engine.store;
-    const original = await store.read('task-board/task', outcome.task);
-    await store.write('task-board/task', { ...original.value, primaryResourceRef: { serviceNodeId: 'browser-agent', namespace: 'codex', kind: 'thread', nativeId: 'saved-task' } },
-      randomUUID(), { objectId: id, expectedRevision: original.pin.revision });
+    const id = outcome.task.objectId;
+    await f.patchTask(outcome.task, { primaryResourceRef: { serviceNodeId: 'browser-agent', namespace: 'codex', kind: 'thread', nativeId: 'saved-task' } });
     const starts = () => f.current().sent.filter(frame => frame.method === 'thread/start').length;
-    await f.open('#/tasks?id=' + id + '&node=browser-task-board');
+    await f.open('#/tasks?id=' + id + '&node=browser-task-board&tab=details');
     const fresh = f.page.getByRole('button', { name: /^(Start a new Codex chat|Neuen Codex-Chat starten)$/ });
     await expect(fresh).toBeVisible(); await expect(fresh).toBeEnabled(); assert.equal(starts(), 0);
     const archiveAction = async name => {

@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_agent_manager::environment::{
     EnvironmentKind, environment_name, read_environment_document, select_environment_document,
 };
@@ -12,18 +14,9 @@ use std::{
 fn oracle() -> &'static IvyJson {
     static DATA: OnceLock<IvyJson> = OnceLock::new();
     DATA.get_or_init(|| {
-        let output = Command::new("node")
-            .arg("tests/fixtures/agent-environment-oracle.mjs")
-            .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let output = reference_data::read(include_bytes!("../fixtures/agent-environment-cases.json.gz"));
         parse(
-            std::str::from_utf8(&output.stdout).unwrap(),
+            std::str::from_utf8(&output).unwrap(),
             2 * 1024 * 1024,
         )
         .unwrap()

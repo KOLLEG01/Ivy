@@ -68,6 +68,47 @@ fn failed_growth_and_idempotent_release_preserve_shared_and_consumer_usage() {
     b.release();
     let mut reused = budget.acquire(&"a".into(), Some(10)).unwrap();
     reused.release();
+
+    let budget = RequestBudget::new(RequestBudgetOptions {
+        maximum: 3,
+        maximum_bytes: 100,
+        per_consumer: 2,
+        per_consumer_bytes: 60,
+        name: "request".into(),
+    });
+    let mut first = budget.acquire(&"a".into(), Some(30)).unwrap();
+    let mut second = budget.acquire(&"a".into(), Some(30)).unwrap();
+    let error = budget.acquire(&"a".into(), Some(0)).err().unwrap();
+    assert_eq!(error.code, "limit_exceeded");
+    assert_eq!(error.outcome, ivy_contracts::Outcome::NotExecuted);
+    assert_eq!(
+        error.details,
+        Some(ivy_contracts::IvyJson::object([
+            ("budget", "request".into()),
+            ("scope", "consumer".into()),
+            ("active", ivy_contracts::IvyJson::Number(2.0)),
+            ("limit", ivy_contracts::IvyJson::Number(2.0)),
+        ]))
+    );
+    assert_eq!(first.grow(1).unwrap_err().code, "limit_exceeded");
+    let mut other = budget.acquire(&"b".into(), Some(40)).unwrap();
+    let error = other.grow(1).unwrap_err();
+    assert_eq!(error.code, "limit_exceeded");
+    assert_eq!(
+        error.details,
+        Some(ivy_contracts::IvyJson::object([
+            ("budget", "request_bytes".into()),
+            ("scope", "global".into()),
+            ("active", ivy_contracts::IvyJson::Number(100.0)),
+            ("requested", ivy_contracts::IvyJson::Number(1.0)),
+            ("limit", ivy_contracts::IvyJson::Number(100.0)),
+        ]))
+    );
+    first.release();
+    first.release();
+    second.release();
+    other.release();
+    budget.acquire(&"a".into(), Some(60)).unwrap().release();
 }
 
 #[test]

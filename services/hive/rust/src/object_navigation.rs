@@ -37,7 +37,7 @@ pub(super) fn icon(value: Option<&JsString>) -> IvyResult<Option<String>> {
         "invalid_arguments",
         "Object icon must be valid Unicode.",
     )?;
-    let icon = value.normalize_nfc().trim();
+    let icon = value.normalize_nfc().trim_ecmascript();
     require(
         !icon.0.is_empty()
             && icon.0.len() <= 32

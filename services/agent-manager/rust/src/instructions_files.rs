@@ -1,5 +1,5 @@
 //! Existing instruction ownership and pending-write recovery under the home lock.
-use crate::instructions::ComposedInstructions;
+use crate::{environment::json_falsy, instructions::ComposedInstructions};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     hash::{digest, hash_json},
@@ -224,7 +224,8 @@ fn apply_locked(
         ))?),
         None => None,
     };
-    state = state.filter(|value| !value.is_null());
+    // The original journal treats falsy JSON primitives as an absent state.
+    state = state.filter(|value| !json_falsy(value));
     require(
         state.as_ref().is_none_or(|state| {
             state.get("schemaVersion") == Some(&IvyJson::Number(1.0))

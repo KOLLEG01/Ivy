@@ -1,12 +1,9 @@
-use ivy_contracts::{
-    IvyJson, JsString,
-    json::{parse, stringify},
-};
+use super::construction_reference;
+use ivy_contracts::{IvyJson, JsString, json::stringify};
 use ivy_hive::{
     server_options::{self, Error},
     store::Credential,
 };
-use std::{fs, path::Path, process::Command};
 
 fn strings(value: &IvyJson) -> Vec<JsString> {
     value
@@ -18,20 +15,9 @@ fn strings(value: &IvyJson) -> Vec<JsString> {
 }
 #[test]
 fn original_constructor_proxy_publisher_url_policy_and_error_order() {
-    let output = Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .arg("tests/fixtures/hive-server-options-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let original = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let original = construction_reference("serverOptions");
     let rows = original.get("rows").unwrap().as_array().unwrap();
-    assert!(rows.len() > 60);
-    let mut observed = vec![];
+    assert_eq!(rows.len(), 72);
     for row in rows {
         let input = row.get("input").unwrap();
         let credentials = input
@@ -69,22 +55,13 @@ fn original_constructor_proxy_publisher_url_policy_and_error_order() {
                 IvyJson::object([("urlConstructorInput", IvyJson::String(input))])
             }
         };
-        observed.push(IvyJson::object([
-            ("original", row.clone()),
-            ("native", actual.clone()),
-        ]));
-        if let Some(path) = std::env::var_os("IVY_HIVE_CONSTRUCTOR_CORPUS") {
-            fs::write(
-                path,
-                stringify(&IvyJson::Array(observed.clone()), usize::MAX).unwrap(),
-            )
-            .unwrap();
-        }
-        assert_eq!(
-            &actual,
-            row.get("expected").unwrap(),
-            "{}",
-            stringify(input, usize::MAX).unwrap()
+        let expected = row.get("expected").unwrap();
+        assert!(
+            &actual == expected,
+            "Input: {}\nNative: {}\nOriginal: {}",
+            stringify(input, usize::MAX).unwrap(),
+            stringify(&actual, usize::MAX).unwrap(),
+            stringify(expected, usize::MAX).unwrap()
         );
     }
 }

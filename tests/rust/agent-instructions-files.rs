@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_agent_manager::{
     environment::select_environment_document,
     instructions::{ComposedInstructions, compose_instructions},
@@ -47,18 +49,9 @@ fn option(value: &IvyJson) -> Option<&IvyJson> {
     (value != &IvyJson::Null).then_some(value)
 }
 fn oracle() -> IvyJson {
-    let output = Command::new("node")
-        .arg("tests/fixtures/agent-instructions-files-oracle.mjs")
-        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("../fixtures/agent-instructions-files-cases.json.gz"));
     parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         4 * 1024 * 1024,
     )
     .unwrap()
@@ -139,9 +132,11 @@ fn status(writer: &InstructionsWriter, home: &Path) -> IvyJson {
     let s = writer.status();
     assert_eq!(s.observed_at.len(), 24);
     assert!(s.observed_at.ends_with('Z'));
+    let canonical_home = fs::canonicalize(home).unwrap();
     let relative = s
         .home
         .strip_prefix(home)
+        .or_else(|_| s.home.strip_prefix(&canonical_home))
         .unwrap_or(&s.home)
         .to_string_lossy()
         .replace('\\', "/");

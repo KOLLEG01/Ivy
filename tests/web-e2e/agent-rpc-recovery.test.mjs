@@ -44,7 +44,7 @@ test('AgentUI keeps task RPCs quiet when another owner changes', { timeout: 7000
   await f.page.waitForTimeout(2000);
   const before = calls.length;
   for (let index = 0; index < 5; index++) {
-    await other.service.connection.request('service.heartbeat', { ready: index % 2 === 0, diagnostics: [] });
+    await other.heartbeat({ ready: index % 2 === 0, diagnostics: [] });
     await f.page.waitForTimeout(400);
   }
   await f.page.waitForTimeout(2000);

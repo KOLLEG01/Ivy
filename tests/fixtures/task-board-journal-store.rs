@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, Outcome,
     hash::hash_json,
@@ -234,22 +236,9 @@ fn snapshot(db: &Connection) -> Json {
 #[tokio::test(flavor = "current_thread")]
 async fn inspection_owner_and_saved_primary_guards_use_the_journal_connection() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-inspection-owner-oracle.mjs",
-        ])
-        .current_dir(&root)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("task-board-inspection-owner-cases.json.gz"));
     let rows = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         MANAGEMENT_FRAME_BYTES,
     )
     .unwrap();
@@ -440,21 +429,8 @@ async fn concrete_journal_routes_match_original_storage_and_rpc_traces() {
     let encoded = if let Some(path) = std::env::var_os("IVY_TASK_BOARD_JOURNAL_FIXTURE") {
         std::fs::read_to_string(path).unwrap()
     } else {
-        let output = Command::new("node")
-            .args([
-                "--experimental-transform-types",
-                "--disable-warning=ExperimentalWarning",
-                "tests/fixtures/task-board-journal-store-oracle.mjs",
-            ])
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap()
+        let output = reference_data::read(include_bytes!("task-board-journal-store-cases.json.gz"));
+        String::from_utf8(output).unwrap()
     };
     let cases = parse(&encoded, MANAGEMENT_FRAME_BYTES).unwrap();
     let mut captured = vec![];
@@ -892,22 +868,9 @@ async fn local_writes_progress_without_running_history_collection() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn original_operation_values_complete_through_real_journal_cas_and_cleanup() {
-    let output = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-operations-oracle.mjs",
-        ])
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("task-board-operations-cases.json.gz"));
     let cases = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         MANAGEMENT_FRAME_BYTES,
     )
     .unwrap();

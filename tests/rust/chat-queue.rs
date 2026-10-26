@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_chat_bridge::{
     admission::ChatAdmission,
@@ -371,17 +373,8 @@ async fn update(store: &ChatStore, key: &str, doc: Document, patch: &Json) -> Iv
 fn oracle() -> &'static Json {
     static ORACLE: OnceLock<Json> = OnceLock::new();
     ORACLE.get_or_init(|| {
-        let output = Command::new("node")
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .arg("tests/rust/fixtures/chat-queue-oracle.mjs")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
+        let output = reference_data::read(include_bytes!("fixtures/chat-queue-cases.json.gz"));
+        parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap()
     })
 }
 

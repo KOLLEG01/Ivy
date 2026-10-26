@@ -1,7 +1,7 @@
 //! Assessment decoding after the native owner has verified retained turn evidence.
 //! This does not establish native provenance or replace completion verification.
 use crate::schema::{Schema, validate};
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse_utf16};
 use std::collections::HashSet;
 
 fn failure(code: &str) -> IvyError {
@@ -63,10 +63,10 @@ pub fn result_items(turn: &IvyJson, items: &[IvyJson]) -> IvyResult<IvyJson> {
         if !ids.insert(id) {
             return Err(invalid());
         }
-        let kind = item.get("type").and_then(IvyJson::as_js_string);
+        let kind = crate::json_text::text(item.get("type"))?;
         if !["userMessage", "agentMessage", "reasoning"]
             .iter()
-            .any(|allowed| kind == Some(&JsString::from(*allowed)))
+            .any(|allowed| kind == JsString::from(*allowed))
         {
             return Err(failure("secretary_triage_unexpected_action"));
         }
@@ -83,8 +83,7 @@ pub fn result_items(turn: &IvyJson, items: &[IvyJson]) -> IvyResult<IvyJson> {
     if finals.len() != 1 {
         return Err(failure("secretary_triage_final_ambiguous"));
     }
-    let text = finals[0].to_utf8().map_err(|_| invalid())?;
-    let result = parse(&text, 1_048_576).map_err(|_| invalid())?;
+    let result = parse_utf16(&finals[0].0, usize::MAX).map_err(|_| invalid())?;
     validate(Schema::Assessment, &result).map_err(|_| invalid())?;
     if result.get("task") != Some(&IvyJson::Null)
         || result.get("disposition") == Some(&IvyJson::from("task"))

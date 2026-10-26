@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::*;
 use ivy_sdk::clock::Clock;
 use ivy_secretary::{
@@ -18,23 +20,9 @@ impl Clock for WorkflowClock {
 }
 #[tokio::test]
 async fn original_assignment_write_receipts_and_retry_boundaries() {
-    let mut command = std::process::Command::new("node");
-    command
-        .arg("tests/secretary-rust/workflow-oracle.mjs")
-        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command.output().expect("Original Node oracle required");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("workflow-cases.json.gz"));
     let corpus = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         16 * 1024 * 1024,
     )
     .unwrap();

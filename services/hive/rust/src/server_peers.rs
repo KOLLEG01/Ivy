@@ -172,7 +172,13 @@ fn text(value: &IvyJson, key: &str) -> IvyResult<JsString> {
         .ok_or_else(IvyError::internal)
 }
 fn delay(milliseconds: f64) -> Duration {
-    Duration::try_from_secs_f64(milliseconds / 1000.0).unwrap_or_default()
+    // The original timer truncates valid delays and schedules other values on the next turn.
+    let milliseconds = if (1.0..=f64::from(i32::MAX)).contains(&milliseconds) {
+        milliseconds.trunc() as u64
+    } else {
+        1
+    };
+    Duration::from_millis(milliseconds)
 }
 fn ready<T: Send + 'static>(value: IvyResult<T>) -> Reply<T> {
     Box::pin(std::future::ready(value))

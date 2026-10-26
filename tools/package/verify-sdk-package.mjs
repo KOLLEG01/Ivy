@@ -2,8 +2,7 @@ import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, relative } from 'node:path';
 import { spawn } from 'node:child_process';
-import { HiveServer } from '../../dist/services/hive/src/server.js';
-import { digest } from '../../dist/packages/contracts/src/canonical.js';
+import { startTestHive } from '../testing/native-service.mjs';
 const root = await mkdtemp(join(tmpdir(), 'ivy-sdk-package-'));
 const packageReceipt = JSON.parse(await readFile(resolve('.local/packages/sdk-package.json'), 'utf8'));
 const packagePath = resolve(packageReceipt.path);
@@ -53,7 +52,7 @@ try {
     validateAgent('OperationAbsence', absent);
     const read: Agent.ReadInput = {nativeVersion:'0.154.0',method:'thread/read',params:{threadId:'original',includeTurns:false}}; validateAgent('ReadInput',read);
     const identity: Agent.InputIdentity = {serviceNodeId:absent.serviceNodeId,epoch:'epoch',requestId:1};
-    const task: TaskBoard.TaskFields = {title:'Public SDK consumer',description:'',acceptanceCriteria:[],category:null,control:'user',priority:1,executionRequirement:null,workspaceRequirement:{kind:'task_workspace'},dependencies:[],userContact:'ticket',nextReviewAt:null,dueAt:null};
+    const task: TaskBoard.TaskFields = {title:'Public SDK consumer',description:'',acceptanceCriteria:[],category:null,control:'user',priority:1,executionRequirement:null,workspaceRequirement:{kind:'task_workspace'},allowParallel:false,userContact:'ticket',dueAt:null};
     const pending: Automation.Pending = {periodDate:'2026-09-07',advanceToDate:'2026-09-08',skippedFromDate:null,skippedThroughDate:null,snapshot:null};
     const value: Wire.Json = {identity,task,pending}; void value;
     function originalOperation(client: RpcClient, target: NativeTarget, call: NativeOperationCall) {
@@ -63,8 +62,8 @@ try {
     }
     void originalOperation;`);
   await command([resolve('node_modules/typescript/bin/tsc'), '--module', 'NodeNext', '--target', 'ES2023', '--strict', '--skipLibCheck', '--noEmit', 'consumer-types.ts'], root);
-  server = new HiveServer({ filename: join(root, 'hive.sqlite'), publicBaseUrl: 'http://127.0.0.1/ivy', version: 'package-test', buildId: digest('package-test'), credentials: [{ principalId: 'package-test', digest: digest('isolated-package-token') }], listenPort: 0 });
-  const { port } = await server.start();
+  server = await startTestHive({ root, credentials: [{ principalId: 'package-test', token: 'isolated-package-token' }] });
+  const port = new URL(server.config.publicBaseUrl).port;
   await writeFile(join(root, 'native-catalog.json'), await readFile('specs/native/codex-0.154.0/catalog.json'));
   await writeFile(join(root, 'verify.mjs'), `import {HiveClient,ServiceClient,discover,callBound,serviceTools,NativeOwner,reconcileNativeOperation,digest,validateAgent,NativeContract,nativeTurnItems,saveNativeParameters,readNativeParameters} from '@ivy/sdk/node';
     import {CodexAppTools} from '@ivy/sdk/codex-app-tools';

@@ -1,3 +1,4 @@
+use crate::storage_fixture;
 use ivy_contracts::{
     IvyJson,
     json::{parse, stringify},
@@ -65,29 +66,48 @@ fn native(input: &Value) -> Value {
         }
     }
 }
-fn oracle(inputs: &[Value]) -> Vec<Value> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut child =
-        Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
-            .arg(root.join("tests/fixtures/hive-storage-read-oracle.mjs"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(serde_json::to_string(inputs).unwrap().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+fn reference(inputs: &[Value], root: &Path) -> Vec<Value> {
+    let record = storage_fixture::reference("storageRead", &json!(inputs), root);
+    if let Some(images) = record["databases"].as_array() {
+        for image in images {
+            let index = image["index"].as_u64().unwrap() as usize;
+            storage_fixture::materialize(
+                image,
+                Path::new(inputs[index]["destination"].as_str().unwrap()),
+            );
+        }
+    }
+    let output = record["output"].as_array().unwrap();
+    assert_eq!(output.len(), inputs.len());
+    output.clone()
+}
+fn cross_read<T: AsRef<str>>(snapshot: &Path, source: &Path, tables: &[T]) {
+    let queries = tables
+        .iter()
+        .map(|table| {
+            (
+                table.as_ref().to_owned(),
+                json!(format!(
+                    "SELECT * FROM \"{}\"",
+                    table.as_ref().replace('"', "\"\"")
+                )),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let observe = |path: &Path| {
+        let mut value = storage_fixture::sqlite(json!({"path":path,"queries":queries}));
+        for rows in value.as_object_mut().unwrap().values_mut() {
+            rows.as_array_mut()
+                .unwrap()
+                .sort_by_cached_key(|row| row.to_string());
+        }
+        value
+    };
+    assert_eq!(
+        observe(snapshot),
+        observe(source),
+        "Node SQLite must read every retained row and blob"
     );
-    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 #[test]
@@ -158,7 +178,7 @@ fn stopped_inspection_matches_original_scopes_errors_and_never_mutates_source() 
         json!({"path":root.0.join("absent.sqlite"),"requirements":[{"key":"fixture/value"}]}),
     );
     inputs.push(json!({"path":root.0.join("absent.sqlite"),"requirements":[null]}));
-    let expected = oracle(&inputs);
+    let expected = reference(&inputs, &root.0);
     for (index, (input, expected)) in inputs.iter().zip(expected).enumerate() {
         assert_eq!(native(input), expected, "row {index}: {input}");
     }
@@ -191,13 +211,14 @@ fn historical_format_four_fixture_snapshot_preserves_all_tables_and_reopens_in_n
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert!(tables.len() > 10);
-    for table in tables {
+    for table in &tables {
         let quoted = table.replace('"', "\"\"");
         for (left, right) in [("main", "original"), ("original", "main")] {
             let different:i64=db.query_row(&format!("SELECT count(*) FROM (SELECT * FROM {left}.\"{quoted}\" EXCEPT SELECT * FROM {right}.\"{quoted}\")"),[],|r|r.get(0)).unwrap();
             assert_eq!(different, 0, "{left}.{table}");
         }
     }
+    cross_read(&target, &source, &tables);
     let requirements = db
         .prepare("SELECT DISTINCT contract_key FROM revisions ORDER BY contract_key")
         .unwrap()
@@ -207,7 +228,7 @@ fn historical_format_four_fixture_snapshot_preserves_all_tables_and_reopens_in_n
         .collect::<Vec<_>>();
     drop(db);
     let input = json!({"path":target,"requirements":requirements});
-    assert_eq!(native(&input), oracle(&[input.clone()])[0]);
+    assert_eq!(native(&input), reference(&[input.clone()], &root.0)[0]);
     assert_eq!(fs::read(&source).unwrap(), original);
 }
 
@@ -217,15 +238,18 @@ fn stopped_backup_matches_original_and_copies_exact_retained_sql_rows() {
     let source = root.0.join("source.sqlite");
     seed(&source);
     let before = fs::read(&source).unwrap();
-    let reference = root.0.join("reference.sqlite");
+    let reference_path = root.0.join("reference.sqlite");
     let native_path = root.0.join("native.sqlite");
-    let expected = oracle(&[json!({"action":"backup","source":source,"destination":reference})]);
+    let expected = reference(
+        &[json!({"action":"backup","source":source,"destination":reference_path})],
+        &root.0,
+    );
     assert_eq!(
         native(&json!({"action":"backup","source":source,"destination":native_path})),
         expected[0]
     );
     let db = Connection::open(&native_path).unwrap();
-    db.execute("ATTACH ? AS reference", [reference.to_str().unwrap()])
+    db.execute("ATTACH ? AS reference", [reference_path.to_str().unwrap()])
         .unwrap();
     for table in ["objects", "revisions"] {
         for (left, right) in [("main", "reference"), ("reference", "main")] {
@@ -234,6 +258,7 @@ fn stopped_backup_matches_original_and_copies_exact_retained_sql_rows() {
         }
     }
     assert_eq!(fs::read(&source).unwrap(), before);
+    cross_read(&native_path, &reference_path, &["objects", "revisions"]);
     drop(db);
     let invalid = root.0.join("future.sqlite");
     let db = Connection::open(&invalid).unwrap();
@@ -246,7 +271,10 @@ fn stopped_backup_matches_original_and_copies_exact_retained_sql_rows() {
     ];
     if cfg!(windows) {
         let fixture = json!({"action":"fixture","root":root.0,"actions":[{"kind":"mkdir","path":"target"},{"kind":"junction","path":"dangling","target":"target"},{"kind":"remove","path":"target"}]});
-        assert_eq!(oracle(&[fixture]), vec![json!({"value":null})]);
+        assert_eq!(
+            storage_fixture::sqlite(json!({"root":root.0,"files":fixture["actions"]})),
+            Value::Null
+        );
         inputs.push(
             json!({"action":"backup","source":invalid,"destination":root.0.join("dangling")}),
         );
@@ -255,9 +283,9 @@ fn stopped_backup_matches_original_and_copies_exact_retained_sql_rows() {
         assert_eq!(&absolute[1..2], ":");
         inputs.push(json!({"action":"backup","source":&absolute[2..],"destination":root.0.join("rooted-output.sqlite")}));
     }
-    let expected = oracle(&inputs);
+    let expected = reference(&inputs, &root.0);
     for (input, expected) in inputs.iter().zip(expected) {
-        assert_eq!(native(input), expected);
+        assert_eq!(native(input), expected, "Offline snapshot input: {input}");
     }
     assert!(!root.0.join("future-output.sqlite").exists());
 }

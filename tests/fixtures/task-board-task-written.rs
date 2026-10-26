@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::parse,
     limits::MANAGEMENT_FRAME_BYTES, operation::parse_operation_id_js,
@@ -139,22 +141,9 @@ impl TaskWriteGates for Bindings {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn task_write_observer_matches_original_selection_notice_bytes_order_and_failure_replay() {
-    let output = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-task-written-oracle.mjs",
-        ])
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("task-board-task-written-cases.json.gz"));
     let rows = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         MANAGEMENT_FRAME_BYTES,
     )
     .unwrap();

@@ -208,11 +208,13 @@ const save = async () => {
   }
   if (!result?.configuration) return;
   }
-  const saved = savePreferences({ ...commentPreferences.value });
-  await nextTick();
-  if (saved) {
-    preferenceBaseline.value = JSON.stringify(savedPreferences.value);
-    message.value = tr("Einstellungen gespeichert.", "Settings saved.");
+  if (preferencesDirty.value) {
+    const saved = savePreferences({ ...commentPreferences.value });
+    await nextTick();
+    if (saved) {
+      preferenceBaseline.value = JSON.stringify(savedPreferences.value);
+      message.value = tr("Einstellungen gespeichert.", "Settings saved.");
+    }
   }
 };
 </script>

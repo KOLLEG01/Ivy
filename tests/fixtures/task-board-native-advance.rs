@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use super::*;
 use ivy_sdk::tools::ToolClients;
 use ivy_task_board::{
@@ -12,22 +14,9 @@ fn data() -> &'static Json {
     static DATA: OnceLock<Json> = OnceLock::new();
     DATA.get_or_init(|| {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let output = Command::new("node")
-            .args([
-                "--experimental-transform-types",
-                "--disable-warning=ExperimentalWarning",
-                "tests/fixtures/task-board-native-advance-oracle.mjs",
-            ])
-            .current_dir(root)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let output = reference_data::read(include_bytes!("task-board-native-advance-cases.json.gz"));
         parse(
-            std::str::from_utf8(&output.stdout).unwrap(),
+            std::str::from_utf8(&output).unwrap(),
             MANAGEMENT_FRAME_BYTES,
         )
         .unwrap()
@@ -736,7 +725,7 @@ async fn reconciliation_and_local_dispatch_match_original_with_actual_journal_ca
             assert!(db.is_autocommit());
         }
     }
-    assert_eq!(count, 244);
+    assert_eq!(count, 61 * data().as_array().unwrap().len());
 }
 
 #[tokio::test(flavor = "current_thread")]

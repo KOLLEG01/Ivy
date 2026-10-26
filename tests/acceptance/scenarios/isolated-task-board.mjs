@@ -10,10 +10,11 @@ import { spawn, spawnSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { startMixedSoak } from '../support/mixed-soak.mjs';
+import { startNativeService, startTestHive } from '../../../tools/testing/native-service.mjs';
 
 // Own only this fresh loopback Hive, AgentManager and TaskBoard. Restart TaskBoard at its
 // explicit checkpoint without touching the native owner.
-const { values } = parseArgs({ options: { ...Object.fromEntries(['distribution', 'native-config', 'auth-file', 'evidence', 'private-distribution', 'secretary-cases', 'quality-case', 'soak-profile'].map(key => [key, { type: 'string' }])), 'native-images': { type: 'boolean' } } });
+const { values } = parseArgs({ options: { ...Object.fromEntries(['distribution', 'hive-artifact', 'agent-manager-artifact', 'task-board-artifact', 'native-config', 'auth-file', 'evidence', 'private-distribution', 'secretary-cases', 'quality-case', 'soak-profile'].map(key => [key, { type: 'string' }])), 'native-images': { type: 'boolean' } } });
 for (const key of ['distribution', 'native-config', 'auth-file', 'evidence']) assert.ok(values[key], 'Missing --' + key);
 assert.equal(Boolean(values['private-distribution']), Boolean(values['secretary-cases']), 'Secretary requires its distribution and fixed cases');
 assert.ok(!values['soak-profile'] || values['quality-case'] && !values['native-images'] && !values['secretary-cases'], 'Mixed traffic accompanies the fixed two-turn quality case only');
@@ -22,9 +23,6 @@ assert.ok(Array.isArray(secretaryCases) && secretaryCases.length <= 6);
 const secretaryTurns = secretaryCases.filter(item => !item.expected?.mediaPending).length;
 const distribution = resolve(values.distribution), root = resolve(values.evidence);
 const load = path => import(pathToFileURL(join(distribution, 'dist', path)).href);
-const { HiveServer } = await load('services/hive/src/server.js');
-const { startAgentManager } = await load('services/agent-manager/src/main.js');
-const { startTaskBoard } = await load('services/task-board/src/main.js');
 const { atomicJson } = await load('packages/host-runtime/src/config.js');
 const { digest } = await load('packages/contracts/src/canonical.js');
 const { HiveClient, discover, callBound } = await load('packages/sdk/src/client.js');
@@ -50,21 +48,17 @@ await save();
 const reservation = createServer(); reservation.listen(0, '127.0.0.1'); await once(reservation, 'listening');
 const port = reservation.address().port; await new Promise((yes, no) => reservation.close(error => error ? no(error) : yes()));
 const publicBaseUrl = `http://127.0.0.1:${port}/ivy`;
-const server = new HiveServer({ filename: join(root, 'hive.sqlite'), publicBaseUrl, listenHost: '127.0.0.1', listenPort: port,
-  consoleRoot: join(distribution, 'dist/console'), version: build.version, buildId: build.buildId,
-  credentials: [{ principalId, digest: digest(token) }, { principalId: owner, digest: digest(serviceToken) }] });
-let manager, taskBoard, child, childResult, soak;
+let server, manager, taskBoard, child, childResult, soak;
 const readyTaskBoard = async path => {
-  const instance = await startTaskBoard(path);
+  const instance = await startNativeService(JSON.parse(await readFile(path, 'utf8')), { artifact: values['task-board-artifact'] ?? distribution });
   taskBoard = instance; // Retain ownership for cleanup even when readiness fails.
-  await instance.service.waitReady({ timeoutMs: 45000 });
-  const deadline = Date.now() + 45000;
-  while (!instance.runtime?.recovered && Date.now() < deadline) await delay(100);
-  assert.ok(instance.runtime?.recovered, 'TaskBoard must reconcile before the scenario starts');
+  const health = await instance.ready();
+  assert.equal(health.ready, true, 'TaskBoard must reconcile before readiness');
   return instance;
 };
 try {
-  await server.start();
+  server = await startTestHive({ root, port, artifact: values['hive-artifact'] ?? distribution,
+    credentials: [{ principalId, token }, { principalId: owner, token: serviceToken }] });
   const common = { schemaVersion: 1, hostId, publicBaseUrl, artifactRoot: distribution, version: build.version, buildId: build.buildId };
   const agent = { ...common, componentId: 'agent-manager', instanceId: 'agent', serviceNodeId: owner, dataRoot: join(root, 'agent'), credential: serviceToken,
     settings: { nativeExecutable: source.settings.nativeExecutable, nativeVersion: source.settings.nativeVersion,
@@ -77,7 +71,8 @@ try {
   const agentPath = join(root, 'agent.json'), taskBoardPath = join(root, 'task-board.json'), configPath = join(root, 'config.json');
   await atomicJson(agentPath, agent); await atomicJson(taskBoardPath, executor);
   await atomicJson(configPath, { hostId, publicBaseUrl, instances: [{ componentId: 'hive', settings: { credentials: [{ token, principalId }] } }, { componentId: 'agent-manager', serviceNodeId: owner }] });
-  manager = await startAgentManager(agentPath); await manager.service.waitReady({ timeoutMs: 45000 });
+  manager = await startNativeService(agent, { artifact: values['agent-manager-artifact'] ?? distribution });
+  await manager.ready();
   const client = new HiveClient(publicBaseUrl, { credential: token });
   const nativeCatalog = JSON.parse(await readFile(join(distribution, 'specs/native/codex-' + source.settings.nativeVersion + '/catalog.json'), 'utf8'));
   if (nativeCatalog.clientRequests.some(item => item.method === 'project/create')) {

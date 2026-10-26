@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_contracts::{
     IvyJson, IvyResult, JsString,
     json::{canonical, parse},
@@ -39,17 +41,8 @@ fn capture(result: IvyResult<Vec<IvyJson>>) -> IvyJson {
 fn oracle() -> &'static IvyJson {
     static DATA: OnceLock<IvyJson> = OnceLock::new();
     DATA.get_or_init(|| {
-        let out = Command::new("node")
-            .arg("tests/fixtures/agent-native-backup-paths-oracle.mjs")
-            .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        parse(std::str::from_utf8(&out.stdout).unwrap(), 16 * 1024 * 1024).unwrap()
+        let out = reference_data::read(include_bytes!("../fixtures/agent-native-backup-paths-cases.json.gz"));
+        parse(std::str::from_utf8(&out).unwrap(), 16 * 1024 * 1024).unwrap()
     })
 }
 fn compare_group(group: &str) {

@@ -72,7 +72,8 @@ test(
         await expect(f.page.locator("main")).toBeVisible();
         await f.page.waitForTimeout(350);
         // One live burst reaches independently mounted loaders through the real socket.
-        f.server.worker.onChanges?.(["services", "system", "uis", "inventory"]);
+        await Promise.all([...providers.values()].map(service =>
+          service.connection.request('service.heartbeat', { ready: true, diagnostics: [] })));
         await expect
             .poll(() => calls.filter(Array.isArray).length, {
               message: app.name + " uses shared read batching",

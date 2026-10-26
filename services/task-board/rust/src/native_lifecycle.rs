@@ -218,7 +218,7 @@ fn missing(reply: &Json, thread: &JsString) -> IvyResult<bool> {
     let Some(error) = reply.get("error") else {
         return Ok(false);
     };
-    let message = s(error, "message")?.trim();
+    let message = s(error, "message")?.trim_ecmascript();
     Ok(ivy_sdk::lowercase_utf16(&message.0)
         == ivy_sdk::lowercase_utf16(&join("unknown thread: ", thread).0))
 }
@@ -900,15 +900,17 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
         value.insert("primaryResourceRef", primary.clone());
         value.insert("publication", steps.pin()?);
         value.insert("updatedAt", at.clone());
+        value.remove("waiting");
+        value.insert("runtimeWait", field(&task.value, "runtimeWait").clone());
+        let mut fields = object(task.value.required("fields")?);
+        fields.remove("nextReviewAt");
         if start {
             value.insert("workflowState", "todo".into());
-            value.insert("waiting", Json::Null);
+            value.insert("runtimeWait", Json::Null);
             value.insert("acceptedReview", Json::Null);
-            let mut fields = object(task.value.required("fields")?);
             fields.insert("control", "agent".into());
-            fields.insert("nextReviewAt", Json::Null);
-            value.insert("fields", fields);
         }
+        value.insert("fields", fields);
         let reserved = steps
             .write(
                 "task-board/task",

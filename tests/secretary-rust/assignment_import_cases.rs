@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::*;
 use base64::Engine;
 use ivy_contracts::{IvyResult, JsString, json::canonical};
@@ -200,23 +202,9 @@ fn retained_rows(before: &IvyJson, after: &IvyJson, gap_import: bool) {
 #[tokio::test]
 async fn explicit_assignment_import_copies_preserve_history_and_frozen_retirement_on_restart() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut command = Command::new("node");
-    command
-        .arg("tests/secretary-rust/assignment-import-oracle.mjs")
-        .current_dir(root);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("assignment-import-cases.json.gz"));
     let corpus = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         32 * 1024 * 1024,
     )
     .unwrap();

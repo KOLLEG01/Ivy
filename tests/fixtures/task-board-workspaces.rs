@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     json::{canonical, parse},
@@ -89,21 +91,9 @@ impl WorkspaceOwner for Owner<'_> {
 }
 #[tokio::test]
 async fn reservations_and_owner_reclamation_match_original_transactions_and_read_fences() {
-    let output = Command::new("node")
-        .args([
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-workspaces-oracle.mjs",
-        ])
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("task-board-workspaces-cases.json.gz"));
     let rows = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         MANAGEMENT_FRAME_BYTES,
     )
     .unwrap();

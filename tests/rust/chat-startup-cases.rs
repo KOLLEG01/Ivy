@@ -21,7 +21,7 @@ fn copy_catalog(source: &Path, artifact: &Path) {
 
 #[tokio::test]
 async fn host_configuration_assets_health_and_control_reach_the_real_service() {
-    let seed = read_oracle("startup-seed", "IVY_CHAT_STARTUP_SEED_CAPTURE");
+    let seed = read_oracle("startup-seed");
     let root = std::env::temp_dir().join(format!("ivy-rust-chat-startup-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&root).unwrap();
     let artifact = root.join("artifact");

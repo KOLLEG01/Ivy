@@ -13,6 +13,8 @@ use std::{
     task::{Context, Poll, Waker},
 };
 use tokio::{io::AsyncWrite, runtime::Builder, time::timeout};
+#[path = "../fixtures/reference-data.rs"]
+mod startup_reference_data;
 
 pub(super) fn locked(filename: &Path) -> bool {
     let db = Connection::open_with_flags(filename, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
@@ -180,41 +182,53 @@ fn native(input: &Value, profile: &Value, fail: bool) -> Value {
     }
     output
 }
-fn original(input: &Value) -> Value {
-    let mut child =
-        Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
-            .arg(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../../tests/fixtures/hive-worker-startup.mjs"),
-            )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-    child
-        .stdin
-        .take()
+fn reference(input: &Value) -> Value {
+    static CASES: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let cases = CASES.get_or_init(|| {
+        serde_json::from_slice(&startup_reference_data::read(include_bytes!(
+            "../fixtures/hive-worker-startup-cases.json.gz"
+        )))
         .unwrap()
-        .write_all(input.to_string().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).unwrap()
+    });
+    let kind = if input.get("workerDataJson").is_some() {
+        "options"
+    } else {
+        "startup"
+    };
+    let key = format!("{kind}-{}", input["case"].as_str().unwrap());
+    let case = cases["cases"]
+        .get(&key)
+        .expect("Retain the original startup case");
+    let mut normalized = input.clone();
+    normalized["filename"] = "<FILENAME>".into();
+    normalized["uiRoot"] = "<UI_ROOT>".into();
+    if let Some(wire) = input["workerDataJson"].as_str() {
+        // Match the complete input while preserving lone UTF-16 units.
+        let mut wire = ivy_contracts::json::parse(wire, usize::MAX).unwrap();
+        wire.insert("filename", "<FILENAME>".into());
+        wire.insert("uiRoot", "<UI_ROOT>".into());
+        normalized["workerDataJson"] = ivy_contracts::json::canonical(&wire, usize::MAX)
+            .unwrap()
+            .into();
+    }
+    assert_eq!(normalized, case["input"], "Startup fixture inputs: {key}");
+    let mut expected = case["expected"].clone();
+    if expected["options"].is_object() {
+        assert_eq!(expected["options"]["uiRoot"], "<UI_ROOT_UNITS>");
+        expected["options"]["uiRoot"] = json!(
+            input["uiRoot"]
+                .as_str()
+                .unwrap()
+                .encode_utf16()
+                .collect::<Vec<_>>()
+        );
+    }
+    expected
 }
 #[test]
 fn actual_worker_startup_retains_fatal_owner_and_reads_announcement_head_after_ready() {
     let root = Root::new();
-    let profile = if let Some(path) = std::env::var_os("IVY_HIVE_STARTUP_PROFILE") {
-        let prior: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-        prior["original"]["registryRuntime"].clone()
-    } else {
-        oracle(&root.0.join("profile.sqlite"), &[op("constructor")])["registryRuntime"].clone()
-    };
+    let profile = startup_profile::registry(false);
     let mut corpus = vec![];
     for name in [
         "ready",
@@ -245,9 +259,7 @@ fn actual_worker_startup_retains_fatal_owner_and_reads_announcement_head_after_r
         }
         let actual = native(&input, &profile, false);
         assert!(base.starts_with(&root.0));
-        fs::remove_dir_all(&base).unwrap();
-        fs::create_dir(&base).unwrap();
-        let expected = original(&input);
+        let expected = reference(&input);
         let fault = if name == "ui-fatal" {
             fs::remove_dir_all(&base).unwrap();
             fs::create_dir(&base).unwrap();
@@ -258,9 +270,6 @@ fn actual_worker_startup_retains_fatal_owner_and_reads_announcement_head_after_r
         corpus.push(
             json!({"input":input,"native":actual,"original":expected,"nativeFlushFailure":fault}),
         );
-    }
-    if let Some(path) = std::env::var_os("IVY_HIVE_WORKER_STARTUP_CORPUS") {
-        fs::write(path, json!(corpus).to_string()).unwrap();
     }
     for case in &corpus {
         for key in [
@@ -326,13 +335,8 @@ fn store_initialization_failure_releases_owner_before_fatal_without_ui_effects()
         }
         let actual = native(&input, &profile, false);
         assert!(base.starts_with(&root.0));
-        fs::remove_dir_all(&base).unwrap();
-        fs::create_dir(&base).unwrap();
-        let expected = original(&input);
+        let expected = reference(&input);
         corpus.push(json!({"input":input,"native":actual,"original":expected}));
-    }
-    if let Some(path) = std::env::var_os("IVY_HIVE_WORKER_EARLY_FAILURE_CORPUS") {
-        fs::write(path, json!(corpus).to_string()).unwrap();
     }
     for case in &corpus {
         for key in [
@@ -378,18 +382,7 @@ fn store_initialization_failure_releases_owner_before_fatal_without_ui_effects()
 fn admitted_server_worker_frame_initializes_actual_owner_without_losing_utf16_or_defaults() {
     use ivy_hive::server_constructor::{Options as ServerOptions, Prepared};
     let root = Root::new();
-    // Explicit qualification runs may reuse observations. Ordinary test
-    // selection obtains them from the existing original-domain oracle.
-    let profile = if let Some(path) = std::env::var_os("IVY_HIVE_STARTUP_PROFILE") {
-        let prior: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-        prior["original"]["registryRuntime"].clone()
-    } else {
-        let observed = oracle(&root.0.join("profile.sqlite"), &[op("constructor")]);
-        if let Some(path) = std::env::var_os("IVY_HIVE_WORKER_PROFILE_CAPTURE") {
-            fs::write(path, observed.to_string()).unwrap();
-        }
-        observed["registryRuntime"].clone()
-    };
+    let profile = startup_profile::registry(false);
     let mut corpus = vec![];
     for name in [
         "omitted-defaults",
@@ -464,13 +457,8 @@ fn admitted_server_worker_frame_initializes_actual_owner_without_losing_utf16_or
         let input = json!({"case":name,"filename":filename,"uiRoot":prepared.ui_root().to_utf8().unwrap(),"publicBaseUrl":"https://example.invalid/base","credentials":[{"principalId":"alpha","digest":format!("sha256:{}","a".repeat(64))}],"workerDataJson":ivy_contracts::json::stringify(&data,ivy_hive::worker_protocol::MAX_FRAME_BYTES).unwrap()});
         let actual = native(&input, &profile, false);
         assert!(base.starts_with(&root.0));
-        fs::remove_dir_all(&base).unwrap();
-        fs::create_dir(&base).unwrap();
-        let expected = original(&input);
+        let expected = reference(&input);
         corpus.push(json!({"input":input,"native":actual,"original":expected}));
-    }
-    if let Some(path) = std::env::var_os("IVY_HIVE_WORKER_OPTIONS_CORPUS") {
-        fs::write(path, json!(corpus).to_string()).unwrap();
     }
     for case in &corpus {
         for key in [

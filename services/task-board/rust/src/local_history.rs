@@ -15,7 +15,7 @@ use ivy_contracts::{
     IvyError, IvyJson as Json, JsString, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::rpc::{OptionalRpcClient, RequestOptions};
-use ivy_store::receipts::has_unresolved_outcome;
+use ivy_store::receipts::has_unresolved_workflow_outcome;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::Mutex;
 
@@ -262,7 +262,7 @@ impl<D, R, C: Contracts, Parse, Failure> LocalHistory<'_, D, R, C, Parse, Failur
                     index.forget(&id);
                     let key = head[1].string()?;
                     let unresolved = self.local.contracts.local(&key)?
-                        && has_unresolved_outcome(&value)?
+                        && has_unresolved_workflow_outcome(&value)?
                         || key == "task-board/native-call"
                             && (field::<ReadFailure<E>>(Some(&value), "state")?
                                 != Some(&Json::from("observed"))

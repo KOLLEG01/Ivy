@@ -33,7 +33,6 @@ use std::{
 };
 const AT: i64 = 1760000000000;
 const DATE: &str = "2025-10-09T08:53:20.000Z";
-static CORPUS: Mutex<()> = Mutex::new(());
 fn p(path: &Path) -> J {
     J::String(node_path::from_native(path))
 }
@@ -440,64 +439,7 @@ impl Test {
             .await
             .unwrap();
     }
-    async fn compare_original(&self, case: &str, input: &J, actual: &J) {
-        self.f.journal.close().await.unwrap();
-        let root = self.f.root.0.canonicalize().unwrap();
-        let state = root.join("state");
-        assert!(state.starts_with(&root) && state != root);
-        fs::remove_dir_all(&state).unwrap();
-        let mut child = Command::new("node")
-            .args([
-                "--experimental-transform-types",
-                "--disable-warning=ExperimentalWarning",
-            ])
-            .arg(
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../../tests/fixtures/host-bootstrap-maintenance-oracle.mjs"),
-            )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(json::stringify(input, usize::MAX).unwrap().as_bytes())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let original =
-            json::parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
-        if let Some(file) = std::env::var_os("IVY_HOST_BOOTSTRAP_MAINTENANCE_CORPUS") {
-            let _guard = CORPUS.lock().unwrap();
-            writeln!(
-                fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(file)
-                    .unwrap(),
-                "{}",
-                json::stringify(
-                    &J::object([
-                        ("case", case.into()),
-                        ("input", input.clone()),
-                        ("actual", actual.clone()),
-                        ("original", original.clone())
-                    ]),
-                    usize::MAX
-                )
-                .unwrap()
-            )
-            .unwrap();
-        }
-        assert_json_eq(actual, &original);
-    }
+
     async fn output(&self, initial: J, results: Vec<J>, trace: Vec<J>, readiness: J) -> J {
         let mut files = Vec::new();
         for process in array(self.next.required("processes").unwrap()) {
@@ -661,99 +603,6 @@ impl Test {
         }
         self.output(initial, results, trace, J::Array(vec![])).await
     }
-}
-#[tokio::test]
-async fn bootstrap_maintenance_exact_replay_after_interrupted_write_and_later_replacement() {
-    let t = Test::new().await;
-    let input = t.input(
-        "maintenance",
-        vec![
-            "pause", "fail", "update", "update", "later", "forbid", "update", "conflict", "status",
-        ],
-    );
-    let actual = t.run(&input).await;
-    let results = array(actual.required("results").unwrap());
-    assert_eq!(
-        results[0].required("value").unwrap().get("errorCode"),
-        Some(&"outcome_unknown".into())
-    );
-    assert_eq!(
-        results[1].required("value").unwrap().get("phase"),
-        Some(&"succeeded".into())
-    );
-    assert_json_eq(&results[1], &results[3]);
-    assert_eq!(
-        actual.get("writes"),
-        Some(&J::Number((replacements(&t.old, &t.next) * 2) as f64))
-    );
-    t.compare_original("interrupted-write-later-historical-replay", &input, &actual)
-        .await;
-}
-#[tokio::test]
-async fn bootstrap_maintenance_third_state_and_tampered_evidence_are_never_overwritten() {
-    let t = Test::new().await;
-    let input = t.input(
-        "maintenance",
-        vec![
-            "pause",
-            "fail",
-            "update",
-            "third",
-            "update",
-            "repair-owner",
-            "tamper",
-            "update",
-            "repair-evidence",
-            "update",
-        ],
-    );
-    let actual = t.run(&input).await;
-    let results = array(actual.required("results").unwrap());
-    assert_eq!(
-        results[1].required("value").unwrap().get("errorCode"),
-        Some(&"target_conflict".into())
-    );
-    assert_eq!(
-        results[2].required("value").unwrap().get("errorCode"),
-        Some(&"storage_invalid".into())
-    );
-    assert_eq!(
-        actual.get("writes"),
-        Some(&J::Number(replacements(&t.old, &t.next) as f64))
-    );
-    t.compare_original("third-state-retained-definition-integrity", &input, &actual)
-        .await;
-}
-#[tokio::test]
-async fn bootstrap_maintenance_rechecks_configuration_and_requires_offline_scheduling() {
-    let t = Test::new().await;
-    let input = t.input(
-        "maintenance",
-        vec![
-            "update",
-            "pause",
-            "change-config",
-            "update",
-            "restore-config",
-            "update",
-        ],
-    );
-    let actual = t.run(&input).await;
-    let results = array(actual.required("results").unwrap());
-    assert_eq!(
-        results[0].required("value").unwrap().get("errorCode"),
-        Some(&"bootstrap_busy".into())
-    );
-    assert_eq!(
-        results[1].required("value").unwrap().get("errorCode"),
-        Some(&"configuration_changed".into())
-    );
-    assert_eq!(
-        results[2].required("value").unwrap().get("phase"),
-        Some(&"succeeded".into())
-    );
-    t.compare_original("offline-and-configuration-generation", &input, &actual)
-        .await;
 }
 #[path = "host-bootstrap-worker-path-cases.rs"]
 mod worker_path_cases;

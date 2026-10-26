@@ -12,6 +12,18 @@ registerHooks({resolve(specifier,context,next) {
 const {canonical,hashJson}=await import('../../packages/contracts/src/canonical.ts');
 const {deriveOperationId}=await import('../../packages/contracts/src/operation-id.ts');
 const {validateJson}=await import('../../packages/contracts/src/canonical-json.ts');
+if(process.argv[2]==='utf16') {
+  const inputs=['null','["ordinary","😀"]'];
+  for(const text of ['\ud800','\udbff','\udc00','\udfff','\ud800x\udfff','😀\ud800']) {
+    inputs.push(text,'"'+text+'"','{"'+text+'":1,"'+text+'":2}','\ufeff"'+text+'"');
+    for(let slashes=1;slashes<=4;slashes++) inputs.push('["'+'\\'.repeat(slashes)+text+'"]');
+    inputs.push('"\\u'+text+'"','"\\"'+text+'"','"'+text+'\n"');
+  }
+  process.stdout.write(JSON.stringify(inputs.map(input=>{
+    try{return{input,expected:{value:JSON.parse(input)}};}catch{return{input,expected:{error:true}};}
+  })));
+  process.exit(0);
+}
 if(process.argv[2]==='deep') {
   const {createHash}=await import('node:crypto');
   const cases=[];

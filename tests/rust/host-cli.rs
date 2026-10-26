@@ -5,7 +5,7 @@
 mod fixture;
 use fixture::{ServiceFixture, host_configuration};
 use ivy_contracts::{IvyJson as J, core_schema::validate_host, hash::digest, json};
-use ivy_host_runtime::{config, host_config, journal::HostJournal, native_path};
+use ivy_host_runtime::{config, host_config, journal::HostJournal, layout, native_path};
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -194,12 +194,18 @@ async fn native_command_replays_durable_work_and_restores_offline_data() {
         Some(&"host_status".into())
     );
     std::fs::write(f.0.join("state/retained.txt"), b"offline private bytes").unwrap();
+    let source_bytes = std::fs::read(&source).unwrap();
     let backup = f.0.join("backup");
     let saved = cli.run(
         &source,
         &["backup", "--destination", backup.to_str().unwrap()],
         0,
     );
+    assert_eq!(saved.get("code"), Some(&"backup_completed".into()));
+    let saved_data = saved.required("data").unwrap();
+    validate_host("BackupResult", saved_data).unwrap();
+    assert_eq!(saved_data.get("hostId"), host.get("hostId"));
+    equal(saved_data.required("directory").unwrap(), &path(&backup));
     let hash = saved
         .required("data")
         .unwrap()
@@ -227,7 +233,35 @@ async fn native_command_replays_durable_work_and_restores_offline_data() {
         instance.insert("enabled", false.into());
     }
     host.insert("instances", J::Array(instances));
+    let context = host_config::HostContext::current().unwrap();
+    let mut expected_config = layout::resolve_host_configuration(
+        &host,
+        &native_path::from_native(&target),
+        &context.environment,
+        context.paths.style,
+        &context.account_home,
+    )
+    .unwrap();
+    validate_host("HostConfig", &expected_config).unwrap();
+    assert_eq!(expected_config.get("hostId"), saved_data.get("hostId"));
+    assert_ne!(
+        expected_config.get("publicBaseUrl"),
+        Some(&"http://127.0.0.1:39081/ivy".into())
+    );
+    for key in ["runtimeRoot", "artifactRoot", "stagingRoot"] {
+        assert!(
+            !native_path::to_native(
+                expected_config
+                    .required(key)
+                    .unwrap()
+                    .as_js_string()
+                    .unwrap()
+            )
+            .exists()
+        );
+    }
     config::atomic_json(&target, host).await.unwrap();
+    let template_bytes = std::fs::read(&target).unwrap();
     let restored = cli.run(
         &target,
         &[
@@ -239,6 +273,94 @@ async fn native_command_replays_durable_work_and_restores_offline_data() {
         ],
         0,
     );
+    assert_eq!(restored.get("code"), Some(&"restore_completed".into()));
+    let restored_data = restored.required("data").unwrap();
+    validate_host("RestoreResult", restored_data).unwrap();
+    assert_eq!(restored_data.get("backupId"), saved_data.get("backupId"));
+    assert_eq!(
+        restored_data.get("manifestHash"),
+        saved_data.get("manifestHash")
+    );
+    let restored_path = layout::host_configuration_path(&expected_config).unwrap();
+    equal(
+        restored_data.required("configPath").unwrap(),
+        &path(&restored_path),
+    );
+    expected_config.insert(
+        "restoredFrom",
+        J::object([
+            ("backupId", saved_data.required("backupId").unwrap().clone()),
+            (
+                "manifestHash",
+                saved_data.required("manifestHash").unwrap().clone(),
+            ),
+            (
+                "restoreId",
+                restored_data.required("restoreId").unwrap().clone(),
+            ),
+        ]),
+    );
+    let restored_value = config::json_file(restored_path.clone(), 1024 * 1024)
+        .await
+        .unwrap();
+    validate_host("HostConfig", &restored_value).unwrap();
+    equal(&restored_value, &expected_config);
+    assert!(
+        restored_value
+            .required("instances")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|instance| instance.get("enabled") == Some(&false.into()))
+    );
+    let restored_root = native_path::to_native(
+        restored_value
+            .required("runtimeRoot")
+            .unwrap()
+            .as_js_string()
+            .unwrap(),
+    );
+    assert!(!restored_root.join("restore.json").exists());
+    {
+        let db = rusqlite::Connection::open_with_flags(
+            restored_root.join("deployments.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(
+            db.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        assert!(
+            db.prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .query([])
+                .unwrap()
+                .next()
+                .unwrap()
+                .is_none()
+        );
+        for table in ["observations", "runtime_targets", "installed"] {
+            assert_eq!(
+                db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        let uncertain = db
+            .prepare("SELECT deployment_id FROM operations WHERE phase='needs_attention'")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(uncertain, vec![deployment.clone()]);
+    }
+    assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
+    assert_eq!(std::fs::read(&target).unwrap(), template_bytes);
     assert_eq!(
         restored.required("data").unwrap().get("state"),
         Some(&"disabled".into())
@@ -255,7 +377,7 @@ async fn native_command_replays_durable_work_and_restores_offline_data() {
         &cli.run(&source, &["status", "--deployment", &deployment], 0),
         &accepted,
     );
-    let restored_config = f.0.join("restored-state/host.json");
+    let restored_config = restored_path;
     let status = cli.run(&restored_config, &["status"], 0);
     assert_eq!(
         status

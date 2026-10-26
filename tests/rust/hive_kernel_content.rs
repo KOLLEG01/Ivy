@@ -353,6 +353,17 @@ pub(super) fn deploy(ui: &str, id: &str, bytes: &str, expected: Value, nonce: &s
 fn quote(value: &Value) -> String {
     format!("'{}'", value.to_string().replace('\'', "''"))
 }
+fn retain(steps: &mut Vec<Value>, ui: &str, id: &str, bytes: &str) {
+    steps.push(sql(format!(
+        "INSERT INTO app_releases VALUES('{}','{}',{});",
+        ui,
+        id,
+        quote(&release(id, bytes)),
+    )));
+    let mut read = request("uis.get", json!({"uiId":ui}));
+    read["files"] = json!([{"kind":"write","path":format!("private/{ui}/{id}/index.html"),"data":STANDARD.encode(bytes)}]);
+    ok(steps, read);
+}
 #[test]
 fn kernel_ui_publication_catalogs_inspection_rollback_receipts_and_files_survive_reopen() {
     let mut s = setup();
@@ -381,6 +392,15 @@ fn kernel_ui_publication_catalogs_inspection_rollback_receipts_and_files_survive
             "deploy-r3",
         ),
     );
+    let retired = push(
+        &mut s,
+        request(
+            "uis.rollback",
+            json!({"uiId":"sample-ui","releaseId":"r2","expectedReleaseId":"r3","mutationId":"epoch:100000:retired"}),
+        ),
+    );
+    // Current publication retires old releases; legacy retained releases remain selectable.
+    retain(&mut s, "sample-ui", "r2", "<h1>two</h1>");
     let rollback = ok(
         &mut s,
         request(
@@ -388,6 +408,7 @@ fn kernel_ui_publication_catalogs_inspection_rollback_receipts_and_files_survive
             json!({"uiId":"sample-ui","releaseId":"r2","expectedReleaseId":"r3","mutationId":"epoch:100000:rollback"}),
         ),
     );
+    retain(&mut s, "sample-ui", "r3", "<h1>three</h1>");
     ok(
         &mut s,
         stage("second-ui", "r1", "<h1>second</h1>", "stage-second"),
@@ -427,6 +448,7 @@ fn kernel_ui_publication_catalogs_inspection_rollback_receipts_and_files_survive
     let get = ok(&mut s, request("uis.get", json!({"uiId":"sample-ui"})));
     let replay = ok(&mut s, first_deploy);
     let result = compare(&s);
+    error(&result, retired, "not_found");
     assert_eq!(value(&result, first), value(&result, replay));
     assert_eq!(value(&result, rollback)["releaseId"], "r2");
     assert_eq!(

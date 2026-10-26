@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::*;
 use ivy_contracts::json::canonical;
 use ivy_secretary::{
@@ -79,21 +81,8 @@ fn put_file(path: &Path, input: &IvyJson) {
 #[tokio::test]
 async fn original_startup_config_values_and_composed_protected_loaders() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut command = Command::new("node");
-    command
-        .arg("tests/secretary-rust/config-oracle.mjs")
-        .current_dir(root)
-        .stderr(Stdio::inherit());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command
-        .output()
-        .expect("Original configuration/main oracle required");
-    assert!(output.status.success());
-    let corpus = parse(&String::from_utf8(output.stdout).unwrap(), 8 * 1024 * 1024).unwrap();
+    let output = reference_data::read(include_bytes!("config-cases.json.gz"));
+    let corpus = parse(&String::from_utf8(output).unwrap(), 8 * 1024 * 1024).unwrap();
     assert_eq!(
         corpus.required("platform").unwrap(),
         &IvyJson::from(if cfg!(windows) {

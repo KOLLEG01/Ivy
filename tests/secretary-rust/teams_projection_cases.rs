@@ -1,26 +1,14 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::*;
 use ivy_contracts::json::canonical;
 use ivy_secretary::teams_projection;
 use std::{path::Path, process::Command};
 #[test]
 fn original_teams_projection_identity_completeness_and_exclusions() {
-    let mut command = Command::new("node");
-    command
-        .arg("tests/secretary-rust/teams-projection-oracle.mjs")
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("teams-projection-cases.json.gz"));
     let corpus = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         32 * 1024 * 1024,
     )
     .unwrap();

@@ -56,7 +56,7 @@ pub struct Invocation(Arc<Parts>);
 pub fn require_fresh(context: &IvyJson, now: &dyn Fn() -> f64) -> IvyResult<()> {
     if let Some(expires_at) = context.get("expiresAt") {
         let now = now();
-        if !expires_at.as_f64().is_some_and(|expires| expires > now) {
+        if !(crate::worker_identity::expiry_number(Some(expires_at))? > now) {
             return Err(IvyError::new(
                 "unauthenticated",
                 "OAuth access token has expired.",

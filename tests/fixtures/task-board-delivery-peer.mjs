@@ -5,7 +5,7 @@ import {toolDefinitionHash} from '../../packages/contracts/src/tool-definition.t
 
 // Only the isolated factory mode enters this finite, original-source-backed peer.
 export function deliveryBoundary(){
- let row=null,request=null,replyRaw=null,inputRaw=null,phoneRequest=null,forwardReads=0,retainedDelivery=null,retentionError=null,retentionConfiguration=false;
+ let row=null,request=null,replyRaw=null,inputRaw=null,phoneRequest=null,forwardReads=0,retentionError=null,retentionConfiguration=false;
  const definitions=new Map();
  const phone=()=>row.input.mode==='phonePrepared';
  const fallback=()=>phone()&&row.input.fault?.outcome==='not_executed';
@@ -23,6 +23,14 @@ export function deliveryBoundary(){
  };
  return ({method,params,id,selected,send,reply,emit})=>{
   const fail=(code,message,outcome='not_executed')=>send({jsonrpc:'2.0',id,error:{code:-32000,message,data:{code,outcome}}});
+  if(method==='objects.query'){
+   assert.deepEqual(params,{contractKey:'task-board/task',includeArchived:true,where:{op:'and',args:[
+    {field:'data:/completionIssue/code',op:'in',value:['task_board_handoff_missing','task_board_recovery_context_unavailable','task_board_recovery_evidence_missing','task_board_no_progress']},
+    {field:'object.ownerObjectId',op:'isNull'},{field:'object.parentId',op:'isNull'}]},limit:100});
+   emit({kind:'retention-io',method,params});
+   if(retentionError?.code==='service_unavailable')fail(retentionError.code,retentionError.message,retentionError.outcome);
+   else reply(id,{items:[],nextCursor:null});return true;
+  }
   if(method==='test.deliveryFixture'){
    assert.equal(row,null);row=structuredClone(params.row);
    assert.equal(row.name,forwarded()?'factory phone different admission recovers original forwarded prompt':fallback()?'factory phone refused question falls back and recovers original chat':phone()?'factory phone question lost admission recovers confirmed':'factory question lost notify recovers confirmed');
@@ -37,12 +45,10 @@ export function deliveryBoundary(){
    assert.equal(params.topic,'task-board.browser-notification');
    emit({kind:'delivery-browser-notice',params});reply(id,{});return true;
   }
-  if(method==='test.retentionDelivery'){
-   assert.ok(row);assert.deepEqual(Object.keys(params).sort(),'error'in params?['error','raw']:['raw']);
-   const raw=params.raw;assert.equal(raw.object.contractKey,'task-board/delivery');assert.equal(raw.content.encoding,'json');
-   assert.ok(['pending','outcome_unknown','confirmed'].includes(raw.content.value.state));
-   retainedDelivery=structuredClone(raw);retentionError=params.error??null;
-   if(retentionError){assert.deepEqual(Object.keys(retentionError).sort(),['code','message','outcome']);assert.ok(['service_unavailable','not_found'].includes(retentionError.code));assert.equal(retentionError.outcome,'not_executed');}
+  if(method==='test.retentionCleanup'){
+   assert.ok(row);assert.deepEqual(Object.keys(params).sort(),'error'in params?['error']:[]);
+   retentionError=params.error??null;
+   if(retentionError){assert.deepEqual(Object.keys(retentionError).sort(),['code','message','outcome']);assert.equal(retentionError.code,'service_unavailable');assert.equal(retentionError.outcome,'not_executed');}
    reply(id,{});return true;
   }
   if(method==='test.retentionConfiguration'){
@@ -52,11 +58,6 @@ export function deliveryBoundary(){
   if(method==='serviceNodes.list'&&retentionConfiguration){
    assert.deepEqual(params,{serviceName:'agent-manager',limit:200});
    emit({kind:'retention-configuration-hosts',params});reply(id,{items:[],nextCursor:null});return true;
-  }
-  if(method==='objects.read'&&retainedDelivery&&params.objectId===retainedDelivery.object.objectId){
-   assert.deepEqual(params,{objectId:retainedDelivery.object.objectId});
-   if(retentionError){emit({kind:'delivery-retention-read',address:params,error:retentionError});fail(retentionError.code,retentionError.message,retentionError.outcome);}
-   else{emit({kind:'delivery-retention-read',address:params,raw:retainedDelivery});reply(id,retainedDelivery);}return true;
   }
   if(method==='serviceNodes.get'&&params.serviceNodeId==='chat-node'){
    assert.ok(row);assert.ok(!phone()||fallback());reply(id,{serviceNodeId:'chat-node',serviceName:'chat-bridge',principalId:expected().principalId,connected:true,synced:true,ready:true});return true;

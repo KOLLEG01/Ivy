@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use base64::{Engine, engine::general_purpose::STANDARD};
 #[path = "chat-native-evidence-cases.rs"]
 mod native_evidence;
@@ -129,20 +131,11 @@ fn body(spec: &Json) -> Json {
 fn oracle() -> &'static Json {
     static ORACLE: OnceLock<Json> = OnceLock::new();
     ORACLE.get_or_init(|| {
-        let output = Command::new("node")
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .arg("tests/rust/fixtures/chat-evidence-bytes-oracle.mjs")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let output = reference_data::read(include_bytes!("fixtures/chat-evidence-bytes-cases.json.gz"));
         if let Some(path) = std::env::var_os("IVY_CHAT_EVIDENCE_BYTES_ORACLE_CAPTURE") {
-            std::fs::write(path, &output.stdout).unwrap();
+            std::fs::write(path, &output).unwrap();
         }
-        parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
+        parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap()
     })
 }
 struct Fixed(i64);

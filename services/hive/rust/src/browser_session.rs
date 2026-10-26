@@ -106,12 +106,11 @@ impl Session<'_> {
         let Some(session) = result? else {
             return Ok(());
         };
-        let token = session
-            .get("sessionToken")
-            .and_then(IvyJson::as_js_string)
-            .filter(|token| !token.0.is_empty())
-            .ok_or_else(IvyError::internal)?;
-        response.set_cookie(&owner.cookie(token, false))?;
+        if session.is_null() {
+            return Err(IvyError::internal());
+        }
+        let token = crate::json_text::value_text(session.get("sessionToken"))?;
+        response.set_cookie(&owner.cookie(&token, false))?;
         response.redirect(&target)
     }
     /// The shared authenticated-HTTP prefix. Browser-push returns before this
@@ -125,11 +124,7 @@ impl Session<'_> {
         if context.is_null() {
             return Err(IvyError::internal());
         }
-        if context
-            .get("sessionDigest")
-            .and_then(IvyJson::as_js_string)
-            .is_some_and(|value| !value.0.is_empty())
-        {
+        if truthy(context.get("sessionDigest")) {
             if let Some(token) =
                 http_auth::session_token(headers.cookie.as_ref()).filter(|v| !v.0.is_empty())
             {
@@ -158,20 +153,11 @@ impl Session<'_> {
             ]))
             .await?;
         owner.reset();
-        let credential = context
-            .get("credentialDigest")
-            .and_then(IvyJson::as_js_string)
-            .ok_or_else(IvyError::internal)?;
+        let credential = context.get("credentialDigest");
         for peer in peers.iter() {
             let peer_context = peer.context();
-            if peer_context
-                .get("sessionDigest")
-                .and_then(IvyJson::as_js_string)
-                .is_some_and(|value| !value.0.is_empty())
-                && peer_context
-                    .get("credentialDigest")
-                    .and_then(IvyJson::as_js_string)
-                    == Some(credential)
+            if truthy(peer_context.get("sessionDigest"))
+                && same_credential(peer_context.get("credentialDigest"), credential)
             {
                 peer.terminate()?;
             }
@@ -203,7 +189,8 @@ pub fn return_path(
     if !input.0.starts_with(&[47]) || input.0.starts_with(&[47, 47]) || input.0.contains(&92) {
         return Err(invalid());
     }
-    let destination = parse_url_with_base(input, origin)?;
+    let input = String::from_utf16_lossy(&input.0).into();
+    let destination = parse_url_with_base(&input, origin)?;
     let components = url_components(&destination.href.clone().into())?;
     let path = JsString::from(components.pathname.clone());
     let mut prefix = base_path.clone();
@@ -226,6 +213,23 @@ pub fn return_path(
     result.push_str(search);
     result.push_str(&destination.hash);
     Ok(result.into())
+}
+fn truthy(value: Option<&IvyJson>) -> bool {
+    match value {
+        None | Some(IvyJson::Null) => false,
+        Some(IvyJson::Bool(value)) => *value,
+        Some(IvyJson::Number(value)) => *value != 0.0 && !value.is_nan(),
+        Some(IvyJson::String(value)) => !value.0.is_empty(),
+        _ => true,
+    }
+}
+fn same_credential(left: Option<&IvyJson>, right: Option<&IvyJson>) -> bool {
+    match (left, right) {
+        (Some(left @ (IvyJson::Object(_) | IvyJson::Array(_))), Some(right)) => {
+            std::ptr::eq(left, right)
+        }
+        _ => left == right,
+    }
 }
 fn require(condition: bool, code: &str, message: &str) -> IvyResult<()> {
     if condition {

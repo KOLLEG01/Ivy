@@ -9,8 +9,8 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
     const f = await taskBoardFixture(t, { viewport });
     const create = async title => (await f.invoke({ action: 'create', fields: {
       title, description: '', acceptanceCriteria: [], category: null, control: 'user', priority: 2,
-      executionRequirement: null, workspaceRequirement: { kind: 'task_workspace' }, dependencies: [],
-      userContact: 'ticket', nextReviewAt: null, dueAt: null,
+      executionRequirement: null, workspaceRequirement: { kind: 'task_workspace' }, allowParallel: false,
+      userContact: 'ticket', dueAt: null,
     } })).task.objectId;
     const first = await create('Ticket image gallery'), second = await create('Separate ticket image');
     const png = await f.page.evaluate(() => {

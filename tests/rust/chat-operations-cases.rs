@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_chat_bridge::{
     admission::ChatAdmission,
     operations::ChatOperations,
@@ -79,17 +81,8 @@ fn document(doc: Option<Document>) -> Json {
 }
 #[tokio::test]
 async fn admitted_operation_identity_replay_and_recovery_match_original() {
-    let output = Command::new("node")
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .arg("tests/rust/fixtures/chat-operations-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let fixture = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let output = reference_data::read(include_bytes!("fixtures/chat-operations-cases.json.gz"));
+    let fixture = parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap();
     let now = fixture.required("now").unwrap().as_f64().unwrap() as i64;
     for case in fixture.required("cases").unwrap().as_array().unwrap() {
         let path = Fixture::new();

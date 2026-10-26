@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_chat_bridge::store::{Destination, Pin, StoreResult, local::LocalStore};
 use ivy_contracts::{
     IvyJson as Json,
@@ -228,17 +230,8 @@ fn step(
 #[test]
 fn local_retention_and_conflicts_match_original_typescript() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = Command::new("node")
-        .current_dir(root)
-        .arg("tests/rust/fixtures/chat-store-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let fixture = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let output = reference_data::read(include_bytes!("fixtures/chat-store-cases.json.gz"));
+    let fixture = parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap();
     let now = n(&fixture, "now");
     let iso = s(&fixture, "iso");
     for case in fixture.required("cases").unwrap().as_array().unwrap() {
@@ -327,9 +320,8 @@ fn node_rust_node_preserves_chat_database_and_atomic_failed_writes() {
     super::node(
         r#"
       import {DatabaseSync} from 'node:sqlite';import {readFileSync} from 'node:fs';
-      const source=readFileSync('services/chat-bridge/src/store.ts','utf8');
-      const schema=source.match(/this\.local\.exec\(`([^`]+)`\)/)[1];
-      const db=new DatabaseSync(process.argv[1]);db.exec(schema);
+      const db=new DatabaseSync(process.argv[1]);
+      db.exec(readFileSync('tests/fixtures/chat-legacy-storage.sql','utf8'));
       const at='2026-09-21T14:13:20.123Z';
       db.prepare('INSERT INTO documents VALUES(?,?,?,?,?,?,?)').run('main','chat-bridge/main','main','root',1,at,at);
       db.prepare('INSERT INTO revisions VALUES(?,?,?,?)').run('main',1,'{ "opaque":"\\ud800", "n":1 }',at);

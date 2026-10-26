@@ -49,10 +49,7 @@ pub fn search(
     let identity = identity("objects.search", parameters)?;
     let limit = limit(parameters, 50);
     let after = match cursor(parameters) {
-        Some(cursor) => store
-            .read_cursor(&identity, cursor)?
-            .and_then(IvyJson::into_js_string)
-            .ok_or_else(|| IvyError::new("invalid_cursor", "Invalid search cursor."))?,
+        Some(cursor) => crate::json_text::value_text(store.read_cursor(&identity, cursor)?.as_ref())?,
         None => JsString::default(),
     };
     let root = parameters

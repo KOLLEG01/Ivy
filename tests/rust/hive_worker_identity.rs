@@ -1,11 +1,11 @@
-use super::{AuthContext, AuthenticatedContext, IvyError, IvyJson, Root, Store, native, oracle};
-use base64::{
-    Engine,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+use super::{
+    AuthContext, AuthenticatedContext, IvyError, IvyJson, Root, Store, native, reference_data,
 };
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ivy_contracts::{IvyResult, hash::digest};
 use ivy_hive::{store::Credential, worker_identity as identity};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 pub(super) fn bind(step: &mut Value, rows: &[Value]) {
     for binding in step["identityBindings"].as_array().unwrap().clone() {
@@ -146,21 +146,57 @@ fn setup() -> Vec<Value> {
         json!({"op":"configure","credentials":[{"principalId":"alpha","digest":credential("a")},{"principalId":"beta","digest":credential("b")}]}),
     ]
 }
+fn reference(steps: &[Value]) -> Value {
+    static CASES: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let cases = CASES.get_or_init(|| {
+        serde_json::from_slice(&reference_data::read(include_bytes!(
+            "../fixtures/hive-worker-identity-reference.json.gz"
+        )))
+        .unwrap()
+    });
+    let key = digest(serde_json::to_vec(steps).unwrap());
+    cases["traces"]
+        .get(&key)
+        .unwrap_or_else(|| panic!("Missing original Hive identity trace: {key}"))
+        .clone()
+}
+fn substitute(value: &Value, aliases: &BTreeMap<String, String>) -> Value {
+    match value {
+        Value::String(text) => Value::String(aliases.get(text).unwrap_or(text).clone()),
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|item| substitute(item, aliases)).collect())
+        }
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), substitute(value, aliases)))
+                .collect(),
+        ),
+        value => value.clone(),
+    }
+}
 fn compare(steps: &[Value]) -> Value {
     let root = Root::new();
     let actual = native(&root.0.join("native.sqlite"), steps);
-    let mut original = steps.to_vec();
-    for (index, step) in original.iter_mut().enumerate() {
+    let expected = reference(steps);
+    assert_eq!(actual["rows"].as_array().unwrap().len(), steps.len());
+    assert_eq!(expected["rows"].as_array().unwrap().len(), steps.len());
+    let mut aliases = BTreeMap::new();
+    for (index, step) in steps.iter().enumerate() {
         if step["op"] == "identity" && step["method"] == "session.create" {
             if let Some(token) = actual["rows"][index]["value"]["sessionToken"].as_str() {
                 assert_eq!(token.len(), 43);
                 let bytes = URL_SAFE_NO_PAD.decode(token).unwrap();
                 assert_eq!(bytes.len(), 32);
-                step["sessionBytes"] = STANDARD.encode(bytes).into();
+                let mut fixed = [0u8; 32];
+                fixed[..8].copy_from_slice(&(index as u64).to_le_bytes());
+                let fixed = URL_SAFE_NO_PAD.encode(fixed);
+                assert_eq!(expected["rows"][index]["value"]["sessionToken"], fixed);
+                assert!(aliases.insert(token.to_owned(), fixed.clone()).is_none());
+                assert!(aliases.insert(digest(token), digest(&fixed)).is_none());
             }
         }
     }
-    let expected = oracle(&root.0.join("reference.sqlite"), &original);
     for (index, (left, right)) in actual["rows"]
         .as_array()
         .unwrap()
@@ -168,8 +204,13 @@ fn compare(steps: &[Value]) -> Value {
         .zip(expected["rows"].as_array().unwrap())
         .enumerate()
     {
+        let mut left = substitute(left, &aliases);
+        left["state"]["sessions"]
+            .as_array_mut()
+            .unwrap()
+            .sort_by(|a, b| a["digest"].as_str().cmp(&b["digest"].as_str()));
         assert_eq!(
-            left, right,
+            &left, right,
             "Worker identity trace {index} ({})",
             steps[index]["method"]
         );
@@ -294,6 +335,27 @@ fn worker_keys_and_access_expiry_preserve_v2_labels_root_identity_and_exact_time
             json!({"context":context,"request":{"fixture":"only expiry admission"}}),
         ));
     }
+    let mut coercions = vec![];
+    for (expires, admitted) in [
+        (json!(" \u{feff}100001\u{feff} "), true),
+        (json!("0x20000"), true),
+        (json!("0b100000000000000000"), true),
+        (json!("0o400000"), true),
+        (json!("Infinity"), true),
+        (json!("inf"), false),
+        (json!("-Infinity"), false),
+        (json!([100001]), true),
+        (json!([["100001"]]), true),
+        (json!([true]), false),
+        (json!([100001, 1]), false),
+        (json!(true), false),
+    ] {
+        coercions.push((steps.len(), admitted));
+        steps.push(action(
+            "execute",
+            json!({"context":{"expiresAt":expires},"request":{"fixture":"retained expiry coercion"}}),
+        ));
+    }
     steps.push(sql(
         "UPDATE metadata SET value=upper(value) WHERE key='cursor_secret';",
     ));
@@ -316,6 +378,13 @@ fn worker_keys_and_access_expiry_preserve_v2_labels_root_identity_and_exact_time
     );
     for i in [checks[2], checks[3], checks[5]] {
         no_effect(&rows, i, "unauthenticated");
+    }
+    for (index, admitted) in coercions {
+        if admitted {
+            success(&rows, index);
+        } else {
+            no_effect(&rows, index, "unauthenticated");
+        }
     }
     no_effect(&rows, invalid, "storage_invalid");
 }
@@ -628,6 +697,8 @@ fn oauth_family_capacity_cleanup_legacy_states_and_sql_failures_keep_original_tr
         ("null", "internal_error", false),
         ("5", "unauthenticated", true),
         ("[]", "unauthenticated", true),
+        ("[1,{\"retained\":true}]", "unauthenticated", true),
+        ("\"xy\"", "unauthenticated", true),
     ] {
         let mut steps = setup();
         steps.push(sql(format!(

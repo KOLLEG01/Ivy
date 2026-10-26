@@ -324,35 +324,6 @@ dashboard.onUpdate(async ({data,output})=>{
 }
 
 #[tokio::test]
-#[ignore = "requires pinned Node/Chromium and the built Windows job launcher"]
-async fn native_binary_matches_original_service_through_real_hive() {
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = tokio::process::Command::new("node")
-        .current_dir(&repo)
-        .arg("--experimental-transform-types")
-        .arg("--import")
-        .arg("./tests/fixtures/dashboards-source-loader.mjs")
-        .arg("tests/fixtures/dashboards-hive.mjs")
-        .env(
-            "DASHBOARDS_TEST_SERVICE",
-            env!("CARGO_BIN_EXE_ivy-dashboards"),
-        )
-        .kill_on_drop(true)
-        .output();
-    let output = tokio::time::timeout(Duration::from_secs(240), output)
-        .await
-        .expect("isolated Hive fixture exceeded its deadline")
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    println!("{}", String::from_utf8_lossy(&output.stdout));
-}
-
-#[tokio::test]
 #[ignore = "requires pinned isolated Chromium and the built Windows job launcher"]
 async fn provider_reconnect_health_and_identity_bound_shutdown() {
     assert!(

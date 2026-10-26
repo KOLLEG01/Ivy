@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_chat_bridge::{
     admission::ChatAdmission,
@@ -13,7 +15,7 @@ use ivy_contracts::{
 use ivy_sdk::{clock::Clock, service::ServiceFuture};
 use std::{
     path::Path,
-    process::{Command, Stdio},
+    process::Stdio,
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -80,23 +82,16 @@ async fn until(mut predicate: impl FnMut() -> bool, label: &str) {
 }
 fn oracle() -> &'static Json {
     static CORPUS: OnceLock<Json> = OnceLock::new();
-    CORPUS.get_or_init(|| read_oracle("oracle", "IVY_CHAT_RUNTIME_ORACLE_CAPTURE"))
+    CORPUS.get_or_init(|| read_oracle("oracle"))
 }
-fn read_oracle(mode: &str, capture: &str) -> Json {
-    let out = Command::new("node")
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .args(["tests/rust/fixtures/chat-service-runtime-peer.mjs", mode])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    if let Some(path) = std::env::var_os(capture) {
-        std::fs::write(path, &out.stdout).unwrap();
-    }
-    parse(std::str::from_utf8(&out.stdout).unwrap(), usize::MAX).unwrap()
+fn read_oracle(mode: &str) -> Json {
+    let bytes: &[u8] = match mode {
+        "oracle" => include_bytes!("fixtures/chat-service-oracle-cases.json.gz"),
+        "startup-seed" => include_bytes!("fixtures/chat-service-startup-seed-cases.json.gz"),
+        "whatsapp-oracle" => include_bytes!("fixtures/chat-service-whatsapp-oracle-cases.json.gz"),
+        _ => panic!("Unknown compatibility corpus: {mode}"),
+    };
+    parse(std::str::from_utf8(&reference_data::read(bytes)).unwrap(), usize::MAX).unwrap()
 }
 struct Peer {
     child: Child,
@@ -439,6 +434,7 @@ async fn service_start_reconnect_health_control_and_close_match_original_main() 
             service_node_id: "chat-provider".into(),
             data_root: Some(dir.clone()),
             language: "en".into(),
+        diagnostic_notifications: true,
         });
         let mut settings = Json::object([
             ("pollMs", Json::Number(60000.0)),

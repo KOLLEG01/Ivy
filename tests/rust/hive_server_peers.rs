@@ -18,10 +18,6 @@ use ivy_hive::{
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
-    fs::OpenOptions,
-    io::Write,
-    path::Path,
-    process::{Command, Stdio},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -30,6 +26,8 @@ use tokio::{runtime::Builder, sync::oneshot};
 mod composition;
 #[path = "hive_server_direct.rs"]
 mod direct;
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 fn wire(value: &Value) -> IvyJson {
     parse(&value.to_string(), usize::MAX).unwrap()
 }
@@ -285,49 +283,55 @@ fn summary(value: IvyJson) -> IvyJson {
         value
     }
 }
-fn oracle(traces: &[Value]) -> IvyJson {
-    let mut child =
-        Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .arg("tests/fixtures/hive-server-peers-oracle.mjs")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-    child
-        .stdin
-        .take()
+fn original(traces: &[Value]) -> &'static IvyJson {
+    static CASES: std::sync::OnceLock<IvyJson> = std::sync::OnceLock::new();
+    let cases = CASES.get_or_init(|| {
+        let bytes = reference_data::read(include_bytes!(
+            "../fixtures/hive-server-peers-reference.json.gz"
+        ));
+        parse(std::str::from_utf8(&bytes).unwrap(), usize::MAX).unwrap()
+    });
+    let key = digest(serde_json::to_string(traces).unwrap());
+    cases
+        .get("traces")
         .unwrap()
-        .write_all(serde_json::to_string(traces).unwrap().as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
-}
-fn corpus(value: IvyJson) {
-    if let Some(path) = std::env::var_os("IVY_HIVE_PEERS_CORPUS") {
-        writeln!(
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .unwrap(),
-            "{}",
-            encode(&value)
-        )
-        .unwrap();
-    }
+        .get(&key)
+        .unwrap_or_else(|| panic!("Missing original Hive server peers group: {key}"))
 }
 fn compare(group: &str, traces: Vec<Value>) {
-    let original = oracle(&traces);
-    compare_sources(group, &traces, &original);
+    compare_sources(group, &traces, original(&traces));
+}
+// Reporter completion and admission of the next queued operation share no response ordering contract.
+fn compared(value: &IvyJson, trace: &Value) -> IvyJson {
+    let mut value = value.clone();
+    let mut rows = value.get("rows").unwrap().as_array().unwrap().to_vec();
+    for (row, step) in rows.iter_mut().zip(trace["steps"].as_array().unwrap()) {
+        if step["op"] == "complete"
+            && step["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("worker:"))
+        {
+            let IvyJson::Array(events) = row else {
+                unreachable!()
+            };
+            let reporter = |event: &IvyJson| event.get("kind") == Some(&"invoke-ok".into());
+            let credential = |event: &IvyJson| {
+                event.get("kind") == Some(&"worker".into())
+                    && event
+                        .get("payload")
+                        .and_then(|payload| payload.get("action"))
+                        == Some(&"credentials.configure".into())
+            };
+            if events.len() == 2 && credential(&events[0]) && reporter(&events[1]) {
+                events.swap(0, 1);
+            }
+        }
+    }
+    value.insert("rows", IvyJson::Array(rows));
+    value
 }
 fn compare_sources(group: &str, traces: &[Value], original: &IvyJson) {
+    assert_eq!(traces.len(), original.as_array().unwrap().len());
     for (trace, source) in traces.iter().zip(original.as_array().unwrap()) {
         let runtime = Builder::new_current_thread()
             .enable_time()
@@ -357,13 +361,15 @@ fn compare_sources(group: &str, traces: &[Value], original: &IvyJson) {
                 );
             }
         }
-        corpus(IvyJson::object([
-            ("group", group.into()),
-            ("input", wire(trace)),
-            ("original", source.clone()),
-            ("native", actual.clone()),
-        ]));
-        if &actual != expected {
+        let count = trace["steps"].as_array().unwrap().len();
+        assert_eq!(actual.get("rows").unwrap().as_array().unwrap().len(), count);
+        assert_eq!(
+            expected.get("rows").unwrap().as_array().unwrap().len(),
+            count
+        );
+        let actual = compared(&actual, trace);
+        let expected = compared(expected, trace);
+        if actual != expected {
             let rows = actual.get("rows").unwrap().as_array().unwrap();
             let original = expected.get("rows").unwrap().as_array().unwrap();
             let index = rows.iter().zip(original).position(|(a, b)| a != b).unwrap();
@@ -927,9 +933,12 @@ async fn run_trace(trace: &Value, source: &IvyJson) -> IvyJson {
                     if let Some(server) = &server {
                         server.lifecycle.worker_event(
                             ivy_hive::worker_runtime::Event::Notification(
-                                ivy_hive::worker_protocol::Notification::EventsAvailable(expanded(
-                                    &step["through"],
-                                )),
+                                ivy_hive::worker_protocol::Notification::EventsAvailable(
+                                    IvyJson::object([(
+                                        "throughSequence",
+                                        expanded(&step["through"]),
+                                    )]),
+                                ),
                             ),
                         );
                     } else {
@@ -1210,7 +1219,14 @@ fn original_provider_forwarding_correlation_deadlines_and_errors() {
     ] {
         let mut f = forward("a", "node", 1.0);
         f["call"]["operationId"] = operation.clone();
-        traces.push(json!({"name":format!("operation-{operation}"),"steps":[connect("p",Some(("node",1.0))),f,{"op":"close","peer":"p"}]}));
+        if operation.is_object() {
+            // Malformed IDs enter through the public guard, before a typed PreparedCall exists.
+            let params = json!({"qualifiedName":"provider.call","expectedDefinitionHash":f["call"]["definitionHash"],"arguments":1,"serviceNodeId":"node","operationId":operation});
+            let call = json!({"op":"direct","name":"invalid-operation","context":context(None),"frame":{"jsonrpc":"2.0","id":"call","method":"tools.call","params":params}});
+            traces.push(json!({"name":format!("operation-{operation}"),"realDirect":true,"expectKinds":["operation-error"],"steps":[connect("p",Some(("node",1.0))),call,{"op":"close","peer":"p"}]}));
+        } else {
+            traces.push(json!({"name":format!("operation-{operation}"),"steps":[connect("p",Some(("node",1.0))),f,{"op":"close","peer":"p"}]}));
+        }
     }
     for outcome in ["not_executed", "unknown", "completed"] {
         traces.push(json!({"name":format!("error-{outcome}"),"steps":[connect("p",Some(("node",1.0))),forward("a","node",1.0),{"op":"result","peer":"p","call":"a","frame":{"jsonrpc":"2.0","id":"assigned","error":{"code":27,"message":{"$units":[101,55296]},"data":{"code":{"$units":[99,56320]},"outcome":outcome,"details":{"kept":true}}}}}]}));
@@ -1512,10 +1528,12 @@ fn native_provider_outcomes_use_the_typed_contract_and_preserve_error_fields() {
             .filter(|event| event["kind"] == "forward-error")
             .collect::<Vec<_>>();
         assert_eq!(failed.len(), 1);
-        if matches!(
-            outcome.as_str(),
-            Some("not_executed" | "unknown" | "completed")
-        ) {
+        if outcome.is_array()
+            || matches!(
+                outcome.as_str(),
+                Some("not_executed" | "unknown" | "completed")
+            )
+        {
             assert_eq!(failed[0]["error"]["message"], "Retained é 🙂.");
             assert_eq!(failed[0]["error"]["data"]["code"], "remote");
             assert_eq!(failed[0]["error"]["data"]["outcome"], outcome);

@@ -80,13 +80,7 @@ pub fn triage_prompt(
     developer
         .0
         .extend("\n\nPersönliche Regeln aus der expliziten Konfiguration:\n".encode_utf16());
-    let personal = match settings.get("instructions") {
-        Some(value) => value
-            .as_js_string()
-            .cloned()
-            .ok_or_else(IvyError::internal)?,
-        None => JsString::default(),
-    };
+    let personal = crate::json_text::text(settings.get("instructions"))?;
     developer.0.extend(personal.0);
     Ok(IvyJson::object([
         ("promptHash", digest(prompt.as_bytes()).into()),

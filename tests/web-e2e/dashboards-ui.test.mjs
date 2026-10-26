@@ -4,8 +4,7 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { expect } from "@playwright/test";
 import { fixture, fixtureToken } from "./fixtures/fixture.mjs";
-import { startDashboards } from "../../dist/services/dashboards/src/main.js";
-import { atomicJson } from "../../dist/packages/host-runtime/src/config.js";
+import { startNativeService } from "../../tools/testing/native-service.mjs";
 import { publishUi } from "../../dist/packages/cli/src/publish-ui.js";
 import { newOperationId } from "../../dist/packages/sdk/src/client.js";
 
@@ -14,7 +13,9 @@ test(
   { timeout: 120000 },
   async (t) => {
     const f = await fixture(t);
-    const build = JSON.parse(await readFile("dist/build-info.json", "utf8"));
+    const browserSession = await f.browser.newBrowserCDPSession();
+    const { arguments: [browserExecutable] } = await browserSession.send('Browser.getBrowserCommandLine');
+    await browserSession.detach();
     const config = {
       schemaVersion: 1,
       componentId: "dashboards",
@@ -22,19 +23,12 @@ test(
       serviceNodeId: "browser-dashboards",
       hostId: "browser-host",
       publicBaseUrl: f.base + "/",
-      artifactRoot: join(f.root, "artifact"),
       dataRoot: join(f.root, "dashboards"),
-      buildId: build.buildId,
-      version: build.version,
       credential: fixtureToken,
-      settings: {},
+      settings: { chromiumExecutable: browserExecutable },
     };
-    await atomicJson(join(config.artifactRoot, "dist/build-info.json"), build);
-    const path = join(f.root, "dashboards.json");
-    await atomicJson(path, config);
-    const service = await startDashboards(path);
+    const service = await startNativeService(config);
     t.after(() => service.close());
-    await service.service.waitReady();
     const definition = JSON.parse(
       await readFile("ui/dashboards-ui/ui.json", "utf8"),
     );

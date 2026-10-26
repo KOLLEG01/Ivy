@@ -19,10 +19,7 @@ use crate::{
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_host_runtime::native_path;
-use std::{
-    path::Path,
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 
 /// Original ServerOptions data after typed configuration admission. Retain its
 /// ordered JSON for worker initialization instead of rebuilding a second shape.
@@ -194,11 +191,19 @@ impl Prepared {
             Some(root) => (root.clone(), native_path::to_native(root)),
             None => {
                 let filename = native_path::to_native(&options.filename);
-                let parent = filename.parent().unwrap_or(if filename.has_root() {
-                    &filename
-                } else {
-                    Path::new(".")
-                });
+                let parent = filename.parent().unwrap_or(&filename);
+                #[cfg(windows)]
+                let parent = {
+                    use std::path::{Component, Prefix};
+                    let mut parts = parent.components();
+                    if matches!(parts.next(), Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)))
+                        && parts.next().is_none()
+                    {
+                        parent.join(std::path::MAIN_SEPARATOR_STR)
+                    } else {
+                        parent.to_path_buf()
+                    }
+                };
                 let path = native_path::lexical(&parent.join("ui-releases"));
                 (native_path::from_native(&path), path)
             }

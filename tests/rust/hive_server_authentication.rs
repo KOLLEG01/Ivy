@@ -4,7 +4,7 @@ use ivy_hive::{
     server_constructor::Constructed,
 };
 use serde_json::{Value, json};
-use std::{fs::OpenOptions, process::Stdio, sync::atomic::AtomicU64};
+use std::sync::atomic::AtomicU64;
 use tokio::sync::oneshot;
 
 type Observations = Arc<Mutex<serde_json::Map<String, Value>>>;
@@ -263,28 +263,7 @@ async fn native(trace: &Value) -> Value {
     json!({"snapshots":snapshots})
 }
 fn compare(group: &str, traces: Vec<Value>) -> Vec<Value> {
-    let mut command =
-        Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()));
-    command
-        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .arg("tests/fixtures/hive-server-authentication-oracle.mjs")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(&serde_json::to_vec(&traces).unwrap())
-        .unwrap();
-    let original = child.wait_with_output().unwrap();
-    assert!(
-        original.status.success(),
-        "{}",
-        String::from_utf8_lossy(&original.stderr)
-    );
-    let original: Vec<Value> = serde_json::from_slice(&original.stdout).unwrap();
+    let original = lifetime_reference("authentication", &traces);
     assert_eq!(original.len(), traces.len());
     let mut observed = vec![];
     for (input, original) in traces.into_iter().zip(original) {
@@ -294,18 +273,15 @@ fn compare(group: &str, traces: Vec<Value>) -> Vec<Value> {
             .build()
             .unwrap()
             .block_on(native(&input));
-        if let Some(path) = std::env::var_os("IVY_HIVE_SERVER_AUTH_CORPUS") {
-            writeln!(
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                    .unwrap(),
-                "{}",
-                json!({"group":group,"input":input,"original":original,"native":native})
-            )
-            .unwrap();
-        }
+        let snapshots = input["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|step| step["op"] == "snapshot")
+            .count()
+            + 1;
+        assert_eq!(original["snapshots"].as_array().unwrap().len(), snapshots);
+        assert_eq!(native["snapshots"].as_array().unwrap().len(), snapshots);
         assert_eq!(
             native, original,
             "Authentication composition: {group}, {input}"

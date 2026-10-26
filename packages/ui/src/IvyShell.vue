@@ -99,6 +99,10 @@ const dark = ref(false),
   sidebarOpen = ref(true),
   logout = ref<HTMLFormElement>();
 const installBanner = ref<HTMLElement>();
+const viewportHeight = ref('100dvh');
+const viewportChanged = () => {
+  viewportHeight.value = (window.visualViewport?.height ?? window.innerHeight) + 'px';
+};
 const { height: installBannerHeight } = useElementSize(installBanner);
 const sidebarKey = computed(() => `ivy.sidebar.collapsed:${props.uiName}`);
 // Read the collapsed state before the first render so the layout does not jump.
@@ -152,8 +156,13 @@ const followTheme = (event: StorageEvent) => {
   dark.value = event.newValue === "dark";
   applyTheme();
 };
-onBeforeUnmount(() => removeEventListener("storage", followTheme));
+onBeforeUnmount(() => {
+  removeEventListener("storage", followTheme);
+  window.visualViewport?.removeEventListener('resize', viewportChanged);
+});
 onMounted(() => {
+  viewportChanged();
+  window.visualViewport?.addEventListener('resize', viewportChanged);
   addEventListener("storage", followTheme);
   try {
     const value = localStorage.getItem("ivy.theme");
@@ -172,6 +181,7 @@ onMounted(() => {
     :data-ui="uiName"
     :data-layout="layout ?? 'default'"
     class="ivy-shell ivy-embedded"
+    :style="{ '--conversation-height': viewportHeight }"
   >
     <!-- Page titles and actions still teleport here, but stay hidden: the embedding UI owns them. -->
     <div hidden><div id="ivy-toolbar-start" /><div id="ivy-toolbar-end" /></div>
@@ -189,6 +199,8 @@ onMounted(() => {
     v-model:open="sidebarOpen"
     :style="{
       '--ivy-install-banner-height': installBannerHeight + 'px',
+      '--ivy-viewport-height': viewportHeight,
+      '--conversation-height': 'calc(var(--ivy-viewport-height) - var(--ivy-content-top))',
       '--ivy-content-top': 'calc(var(--ivy-mobile-app-bar-height, 0px) + 3rem)',
       '--ivy-sidebar-offset': sidebarOpen && panel ? 'calc(16rem + var(--sidebar-width-icon) + 1px)' : 'calc(var(--sidebar-width-icon) + 1px)',
       '--sidebar-width': panel

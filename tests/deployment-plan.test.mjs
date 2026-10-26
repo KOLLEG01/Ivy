@@ -116,8 +116,8 @@ for (const component of ['fixture', 'host-executor', 'task-board', 'secretary', 
   const identity = { schemaVersion: 1, version: source.version, buildId: 'sha256:' + '2'.repeat(64) };
   const packages = [
     { id: 'fixture', name: `ivy-${component}`, manifest_path: serviceManifest, targets: [
-      { name: `ivy-${component}`, kind: ['bin'] },
-      ...(component === 'host-executor' ? ['ivy', 'ivy-bootstrap-auto-worker'].map(name => ({ name, kind: ['bin'] })) : []),
+      { name: `ivy-${component}`, kind: ['bin'], src_path: join(dirname(serviceManifest), 'src/main.rs') },
+      ...(component === 'host-executor' ? ['ivy', 'ivy-bootstrap-auto-worker', 'ivy-publish-ui'].map(name => ({ name, kind: ['bin'], src_path: join(dirname(serviceManifest), 'src', name + '.rs') })) : []),
     ] },
     { id: 'helpers', name: 'ivy-host-runtime', manifest_path: helperManifest, targets: ['ivy-health', 'ivy-job', 'ivy-host-job'].map(name => ({ name, kind: ['bin'] })) },
   ];

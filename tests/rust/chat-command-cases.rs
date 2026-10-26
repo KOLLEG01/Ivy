@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::snapshot;
 use ivy_chat_bridge::whatsapp::{
     command_native::{
@@ -359,17 +361,8 @@ impl RetryIdentity for Ids {
 
 #[tokio::test]
 async fn original_command_policy_and_native_intent_recovery_match() {
-    let out = Command::new("node")
-        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .arg("tests/rust/fixtures/chat-whatsapp-commands-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let corpus = parse(std::str::from_utf8(&out.stdout).unwrap(), usize::MAX).unwrap();
+    let out = reference_data::read(include_bytes!("fixtures/chat-whatsapp-commands-cases.json.gz"));
+    let corpus = parse(std::str::from_utf8(&out).unwrap(), usize::MAX).unwrap();
     let actual_parsers: Vec<Json> = Vec::new();
     let mut actual_policies = vec![];
     let mut actual_dispatches = vec![];

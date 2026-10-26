@@ -196,17 +196,22 @@ fn walk(
             let Some(IvyJson::Object(values)) = value else {
                 return fail("record", issues);
             };
-            IvyJson::object(values.iter().map(|(key, value)| {
-                (
-                    key.clone(),
-                    walk(
-                        item,
-                        Some(value),
-                        &child(path, IvyJson::String(key.clone())),
-                        issues,
-                    ),
-                )
-            }))
+            IvyJson::object(
+                values
+                    .iter()
+                    .filter(|(key, _)| key != &JsString::from("__proto__"))
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            walk(
+                                item,
+                                Some(value),
+                                &child(path, IvyJson::String(key.clone())),
+                                issues,
+                            ),
+                        )
+                    }),
+            )
         }
         Schema::Object(fields, loose) => {
             let Some(value @ IvyJson::Object(_)) = value else {

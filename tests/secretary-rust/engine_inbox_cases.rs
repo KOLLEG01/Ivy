@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::*;
 use ivy_contracts::{JsString, hash::hash_json, json::canonical};
 use ivy_sdk::clock::Clock;
@@ -27,23 +29,9 @@ fn fixed_uuid() -> JsString {
 
 #[tokio::test]
 async fn original_public_inbox_admission_and_retained_history() {
-    let mut command = std::process::Command::new("node");
-    command
-        .arg("tests/secretary-rust/engine-inbox-oracle.mjs")
-        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let output = command.output().expect("Original Node oracle required");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let output = reference_data::read(include_bytes!("engine-inbox-cases.json.gz"));
     let corpus = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
+        std::str::from_utf8(&output).unwrap(),
         32 * 1024 * 1024,
     )
     .unwrap();

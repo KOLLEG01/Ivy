@@ -25,8 +25,26 @@ impl Default for AuthenticationRateOptions {
         }
     }
 }
+#[derive(Clone, Copy)]
+enum ArrivalTime {
+    Monotonic(Instant),
+    Milliseconds(f64),
+}
+impl ArrivalTime {
+    fn elapsed(self, at: Self, window: Duration) -> bool {
+        match (self, at) {
+            (Self::Monotonic(now), Self::Monotonic(at)) => {
+                now.saturating_duration_since(at) >= window
+            }
+            (Self::Milliseconds(now), Self::Milliseconds(at)) => {
+                now - at >= window.as_secs_f64() * 1000.0
+            }
+            _ => true,
+        }
+    }
+}
 struct Arrivals {
-    at: Instant,
+    at: ArrivalTime,
     count: usize,
 }
 #[derive(Default)]
@@ -44,8 +62,13 @@ impl AuthenticationRate {
         }
     }
     pub fn admit(&mut self, key: &JsString, now: Instant) -> IvyResult<()> {
-        let elapsed =
-            |entry: &Arrivals| now.saturating_duration_since(entry.at) >= self.options.window;
+        self.admit_time(key, ArrivalTime::Monotonic(now))
+    }
+    pub(crate) fn admit_at_ms(&mut self, key: &JsString, now: f64) -> IvyResult<()> {
+        self.admit_time(key, ArrivalTime::Milliseconds(now))
+    }
+    fn admit_time(&mut self, key: &JsString, now: ArrivalTime) -> IvyResult<()> {
+        let elapsed = |entry: &Arrivals| now.elapsed(entry.at, self.options.window);
         if self.global.as_ref().is_none_or(elapsed) {
             self.global = Some(Arrivals { at: now, count: 0 });
         }

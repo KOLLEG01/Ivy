@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_agent_manager::{
     environment::{EnvironmentKind, environment_name, read_environment_document},
     instructions_manager::{InstructionsManager, InstructionsSettings},
@@ -23,17 +25,10 @@ use std::{
 fn data() -> &'static IvyJson {
     static DATA: OnceLock<IvyJson> = OnceLock::new();
     DATA.get_or_init(|| {
-        let out = Command::new("node")
-            .arg("tests/fixtures/agent-instructions-source-oracle.mjs")
-            .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        parse(std::str::from_utf8(&out.stdout).unwrap(), 4 * 1024 * 1024).unwrap()
+        let out = reference_data::read(include_bytes!(
+            "../fixtures/agent-instructions-source-cases.json.gz"
+        ));
+        parse(std::str::from_utf8(&out).unwrap(), 4 * 1024 * 1024).unwrap()
     })
 }
 fn field<'a>(v: &'a IvyJson, k: &str) -> &'a IvyJson {
@@ -319,7 +314,10 @@ async fn manager_composition_and_bootstrap_preserve_original_files_and_status() 
         manager.close().wait().await;
         client.consumed();
         let s = manager.status();
-        assert_eq!(s.home, home);
+        assert_eq!(
+            fs::canonicalize(&s.home).unwrap(),
+            fs::canonicalize(&home).unwrap()
+        );
         assert_eq!(s.observed_at.len(), 24);
         let status = IvyJson::object([
             ("state", s.state.into()),

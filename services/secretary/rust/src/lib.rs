@@ -75,6 +75,7 @@ pub mod source_identity;
 pub mod store;
 pub mod triage_media;
 pub mod triage_prompt;
+mod json_text;
 pub mod triage_results;
 pub mod triage_schema;
 pub mod triage_store;

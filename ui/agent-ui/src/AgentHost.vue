@@ -666,7 +666,7 @@ watch(() => action.saved.value?.phase, (phase) => {
 
 <style scoped>
 .new-task-page {
-  min-height: calc(100dvh - 3rem - var(--ivy-install-banner-height, 0px));
+  min-height: calc(var(--conversation-height, calc(100dvh - var(--ivy-content-top, 3rem))) - var(--ivy-install-banner-height, 0px));
 }
 .new-task-center {
   min-height: 360px;

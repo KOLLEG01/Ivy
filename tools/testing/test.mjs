@@ -17,6 +17,10 @@ const { values, positionals } = parseArgs({ allowPositionals: true, options: {
   'timeout-ms': { type: 'string' }, progress: { type: 'boolean' }, jobs: { type: 'string', default: '4' },
   'keep-failure': { type: 'boolean' }, 'test-name-pattern': { type: 'string' },
   'public-root': { type: 'string' }, 'consumer-root': { type: 'string' }, upstream: { type: 'string' },
+  'hive-artifact': { type: 'string' }, 'secretary-artifact': { type: 'string' },
+  'agent-manager-artifact': { type: 'string' }, 'task-board-artifact': { type: 'string' },
+  'chat-bridge-artifact': { type: 'string' },
+  'dashboards-artifact': { type: 'string' }, 'data-collector-artifact': { type: 'string' },
 } });
 const jobs = Number(values.jobs);
 const testTimeout = Number(values['timeout-ms'] ?? (values.all ? 7200000 : 300000));
@@ -47,6 +51,9 @@ else if (selected.length === 0) {
   const env = { ...process.env, TMP: temp, TEMP: temp, TMPDIR: temp, IVY_TEST_TEMP: temp,
     IVY_TEST_PROGRESS: values.progress ? '1' : '0' };
   delete env.NODE_TEST_CONTEXT;
+  for (const component of ['hive', 'secretary', 'agent-manager', 'task-board', 'chat-bridge', 'dashboards', 'data-collector']) {
+    if (values[component + '-artifact']) env['IVY_TEST_' + component.replaceAll('-', '_').toUpperCase() + '_ARTIFACT'] = resolve(values[component + '-artifact']);
+  }
   let failed = true;
   async function run(args, cwd = root, stream = false, timeout = 180000) {
     const child = spawn(process.execPath, args, { cwd, env, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -83,8 +90,9 @@ else if (selected.length === 0) {
     const needsHive = !env.IVY_TEST_HIVE_URL && [...inputs].some(path =>
       /\.(mjs|ts)$/.test(path) && existsSync(join(root, path)) && /IVY_TEST_HIVE_(URL|CREDENTIAL)/.test(readFileSync(join(root, path), 'utf8')));
     const publicRoot = values['public-root'] ?? env.IVY_TEST_PUBLIC_ROOT ?? (config.privateRepo ? undefined : root);
-    if (needsHive && (!publicRoot || !existsSync(resolve(publicRoot, 'dist/services/hive/src/server.js'))))
-      throw Error('Set IVY_TEST_PUBLIC_ROOT (or --public-root) to the built public repo for isolated Hive tests.');
+    const hiveArtifact = env.IVY_TEST_HIVE_ARTIFACT ?? publicRoot;
+    if (needsHive && (!hiveArtifact || !existsSync(resolve(hiveArtifact, 'dist/native', process.platform + '-' + process.arch, 'ivy-hive' + (process.platform === 'win32' ? '.exe' : '')))))
+      throw Error('Supply --hive-artifact (or IVY_TEST_HIVE_ARTIFACT) with a built native Hive package.');
     const needsPython = config.privateRepo && [...inputs].some(path => /\.(mjs|ts)$/.test(path) && existsSync(join(root, path)) && /IVY_TEST_PYTHON/.test(readFileSync(join(root, path), 'utf8')));
     if (needsPython) {
       const python = spawnSync(env.IVY_TEST_PYTHON ?? 'python', ['--version'], { env, windowsHide: true, encoding: 'utf8', timeout: 5000 });
@@ -92,7 +100,7 @@ else if (selected.length === 0) {
     }
     const testBuildStamp = resolve(root, 'dist/.test-build.json');
     const testBuildInputs = [...inputs, 'tools/testing/test.mjs', 'tools/testing/test-selection.mjs', 'tsconfig.json', 'tsconfig.test.json',
-      'dist/packages', 'dist/services', 'dist/tests', 'dist/specs'].map(path => resolve(root, path));
+      'dist/packages', 'dist/tests', 'dist/specs'].map(path => resolve(root, path));
     if (values['no-build'] && rustTests.length) throw Error('--no-build is unavailable for Cargo tests; Cargo verifies incremental inputs itself.');
     if (values['no-build'] && javascriptTests.some(t => t.scope !== 'tooling')) {
       let stamp;
@@ -103,10 +111,9 @@ else if (selected.length === 0) {
     if (!values['no-build'] && javascriptTests.some(t => t.scope !== 'tooling')) {
       if (selected.some(t => t.kind === 'web')) await run(['node_modules/vue-tsc/bin/vue-tsc.js', '-p', 'tsconfig.web.json', '--noEmit']);
       // Stage shared runtime resources without compiling unrelated legacy backends.
-      const { stageBackend } = await import('../build/build-backend.mjs');
-      const { buildIdentity } = await import('../../packages/host-runtime/src/build-identity.mjs');
+      const { stageSdk } = await import('../build/build-sdk.mjs');
       const previousDirectory = process.cwd();
-      try { process.chdir(root); stageBackend(buildIdentity(root)); }
+      try { process.chdir(root); stageSdk(); }
       finally { process.chdir(previousDirectory); }
       // The web build replaces dist/apps with production bundles. Run it before the
       // test project emits imported ui modules that Node-based tests load directly.
@@ -132,7 +139,7 @@ else if (selected.length === 0) {
     const args = ['--test', '--test-concurrency=' + concurrency, '--test-reporter', pathToFileURL(resolve(root, 'tools/testing/test-reporter.mjs')).href,
       ...(values['test-name-pattern'] ? ['--test-name-pattern', values['test-name-pattern']] : []), ...paths];
     const reusable = values.reuse && !values.all && !needsHive && !values['test-name-pattern'] && !values['consumer-root'] && !env.IVY_TEST_PRIVATE_ROOT && selected.every(t => config.cacheable?.(t.file));
-    const cacheInputs = reusable ? [...new Set(git(['ls-files', '-z', '--cached', '--others', '--exclude-standard']))].map(path => resolve(root, path)).concat(['packages', 'services', 'ui', 'instructions', 'tools', 'tests', 'specs', 'dist/packages', 'dist/services', 'dist/tests', 'dist/specs', 'node_modules/.package-lock.json'].map(path => resolve(root, path))) : [];
+    const cacheInputs = reusable ? [...new Set(git(['ls-files', '-z', '--cached', '--others', '--exclude-standard']))].map(path => resolve(root, path)).concat(['packages', 'services', 'ui', 'instructions', 'tools', 'tests', 'specs', 'dist/packages', 'dist/tests', 'dist/specs', 'node_modules/.package-lock.json'].map(path => resolve(root, path))) : [];
     const cacheKey = reusable ? fingerprint(cacheInputs, { files: paths, jobs, env: Object.fromEntries(Object.entries(process.env).sort()) }) : null;
     const cachePath = resolve(root, 'dist/.test-cache', 'passed.json');
     let previous;
@@ -142,7 +149,7 @@ else if (selected.length === 0) {
     if (reuse) {
       if (values.progress) console.log('Reusing successful isolated tests; inputs unchanged.');
     } else if (needsHive) {
-      await run([resolve(publicRoot, 'tools/testing/with-test-hive.mjs'), '--cwd', root, '--chat-fixture', '--timeout-ms', String(testTimeout), '--', ...args], root, true, testTimeout + 5000);
+      await run([resolve(publicRoot, 'tools/testing/with-test-hive.mjs'), '--cwd', root, '--hive-artifact', hiveArtifact, '--timeout-ms', String(testTimeout), '--', ...args], root, true, testTimeout + 20000);
     } else if (paths.length) await run(args, root, true, testTimeout);
     if (cacheKey && !reuse && cacheKey === fingerprint(cacheInputs, { files: paths, jobs, env: Object.fromEntries(Object.entries(process.env).sort()) })) {
       mkdirSync(dirname(cachePath), { recursive: true }); writeFileSync(cachePath, JSON.stringify({ key: cacheKey }));

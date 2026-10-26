@@ -169,6 +169,20 @@ test('native Hive starts storage, serves authenticated Console/MCP and restarts'
     assert.deepEqual(discovered.supportedVersions, ['2026-07-28']); assert.equal(discovered.resultType, 'complete');
     assert.equal((await mcp('tools/call', { name: 'hive_status', arguments: {} }, true)).structuredContent.result.callerPrincipalId, 'reference-user');
     const resource = config.publicBaseUrl + '/mcp', redirectUri = 'http://127.0.0.1/callback';
+    const origin = new URL(config.publicBaseUrl).origin;
+    const protectedMetadata = await (await request('/.well-known/oauth-protected-resource')).json();
+    assert.equal(protectedMetadata.resource, resource); assert.deepEqual(protectedMetadata.authorization_servers, [origin]);
+    const developmentMetadata = await (await request('/.well-known/oauth-protected-resource/mcp-dev')).json();
+    assert.equal(developmentMetadata.resource, config.publicBaseUrl + '/mcp-dev');
+    const authorizationMetadata = await (await fetch(origin + '/.well-known/oauth-authorization-server', {
+      headers: { Connection: 'close' }, signal: AbortSignal.timeout(10000),
+    })).json();
+    assert.equal(authorizationMetadata.issuer, origin);
+    assert.equal(authorizationMetadata.authorization_response_iss_parameter_supported, true);
+    assert.deepEqual(authorizationMetadata.code_challenge_methods_supported, ['S256']);
+    const challenge = await request('/mcp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    assert.equal(challenge.status, 401); assert.match(challenge.headers.get('www-authenticate') ?? '', /oauth-protected-resource/);
+    await challenge.arrayBuffer();
     const registered = await request('/oauth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ client_name: 'Native PKCE check', redirect_uris: [redirectUri] }) });
     assert.equal(registered.status, 201); const client = await registered.json();
@@ -181,12 +195,22 @@ test('native Hive starts storage, serves authenticated Console/MCP and restarts'
     const authorized = await request('/oauth/authorize', { method: 'POST', headers: { Origin: new URL(config.publicBaseUrl).origin,
       'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ transaction, credential: token }) });
     assert.equal(authorized.status, 303); const callback = new URL(authorized.headers.get('location'));
-    assert.equal(callback.searchParams.get('state'), state); assert.ok(callback.searchParams.get('iss'));
+    assert.equal(callback.origin + callback.pathname, redirectUri);
+    assert.equal(callback.searchParams.get('state'), state); assert.equal(callback.searchParams.get('iss'), origin);
     const exchange = async form => request('/oauth/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ client_id: client.client_id, resource, ...form }) });
     const codeGrant = { grant_type: 'authorization_code', code: callback.searchParams.get('code'), redirect_uri: redirectUri, code_verifier: verifier };
     const issued = await exchange(codeGrant); assert.equal(issued.status, 200); const tokens = await issued.json();
-    assert.equal(tokens.token_type, 'Bearer'); assert.ok(tokens.refresh_token); assert.ok(tokens.expires_in > 0);
+    assert.equal(tokens.token_type, 'Bearer'); assert.ok(tokens.refresh_token); assert.equal(tokens.expires_in, 900);
+    assert.match(tokens.access_token, /^ivyoa2\./);
+    const parts = tokens.access_token.split('.'), encodedClaims = Buffer.from(parts[1], 'base64url').toString('utf8');
+    assert.equal(encodedClaims.includes(token), false);
+    assert.equal(encodedClaims.includes('sha256:' + createHash('sha256').update(token).digest('hex')), false);
+    const claims = JSON.parse(encodedClaims); claims.expiresAt += 86400000;
+    const tampered = parts[0] + '.' + Buffer.from(JSON.stringify(claims)).toString('base64url') + '.' + parts[2];
+    for (const rejected of ['ivyoa1.' + parts.slice(1).join('.'), tampered, tokens.refresh_token]) {
+      assert.equal(await credentialStatus(rejected), 401);
+    }
     assert.equal((await mcp('tools/call', { name: 'hive_status', arguments: {} }, false, tokens.access_token)).structuredContent.result.callerPrincipalId, 'reference-user');
     assert.notEqual((await exchange(codeGrant)).status, 200, 'An authorization code can be exchanged only once.');
     const refreshGrant = refresh_token => ({ grant_type: 'refresh_token', refresh_token });
@@ -230,6 +254,7 @@ test('native Hive starts storage, serves authenticated Console/MCP and restarts'
     assert.equal(capabilities.items.length, 1); assert.ok(capabilities.nextCursor);
     const capabilitiesNext = await rpc('discovery.list', { serviceName: 'hive', query: 'object', limit: 1, cursor: capabilities.nextCursor });
     assert.equal(capabilitiesNext.items.length, 1); assert.notDeepEqual(capabilitiesNext.items, capabilities.items);
+    for (const entry of [...capabilities.items, ...capabilitiesNext.items]) assert.match(entry.mcpName, /^hive_object_/);
     let throughSequence = journalStart.throughSequence;
     for (const revision of [1, 2, 3]) {
       const events = await rpc('events.read', { afterSequence: throughSequence, filter: { topics: ['hive.object.changed'], objectIds: [createdPage.object.id] }, limit: 1 });
@@ -366,8 +391,13 @@ test('native Hive starts storage, serves authenticated Console/MCP and restarts'
     const retainedPage = await rpc('wiki.read', { objectId: createdPage.object.id });
     assert.equal(retainedPage.object.currentRevision, 3); assert.equal(retainedPage.content.value, 'ReferencePagingWord revision 3.');
     assert.deepEqual(await rpc('wiki.create', createPage), createdPage, 'Mutation receipts survive the process restart.');
+    assert.equal((await mcp('tools/call', { name: 'hive_status', arguments: {} }, false, rotated.access_token)).structuredContent.result.callerPrincipalId, 'reference-user');
     const renewed = await exchange(refreshGrant(rotated.refresh_token)); assert.equal(renewed.status, 200); const afterRestart = await renewed.json();
     assert.equal((await mcp('tools/call', { name: 'hive_status', arguments: {} }, true, afterRestart.access_token)).structuredContent.result.callerPrincipalId, 'reference-user');
+    const another = await (await request('/oauth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_name: 'Other public client', redirect_uris: [redirectUri] }) })).json();
+    assert.equal((await exchange({ ...refreshGrant(tokens.refresh_token), client_id: another.client_id })).status, 401);
+    assert.equal((await exchange({ ...refreshGrant(afterRestart.refresh_token), resource: config.publicBaseUrl + '/wrong' })).status, 400);
     assert.equal((await exchange(refreshGrant(tokens.refresh_token))).status, 401, 'Reusing an earlier token revokes its durable family.');
     assert.equal((await exchange(refreshGrant(afterRestart.refresh_token))).status, 401, 'A revoked family cannot rotate again.');
     const secondSnapshot = await poll(async () => (await snapshots()).find(name => name !== firstSnapshot));
@@ -406,8 +436,16 @@ test('native Hive starts storage, serves authenticated Console/MCP and restarts'
       await poll(async () => await credentialStatus(replacement) === 200);
       token = replacement;
       assert.equal(await credentialStatus(oldToken), 401);
+      assert.equal(await credentialStatus(afterRestart.access_token), 401);
       await Promise.race([retired, delay(10000, undefined, { ref: false }).then(() => { throw Error('Old credential socket was not retired.'); })]);
     } finally { oldSocket.terminate(); }
+    config.settings.credentials.push({ principalId: 'reference-user', token: oldToken });
+    await writeFile(configPath, JSON.stringify(config));
+    await poll(async () => await credentialStatus(oldToken) === 200);
+    assert.equal((await exchange(refreshGrant(afterRestart.refresh_token))).status, 401, 'Restoring a static credential must not restore a removed refresh family.');
+    config.settings.credentials = [{ principalId: 'reference-user', token: replacement }];
+    await writeFile(configPath, JSON.stringify(config));
+    await poll(async () => await credentialStatus(oldToken) === 401);
     await stop();
     await utimes(join(root, 'backups', secondSnapshot), new Date(0), new Date(0));
     await start();

@@ -3,8 +3,6 @@ use ivy_contracts::IvyResult;
 use ivy_hive::objects;
 use serde_json::{Value, json};
 use std::time::Duration;
-#[path = "hive_object_create.rs"]
-mod creation;
 
 pub(super) fn bind(step: &mut Value, rows: &[Value]) {
     for binding in step["bindings"].as_array().unwrap().clone() {
@@ -150,10 +148,10 @@ pub(super) fn apply_units(parameters: &mut IvyJson, step: &Value) {
         parameters.insert("content", content);
     }
 }
-fn sql(text: impl Into<String>) -> Value {
+pub(super) fn sql(text: impl Into<String>) -> Value {
     json!({"op":"sql","sql":text.into()})
 }
-fn definition(key: &str, version: &str, media: &str, hive: bool) -> Value {
+pub(super) fn definition(key: &str, version: &str, media: &str, hive: bool) -> Value {
     let mut value = json!({"key":key,"version":version,"owner":{"kind":if hive {"hive"} else {"agent"}},"mediaType":media,"retention":{"objects":{"mode":"retain"},"revisions":{"mode":"all"}},"specMarkdown":"synthetic immutable content fixture"});
     if media == "application/json" {
         value["jsonSchema"] = json!({"type":"object","required":["n"],"properties":{"n":{"type":"integer"}},"additionalProperties":false});
@@ -189,7 +187,7 @@ pub(super) fn setup() -> Vec<Value> {
     steps.push(sql(seed));
     steps
 }
-fn write(
+pub(super) fn write(
     nonce: &str,
     id: &str,
     expected: u64,
@@ -206,7 +204,7 @@ fn write(
 fn compare(steps: &[Value]) -> Value {
     super::object_mutations::compare(steps)
 }
-fn code(result: &Value, index: usize) -> &Value {
+pub(super) fn code(result: &Value, index: usize) -> &Value {
     &result["rows"][index]["error"]["data"]["code"]
 }
 fn read(id: &str, revision: u64) -> Value {

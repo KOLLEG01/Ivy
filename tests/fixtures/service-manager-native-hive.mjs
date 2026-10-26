@@ -4,7 +4,7 @@ import {join, resolve, toNamespacedPath} from 'node:path';
 import {createServer} from 'node:net';
 import {spawn, spawnSync} from 'node:child_process';
 import {setTimeout as delay} from 'node:timers/promises';
-import {HiveServer} from '../../services/hive/src/server.ts';
+import {startTestHive} from '../../tools/testing/native-service.mjs';
 import {HiveClient, discover, callBound, newOperationId} from '../../packages/sdk/src/client.ts';
 import {HostJournal} from '../../packages/host-runtime/src/journal.ts';
 import {atomicJson} from '../../packages/host-runtime/src/config.ts';
@@ -72,8 +72,7 @@ journal.saveCandidate(candidate, {schemaVersion:1, componentId:'fixture', kind:'
   readiness:{timeoutMs:1000,command:{executable:'node',args:['-e','process.exit(0)'],timeoutMs:1000}},
   shutdown:{timeoutMs:1000}, restart:{policy:'never',minimumDelayMs:100,maximumDelayMs:1000}, storage:{writeFormat:1,minReadableFormat:1,maxReadableFormat:1}});
 journal.setInstalled({instanceId:'fixture', candidateId, buildId:candidateId, enabled:true, installedAt:new Date().toISOString()});
-const hive = new HiveServer({filename:join(root,'hive.sqlite'), packageRoot:join(root,'packages'), publicBaseUrl, listenHost:'127.0.0.1', listenPort:port,
-  version:'test', buildId:digest('isolated-hive'), credentials:[{principalId:'manager',digest:digest(token)}]});
+let hive;
 let manager;
 let dispatcherOwner;
 let dispatcherProof;
@@ -285,7 +284,7 @@ async function stop() {
   }
 }
 try {
-  await hive.start();
+  hive = await startTestHive({root:join(root,'hive'), port, credentials:[{principalId:'manager',token}]});
   const client = new HiveClient(publicBaseUrl,{credential:token});
   const originalConfiguration = await client.request('hostConfigurations.put',{hostId:config.hostId,configuration:config,mutationId:await newOperationId(client)});
   const executor = async () => atomicJson(join(root,'state','executor.json'), {schemaVersion:1,hostId:config.hostId,pid:process.pid,bootId:'executor-fixture',buildId:null,
@@ -322,6 +321,9 @@ try {
   journal.advance(record.deploymentId,record.phase,'failed',{errorCode:'fixture_terminal_failure'});
   const terminal = await call('deploy',deploy);
   assert.equal(terminal.deploymentId,record.deploymentId);assert.equal(terminal.phase,'failed');
+  // Acknowledge this report before later terminal operations retire it locally.
+  // The catalog assertion below also checks history after that local retirement.
+  await until(async()=> (await client.request('deployments.list',{hostId:config.hostId})).items.some(i=>i.record.deploymentId===record.deploymentId));
   await assert.rejects(call('deploy',{instanceId:'fixture',operationId:deploy.operationId,source:join(root,'missing-source')}),e=>e.code==='mutation_conflict');
   results.push('routed operation binding and terminal replay');
   for (const action of ['rollback','restart','enable','disable']) {
@@ -373,7 +375,8 @@ try {
   await delay(650);assert.equal(manager.child.exitCode,null);
   await stop();
   await start();bindings.clear();
-  const replay = await call('deploy',deploy);assert.equal(replay.deploymentId,record.deploymentId);assert.equal(replay.phase,'failed');
+  const replay = await call('deploy',sourceArgs);assert.equal(replay.deploymentId,sourceRecord.deploymentId);assert.equal(replay.phase,'failed');
+  await assert.rejects(call('deploy',deploy),e=>e.code==='operation_expired');
   await stop();
   results.push('host reload refusal, control binding, process replacement replay');
   }
@@ -382,5 +385,5 @@ try {
   console.log(JSON.stringify({ok:true,results,...(releaseIdentity ? {mode,identity:releaseIdentity,componentStamp:{schemaVersion:1,componentId:'service-manager',version,buildId:hash},processProof:dispatcherProof} : {}),limitations:['Executor status is a fixture; no native deployment executor or archive/platform acceptance.']}));
 } finally {
   clearInterval(executorTimer);
-  try {await stopDispatcherOwner();await stop();} finally {await hive.close();journal.close();}
+  try {await stopDispatcherOwner();await stop();} finally {await hive?.close();journal.close();}
 }

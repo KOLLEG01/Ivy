@@ -87,11 +87,14 @@ impl Sender for Effects {
         details: VapidDetails,
     ) -> browser_push::SendFuture {
         let options = obj([
-            ("vapidDetails", obj([
-                ("publicKey", details.public_key.into()),
-                ("privateKey", details.private_key.into()),
-                ("subject", details.subject.into()),
-            ])),
+            (
+                "vapidDetails",
+                obj([
+                    ("publicKey", details.public_key.into()),
+                    ("privateKey", details.private_key.into()),
+                    ("subject", details.subject.into()),
+                ]),
+            ),
             ("TTL", IvyJson::Number(3600.0)),
             ("timeout", IvyJson::Number(10000.0)),
         ]);
@@ -313,47 +316,6 @@ fn redirect_query(value: &JsString) -> JsString {
     let at = value.0.iter().position(|c| *c == b'?' as u16).unwrap();
     JsString(value.0[at + 1..].to_vec())
 }
-#[test]
-fn original_constructor_paths_options_and_bound_business_owners() {
-    let output = Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
-        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .arg("tests/fixtures/hive-server-constructor-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let original = json(std::str::from_utf8(&output.stdout).unwrap());
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let rows = original.get("rows").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), 25);
-    let mut observations = vec![];
-    for row in rows {
-        let input = row.get("input").unwrap().get("options").unwrap();
-        let native = match runtime.block_on(execute(input)) {
-            Ok(value) => obj([("value", value)]),
-            Err(Error::Ivy(error)) => obj([("error", error.to_wire())]),
-            Err(Error::UrlConstructor { input }) => {
-                obj([("urlConstructorInput", IvyJson::String(input))])
-            }
-        };
-        observations.push(obj([("original", row.clone()), ("native", native.clone())]));
-        if let Some(path) = std::env::var_os("IVY_HIVE_SERVER_BINDINGS_CORPUS") {
-            std::fs::write(path, encode(&IvyJson::Array(observations.clone()))).unwrap();
-        }
-        assert_eq!(
-            &native,
-            row.get("expected").unwrap(),
-            "{}",
-            encode(row.get("input").unwrap())
-        );
-    }
-}
 fn launch() -> WorkerLaunch {
     WorkerLaunch {
         root: PathBuf::from("constructor-unused-root"),
@@ -438,11 +400,15 @@ fn native_constructor_is_inert_and_does_not_retain_lifecycle() {
     #[cfg(windows)]
     {
         for (name, filename, path) in [
-            ("drive-prefix-only", r"C:", PathBuf::from("ui-releases")),
+            (
+                "drive-prefix-only",
+                r"C:",
+                PathBuf::from(r"C:\").join("ui-releases"),
+            ),
             (
                 "drive-relative",
                 r"C:hive.sqlite",
-                PathBuf::from("C:").join("ui-releases"),
+                PathBuf::from(r"C:\").join("ui-releases"),
             ),
             (
                 "rooted-filename",
@@ -534,6 +500,9 @@ fn native_constructor_is_inert_and_does_not_retain_lifecycle() {
         ));
     }
 }
+
+#[path = "hive_server_constructor_cases.rs"]
+mod constructor_cases;
 
 #[path = "hive_server_authentication.rs"]
 mod authentication;

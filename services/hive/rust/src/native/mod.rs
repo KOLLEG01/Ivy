@@ -217,7 +217,9 @@ async fn shutdown_signal() -> std::io::Result<()> {
     #[cfg(not(unix))]
     tokio::signal::ctrl_c().await
 }
-pub async fn run() -> IvyResult<()> {
+pub async fn run(
+    sender: impl FnOnce() -> IvyResult<Arc<dyn ivy_hive::browser_push::Sender>>,
+) -> IvyResult<()> {
     let config_path = configuration_path(
         &std::env::args_os().skip(1).collect::<Vec<_>>(),
         std::env::var_os("IVY_INSTANCE_CONFIG"),
@@ -302,11 +304,7 @@ pub async fn run() -> IvyResult<()> {
         .await?;
     let holder = Arc::new(OnceLock::new());
     let listener = Listener::new(holder.clone());
-    let client = ivy_hive::browser_push_https::NativeHttps::new()?;
-    let sender = ivy_hive::browser_push_native::NativeSender::new(
-        Arc::new(client),
-        ivy_hive::browser_push_native::system_expiration(),
-    );
+    let sender = sender()?;
     let executable = std::env::current_exe().map_err(failure)?;
     let job = std::env::var_os("IVY_JOB_LAUNCHER")
         .map(PathBuf::from)
@@ -330,7 +328,7 @@ pub async fn run() -> IvyResult<()> {
                 environment: BTreeMap::new(),
             },
             Dependencies {
-                sender: Arc::new(sender),
+                sender,
                 redirects: Arc::new(ivy_hive::oauth::UrlRedirects),
                 entropy: Arc::new(ivy_hive::oauth::OsEntropy),
                 listener: Arc::new(listener),

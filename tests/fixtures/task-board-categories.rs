@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     hash::{digest, hash_json},
@@ -33,18 +35,9 @@ fn s<'a>(v: &'a Json, k: &str) -> &'a JsString {
 fn data() -> &'static Json {
     static D: OnceLock<Json> = OnceLock::new();
     D.get_or_init(|| {
-        let p = Command::new("node")
-            .args([
-                "--experimental-transform-types",
-                "--disable-warning=ExperimentalWarning",
-                "tests/fixtures/task-board-categories-oracle.mjs",
-            ])
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .output()
-            .unwrap();
-        assert!(p.status.success(), "{}", String::from_utf8_lossy(&p.stderr));
+        let p = reference_data::read(include_bytes!("task-board-categories-cases.json.gz"));
         parse(
-            std::str::from_utf8(&p.stdout).unwrap(),
+            std::str::from_utf8(&p).unwrap(),
             MANAGEMENT_FRAME_BYTES,
         )
         .unwrap()

@@ -24,7 +24,7 @@ Wire fields and operations: [schemas](schemas).
 
 ## AgentManager
 
-[Agent contracts](schemas/agent.schema.json), [implementation](../services/agent-manager/src),
+[Agent contracts](schemas/agent.schema.json), [implementation](../services/agent-manager/rust/src),
 [native environments](AGENT-INSTRUCTIONS.md).
 
 An isolated [Claude adapter option](CLAUDE-ADAPTER.md) uses the same AgentManager service contract.
@@ -57,7 +57,7 @@ Checks: [operations](../tests/native-operations.test.ts), [inputs](../tests/agen
 
 [TaskBoard](TASK_BOARD.md) owns task workflow and result review.
 
-[ChatBridge](../services/chat-bridge/src) owns one WhatsApp transport and exactly one current
+[ChatBridge](../services/chat-bridge/rust/src) owns one WhatsApp transport and exactly one current
 Main binding. Sender admission precedes message persistence. Original message identities prevent
 loopbacks and duplicate input; delayed replies retain their channel/context. Service notices enter
 Main as retained assignments; only Main's resulting reply reaches the outbox. Consumers discover
@@ -86,7 +86,10 @@ blocks dispatch. The file queue admits 32 unresolved deliveries and 64 MiB, expi
 after seven days and retains at most 256 completed receipts with compact replay fences.
 Checks: [file delivery](../tests/chat-files.test.ts).
 
-ChatBridge observes unresolved Hive warning/error diagnostics. A problem lasting five minutes
+`Chat.Settings.diagnosticNotifications` is an optional boolean, defaulting to `false`.
+It controls automatic diagnostic warning/failure and recovery notices. Disabling it
+preserves notices already admitted to Main and their delivery receipts.
+When explicitly enabled, ChatBridge observes unresolved Hive warning/error diagnostics. A problem lasting five minutes
 enters Main once; resolution must remain stable for five minutes before one recovery notice.
 Diagnostics with the same visible service, error code and dependent service form one incident,
 independently of internal resource IDs. Recovery requires the entire group to remain healthy.

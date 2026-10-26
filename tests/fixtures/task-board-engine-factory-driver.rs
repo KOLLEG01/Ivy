@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use super::*;
 use ivy_contracts::{hash::digest, json::canonical, limits::MANAGEMENT_FRAME_BYTES};
 use ivy_task_board::{engine_invocations::InvocationRequest, evidence_bytes::ChunkKey};
@@ -446,21 +448,8 @@ pub(super) fn exact_evidence(fixture: &Fixture, peer: &Peer, expected: usize, ph
     }
 }
 fn data() -> Json {
-    let output = std::process::Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-native-driver-oracle.mjs",
-        ])
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    json(std::str::from_utf8(&output.stdout).unwrap())
+    let output = reference_data::read(include_bytes!("task-board-native-driver-cases.json.gz"));
+    json(std::str::from_utf8(&output).unwrap())
 }
 #[tokio::test(flavor = "current_thread")]
 async fn production_factory_recovers_committed_native_calls_without_redispatch_and_starts_the_exact_turn()

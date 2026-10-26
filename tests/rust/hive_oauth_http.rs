@@ -280,22 +280,8 @@ async fn native(input: &Value) -> Value {
     carrier(&IvyJson::from_serde(&json!({"trace":*trace.lock().unwrap()})).unwrap())
 }
 async fn compare(name: &str, input: Value) -> Value {
-    let original = original_output("tests/fixtures/hive-oauth-http-oracle.mjs", &input);
+    let original = auth_reference("oauth-http", &input);
     let native = tokio::task::LocalSet::new().run_until(native(&input)).await;
-    if let Ok(path) = std::env::var("IVY_HIVE_OAUTH_HTTP_CORPUS") {
-        let _guard = CORPUS.lock().unwrap();
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .unwrap();
-        writeln!(
-            file,
-            "{}",
-            json!({"name":name,"input":input,"original":original,"native":native})
-        )
-        .unwrap();
-    }
     assert_eq!(native, original, "OAuth HTTP: {name}");
     native
 }

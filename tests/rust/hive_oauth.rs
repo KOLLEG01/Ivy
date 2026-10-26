@@ -517,24 +517,10 @@ async fn native_oauth(input: &Value) -> Value {
     carrier(&IvyJson::from_serde(&json!({"snapshots":snapshots})).unwrap())
 }
 async fn compare_oauth(name: &str, input: Value) -> Value {
-    let original = original_output("tests/fixtures/hive-oauth-oracle.mjs", &input);
+    let original = auth_reference("oauth", &input);
     let native = tokio::task::LocalSet::new()
         .run_until(native_oauth(&input))
         .await;
-    if let Ok(path) = std::env::var("IVY_HIVE_OAUTH_CORPUS") {
-        let _guard = CORPUS.lock().unwrap();
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .unwrap();
-        writeln!(
-            file,
-            "{}",
-            json!({"name":name,"input":input,"original":original,"native":native})
-        )
-        .unwrap();
-    }
     assert_eq!(native, original, "OAuth: {name}");
     native
 }
@@ -594,6 +580,36 @@ async fn oauth_native_grants_refresh_reuse_and_resource_binding_match_original()
     );
     assert_eq!(
         result(&value, "revoked")["error"]["data"]["code"],
+        "unauthenticated"
+    );
+    let development = "https://example.test/ivy/mcp-dev";
+    let mut steps = flow();
+    for step in &mut steps {
+        for pair in step
+            .get_mut("form")
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
+        {
+            if pair[0] == "resource" {
+                pair[1] = development.into();
+            }
+        }
+    }
+    steps.extend([
+        json!({"op":"auth","id":"development","token":r("tokens.access_token"),"resource":development}),
+        json!({"op":"auth","id":"production","token":r("tokens.access_token"),"resource":"https://example.test/ivy/mcp"}),
+    ]);
+    let value = compare_oauth(
+        "development-access-is-bound-to-development-resource",
+        json!({"steps":steps}),
+    )
+    .await;
+    let principal: Value =
+        serde_json::from_str(result(&value, "development")["encoded"].as_str().unwrap()).unwrap();
+    assert_eq!(principal["principalId"], "alpha");
+    assert_eq!(
+        result(&value, "production")["error"]["data"]["code"],
         "unauthenticated"
     );
 }
@@ -697,29 +713,58 @@ async fn oauth_native_pending_and_code_capacity_reclaim_without_consuming_retry(
         result(&value, "full")["error"]["data"]["code"],
         "limit_exceeded"
     );
+    for i in 0..1024 {
+        assert!(result(&value, &format!("pending-{i}"))["encoded"].is_string());
+    }
+    assert!(result(&value, "reclaimed")["encoded"].is_string());
     let mut steps = vec![registration()];
     for i in 0..1024 {
         let id = format!("pending-{i}");
         steps.extend([begin(&id), authorize(&format!("code-{i}"), &id)]);
     }
+    steps.extend([json!({"op":"clock","now":160000}), begin("retry")]);
+    for i in 0..8 {
+        steps.push(authorize(&format!("full-{i}"), "retry"));
+    }
+    let mut wrong_credential = authorize("wrongCredential", "credentialRetry");
+    wrong_credential["credentialDigest"] = digest("wrong").into();
     steps.extend([
-        json!({"op":"clock","now":160000}),
-        begin("retry"),
-        authorize("full", "retry"),
         json!({"op":"transaction","id":"retained","transaction":r("retry.transaction")}),
         json!({"op":"clock","now":1_000_000}),
         authorize("reclaimed", "retry"),
         exchange("token", "reclaimed"),
+        exchange("consumed", "reclaimed"),
+        begin("credentialRetry"),
+        wrong_credential,
+        json!({"op":"transaction","id":"credentialRetained","transaction":r("credentialRetry.transaction")}),
+        authorize("credentialReclaimed", "credentialRetry"),
     ]);
     let value = compare_oauth(
         "1024-code-bound-preserves-pending-and-reclaims-expiry",
         json!({"steps":steps}),
     )
     .await;
-    assert_eq!(
-        result(&value, "full")["error"]["data"]["code"],
-        "limit_exceeded"
-    );
+    for i in 0..8 {
+        assert_eq!(
+            result(&value, &format!("full-{i}"))["error"]["data"]["code"],
+            "limit_exceeded"
+        );
+    }
+    for name in [
+        "retained",
+        "reclaimed",
+        "token",
+        "credentialRetained",
+        "credentialReclaimed",
+    ] {
+        assert!(result(&value, name)["encoded"].is_string(), "{name}");
+    }
+    for name in ["consumed", "wrongCredential"] {
+        assert_eq!(
+            result(&value, name)["error"]["data"]["code"],
+            "unauthenticated"
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1143,7 +1188,7 @@ async fn oauth_native_rolling_refresh_and_family_capacity_match_original() {
         ));
     }
     let mut steps = flow();
-    steps.extend([json!({"op":"sql","sql":seed}),refresh("atCapacity","tokens.refresh_token"),begin("next"),authorize("nextCode","next"),exchange("full","nextCode"),exchange("consumed","nextCode"),json!({"op":"sql","sql":"UPDATE metadata SET value=json_set(value,'$.expiresAt',100000) WHERE key='oauth_refresh:filler-0';"}),begin("reclaim"),authorize("reclaimCode","reclaim"),exchange("reclaimed","reclaimCode")]);
+    steps.extend([json!({"op":"sql","sql":seed.clone()}),refresh("atCapacity","tokens.refresh_token"),begin("next"),authorize("nextCode","next"),exchange("full","nextCode"),exchange("consumed","nextCode"),json!({"op":"sql","sql":"UPDATE metadata SET value=json_set(value,'$.expiresAt',100000) WHERE key='oauth_refresh:filler-0';"}),begin("reclaim"),authorize("reclaimCode","reclaim"),exchange("reclaimed","reclaimCode")]);
     let value = compare_oauth(
         "1024-family-bound-rotation-at-capacity-and-expired-reclamation",
         json!({"steps":steps}),
@@ -1159,5 +1204,56 @@ async fn oauth_native_rolling_refresh_and_family_capacity_match_original() {
             .unwrap()
             .len(),
         1024
+    );
+    let mut steps = flow();
+    steps.extend([
+        json!({"op":"sql","sql":seed}),
+        json!({"op":"clock","now":100000+year-1000}),
+        refresh("renewed", "tokens.refresh_token"),
+        json!({"op":"restart"}),
+        json!({"op":"clock","now":100000+year+1000}),
+        refresh("beyondOriginal", "renewed.refresh_token"),
+        json!({"op":"snapshot","name":"full capacity after rolling refresh and restart"}),
+    ]);
+    for id in ["left", "right"] {
+        let mut concurrent = refresh(id, "beyondOriginal.refresh_token");
+        concurrent["op"] = "spawnToken".into();
+        steps.push(concurrent);
+    }
+    steps.extend([
+        json!({"op":"join","ids":["left","right"]}),
+        refresh("revoked", "left.refresh_token"),
+    ]);
+    let value = compare_oauth(
+        "rolling-refresh-restart-and-concurrent-reuse-at-full-family-capacity",
+        json!({"steps":steps}),
+    )
+    .await;
+    let before = value["snapshots"][0]["families"].as_array().unwrap();
+    assert_eq!(before.len(), 1024);
+    let live = before
+        .iter()
+        .map(|row| serde_json::from_str::<Value>(row["value"].as_str().unwrap()).unwrap())
+        .find(|state| state["clientId"] != "filler")
+        .unwrap();
+    assert_eq!(live["generation"], 3);
+    assert_eq!(live["expiresAt"], 100000 + year + 1000 + year);
+    assert_eq!(
+        ["left", "right"]
+            .iter()
+            .filter(|id| result(&value, id)["encoded"].is_string())
+            .count(),
+        1
+    );
+    assert_eq!(
+        ["left", "right"]
+            .iter()
+            .filter(|id| result(&value, id)["error"]["data"]["code"] == "unauthenticated")
+            .count(),
+        1
+    );
+    assert_eq!(
+        result(&value, "revoked")["error"]["data"]["code"],
+        "unauthenticated"
     );
 }

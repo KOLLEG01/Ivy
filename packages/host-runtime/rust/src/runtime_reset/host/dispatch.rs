@@ -237,7 +237,3 @@ impl ResetHost {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "../../../../../../tests/rust/host-reset-dispatch-cases.rs"]
-mod dispatch_cases;

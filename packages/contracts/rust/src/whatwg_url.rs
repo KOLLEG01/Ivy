@@ -17,17 +17,33 @@ pub struct UrlComponents {
     pub pathname: String,
 }
 fn parsed(input: &JsString) -> IvyResult<Url> {
-    let text=input.to_utf8()?;
-    let mut url=Url::parse(&text).map_err(|_| IvyError::internal())?;
+    let text = String::from_utf16_lossy(&input.0);
+    let mut url = Url::parse(&text).map_err(|_| IvyError::internal())?;
     // The native parser drops a file host before a Windows drive path. Keep
     // Node's public URL identity, including UNC hosts used in MCP metadata.
-    if url.scheme()=="file" && url.host_str().is_none() && text.get(..7).is_some_and(|s|s.eq_ignore_ascii_case("file://")) {
-        let host=text[7..].split(['/', '\\', '?', '#']).next().unwrap_or_default();
-        let drive=host.len()==2&&host.as_bytes()[0].is_ascii_alphabetic()&&matches!(host.as_bytes()[1],b':'|b'|');
-        if !host.is_empty()&&!host.eq_ignore_ascii_case("localhost")&&!drive {url.set_host(Some(host)).map_err(|_|IvyError::internal())?;}
+    if url.scheme() == "file"
+        && url.host_str().is_none()
+        && text
+            .get(..7)
+            .is_some_and(|s| s.eq_ignore_ascii_case("file://"))
+    {
+        let host = text[7..]
+            .split(['/', '\\', '?', '#'])
+            .next()
+            .unwrap_or_default();
+        let drive = host.len() == 2
+            && host.as_bytes()[0].is_ascii_alphabetic()
+            && matches!(host.as_bytes()[1], b':' | b'|');
+        if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") && !drive {
+            url.set_host(Some(host)).map_err(|_| IvyError::internal())?;
+        }
     }
-    if url.cannot_be_a_base()&&(url.query().is_some()||url.fragment().is_some())&&url.path().ends_with(' ') {
-        let path=format!("{}%20",&url.path()[..url.path().len()-1]);url.set_path(&path);
+    if url.cannot_be_a_base()
+        && (url.query().is_some() || url.fragment().is_some())
+        && url.path().ends_with(' ')
+    {
+        let path = format!("{}%20", &url.path()[..url.path().len() - 1]);
+        url.set_path(&path);
     }
     Ok(url)
 }
@@ -59,7 +75,7 @@ pub fn clear_url_credentials(input: &JsString) -> IvyResult<JsString> {
 pub fn parse_url_with_base(input: &JsString, base: &JsString) -> IvyResult<UrlProjection> {
     Ok(projection(
         parsed(base)?
-            .join(&input.to_utf8()?)
+            .join(&String::from_utf16_lossy(&input.0))
             .map_err(|_| IvyError::internal())?,
     ))
 }
@@ -84,7 +100,10 @@ pub fn set_url_search_params(
     if !updates.is_empty() {
         let mut pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
         for (name, value) in updates {
-            let (name, value) = (name.to_utf8()?, value.to_utf8()?);
+            let (name, value) = (
+                String::from_utf16_lossy(&name.0),
+                String::from_utf16_lossy(&value.0),
+            );
             if let Some(index) = pairs.iter().position(|(key, _)| *key == name) {
                 pairs[index].1 = value;
                 let mut position = 0;

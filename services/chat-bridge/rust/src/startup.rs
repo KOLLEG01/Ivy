@@ -48,6 +48,10 @@ impl ChatStartup {
                     .cloned()
                     .ok_or_else(IvyError::internal)?,
                 data_root: Some(owner.data_root().to_path_buf()),
+                diagnostic_notifications: settings
+                    .get("diagnosticNotifications")
+                    .and_then(Json::as_bool)
+                    == Some(true),
                 language: settings
                     .get("language")
                     .filter(|value| !value.is_null())

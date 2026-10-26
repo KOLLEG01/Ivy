@@ -7,7 +7,7 @@ import { expect } from '@playwright/test';
 import { taskBoardFixture } from './fixtures/task-board-fixture.mjs';
 import { choose } from './fixtures/select.mjs';
 
-const fields = title => ({ title, description: '', acceptanceCriteria: [], category: null, control: 'user', priority: 2,
+const fields = title => ({ title, description: '', acceptanceCriteria: [], category: null, control: 'user', allowParallel: false, priority: 2,
   executionRequirement: null, workspaceRequirement: { kind: 'task_workspace' },  userContact: 'ticket',  dueAt: null });
 const gate = () => { let release; return { promise: new Promise(resolve => { release = resolve; }), release: () => release() }; };
 const routeTo = id => '#/tasks?node=browser-task-board&id=' + id;
@@ -142,17 +142,16 @@ test('optimistic comments render once before dispatch and acknowledgement, retai
 for (const width of [1440, 390]) test(`posting with an open question stays writable across conversation pages at ${width}px`, { timeout: 120000 }, async t => {
   const f = await taskBoardFixture(t, { viewport: { width, height: 900 } });
   const created = await f.invoke({ action: 'create', fields: fields('Long conversation with an open question') }), id = created.task.objectId;
-  const store = f.taskBoard().runtime.engine.store, current = await store.read('task-board/task', id);
+  const current = await f.task(id);
   const comments = Array.from({ length: 120 }, (_, index) => ({
     commentId: 'existing-' + (index + 1), sequence: index + 1,
     author: { principalId: 'browser-fixture', serviceNodeId: 'browser-task-board', source: 'worker', generation: 1 },
     authorKind: 'agent', body: index ? 'Existing message ' + (index + 1) : 'Which implementation should continue?',
     ...(index ? {} : { purpose: 'question', recipient: { kind: 'user' } }),
     requests: [], responses: [], attachments: [], delivery: null, run: null, turnId: null, replyTo: null,
-    createdAt: current.value.createdAt, operationId: 'existing-' + (index + 1),
+    createdAt: current.createdAt, operationId: 'existing-' + (index + 1),
   }));
-  await store.write('task-board/task', { ...current.value, comments, agentCommentCount: 120, openQuestionCount: 1 }, randomUUID(),
-    { objectId: id, expectedRevision: current.pin.revision });
+  await f.seedComments(id, comments.map(({ author, sequence, createdAt, operationId, delivery, run, turnId, ...comment }) => comment));
   const nodes = await f.client.request('objects.query', { contractKey: 'task-board/comment-node',
     where: { field: 'object.parentId', op: 'eq', value: id }, limit: 200 });
   assert.equal(nodes.nextCursor, null);
@@ -176,14 +175,12 @@ for (const width of [1440, 390]) test(`posting with an open question stays writa
   await expect(editor).toContainText('The next draft remains writable');
   await expect(questions).toContainText('Which implementation should continue?');
   assert.deepEqual(historyReads, [], 'Posting needs the current ticket revision, not its comment tree.');
-  const latest = await store.read('task-board/task', id);
+  const latest = await f.task(id);
   const newer = Array.from({ length: 60 }, (_, index) => ({
     ...comments[1], commentId: 'newer-' + index, operationId: 'newer-' + index,
-    sequence: latest.value.comments.length + index + 1, body: 'Later agent update ' + index,
+    sequence: latest.comments.length + index + 1, body: 'Later agent update ' + index,
   }));
-  await store.write('task-board/task', { ...latest.value, comments: [...latest.value.comments, ...newer],
-    agentCommentCount: latest.value.agentCommentCount + newer.length }, randomUUID(),
-    { objectId: id, expectedRevision: latest.pin.revision });
+  await f.seedComments(id, newer.map(({ author, sequence, createdAt, operationId, delivery, run, turnId, ...comment }) => comment));
   await f.page.reload();
   await expect(f.page.locator('[data-slot=conversation-message]')).toHaveCount(50);
   await expect(f.page.locator('[data-slot=conversation-message]').filter({ hasText: 'An ordinary comment while the question stays open' })).toHaveCount(0);
@@ -192,8 +189,8 @@ for (const width of [1440, 390]) test(`posting with an open question stays writa
   await send.click();
   await expect.poll(async () => (await f.task(id)).comments.some(comment => comment.body === 'A new message after reopening')).toBe(true);
   await expect(f.page.locator('[data-slot=conversation-message]').filter({ hasText: 'A new message after reopening' })).toBeInViewport();
-  const beforeFollowUp = await store.read('task-board/task', id);
-  await f.invoke({ action: 'comment', taskId: id, expectedRevision: beforeFollowUp.pin.revision, authorKind: 'agent',
+  const beforeFollowUp = await f.client.request('objects.read', { objectId: id });
+  await f.invoke({ action: 'comment', taskId: id, expectedRevision: beforeFollowUp.revision.revision, authorKind: 'agent',
     commentId: 'agent-follow-up', body: 'One short follow-up below the composer', requests: [], responses: [], attachments: [], replyTo: null });
   const arrived = f.page.getByRole('button', { name: /^New message from / });
   await expect(arrived).toBeVisible();
@@ -387,15 +384,14 @@ test('approval responses use one optimistic message and retain the composer draf
 for (const width of [1440, 390]) test(`a paged conversation loads older messages on scroll at ${width}px`, { timeout: 120000 }, async t => {
   const f = await taskBoardFixture(t, { viewport: { width, height: 900 } });
   const created = await f.invoke({ action: 'create', fields: fields('Paged conversation') }), id = created.task.objectId;
-  const store = f.taskBoard().runtime.engine.store, current = await store.read('task-board/task', id);
+  const current = await f.task(id);
   const comments = Array.from({ length: 120 }, (_, index) => ({
     commentId: 'paged-' + (index + 1), sequence: index + 1,
     author: { principalId: 'browser-fixture', serviceNodeId: 'browser-task-board', source: 'user', generation: 1 },
     authorKind: 'user', body: 'Message ' + (index + 1), requests: [], responses: [], attachments: [], delivery: null,
-    run: null, turnId: null, replyTo: null, createdAt: current.value.createdAt, operationId: 'paged-' + (index + 1),
+    run: null, turnId: null, replyTo: null, createdAt: current.createdAt, operationId: 'paged-' + (index + 1),
   }));
-  await store.write('task-board/task', { ...current.value, comments }, randomUUID(),
-    { objectId: id, expectedRevision: current.pin.revision });
+  await f.seedComments(id, comments.map(({ author, sequence, createdAt, operationId, delivery, run, turnId, ...comment }) => comment));
   const olderReads = [];
   f.page.on('request', request => {
     if (!request.url().endsWith('/api/v1/rpc') || request.method() !== 'POST') return;
@@ -427,28 +423,23 @@ for (const width of [1440, 390]) test(`the common overlay, filtered counters and
   const user = await create('User feedback');
   const dependency = await create('Dependency wait', {}, { workflowState: 'waiting', wakeAt: null, dependencies: [user.objectId] });
   const runtime = await create('Runtime wait');
-  const store = f.taskBoard().runtime.engine.store;
-  const runtimeTask = await store.read('task-board/task', runtime.objectId);
-  await store.write('task-board/task', { ...runtimeTask.value, workflowState: 'waiting',
+  await f.patchTask(runtime, { workflowState: 'waiting',
     wakeAt: null, dependencies: [],
-    runtimeWait: { reason: 'workspace', detail: 'Workspace is unavailable.', since: new Date().toISOString() } }, randomUUID(),
-    { objectId: runtime.objectId, expectedRevision: runtimeTask.pin.revision });
+    runtimeWait: { reason: 'workspace', detail: 'Workspace is unavailable.', since: new Date().toISOString() } });
   await create('Time wait', {}, { workflowState: 'waiting', wakeAt: '2099-01-01T12:00:00.000Z', dependencies: [] });
   await create('Manual work to do');
   const ready = await create('Ready without a blocker', { control: 'agent' });
   await create('Due is not a restart', { control: 'agent', dueAt: '2099-01-01T12:00:00.000Z' });
   const unscheduled = await create('No restart set', { control: 'agent' }, { wakeAt: null, dependencies: [] });
   // Real retained mixed comments exercise visibility without per-user read tracking.
-  const current = await store.read('task-board/task', user.objectId);
-  const noDate = await store.read('task-board/task', unscheduled.objectId);
-  await store.write('task-board/task', { ...noDate.value, workflowState: 'waiting', wakeAt: null, dependencies: [] }, randomUUID(),
-    { objectId: noDate.pin.objectId, expectedRevision: noDate.pin.revision });
+  await f.patchTask(unscheduled, { workflowState: 'waiting', wakeAt: null, dependencies: [] });
   const now = new Date().toISOString();
   const comment = (id, authorKind, sourceTaskId) => ({ commentId: id, sequence: 0, author: { principalId: 'browser-fixture', serviceNodeId: 'browser-task-board', source: 'worker', generation: 1 },
     authorKind, body: id, requests: [], responses: [], delivery: null, attachments: [], run: null, turnId: null, replyTo: null, createdAt: now, operationId: id, ...(sourceTaskId ? { sourceTaskId } : {}) });
   const comments = [comment('User message', 'user'), comment('Direct agent answer', 'agent'), comment('Cross-agent note', 'agent', dependency.objectId)].map((value, i) => ({ ...value, sequence: i + 1 }));
-  await store.write('task-board/task', { ...current.value, workflowState: 'waiting', comments: comments.map(value => value.commentId === 'Direct agent answer' ? { ...value, purpose: 'question', recipient: { kind: 'user' } } : value), agentCommentCount: 2, openQuestionCount: 1,
-    wakeAt: null, dependencies: [] }, randomUUID(), { objectId: user.objectId, expectedRevision: current.pin.revision });
+  await f.seedComments(user.objectId, comments.map(({ author, sequence, createdAt, operationId, delivery, run, turnId, ...value }) =>
+    value.commentId === 'Direct agent answer' ? { ...value, purpose: 'question', recipient: { kind: 'user' } } : value));
+  await f.patchTask(user, { workflowState: 'waiting', wakeAt: null, dependencies: [] });
   await f.open('#/tasks?node=browser-task-board');
   const waiting = f.page.getByRole('region', { name: 'Waiting', exact: true });
   for (const [group, title] of [['user', 'User feedback'], ['dependency', 'Dependency wait'], ['runtime', 'Runtime wait'], ['time', 'Time wait'], ['error', 'No restart set'], ['todo', 'Manual work to do']]) {
@@ -472,7 +463,8 @@ for (const width of [1440, 390]) test(`the common overlay, filtered counters and
   await expect(f.page.getByRole('link', { name: 'Back to board' })).toHaveCount(0);
   await expect(f.page.locator('[id="comment-Direct agent answer"]').getByText('Direct agent answer', { exact: true })).toBeVisible();
   await expect(f.page.getByText('Cross-agent note', { exact: true })).toHaveCount(0);
-  assert.equal((await store.page('task-board/comment-read-state')).items.length, 0);
+  const readStates = await f.client.request('objects.query', { contractKey: 'task-board/comment-read-state', limit: 1 });
+  assert.equal(readStates.items.length, 0);
   await expect(card.locator('[aria-label*="unread"]')).toHaveCount(0);
   // The retained board is intentionally aria-hidden while the overlay is open.
   const backgroundCard = f.page.locator('[data-slot=task-board-background] article').filter({ hasText: 'User feedback' });

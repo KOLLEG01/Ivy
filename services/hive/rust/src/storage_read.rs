@@ -233,8 +233,8 @@ pub fn snapshot_stopped_hive(source: &Path, destination: &Path) -> IvyResult<Ivy
     const CONFLICT: &str =
         "Offline Hive snapshot needs an existing source and a fresh destination.";
     require(
-        source.is_absolute()
-            && destination.is_absolute()
+        source.has_root()
+            && destination.has_root()
             && retained_path_exists(source)?
             && !retained_path_exists(destination)?,
         "target_conflict",
@@ -261,18 +261,20 @@ pub fn snapshot_stopped_hive(source: &Path, destination: &Path) -> IvyResult<Ivy
         "Hive snapshot refused an invalid database.",
     )?;
     // Reserve the fresh path exclusively so a concurrent file cannot be overwritten.
-    let file = OpenOptions::new()
-        .write(true)
-        .read(true)
-        .create_new(true)
-        .open(destination)
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                IvyError::new("target_conflict", CONFLICT)
-            } else {
-                internal(error)
-            }
-        })?;
+    let mut options = OpenOptions::new();
+    options.write(true).read(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(destination).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            IvyError::new("target_conflict", CONFLICT)
+        } else {
+            internal(error)
+        }
+    })?;
     let mut target = Connection::open(destination).map_err(internal)?;
     let backup = Backup::new(&db, &mut target).map_err(internal)?;
     backup

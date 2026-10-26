@@ -116,7 +116,9 @@ pub(crate) fn mime(source: &Source) -> String {
         .split(|unit| *unit == u16::from(b';'))
         .next()
         .unwrap_or_default();
-    String::from_utf16_lossy(prefix).trim().to_ascii_lowercase()
+    String::from_utf16_lossy(
+        &ivy_contracts::json::lowercase_utf16(JsString::trim_ecmascript_units(prefix)).0,
+    )
 }
 
 /// The selected native request supplies the budget; this function never truncates.

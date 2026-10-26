@@ -481,26 +481,8 @@ async fn native(input: &Value) -> Value {
     )
 }
 async fn compare(name: &str, input: Value) -> Value {
-    let original = original_output("tests/fixtures/hive-auth-pages-oracle.mjs", &input);
+    let original = auth_reference("auth-pages", &input);
     let native = native(&input).await;
-    if let Ok(path) = std::env::var(if name.starts_with("raw-") {
-        "IVY_HIVE_AUTH_FORM_CORPUS"
-    } else {
-        "IVY_HIVE_AUTH_PAGES_CORPUS"
-    }) {
-        let _guard = CORPUS.lock().unwrap();
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .unwrap();
-        writeln!(
-            f,
-            "{}",
-            json!({"name":name,"input":input,"original":original,"native":native})
-        )
-        .unwrap();
-    }
     assert_eq!(native, original, "Authentication pages: {name}");
     native
 }

@@ -1,3 +1,5 @@
+#[path = "reference-data.rs"]
+mod reference_data;
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, Outcome,
     hash::hash_json,
@@ -310,22 +312,9 @@ impl Store for Memory {
 
 #[test]
 fn task_key_recovery_matches_original_with_races_and_lost_replies() {
-    let result = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-key-oracle.mjs",
-        ])
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
+    let result = reference_data::read(include_bytes!("task-board-key-cases.json.gz"));
     let cases = parse(
-        std::str::from_utf8(&result.stdout).unwrap(),
+        std::str::from_utf8(&result).unwrap(),
         MANAGEMENT_FRAME_BYTES,
     )
     .unwrap();

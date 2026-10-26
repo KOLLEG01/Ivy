@@ -244,34 +244,25 @@ fn execute(row: &IvyJson, info: &IvyJson) -> IvyJson {
         ("bodyBase64", STANDARD.encode(bytes).into()),
     ])
 }
-fn save(suffix: &str, value: &IvyJson) {
-    if let Some(prefix) = std::env::var_os("IVY_HIVE_MCP_SUBSCRIPTION_CORPUS") {
-        std::fs::write(
-            format!("{}-{suffix}.json", prefix.to_string_lossy()),
-            encode(value),
-        )
-        .unwrap();
-    }
-}
 #[test]
 fn modern_subscription_frames_and_lifecycle_match_original_sdk() {
     let cases = cases();
-    let source = super::mcp_protocol::oracle(&obj([
+    let source = super::mcp_protocol::reference(&obj([
         ("mode", "subscription-lifecycle".into()),
         ("cases", IvyJson::Array(cases.clone())),
     ]));
-    save("source", &source);
     let native: Vec<_> = cases
         .iter()
         .map(|row| execute(row, source.get("serverInfo").unwrap()))
         .collect();
-    save(
-        "comparison",
-        &obj([
-            ("cases", IvyJson::Array(cases)),
-            ("source", source.clone()),
-            ("native", IvyJson::Array(native.clone())),
-        ]),
+    assert_eq!(
+        source
+            .get("observations")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        native.len()
     );
     for (original, native) in source
         .get("observations")

@@ -5,7 +5,7 @@ Hive objects. Definitions are versioned `dashboards/dashboard` objects. The
 service owns CRUD and checks workspace membership and update/delete revisions.
 Mutations preserve the caller's operation identity across reconnects.
 
-The [service registry](../services/dashboards/src/schema.ts) defines the compact
+The [service registry](../services/dashboards/rust/src) defines the compact
 MCP tools: `dashboard_list`, `dashboard_read`, `dashboard_save`, `dashboard_delete`
 and `dashboard_render`. The Web UI additionally uses the data snapshot tool.
 
@@ -99,6 +99,6 @@ For Windows services, keep Chromium in an explicit Ivy runtime directory and set
 a browser available in an interactive test cache may not be visible to the
 scheduled service.
 
-Implementation: [service](../services/dashboards/src/main.ts),
+Implementation: [service](../services/dashboards/rust/src/main.rs),
 [viewer](../ui/dashboards-ui/src/Viewer.vue),
 [focused checks](../tests/dashboards.test.ts).

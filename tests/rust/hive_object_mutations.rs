@@ -1,4 +1,4 @@
-use super::{Root, native, oracle};
+use super::{Root, native, reference as oracle};
 use serde_json::{Value, json};
 
 fn sql(text: impl Into<String>) -> Value {

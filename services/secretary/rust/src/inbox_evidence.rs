@@ -148,22 +148,28 @@ pub fn notice_text(
     } else {
         message.required("text")?
     };
-    let mut text = format!(
-        "[{}] {}",
-        message.required("accountId")?.as_str()?,
-        sender.as_str()?
-    );
+    fn units(value: &IvyJson) -> IvyResult<&[u16]> {
+        value
+            .as_js_string()
+            .map(|text| text.0.as_slice())
+            .ok_or_else(|| IvyError::new("invalid_arguments", "Expected a string."))
+    }
+    let mut text = vec!['[' as u16];
+    text.extend_from_slice(units(message.required("accountId")?)?);
+    text.extend("] ".encode_utf16());
+    text.extend_from_slice(units(sender)?);
     if email
         && (title)
             .as_js_string()
             .is_some_and(|text| !text.0.is_empty())
     {
-        text.push_str(" – ");
-        text.push_str(&title.as_str()?);
+        text.extend(" – ".encode_utf16());
+        text.extend_from_slice(units(title)?);
     }
-    text.push_str(": ");
-    text.push_str(&body.as_str()?);
-    Ok(JsString(text.encode_utf16().take(8192).collect()))
+    text.extend(": ".encode_utf16());
+    text.extend_from_slice(units(body)?);
+    text.truncate(8192);
+    Ok(JsString(text))
 }
 
 /// Borrows the engine's admitted settings, journal and generation cancellation.

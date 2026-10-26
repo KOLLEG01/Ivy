@@ -371,24 +371,18 @@ fn opus_file(
 #[tokio::test]
 async fn native_opus_worker_matches_original_duration_gain_and_pcm_and_rejects_incomplete_data() {
     let temp = Temp::new();
-    for channels in [1, 2] {
-        let bytes = opus_file(channels, 512, 312, 137, 6, channels as u32);
-        let input = temp.0.join("input.ogg");
-        let expected = temp.0.join("expected.wav");
-        std::fs::write(&input, &bytes).unwrap();
-        let output = Command::new("node")
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .arg("tests/rust/fixtures/chat-native-opus-oracle.mjs")
-            .arg(&input)
-            .arg(&expected)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let expected = std::fs::read(expected).unwrap();
+    // Synthetic mono/stereo Opus with gain, pre-skip and end trimming; WAVs
+    // were captured with the original codec. No JavaScript backend is loaded.
+    for (bytes, expected) in [
+        (
+            include_bytes!("fixtures/chat-opus-1.ogg").as_slice(),
+            include_bytes!("fixtures/chat-opus-1.wav").as_slice(),
+        ),
+        (
+            include_bytes!("fixtures/chat-opus-2.ogg").as_slice(),
+            include_bytes!("fixtures/chat-opus-2.wav").as_slice(),
+        ),
+    ] {
         let wav = worker()
             .decode(&bytes, Translator::default())
             .await
@@ -438,7 +432,7 @@ async fn native_opus_worker_matches_original_duration_gain_and_pcm_and_rejects_i
                 .await
                 .is_err()
         );
-        let mut corrupt = bytes.clone();
+        let mut corrupt = bytes.to_vec();
         let last = corrupt.len() - 1;
         corrupt[last] ^= 1;
         assert!(decode_ogg_opus(&corrupt).is_err());

@@ -1286,27 +1286,16 @@ watch(
     } else if (atBottom.value) await scrollBottom();
   },
 );
-const viewportChanged = () => {
-  const viewport = window.visualViewport;
-  if (taskRoot.value && viewport)
-    taskRoot.value.style.setProperty(
-      "--conversation-height",
-      Math.max(260, viewport.height - 48) + "px",
-    );
-};
 onMounted(() => {
-  viewportChanged();
   if (outputPages.value.length) {
     if (restoreTop !== null && scroller.value) {
       scroller.value.scrollTop = restoreTop;
       restoreTop = null;
     } else if (atBottom.value) void scrollBottom();
   }
-  window.visualViewport?.addEventListener("resize", viewportChanged);
   window.addEventListener("pagehide", retainScroll);
 });
 onBeforeUnmount(() => {
-  window.visualViewport?.removeEventListener("resize", viewportChanged);
   window.removeEventListener("pagehide", retainScroll);
   clearTimeout(scrollTimer);
   retainScroll();

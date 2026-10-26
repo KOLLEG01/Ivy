@@ -40,7 +40,7 @@ fn path(path: &Path) -> IvyJson {
     IvyJson::String(native_path::from_native(path))
 }
 async fn fixture(component: &str, app: bool) -> (ServiceFixture, IvyJson, IvyJson) {
-    let (fixture, mut candidate, mut manifest) = super::artifact_cases::fixture().await;
+    let (fixture, mut candidate, mut manifest) = base_fixture().await;
     let package = fixture.0.join("package");
     let root = package.join("artifact");
     fs::create_dir_all(root.join("dist/apps/fixture")).unwrap();
@@ -1150,4 +1150,72 @@ async fn native_archive_stops_at_the_existing_compressed_byte_limit() {
             .len()
             <= package_archive::MAXIMUM_ARCHIVE_BYTES
     );
+}
+
+async fn base_fixture() -> (ServiceFixture, IvyJson, IvyJson) {
+    let fixture = ServiceFixture::new();
+    let root = fixture.0.join("artifact");
+    let candidate = IvyJson::object([
+        (
+            "candidateId",
+            IvyJson::from(format!("sha256:{}", "a".repeat(64))),
+        ),
+        ("componentId", "fixture".into()),
+        ("artifactRoot", path(&root)),
+        ("manifestPath", path(&root.join("manifest.json"))),
+        ("createdAt", "2026-01-01T00:00:00.000Z".into()),
+        (
+            "platform",
+            IvyJson::object([
+                ("os", "win32".into()),
+                ("arch", "x64".into()),
+                ("node", "24.18.0".into()),
+            ]),
+        ),
+        (
+            "buildId",
+            IvyJson::from(format!("sha256:{}", "a".repeat(64))),
+        ),
+    ]);
+    let manifest = IvyJson::object([
+        ("schemaVersion", IvyJson::Number(1.0)),
+        ("componentId", "fixture".into()),
+        ("kind", "app".into()),
+        ("version", "1.0.0".into()),
+        (
+            "buildId",
+            IvyJson::from(format!("sha256:{}", "a".repeat(64))),
+        ),
+        ("connectsToHive", false.into()),
+        (
+            "requirements",
+            IvyJson::object([
+                ("node", ">=24.18.0 <25.0.0".into()),
+                ("hiveProtocol", IvyJson::Null),
+                ("contracts", IvyJson::Array(vec![])),
+            ]),
+        ),
+        (
+            "app",
+            IvyJson::object([
+                ("appId", "fixture".into()),
+                ("dist", "dist/apps/fixture".into()),
+                ("entryPath", "index.html".into()),
+            ]),
+        ),
+    ]);
+    config::atomic_json(root.join("manifest.json"), manifest.clone())
+        .await
+        .unwrap();
+    config::atomic_json(
+        root.join("dist/build-info.json"),
+        IvyJson::object([(
+            "buildId",
+            IvyJson::from(format!("sha256:{}", "a".repeat(64))),
+        )]),
+    )
+    .await
+    .unwrap();
+    fs::write(root.join("dist/main.js"), b"fixture").unwrap();
+    (fixture, candidate, manifest)
 }

@@ -1,8 +1,21 @@
 use ivy_contracts::{IvyJson, json::parse};
-use ivy_store::receipts::has_unresolved_outcome;
+use ivy_store::receipts::{has_unresolved_outcome, has_unresolved_workflow_outcome};
 
 #[test]
 fn typed_receipt_markers_and_structured_errors_are_detected_without_coercion() {
+    for (text, expected) in [
+        (r#"{"outcome":{"objectId":"delivery"}}"#, false),
+        (r#"{"outcome":{}}"#, false),
+        (r#"{"outcome":{"result":{"execution":"unknown"}}}"#, true),
+        (r#"{"outcome":{"phase":false}}"#, true),
+        (r#"{"outcome":["completed"]}"#, true),
+    ] {
+        assert_eq!(
+            has_unresolved_workflow_outcome(&parse(text, usize::MAX).unwrap()).unwrap(),
+            expected,
+            "{text}"
+        );
+    }
     for (text, expected) in [
         (r#"null"#, false),
         (r#""unknown""#, false),

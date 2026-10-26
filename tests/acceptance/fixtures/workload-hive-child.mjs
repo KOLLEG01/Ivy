@@ -1,40 +1,56 @@
-// An owned Hive process for workload measurements. The product worker, transport, SQLite
-// durability and limits are unchanged. IPC controls only this acceptance process.
-import { readFile } from 'node:fs/promises';
-import { HiveServer } from '../../../dist/services/hive/src/server.js';
+// Own a native Hive process. IPC controls this fixture; all service traffic uses Hive's public transport.
+import assert from 'node:assert/strict';
+import { copyFile, readFile, readdir } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
+import { startNativeService } from '../../../tools/testing/native-service.mjs';
 
 const options = JSON.parse(await readFile(process.argv[2], 'utf8'));
-const server = new HiveServer(options), samples = new Map();
-const request = server.worker.request.bind(server.worker);
-let measuring = false;
-server.worker.request = async (payload, ...args) => {
-  const selected = measuring && payload.action === 'execute'
-    && ['objects.list', 'objects.query'].includes(payload.request.method)
-    && payload.request.params.limit === 50;
-  const start = performance.now();
-  try { return await request(payload, ...args); }
-  finally {
-    if (selected) {
-      const values = samples.get(payload.request.method) ?? [];
-      values.push(performance.now() - start); samples.set(payload.request.method, values);
-    }
-  }
-};
+const dataRoot = dirname(options.filename);
+const backupDirectory = join(dirname(dataRoot), 'backups', randomUUID());
+const owner = await startNativeService({ schemaVersion: 1, componentId: 'hive', instanceId: 'workload-hive',
+  serviceNodeId: 'workload.hive', hostId: 'workload', dataRoot, publicBaseUrl: options.publicBaseUrl,
+  settings: { listenHost: '127.0.0.1', listenPort: options.listenPort, credentials: options.credentials,
+    backup: { enabled: !!options.captureOnlineBackup, directory: backupDirectory, intervalHours: 24, retain: 2 } } },
+  { artifact: options.artifactRoot, parentPid: process.pid });
 let chain = Promise.resolve();
 process.on('message', message => {
   chain = chain.then(async () => {
     try {
       let result;
-      if (message.action === 'measure') { samples.clear(); measuring = true; result = { measuring }; }
-      else if (message.action === 'samples') { measuring = false; result = { samples: Object.fromEntries(samples), memory: process.memoryUsage(), usage: process.resourceUsage() }; }
-      else if (message.action === 'backup') result = await request({ action: 'backup', destination: message.destination }, 600_000);
-      else if (message.action === 'close') { await server.close(); result = { closed: true }; }
-      else throw new Error('Unknown acceptance control.');
-      process.send({ id: message.id, result }, () => { if (message.action === 'close') process.disconnect(); });
+      if (message.action === 'samples') result = { nativePid: owner.pid, coordinatorMemory: process.memoryUsage() };
+      else if (message.action === 'backup') {
+        assert.ok(options.captureOnlineBackup, 'This launch must own a scheduled online snapshot.');
+        // A fresh backup directory makes the production scheduler take an online
+        // snapshot after recovery. Only its completed publication is consumed;
+        // no second connection opens the live, exclusively owned database.
+        const deadline = Date.now() + 600000;
+        let filename;
+        while (!filename) {
+          filename = (await readdir(backupDirectory)).find(name => /^hive-.*\.sqlite\.json$/.test(name));
+          if (!filename) {
+            if (owner.child.exitCode !== null || Date.now() >= deadline) throw Error('Native online snapshot did not complete: ' + owner.logs);
+            await delay(50);
+          }
+        }
+        const publication = JSON.parse(await readFile(join(backupDirectory, filename), 'utf8'));
+        assert.equal(publication.buildId, owner.config.buildId);
+        await copyFile(join(backupDirectory, filename.slice(0, -5)), message.destination, 1);
+        const hash = createHash('sha256');
+        for await (const bytes of createReadStream(message.destination)) hash.update(bytes);
+        const bytesHash = 'sha256:' + hash.digest('hex');
+        assert.equal(bytesHash, publication.bytesHash);
+        result = { bytesHash, pages: publication.pages, createdAt: publication.createdAt,
+          mechanism: 'Native Hive scheduled online backup after recovery' };
+      } else if (message.action === 'close' || message.action === 'crash') {
+        const exit = await (message.action === 'close' ? owner.close() : owner.kill());
+        result = { nativePid: owner.pid, exit };
+      } else throw Error('Unknown acceptance control.');
+      process.send({ id: message.id, result }, () => { if (message.action === 'close' || message.action === 'crash') process.disconnect(); });
     } catch (error) { process.send({ id: message.id, error: { code: error.code, message: error.message } }); }
   });
 });
-// Losing the harness cannot leave an acceptance listener behind.
-process.on('disconnect', () => { void server.close().finally(() => process.exit()); });
-await server.start();
-process.send({ ready: true, pid: process.pid });
+process.on('disconnect', () => { void owner.close().finally(() => process.exit()); });
+process.send({ ready: true, pid: owner.pid });

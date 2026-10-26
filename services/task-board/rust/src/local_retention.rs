@@ -6,7 +6,7 @@ use ivy_contracts::{
 };
 use ivy_sdk::rpc::{RequestOptions, RpcClient};
 use ivy_store::{
-    receipts::has_unresolved_outcome,
+    receipts::has_unresolved_workflow_outcome,
     rusqlite::{OptionalExtension, params},
     sqlite::error,
 };
@@ -295,7 +295,7 @@ impl<R: RpcClient> LocalRetention<'_, R> {
                 for (id, key, encoded) in rows {
                     let value = parse(&encoded, MANAGEMENT_FRAME_BYTES)?;
                     if selected.contains(&id) {
-                        if has_unresolved_outcome(&value)?
+                        if has_unresolved_workflow_outcome(&value)?
                             || key == "task-board/native-call"
                                 && (!equal(&value, "state", "observed")
                                     || !equal(&value, "ownerPhase", "succeeded")

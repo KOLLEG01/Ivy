@@ -163,15 +163,6 @@ impl dispatch::Application for Application<'_> {
         .await
     }
 }
-fn save(suffix: &str, value: &IvyJson) {
-    if let Some(prefix) = std::env::var_os("IVY_HIVE_MCP_DISPATCH_CORPUS") {
-        std::fs::write(
-            format!("{}-{suffix}.json", prefix.to_string_lossy()),
-            encode(value),
-        )
-        .unwrap();
-    }
-}
 async fn execute(row: &IvyJson) -> IvyJson {
     let development = row.get("path") == Some(&"/mcp-dev".into());
     let options = request::Options {
@@ -320,8 +311,7 @@ fn original_storage_effects(source: &IvyJson, name: &IvyJson) -> IvyJson {
     assert_eq!(index, catalog.len());
     IvyJson::Array(effects)
 }
-#[tokio::test(flavor = "current_thread")]
-async fn registered_dispatch_matches_original_http_and_application_effects() {
+pub(super) fn reference() -> IvyJson {
     let reference = super::mcp_inbound::reference();
     let cached = reference.get("cases").unwrap().as_array().unwrap();
     let cases: Vec<_> = cached
@@ -330,27 +320,27 @@ async fn registered_dispatch_matches_original_http_and_application_effects() {
         .cloned()
         .chain(fresh_cases(&reference))
         .collect();
-    let source = super::mcp_protocol::oracle(&obj([
+    let source = super::mcp_protocol::reference(&obj([
         ("mode", "baseline".into()),
         ("client", false.into()),
         ("recordEffects", true.into()),
         ("recordStorageEffects", true.into()),
         ("cases", IvyJson::Array(cases.clone())),
     ]));
-    save("source", &source);
+    obj([("cases", IvyJson::Array(cases)), ("source", source)])
+}
+#[tokio::test(flavor = "current_thread")]
+async fn registered_dispatch_matches_original_http_and_application_effects() {
+    let reference = super::mcp_inbound::reference();
+    let comparison = self::reference();
+    let cases = comparison.get("cases").unwrap().as_array().unwrap();
+    let source = comparison.get("source").unwrap();
     let mut native = vec![];
-    for row in &cases {
+    for row in cases {
         native.push(execute(row).await);
     }
-    save(
-        "comparison",
-        &obj([
-            ("cases", IvyJson::Array(cases.clone())),
-            ("source", source.clone()),
-            ("native", IvyJson::Array(native.clone())),
-        ]),
-    );
     let wires = source.get("wire").unwrap().as_array().unwrap();
+    assert_eq!(wires.len(), cases.len());
     for (i, row) in native.iter().enumerate() {
         let original = &wires[i];
         let wire = obj([

@@ -361,27 +361,13 @@ async fn native_http(input: &Value) -> Value {
     result
 }
 async fn compare_http(name: &str, input: Value) -> Value {
-    let expected = original_output("tests/fixtures/hive-browser-push-http-oracle.mjs", &input);
+    let expected = auth_reference("browser-push-http", &input);
     let observed = tokio::task::LocalSet::new()
         .run_until(native_http(&input))
         .await;
     // The carrier records integer-valued JS numbers as JSON integers. Preserve
     // exact encoded request/response text while normalizing Rust's 0.0 spelling.
     let observed = carrier(&IvyJson::from_serde(&observed).unwrap());
-    if let Ok(path) = std::env::var("IVY_HIVE_PUSH_HTTP_CORPUS") {
-        let _guard = CORPUS.lock().unwrap();
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .unwrap();
-        writeln!(
-            file,
-            "{}",
-            json!({"name":name,"input":input,"original":expected,"native":observed})
-        )
-        .unwrap();
-    }
     assert_eq!(observed, expected, "Browser push HTTP: {name}");
     observed
 }
@@ -478,6 +464,10 @@ async fn push_http_length_stream_and_retained_admission_failures_match_original(
         json!("0000"),
         json!("1"),
         json!(["17"]),
+        json!(0),
+        json!([["17"]]),
+        json!(format!("{}17", "0".repeat(400))),
+        json!({"toString":null}),
     ]
     .into_iter()
     .enumerate()
@@ -530,7 +520,7 @@ async fn push_http_response_transitions_and_worker_failures_match_original() {
     compare_http("worker-failure-does-not-wake", value).await;
 }
 #[tokio::test(flavor = "current_thread")]
-async fn shared_http_buffers_recover_after_concurrent_global_limit() {
+async fn push_http_shared_buffers_recover_after_concurrent_global_limit() {
     let maximum = 64 * 1024 * 1024;
     let first = json!({"op":"run","mode":"body","id":"held","limit":maximum,"chunks":[{"fill":32,"length":maximum},{"text":"","gate":"finish"}]});
     let mut value = script(vec![

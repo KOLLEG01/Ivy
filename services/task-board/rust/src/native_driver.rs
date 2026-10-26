@@ -507,10 +507,14 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
         require(
             !["completed", "failed", "cancelled"]
                 .iter()
-                .any(|s| field(&run.value, "phase") == &Json::from(*s))
-                && field(&task.value, "publication").is_null(),
+                .any(|s| field(&run.value, "phase") == &Json::from(*s)),
             "task_board_native_order",
-            "Native execution requires an unfinished Run and no pending task publication.",
+            "Native execution requires an unfinished Run.",
+        )?;
+        require(
+            field(&task.value, "publication").is_null(),
+            "task_board_publication_busy",
+            "Native execution waits for the current task publication.",
         )?;
         let claim_run = field(field(&task.value, "claim"), "run");
         let active = claim_run.get("objectId").and_then(Json::as_js_string) == Some(run_id);

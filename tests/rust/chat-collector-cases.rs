@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::super::Fixture;
 use super::{Gate, array, equal, field, member, merge, result, text};
 #[path = "chat-cancellation-cases.rs"]
@@ -25,7 +27,6 @@ use ivy_sdk::{
 use std::{
     collections::{HashMap, VecDeque},
     path::Path,
-    process::Command,
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicI64, Ordering},
@@ -36,20 +37,8 @@ use std::{
 fn oracle() -> &'static Json {
     static CORPUS: OnceLock<Json> = OnceLock::new();
     CORPUS.get_or_init(|| {
-        let output = Command::new("node")
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .arg("tests/rust/fixtures/chat-collector-oracle.mjs")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        if let Some(path) = std::env::var_os("IVY_CHAT_COLLECTOR_ORACLE_CAPTURE") {
-            std::fs::write(path, &output.stdout).unwrap();
-        }
-        parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
+        let output = reference_data::read(include_bytes!("fixtures/chat-collector-cases.json.gz"));
+        parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap()
     })
 }
 fn number(v: &Json, key: &str) -> usize {

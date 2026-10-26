@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use super::snapshot;
 use ivy_chat_bridge::whatsapp::{
     journal::{HistoryLimits, OutputState},
@@ -512,17 +514,8 @@ fn delivery_events(events: &[Json], name_reads: &mut Vec<String>) -> Json {
 }
 #[tokio::test]
 async fn original_listener_history_notifications_and_receipts_match() {
-    let output = Command::new("node")
-        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .arg("tests/rust/fixtures/chat-whatsapp-listener-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let oracle = parse(&String::from_utf8(output.stdout).unwrap(), usize::MAX).unwrap();
+    let output = reference_data::read(include_bytes!("fixtures/chat-whatsapp-listener-cases.json.gz"));
+    let oracle = parse(&String::from_utf8(output).unwrap(), usize::MAX).unwrap();
     let specs = f(&oracle, "specs").as_array().unwrap();
     let mut rows = Vec::new();
     for spec in specs {

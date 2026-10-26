@@ -11,9 +11,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-#[path = "data-collector-runtime.inc.rs"]
-mod runtime;
-
 fn json(s: &str) -> IvyJson {
     parse(s, usize::MAX).unwrap()
 }
@@ -306,83 +303,6 @@ fn sqlite_key_coercion_does_not_change_lossless_receipt_request_identity() {
             .unwrap_err()
             .code,
         "operation_conflict"
-    );
-}
-
-#[test]
-fn node_to_rust_to_node_to_rust_preserves_journal_and_lossless_documents() {
-    let db = Database::new();
-    let oracle = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../tests/rust/data-collector-store-oracle.mjs");
-    let invoke = |phase: &str| {
-        let result = std::process::Command::new("node")
-            .arg("--disable-warning=ExperimentalWarning")
-            .arg(&oracle)
-            .arg(phase)
-            .arg(db.path())
-            .output()
-            .unwrap();
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-    };
-    invoke("seed");
-    let opaque;
-    {
-        let s = db.open(Limits::default());
-        let mut row = s.get("oracle", false).unwrap().unwrap();
-        opaque = model::field(&row, "future").unwrap().clone();
-        assert_eq!(
-            model::field(&opaque, "wide")
-                .unwrap()
-                .as_array()
-                .unwrap()
-                .len(),
-            400001
-        );
-        assert_eq!(
-            stringify(model::field(&opaque, "deep").unwrap(), usize::MAX).unwrap(),
-            format!("{}false{}", "[".repeat(300), "]".repeat(300))
-        );
-        assert_eq!(model::number(&row, "revision").unwrap(), 4.0);
-        row.insert("state", IvyJson::Null);
-        s.save(&row).unwrap();
-        let mut run = s.run("pending").unwrap().unwrap();
-        run.insert("executionCommitted", true.into());
-        s.save_run(&run).unwrap();
-        assert_eq!(
-            s.mutate("receipt", "request", 1, |_| panic!("cross-runtime replay"))
-                .unwrap(),
-            json(r#"{"runId":"pending","value":0}"#)
-        );
-        s.mutate("rust-receipt", "rust-request", 2, |_| {
-            Ok(IvyJson::object([
-                ("saved", true.into()),
-                ("future", opaque.clone()),
-            ]))
-        })
-        .unwrap();
-        assert!(s.used_run_id("retired-run").unwrap());
-        assert_eq!(
-            s.connection()
-                .query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            s.connection()
-                .query_row("PRAGMA busy_timeout", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-    }
-    invoke("verify");
-    let s = db.open(Limits::default());
-    assert_eq!(
-        s.operation("node-after-rust").unwrap().unwrap(),
-        IvyJson::object([("saved", true.into()), ("future", opaque)])
     );
 }
 

@@ -1,3 +1,5 @@
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use ivy_chat_bridge::{
     admission::ChatAdmission, operations::ChatOperations, queries::ChatQueries, store::ChatStore,
 };
@@ -69,17 +71,8 @@ fn nodes(predicate: &Json) -> usize {
 }
 #[tokio::test]
 async fn exact_input_lookup_filters_channels_before_reading_pinned_content() {
-    let output = Command::new("node")
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .arg("tests/rust/fixtures/chat-queries-oracle.mjs")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let cases = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let output = reference_data::read(include_bytes!("fixtures/chat-queries-cases.json.gz"));
+    let cases = parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap();
     for case in cases.as_array().unwrap() {
         let definition = case.required("definition").unwrap();
         let admission = ChatAdmission::new(definition).unwrap();
