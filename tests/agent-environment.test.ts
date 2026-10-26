@@ -177,7 +177,10 @@ test("External MCP credentials are scoped to an exact endpoint and never use the
   const allowed = new Set(['https://hive.example/mcp']);
   assert.throws(() => resolveMcpServer(server, allowed, 'hive', {}), { code: 'access_denied' });
   assert.throws(() => resolveMcpServer(server, allowed, 'hive', { tools: { ...credentials.tools, bearerToken: 'bad\r\nheader' } }), { code: 'invalid_arguments' });
-  assert.throws(() => resolveMcpServer({ ...server, authentication: 'agent-manager', credentialId: undefined }, allowed, 'hive', credentials), { code: 'access_denied' });
+  const hiveServer = { ...server };
+  delete hiveServer.credentialId;
+  hiveServer.authentication = 'agent-manager';
+  assert.throws(() => resolveMcpServer(hiveServer, allowed, 'hive', credentials), { code: 'access_denied' });
 });
 
 test("AgentManager enables ivy_dev by default and allows a host override to disable it", async (t) => {
