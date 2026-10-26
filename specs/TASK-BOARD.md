@@ -301,5 +301,5 @@ Sources: [allocation](../services/task-board/rust/src/scheduler.rs),
   Unknown outcomes cannot create another contact. Delivery recovery continues independently of
   Task workflow state.
 
-Checks: [engine](../tests/task-board-engine.test.ts), [scheduler](../tests/task-board-scheduler.test.ts),
-[reconciliation](../tests/task-board-reconciler.test.ts), [delivery](../tests/task-board-deliveries.test.ts).
+Checks: [engine](../tests/fixtures/task-board-engine-actions.rs), [scheduler](../tests/fixtures/task-board-scheduler.rs),
+[reconciliation](../tests/fixtures/task-board-reconciler.rs), [delivery](../tests/fixtures/task-board-deliveries.rs).

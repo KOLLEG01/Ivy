@@ -50,12 +50,12 @@ An isolated [Claude adapter option](CLAUDE-ADAPTER.md) uses the same AgentManage
 - `agent.stageFile` stores a message attachment of up to 8 MiB by content on its host and
   returns its path for native local-image or file references; unused files expire after 30 days.
 
-Checks: [operations](../tests/native-operations.test.ts), [inputs](../tests/agent-interactions.test.ts),
-[native projection](../tests/native-projection.test.ts), [staged files](../tests/agent-staged-files.test.ts).
+Checks: [operations](../tests/rust/agent-service-kernel.rs), [inputs](../tests/rust/agent-interactions.rs),
+[native projection](../tests/native-projection.test.ts), [staged files](../tests/rust/agent-staged-files.rs).
 
 ## Task and channel services
 
-[TaskBoard](TASK_BOARD.md) owns task workflow and result review.
+[TaskBoard](TASK-BOARD.md) owns task workflow and result review.
 
 [ChatBridge](../services/chat-bridge/rust/src) owns one WhatsApp transport and exactly one current
 Main binding. Sender admission precedes message persistence. Original message identities prevent
@@ -67,7 +67,7 @@ readable across native plan and presentation changes; caller, source, input, bin
 identity checks still apply. Pending service replies are confirmed only after every WhatsApp
 output part has a durable transport receipt. Delivery confirms
 the original transport result or stays unknown. Transport retention and recovery are tested in
-[Chat tests](../tests/chat-outbox.test.ts). `Chat.Settings.language` optionally selects `en` or
+[Chat tests](../tests/rust/chat-outbox.rs). `Chat.Settings.language` optionally selects `en` or
 `de` for ChatBridge-authored WhatsApp copy; omission uses English. It is a presentation setting,
 not part of the workspace `Definition` or the separate transcription-language setting.
 
@@ -84,7 +84,7 @@ acknowledgement. Uncertain media sends are never repeated automatically. File in
 bytes share the ordered durable transport journal. A changed Main, account or recipient
 blocks dispatch. The file queue admits 32 unresolved deliveries and 64 MiB, expires files
 after seven days and retains at most 256 completed receipts with compact replay fences.
-Checks: [file delivery](../tests/chat-files.test.ts).
+Checks: [file delivery](../tests/rust/chat-files.rs).
 
 `Chat.Settings.diagnosticNotifications` is an optional boolean, defaulting to `false`.
 It controls automatic diagnostic warning/failure and recovery notices. Disabling it
@@ -104,13 +104,13 @@ itself remain visible as a diagnostic without recursively generating notices.
 Receive receipts save immutable reply snapshots before changing delivery state. If retention
 prunes an offered reply revision, recovery verifies its current immutable content against that
 original snapshot and preserves the original offer and acknowledgement identities.
-Checks: [operational notices](../tests/chat-diagnostic-notifications.test.ts),
-[binding evidence](../tests/hive-tool-binding-diagnostics.test.ts).
+Checks: [operational notices](../tests/rust/chat-diagnostics.rs),
+[binding evidence](../tests/rust/hive_network.rs).
 
 [PhoneBridge](PHONE-VOICE.md) owns SIP, audio and its native runtime. Call admission, screening,
 routing and shutdown must use the exact principal/peer/call identity. Voice task operations use
 the configured Codex CLI and native WebRTC boundary. Actual device/media
-readiness is required before reporting an active call. See [call checks](../tests/phone-calls.test.ts).
+readiness is required before reporting an active call. See [call checks](../tests/rust/phone_call_commands.rs).
 
 The [automation example](../docs/examples/services/automation-example/src) demonstrates durable
 event consumption, period claims and persistence before ACK; it is source-only example code.

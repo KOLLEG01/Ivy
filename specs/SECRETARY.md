@@ -151,5 +151,5 @@ Sources: [triage](../services/secretary/rust/src/triage.rs),
 Sources: [document projection](../services/secretary/rust/src/media_document.rs),
 [video](../services/secretary/rust/src/media_video.rs), [media spool](../services/secretary/rust/src/media_spool.rs).
 Exact media shapes are in [schemas](schemas); focused checks cover
-[inbox](../tests/secretary.test.mjs), [triage](../tests/secretary-triage.test.mjs),
-[media](../tests/secretary-media.test.mjs) and [video](../tests/secretary-video.test.mjs).
+[inbox](../tests/secretary-rust/engine_inbox_cases.rs), [triage](../tests/secretary-rust/triage_workflow_cases.rs),
+[media](../tests/secretary-rust/media-input.rs) and [video](../tests/secretary-rust/video_cases.rs).

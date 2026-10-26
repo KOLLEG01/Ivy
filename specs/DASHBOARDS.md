@@ -101,4 +101,4 @@ scheduled service.
 
 Implementation: [service](../services/dashboards/rust/src/main.rs),
 [viewer](../ui/dashboards-ui/src/Viewer.vue),
-[focused checks](../tests/dashboards.test.ts).
+[focused checks](../tests/rust/dashboards-handlers.rs).

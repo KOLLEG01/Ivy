@@ -161,4 +161,4 @@ Sources: [routing](../services/hive/rust/src/live_routing.rs), [inventory](../se
   Host deployment reports are observations; the host journal remains authoritative.
 
 Sources: [events](../services/hive/rust/src/events.rs), [apps](../services/hive/rust/src/uis.rs),
-[transport checks](../tests/transports.test.ts), [storage checks](../tests/storage.test.ts).
+[transport checks](../tests/rust/hive_server_rpc.rs), [storage checks](../tests/rust/hive_store.rs).

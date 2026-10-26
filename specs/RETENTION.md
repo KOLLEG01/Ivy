@@ -3,7 +3,7 @@
 Contract policy: [wire schema](schemas/hive-wire.schema.json).
 Implementation: [collector](../services/hive/rust/src/retention.rs),
 [Object references](../services/hive/rust/src/objects.rs), [mutation journal](../services/hive/rust/src/store.rs).
-Checks: [retention](../tests/retention.test.ts).
+Checks: [retention](../tests/rust/hive_retention.rs).
 
 - Each contract declares Object and revision retention. The latest registered family policy
   governs collection; a new policy is previewed before a later pass applies it.
@@ -62,21 +62,22 @@ Checks: [retention](../tests/retention.test.ts).
   completed history immediately; active, uncertain and referenced work is not a victim.
   Admission and result reservations leave room to finish or acknowledge existing work.
 
-  | Owner | History eligible for eviction | State that remains protected |
-  | --- | --- | --- |
-  | AgentManager | Known completed native operations | Pending/unknown effects and turn ownership until its completion is handled |
-  | Secretary | Completed actions, released technical workflows and successful follow-ups | Unacknowledged captures, prepared writes, running/unknown work and active context dependencies |
-  | ChatBridge | Completed operations, acknowledged offers, terminal input plumbing and confirmed resolved diagnostic notices | Queued inputs/notices, partial offers, pending transport delivery and uncertain effects |
-  | TaskBoard | Released local operation results and completed workflow plumbing | Active gates, pending dependencies, current task revisions, unconfirmed deliveries and uncertain native effects |
-  | WhatsApp transport | Finished input bodies, confirmed outgoing bodies and inactive delivered-turn caches | Pending/unknown messages, current-turn deduplication and partly delivered turns |
-  | DataCollector | Completed operation results and old known terminal runs | Latest task status, executions/publications, unknown outcomes and prepared definition writes |
-  | PhoneBridge | Explicitly released independent results and results of fully released known calls | Original uncertainty, call/epoch identity, Voice bindings and archival recovery evidence |
-  | Host runtime | Superseded successful/rolled-back deployments, resolved failures and older completed bootstrap details | Live work, unresolved failures, current adoption, recent deployments, replay identities and exact rollback evidence |
+  | Owner              | History eligible for eviction                                                                                | State that remains protected                                                                                        |
+  | ------------------ | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+  | AgentManager       | Known completed native operations                                                                            | Pending/unknown effects and turn ownership until its completion is handled                                          |
+  | Secretary          | Completed actions, released technical workflows and successful follow-ups                                    | Unacknowledged captures, prepared writes, running/unknown work and active context dependencies                      |
+  | ChatBridge         | Completed operations, acknowledged offers, terminal input plumbing and confirmed resolved diagnostic notices | Queued inputs/notices, partial offers, pending transport delivery and uncertain effects                             |
+  | TaskBoard          | Released local operation results and completed workflow plumbing                                             | Active gates, pending dependencies, current task revisions, unconfirmed deliveries and uncertain native effects     |
+  | WhatsApp transport | Finished input bodies, confirmed outgoing bodies and inactive delivered-turn caches                          | Pending/unknown messages, current-turn deduplication and partly delivered turns                                     |
+  | DataCollector      | Completed operation results and old known terminal runs                                                      | Latest task status, executions/publications, unknown outcomes and prepared definition writes                        |
+  | PhoneBridge        | Explicitly released independent results and results of fully released known calls                            | Original uncertainty, call/epoch identity, Voice bindings and archival recovery evidence                            |
+  | Host runtime       | Superseded successful/rolled-back deployments, resolved failures and older completed bootstrap details       | Live work, unresolved failures, current adoption, recent deployments, replay identities and exact rollback evidence |
 
   Opaque IDs require compact persistent replay guards after payload eviction. These guards
   are required current state, not retained result history: an evicted identity must never
   create fresh work, including after an automatic binary rollback. Timestamped journals
   use a monotonic eviction fence. A missing receipt is not evidence of an absent effect.
+
 - Diagnostic histories, Phone call samples, UI/native output caches, app releases and package
   versions already have capacity eviction. Current credentials, subscriptions, leases,
   configurations, domain records and referenced revisions are authoritative state, not

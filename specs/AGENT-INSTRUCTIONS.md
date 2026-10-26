@@ -86,4 +86,4 @@ Defaults: [runtime instructions](../instructions/README.md).
   host-specific patches.
 - Ship runtime skills only. Host operations belong to the repository deployment specification.
 
-Checks: [instructions](../tests/agent-instructions.test.ts), [environments](../tests/agent-environment.test.ts).
+Checks: [instructions](../tests/rust/agent-instructions.rs), [environments](../tests/rust/agent-environment.rs).
