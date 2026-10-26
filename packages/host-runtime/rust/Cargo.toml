@@ -6,9 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[features]
-qualification-live-retirement = []
-
 [[test]]
 name = "host-actions"
 path = "../../../tests/rust/host-actions.rs"

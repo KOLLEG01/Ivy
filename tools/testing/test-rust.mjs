@@ -71,7 +71,8 @@ for(const file of positionals){
   }
   for(const required of target.prerequisites??[]){
     if(required.platform && required.platform!==process.platform)continue;
-    prerequisites.set(required.package+'/'+required.bin,required);
+    const kind=required.example?'example':'bin';
+    prerequisites.set(required.package+'/'+kind+'/'+required[kind],required);
   }
 }
 if(!groups.size && !libraries.size && !integrations.size)throw Error('Select at least one Cargo test file.');
@@ -102,7 +103,8 @@ const testedPackages=positionals.map(file=>rustTests[file].package);
 const required=[...prerequisites.values()];
 if(required.length && !await runCommands([['build','--locked',
   ...[...new Set([...required.map(target=>target.package),...testedPackages])].flatMap(pkg=>['--package',pkg]),
-  ...[...new Set(required.map(target=>target.bin))].flatMap(bin=>['--bin',bin])]]))return;
+  ...[...new Set(required.filter(target=>target.bin).map(target=>target.bin))].flatMap(bin=>['--bin',bin]),
+  ...[...new Set(required.filter(target=>target.example).map(target=>target.example))].flatMap(example=>['--example',example])]]))return;
 const commands=[
   ...integrationGroups(groups).map(([pkg,{library,tests,testThreads}])=>['test','--locked',
     ...[pkg].flat().flatMap(name=>['--package',name]),...(library?['--lib']:[]),...[...tests].flatMap(t=>['--test',t]),

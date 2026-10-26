@@ -16,10 +16,10 @@ use tokio::{
     runtime::Builder,
     time::{sleep, timeout},
 };
-#[path = "../fixtures/hive-startup-profile.rs"]
-mod startup_profile;
 #[path = "hive_worker_online_backup.rs"]
 mod online_backup;
+#[path = "../fixtures/hive-startup-profile.rs"]
+mod startup_profile;
 
 struct Root(PathBuf);
 impl Root {
@@ -38,7 +38,19 @@ impl Drop for Root {
 fn launch(root: &Root) -> WorkerLaunch {
     let executable = std::env::var_os("IVY_HIVE_TEST_WORKER")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_ivy-hive-worker-fixture")));
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples")
+                .join(format!(
+                    "ivy-hive-worker-fixture{}",
+                    std::env::consts::EXE_SUFFIX
+                ))
+        });
     WorkerLaunch {
         root: root.0.clone(),
         executable,
@@ -105,8 +117,9 @@ async fn request(client: &StorageClient, value: IvyJson) -> Result<IvyJson, IvyE
 
 fn original_profile(root: &Root) -> PathBuf {
     let path = root.0.join("profile.json");
-    let bytes = serde_json::json!({"original":{"registryRuntime":startup_profile::registry(false)}})
-        .to_string();
+    let bytes =
+        serde_json::json!({"original":{"registryRuntime":startup_profile::registry(false)}})
+            .to_string();
     fs::write(&path, &bytes).unwrap();
     path
 }
@@ -261,7 +274,10 @@ fn nonlast_client_drop_preserves_held_kernel_and_actual_reply() {
     let canonical_root = fs::canonicalize(&root.0).unwrap();
     let canonical_parent = fs::canonicalize(std::env::temp_dir()).unwrap();
     assert_eq!(canonical_root.parent(), Some(canonical_parent.as_path()));
-    assert_eq!(fs::read(root.0.join("client-clone-case")).unwrap(), b"nonlast");
+    assert_eq!(
+        fs::read(root.0.join("client-clone-case")).unwrap(),
+        b"nonlast"
+    );
     let removed_path = root.0.clone();
     drop(std::mem::ManuallyDrop::into_inner(root));
     assert!(!removed_path.exists());

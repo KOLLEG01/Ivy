@@ -4,9 +4,6 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-[features]
-qualification-live-retirement = ["ivy-host-runtime/qualification-live-retirement"]
-
 [dependencies]
 chrono.workspace = true
 chrono-tz.workspace = true
@@ -51,12 +48,9 @@ path = "src/bin/offline_backup.rs"
 name = "ivy-hive-inspect-storage"
 path = "src/bin/inspect_storage.rs"
 
-# Integration-test process; no deployment plan references this executable.
-[[bin]]
+[[example]]
 name = "ivy-hive-worker-fixture"
 path = "../../../tests/fixtures/hive-worker-child.rs"
-test = false
-bench = false
 
 [[example]]
 name = "ivy-hive-browser-fixture"

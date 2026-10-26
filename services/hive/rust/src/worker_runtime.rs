@@ -23,10 +23,6 @@ use tokio::{
     time::Instant,
 };
 
-#[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-#[path = "../../../../tests/rust/hive_live_retirement.rs"]
-mod qualification_tests;
-
 #[derive(Clone)]
 pub struct WorkerLaunch {
     pub root: PathBuf,
@@ -101,8 +97,6 @@ struct Client {
     changed: Arc<Notify>,
     epoch: Instant,
     events: EventSink,
-    #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-    trace: Mutex<std::sync::Weak<qualification_tests::Trace>>,
 }
 /// One writer generation. All queue reservations survive caller abandonment or
 /// timeout until reply or confirmed retirement, exactly as in WorkerClient.
@@ -116,8 +110,6 @@ impl StorageClient {
             changed: Arc::new(Notify::new()),
             epoch: Instant::now(),
             events,
-            #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-            trace: Mutex::new(std::sync::Weak::new()),
         }))
     }
     fn now(&self) -> u64 {
@@ -160,10 +152,6 @@ impl StorageClient {
         drop(state);
         let weak = Arc::downgrade(&self.0);
         let launch = self.0.launch.clone();
-        #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-        let registration = qualification_tests::begin(
-            &self.0.trace, qualification_tests::Role::Launch, generation,
-        );
         let _task = tokio::spawn(async move {
             let result = process::spawn(
                 &Command {
@@ -203,8 +191,6 @@ impl StorageClient {
                 }
             }
         });
-        #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-        registration.register(_task);
         waiter
     }
     pub fn request(
@@ -242,8 +228,6 @@ impl StorageClient {
             }
         };
         state.pending.insert(id, sender);
-        #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-        qualification_tests::admitted(&self.0.trace, id, options);
         let failed = state
             .writer
             .as_ref()
@@ -302,17 +286,8 @@ impl StorageClient {
             Some(generation),
         );
         let client = self.clone();
-        #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-        let registration = qualification_tests::begin(
-            &self.0.trace, qualification_tests::Role::Close, generation,
-        );
-        #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-        let observation = registration.observation();
         let _task = tokio::spawn(async move {
-            #[cfg(not(all(test, windows, feature = "qualification-live-retirement")))]
             let _ = cooperative.await;
-            #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-            observation.cooperative(cooperative.await);
             let mut state = client.0.state.lock().unwrap();
             let effects = if state.policy.lifecycle() == Lifecycle::Ready(generation) {
                 state.policy.shutdown()
@@ -321,39 +296,40 @@ impl StorageClient {
             };
             client.deliver(state, effects, false);
         });
-        #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-        registration.register(_task);
         waiter
     }
     fn timer(&self, generation: Generation) -> AbortHandle {
         let weak = Arc::downgrade(&self.0);
         let changed = self.0.changed.clone();
         let epoch = self.0.epoch;
-        #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-        let registration = qualification_tests::begin(
-            &self.0.trace, qualification_tests::Role::Timer, generation,
-        );
         let task = tokio::spawn(async move {
             loop {
                 let notified = changed.notified();
                 let deadline = {
-                    let Some(client) = weak.upgrade() else { return; };
+                    let Some(client) = weak.upgrade() else {
+                        return;
+                    };
                     let state = client.state.lock().unwrap();
-                    if !matches!(state.policy.lifecycle(), Lifecycle::Starting(g) | Lifecycle::Ready(g) if g == generation) { return; }
+                    if !matches!(state.policy.lifecycle(), Lifecycle::Starting(g) | Lifecycle::Ready(g) if g == generation)
+                    {
+                        return;
+                    }
                     state.policy.next_deadline()
                 };
                 if let Some(deadline) = deadline {
                     tokio::select! { _ = notified => continue, _ = tokio::time::sleep_until(epoch + Duration::from_millis(deadline)) => {} }
-                    let Some(client) = weak.upgrade().map(StorageClient) else { return; };
+                    let Some(client) = weak.upgrade().map(StorageClient) else {
+                        return;
+                    };
                     let mut state = client.0.state.lock().unwrap();
                     let effects = state.policy.expire(client.now());
                     client.deliver(state, effects, false);
-                } else { notified.await; }
+                } else {
+                    notified.await;
+                }
             }
         });
         let abort = task.abort_handle();
-        #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-        registration.register(task);
         abort
     }
     fn bind(&self, generation: Generation, mut process: OwnedProcess) {
@@ -374,10 +350,6 @@ impl StorageClient {
         state.writer = Some(sender);
         let weak = Arc::downgrade(&self.0);
         let options = self.0.launch.options.clone();
-        #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-        let writer_registration = qualification_tests::begin(
-            &self.0.trace, qualification_tests::Role::Writer, generation,
-        );
         let writer = tokio::spawn(async move {
             let mut stdin = stdin;
             let result = async {
@@ -395,10 +367,6 @@ impl StorageClient {
             }
         });
         let weak = Arc::downgrade(&self.0);
-        #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-        let reader_registration = qualification_tests::begin(
-            &self.0.trace, qualification_tests::Role::Reader, generation,
-        );
         let reader = tokio::spawn(async move {
             let mut reader = FrameReader::new(stdout);
             loop {
@@ -419,10 +387,6 @@ impl StorageClient {
                 client.fail(generation, connection_failed(), false);
             }
         });
-        #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-        let drain_registration = qualification_tests::begin(
-            &self.0.trace, qualification_tests::Role::Stderr, generation,
-        );
         let drain = tokio::spawn(async move {
             let mut bytes = [0; 8192];
             while stderr.read(&mut bytes).await.is_ok_and(|n| n != 0) {}
@@ -432,20 +396,8 @@ impl StorageClient {
             reader.abort_handle(),
             drain.abort_handle(),
         ]);
-        #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-        {
-            writer_registration.register(writer);
-            reader_registration.register(reader);
-            drain_registration.register(drain);
-        }
         drop(state);
         let weak = Arc::downgrade(&self.0);
-        #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-        let registration = qualification_tests::begin(
-            &self.0.trace, qualification_tests::Role::Watcher, generation,
-        );
-        #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-        let observation = registration.observation();
         let _task = tokio::spawn(async move {
             let result = completion.wait().await;
             if let Some(client) = weak.upgrade().map(StorageClient) {
@@ -462,21 +414,8 @@ impl StorageClient {
                     false,
                 );
                 client.retired(generation, result.error_code.is_none());
-                #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-                observation.terminal(
-                    qualification_tests::StopObservation::Returned(result.error_code.clone()),
-                    result.error_code.is_none(), true,
-                );
-            } else {
-                #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-                observation.terminal(
-                    qualification_tests::StopObservation::Returned(result.error_code.clone()),
-                    result.error_code.is_none(), false,
-                );
             }
         });
-        #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-        registration.register(_task);
     }
     fn message(&self, generation: Generation, message: Message) {
         if let Message::Fatal(error) = message {
@@ -563,8 +502,6 @@ impl StorageClient {
             state.writer = None;
             for pump in state.pumps.drain(..) {
                 pump.abort();
-                #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-                qualification_tests::cancelled(&self.0.trace, pump.id());
             }
         }
         drop(state);
@@ -590,28 +527,13 @@ impl StorageClient {
         drop(state);
         if let Some(process) = process {
             let weak = Arc::downgrade(&self.0);
-            #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-            let registration = qualification_tests::begin(
-                &self.0.trace, qualification_tests::Role::Stop, generation,
-            );
-            #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-            let observation = registration.observation();
             let _task = tokio::spawn(async move {
                 let result = process.stop(Duration::ZERO).await;
-                #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-                let observed = qualification_tests::StopObservation::from_result(&result);
                 let confirmed = result.is_ok_and(|r| r.error_code.is_none());
                 if let Some(client) = weak.upgrade().map(StorageClient) {
                     client.retired(generation, confirmed);
-                    #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-                    observation.terminal(observed, confirmed, true);
-                } else {
-                    #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-                    observation.terminal(observed, confirmed, false);
                 }
             });
-            #[cfg(all(test, windows, feature = "qualification-live-retirement"))]
-            registration.register(_task);
         } else if !launching {
             self.retired(generation, absent);
         }

@@ -1221,6 +1221,7 @@ export const rustTests = {
     "filter": "worker_process::initialized_kernel_",
     "testThreads": 1,
     "prerequisites": [
+      { "package": "ivy-hive", "example": "ivy-hive-worker-fixture" },
       {
         "platform": "win32",
         "package": "ivy-host-runtime",
@@ -1728,6 +1729,7 @@ export const rustTests = {
     "package": "ivy-hive",
     "test": "hive-worker-client",
     "prerequisites": [
+      { "package": "ivy-hive", "example": "ivy-hive-worker-fixture" },
       {
         "platform": "win32",
         "package": "ivy-host-runtime",
@@ -1735,11 +1737,22 @@ export const rustTests = {
       }
     ]
   },
+  "tests/rust/hive_worker_process.rs": {
+    "package": "ivy-hive",
+    "test": "hive-worker-client",
+    "filter": "worker_process::real_",
+    "testThreads": 1,
+    "prerequisites": [
+      { "package": "ivy-hive", "example": "ivy-hive-worker-fixture" },
+      { "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }
+    ]
+  },
   "tests/rust/hive_worker_online_backup.rs": {
     "package": "ivy-hive",
     "test": "hive-worker-client",
     "filter": "worker_process::online_backup::",
     "prerequisites": [
+      { "package": "ivy-hive", "example": "ivy-hive-worker-fixture" },
       {
         "platform": "win32",
         "package": "ivy-host-runtime",
