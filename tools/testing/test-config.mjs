@@ -312,6 +312,10 @@ export const rustTests = {
     "filter": "portable_dependencies_cases::io_cases::",
     "testThreads": 1
   },
+  "tests/rust/host-portable-http.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-portable-http"
+  },
   "tests/rust/host-codex-job-path-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",
@@ -1542,6 +1546,11 @@ export const rustTests = {
     "package": "ivy-agent-manager",
     "test": "agent-instructions",
     "filter": "mcp_file_cases::"
+  },
+  "tests/rust/agent-mcp-render.rs": {
+    "package": "ivy-agent-manager",
+    "test": "agent-instructions",
+    "filter": "mcp_render_cases::"
   },
   "tests/rust/agent-staged-files.rs": {
     "test": "agent-interactions",

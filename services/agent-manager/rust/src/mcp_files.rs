@@ -122,12 +122,21 @@ pub async fn apply_mcp(
     host_id: &JsString,
     hive_url: &JsString,
     credential: &JsString,
+    credentials: &crate::mcp_credentials::McpCredentials,
 ) -> IvyResult<AppliedMcp> {
     let home = internal(
         tokio::task::spawn_blocking(move || internal(ivy_host_runtime::paths::realpath(&home)))
             .await,
     )??;
-    let prepared = prepare_mcp(connection, defaults, host_id, hive_url, credential).await?;
+    let prepared = prepare_mcp(
+        connection,
+        defaults,
+        host_id,
+        hive_url,
+        credential,
+        credentials,
+    )
+    .await?;
     let root = home.join(".ivy-agent-mcp");
     let check_root = root.clone();
     internal(tokio::task::spawn_blocking(move || state_root(&check_root)).await)??;

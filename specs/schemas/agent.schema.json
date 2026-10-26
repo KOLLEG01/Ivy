@@ -756,6 +756,27 @@
       ],
       "additionalProperties": false
     },
+    "McpCredential": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "maxLength": 2048,
+          "minLength": 1
+        },
+        "bearerToken": {
+          "type": "string",
+          "maxLength": 16384,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._~+/-]+=*$"
+        }
+      },
+      "required": [
+        "url",
+        "bearerToken"
+      ],
+      "additionalProperties": false
+    },
     "McpServer": {
       "type": "object",
       "properties": {
@@ -776,8 +797,15 @@
         "authentication": {
           "enum": [
             "none",
-            "agent-manager"
+            "agent-manager",
+            "bearer"
           ]
+        },
+        "credentialId": {
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
         },
         "startupTimeoutSeconds": {
           "type": "integer",
@@ -1079,6 +1107,16 @@
           "type": "string",
           "maxLength": 2048,
           "minLength": 1
+        },
+        "mcpCredentials": {
+          "type": "object",
+          "maxProperties": 32,
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/McpCredential"
+          }
         },
         "patcherEnabled": {
           "type": "boolean"

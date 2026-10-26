@@ -20,6 +20,7 @@ pub mod interactions;
 pub mod inventory;
 pub mod inventory_manager;
 pub mod local_state;
+pub mod mcp_credentials;
 pub mod mcp_files;
 pub mod mcp_import;
 pub mod mcp_manager;

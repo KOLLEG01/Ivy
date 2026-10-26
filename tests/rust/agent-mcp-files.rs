@@ -66,6 +66,7 @@ async fn apply(home: &Path) -> ivy_contracts::IvyResult<ivy_agent_manager::mcp_f
         &"fixture".into(),
         &"https://fixture.example".into(),
         &"fixture-only".into(),
+        &Default::default(),
     )
     .await
 }

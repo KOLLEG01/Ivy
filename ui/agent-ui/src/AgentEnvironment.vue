@@ -24,7 +24,7 @@ async function read(kind: Kind, hostId: string | null): Promise<{ object: Operat
   try { object = await client.request('objects.stat', { path: '/' + await name(kind, hostId) }); }
   catch (failure) { if ((failure as { code?: string }).code === 'not_found') return null; throw failure; }
   const value = await client.request('objects.read', { objectId: object.id, revision: object.currentRevision });
-  if (value.object.contractKey !== contracts[kind] || value.revision.contractVersion !== '1.0.0' || value.content.encoding !== 'json') throw new Error('The managed environment path contains another document type.');
+  if (value.object.contractKey !== contracts[kind] || value.revision.contractVersion !== (kind === 'mcp' ? '1.1.0' : '1.0.0') || value.content.encoding !== 'json') throw new Error('The managed environment path contains another document type.');
   return { object, document: value.content.value as Agent.McpDocument | Agent.SkillsDocument };
 }
 async function load(kind: Kind) {
@@ -50,7 +50,7 @@ async function save(kind: Kind, remove = false) {
   try {
     let values: unknown = [];
     if (!remove) { values = JSON.parse(editor.text); if (!Array.isArray(values)) throw new Error('Configuration must be a JSON array.'); }
-    editor.pending ??= { mutationId: await newOperationId(client), contractVersion: '1.0.0', references: {},
+    editor.pending ??= { mutationId: await newOperationId(client), contractVersion: kind === 'mcp' ? '1.1.0' : '1.0.0', references: {},
       content: { encoding: 'json', value: kind === 'mcp'
         ? { schemaVersion: 1, hostId: props.hostId, enabled: remove ? null : editor.enabled, servers: remove ? [] : values }
         : { schemaVersion: 1, hostId: props.hostId, enabled: remove ? null : editor.enabled, files: remove ? [] : values } },
@@ -69,7 +69,7 @@ watch(() => [props.node, props.hostId], () => { for (const kind of ['mcp', 'skil
 
 <template><section class="space-y-5" :aria-label="hostId === null ? 'Hive agent environment' : 'Host agent environment'">
   <h3 class="sr-only">{{ hostId === null ? 'Hive-wide MCP and skills' : 'MCP and skills for this host' }}</h3>
-  <p class="text-sm text-muted-foreground">Secrets are never stored in these documents. AgentManager injects its own provisioned key only for the exact Hive MCP URL.</p>
+  <p class="text-sm text-muted-foreground">Secrets are never stored in these documents. Hive authentication uses the host's provisioned key. External bearer authentication uses a credentialId from protected host settings, bound to its exact MCP URL.</p>
   <section v-for="kind in (['mcp', 'skills'] as const)" :key="kind" class="space-y-3 border-t pt-4" :aria-label="kind === 'mcp' ? 'MCP configuration' : 'Skills configuration'">
     <h4 class="text-sm font-medium">{{ kind === 'mcp' ? 'MCP servers' : 'Skill files' }}</h4>
     <fieldset :disabled="editors[kind].busy || !editors[kind].loaded || !!editors[kind].pending" class="min-w-0 space-y-3">

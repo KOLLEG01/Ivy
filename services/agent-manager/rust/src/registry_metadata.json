@@ -722,7 +722,7 @@
       },
       {
         "key": "agent/mcp-configuration",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "owner": {
           "kind": "service",
           "serviceName": "agent-manager"
@@ -740,7 +740,7 @@
         "jsonSchema": {
           "$agentSchema": "McpDocument"
         },
-        "specMarkdown": "Versioned secret-free MCP intent. AgentManager injects only its own host credential and only for its exact Hive MCP resource."
+        "specMarkdown": "Versioned secret-free MCP intent. AgentManager injects its host credential only for its exact Hive MCP resource. Bearer authentication references a credentialId provisioned in protected host settings.mcpCredentials; each credential binds an exact endpoint URL. Include /settings/mcpCredentials in the instance secretPaths."
       },
       {
         "key": "agent/skills",

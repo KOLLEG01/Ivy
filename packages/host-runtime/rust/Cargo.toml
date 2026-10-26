@@ -104,6 +104,10 @@ name = "host-build-inputs"
 path = "../../../tests/rust/host-build-input-cases.rs"
 
 [[test]]
+name = "host-portable-http"
+path = "../../../tests/rust/host-portable-http.rs"
+
+[[test]]
 name = "host-compiler-tools"
 path = "../../../tests/rust/host-compiler-tools.rs"
 harness = false

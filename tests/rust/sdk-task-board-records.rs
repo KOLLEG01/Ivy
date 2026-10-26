@@ -277,7 +277,7 @@ fn comment_and_run_upgrades_expose_current_content_without_legacy_planning() {
 }
 
 #[test]
-fn removed_delivery_fields_keep_saved_result_code_and_evidence_references() {
+fn saved_material_uses_a_reference_count_summary_and_keeps_attachments() {
     let artifact = parse(
         r#"{"object":{"objectId":"evidence","revision":2},"label":"proof","mediaType":"application/json","byteLength":3,"contentHash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
     );
@@ -304,10 +304,9 @@ fn removed_delivery_fields_keep_saved_result_code_and_evidence_references() {
         .unwrap();
     let body = saved.get("body").unwrap().as_js_string().unwrap();
     assert!(
-        body.contains_ascii("saved-result")
-            && body.contains_ascii("0123456789abcdef")
-            && body.contains_ascii("src/example.rs")
+        body.contains_ascii("Imported references for 1 saved results. Details remain with those result records and their attachments.")
     );
+    assert!(!body.contains_ascii("0123456789abcdef") && !body.contains_ascii("src/example.rs"));
     let attachments = saved.get("attachments").unwrap().as_array().unwrap();
     assert_eq!(attachments.len(), 1);
     assert_eq!(attachments[0].get("object"), artifact.get("object"));

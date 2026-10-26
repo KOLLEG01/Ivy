@@ -14,6 +14,7 @@ pub struct McpSettings {
     pub hive_url: JsString,
     pub credential: JsString,
     pub defaults: IvyJson,
+    pub credentials: crate::mcp_credentials::McpCredentials,
 }
 #[derive(Clone, Debug)]
 pub struct McpStatus {
@@ -194,6 +195,7 @@ impl McpManager {
                 &settings.host_id,
                 &settings.hive_url,
                 &settings.credential,
+                &settings.credentials,
             )
             .await;
             completion.finish(result);

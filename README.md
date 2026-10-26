@@ -122,8 +122,11 @@ and integrations receive the data needed for their work under their own accounts
 ## Installation
 
 Start with Hive, HostExecutor and ServiceManager. Hive includes the web Console;
-the other services and apps are optional. Use Node.js 24.18 or newer in the 24.x
-line and the npm version pinned in [package.json](package.json). Expose remote
+the other services and apps are optional. Prepared services run as native Rust
+executables. Building from source requires the pinned [Rust toolchain](rust-toolchain.toml),
+Node.js 24.18 or newer in the 24.x line and the npm version pinned in
+[package.json](package.json). Node remains necessary for the public TypeScript SDK,
+user-script workloads and vendor SDK bridges. Expose remote
 installations through an HTTPS reverse proxy.
 
 Follow [First public installation](specs/DEPLOYMENT.md#first-public-installation)

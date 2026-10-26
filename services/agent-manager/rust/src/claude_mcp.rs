@@ -8,7 +8,6 @@ use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     hash::{digest, hash_json},
     json::{parse, stringify},
-    whatwg_url::parse_url,
 };
 use ivy_host_runtime::node_path::{self, Style};
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
@@ -25,6 +24,7 @@ pub struct ClaudeMcpSettings {
     pub hive_url: JsString,
     pub credential: JsString,
     pub defaults: IvyJson,
+    pub credentials: crate::mcp_credentials::McpCredentials,
 }
 struct State {
     status: McpStatus,
@@ -93,21 +93,11 @@ async fn prepare(settings: &ClaudeMcpSettings, connection: &dyn RpcClient) -> Iv
             if server.get("enabled") != Some(&IvyJson::Bool(true)) {
                 continue;
             }
-            let url = parse_url(text(server, "url")?)?;
-            let loopback = ["localhost", "127.0.0.1", "[::1]"].contains(&url.hostname.as_str());
-            require(
-                (url.protocol == "https:" || url.protocol == "http:" && loopback)
-                    && url.username.is_empty()
-                    && url.password.is_empty()
-                    && url.hash.is_empty(),
-                "invalid_arguments",
-                "Managed remote MCP URLs require HTTPS.",
-            )?;
-            let authenticated = text(server, "authentication")? == &JsString::from("agent-manager");
-            require(
-                !authenticated || allowed.contains(&url.href),
-                "access_denied",
-                "AgentManager credentials may only reach this Hive MCP resource.",
+            let resolved = crate::mcp_credentials::resolve_mcp_server(
+                server,
+                &allowed,
+                &settings.credential,
+                &settings.credentials,
             )?;
             let name = text(server, "name")?;
             require(
@@ -115,13 +105,12 @@ async fn prepare(settings: &ClaudeMcpSettings, connection: &dyn RpcClient) -> Iv
                 "invalid_arguments",
                 "Managed MCP server names must be unique.",
             )?;
-            let mut value = IvyJson::object([("type", "http".into()), ("url", url.href.into())]);
-            if authenticated {
-                let mut bearer = JsString::from("Bearer ");
-                bearer.0.extend_from_slice(&settings.credential.0);
+            let mut value =
+                IvyJson::object([("type", "http".into()), ("url", resolved.url.into())]);
+            if let Some(authorization) = resolved.authorization {
                 value.insert(
                     "headers",
-                    IvyJson::object([("Authorization", IvyJson::String(bearer))]),
+                    IvyJson::object([("Authorization", authorization.into())]),
                 );
             }
             servers.insert(name.clone(), value);
@@ -143,6 +132,10 @@ async fn prepare(settings: &ClaudeMcpSettings, connection: &dyn RpcClient) -> Iv
         version: hash_json(&IvyJson::object([
             ("selection", desired.version.into()),
             ("servers", names),
+            (
+                "credentials",
+                crate::mcp_credentials::credentials_hash(&settings.credentials)?.into(),
+            ),
         ]))?,
         servers,
         enabled,

@@ -111,7 +111,12 @@ pub async fn read_environment_document(
     let revision_info = field(&value, "revision")?;
     let content = field(&value, "content")?;
     if object_info.get("contractKey") != Some(&IvyJson::from(kind.contract()))
-        || revision_info.get("contractVersion") != Some(&IvyJson::from("1.0.0"))
+        || revision_info.get("contractVersion")
+            != Some(&IvyJson::from(if kind == EnvironmentKind::Mcp {
+                "1.1.0"
+            } else {
+                "1.0.0"
+            }))
         || content.get("encoding") != Some(&IvyJson::from("json"))
     {
         return Err(IvyError::new(

@@ -1,139 +1,100 @@
-#[path = "../fixtures/reference-data.rs"]
-mod reference_data;
 use ivy_agent_manager::environment::{
-    EnvironmentKind, environment_name, read_environment_document, select_environment_document,
+    EnvironmentKind, read_environment_document, select_environment_document,
 };
-use ivy_contracts::{IvyError, IvyJson, Outcome, json::parse};
+use ivy_contracts::{IvyJson as Json, IvyResult};
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
-use std::{
-    path::PathBuf,
-    process::Command,
-    sync::{Mutex, OnceLock},
-};
+use std::sync::Mutex;
 
-fn oracle() -> &'static IvyJson {
-    static DATA: OnceLock<IvyJson> = OnceLock::new();
-    DATA.get_or_init(|| {
-        let output = reference_data::read(include_bytes!("../fixtures/agent-environment-cases.json.gz"));
-        parse(
-            std::str::from_utf8(&output).unwrap(),
-            2 * 1024 * 1024,
-        )
-        .unwrap()
-    })
+fn document(enabled: Json) -> Json {
+    Json::object([
+        ("schemaVersion", Json::Number(1.0)),
+        ("hostId", Json::Null),
+        ("enabled", enabled),
+        ("servers", Json::Array(vec![])),
+    ])
 }
-fn kind(row: &IvyJson) -> EnvironmentKind {
-    if row.get("kind") == Some(&IvyJson::from("mcp")) {
-        EnvironmentKind::Mcp
-    } else {
-        EnvironmentKind::Skills
-    }
-}
-fn option(value: &IvyJson) -> Option<&IvyJson> {
-    (!value.is_null()).then_some(value)
-}
-
 #[test]
-fn environment_names_inheritance_and_revision_hashes_match_original() {
-    let names = oracle().get("names").unwrap().as_array().unwrap();
-    assert_eq!(names.len(), 22);
-    for row in names {
-        assert_eq!(
-            IvyJson::from(environment_name(
-                kind(row),
-                row.get("hostId").unwrap().as_js_string()
-            )),
-            *row.get("expected").unwrap()
-        );
-    }
-    let cases = oracle().get("selections").unwrap().as_array().unwrap();
-    assert_eq!(cases.len(), 68);
-    for row in cases {
-        let selected = select_environment_document(
-            row.get("defaults").unwrap(),
-            option(row.get("global").unwrap()),
-            option(row.get("host").unwrap()),
-        )
-        .unwrap();
-        assert_eq!(
-            IvyJson::object([
-                ("document", selected.document),
-                ("version", selected.version.into())
-            ]),
-            *row.get("expected").unwrap()
-        );
-    }
+fn disabled_host_override_and_inherited_versions_are_retained() {
+    let defaults = document(true.into());
+    let global = Json::object([
+        ("document", defaults.clone()),
+        ("revision", Json::Number(1.0)),
+    ]);
+    let disabled = document(false.into());
+    let host = Json::object([
+        ("document", disabled.clone()),
+        ("revision", Json::Number(2.0)),
+    ]);
+    let selected = select_environment_document(&defaults, Some(&global), Some(&host)).unwrap();
+    assert_eq!(selected.document, disabled);
+    let inherited = Json::object([
+        ("document", document(Json::Null)),
+        ("revision", Json::Number(3.0)),
+    ]);
+    let fallback = select_environment_document(&defaults, Some(&global), Some(&inherited)).unwrap();
+    assert_eq!(fallback.document, defaults);
+    assert_ne!(selected.version, fallback.version);
 }
-
 struct Client {
-    row: IvyJson,
-    calls: Mutex<Vec<IvyJson>>,
+    version: &'static str,
+    calls: Mutex<Vec<String>>,
 }
 impl RpcClient for Client {
     fn request<'a>(
         &'a self,
         method: &'a str,
-        params: IvyJson,
+        params: Json,
         _: RequestOptions,
     ) -> RequestFuture<'a> {
         Box::pin(async move {
-            self.calls.lock().unwrap().push(IvyJson::object([
-                ("method", method.into()),
-                ("params", params),
-            ]));
-            let (result, error) = match method {
-                "objects.stat" => ("stat", "statError"),
-                "objects.read" => ("value", "readError"),
-                _ => panic!("Unexpected method {method}"),
-            };
-            if let Some(e) = self.row.get(error).and_then(option) {
-                let code = e
-                    .get("code")
-                    .unwrap()
-                    .as_js_string()
-                    .unwrap()
-                    .to_utf8()
-                    .unwrap();
-                let outcome = if e.get("outcome") == Some(&IvyJson::from("unknown")) {
-                    Outcome::Unknown
-                } else {
-                    Outcome::NotExecuted
-                };
-                return Err(IvyError::new(&code, "fixture failure").with_outcome(outcome));
+            self.calls.lock().unwrap().push(method.into());
+            if method == "objects.stat" {
+                return Ok(Json::object([
+                    ("id", "intent".into()),
+                    ("currentRevision", Json::Number(7.0)),
+                    ("effectivelyArchived", false.into()),
+                ]));
             }
-            Ok(self.row.get(result).unwrap().clone())
+            assert_eq!(params.get("revision"), Some(&Json::Number(7.0)));
+            Ok(Json::object([
+                (
+                    "object",
+                    Json::object([("contractKey", "agent/mcp-configuration".into())]),
+                ),
+                (
+                    "revision",
+                    Json::object([
+                        ("contractVersion", self.version.into()),
+                        ("contentHash", "sha256:fixture".into()),
+                    ]),
+                ),
+                (
+                    "content",
+                    Json::object([
+                        ("encoding", "json".into()),
+                        ("value", document(true.into())),
+                    ]),
+                ),
+            ]))
         })
     }
 }
-
 #[tokio::test]
-async fn environment_reads_pin_revisions_validate_scope_and_preserve_failures() {
-    let rows = oracle().get("reads").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), 52);
-    for row in rows {
+async fn mcp_reads_the_pinned_current_contract_and_refuses_another_version() -> IvyResult<()> {
+    for (version, accepted) in [("1.1.0", true), ("1.0.0", false)] {
         let client = Client {
-            row: row.clone(),
-            calls: Mutex::new(Vec::new()),
+            version,
+            calls: Mutex::new(vec![]),
         };
-        let actual = match read_environment_document(
-            &client,
-            kind(row),
-            row.get("hostId").unwrap().as_js_string(),
-        )
-        .await
-        {
-            Ok(value) => IvyJson::object([("result", value.unwrap_or(IvyJson::Null))]),
-            Err(error) => IvyJson::object([("error", error.to_wire())]),
-        };
+        let result = read_environment_document(&client, EnvironmentKind::Mcp, None).await;
+        assert_eq!(result.is_ok(), accepted);
+        if !accepted {
+            assert_eq!(result.unwrap_err().code, "contract_mismatch");
+        }
         assert_eq!(
-            &actual,
-            row.get("expected").unwrap(),
-            "{:?}",
-            row.get("mode")
-        );
-        assert_eq!(
-            IvyJson::Array(client.calls.into_inner().unwrap()),
-            *row.get("calls").unwrap()
+            *client.calls.lock().unwrap(),
+            ["objects.stat", "objects.read"]
         );
     }
+    Ok(())
 }

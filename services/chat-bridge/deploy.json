@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "chat-bridge",
   "kind": "service",
-  "version": "0.2.44",
+  "version": "0.4.0",
   "description": "WhatsApp Main, explicit file delivery and durable notifications",
   "connectsToHive": true,
   "requirements": {

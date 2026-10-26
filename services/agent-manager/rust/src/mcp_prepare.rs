@@ -45,6 +45,7 @@ pub async fn prepare_mcp(
     host_id: &JsString,
     hive_url: &JsString,
     credential: &JsString,
+    credentials: &crate::mcp_credentials::McpCredentials,
 ) -> IvyResult<PreparedMcp> {
     let global = read_environment_document(connection, EnvironmentKind::Mcp, None).await?;
     let host = read_environment_document(connection, EnvironmentKind::Mcp, Some(host_id)).await?;
@@ -57,7 +58,15 @@ pub async fn prepare_mcp(
             RequestOptions::default(),
         )
         .await?;
-    assemble_mcp(desired, openai, urls, host_id, hive_url, credential)
+    assemble_mcp(
+        desired,
+        openai,
+        urls,
+        host_id,
+        hive_url,
+        credential,
+        credentials,
+    )
 }
 
 /// Explicit import uses an operator-supplied selected document and OpenAI
@@ -86,7 +95,15 @@ pub fn prepare_mcp_import_snapshot(
     }
     let desired = select_environment_document(document, None, None)?;
     let urls = hive_mcp_urls(hive_url)?;
-    assemble_mcp(desired, openai.clone(), urls, host_id, hive_url, credential)
+    assemble_mcp(
+        desired,
+        openai.clone(),
+        urls,
+        host_id,
+        hive_url,
+        credential,
+        &Default::default(),
+    )
 }
 
 fn assemble_mcp(
@@ -96,18 +113,23 @@ fn assemble_mcp(
     host_id: &JsString,
     hive_url: &JsString,
     credential: &JsString,
+    credentials: &crate::mcp_credentials::McpCredentials,
 ) -> IvyResult<PreparedMcp> {
     validate_output("openai.getConfiguration", &openai)?;
     let app_id = openai
         .get("configuration")
         .and_then(|v| v.get("appId"))
         .and_then(IvyJson::as_js_string);
-    let sections = render_mcp_sections(&desired.document, &urls, credential, app_id)?;
+    let sections = render_mcp_sections(&desired.document, &urls, credential, app_id, credentials)?;
     let desired_version = hash_json(&IvyJson::object([
         ("document", desired.version.into()),
         ("approvalPolicy", "never".into()),
         ("defaultPermissions", ":danger-full-access".into()),
         ("openai", openai.clone()),
+        (
+            "credentials",
+            crate::mcp_credentials::credentials_hash(credentials)?.into(),
+        ),
     ]))?;
     let server_names = desired
         .document

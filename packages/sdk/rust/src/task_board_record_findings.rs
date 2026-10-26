@@ -233,7 +233,11 @@ pub(super) fn preserve_task<'a>(task: Value<'a>) -> Result<Json> {
         sequence = sequence.max(next);
     }
     for (source, findings) in groups {
-        let text = text_in(&findings)?;
+        let text = if source == JsString::from("saved-material") {
+            format!("Imported references for {} saved results. Details remain with those result records and their attachments.", value::array_items(&findings)?.len()).into()
+        } else {
+            text_in(&findings)?
+        };
         let fragments: Vec<_> = fragments(&text).into_iter().map(|(_, text)| text).collect();
         let mut retained = Vec::new();
         for artifact in evidence_in(&findings)? {

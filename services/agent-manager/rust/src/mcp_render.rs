@@ -42,6 +42,7 @@ pub fn render_mcp_sections(
     hive_urls: &HashSet<String>,
     credential: &JsString,
     app_id: Option<&JsString>,
+    credentials: &crate::mcp_credentials::McpCredentials,
 ) -> IvyResult<Option<Vec<String>>> {
     if document.get("enabled") != Some(&IvyJson::Bool(true)) {
         return Ok(None);
@@ -59,35 +60,16 @@ pub fn render_mcp_sections(
                 "Managed MCP server names must be unique.",
             ));
         }
-        let url = parse_url(text(server, "url")?)?;
-        let loopback = ["localhost", "127.0.0.1", "[::1]"].contains(&url.hostname.as_str());
-        if !(url.protocol == "https:" || url.protocol == "http:" && loopback)
-            || !url.username.is_empty()
-            || !url.password.is_empty()
-            || !url.hash.is_empty()
-        {
-            return Err(IvyError::new(
-                "invalid_arguments",
-                "Managed remote MCP URLs require HTTPS.",
-            ));
-        }
-        let authenticated = text(server, "authentication")? == &JsString::from("agent-manager");
-        if authenticated && !hive_urls.contains(&url.href) {
-            return Err(IvyError::new(
-                "access_denied",
-                "AgentManager credentials can only be sent to this Hive MCP resource.",
-            ));
-        }
+        let resolved =
+            crate::mcp_credentials::resolve_mcp_server(server, hive_urls, credential, credentials)?;
         let mut lines = vec![
             format!("[mcp_servers.{}]", quoted(name)?),
-            format!("url = {}", quoted(&url.href.into())?),
+            format!("url = {}", quoted(&resolved.url.into())?),
         ];
-        if authenticated {
-            let mut bearer = JsString::from("Bearer ");
-            bearer.0.extend_from_slice(&credential.0);
+        if let Some(authorization) = resolved.authorization {
             lines.push(format!(
                 "http_headers = {{ Authorization = {} }}",
-                quoted(&bearer)?
+                quoted(&authorization.into())?
             ));
         }
         for (key, property) in [

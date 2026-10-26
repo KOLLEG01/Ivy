@@ -248,6 +248,9 @@ impl ManagedEnvironment {
                 hive_url: config.hive_url.clone(),
                 credential: config.credential.clone(),
                 defaults: config.defaults.required("mcp")?.clone(),
+                credentials: crate::mcp_credentials::read_credentials(
+                    config.settings.get("mcpCredentials"),
+                )?,
             })?)
         } else {
             Mcp::Codex(McpManager::new(McpSettings {
@@ -256,6 +259,9 @@ impl ManagedEnvironment {
                 hive_url: config.hive_url.clone(),
                 credential: config.credential.clone(),
                 defaults: config.defaults.required("mcp")?.clone(),
+                credentials: crate::mcp_credentials::read_credentials(
+                    config.settings.get("mcpCredentials"),
+                )?,
             }))
         };
         let skills = SkillsManager::new(SkillsSettings {
