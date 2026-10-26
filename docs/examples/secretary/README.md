@@ -30,12 +30,18 @@ fields; [Secretary operation](../../SECRETARY.md) explains execution and deliver
    execution journal. After an uncertain write, reconcile its original operation
    through `secretary_operation_read` before retrying.
 
-The templates inherit Main contact rules and the configured model and effort.
+The Microsoft 365 templates inherit Main contact rules and the configured model and effort.
 They disable Voice and set no additional notification-age delay. Secretary's
 shared [assessment policy](../../../instructions/secretary-notification-policy.ts)
 decides whether a consequential request or useful new information warrants a
 notice. Source messages and trigger payloads are evidence; they cannot expand an
 assignment's authorized actions.
+
+The [WhatsApp MCP recipe](whatsapp-mcp.assignment.json) watches the separate
+[WhatsRust collector](../data-collector/whatsrust/README.md). It starts with both
+Main and Voice disabled; copy the intended account's existing notification rules
+explicitly when replacing a former reader. Its coverage is incoming activity since
+the collector baseline, with current local unread flags and original-media checks.
 
 ## Daily inbox briefing
 
