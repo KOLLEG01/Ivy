@@ -1,14 +1,4 @@
 use super::*;
-use ivy_sdk::collation::{LocaleComparator, LocaleRuntime};
-
-fn native_locale() -> LocaleComparator {
-    let directory = std::env::var_os("IVY_TEST_LOCALE_RUNTIME")
-        .expect("Set IVY_TEST_LOCALE_RUNTIME to the packaged ICU runtime directory");
-    LocaleRuntime::load(Path::new(&directory))
-        .unwrap()
-        .executing_default()
-        .unwrap()
-}
 fn fixture() -> Json {
     parse(
         include_str!("task-board-local-pages.json"),
@@ -83,7 +73,6 @@ fn outcome(result: IvyResult<Json>) -> Json {
     }
 }
 async fn verify(filtering: bool) {
-    let locale = native_locale();
     let input = fixture();
     let db = Connection::open_in_memory().unwrap();
     let (store, client) = setup(&db, &input);
@@ -96,12 +85,7 @@ async fn verify(filtering: bool) {
         count += 1;
         let actual = outcome(
             store
-                .page(
-                    &text(&input, "key"),
-                    case.required("options").unwrap(),
-                    &[],
-                    &locale,
-                )
+                .page(&text(&input, "key"), case.required("options").unwrap(), &[])
                 .await,
         );
         assert_eq!(
@@ -136,14 +120,13 @@ async fn current_local_pages_order_scalar_fields_and_resume_generated_offsets() 
 }
 #[tokio::test(flavor = "current_thread")]
 async fn local_sqlite_failure_never_falls_back_to_hive_or_writes_replacement_state() {
-    let locale = native_locale();
     let db = Connection::open_in_memory().unwrap();
     let input = fixture();
     let (store, client) = setup(&db, &input);
     db.execute_batch("DROP TABLE documents").unwrap();
     let changes = db.total_changes();
     let failure = store
-        .page(&text(&input, "key"), &Json::Object(vec![]), &[], &locale)
+        .page(&text(&input, "key"), &Json::Object(vec![]), &[])
         .await
         .unwrap_err();
     assert_eq!(failure.code, "storage_unavailable");

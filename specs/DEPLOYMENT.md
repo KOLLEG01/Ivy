@@ -14,13 +14,9 @@ Intentional Node SDK consumers and user scripts remain supported.
 
 ## Releases
 
-Native TaskBoard builds require the qualified full ICU 78.3/Unicode 17 runtime
-in `.local/native-runtime/<os>-<arch>/`: `icudt78.dll`, `icuuc78.dll`, `icuin78.dll`
-on Windows, or `libicudata.so.78`, `libicuuc.so.78`, `libicui18n.so.78` on Linux,
-plus `LICENSE.icu`. The selected component build stages these inputs beside its
-binary and includes the native catalogs. Missing inputs fail before compilation.
-Node remains a build prerequisite; the prepared service and health commands run
-their native executables directly.
+TaskBoard display languages use compiled Rust locale data. Its native package
+includes the native catalogs. Node remains a build prerequisite; the prepared
+service and health commands run their native executables directly.
 
 - Build one selected component from one fixed source snapshot. Keep the checkout stable
   during capture; later edits cannot alter a prepared candidate. Preparation and tests
@@ -246,12 +242,12 @@ the [host schema](schemas/host.schema.json).
 | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | `status [--deployment ID]`                                                                                                       | Read host state or the original deployment record, including readiness and preparation progress. |
 | `prepare --component ID --source PATH`; `preparations`; `compact-preparations`                                                   | Capture an immutable candidate; inspect or compact retained preparations.                        |
-| `collect-storage`                                                                                                               | Run the automatic storage policy now and report removals and protected or blocked areas.         |
+| `collect-storage`                                                                                                                | Run the automatic storage policy now and report removals and protected or blocked areas.         |
 | `deploy --instance ID (--candidate ID \| --source PATH) --operation-id ID`                                                       | Durably request activation; prefer deploying the exact inspected candidate.                      |
 | `restart`, `enable`, `disable` with `--instance ID --operation-id ID`; `rollback --instance ID --to BUILD --operation-id ID`     | Change an instance through the executor.                                                         |
 | `install-bootstrap --candidate ID`; `inspect-bootstrap`; `update-bootstrap --request PATH`; `bootstrap-status --operation-id ID` | Install or maintain bootstrap-owned processes separately from ordinary deployment.               |
 | `backup --destination PATH`; `restore --backup PATH --backup-hash HASH`                                                          | Snapshot or restore an offline host.                                                             |
-| `runtime-reset [--apply --confirm ID]`; `runtime-reset-host --phase PHASE` with the coordinated reset identities                  | Preview or run the configured reset using the native Host phases, Hive storage and UI publisher. |
+| `runtime-reset [--apply --confirm ID]`; `runtime-reset-host --phase PHASE` with the coordinated reset identities                 | Preview or run the configured reset using the native Host phases, Hive storage and UI publisher. |
 
 Preserve the exact request, operation ID, candidate/build ID and returned deployment ID.
 After acceptance, read `status --deployment ID` until `data.record.phase` is terminal:

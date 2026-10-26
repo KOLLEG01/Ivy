@@ -74,43 +74,28 @@ fn instance(root: &Root, matching_build: bool, component: &str) -> (PathBuf, Jso
     (path, config)
 }
 
-fn inputs(
-    root: &Root,
-    prompts: PromptOwner,
-) -> (
-    NativeRuntimeInputs<PromptOwner>,
-    std::sync::Weak<LocaleRuntime>,
-) {
-    let runtime = LocaleRuntime::load(&PathBuf::from(
-        std::env::var_os("IVY_TEST_LOCALE_RUNTIME").expect("Supply the packaged ICU runtime"),
-    ))
-    .unwrap();
-    let weak = Arc::downgrade(&runtime);
+fn inputs(root: &Root, prompts: PromptOwner) -> NativeRuntimeInputs<PromptOwner> {
     let packaged = ivy_task_board::runtime_inputs::packaged(
         root.0.join("configured artifact"),
-        runtime.executing_default().unwrap(),
+        LocaleComparator::system().unwrap(),
     )
     .unwrap();
-    (
-        NativeRuntimeInputs {
-            contracts: packaged.contracts,
-            catalogs: packaged.catalogs,
-            registry: packaged.registry,
-            locale: packaged.locale,
-            prompts,
-            chat_readable_versions: packaged.chat_readable_versions,
-        },
-        weak,
-    )
+    NativeRuntimeInputs {
+        contracts: packaged.contracts,
+        catalogs: packaged.catalogs,
+        registry: packaged.registry,
+        locale: packaged.locale,
+        prompts,
+        chat_readable_versions: packaged.chat_readable_versions,
+    }
 }
-
 #[tokio::test(flavor = "current_thread")]
 async fn native_runtime_owns_configured_journal_and_resources_until_shutdown() {
     for open in [false, true] {
         let root = Root::new();
         let (path, config) = instance(&root, true, "task-board");
         let alive = Rc::new(Cell::new(true));
-        let (inputs, locale) = inputs(&root, PromptOwner(alive.clone()));
+        let inputs = inputs(&root, PromptOwner(alive.clone()));
         let runtime = NativeRuntime::prepare(&path, inputs).await.unwrap();
         let data = root.0.join("configured data");
         assert_eq!(runtime.host.config.json(), &config);
@@ -130,14 +115,9 @@ async fn native_runtime_owns_configured_journal_and_resources_until_shutdown() {
         }
         let shutdown = async {
             assert!(alive.get());
-            assert!(locale.upgrade().is_some());
         };
         bounded(runtime.run(shutdown)).await.unwrap();
         assert!(!alive.get(), "Prompt owner must release after shutdown");
-        assert!(
-            locale.upgrade().is_none(),
-            "The actual ICU owner must release"
-        );
         let health = json(&std::fs::read_to_string(data.join("health.json")).unwrap());
         assert_eq!(health.get("instanceId"), config.get("instanceId"));
         assert_eq!(health.get("buildId"), config.get("buildId"));
@@ -176,11 +156,10 @@ async fn native_runtime_rejects_build_and_service_identity_before_opening_journa
         let root = Root::new();
         let (path, _) = instance(&root, matching, component);
         let alive = Rc::new(Cell::new(true));
-        let (inputs, locale) = inputs(&root, PromptOwner(alive.clone()));
+        let inputs = inputs(&root, PromptOwner(alive.clone()));
         let result = NativeRuntime::prepare(path, inputs).await;
         assert_eq!(result.err().unwrap().code, error);
         assert!(!alive.get());
-        assert!(locale.upgrade().is_none());
         let data = root.0.join("configured data");
         assert!(!data.join("task-board.sqlite").exists());
         assert!(!data.join("health.json").exists());
@@ -198,7 +177,7 @@ async fn native_runtime_registers_the_full_catalog_and_serves_an_sdk_workspace_c
     config.insert("publicBaseUrl", peer.url.clone().into());
     std::fs::write(&path, stringify(&config, 32768).unwrap()).unwrap();
     let alive = Rc::new(Cell::new(true));
-    let (inputs, locale) = inputs(&root, PromptOwner(alive.clone()));
+    let inputs = inputs(&root, PromptOwner(alive.clone()));
     let advertisement = inputs.registry.value().clone();
     let runtime = NativeRuntime::prepare(&path, inputs).await.unwrap();
     let client = runtime.host.service.client.clone();
@@ -242,7 +221,6 @@ async fn native_runtime_registers_the_full_catalog_and_serves_an_sdk_workspace_c
         })
         .await;
         assert!(alive.get());
-        assert!(locale.upgrade().is_some());
         shutdown.notify_one();
     };
     let (result, ()) =
@@ -250,7 +228,6 @@ async fn native_runtime_registers_the_full_catalog_and_serves_an_sdk_workspace_c
     result.unwrap();
     assert!(!client.ready());
     assert!(!alive.get());
-    assert!(locale.upgrade().is_none());
     let registrations = peer
         .frames
         .lock()

@@ -17,7 +17,6 @@ use ivy_task_board::{
 };
 use std::{
     cell::{Cell, RefCell},
-    cmp::Ordering,
     sync::Arc,
 };
 
@@ -336,9 +335,6 @@ impl AllocationRuntime for World {
     fn service_node_id(&self) -> &JsString {
         &self.node
     }
-    fn compare_default(&self, a: &JsString, b: &JsString) -> Ordering {
-        a.0.cmp(&b.0)
-    }
 }
 impl SchedulerPolicies for World {
     async fn read_task(&self, id: &JsString) -> IvyResult<Document> {
@@ -352,9 +348,6 @@ impl SchedulerPolicies for World {
     }
     fn now(&self) -> JsString {
         self.now.borrow().as_str().into()
-    }
-    fn compare_default(&self, a: &JsString, b: &JsString) -> Ordering {
-        a.0.cmp(&b.0)
     }
     async fn aggregate(&self, _: &Json, id: &JsString) -> IvyResult<()> {
         self.event("aggregate", Json::String(id.clone()));

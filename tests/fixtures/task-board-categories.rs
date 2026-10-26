@@ -7,7 +7,7 @@ use ivy_contracts::{
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::{
-    collation::{LocaleComparator, LocaleRuntime},
+    collation::LocaleComparator,
     rpc::{RequestFuture, RequestOptions, RpcClient},
 };
 use ivy_task_board::{
@@ -36,11 +36,7 @@ fn data() -> &'static Json {
     static D: OnceLock<Json> = OnceLock::new();
     D.get_or_init(|| {
         let p = reference_data::read(include_bytes!("task-board-categories-cases.json.gz"));
-        parse(
-            std::str::from_utf8(&p).unwrap(),
-            MANAGEMENT_FRAME_BYTES,
-        )
-        .unwrap()
+        parse(std::str::from_utf8(&p).unwrap(), MANAGEMENT_FRAME_BYTES).unwrap()
     })
 }
 fn error(v: &Json) -> IvyError {
@@ -163,12 +159,7 @@ impl CategoryStore for World {
     }
 }
 fn native_locale() -> LocaleComparator {
-    let directory = std::env::var_os("IVY_TEST_LOCALE_RUNTIME")
-        .expect("Set IVY_TEST_LOCALE_RUNTIME to the packaged ICU runtime directory");
-    LocaleRuntime::load(Path::new(&directory))
-        .unwrap()
-        .executing_default()
-        .unwrap()
+    LocaleComparator::system().unwrap()
 }
 #[derive(Default)]
 struct Executor<'a> {

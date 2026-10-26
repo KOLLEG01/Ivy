@@ -21,7 +21,7 @@ fn text(value: Option<&Json>) -> IvyResult<&JsString> {
         .ok_or_else(value::invalid)
 }
 fn is_text(value: Option<&Json>, expected: &str) -> bool {
-    value.and_then(Json::as_js_string) == Some(&JsString::from(expected))
+    value.is_some_and(|value| value.is_str(expected))
 }
 fn ids(values: impl IntoIterator<Item = Json>) -> IvyResult<Vec<Json>> {
     let mut unique = Vec::new();

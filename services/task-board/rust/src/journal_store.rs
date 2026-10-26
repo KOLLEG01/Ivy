@@ -423,16 +423,15 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
     }
 
     /// Local keys stay on SQLite, including when its query fails. The owner
-    /// supplies both locale ordering and the exact readable remote versions.
+    /// supplies the exact readable remote versions.
     pub async fn page(
         &self,
         key: &str,
         options: &Json,
         readable_versions: &[JsString],
-        locale: &impl crate::category_projection::CategoryLocale,
     ) -> IvyResult<Json> {
         if self.contracts.local(key)? {
-            self.journal.page(key, options, locale)
+            self.journal.page(key, options)
         } else {
             self.remote_page(key, options, readable_versions).await
         }

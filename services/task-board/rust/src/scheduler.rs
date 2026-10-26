@@ -16,7 +16,7 @@ use ivy_sdk::{
     clock::date_to_iso, native_evidence::native_instant, operation_ids::scoped_operation_id,
     rpc::RpcClient, tools::ToolClients,
 };
-use std::{cmp::Ordering, sync::Arc};
+use std::sync::Arc;
 #[allow(async_fn_in_trait)]
 pub trait SchedulerStore: AllocationStore + WakeStore {
     fn free_bytes(&self) -> IvyResult<Option<f64>>;
@@ -59,7 +59,6 @@ pub trait SchedulerPolicies: TaskPrompts {
     fn enabled(&self) -> bool;
     fn interval_ms(&self) -> f64;
     fn now(&self) -> JsString;
-    fn compare_default(&self, left: &JsString, right: &JsString) -> Ordering;
     async fn aggregate(&self, task: &Json, id: &JsString) -> IvyResult<()>;
     async fn forward_delegated_review(&self, task: &Document) -> IvyResult<()>;
     async fn unstarted_missing_context(&self, task: &Document) -> IvyResult<bool>;
@@ -119,9 +118,6 @@ impl<R: RpcClient + 'static, P: SchedulerPolicies> AllocationRuntime for Schedul
     fn service_node_id(&self) -> &JsString {
         &self.service_node_id
     }
-    fn compare_default(&self, a: &JsString, b: &JsString) -> Ordering {
-        self.policies.compare_default(a, b)
-    }
 }
 impl<R: RpcClient + 'static, P: SchedulerPolicies> SchedulerPolicies for SchedulerRuntime<R, P> {
     async fn read_task(&self, id: &JsString) -> IvyResult<Document> {
@@ -135,9 +131,6 @@ impl<R: RpcClient + 'static, P: SchedulerPolicies> SchedulerPolicies for Schedul
     }
     fn now(&self) -> JsString {
         self.policies.now()
-    }
-    fn compare_default(&self, a: &JsString, b: &JsString) -> Ordering {
-        self.policies.compare_default(a, b)
     }
     async fn aggregate(&self, t: &Json, id: &JsString) -> IvyResult<()> {
         self.policies.aggregate(t, id).await

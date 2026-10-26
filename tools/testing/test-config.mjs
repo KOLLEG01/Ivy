@@ -549,11 +549,6 @@ export const rustTests = {
     "package": "ivy-sdk",
     "test": "sdk-collation"
   },
-  "tests/rust/sdk-locale-case.rs": {
-    "package": "ivy-sdk",
-    "lib": true,
-    "filter": "collation::casing_tests"
-  },
   "tests/rust/contracts-native-urls.rs": {
     "package": "ivy-contracts",
     "test": "contracts",
@@ -804,7 +799,7 @@ export const rustTests = {
   "tests/fixtures/task-board-categories.rs": {
     "package": "ivy-task-board",
     "test": "task-board-output",
-    "filter": "categories::native_casing_errors_preserve_the_projection_and_release_queued_requests"
+    "filter": "categories::"
   },
   "tests/fixtures/task-board-deliveries-journal.rs": {
     "package": "ivy-task-board",

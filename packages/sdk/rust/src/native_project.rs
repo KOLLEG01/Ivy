@@ -7,7 +7,10 @@ use crate::{
 use ivy_contracts::agent_schema::validate_agent;
 
 fn explicit(params: &IvyJson) -> Option<IvyJson> {
-    if params.get("projectId") == Some(&IvyJson::from("")) {
+    if params
+        .get("projectId")
+        .is_some_and(|value| value.is_str(""))
+    {
         let mut value = params.clone();
         value.insert("projectId", IvyJson::Null);
         return Some(value);
@@ -37,7 +40,10 @@ pub fn default_native_thread_project(params: &IvyJson, inventory: &IvyJson) -> I
         .as_array()
         .ok_or_else(IvyError::internal)?
     {
-        if project.get("source") != Some(&IvyJson::from("native")) {
+        if !project
+            .get("source")
+            .is_some_and(|value| value.is_str("native"))
+        {
             continue;
         }
         for path in project

@@ -145,7 +145,7 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
         let plan = field(run, "plan");
         let primary = field(run, "primaryResourceRef");
         let mut definition = "turnStart";
-        let (method, params) = if field(origin, "kind") == &Json::from("steer") {
+        let (method, params) = if field(origin, "kind").is_str("steer") {
             require(
                 slot == NativeSlot::Steer
                     && primary.as_object().is_some()
@@ -170,11 +170,11 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
                     ("input", Json::Array(vec![task_input(text)])),
                 ]),
             )
-        } else if field(origin, "kind") == &Json::from("reattach") {
+        } else if field(origin, "kind").is_str("reattach") {
             require(
                 slot == NativeSlot::Thread
-                    && primary.get("namespace") == Some(&Json::from("codex"))
-                    && primary.get("kind") == Some(&Json::from("thread"))
+                    && field(primary, "namespace").is_str("codex")
+                    && field(primary, "kind").is_str("thread")
                     && primary.get("serviceNodeId") == field(run, "target").get("serviceNodeId"),
                 "task_board_primary_mismatch",
                 "Reattachment requires the saved primary thread on the selected native owner.",
@@ -189,8 +189,8 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
             let primary = field(&task.value, "primaryResourceRef");
             require(
                 primary.is_null()
-                    || (primary.get("namespace") == Some(&Json::from("codex"))
-                        && primary.get("kind") == Some(&Json::from("thread"))
+                    || (field(primary, "namespace").is_str("codex")
+                        && field(primary, "kind").is_str("thread")
                         && primary.get("serviceNodeId")
                             == field(run, "target").get("serviceNodeId")),
                 "task_board_primary_mismatch",
@@ -218,7 +218,7 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
                 string(run.required("owner")?, "serviceNodeId")?,
                 None,
             )?;
-            let mut input = if field(run, "owner").get("source") == Some(&Json::from("scheduler")) {
+            let mut input = if field(field(run, "owner"), "source").is_str("scheduler") {
                 vec![]
             } else {
                 field(field(plan, "turnStart"), "input")

@@ -90,7 +90,6 @@ fn invoke(executable: &Path, cwd: &Path, input: &[u8], arguments: &[&str]) -> (i
     );
     #[cfg(unix)]
     command.env("PATH", "");
-    command.env("IVY_TEST_LOCALE_RUNTIME", cwd.join("absent-locale"));
     let mut child = command.spawn().unwrap();
     let written = child.stdin.take().unwrap().write_all(input);
     let output = child.wait_with_output().unwrap();

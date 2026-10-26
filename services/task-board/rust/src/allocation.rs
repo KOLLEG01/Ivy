@@ -19,7 +19,7 @@ use ivy_sdk::{
     rpc::{RequestOptions, RpcClient},
     tools::{BoundToolClient, InterfaceRequirement, ToolCallOptions, ToolClients},
 };
-use std::{cmp::Ordering, collections::HashMap, future::Future, sync::Arc, task::Poll};
+use std::{collections::HashMap, future::Future, sync::Arc, task::Poll};
 
 #[cfg(test)]
 #[path = "../../../../tests/fixtures/task-board-allocation-continuation.rs"]
@@ -36,14 +36,12 @@ pub trait AllocationStore: Store {
     ) -> IvyResult<Option<JsString>>;
     async fn named_plan(&self, name: &JsString) -> IvyResult<Option<Document>>;
 }
-/// Bind comparison to the host's exact default ECMAScript locale ordering.
-/// Do not silently replace it with ordinal or English-only comparison.
+/// Native owner bindings. Eligible service identifiers have ordinal order.
 pub trait AllocationRuntime: TaskPrompts {
     fn client(&self) -> Arc<dyn RpcClient>;
     fn tools(&self) -> &Arc<ToolClients>;
     fn principal_id(&self) -> &JsString;
     fn service_node_id(&self) -> &JsString;
-    fn compare_default(&self, left: &JsString, right: &JsString) -> Ordering;
 }
 pub struct Allocator<'a, S, E> {
     pub store: &'a S,
@@ -58,7 +56,7 @@ fn s<'a>(v: &'a Json, k: &str) -> IvyResult<&'a JsString> {
     v.required(k)?.as_js_string().ok_or_else(IvyError::internal)
 }
 fn eq(v: &Json, k: &str, t: &str) -> bool {
-    v.get(k) == Some(&Json::from(t))
+    v.get(k).is_some_and(|value| value.is_str(t))
 }
 fn same(left: &Json, right: &Json) -> IvyResult<bool> {
     if left.is_null() || right.is_null() {
@@ -760,10 +758,8 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                         )
                 })
                 .then_with(|| {
-                    self.engine.compare_default(
-                        &text(field(&a.node, "serviceNodeId")),
-                        &text(field(&b.node, "serviceNodeId")),
-                    )
+                    text(field(&a.node, "serviceNodeId"))
+                        .cmp(&text(field(&b.node, "serviceNodeId")))
                 })
         });
         let mut selected = None;

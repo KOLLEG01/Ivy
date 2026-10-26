@@ -1,6 +1,6 @@
 use super::*;
 use futures_util::FutureExt;
-use ivy_sdk::collation::LocaleRuntime;
+use ivy_sdk::collation::LocaleComparator;
 use ivy_task_board::{
     native_journal::NativeJournal,
     native_policies::{NativePolicies, NativePolicyFactory},
@@ -215,17 +215,13 @@ fn contracts() -> RuntimeContracts {
 
 #[tokio::test(flavor = "current_thread")]
 async fn native_policy_factory_runs_the_empty_graph_with_actual_journal_and_locale_owners() {
-    let runtime = LocaleRuntime::load(&PathBuf::from(
-        std::env::var_os("IVY_TEST_LOCALE_RUNTIME").expect("Supply the packaged ICU runtime"),
-    ))
-    .unwrap();
     for file in [false, true] {
         let peer = Peer::start_mode(Some("--native-policies")).await;
         let root = Root::new();
         let probe = Probe {
             native: NativePolicyFactory {
                 journal: NativeJournal::new(file.then(|| root.0.clone()), HistoryLimits::default()),
-                locale: runtime.executing_default().unwrap(),
+                locale: LocaleComparator::system().unwrap(),
                 prompts: PromptBoundary,
                 chat_readable_versions: vec!["fixture-chat-reader".into()],
             },

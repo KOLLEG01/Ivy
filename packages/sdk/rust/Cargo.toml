@@ -18,12 +18,10 @@ serde_json.workspace = true
 chrono.workspace = true
 jiff-tzdb.workspace = true
 tz-rs.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-libc.workspace = true
+icu_collator.workspace = true
+icu_casemap.workspace = true
+icu_locale_core.workspace = true
+sys-locale.workspace = true
 
 [[test]]
 name = "sdk"

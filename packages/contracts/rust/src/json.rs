@@ -9,19 +9,24 @@ mod value_traits;
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct JsString(pub Vec<u16>);
 pub fn lowercase_utf16(value: &[u16]) -> JsString {
+    map_unicode(value, str::to_lowercase)
+}
+/// Apply ordinary Rust text operations at the lossless JSON boundary. Unpaired
+/// surrogates delimit Unicode segments and remain unchanged in the result.
+pub fn map_unicode(value: &[u16], mut map: impl FnMut(&str) -> String) -> JsString {
     let mut output = Vec::new();
     let mut segment = String::new();
     for c in char::decode_utf16(value.iter().copied()) {
         match c {
             Ok(c) => segment.push(c),
             Err(e) => {
-                output.extend(segment.to_lowercase().encode_utf16());
+                output.extend(map(&segment).encode_utf16());
                 segment.clear();
                 output.push(e.unpaired_surrogate());
             }
         }
     }
-    output.extend(segment.to_lowercase().encode_utf16());
+    output.extend(map(&segment).encode_utf16());
     JsString(output)
 }
 impl From<&str> for JsString {
@@ -35,6 +40,9 @@ impl From<String> for JsString {
     }
 }
 impl JsString {
+    pub fn eq_str(&self, value: &str) -> bool {
+        self.0.iter().copied().eq(value.encode_utf16())
+    }
     /// Native Unicode lowercase retains unpaired UTF-16 units as boundaries.
     pub fn to_english_lowercase(&self) -> Self {
         lowercase_utf16(&self.0)
@@ -136,7 +144,13 @@ impl IvyJson {
         }
     }
     pub fn get(&self, key: &str) -> Option<&Self> {
-        self.get_key(&JsString::from(key))
+        match self {
+            Self::Object(pairs) => pairs
+                .iter()
+                .find(|(name, _)| name.eq_str(key))
+                .map(|(_, value)| value),
+            _ => None,
+        }
     }
     pub fn get_key(&self, key: &JsString) -> Option<&Self> {
         match self {
@@ -149,6 +163,10 @@ impl IvyJson {
             Self::String(s) => s.to_utf8(),
             _ => Err(invalid("Expected a string.")),
         }
+    }
+    /// Match a domain tag without allocating another encoded JSON string.
+    pub fn is_str(&self, expected: &str) -> bool {
+        matches!(self, Self::String(value) if value.eq_str(expected))
     }
     pub fn as_f64(&self) -> Option<f64> {
         if let Self::Number(v) = self {
@@ -193,9 +211,10 @@ impl IvyJson {
             .ok_or_else(|| invalid(&format!("Missing required property: {key}")))
     }
     pub fn remove(&mut self, key: &str) -> Option<Self> {
-        let key = JsString::from(key);
         if let Self::Object(v) = self {
-            v.iter().position(|p| p.0 == key).map(|i| v.remove(i).1)
+            v.iter()
+                .position(|p| p.0.eq_str(key))
+                .map(|i| v.remove(i).1)
         } else {
             None
         }

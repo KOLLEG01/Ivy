@@ -160,7 +160,6 @@ impl<C: Fn() -> String, I: Fn() -> JsString, K, P> LifecyclePages
                 key,
                 options,
                 self.context.journal.contracts.readable_versions(key)?,
-                self,
             )
             .await
     }

@@ -1,9 +1,6 @@
-//! Internal journal queries over current SQLite heads. Locale ordering is
-//! supplied by the host owner; this module does not select a fallback locale.
-use crate::{
-    category_projection::CategoryLocale,
-    local_journal::{LocalJournal, count_column, require},
-};
+//! Internal journal queries over current SQLite heads. Keys, timestamps and
+//! identifiers have deterministic ordinal ordering, independent of display locale.
+use crate::local_journal::{LocalJournal, count_column, require};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
@@ -22,32 +19,66 @@ struct Row {
 fn string(value: &Json) -> IvyResult<&JsString> {
     value.as_js_string().ok_or_else(IvyError::internal)
 }
-fn field<'a>(row: &'a Row, path: &JsString) -> Option<&'a Json> {
-    if path == &JsString::from("object.id") {
-        return Some(&row.id);
+enum Selector {
+    Id,
+    Parent,
+    Data(Vec<String>),
+    // Only JSON-escaped, non-Unicode field names need the lossless adapter.
+    Escaped(Vec<JsString>),
+    Missing,
+}
+impl Selector {
+    fn parse(value: &Json) -> IvyResult<Self> {
+        let path = string(value)?;
+        Ok(if path.eq_str("object.id") {
+            Self::Id
+        } else if path.eq_str("object.parentId") {
+            Self::Parent
+        } else if let Ok(path) = path.to_utf8() {
+            path.strip_prefix("data:/").map_or(Self::Missing, |path| {
+                Self::Data(path.split('/').map(str::to_owned).collect())
+            })
+        } else if let Some(path) = path.0.strip_prefix(&[100, 97, 116, 97, 58, 47]) {
+            Self::Escaped(
+                path.split(|unit| *unit == 47)
+                    .map(|part| JsString(part.to_vec()))
+                    .collect(),
+            )
+        } else {
+            Self::Missing
+        })
     }
-    if path == &JsString::from("object.parentId") {
-        return Some(&row.parent);
-    }
-    let parts = path.0.strip_prefix(&[100, 97, 116, 97, 58, 47])?;
-    let mut value = &row.value;
-    for part in parts.split(|unit| *unit == 47) {
-        value = match value {
-            Json::Object(_) => value.get_key(&JsString(part.to_vec()))?,
-            Json::Array(values) => {
-                // Query selectors address JSON array elements, never inherited
-                // language properties or coercion hooks.
-                let text = String::from_utf16(part).ok()?;
-                let index = text.parse::<usize>().ok()?;
-                if index.to_string() != text {
-                    return None;
+    fn read<'a>(&self, row: &'a Row) -> Option<&'a Json> {
+        let mut value = &row.value;
+        match self {
+            Self::Id => return Some(&row.id),
+            Self::Parent => return Some(&row.parent),
+            Self::Missing => return None,
+            Self::Data(parts) => {
+                for part in parts {
+                    value = match value {
+                        Json::Object(_) => value.get(part)?,
+                        Json::Array(values) => values.get(index(part)?)?,
+                        _ => return None,
+                    };
                 }
-                values.get(index)?
             }
-            _ => return None,
-        };
+            Self::Escaped(parts) => {
+                for part in parts {
+                    value = match value {
+                        Json::Object(_) => value.get_key(part)?,
+                        Json::Array(values) => values.get(index(&part.to_utf8().ok()?)?)?,
+                        _ => return None,
+                    };
+                }
+            }
+        }
+        Some(value)
     }
-    Some(value)
+}
+fn index(text: &str) -> Option<usize> {
+    let index = text.parse::<usize>().ok()?;
+    (index.to_string() == text).then_some(index)
 }
 fn same(left: &Json, right: &Json) -> IvyResult<bool> {
     Ok(canonical(left, MANAGEMENT_FRAME_BYTES)? == canonical(right, MANAGEMENT_FRAME_BYTES)?)
@@ -70,7 +101,7 @@ fn matches(row: &Row, predicate: &Json) -> IvyResult<bool> {
         }
         "not" => Ok(!matches(row, predicate.required("arg")?)?),
         _ => {
-            let value = field(row, string(predicate.required("field")?)?);
+            let value = Selector::parse(predicate.required("field")?)?.read(row);
             match op.as_str() {
                 "eq" | "ne" => match value {
                     Some(value) => Ok(same(value, predicate.required("value")?)? == (op == "eq")),
@@ -129,12 +160,12 @@ impl Scalar {
             Self::Number(_, text) | Self::Text(text) => text,
         }
     }
-    fn compare(&self, right: &Self, locale: &impl CategoryLocale) -> Ordering {
+    fn compare(&self, right: &Self) -> Ordering {
         match (self, right) {
             (Self::Number(left, _), Self::Number(right, _)) => {
                 left.partial_cmp(right).unwrap_or(Ordering::Equal)
             }
-            _ => locale.compare_default(self.text(), right.text()),
+            _ => self.text().cmp(right.text()),
         }
     }
 }
@@ -164,7 +195,7 @@ impl LocalJournal<'_> {
     /// Page current local records using internal native query definitions.
     /// Root/version filters and projections belong to the remote store; local
     /// records retain their existing key-only scope and empty projection map.
-    pub fn page(&self, key: &str, options: &Json, locale: &impl CategoryLocale) -> IvyResult<Json> {
+    pub fn page(&self, key: &str, options: &Json) -> IvyResult<Json> {
         let mut statement = self
             .connection
             .prepare(
@@ -193,6 +224,10 @@ impl LocalJournal<'_> {
             .unwrap_or(&default_order)
             .as_array()
             .ok_or_else(IvyError::internal)?;
+        let selectors = orders
+            .iter()
+            .map(|order| Selector::parse(order.required("field")?))
+            .collect::<IvyResult<Vec<_>>>()?;
         let mut selected = Vec::new();
         for row in rows {
             let (id, parent, revision, encoded) = row.map_err(error)?;
@@ -207,15 +242,15 @@ impl LocalJournal<'_> {
                     continue;
                 }
             }
-            let keys = orders
+            let keys = selectors
                 .iter()
-                .map(|order| Scalar::read(field(&row, string(order.required("field")?)?)))
+                .map(|selector| Scalar::read(selector.read(&row)))
                 .collect::<IvyResult<Vec<_>>>()?;
             selected.push((row, keys));
         }
         selected.sort_by(|(left, left_keys), (right, right_keys)| {
             for ((left, right), order) in left_keys.iter().zip(right_keys).zip(orders) {
-                let result = left.compare(right, locale);
+                let result = left.compare(right);
                 if result != Ordering::Equal {
                     return if order.get("direction") == Some(&Json::from("desc")) {
                         result.reverse()
@@ -224,10 +259,10 @@ impl LocalJournal<'_> {
                     };
                 }
             }
-            locale.compare_default(
-                left.id.as_js_string().unwrap(),
-                right.id.as_js_string().unwrap(),
-            )
+            left.id
+                .as_js_string()
+                .unwrap()
+                .cmp(right.id.as_js_string().unwrap())
         });
         let offset = offset(options, selected.len())?;
         let limit = options

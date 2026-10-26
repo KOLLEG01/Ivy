@@ -22,7 +22,7 @@ use std::{
 };
 
 /// Use the owning host's default locale for category casing and ordering.
-/// Allocation and category bindings share this policy, without an English fallback.
+/// Identifier ordering is separate from this user-facing display policy.
 pub trait CategoryLocale {
     fn lowercase_default(&self, value: &JsString) -> IvyResult<JsString>;
     fn compare_default(&self, left: &JsString, right: &JsString) -> Ordering;

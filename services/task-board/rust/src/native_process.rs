@@ -1,13 +1,13 @@
-//! The process owns configuration, packaged catalogs and ICU until final drain.
+//! The process owns configuration and packaged catalogs until final drain.
 use crate::{native_runtime::NativeRuntime, prompts::CurrentTaskPrompts, runtime_inputs};
 use ivy_contracts::{IvyError, IvyResult};
 use ivy_host_runtime::config::native_instance_config;
-use ivy_sdk::collation::LocaleRuntime;
+use ivy_sdk::collation::LocaleComparator;
 use std::path::PathBuf;
 
 pub async fn prepare(path: impl Into<PathBuf>) -> IvyResult<NativeRuntime<CurrentTaskPrompts>> {
     let config = native_instance_config(path).await?;
-    let locale = LocaleRuntime::from_current_executable()?.executing_default()?;
+    let locale = LocaleComparator::system()?;
     let inputs = runtime_inputs::packaged(config.artifact_root().join("dist"), locale)?;
     NativeRuntime::from_config(config, inputs)
 }

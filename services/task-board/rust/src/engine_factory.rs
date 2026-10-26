@@ -75,7 +75,7 @@ use ivy_sdk::{
     tools::ToolClients,
 };
 use ivy_store::rusqlite::Connection;
-use std::{cmp::Ordering, sync::Arc};
+use std::sync::Arc;
 
 #[path = "factory_reads.rs"]
 mod reads;
@@ -276,9 +276,6 @@ impl<
     }
     fn now(&self) -> JsString {
         (self.now)().into()
-    }
-    fn compare_default(&self, a: &JsString, b: &JsString) -> Ordering {
-        CategoryLocale::compare_default(self.current, a, b)
     }
     async fn aggregate(&self, t: &Json, id: &JsString) -> IvyResult<()> {
         self.checks.aggregate(t, id).await

@@ -1,7 +1,7 @@
 //! Execute the service binary with its actual packaged input and process owners.
 use super::*;
 
-fn executable(root: &Root, locale: bool) -> PathBuf {
+fn executable(root: &Root) -> PathBuf {
     let directory = root.0.join("configured artifact/dist/native");
     std::fs::create_dir_all(&directory).unwrap();
     let executable = directory.join(format!("ivy-task-board{}", std::env::consts::EXE_SUFFIX));
@@ -11,20 +11,6 @@ fn executable(root: &Root, locale: bool) -> PathBuf {
         |artifact| ivy_host_runtime::native_plan::native_binary_path(artifact, "ivy-task-board"),
     );
     std::fs::copy(&binary, &executable).unwrap();
-    if locale {
-        let source = if packaged.is_some() {
-            binary.parent().unwrap().to_owned()
-        } else {
-            PathBuf::from(std::env::var_os("IVY_TEST_LOCALE_RUNTIME").unwrap())
-        };
-        #[cfg(windows)]
-        let names = ["icudt78.dll", "icuuc78.dll", "icuin78.dll"];
-        #[cfg(not(windows))]
-        let names = ["libicudata.so.78", "libicuuc.so.78", "libicui18n.so.78"];
-        for name in names {
-            std::fs::copy(source.join(name), directory.join(name)).unwrap();
-        }
-    }
     executable
 }
 
@@ -40,11 +26,11 @@ fn command(executable: &Path) -> Command {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn executable_refuses_configuration_before_locale_loading_without_leaking_credentials() {
+async fn executable_refuses_configuration_without_leaking_credentials() {
     for variant in 0..4 {
         let root = Root::new();
         let (path, _) = instance(&root, false, "task-board");
-        let executable = executable(&root, false);
+        let executable = executable(&root);
         let mut child = command(&executable);
         match variant {
             0 => {}
@@ -92,7 +78,7 @@ async fn executable_registers_current_inputs_and_stops_offline_with_its_journal_
     let (path, mut config) = instance(&root, true, "task-board");
     config.insert("publicBaseUrl", peer.url.clone().into());
     std::fs::write(&path, stringify(&config, 32768).unwrap()).unwrap();
-    let executable = executable(&root, true);
+    let executable = executable(&root);
     let mut child = command(&executable)
         .env("IVY_INSTANCE_CONFIG", &path)
         .env("PATH", "")
@@ -197,7 +183,7 @@ async fn executable_saves_and_replays_catalog_checked_plans_and_refuses_a_wrong_
     use ivy_contracts::{checked_native_contract::CheckedNativeContracts, hash::hash_json};
     let root = Root::new();
     let (path, mut config) = instance(&root, true, "task-board");
-    let executable = executable(&root, true);
+    let executable = executable(&root);
     let catalog_directory = root
         .0
         .join("configured artifact/dist/specs/native/codex-0.159.2");

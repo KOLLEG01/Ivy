@@ -52,7 +52,7 @@ pub(super) fn present(value: &Value<'_>) -> bool {
     !nullish(value)
 }
 pub(super) fn is_text(value: &Value<'_>, text: &str) -> bool {
-    value.as_deref().and_then(Json::as_js_string) == Some(&JsString::from(text))
+    value.as_deref().is_some_and(|value| value.is_str(text))
 }
 pub(super) fn field<'a>(value: &Value<'a>, key: &str) -> Result<Value<'a>> {
     match value {

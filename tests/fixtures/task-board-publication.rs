@@ -12,7 +12,6 @@ use ivy_sdk::{
 };
 use ivy_store::rusqlite::Connection;
 use ivy_task_board::{
-    category_projection::CategoryLocale,
     journal_store::{Contracts, JournalStore},
     local_journal::{self, LocalJournal},
     local_retention::HistoryLimits,
@@ -33,15 +32,6 @@ fn string(value: &Json, key: &str) -> JsString {
     value.required(key).unwrap().as_js_string().unwrap().clone()
 }
 struct FixtureContracts;
-struct RemoteOnly;
-impl CategoryLocale for RemoteOnly {
-    fn lowercase_default(&self, _: &JsString) -> IvyResult<JsString> {
-        panic!("Remote queries do not select a local locale")
-    }
-    fn compare_default(&self, _: &JsString, _: &JsString) -> std::cmp::Ordering {
-        panic!("Remote queries do not select a local locale")
-    }
-}
 impl Contracts for FixtureContracts {
     fn version(&self, key: &str) -> IvyResult<String> {
         assert_eq!(key, "task-board/attachment");
@@ -207,12 +197,7 @@ async fn verify_publication_cases(cases: &Json) {
                     .map(|v| v.as_js_string().unwrap().clone())
                     .collect::<Vec<_>>();
                 store
-                    .page(
-                        &text(i, "key"),
-                        i.required("options").unwrap(),
-                        &versions,
-                        &RemoteOnly,
-                    )
+                    .page(&text(i, "key"), i.required("options").unwrap(), &versions)
                     .await
             };
             outcomes.push(match result {
