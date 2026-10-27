@@ -41,5 +41,10 @@ and collectors need no change.
 Secretary retrieves originals through the same MCP server. A media reference or
 caption is not proof of its contents: require available original bytes, bounded
 chunks, declared size, MIME and SHA-256; report unavailable or unsupported media.
+For retained image/audio originals up to 4 MiB, use `whatsrust_media` with
+`format: "content"`: it verifies the complete original and emits compact metadata
+plus an MCP image/audio block. Check actual client rendering separately. Native
+clients that replace audio blocks with text cannot establish the spoken content;
+retain that limitation without inventing a transcript or an urgency assessment.
 The MCP archive may omit quote/reaction projections and outgoing original media.
 Do not treat an API acknowledgement as delivery or a send receipt as a read receipt.
