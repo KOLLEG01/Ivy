@@ -463,6 +463,30 @@ fn offline_url() -> String {
     format!("http://{}/ivy/", listener.local_addr().unwrap())
 }
 #[tokio::test]
+async fn service_entry_starts_hive_tls_with_both_crypto_providers() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("https://{}/ivy/", listener.local_addr().unwrap());
+    let fixture = Fixture::new(&url).await;
+    let mut service = fixture.command().spawn().unwrap();
+    let header = tokio::time::timeout(Duration::from_secs(15), async {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut header = [0; 5];
+        socket.read_exact(&mut header).await.unwrap();
+        // An inert peer only observes ClientHello, then closes. No remote
+        // provider, trusted certificate, SIP call or audio device is used.
+        header
+    })
+    .await
+    .expect("Phone service did not start the Hive TLS handshake");
+    let health = fixture.health().await;
+    fixture
+        .control(&health, health.get("bootId").unwrap().clone())
+        .await;
+    assert!(bounded(service.wait()).await.unwrap().success());
+    assert_eq!(header[0], 0x16, "Expected a TLS handshake record");
+    assert_eq!(header[1], 0x03, "Expected a TLS record version");
+}
+#[tokio::test]
 async fn service_entry_ignores_stale_control_and_restarts_after_confirmed_stop() {
     let fixture = Fixture::new(&offline_url()).await;
     let mut service = fixture.command().spawn().unwrap();

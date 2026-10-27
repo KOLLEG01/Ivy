@@ -162,6 +162,7 @@ impl PhoneService {
     /// Startup remains owned if its observer disappears. A late delivered handle
     /// is dropped and performs the same retained stop as an ordinary owner.
     pub async fn start(config: InstanceConfig) -> IvyResult<Self> {
+        crate::tls::initialize();
         let (send, receive) = oneshot::channel();
         tokio::spawn(async move {
             let _ = send.send(Self::start_owned(config).await);

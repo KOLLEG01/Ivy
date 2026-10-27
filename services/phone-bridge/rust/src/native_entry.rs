@@ -31,6 +31,7 @@ pub fn run_owned_native_entry<E>(
         Ok(arguments) => arguments,
         Err(code) => return code,
     };
+    crate::tls::initialize();
     // Construction failures carry no payload to stderr. Once construction has
     // succeeded, the pipe installs its established redacted task-panic hook.
     std::panic::set_hook(Box::new(|_| {}));

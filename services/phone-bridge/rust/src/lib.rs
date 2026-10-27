@@ -47,6 +47,7 @@ pub mod service_speech;
 #[path = "../../../../tests/rust/phone_service_support.rs"]
 mod service_test_support;
 pub mod sip;
+mod tls;
 pub mod voice_rpc;
 pub mod voice_selection;
 pub mod voice_work;
