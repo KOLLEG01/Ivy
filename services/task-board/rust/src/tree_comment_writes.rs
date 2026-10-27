@@ -333,7 +333,13 @@ where
             return Ok(reuse()?);
         }
         let proposed = v::items(task.required("comments")?)?;
-        for (before, after) in v::items(prior.required("comments")?)?.iter().zip(&proposed) {
+        let previous = v::items(prior.required("comments")?)?;
+        require(
+            proposed.len() >= previous.len(),
+            "task_board_comment_mismatch",
+            "Published conversation entries cannot be removed.",
+        )?;
+        for (before, after) in previous.iter().zip(&proposed) {
             require(
                 hash(&immutable(before))? == hash(&immutable(after))?,
                 "task_board_comment_mismatch",

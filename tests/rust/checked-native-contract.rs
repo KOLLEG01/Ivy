@@ -68,9 +68,7 @@ fn claude_catalog_keeps_saved_plan_identity_and_selects_rust_sdk_by_default() {
             "sha256:d2bbd218eeceea5c93b60aa6220944a4cc299aa6b78f5170259d98075a265e69".into(),
         ),
     ]);
-    let current = catalogs
-        .checked_native_contract(&version, None)
-        .unwrap();
+    let current = catalogs.checked_native_contract(&version, None).unwrap();
     let rust = catalogs
         .checked_native_contract(&version, Some(&rust_identity))
         .unwrap();

@@ -654,6 +654,12 @@ export const rustTests = {
     "package": "ivy-task-board",
     "test": "task-board-operations"
   },
+  "tests/fixtures/task-board-large-task-writes.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-host-runtime",
+    "filter": "large_task_writes::",
+    "testThreads": 1
+  },
   "tests/fixtures/task-board-lifecycle.rs": {
     "package": "ivy-task-board",
     "test": "task-board-operations",

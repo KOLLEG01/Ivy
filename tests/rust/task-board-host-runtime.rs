@@ -21,6 +21,9 @@ mod document_json;
 #[path = "../fixtures/task-board-tree-comments.rs"]
 mod tree_comments;
 
+#[path = "../fixtures/task-board-large-task-writes.rs"]
+mod large_task_writes;
+
 #[path = "../fixtures/task-board-wake.rs"]
 mod wake_policy;
 
