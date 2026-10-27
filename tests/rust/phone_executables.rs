@@ -568,7 +568,7 @@ async fn service_registers_all_tools_and_preserves_native_owner_across_hive_reco
         info.get("identity").unwrap().get("serviceName"),
         Some(&"phone-bridge".into())
     );
-    assert_eq!(info.get("tools").unwrap().as_array().unwrap().len(), 23);
+    assert_eq!(info.get("tools").unwrap().as_array().unwrap().len(), 25);
     assert_eq!(
         info.get("heartbeat").unwrap().get("ready"),
         Some(&true.into())
