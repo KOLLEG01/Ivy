@@ -21,6 +21,8 @@ async function unreadSummary(config, mcp, signal, pending) {
       const identity = bare(chat.jid);
       if (seen.has(identity)) throw fail('unread_duplicate_chat');
       seen.add(identity);
+      // Keep archived identities seen so pending activity cannot add them back.
+      if (chat.archived === true) continue;
       // An allow-list cannot establish which sender caused a group's unread flag.
       if (config.allowedSenderIds?.length && !config.allowedSenderIds.some(id => bare(id) === identity)) continue;
       total++;
@@ -35,6 +37,10 @@ async function unreadSummary(config, mcp, signal, pending) {
           flag = value.unread; observedAt = value.observed_at;
         }
       }
+      // Group flags do not identify the unread sender. Require an eligible retained
+      // message when sender exclusions could otherwise count an ignored sender.
+      if (flag === true && identity.endsWith('@g.us') && config.ownSenderIds?.length &&
+          !pending.some(message => bare(message.conversationId) === identity)) flag = null;
       if (flag === null) unknown++;
       else { if (flag) count++; oldest = Math.min(oldest, observedAt); }
     }
@@ -61,7 +67,17 @@ export default async function collect({ config, mcp, state, signal }) {
       !Number.isSafeInteger(config.maximumPending) || config.maximumPending < 1 || config.maximumPending > 100 ||
       !Number.isFinite(Date.parse(config.since))) throw fail('configuration_invalid');
   const key = 'whatsapp:' + config.accountKey;
-  const previous = state ?? { cursor: 0, initialized: false, pending: {}, activity: [] };
+  const own = new Set([config.expectedAccountJid, ...(config.ownSenderIds ?? [])].map(bare));
+  const excluded = new Set([...(config.excludedConversationIds ?? []), '0@c.us'].map(bare));
+  const allowed = (conversationId, senderId) => jid(conversationId) && jid(senderId) &&
+    !own.has(bare(senderId)) && !own.has(bare(conversationId)) && !excluded.has(bare(conversationId)) &&
+    (!config.allowedSenderIds?.length || config.allowedSenderIds.some(id => bare(id) === bare(senderId)));
+  const previous = structuredClone(state ?? { cursor: 0, initialized: false, pending: {}, activity: [] });
+  // A changed exclusion also applies to candidates retained by an earlier poll.
+  for (const [id, message] of Object.entries(previous.pending))
+    if (!allowed(message.conversationId, message.senderId)) delete previous.pending[id];
+  const retained = new Set(Object.values(previous.pending).map(message => hash([message.conversationId, message.id])));
+  previous.activity = previous.activity.filter(message => retained.has(hash([message.conversationId, message.id])));
   let next = structuredClone(previous);
   const accounts = {};
   let complete = false, issue = null, journalComplete = false, unknownUnread = 0;
@@ -88,10 +104,7 @@ export default async function collect({ config, mcp, state, signal }) {
         if (!jid(message.sender_jid) ||
             typeof message.message_id !== 'string' || !message.message_id || message.message_id.length > 256 || typeof message.body !== 'string' ||
             typeof message.kind !== 'string' || message.kind.length > 80 || !Number.isSafeInteger(message.timestamp)) throw fail('message_invalid');
-        if (bare(message.sender_jid) === bare(config.expectedAccountJid) ||
-            (config.ownSenderIds ?? []).some(id => bare(id) === bare(message.sender_jid)) ||
-            (config.excludedConversationIds ?? []).some(id => bare(id) === bare(message.chat_jid)) ||
-            (config.allowedSenderIds?.length && !config.allowedSenderIds.some(id => bare(id) === bare(message.sender_jid)))) continue;
+        if (!allowed(message.chat_jid, message.sender_jid)) continue;
         const id = hash([message.chat_jid, message.message_id]);
         if (!next.pending[id] && message.timestamp * 1000 < Date.parse(config.since)) continue;
         next.pending[id] = {

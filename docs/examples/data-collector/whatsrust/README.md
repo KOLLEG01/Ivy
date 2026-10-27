@@ -10,6 +10,9 @@ Set the exact account JID returned by `whatsrust_events` (including its device
 suffix), database identity, native owner, registered project directory and account
 key. Copy existing sender and conversation exclusions before changing readers.
 Sender comparisons normalize device suffixes and legacy `@c.us` addresses.
+Configure every verified phone-number and LID identity of ignored senders explicitly;
+the collector does not guess mappings between those identity types. Updated
+exclusions also remove previously retained candidates and activity.
 
 Start disabled and inspect one manual run. The first complete event traversal
 establishes a baseline without announcing old messages. Subsequent polls retain
@@ -33,7 +36,10 @@ projection publishes `unreadCount` with `unreadCountKind: "lower_bound"`,
 `unreadComplete: false`. Unknown chat flags are looked up at most 100 times per poll;
 unresolved flags remain unknown. A failed count scan publishes `null` without
 blocking independently complete message activity. Source identity is checked again
-after counting. Own/excluded chats and system/newsletter entries do not contribute.
+after counting. Own/excluded chats, archived chats and system/newsletter entries do
+not contribute to the counter.
+With sender exclusions, an unread group flag needs an eligible retained message
+to contribute; otherwise its filtered unread state remains unknown.
 Consumers must show the lower bound and its local coverage, never a whole-phone
 total or an all-clear state. Its `pendingUnreadCount` covers only incoming
 messages retained since the baseline. Neither this result nor the local archive
