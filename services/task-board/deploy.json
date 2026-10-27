@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "task-board",
   "kind": "service",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Durable task actions, retained native Run reconciliation and fair scheduling",
   "connectsToHive": true,
   "requirements": {
