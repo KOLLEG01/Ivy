@@ -44,6 +44,56 @@ fn capture(result: IvyResult<IvyJson>) -> IvyJson {
 }
 
 #[test]
+fn claude_catalog_keeps_saved_plan_identity_and_selects_rust_sdk_by_default() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let catalogs = CheckedNativeContracts::new(repo);
+    let version = "0.142.3".into();
+    let rust_identity = IvyJson::object([
+        (
+            "sourceHash",
+            "sha256:0430db0d2378063bc34323ff6b9a6b36aa6511da44d853f5bd2cae3416a4715f".into(),
+        ),
+        (
+            "nativeExecutableHash",
+            "sha256:d13d3e2a03135e08f7db3bd2509c086dab0968549834c0c46df03af3002e65a3".into(),
+        ),
+    ]);
+    let saved_identity = IvyJson::object([
+        (
+            "sourceHash",
+            "sha256:c55467a1bc4b9a8df8287db12568238351e8782580e28e3d8ddfa38264a3fe44".into(),
+        ),
+        (
+            "nativeExecutableHash",
+            "sha256:d2bbd218eeceea5c93b60aa6220944a4cc299aa6b78f5170259d98075a265e69".into(),
+        ),
+    ]);
+    let current = catalogs
+        .checked_native_contract(&version, None)
+        .unwrap();
+    let rust = catalogs
+        .checked_native_contract(&version, Some(&rust_identity))
+        .unwrap();
+    let saved = catalogs
+        .checked_native_contract(&version, Some(&saved_identity))
+        .unwrap();
+    assert_eq!(current.catalog_hash(), rust.catalog_hash());
+    assert_ne!(current.catalog_hash(), saved.catalog_hash());
+    // Saved TaskBoard plans pin the source hash even after the live owner changes.
+    let saved_plan = IvyJson::object([(
+        "sourceHash",
+        saved_identity.get("sourceHash").unwrap().clone(),
+    )]);
+    assert_eq!(
+        catalogs
+            .checked_native_contract(&version, Some(&saved_plan))
+            .unwrap()
+            .catalog_hash(),
+        saved.catalog_hash()
+    );
+}
+
+#[test]
 fn candidate_reuse_keeps_file_changes_errors_and_failed_selections_fresh() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let mut catalog = parse(
