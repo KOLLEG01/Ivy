@@ -158,6 +158,9 @@ impl Pair {
     }
     fn connect(&mut self) {
         self.negotiate();
+        self.finish_connection();
+    }
+    fn finish_connection(&mut self) {
         for _ in 0..2000 {
             self.deliver();
             if self.peer.connection_result(self.now) == Ok(true)
@@ -229,6 +232,57 @@ impl Pair {
 
 mod protocol_tests {
     use super::*;
+
+    #[test]
+    fn unreachable_ice_probe_does_not_retire_a_viable_connection() {
+        use super::super::network::send_result;
+        use std::io::{Error, ErrorKind};
+
+        let mut pair = Pair::new();
+        let offer = SdpOffer::from_sdp_string(pair.peer.offer()).unwrap();
+        let answer = pair.remote.sdp_api().accept_offer(offer).unwrap();
+        pair.drain_remote();
+        pair.peer
+            .answer(pair.now, &answer.to_sdp_string(), &mut |packet| {
+                pair.to_remote.push_back(packet.into());
+                Ok(())
+            })
+            .unwrap();
+        let mut dropped = 0;
+        // Candidate probes are released by the engine's monotonic timer.
+        for _ in 0..200 {
+            pair.now += Duration::from_millis(5);
+            pair.peer
+                .timeout(pair.now, &mut |packet| {
+                    if dropped == 0 {
+                        dropped += 1;
+                        send_result(
+                            Err(Error::from(ErrorKind::NetworkUnreachable)),
+                            packet.contents.len(),
+                        )
+                    } else {
+                        pair.to_remote.push_back(packet.into());
+                        Ok(())
+                    }
+                })
+                .unwrap();
+            if dropped > 0 {
+                break;
+            }
+        }
+        assert_eq!(dropped, 1);
+        pair.finish_connection();
+        assert_eq!(pair.peer.connection_result(pair.now), Ok(true));
+        assert!(pair.remote.is_connected() && pair.peer.events_open() && pair.remote_events);
+        pair.peer.close(&mut |_| Ok(())).unwrap();
+
+        // A bad socket/owner or an impossible partial UDP write is still fatal.
+        assert_eq!(
+            send_result(Err(Error::from(ErrorKind::InvalidInput)), 1),
+            Err(RealtimeError::Failed)
+        );
+        assert_eq!(send_result(Ok(0), 1), Err(RealtimeError::Failed));
+    }
 
     #[test]
     fn admission_sdp_deadline_and_retained_audio_close() {

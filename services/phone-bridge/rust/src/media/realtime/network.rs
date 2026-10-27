@@ -73,10 +73,32 @@ impl Datagrams for Sockets {
             .iter()
             .find(|(local, _)| *local == packet.source)
             .ok_or(RealtimeError::Failed)?;
-        match socket.send_to(&packet.contents, packet.destination) {
-            Ok(length) if length == packet.contents.len() => Ok(()),
-            _ => Err(RealtimeError::Failed),
+        send_result(
+            socket.send_to(&packet.contents, packet.destination),
+            packet.contents.len(),
+        )
+    }
+}
+
+pub(super) fn send_result(result: io::Result<usize>, expected: usize) -> Result<()> {
+    match result {
+        Ok(length) if length == expected => Ok(()),
+        // ICE probes all candidate pairs, including adapters without a route to
+        // this peer. Lose that datagram and let ICE use another pair or its
+        // existing deadline; it must not retire the entire audio connection.
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock
+                    | io::ErrorKind::Interrupted
+                    | io::ErrorKind::AddrNotAvailable
+                    | io::ErrorKind::NetworkUnreachable
+                    | io::ErrorKind::HostUnreachable
+            ) =>
+        {
+            Ok(())
         }
+        _ => Err(RealtimeError::Failed),
     }
 }
 

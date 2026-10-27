@@ -169,6 +169,48 @@ fn call_args() -> IvyJson {
 fn empty() -> IvyJson {
     object([])
 }
+
+#[tokio::test]
+async fn realtime_errors_retain_the_original_receipt_and_leave_the_pipe_usable() {
+    for code in ["phone_webrtc_failed", "phone_webrtc_sdp_invalid"] {
+        let mut f = Fixture::new("realtime-error");
+        let work = f.request(
+            "call.realtime.answer",
+            object([
+                ("callId", id(3)),
+                ("generation", 0.0.into()),
+                ("sdp", "invalid answer".into()),
+            ]),
+            Some(uuid(2)),
+            15000,
+        );
+        f.sent(1).await;
+        let mut reply = f.response(0, IvyJson::Null);
+        reply.insert("ok", false.into());
+        reply.insert("error", code.into());
+        f.raw(format!("{}\n", canonical(&reply, FRAME_BYTES).unwrap()).as_bytes())
+            .await;
+        equal(&timed(work.wait()).await.unwrap(), &reply, code);
+        f.receipt(1).await;
+        let receipt = f
+            .hooks
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|event| event.get("kind") == Some(&"receipt".into()))
+            .cloned()
+            .unwrap();
+        equal(receipt.get("reply").unwrap(), &reply, code);
+        let heartbeat = f.request("heartbeat", empty(), None, 15000);
+        f.sent(2).await;
+        f.reply(1, object([("ok", true.into())])).await;
+        timed(heartbeat.wait()).await.unwrap();
+        assert!(!f.client.is_closed());
+        f.finish().await;
+    }
+}
+
 #[tokio::test]
 async fn original_pipe_receipts_late_replies_capacity_and_scoped_observations_agree() {
     let cases = fixture("native");

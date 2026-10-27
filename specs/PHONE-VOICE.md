@@ -105,6 +105,8 @@ Implementation: [Codex client](../services/phone-bridge/rust/src/voice_rpc/owner
 - Opus uses 48 kHz PCM directly without an identity resampling filter.
   WebRTC transmission uses a dedicated monotonic 20 ms audio clock, with bounded
   catch-up after short scheduling delays and no backlog burst after suspension.
+  Unreachable ICE candidate pairs and transient UDP send congestion drop only
+  that datagram; other pairs and the existing connection deadline remain active.
   Realtime queues blend actual PCM cuts over 5 ms within the existing frame;
   continuous samples stay unchanged and authority reset discards blend history.
   Packet gaps preserve decoder/filter state and recover up to 120 ms from

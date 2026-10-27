@@ -462,7 +462,9 @@
             "phone_offer_expired",
             "operation_outcome_unknown",
             "runtime_stopping",
-            "phone_access_limited"
+            "phone_access_limited",
+            "phone_webrtc_sdp_invalid",
+            "phone_webrtc_failed"
           ]
         }
       }
