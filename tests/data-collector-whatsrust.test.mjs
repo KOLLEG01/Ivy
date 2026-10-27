@@ -7,6 +7,7 @@ const event=(sequence,overrides={})=>({sequence,kind:'message.received',data:{ch
 const run=(state,events,unread={ok:true,connected:true,complete:true,unread:true,observed_at:1793040000,read_receipts_sent:false},extra={},settings={})=>collect({config:{...config,...settings},mcp:{async call(tool,args){
  if(tool==='whatsrust_status')return {ok:true,connected:true};
  if(tool==='whatsrust_unread')return unread;
+ if(tool==='whatsrust_chats')return {items:[],next_cursor:null,coverage:'locally_synchronized'};
  if(tool!=='whatsrust_events')throw Error('Unexpected tool');
  const items=events.filter(x=>x.sequence>args.after);
  return {ok:true,account_jid:account,database_id:'database',gap:false,has_more:false,items,through_sequence:items.at(-1)?.sequence??args.after,...extra};
@@ -28,10 +29,12 @@ test('WhatsRust unknown unread state retains candidates and prevents assessment 
  assert.equal(read.data.activity['whatsapp:personal'].length,0);
 });
 
-test('WhatsRust keeps count unknown when a fresh local unread flag is known',async()=>{
+test('WhatsRust exposes a lower bound without treating a known flag as a complete count',async()=>{
  const result=await run(initialized,[event(1)],{ok:true,connected:true,complete:false,unread:true,count:null,observed_at:1793040000,read_receipts_sent:false});
  assert.equal(result.data.observation.complete,true);
- assert.equal(result.data.accounts['whatsapp:personal'].unreadCount,null);
+ assert.equal(result.data.accounts['whatsapp:personal'].unreadCount,1);
+ assert.equal(result.data.accounts['whatsapp:personal'].unreadCountKind,'lower_bound');
+ assert.equal(result.data.accounts['whatsapp:personal'].unreadComplete,false);
  assert.equal(result.data.accounts['whatsapp:personal'].pendingUnreadCount,1);
 });
 
@@ -74,4 +77,52 @@ test('WhatsRust bounded catch-up retains progress without publishing a partial o
 test('WhatsRust pending budget cannot silently discard earlier events',async()=>{
  const value=await run(initialized,[event(1),event(2)],undefined,{}, {maximumPending:1});
  assert.equal(value.data.source.error,'pending_limit');assert.deepEqual(value.state,initialized);
+});
+
+test('WhatsRust counts locally unread conversations, preserves unknowns and applies exclusions',async()=>{
+ const row=(n,count)=>({jid:`1555000000${n}@s.whatsapp.net`,unread_count:count,unread_observed_at:1793040000});
+ const calls=[];
+ const result=await collect({config:{...config,excludedConversationIds:['15550000009@c.us']},state:initialized,signal:new AbortController().signal,mcp:{async call(tool,args){
+  calls.push({tool,args});
+  if(tool==='whatsrust_status')return {ok:true,connected:true};
+  if(tool==='whatsrust_events')return {ok:true,account_jid:account,database_id:'database',gap:false,items:[],through_sequence:0,has_more:false};
+  if(tool==='whatsrust_chats')return args.cursor
+   ? {items:[row(4,null),row(5,0)],next_cursor:null,coverage:'locally_synchronized'}
+   : {items:[row(1,7),row(2,8),row(3,null),row(9,20)],next_cursor:'next',coverage:'locally_synchronized'};
+  if(tool==='whatsrust_unread')return {ok:true,connected:true,unread:args.jid.endsWith('3@s.whatsapp.net')?true:null,observed_at:1793040001,read_receipts_sent:false};
+  throw Error('Unexpected write');
+ }}});
+ const a=result.data.accounts['whatsapp:personal'];
+ assert.equal(a.unreadCount,2);assert.equal(a.unreadCountKind,'lower_bound');assert.equal(a.unreadCountUnit,'conversations');
+ assert.equal(a.unreadUnknownConversations,1);assert.equal(a.unreadTotalConversations,4);assert.equal(a.unreadComplete,false);
+ assert.equal(a.state,'partial');assert.match(a.healthDetail,/≥2 local unread chats/);
+ assert.equal(result.data.observation.complete,true);assert.equal(result.state.cursor,0);
+ assert.equal(calls.filter(c=>c.tool==='whatsrust_unread').length,2);
+});
+
+test('WhatsRust unavailable count scan never invents zero or blocks an independently complete activity scan',async()=>{
+ for(const bad of [{items:[],next_cursor:'again',coverage:'locally_synchronized'},{items:[],next_cursor:null,coverage:'unknown'}]){
+  const result=await collect({config,state:initialized,signal:new AbortController().signal,mcp:{async call(tool){
+   if(tool==='whatsrust_status')return {ok:true,connected:true};
+   if(tool==='whatsrust_events')return {ok:true,account_jid:account,database_id:'database',gap:false,items:[],through_sequence:0,has_more:false};
+   if(tool==='whatsrust_chats')return bad;
+   throw Error('Unexpected call');
+  }}});
+  assert.equal(result.data.accounts['whatsapp:personal'].unreadCount,null);
+  assert.equal(result.data.observation.complete,true);assert.equal(result.data.source.unreadSummaryError,'unread_page_invalid');
+ }
+});
+
+test('WhatsRust identity or connection loss during the added count scan invalidates the observation',async()=>{
+ for(const kind of ['account','connection']){
+  let events=0,status=0;
+  const result=await collect({config,state:initialized,signal:new AbortController().signal,mcp:{async call(tool){
+   if(tool==='whatsrust_status')return {ok:true,connected:!(kind==='connection'&&++status===2)};
+   if(tool==='whatsrust_events')return {ok:true,account_jid:kind==='account'&&++events===2?'15550000009@s.whatsapp.net':account,database_id:'database',gap:false,items:[],through_sequence:0,has_more:false};
+   if(tool==='whatsrust_chats')return {items:[],next_cursor:null,coverage:'locally_synchronized'};
+   throw Error('Unexpected call');
+  }}});
+  assert.equal(result.data.observation.complete,false);assert.equal(result.data.accounts['whatsapp:personal'].unreadCount,null);
+  assert.deepEqual(result.state,initialized);
+ }
 });
