@@ -69,8 +69,8 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                 .map(Json::String)
                 .map_err(WriteFailure::<()>::from)
         };
-        let executor = LocalExecutor::default();
         let jobs = CommentWriteJobs::default();
+        let executor = LocalExecutor::default();
         let writer = TreeCommentWriter {
             jobs: &jobs,
             executor: &executor,
