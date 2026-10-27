@@ -34,7 +34,10 @@ total. Separately, complete bounded chat pagination counts locally observed unre
 projection publishes `unreadCount` with `unreadCountKind: "lower_bound"`,
 `unreadCountUnit: "conversations"`, explicit unknown-chat coverage and
 `unreadComplete: false`. Unknown chat flags are looked up at most 100 times per poll;
-unresolved flags remain unknown. A failed count scan publishes `null` without
+unresolved flags remain unknown. Empty LID records with no name, message timestamp,
+count, known unread flag or retained incoming activity are omitted from the counter
+and its unknown coverage. They are reconsidered every poll and become eligible
+when chat or read-state evidence appears. A failed count scan publishes `null` without
 blocking independently complete message activity. Source identity is checked again
 after counting. Own/excluded chats, archived chats and system/newsletter entries do
 not contribute to the counter.

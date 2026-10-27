@@ -112,6 +112,32 @@ test('WhatsRust counts locally unread conversations, preserves unknowns and appl
  assert.equal(calls.filter(c=>c.tool==='whatsrust_unread').length,2);
 });
 
+test('WhatsRust omits empty unknown LID records but keeps real chat and read-state evidence',async()=>{
+ const empty={jid:'12345@lid',name:'',last_timestamp:0,unread_count:null};
+ const unknown={ok:true,connected:true,complete:false,unread:null,count:null,observed_at:1793040000,read_receipts_sent:false};
+ for(const [row,unread,count,unclear,total] of [
+  [empty,unknown,0,0,0],
+  [empty,{...unknown,unread:true},1,0,1],
+  [empty,{...unknown,unread:false},0,0,1],
+  [{...empty,name:'Contact'},unknown,0,1,1],
+  [{...empty,last_timestamp:1793040000},unknown,0,1,1],
+  [{...empty,jid:chat},unknown,0,1,1],
+  [empty,{...unknown,unread:true,observed_at:null},0,1,1],
+ ]){
+  const result=await collect({config,state:initialized,signal:new AbortController().signal,mcp:{async call(tool){
+   if(tool==='whatsrust_status')return {ok:true,connected:true};
+   if(tool==='whatsrust_events')return {ok:true,account_jid:account,database_id:'database',gap:false,items:[],through_sequence:0,has_more:false};
+   if(tool==='whatsrust_chats')return {items:[row],next_cursor:null,coverage:'locally_synchronized'};
+   if(tool==='whatsrust_unread')return unread;
+   throw Error('Unexpected tool');
+  }}});
+  const a=result.data.accounts['whatsapp:personal'];
+  assert.equal(a.unreadCount,count);assert.equal(a.unreadUnknownConversations,unclear);assert.equal(a.unreadTotalConversations,total);
+  assert.equal(a.unreadComplete,false);assert.deepEqual(result.state,initialized);
+  if(unclear===0)assert.doesNotMatch(a.healthDetail,/unknown read state/);
+ }
+});
+
 test('WhatsRust archived chats do not contribute unknowns, counts or pending fallback counts',async()=>{
  const before=await run(initialized,[event(1)]);
  let lookups=0;
