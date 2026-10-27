@@ -19,6 +19,7 @@ regex.workspace = true
 url.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+dunce = "1.0.5"
 windows-sys = { workspace = true, features = ["Win32_Globalization"] }
 
 [[bin]]

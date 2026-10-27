@@ -2139,6 +2139,7 @@ version = "0.2.40"
 dependencies = [
  "base64 0.23.1",
  "chrono",
+ "dunce",
  "flate2",
  "futures-util",
  "ivy-contracts",

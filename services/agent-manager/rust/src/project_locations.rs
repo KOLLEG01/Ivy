@@ -45,6 +45,19 @@ fn text<'a>(value: &'a IvyJson, key: &str) -> IvyResult<&'a JsString> {
 fn realpath(path: &JsString) -> IvyResult<JsString> {
     internal(paths::realpath(&node_path::to_native(path))).map(|path| node_path::from_native(&path))
 }
+// Codex stores ordinary Windows paths without the filesystem's verbatim prefix.
+// Keep native canonical paths for admission checks, then use the same spelling
+// at the protocol boundary so a saved workspace can resume in its native thread.
+fn protocol_path(path: JsString) -> JsString {
+    #[cfg(windows)]
+    {
+        node_path::from_native(dunce::simplified(&node_path::to_native(&path)))
+    }
+    #[cfg(not(windows))]
+    {
+        path
+    }
+}
 fn access(path: &JsString) -> IvyResult<()> {
     internal(filesystem::access(
         &node_path::to_native(path),
@@ -182,7 +195,7 @@ impl ProjectLocations {
                 .await?;
             return Ok(IvyJson::object([
                 ("kind", kind.into()),
-                ("cwd", IvyJson::String(cwd)),
+                ("cwd", IvyJson::String(protocol_path(cwd))),
                 ("project", IvyJson::Null),
             ]));
         }
@@ -199,7 +212,7 @@ impl ProjectLocations {
             let cwd = self.prepare_directory(path, root.clone(), false).await?;
             return Ok(IvyJson::object([
                 ("kind", kind.into()),
-                ("cwd", IvyJson::String(cwd)),
+                ("cwd", IvyJson::String(protocol_path(cwd))),
                 ("project", project),
             ]));
         }
@@ -300,7 +313,7 @@ impl ProjectLocations {
         if let Some(project) = policy.existing_project(&self.projects()?, &cwd, expected)? {
             return Ok(IvyJson::object([
                 ("kind", kind.into()),
-                ("cwd", IvyJson::String(cwd)),
+                ("cwd", IvyJson::String(protocol_path(cwd))),
                 ("project", project),
             ]));
         }
@@ -318,7 +331,7 @@ impl ProjectLocations {
         };
         let project = register(IvyJson::object([
             ("name", IvyJson::String(name)),
-            ("cwd", IvyJson::String(cwd.clone())),
+            ("cwd", IvyJson::String(protocol_path(cwd.clone()))),
             (
                 "idempotencyKey",
                 ProjectPolicy::allocation_key(principal, selection)?.into(),
@@ -341,7 +354,7 @@ impl ProjectLocations {
         )?;
         Ok(IvyJson::object([
             ("kind", kind.into()),
-            ("cwd", IvyJson::String(cwd)),
+            ("cwd", IvyJson::String(protocol_path(cwd))),
             ("project", project),
         ]))
     }
@@ -551,13 +564,25 @@ impl ProjectLocations {
         let mut result = IvyJson::object([
             ("hostId", IvyJson::String(host_id.clone())),
             ("serviceNodeId", IvyJson::String(service_node_id.clone())),
-            ("canonicalCwd", IvyJson::String(intended_path.clone())),
-            ("taskRoot", IvyJson::String(task_root)),
-            ("bootstrapPath", IvyJson::String(bootstrap_path)),
-            ("intendedPath", IvyJson::String(intended_path)),
+            (
+                "canonicalCwd",
+                IvyJson::String(protocol_path(intended_path.clone())),
+            ),
+            ("taskRoot", IvyJson::String(protocol_path(task_root))),
+            (
+                "bootstrapPath",
+                IvyJson::String(protocol_path(bootstrap_path)),
+            ),
+            (
+                "intendedPath",
+                IvyJson::String(protocol_path(intended_path)),
+            ),
             (
                 "sourcePath",
-                source_path.map(IvyJson::String).unwrap_or(IvyJson::Null),
+                source_path
+                    .map(protocol_path)
+                    .map(IvyJson::String)
+                    .unwrap_or(IvyJson::Null),
             ),
             ("project", project),
             ("useWorktree", use_worktree.into()),
@@ -567,5 +592,62 @@ impl ProjectLocations {
             result.insert("nativeProjectId", IvyJson::String(id));
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn workspace_keeps_the_native_threads_ordinary_working_directory() {
+        let root = std::env::temp_dir().join(format!("ivy-workspace-{}", uuid::Uuid::new_v4()));
+        let working = root.join("work");
+        std::fs::create_dir_all(&working).unwrap();
+        let input = node_path::from_native(&working);
+        let settings = IvyJson::object([
+            (
+                "projectRoot",
+                IvyJson::String(node_path::from_native(&root.join("projects"))),
+            ),
+            (
+                "internalProjectRoot",
+                IvyJson::String(node_path::from_native(&root.join("internal"))),
+            ),
+        ]);
+        let locations = ProjectLocations::new(
+            ProjectPolicy::new(
+                node_path::from_native(&root.join("data")),
+                &settings,
+                &[],
+                node_path::Context::current().unwrap(),
+                &node_path::from_native(&root),
+            )
+            .unwrap(),
+            None,
+            None,
+            Arc::new(WorkspaceGit::new(root.join("commands"), None)),
+        );
+        let requirement = IvyJson::object([
+            ("kind", "directory_path".into()),
+            ("path", IvyJson::String(input.clone())),
+        ]);
+        let workspace = locations
+            .workspace(
+                &"TASK-9999".into(),
+                &requirement,
+                false,
+                &"host".into(),
+                &"host.agent".into(),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            workspace.get("canonicalCwd"),
+            Some(&IvyJson::String(input.clone()))
+        );
+        assert_eq!(workspace.get("intendedPath"), Some(&IvyJson::String(input)));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
