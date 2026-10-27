@@ -2,7 +2,7 @@
 
 This collector uses the same direct native MCP transport as the Microsoft 365
 example. It starts no model turn and has access only to status, event history and
-local unread observations. Configure the authenticated MCP server on the selected
+local unread observations and synchronized chat pages. Configure the authenticated MCP server on the selected
 native owner first. No credentials belong in the task script or configuration.
 
 Materialize `whatsrust.task.json` with the [task helper](../../../../tools/operations/data-collector-task.mjs).
@@ -10,6 +10,9 @@ Set the exact account JID returned by `whatsrust_events` (including its device
 suffix), database identity, native owner, registered project directory and account
 key. Copy existing sender and conversation exclusions before changing readers.
 Sender comparisons normalize device suffixes and legacy `@c.us` addresses.
+Configure every verified phone-number and LID identity of ignored senders explicitly;
+the collector does not guess mappings between those identity types. Updated
+exclusions also remove previously retained candidates and activity.
 
 Start disabled and inspect one manual run. The first complete event traversal
 establishes a baseline without announcing old messages. Subsequent polls retain
@@ -26,7 +29,22 @@ Before publishing complete activity, each pending conversation is queried again
 with `whatsrust_unread`. Reads send no read receipts. A connected local unread flag
 with an observation timestamp can be known while the provider's total `count` is
 null and `complete` is false. This example requires the flag, never invents the
-total, and reports `unreadCount: null`. Its `pendingUnreadCount` covers only incoming
+total. Separately, complete bounded chat pagination counts locally observed unread
+**conversations**, including known unread flags with unknown message totals. The
+projection publishes `unreadCount` with `unreadCountKind: "lower_bound"`,
+`unreadCountUnit: "conversations"`, explicit unknown-chat coverage and
+`unreadComplete: false`. Unknown chat flags are looked up at most 100 times per poll;
+unresolved flags remain unknown. Empty LID records with no name, message timestamp,
+count, known unread flag or retained incoming activity are omitted from the counter
+and its unknown coverage. They are reconsidered every poll and become eligible
+when chat or read-state evidence appears. A failed count scan publishes `null` without
+blocking independently complete message activity. Source identity is checked again
+after counting. Own/excluded chats, archived chats and system/newsletter entries do
+not contribute to the counter.
+With sender exclusions, an unread group flag needs an eligible retained message
+to contribute; otherwise its filtered unread state remains unknown.
+Consumers must show the lower bound and its local coverage, never a whole-phone
+total or an all-clear state. Its `pendingUnreadCount` covers only incoming
 messages retained since the baseline. Neither this result nor the local archive
 claims complete phone history or an authoritative remote unread snapshot.
 

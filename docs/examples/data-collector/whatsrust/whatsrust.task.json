@@ -12,7 +12,7 @@
     "serviceNodeId": "host.agent-manager",
     "cwd": "/absolute/internal-project",
     "server": "whatsapp",
-    "tools": ["whatsrust_status", "whatsrust_events", "whatsrust_unread"]
+    "tools": ["whatsrust_status", "whatsrust_events", "whatsrust_unread", "whatsrust_chats"]
   },
   "config": {
     "accountKey": "personal",
