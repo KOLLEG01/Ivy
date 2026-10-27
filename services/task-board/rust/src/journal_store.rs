@@ -43,6 +43,8 @@ pub(crate) mod mutation_ports;
 pub mod persistent_reads;
 #[path = "reference_writes.rs"]
 pub(crate) mod reference_writes;
+#[path = "task_publication.rs"]
+mod task_publication;
 #[path = "write_completion.rs"]
 pub(crate) mod write_completion;
 
@@ -863,7 +865,20 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                 )
             };
         }
-        let references = self.references(key, value)?;
+        // Domain reads hydrate the entire conversation. Only its bounded header
+        // and immutable nodes belong in Hive, including prepared-write replay.
+        let published;
+        let (value, references) = if key == "task-board/task"
+            && create.is_none()
+            && ["2.2.0", "2.3.0", "3.0.0", "3.1.0"].contains(&version.as_str())
+        {
+            published = self
+                .publish_task_content(value, destination, &version)
+                .await?;
+            (&published.0, published.1.clone())
+        } else {
+            (value, self.references(key, value)?)
+        };
         let identity = if retained {
             mutation.clone()
         } else {
