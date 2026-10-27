@@ -106,7 +106,7 @@ defs.SavedDefinition.properties.channels = { ...array(ref("ChannelConfiguration"
 // Protected runtime transport configuration.
 defs.Settings.properties.whatsappConfigPath = string(4096, 1);
 defs.Settings.properties.language = { enum: ["en", "de"] };
-defs.Settings.properties.diagnosticNotifications = { type: "boolean" };
+defs.Settings.properties.diagnosticNotifications = { type: "boolean", default: false };
 defs.Payload.properties.turnOptions = {
   type: "object",
   additionalProperties: false,
