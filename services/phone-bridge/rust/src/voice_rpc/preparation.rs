@@ -67,7 +67,9 @@ struct Inner {
 #[derive(Clone)]
 pub struct VoicePreparation(Arc<Inner>);
 impl VoicePreparation {
-    pub(super) fn is_preparing(&self, thread: &JsString) -> bool { self.0.state.lock().unwrap().pending.contains_key(thread) }
+    pub(super) fn is_preparing(&self, thread: &JsString) -> bool {
+        self.0.state.lock().unwrap().pending.contains_key(thread)
+    }
     pub fn new(control: VoiceControl, journal: Arc<dyn VoicePreparationJournal>) -> Self {
         Self(Arc::new(Inner {
             control,
@@ -330,9 +332,12 @@ impl Inner {
             if recovered.get("status") == Some(&"completed".into()) {
                 if cache.lock().unwrap().get("preparationPromptHash")
                     == Some(&IvyJson::from(digest(PROMPT)))
+                    && !preparation_not_ready(recovered)
                 {
                     return validate_preparation(Some(recovered));
                 }
+                // A completed negative read-only check is safe to refresh. Keep
+                // uncertain/in-progress turns bound to their original operation.
                 *cache.lock().unwrap() = IvyJson::object([
                     ("fingerprint", fingerprint.into()),
                     ("threadId", IvyJson::String(thread_id.clone())),
@@ -443,6 +448,29 @@ impl Inner {
     }
 }
 
+fn preparation_final(items: &[IvyJson]) -> Option<&IvyJson> {
+    items.iter().rev().find(|item| {
+        item.get("type") == Some(&"agentMessage".into())
+            && item
+                .get("phase")
+                .is_none_or(|phase| phase.is_null() || *phase == IvyJson::from("final_answer"))
+    })
+}
+
+fn preparation_not_ready(turn: &IvyJson) -> bool {
+    turn.get("status") == Some(&"completed".into())
+        && turn
+            .get("items")
+            .and_then(IvyJson::as_array)
+            .and_then(preparation_final)
+            .and_then(|item| item.get("text"))
+            .and_then(IvyJson::as_js_string)
+            .is_some_and(|text| {
+                text.to_utf8()
+                    .is_ok_and(|text| text.trim().starts_with("NOT_READY:"))
+            })
+}
+
 fn validate_preparation(turn: Option<&IvyJson>) -> IvyResult<()> {
     let items = match turn.and_then(|turn| turn.get("items")) {
         None | Some(IvyJson::Null) => &[][..],
@@ -451,12 +479,7 @@ fn validate_preparation(turn: Option<&IvyJson>) -> IvyResult<()> {
     if items.iter().any(IvyJson::is_null) {
         return Err(IvyError::internal());
     }
-    let final_item = items.iter().rev().find(|item| {
-        item.get("type") == Some(&"agentMessage".into())
-            && item
-                .get("phase")
-                .is_none_or(|phase| phase.is_null() || *phase == IvyJson::from("final_answer"))
-    });
+    let final_item = preparation_final(items);
     let completed = turn.is_some_and(|turn| turn.get("status") == Some(&"completed".into()));
     let text = if completed {
         final_item

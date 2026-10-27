@@ -31,6 +31,9 @@ Implementation: [Codex client](../services/phone-bridge/rust/src/voice_rpc/owner
   `ivy_instructions` and `phone_bridge_status` calls plus a final `READY`. Validate
   those calls and the final response from the original completed native turn;
   `NOT_READY`, missing tools, tool errors and failed turns cannot confirm readiness.
+  Start idle preparation after the service's own Hive registration is ready.
+  A completed `NOT_READY: <reason>` preparation may run a fresh read-only check
+  on the same task; retain successful and uncertain preparations without replay.
   Preparation forbids calls, messages, ticket/settings/voice changes and restarts
   without an assignment. Its limits end when the actual conversation context arrives.
 - A conversation consumes its prepared task. After confirmed hangup and cleanup,

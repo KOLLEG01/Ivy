@@ -413,7 +413,11 @@ impl Inner {
                         let owner = Arc::downgrade(self);
                         voice.set_work_observer(Arc::new(move |id, code| {
                             if let Some(owner) = owner.upgrade() {
-                                owner.diagnostics.lock().unwrap().work_observed(&String::from_utf16_lossy(&id.0), code, &now());
+                                owner.diagnostics.lock().unwrap().work_observed(
+                                    &String::from_utf16_lossy(&id.0),
+                                    code,
+                                    &now(),
+                                );
                             }
                         }));
                         Ok(Arc::new(voice) as Arc<dyn PhoneFlowVoice>)
@@ -451,7 +455,11 @@ impl Inner {
             let owner = Arc::downgrade(self);
             flow.set_cleanup_observer(Arc::new(move |id, code| {
                 if let Some(owner) = owner.upgrade() {
-                    owner.diagnostics.lock().unwrap().cleanup_observed(&String::from_utf16_lossy(&id.0), code, &now());
+                    owner.diagnostics.lock().unwrap().cleanup_observed(
+                        &String::from_utf16_lossy(&id.0),
+                        code,
+                        &now(),
+                    );
                 }
             }));
             Ok::<_, IvyError>(Runtime {
@@ -605,6 +613,12 @@ impl Inner {
     fn check_voice(self: &Arc<Self>) {
         if self.stopped.load(Ordering::Acquire)
             || self.settings.get("codexVoice").is_none_or(IvyJson::is_null)
+            || !self
+                .service
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(ServiceClient::ready)
         {
             return;
         }

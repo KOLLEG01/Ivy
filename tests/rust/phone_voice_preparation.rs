@@ -329,6 +329,81 @@ async fn preparation_recovery_and_durable_boundaries_over_native_rpc() {
     same(&actual, scenarios());
 }
 
+#[tokio::test]
+async fn completed_negative_readiness_is_refreshed_on_the_same_task() {
+    let (control, _, mut peers, _) = fixture(
+        vec![Plan::default()],
+        value(r#"{"cwd":"C:\\work"}"#),
+        hooks(),
+    );
+    timed(control.open().wait()).await.unwrap();
+    let mut peer = timed(peers.recv()).await.unwrap();
+    let journal = journal("recovered");
+    let preparation = VoicePreparation::new(control.clone(), journal.clone());
+    let work = preparation.prepare(THREAD.into());
+    let joined = preparation.prepare(THREAD.into());
+    let read = peer.request().await;
+    assert_eq!(read.get("method"), Some(&"thread/read".into()));
+    let mut negative = ready(&journal);
+    let mut items = negative.get("items").unwrap().as_array().unwrap().to_vec();
+    items.last_mut().unwrap().insert(
+        "text",
+        "NOT_READY: phone_bridge_status failed: Service Node not found.".into(),
+    );
+    negative.insert("items", IvyJson::Array(items));
+    assert!(preparation_not_ready(&negative));
+    peer.reply(&read, read_reply(&journal, Some(negative)))
+        .await;
+
+    let start = peer.request().await;
+    assert_eq!(start.get("method"), Some(&"turn/start".into()));
+    assert_ne!(start.get("id"), Some(&OLD.into()));
+    assert_eq!(
+        start.get("params").unwrap().get("threadId"),
+        Some(&THREAD.into())
+    );
+    assert_eq!(journal.attempts.lock().unwrap().len(), 1);
+    assert_eq!(
+        start.get("id"),
+        journal
+            .cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .get("preparationOperationId"),
+    );
+    let next_turn: IvyJson = "10000000-0000-4000-8000-000000000004".into();
+    peer.reply(
+        &start,
+        IvyJson::object([(
+            "turn",
+            IvyJson::object([("id", next_turn.clone()), ("status", "completed".into())]),
+        )]),
+    )
+    .await;
+    let read = peer.request().await;
+    let mut positive = ready(&journal);
+    positive.insert("id", next_turn);
+    peer.reply(&read, read_reply(&journal, Some(positive.clone())))
+        .await;
+    timed(work.wait()).await.unwrap();
+    timed(joined.wait()).await.unwrap();
+    assert_eq!(journal.attempts.lock().unwrap().len(), 2);
+
+    // Successful preparation remains reusable without another inference turn.
+    let reused = preparation.prepare(THREAD.into());
+    let read = peer.request().await;
+    assert_eq!(read.get("method"), Some(&"thread/read".into()));
+    peer.reply(&read, read_reply(&journal, Some(positive)))
+        .await;
+    timed(reused.wait()).await.unwrap();
+    assert_eq!(journal.attempts.lock().unwrap().len(), 2);
+    timed(control.close(Box::pin(async { Ok(()) })).wait())
+        .await
+        .unwrap();
+}
+
 async fn linked_fixture(
     plans: usize,
 ) -> (
