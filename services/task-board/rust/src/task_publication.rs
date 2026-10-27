@@ -5,7 +5,7 @@ use super::persistent_reads::{
 };
 use super::{
     Contracts, JournalStore,
-    mutation_ports::{RpcMutationSource, WriteFailure},
+    mutation_ports::{LocalMutationSource, WriteFailure},
 };
 use super::{
     comment_writes::tree::{CommentWriteJobs, TreeCommentWriter},
@@ -19,8 +19,29 @@ use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, json::canonical,
     limits::JSON_OBJECT_CONTENT_BYTES,
 };
-use ivy_sdk::{rpc::RpcClient, task_comments::RpcCommentSource};
+use ivy_sdk::{
+    rpc::{RequestOptions, RpcClient},
+    task_comments::RpcCommentSource,
+};
 use std::sync::Arc;
+
+struct Requests<'a, R>(&'a R);
+impl<R: RpcClient> LocalMutationSource<()> for Requests<'_, R> {
+    async fn request_owned(
+        &self,
+        method: &str,
+        params: Option<Json>,
+    ) -> Result<Json, WriteFailure<()>> {
+        self.0
+            .request(
+                method,
+                params.ok_or_else(IvyError::internal)?,
+                RequestOptions::default(),
+            )
+            .await
+            .map_err(Into::into)
+    }
+}
 
 impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsString>
     JournalStore<'_, R, P, C, I>
@@ -36,7 +57,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
             Arc::new(RpcCommentSource::new(self.client.clone())),
             tokio::runtime::Handle::current(),
         );
-        let source = RpcMutationSource(self.client.as_ref());
+        let source = Requests(self.client.as_ref());
         let source_failure = WriteFailure::<()>::from;
         let port = CommentPort {
             comments: &comments,
