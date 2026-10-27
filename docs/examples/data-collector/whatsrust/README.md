@@ -2,7 +2,7 @@
 
 This collector uses the same direct native MCP transport as the Microsoft 365
 example. It starts no model turn and has access only to status, event history and
-local unread observations. Configure the authenticated MCP server on the selected
+local unread observations and synchronized chat pages. Configure the authenticated MCP server on the selected
 native owner first. No credentials belong in the task script or configuration.
 
 Materialize `whatsrust.task.json` with the [task helper](../../../../tools/operations/data-collector-task.mjs).
@@ -26,7 +26,16 @@ Before publishing complete activity, each pending conversation is queried again
 with `whatsrust_unread`. Reads send no read receipts. A connected local unread flag
 with an observation timestamp can be known while the provider's total `count` is
 null and `complete` is false. This example requires the flag, never invents the
-total, and reports `unreadCount: null`. Its `pendingUnreadCount` covers only incoming
+total. Separately, complete bounded chat pagination counts locally observed unread
+**conversations**, including known unread flags with unknown message totals. The
+projection publishes `unreadCount` with `unreadCountKind: "lower_bound"`,
+`unreadCountUnit: "conversations"`, explicit unknown-chat coverage and
+`unreadComplete: false`. Unknown chat flags are looked up at most 100 times per poll;
+unresolved flags remain unknown. A failed count scan publishes `null` without
+blocking independently complete message activity. Source identity is checked again
+after counting. Own/excluded chats and system/newsletter entries do not contribute.
+Consumers must show the lower bound and its local coverage, never a whole-phone
+total or an all-clear state. Its `pendingUnreadCount` covers only incoming
 messages retained since the baseline. Neither this result nor the local archive
 claims complete phone history or an authoritative remote unread snapshot.
 
