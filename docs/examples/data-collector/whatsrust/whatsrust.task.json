@@ -1,0 +1,32 @@
+{
+  "id": "whatsapp-mcp",
+  "name": "WhatsApp through MCP",
+  "enabled": false,
+  "intervalSeconds": 60,
+  "timeoutSeconds": 120,
+  "memoryMb": 128,
+  "script": "@file:whatsrust.mjs",
+  "dependencies": {},
+  "secretNames": [],
+  "mcp": {
+    "serviceNodeId": "host.agent-manager",
+    "cwd": "/absolute/internal-project",
+    "server": "whatsapp",
+    "tools": ["whatsrust_status", "whatsrust_events", "whatsrust_unread"]
+  },
+  "config": {
+    "accountKey": "personal",
+    "displayName": "WhatsApp",
+    "server": "whatsapp",
+    "expectedAccountJid": "15550000001:2@s.whatsapp.net",
+    "expectedDatabaseId": "expected-event-database-id",
+    "since": "2026-01-01T00:00:00.000Z",
+    "ownSenderIds": [],
+    "allowedSenderIds": [],
+    "excludedConversationIds": [],
+    "maximumPages": 50,
+    "pageSize": 25,
+    "maximumPending": 100
+  },
+  "retention": { "maximumCount": 1000, "maximumAgeDays": 7, "maximumBytes": 16777216 }
+}

@@ -12,6 +12,7 @@ assignments.
 | Source                       | Authentication                                                          | Setup instructions                           |
 | ---------------------------- | ----------------------------------------------------------------------- | -------------------------------------------- |
 | Outlook / Teams / Gmail      | Public MCP plugins connected on the selected native owner               | [MCP accounts](m365/README.md)               |
+| WhatsApp                    | Authenticated WhatsRust MCP server on the selected native owner         | [WhatsApp MCP](whatsrust/README.md)          |
 | Fröling                      | Existing bearer token, or Connect username/password                     | [Heating](home/README.md#froling-setup)      |
 | Washer / dryer               | Direct, unauthenticated JSON push to DataCollector's configured port    | [Appliances](home/README.md#appliance-setup) |
 | Blink                        | OAuth token/refresh token, or email/password with provider verification | [Cameras](cameras/README.md)                 |
