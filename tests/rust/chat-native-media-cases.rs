@@ -473,10 +473,19 @@ async fn retained_account(root: &Path, number: &str) {
     use ivy_chat_bridge::whatsapp::{auth::AuthAccount, auth_backend::NativeAuthStore};
     use wacore::store::traits::DeviceStore;
     std::fs::create_dir_all(root.join("whatsapp")).unwrap();
+    std::fs::create_dir(root.join("whatsapp-owner")).unwrap();
+    // Original Node ExecutorLock takes a directory, creates this database, and
+    // leaves its PID row behind after closing the kernel lock.
+    let node_lock =
+        rusqlite::Connection::open(root.join("whatsapp-owner/executor-lock.sqlite")).unwrap();
+    node_lock
+        .execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; CREATE TABLE owner(pid INTEGER); INSERT INTO owner VALUES (1); COMMIT;")
+        .unwrap();
+    node_lock.close().unwrap();
     let backend = NativeAuthStore::new(
         AuthAccount::acquire(
             &root.join("whatsapp/auth.sqlite"),
-            &root.join("whatsapp-owner"),
+            &root.join("whatsapp-owner/executor-lock.sqlite"),
         )
         .unwrap(),
     );
@@ -490,12 +499,13 @@ fn account_config() -> Json {
     parse(r#"{"accountId":"synthetic-account","botPhoneNumber":"+15555550102","since":"2020-01-01T00:00:00.000Z","senders":[{"phoneNumber":"+15555550101","principalId":"synthetic-principal","channelId":"synthetic-channel"}]}"#,usize::MAX).unwrap()
 }
 #[tokio::test]
-async fn native_service_parts_open_retained_paths_without_network_and_release_the_account() {
-    use ivy_chat_bridge::whatsapp::{
-        auth::AuthAccount, journal_io::JournalIo, journal_owner::Journal, service_parts,
-    };
+async fn native_service_parts_open_original_node_owner_layout_without_network_and_release_the_account()
+ {
+    use ivy_chat_bridge::whatsapp::{journal_io::JournalIo, journal_owner::Journal, service_parts};
     let root = Temp::new();
     retained_account(&root.0, "15555550102").await;
+    let lock_path = root.0.join("whatsapp-owner/executor-lock.sqlite");
+    let original_lock = std::fs::read(&lock_path).unwrap();
     let original = Journal::new(JournalIo::open(root.0.join("whatsapp.sqlite")).unwrap());
     let ids = original
         .access(|j| {
@@ -555,12 +565,25 @@ async fn native_service_parts_open_retained_paths_without_network_and_release_th
     parts.socket.close().await.unwrap();
     (parts.resources.retire_account)().await.unwrap();
     parts.journal.close().await.unwrap();
-    let next = AuthAccount::acquire(
-        &root.0.join("whatsapp/auth.sqlite"),
-        &root.0.join("whatsapp-owner"),
+    drop(parts);
+    assert!(root.0.join("whatsapp-owner").is_dir());
+    assert_eq!(std::fs::read(lock_path).unwrap(), original_lock);
+    let next = service_parts::open(
+        account_config(),
+        root.0.clone(),
+        root.0.join("artifact"),
+        PathBuf::from(env!("CARGO_BIN_EXE_ivy-chat-bridge")),
+        Translator::default(),
     )
+    .await
     .unwrap();
-    next.close().unwrap();
+    assert_eq!(
+        next.socket.state(),
+        ivy_contracts::JsString::from("stopped")
+    );
+    next.socket.close().await.unwrap();
+    (next.resources.retire_account)().await.unwrap();
+    next.journal.close().await.unwrap();
 }
 #[tokio::test]
 async fn native_service_parts_failed_account_admission_keeps_retained_auth_and_releases_ownership()
@@ -591,7 +614,7 @@ async fn native_service_parts_failed_account_admission_keeps_retained_auth_and_r
     );
     let mut owner = AuthAccount::acquire(
         &root.0.join("whatsapp/auth.sqlite"),
-        &root.0.join("whatsapp-owner"),
+        &root.0.join("whatsapp-owner/executor-lock.sqlite"),
     )
     .unwrap();
     assert_eq!(owner.store().get("creds", "default").unwrap(), before);

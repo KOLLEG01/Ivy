@@ -34,12 +34,14 @@ pub async fn open(
             use std::os::unix::fs::DirBuilderExt;
             directory.mode(0o700);
         }
-        directory
-            .create(root.join("whatsapp"))
-            .map_err(|_| IvyError::internal())?;
+        for name in ["whatsapp", "whatsapp-owner"] {
+            directory
+                .create(root.join(name))
+                .map_err(|_| IvyError::internal())?;
+        }
         let backend = Arc::new(NativeAuthStore::new(AuthAccount::acquire(
             &root.join("whatsapp/auth.sqlite"),
-            &root.join("whatsapp-owner"),
+            &root.join("whatsapp-owner/executor-lock.sqlite"),
         )?));
         let journal = Journal::new(JournalIo::open(root.join("whatsapp.sqlite"))?);
         Ok((backend, journal))
