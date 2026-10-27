@@ -25,18 +25,23 @@ async function unreadSummary(config, mcp, signal, pending) {
       if (chat.archived === true) continue;
       // An allow-list cannot establish which sender caused a group's unread flag.
       if (config.allowedSenderIds?.length && !config.allowedSenderIds.some(id => bare(id) === identity)) continue;
-      total++;
       let flag = Number.isSafeInteger(chat.unread_count) && chat.unread_count >= 0 &&
         Number.isSafeInteger(chat.unread_observed_at) && chat.unread_observed_at > 0 ? chat.unread_count > 0 : null;
-      let observedAt = chat.unread_observed_at;
+      let observedAt = chat.unread_observed_at, emptyUnknown = false;
       if (flag === null && lookups < 100) {
         lookups++;
         const value = await mcp.call('whatsrust_unread', { jid: chat.jid });
         if (value?.ok !== true || value.connected !== true || value.read_receipts_sent !== false) throw fail('unread_source_unavailable');
+        emptyUnknown = value.complete === false && value.unread === null && value.count === null;
         if (typeof value.unread === 'boolean' && Number.isSafeInteger(value.observed_at) && value.observed_at > 0) {
           flag = value.unread; observedAt = value.observed_at;
         }
       }
+      // Empty LID metadata with no read state is not evidence of a conversation.
+      // Reconsider it on every poll; known flags or incoming activity take priority.
+      if (emptyUnknown && identity.endsWith('@lid') && chat.name === '' && chat.last_timestamp === 0 &&
+          chat.unread_count === null && !pending.some(message => bare(message.conversationId) === identity)) continue;
+      total++;
       // Group flags do not identify the unread sender. Require an eligible retained
       // message when sender exclusions could otherwise count an ignored sender.
       if (flag === true && identity.endsWith('@g.us') && config.ownSenderIds?.length &&
@@ -174,7 +179,7 @@ export default async function collect({ config, mcp, state, signal }) {
     pendingUnreadComplete: complete, pendingUnreadCount: complete ? messages.length : null,
     pendingUnreadConversations: complete ? new Set(messages.map(m => m.conversationId)).size : null,
     observedAt, healthDetail: issue ?? summaryError ?? (summary ?
-      `≥${summary.count} local unread chats; ${summary.unknown} chats have unknown read state. Full phone coverage is unverified.` : ''), messages: messages.slice(0, 50),
+      `≥${summary.count} local unread chats.${summary.unknown ? ` ${summary.unknown} chats have unknown read state.` : ''} Full phone coverage is unverified.` : ''), messages: messages.slice(0, 50),
   };
   return {
     data: { schemaVersion: 1, accounts, activity: { [key]: next.activity ?? [] },
