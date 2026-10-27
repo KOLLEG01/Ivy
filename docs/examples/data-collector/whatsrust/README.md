@@ -2,7 +2,7 @@
 
 This collector uses the same direct native MCP transport as the Microsoft 365
 example. It starts no model turn and has access only to status, event history and
-local unread observations and synchronized chat pages. Configure the authenticated MCP server on the selected
+local unread observations, synchronized chat pages and contact metadata. Configure the authenticated MCP server on the selected
 native owner first. No credentials belong in the task script or configuration.
 
 Materialize `whatsrust.task.json` with the [task helper](../../../../tools/operations/data-collector-task.mjs).
@@ -29,7 +29,13 @@ Before publishing complete activity, each pending conversation is queried again
 with `whatsrust_unread`. Reads send no read receipts. A connected local unread flag
 with an observation timestamp can be known while the provider's total `count` is
 null and `complete` is false. This example requires the flag, never invents the
-total. Separately, complete bounded chat pagination counts locally observed unread
+total.
+Receipt-backed `read_through_at` and the explicit same-second `read_message_ids`
+remove already-read candidates while retaining newer messages and unproved ties.
+Sender labels use at most 25 contact lookups per poll, deduplicated by sender,
+with the direct phone identity as fallback. Contact lookup failure does not block
+the independently verified unread observation.
+Separately, complete bounded chat pagination counts locally observed unread
 **conversations**, including known unread flags with unknown message totals. The
 projection publishes `unreadCount` with `unreadCountKind: "lower_bound"`,
 `unreadCountUnit: "conversations"`, explicit unknown-chat coverage and
@@ -43,8 +49,10 @@ after counting. Own/excluded chats, archived chats and system/newsletter entries
 not contribute to the counter.
 With sender exclusions, an unread group flag needs an eligible retained message
 to contribute; otherwise its filtered unread state remains unknown.
-Consumers must show the lower bound and its local coverage, never a whole-phone
-total or an all-clear state. Its `pendingUnreadCount` covers only incoming
+Coverage and completeness metadata remain available independently of source health.
+A fresh local counter with no unknown relevant chats is healthy; partial coverage
+alone is not a connection or execution failure. Consumers must not infer a
+whole-phone total from the local scope. Its `pendingUnreadCount` covers only incoming
 messages retained since the baseline. Neither this result nor the local archive
 claims complete phone history or an authoritative remote unread snapshot.
 

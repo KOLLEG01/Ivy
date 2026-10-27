@@ -7,12 +7,36 @@ const event=(sequence,overrides={})=>({sequence,kind:'message.received',data:{ch
 const run=(state,events,unread={ok:true,connected:true,complete:true,unread:true,observed_at:1793040000,read_receipts_sent:false},extra={},settings={})=>collect({config:{...config,...settings},mcp:{async call(tool,args){
  if(tool==='whatsrust_status')return {ok:true,connected:true};
  if(tool==='whatsrust_unread')return unread;
+ if(tool==='whatsrust_contacts')return {items:[]};
  if(tool==='whatsrust_chats')return {items:[],next_cursor:null,coverage:'locally_synchronized'};
  if(tool!=='whatsrust_events')throw Error('Unexpected tool');
  const items=events.filter(x=>x.sequence>args.after);
  return {ok:true,account_jid:account,database_id:'database',gap:false,has_more:false,items,through_sequence:items.at(-1)?.sequence??args.after,...extra};
 }},state,signal:new AbortController().signal});
 const initialized={cursor:0,initialized:true,pending:{},activity:[]};
+test('WhatsRust read-through proofs prune older read messages while retaining unread timestamp ties',async()=>{
+ const t=1793040000;
+ const before=await run(initialized,[event(1),event(2),event(3,{timestamp:t+1})]);
+ const unread={ok:true,connected:true,unread:true,observed_at:t+2,read_receipts_sent:false,read_through_at:t,read_message_ids:['m1']};
+ const after=await run(before.state,[],unread);
+ assert.deepEqual(after.data.activity['whatsapp:personal'].map(x=>x.id),['m2','m3']);
+ const read=await run(after.state,[],{...unread,read_through_at:t+1,read_message_ids:['m3']});
+ assert.equal(read.data.activity['whatsapp:personal'].length,0);
+});
+test('WhatsRust resolves sender display names without turning local coverage into a health error',async()=>{
+ const before=await run(initialized,[event(1),event(2)]);let lookups=0;
+ const value=await collect({config,state:before.state,signal:new AbortController().signal,mcp:{async call(tool,args){
+  if(tool==='whatsrust_status')return {ok:true,connected:true};
+  if(tool==='whatsrust_events')return {ok:true,account_jid:account,database_id:'database',gap:false,items:[],through_sequence:args.after,has_more:false};
+  if(tool==='whatsrust_unread')return {ok:true,connected:true,unread:true,observed_at:1793040000,read_receipts_sent:false};
+  if(tool==='whatsrust_chats')return {items:[],next_cursor:null,coverage:'locally_synchronized'};
+  if(tool==='whatsrust_contacts'){lookups++;return {items:[{jid:chat,name:'Alice',push_name:''}]};}
+  throw Error('Unexpected tool');
+ }}});
+ const a=value.data.accounts['whatsapp:personal'];
+ assert.deepEqual(a.messages.map(m=>m.sender),['Alice','Alice']);assert.equal(lookups,1);
+ assert.equal(a.state,'healthy');assert.equal(a.healthDetail,'');assert.equal(a.unreadComplete,false);
+});
 test('WhatsRust baselines old events, resumes cursor and does not publish own or duplicate messages',async()=>{
  const base=await run(null,[event(1)]);assert.deepEqual(base.data.activity['whatsapp:personal'],[]);assert.equal(base.state.cursor,1);
  const next=await run(base.state,[event(1),event(2),event(3,{from_me:true})]);
@@ -107,7 +131,7 @@ test('WhatsRust counts locally unread conversations, preserves unknowns and appl
  const a=result.data.accounts['whatsapp:personal'];
  assert.equal(a.unreadCount,2);assert.equal(a.unreadCountKind,'lower_bound');assert.equal(a.unreadCountUnit,'conversations');
  assert.equal(a.unreadUnknownConversations,1);assert.equal(a.unreadTotalConversations,4);assert.equal(a.unreadComplete,false);
- assert.equal(a.state,'partial');assert.match(a.healthDetail,/≥2 local unread chats/);
+ assert.equal(a.state,'partial');assert.match(a.healthDetail,/1 chats have unknown read state/);
  assert.equal(result.data.observation.complete,true);assert.equal(result.state.cursor,0);
  assert.equal(calls.filter(c=>c.tool==='whatsrust_unread').length,2);
 });

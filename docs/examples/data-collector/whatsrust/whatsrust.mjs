@@ -6,6 +6,29 @@ const order = (a, b) => a.conversationId.localeCompare(b.conversationId) || a.id
 const bare = jid => String(jid).replace(/:[0-9]+@/, '@').replace(/@c\.us$/, '@s.whatsapp.net');
 const jid = value => typeof value === 'string' && value.length <= 256 && /^[A-Za-z0-9.:_-]+@(s\.whatsapp\.net|lid|g\.us|c\.us)$/.test(value);
 
+async function senderNames(mcp, messages, signal) {
+  const names = new Map(); let lookups = 0;
+  for (const message of messages) {
+    const sender = bare(message.senderId), conversation = bare(message.conversationId);
+    if (!names.has(sender)) {
+      let name = '';
+      for (const id of new Set([sender, ...(!conversation.endsWith('@g.us') ? [conversation] : [])])) {
+        if (lookups >= 25) break;
+        signal.throwIfAborted(); lookups++;
+        try {
+          const result = await mcp.call('whatsrust_contacts', { q: id, limit: 200 });
+          const contact = result.items?.find(row => bare(row.jid) === id);
+          name = String(contact?.name || contact?.push_name || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+          if (name) break;
+        } catch { signal.throwIfAborted(); }
+      }
+      const phone = conversation.match(/^([0-9]+)@s\.whatsapp\.net$/);
+      names.set(sender, name || (phone ? '+' + phone[1] : sender));
+    }
+    message.sender = names.get(sender);
+  }
+}
+
 async function unreadSummary(config, mcp, signal, pending) {
   const excluded = new Set([config.expectedAccountJid, ...(config.ownSenderIds ?? []),
     ...(config.excludedConversationIds ?? []), '0@c.us'].map(bare));
@@ -129,7 +152,7 @@ export default async function collect({ config, mcp, state, signal }) {
       next.baselineAt = new Date().toISOString();
     }
     if (!journalComplete) throw fail('event_page_limit');
-    const unread = new Map();
+    const unread = new Map(), readThrough = new Map();
     for (const conversationId of new Set(Object.values(next.pending).map(m => m.conversationId))) {
       signal.throwIfAborted();
       const value = await mcp.call('whatsrust_unread', { jid: conversationId });
@@ -138,10 +161,18 @@ export default async function collect({ config, mcp, state, signal }) {
           !Number.isSafeInteger(value.observed_at) || value.observed_at <= 0 || value.read_receipts_sent !== false) {
         unknownUnread++;
         unread.set(conversationId, null);
-      } else unread.set(conversationId, value.unread);
+      } else {
+        unread.set(conversationId, value.unread);
+        if (Number.isSafeInteger(value.read_through_at) && value.read_through_at > 0)
+          readThrough.set(conversationId, { at: value.read_through_at * 1000,
+            ids: new Set(Array.isArray(value.read_message_ids) ? value.read_message_ids.slice(0, 100).filter(id => typeof id === 'string') : []) });
+      }
     }
-    for (const [id, message] of Object.entries(next.pending))
-      if (unread.get(message.conversationId) === false) delete next.pending[id];
+    for (const [id, message] of Object.entries(next.pending)) {
+      const read = readThrough.get(message.conversationId), time = Date.parse(message.occurredAt);
+      if (unread.get(message.conversationId) === false || read &&
+          (time < read.at || time === read.at && read.ids.has(message.id))) delete next.pending[id];
+    }
     if (unknownUnread) throw fail('unread_incomplete');
     next.activity = Object.values(next.pending).map(({ id, conversationId, revision, occurredAt }) => ({ id, conversationId, revision, occurredAt })).sort(order);
     complete = true;
@@ -153,6 +184,7 @@ export default async function collect({ config, mcp, state, signal }) {
   }
   let summary = null, summaryError = null;
   if (complete) {
+    await senderNames(mcp, Object.values(next.pending), signal);
     try {
       summary = await unreadSummary(config, mcp, signal, Object.values(next.pending));
       const guard = await mcp.call('whatsrust_events', { after: next.cursor, limit: 1, database_id: config.expectedDatabaseId });
@@ -171,15 +203,15 @@ export default async function collect({ config, mcp, state, signal }) {
   const observedAt = new Date().toISOString();
   accounts[key] = {
     application: 'whatsapp', displayName: config.displayName ?? 'WhatsApp', accountId: config.expectedAccountJid,
-    ok: complete, status: complete ? 'ok' : 'trouble', state: summary ? 'partial' : complete ? 'healthy' : 'incomplete',
+    ok: complete, status: complete ? 'ok' : 'trouble', state: complete ? (summary?.unknown > 0 ? 'partial' : 'healthy') : 'incomplete',
     unreadComplete: false, unreadCount: summary?.count ?? null,
     ...(summary ? { unreadCountKind: 'lower_bound', unreadCountUnit: 'conversations',
       unreadUnknownConversations: summary.unknown, unreadTotalConversations: summary.total,
       unreadCoverage: 'locally_synchronized', unreadOldestStateAt: summary.oldestStateAt } : {}),
     pendingUnreadComplete: complete, pendingUnreadCount: complete ? messages.length : null,
     pendingUnreadConversations: complete ? new Set(messages.map(m => m.conversationId)).size : null,
-    observedAt, healthDetail: issue ?? summaryError ?? (summary ?
-      `≥${summary.count} local unread chats.${summary.unknown ? ` ${summary.unknown} chats have unknown read state.` : ''} Full phone coverage is unverified.` : ''), messages: messages.slice(0, 50),
+    observedAt, healthDetail: issue ?? summaryError ?? (summary?.unknown > 0 ?
+      `${summary.unknown} chats have unknown read state.` : ''), messages: messages.slice(0, 50),
   };
   return {
     data: { schemaVersion: 1, accounts, activity: { [key]: next.activity ?? [] },
