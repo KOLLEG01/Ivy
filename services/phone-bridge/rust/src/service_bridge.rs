@@ -1,6 +1,6 @@
 //! Public Phone tools over the call, journal and native owners.
 use crate::{
-    native_client::{PhoneNativeClient, validate_phone},
+    native_client::PhoneNativeClient,
     service_flow::{PhoneFlow, PhoneVoiceControl},
     service_registry::{PHONE_TOOLS, validate_phone_service},
     voice_selection::VoiceSelection,
@@ -209,7 +209,7 @@ impl PhoneBridge {
                 let inventory = self
                     .native_result("inventory", None, 15000, "phone_inventory_unavailable")
                     .await?;
-                validate_phone("PhoneInventory", &inventory)?;
+                validate_phone_service("PhoneInventory", &inventory)?;
                 audio::setup(&inventory, &self.flow.audio_profiles())?
             }
             "codecTest" => {

@@ -368,6 +368,11 @@ impl Fixture {
                 let result = {
                     let mut state = native_state.lock().unwrap();
                     match method.as_str() {
+                        "inventory" => object([
+                            ("processLoopbackSupported", true.into()),
+                            ("devices", IvyJson::Array(vec![])),
+                            ("codecs", IvyJson::Array(vec![])),
+                        ]),
                         "status" => {
                             let mut status = state.status.clone();
                             if state.errors > 0 {
@@ -724,6 +729,26 @@ async fn partial_voice_update_replays_its_original_defaults_after_a_newer_select
     assert!(events.iter().all(|event| !event.starts_with("start:") && !event.starts_with("prepare:")));
     let mut conflict = original; conflict.insert("voiceId", "cove".into());
     assert_eq!(bridge.invoke("update", conflict, "other".into(), &signal).await.unwrap_err().code, "mutation_conflict");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn audio_setup_validates_inventory_through_the_public_service_contract() {
+    let fixture = Fixture::new(&object([("unprepared", true.into())])).await;
+    let bridge = crate::service_bridge::PhoneBridge::new(fixture.flow.clone(), fixture.native.clone());
+    let before = fixture.requests.lock().unwrap().len();
+    let report = bridge.invoke("audioSetup", object([]), "main".into(),
+        &tokio_util::sync::CancellationToken::new()).await.unwrap();
+    assert_eq!(report.get("processLoopbackSupported"), Some(&true.into()));
+    for route in report.required("routes").unwrap().as_array().unwrap() {
+        assert_eq!(route.get("ready"), Some(&false.into()));
+        assert!(route.required("endpoints").unwrap().as_array().unwrap().iter()
+            .all(|endpoint| endpoint.get("state") == Some(&"missing".into())));
+    }
+    let requests = fixture.requests.lock().unwrap()[before..].to_vec();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].get("method"), Some(&"inventory".into()),
+        "Audio setup may only observe devices, never change them.");
     fixture.close().await;
 }
 
