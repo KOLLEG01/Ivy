@@ -328,12 +328,14 @@ impl Inner {
     ) -> IvyResult<JsString> {
         guard().await?;
         self.works.initialize().await?;
+        let catalog_started = std::time::Instant::now();
         let speakers = self.control.speaker_voices().await?;
         let (call, id, generation) = {
             let s = session.lock().unwrap();
             (s.call.clone(), s.thread_id.clone(), s.generation)
         };
         let call_id = text(&call, "callId")?;
+        crate::diagnostics::voice_start_timing(&call_id, "speaker_catalog", catalog_started);
         let speaker = match self.journal.selected_speaker_voice(call_id.clone()).await? {
             Some(id) => id,
             None => text(&speakers, "defaultVoiceId")?,
@@ -449,9 +451,11 @@ impl Inner {
             {
                 params.insert("model", model.clone().into());
             }
+            let realtime_started = std::time::Instant::now();
             self.call("thread/realtime/start", params, Default::default())
                 .await?;
             let answer = pending.wait().await?;
+            crate::diagnostics::voice_start_timing(&call_id, "realtime_sdp", realtime_started);
             session.lock().unwrap().speaker_voice_id = Some(speaker);
             guard().await?;
             require(

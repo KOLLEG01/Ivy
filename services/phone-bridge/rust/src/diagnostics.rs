@@ -1,5 +1,19 @@
 use ivy_contracts::IvyJson;
 
+pub(crate) fn voice_start_timing(
+    call_id: &ivy_contracts::JsString,
+    stage: &str,
+    started: std::time::Instant,
+) {
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "event": "phone_voice_start_timing", "callId": call_id.to_utf8().unwrap_or_default(),
+            "stage": stage, "elapsedMs": started.elapsed().as_millis()
+        })
+    );
+}
+
 /// Bounded telemetry only. Retained effect outcomes live in the command journal.
 /// The serialized service owner supplies a single ISO timestamp for each observation.
 pub struct PhoneDiagnostics {

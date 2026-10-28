@@ -9,7 +9,7 @@ use std::{
     path::PathBuf,
     sync::{
         OnceLock,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
 };
 use tokio::{
@@ -51,6 +51,8 @@ struct Voice {
     serial: AtomicU32,
     fail_prepare: bool,
     models_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    speakers_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    fail_speakers: AtomicBool,
 }
 impl Voice {
     async fn finish(&self, method: &str, mut extra: IvyJson) -> IvyResult<()> {
@@ -127,7 +129,18 @@ impl PhoneFlowVoice for Arc<Voice> {
         })
     }
     fn speaker_voices(&self) -> FlowFuture<IvyJson> {
-        Box::pin(async { Ok(cases().get("speakers").unwrap().clone()) })
+        let voice = self.clone();
+        let gate = self.speakers_gate.lock().unwrap().clone();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                voice.event("speakers_wait".into());
+                gate.acquire().await.unwrap().forget();
+            }
+            if voice.fail_speakers.load(Ordering::SeqCst) {
+                return Err(IvyError::new("phone_speaker_catalog_invalid", "Fixture failure"));
+            }
+            Ok(cases().get("speakers").unwrap().clone())
+        })
     }
     fn speaker_voice(&self, _: &JsString) -> Option<JsString> {
         Some(self.effective.lock().unwrap().clone())
@@ -435,6 +448,8 @@ impl Fixture {
             serial: AtomicU32::new(100),
             fail_prepare: row.get("failPrepare") == Some(&true.into()),
             models_gate: Mutex::new(None),
+            speakers_gate: Mutex::new(None),
+            fail_speakers: AtomicBool::new(false),
         });
         let flow = PhoneFlow::new(
             calls,
@@ -709,6 +724,36 @@ async fn partial_voice_update_replays_its_original_defaults_after_a_newer_select
     assert!(events.iter().all(|event| !event.starts_with("start:") && !event.starts_with("prepare:")));
     let mut conflict = original; conflict.insert("voiceId", "cove".into());
     assert_eq!(bridge.invoke("update", conflict, "other".into(), &signal).await.unwrap_err().code, "mutation_conflict");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn prewarm_loads_speakers_concurrently_and_catalog_failure_keeps_the_task_warm() {
+    let fixture = Fixture::new(&object([("unprepared", true.into())])).await;
+    let models = Arc::new(tokio::sync::Semaphore::new(0));
+    let speakers = Arc::new(tokio::sync::Semaphore::new(0));
+    *fixture.voice.models_gate.lock().unwrap() = Some(models.clone());
+    *fixture.voice.speakers_gate.lock().unwrap() = Some(speakers.clone());
+    let flow = fixture.flow.clone();
+    let warming = tokio::spawn(async move { flow.prewarm_voice("main".into()).await });
+    until(|| {
+        let events = fixture.voice.events.lock().unwrap();
+        events.iter().any(|v| v == "models_wait")
+            && events.iter().any(|v| v == "speakers_wait")
+    }).await;
+    models.add_permits(1);
+    until(|| fixture.voice.events.lock().unwrap().iter().any(|v| v == "prewarm")).await;
+    assert!(!warming.is_finished(), "The catalog is still loading after the task warmed.");
+    speakers.add_permits(1);
+    timed(warming).await.unwrap().unwrap();
+
+    *fixture.voice.models_gate.lock().unwrap() = None;
+    *fixture.voice.speakers_gate.lock().unwrap() = None;
+    fixture.voice.events.lock().unwrap().clear();
+    fixture.voice.fail_speakers.store(true, Ordering::SeqCst);
+    assert_eq!(fixture.flow.prewarm_voice("main".into()).await.unwrap_err().code,
+        "phone_speaker_catalog_invalid");
+    assert!(fixture.voice.events.lock().unwrap().iter().any(|v| v == "prewarm"));
     fixture.close().await;
 }
 

@@ -298,6 +298,7 @@ impl PhoneFlow {
         call: &IvyJson,
         generation: u32,
     ) -> IvyResult<(JsString, JsString)> {
+        let started = std::time::Instant::now();
         self.continuing(call).await?;
         require(
             self.0.voice.is_some() && self.codex().is_some(),
@@ -340,13 +341,14 @@ impl PhoneFlow {
         let thread = thread?;
         let offer = operation_result(&media?)?;
         require(
-            offer.get("callId") == Some(&id.into())
+            offer.get("callId") == Some(&id.clone().into())
                 && offer.get("generation") == Some(&f64::from(generation).into())
                 && offer.get("sdp").and_then(IvyJson::as_js_string).is_some(),
             "phone_voice_sdp_invalid",
             "Native WebRTC offer belongs to another call or generation.",
         )?;
         self.continuing(call).await?;
+        crate::diagnostics::voice_start_timing(&id, "task_and_offer", started);
         Ok((thread, text(&offer, "sdp")?))
     }
     async fn connect(&self, call: &IvyJson) -> IvyResult<()> {

@@ -138,7 +138,9 @@ Implementation: [Codex client](../services/phone-bridge/rust/src/voice_rpc/owner
   generations and operations prevent another restart on replay.
 - Audio speaker voices are separate from model/reasoning selection.
   `phone_bridge_speaker_voices` uses native `thread/realtime/listVoices`, cached
-  for 60 seconds and cleared on reconnect. It selects the highest numeric `vN`
+  for 60 seconds and cleared on reconnect. Idle preparation loads this catalog
+  alongside task preparation; catalog failure does not prevent the task warming.
+  It selects the highest numeric `vN`
   group whose voices and required startup parameters fit the pinned native start
   contract. `catalogVersion` reports the group; `protocol` reports the independently
   validated start version. The original V1 group remains usable with a V3 start;

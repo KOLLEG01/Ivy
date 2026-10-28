@@ -446,11 +446,18 @@ impl PhoneFlow {
         let Some(voice) = self.0.voice.as_ref() else {
             return Ok(());
         };
-        let models = self.voice_model_catalog().await?;
-        self.default_selection().await?.validate(&models)?;
-        voice
-            .prewarm(principal, self.default_selection().await?)
-            .await
+        // Discover voices while the task warms, so the first call can reuse the
+        // same connection-scoped catalog without delaying task preparation.
+        let task = async {
+            let models = self.voice_model_catalog().await?;
+            let selection = self.default_selection().await?;
+            selection.validate(&models)?;
+            voice.prewarm(principal, selection).await
+        };
+        let (task, speakers) = tokio::join!(task, voice.speaker_voices());
+        task?;
+        speakers?;
+        Ok(())
     }
     pub fn audio_profiles(&self) -> IvyJson {
         match self.0.settings.get("audio").filter(|v| !v.is_null()) {
@@ -987,8 +994,10 @@ impl PhoneFlow {
         sdp: JsString,
         generation: u32,
     ) -> IvyResult<()> {
+        let checked = std::time::Instant::now();
         self.confirm_connected(call).await?;
         let id = text(call, "callId")?;
+        crate::diagnostics::voice_start_timing(&id, "connected_check", checked);
         let voice = self.voice()?;
         let greeting = if call.get("direction") == Some(&"incoming".into()) {
             self.0
@@ -1018,6 +1027,7 @@ impl PhoneFlow {
             )
             .await?;
         self.continuing(call).await?;
+        let connecting = std::time::Instant::now();
         let connected = operation_result(
             &self
                 .calls()
@@ -1031,10 +1041,14 @@ impl PhoneFlow {
             "phone_voice_not_ready",
             "Native Voice media did not connect to the original call.",
         )?;
+        crate::diagnostics::voice_start_timing(&id, "rtc_connect", connecting);
         self.continuing(call).await?;
+        let opening = std::time::Instant::now();
         voice
-            .connected(id, self.connected_guard(call.clone()))
-            .await
+            .connected(id.clone(), self.connected_guard(call.clone()))
+            .await?;
+        crate::diagnostics::voice_start_timing(&id, "opening_cue", opening);
+        Ok(())
     }
     async fn recycle(&self, call: &IvyJson, operation_id: Option<JsString>) -> IvyResult<()> {
         self.confirm_connected(call).await?;
