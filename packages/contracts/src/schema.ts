@@ -72,34 +72,32 @@ const re2Engine = Object.assign((pattern: string, _flags: string) => {
 }, { code: 'ivyRE2' });
 
 export class SchemaValidators {
-  private readonly cache = new Map<string, ValidateFunction>();
-  private readonly immutable = new WeakMap<object, ValidateFunction>();
-  private anonymousCompiler: Ajv2020 | null = null;
-  private compilations = 0;
+  // Only fixed-size identities and weak references are retained here. Compiled
+  // application graphs belong to their callers and remain collectible.
+  private readonly cache = new Map<string, WeakRef<ValidateFunction>>();
+  private readonly immutable = new WeakMap<object, WeakRef<ValidateFunction>>();
+  private metaCompiler: Ajv2020 | null = null;
   compile(schema: Schema): ValidateFunction {
     const frozen = typeof schema === 'object' && Object.isFrozen(schema);
-    if (frozen) { const validator = this.immutable.get(schema); if (validator) return validator; }
+    if (frozen) { const validator = this.immutable.get(schema)?.deref(); if (validator) return validator; }
     const identity = hashJson(schema);
-    const existing = this.cache.get(identity);
-    if (existing) { if (frozen) this.immutable.set(schema, existing); return existing; }
+    const existing = this.cache.get(identity), cached = existing?.deref();
+    if (cached) { if (frozen) this.immutable.set(schema, existing!); return cached; }
     admitSchema(schema);
-    // Ajv's generated-code scope also retains dependencies after root unregistration.
-    // Reset compiler and function cache together after a bounded batch, including failed compiles.
-    if (this.compilations === 256) { this.cache.clear(); this.anonymousCompiler = null; this.compilations = 0; }
-    this.compilations++;
     const options = { strict: false, allErrors: false, ownProperties: true, inlineRefs: false,
       validateFormats: false, loopRequired: 64, loopEnum: 64, code: { regExp: re2Engine } };
-    const containsId = (value: unknown): boolean => value !== null && typeof value === 'object' &&
-      (Object.hasOwn(value, '$id') || Object.values(value).some(containsId));
-    // Explicit resource IDs keep an isolated compiler. Anonymous local-reference graphs can
-    // reuse meta-schema setup without registering their roots or retaining an unbounded cache.
-    const isolated = containsId(schema);
-    const ajv = isolated ? new Ajv2020(options) : this.anonymousCompiler ??= new Ajv2020({ ...options, addUsedSchema: false });
     let validator: ValidateFunction;
-    try { validator = ajv.compile(schema as AnySchema); } catch { fail('registry_invalid', 'Invalid or unsupported JSON schema.'); }
-    finally { if (!isolated && typeof schema === 'object') ajv.removeSchema(schema as AnySchema); }
-    this.cache.set(identity, validator);
-    if (frozen) this.immutable.set(schema, validator);
+    try {
+      // Reuse only the fixed meta-schemas. Each application validator has its own
+      // code scope, so one live function cannot retain unrelated compilations.
+      const meta = this.metaCompiler ??= new Ajv2020({ ...options, addUsedSchema: false });
+      if (!meta.validateSchema(schema as AnySchema)) fail('registry_invalid', 'Invalid or unsupported JSON schema.');
+      validator = new Ajv2020({ ...options, meta: false, validateSchema: false, addUsedSchema: false }).compile(schema as AnySchema);
+    } catch { fail('registry_invalid', 'Invalid or unsupported JSON schema.'); }
+    const reference = new WeakRef(validator);
+    if (!this.cache.has(identity) && this.cache.size === 256) this.cache.delete(this.cache.keys().next().value!);
+    this.cache.set(identity, reference);
+    if (frozen) this.immutable.set(schema, reference);
     return validator;
   }
   validate(schema: Schema, value: unknown, maximumBytes = 1024 * 1024): void {

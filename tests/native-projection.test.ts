@@ -2,12 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
-import { generateProjection } from '../tools/contracts/native-projection.mjs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { SchemaValidators } from '../packages/contracts/src/schema.js';
 import { validateAgent } from '../packages/contracts/src/validation.js';
 import { digest } from '../packages/contracts/src/canonical.js';
 import type { Schema } from '../packages/contracts/src/types.js';
 import type { Agent } from '../packages/contracts/src/generated.js';
+
+const { generateProjection } = await import(pathToFileURL(resolve('tools/contracts/native-projection.mjs')).href) as typeof import('../tools/contracts/native-projection.mjs');
 
 const input = (version: string) => JSON.parse(gunzipSync(readFileSync(`specs/native/codex-${version}/source.json.gz`), { maxOutputLength: 32 * 1024 * 1024 }).toString('utf8')) as {
   json: Record<string, string>; typescript: Record<string, string>; commonRust: string;

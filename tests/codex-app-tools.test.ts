@@ -152,7 +152,7 @@ createInterface({input:process.stdin}).on('line', line => {
  const {name,arguments:args} = request.params;
  if (name === 'set_thread_archived' && scenario === 'unknown') { process.stdout.end(); setTimeout(()=>process.exit(0),10); return; }
  const value = name === 'read_thread' ? {schemaVersion:1,thread:{id:args.threadId,kind:'codex',hostId:scenario==='foreign-actor'?'remote':'local',status:{type:'idle',activeFlags:[]}}} :
-   name === 'list_projects' ? {schemaVersion:2,projects:[{projectId:target,projectKind:'local',hostId:'local',path:${JSON.stringify("C:\\Ivy\\PhoneFixture")}}]} :
+   name === 'list_projects' ? {schemaVersion:2,projects:[{projectId:target,projectKind:'local',hostId:'local',path:${JSON.stringify(join(root, "project"))}}]} :
    name === 'list_threads' ? {schemaVersion:4,pinnedThreads:[{id:target,kind:'codex',hostId:'local',status:'active'}],threads:[]} :
    name === 'navigate_to_codex_page' ? {navigated:true} :
     name === 'transfer_voice_call' ? {transferred:true} :
@@ -168,7 +168,7 @@ createInterface({input:process.stdin}).on('line', line => {
         serverPath: server,
         pipePath: "\\\\.\\pipe\\ivy-fixture-not-connected",
         actorThreadId: actor,
-        internalProjectRoot: "C:\\Ivy\\PhoneFixture",
+        internalProjectRoot: join(root, "project"),
         ...(scenario === "schema-drift"
           ? { inputSchemasHash: "sha256:" + "0".repeat(64) }
           : {}),

@@ -33,7 +33,7 @@ test('internal plans pin native project membership before retaining start parame
   let projectId = 'native-internal', reads = 0;
   const client = { request: async (method: string, args: { qualifiedName?: string }) => {
     if (method === 'tools.list') return { provider: { node: { serviceNodeId: 'agent' } }, items: [
-      { qualifiedName: 'agent.projects', definitionHash: hashJson('projects'), definition: { interfaceVersion: '1.0.0' } }], nextCursor: null };
+      { qualifiedName: 'agent.projects', definitionHash: hashJson('projects'), definition: { interfaceVersion: '1.0.0', annotations: { readOnlyHint: true } } }], nextCursor: null };
     assert.equal(method, 'tools.call'); assert.equal(args.qualifiedName, 'agent.projects'); reads++;
     return { source: 'native', observedAt: new Date().toISOString(), projects: [
       { nativeId: projectId, source: 'native', name: 'Internal', paths: ['/internal'] }] };

@@ -3,6 +3,37 @@ import assert from 'node:assert/strict';
 import { SchemaValidators, scalarTypes } from '../packages/contracts/src/schema.js';
 import { bundleLocalSchema } from '../packages/contracts/src/local-bundle.js';
 import { hashJson } from '../packages/contracts/src/canonical.js';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { setImmediate } from 'node:timers/promises';
+
+const memoryCase = 'validator memoization releases compiled graphs while schema owners and unrelated validators remain alive';
+test(memoryCase, async () => {
+  const gc = (globalThis as { gc?: () => void }).gc;
+  if (!gc) {
+    assert.equal(process.env['IVY_SCHEMA_WEAK_CHILD'], undefined, 'Memory child requires exposed GC.');
+    const env: NodeJS.ProcessEnv = { ...process.env, IVY_SCHEMA_WEAK_CHILD: '1' };
+    delete env['NODE_TEST_CONTEXT'];
+    const child = spawnSync(process.execPath, ['--expose-gc', '--test', '--test-reporter=tap',
+      '--test-name-pattern=^' + memoryCase + '$', fileURLToPath(import.meta.url)],
+    { env, encoding: 'utf8', timeout: 30000, windowsHide: true });
+    assert.equal(child.status, 0, child.stdout + child.stderr);
+    assert.match(child.stdout, /# pass 1\b/, 'Memory child must actually select its case.');
+    return;
+  }
+  const owner = new SchemaValidators(), schema = Object.freeze({ type: 'string', pattern: '^saved+$' });
+  const reference = (() => new WeakRef(owner.compile(schema)))();
+  const unrelated = owner.compile(Object.freeze({ type: 'integer' }));
+  let collected = false;
+  for (let attempt = 0; attempt < 40; attempt++) {
+    await setImmediate(); gc(); await setImmediate();
+    if (reference.deref() === undefined) { collected = true; break; }
+  }
+  assert.equal(collected, true, 'The live cache or another validator pinned a compiled application graph.');
+  assert.equal(unrelated(1), true); assert.equal(unrelated('wrong'), false);
+  const rebuilt = owner.compile(schema);
+  assert.equal(rebuilt('saved'), true); assert.equal(rebuilt('wrong'), false);
+});
 
 test('local bundles ignore unrelated definitions but retain transitive, recursive and escaped references', () => {
   const document = { $defs: { Root: { type: 'object', properties: { value: { $ref: '#/$defs/a~1b' }, next: { $ref: '#/$defs/Root' } }, additionalProperties: false }, 'a/b': { type: 'integer' }, Settings: { type: 'string' } } };
@@ -28,7 +59,7 @@ test('scalar intersection respects integer subtyping through local references an
   assert.deepEqual([...scalarTypes({ properties: { value: { allOf: [{ type: 'string' }, { type: 'integer' }] } } }, '/value')], []);
 });
 
-test('anonymous compiler reuse preserves incompatible local definitions, recursion and cached functions after eviction', () => {
+test('validator memoization preserves incompatible local definitions, recursion and caller-held functions after eviction', () => {
   const validators = new SchemaValidators();
   const string = { $ref: '#/$defs/value', $defs: { value: { type: 'string' } } };
   const integer = { $ref: '#/$defs/value', $defs: { value: { type: 'integer' } } };
