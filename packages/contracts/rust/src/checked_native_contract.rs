@@ -9,7 +9,7 @@ use crate::{
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 /// Derived from the same normative Agent schema as the public native read contract.
@@ -83,22 +83,34 @@ fn catalog_filename(name: &str) -> bool {
 #[derive(Default)]
 struct Cache {
     selections: HashMap<String, Arc<NativeContract>>,
-    catalogs: HashMap<PathBuf, (String, Arc<NativeContract>)>,
+    catalogs: HashMap<PathBuf, (String, Weak<NativeContract>)>,
 }
 impl Cache {
     fn load(&mut self, path: &Path) -> IvyResult<Arc<NativeContract>> {
         let bytes = std::fs::read(path).map_err(|_| IvyError::internal())?;
-        let hash = digest(&bytes);
+        self.load_bytes(path, &bytes)
+    }
+    fn load_bytes(&mut self, path: &Path, bytes: &[u8]) -> IvyResult<Arc<NativeContract>> {
+        let hash = digest(bytes);
         if let Some((previous, contract)) = self.catalogs.get(path) {
             if previous == &hash {
-                return Ok(contract.clone());
+                if let Some(contract) = contract.upgrade() {
+                    return Ok(contract);
+                }
             }
         }
-        let value = parse(&String::from_utf8_lossy(&bytes), usize::MAX)
-            .map_err(|_| IvyError::internal())?;
+        if let Some(contract) = self.catalogs.values().find_map(|(previous, contract)| {
+            (previous == &hash).then(|| contract.upgrade()).flatten()
+        }) {
+            self.catalogs
+                .insert(path.to_owned(), (hash, Arc::downgrade(&contract)));
+            return Ok(contract);
+        }
+        let value =
+            parse(&String::from_utf8_lossy(bytes), usize::MAX).map_err(|_| IvyError::internal())?;
         let contract = Arc::new(NativeContract::new(&value)?);
         self.catalogs
-            .insert(path.to_owned(), (hash, contract.clone()));
+            .insert(path.to_owned(), (hash, Arc::downgrade(&contract)));
         Ok(contract)
     }
 }
@@ -215,16 +227,14 @@ impl CheckedNativeContracts {
             } else {
                 directory.join("catalog.json")
             };
-            let bytes = std::fs::read(path).map_err(|e| {
+            let bytes = std::fs::read(&path).map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     missing()
                 } else {
                     IvyError::internal()
                 }
             })?;
-            let value = parse(&String::from_utf8_lossy(&bytes), usize::MAX)
-                .map_err(|_| IvyError::internal())?;
-            let contract = NativeContract::new(&value)?;
+            let contract = cache.load_bytes(&path, &bytes)?;
             if contract
                 .catalog()
                 .get("version")
@@ -235,7 +245,7 @@ impl CheckedNativeContracts {
                     "The retained catalog identifies another native version.",
                 ));
             }
-            Arc::new(contract)
+            contract
         };
         cache.selections.insert(key, selected.clone());
         Ok(selected)

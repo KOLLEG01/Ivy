@@ -132,6 +132,8 @@ export const privateRepo = false;
 
 // Explicit Cargo targets keep --files narrow and do not infer service ownership.
 export const rustTests = {
+  "tests/rust/host-memory.rs": { package: "ivy-host-runtime", test: "host-memory" },
+  "tests/rust/native-catalog-memory.rs": { package: "ivy-host-runtime", test: "native-catalog-memory", testThreads: 1 },
   "tests/rust/chat-files.rs": {
     "package": "ivy-chat-bridge",
     "lib": true,

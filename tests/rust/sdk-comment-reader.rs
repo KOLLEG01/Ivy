@@ -361,7 +361,7 @@ async fn range_visits_intersections_and_returns_independent_lossless_comment_ent
 async fn cache_is_bounded_first_write_wins_and_versions_are_independent() {
     let mut node = leaf(1);
     *mutate(&mut node, &["entry", "comment", "body"]) = "😀".into();
-    let size = stringify(&node, usize::MAX).unwrap().len();
+    let size = node.retained_bytes() + 512;
     let calls = Arc::new(Mutex::new(Vec::new()));
     let log = calls.clone();
     let reader = CommentReader::with_maximum_bytes(
@@ -391,6 +391,26 @@ async fn cache_is_bounded_first_write_wins_and_versions_are_independent() {
     next.insert("revision", J::Number(2.0));
     reader.node(&next, &"task".into(), None).await.unwrap();
     assert_eq!(*calls.lock().unwrap(), vec![pin("a"), next]);
+}
+
+#[tokio::test]
+async fn cache_rejects_expanded_json_that_fits_its_wire_budget() {
+    let node = Arc::new(page(vec![J::Null; 1024]));
+    let maximum = stringify(&node, usize::MAX).unwrap().len() * 2;
+    assert!(node.retained_bytes() > maximum);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let reads = calls.clone();
+    let reader = CommentReader::with_maximum_bytes(
+        source(move |pin, _| {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Ok(saved(&pin, leaf(1))) })
+        }),
+        tokio::runtime::Handle::current(),
+        maximum,
+    );
+    reader.remember(&pin("large"), node).unwrap();
+    reader.node(&pin("large"), &"task".into(), None).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

@@ -93,6 +93,9 @@ impl<N> Default for Cache<N> {
 }
 impl<N> Cache<N> {
     pub fn insert(&mut self, key: NodePin, node: N, bytes: usize, maximum: usize) {
+        let bytes = bytes
+            .saturating_add(key.object_id.0.capacity().saturating_mul(4))
+            .saturating_add(3 * std::mem::size_of::<(NodePin, (N, usize))>());
         if bytes > maximum || self.nodes.contains_key(&key) {
             return;
         }

@@ -86,6 +86,7 @@ impl HealthFile {
         Self::with_launch_id(config, js_environment("IVY_LAUNCH_ID"))
     }
     pub fn with_launch_id(config: InstanceConfig, launch_id: Option<JsString>) -> Self {
+        crate::memory::start_reclaiming();
         Self { config, started_at: now(), boot_id: uuid::Uuid::new_v4().to_string(), launch_id, writes: Arc::new(Mutex::new(())) }
     }
     pub fn boot_id(&self) -> &str { &self.boot_id }

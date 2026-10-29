@@ -4,7 +4,6 @@ use crate::{
     rpc::{RequestOptions, RpcClient},
 };
 use futures_util::{StreamExt, stream::FuturesUnordered};
-use ivy_contracts::json::stringify;
 use std::{
     future::Future,
     pin::Pin,
@@ -91,7 +90,6 @@ impl<S: CommentSource + ?Sized> CommentReader<S> {
     pub fn new(source: Arc<S>, executor: Handle) -> Self {
         Self::with_maximum_bytes(source, executor, 16 * 1024 * 1024)
     }
-    /// Cache capacity is charged by the UTF-8 size of each encoded JSON node.
     pub fn with_maximum_bytes(source: Arc<S>, executor: Handle, maximum_bytes: usize) -> Self {
         Self {
             source,
@@ -121,9 +119,7 @@ impl<S: CommentSource + ?Sized> CommentReader<S> {
         let key = NodePin::read(pin).map_err(CommentError::Invalid)?;
         let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
         if !cache.nodes.contains_key(&key) {
-            let bytes = stringify(&node, usize::MAX)
-                .map_err(CommentError::Invalid)?
-                .len();
+            let bytes = node.retained_bytes();
             cache.insert(key, node, bytes, self.maximum_bytes);
         }
         Ok(())

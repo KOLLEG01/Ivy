@@ -50,14 +50,14 @@ fn dynamic_validators_check_json_fields_types_and_structural_uniqueness() {
 }
 
 #[test]
-fn dynamic_validator_cache_bounds_failed_compiles_and_retains_owned_handles() {
+fn dynamic_validator_cache_keeps_valid_entries_after_failed_compiles() {
     use ivy_contracts::schema::SchemaValidators;
     use std::sync::Arc;
     let validators = SchemaValidators::new();
     let schema = parse(r#"{"type":"string"}"#, 1000).unwrap();
     let first = validators.compile(&schema).unwrap();
     assert!(Arc::ptr_eq(&first, &validators.compile(&schema).unwrap()));
-    for i in 0..255 {
+    for i in 0..300 {
         let rejected = IvyJson::object([
             ("title", i.to_string().into()),
             ("enum", IvyJson::Array(vec![])),
@@ -65,7 +65,7 @@ fn dynamic_validator_cache_bounds_failed_compiles_and_retains_owned_handles() {
         assert!(validators.compile(&rejected).is_err());
     }
     assert!(Arc::ptr_eq(&first, &validators.compile(&schema).unwrap()));
-    // Admission failures occur before the batch count/cache reset.
+    // Neither compiler nor admission failures retain entries or evict successes.
     assert!(
         validators
             .compile(&IvyJson::object([("unknown", true.into())]))
@@ -75,7 +75,7 @@ fn dynamic_validator_cache_bounds_failed_compiles_and_retains_owned_handles() {
     validators
         .compile(&parse(r#"{"type":"integer"}"#, 1000).unwrap())
         .unwrap();
-    assert!(!Arc::ptr_eq(&first, &validators.compile(&schema).unwrap()));
+    assert!(Arc::ptr_eq(&first, &validators.compile(&schema).unwrap()));
     assert!(first.matches(&"still usable".into()).unwrap());
     assert!(!first.matches(&IvyJson::Number(1.0)).unwrap());
     // Value canonicalization/limits precede schema compilation/admission.

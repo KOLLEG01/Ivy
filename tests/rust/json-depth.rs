@@ -45,6 +45,7 @@ fn deep_lifecycle_and_error_cleanup_in_subprocess() {
             let text = nested(50_000, kind, r#""\ud800""#);
             let value = parse(&text, text.len()).unwrap();
             let copy = value.clone();
+            assert!(value.retained_bytes() > text.len());
             assert_eq!(value, copy);
             assert!(json_equal(&value, &copy));
             assert_eq!(stringify(&value, text.len()).unwrap(), text);
@@ -161,4 +162,30 @@ fn debug_shape_and_owned_extraction_remain_usable() {
     assert!(IvyJson::Null.into_object().is_none());
     assert!(IvyJson::Null.into_js_string().is_none());
     assert_ne!(IvyJson::Number(f64::NAN), IvyJson::Number(f64::NAN));
+}
+
+#[test]
+fn retained_bytes_counts_utf16_keys_and_container_capacity_once() {
+    use std::mem::size_of;
+    let mut units = Vec::with_capacity(40);
+    units.extend([0xd800, 0xdfff]);
+    let text_bytes = units.capacity() * size_of::<u16>();
+    let mut values = Vec::with_capacity(12);
+    values.push(IvyJson::String(JsString(units)));
+    values.push(IvyJson::Null);
+    let array_bytes = values.capacity() * size_of::<IvyJson>();
+    let mut key = Vec::with_capacity(20);
+    key.push(0xd800);
+    let key_bytes = key.capacity() * size_of::<u16>();
+    let mut pairs = Vec::with_capacity(8);
+    pairs.push((JsString(key), IvyJson::Array(values)));
+    let object_bytes = pairs.capacity() * size_of::<(JsString, IvyJson)>();
+    let value = IvyJson::Object(pairs);
+    assert_eq!(
+        value.retained_bytes(),
+        size_of::<IvyJson>() + object_bytes + key_bytes + array_bytes + text_bytes
+    );
+    assert_eq!(IvyJson::Null.retained_bytes(), size_of::<IvyJson>());
+    let dense = IvyJson::Array(vec![IvyJson::Null; 4096]);
+    assert!(dense.retained_bytes() > stringify(&dense, usize::MAX).unwrap().len() * 4);
 }

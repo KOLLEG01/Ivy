@@ -99,15 +99,20 @@ pub fn native_tool_definition(
     Ok(value)
 }
 struct Definition {
-    value: IvyJson,
+    value: OnceLock<IvyJson>,
     hash: OnceLock<String>,
+}
+#[derive(Default)]
+struct SchemaCache {
+    values: HashMap<String, Arc<IvyJson>>,
+    bytes: usize,
 }
 pub struct NativeContract {
     catalog: IvyJson,
     catalog_hash: String,
     methods: Vec<(JsString, Definition)>,
     indexes: HashMap<JsString, usize>,
-    schemas: Mutex<HashMap<String, Arc<IvyJson>>>,
+    schemas: Mutex<SchemaCache>,
     validators: SchemaValidators,
 }
 impl NativeContract {
@@ -115,7 +120,6 @@ impl NativeContract {
         validate_agent("Catalog", catalog)?;
         let catalog = catalog.clone();
         let catalog_hash = hash_json(&catalog)?;
-        let identity = JsString::from(catalog_hash.clone());
         let mut methods = Vec::new();
         let mut indexes = HashMap::new();
         for method in catalog
@@ -137,7 +141,7 @@ impl NativeContract {
             methods.push((
                 name,
                 Definition {
-                    value: native_tool_definition(&catalog, method, Some(&identity))?,
+                    value: OnceLock::new(),
                     hash: OnceLock::new(),
                 },
             ));
@@ -147,7 +151,7 @@ impl NativeContract {
             catalog_hash,
             methods,
             indexes,
-            schemas: Mutex::new(HashMap::new()),
+            schemas: Mutex::new(SchemaCache::default()),
             validators: SchemaValidators::new(),
         })
     }
@@ -169,18 +173,40 @@ impl NativeContract {
             })
     }
     pub fn definition(&self, method: &JsString) -> IvyResult<&IvyJson> {
-        Ok(&self.entry(method)?.value)
+        let entry = self.entry(method)?;
+        if entry.value.get().is_none() {
+            let source = &self
+                .catalog
+                .get("clientRequests")
+                .unwrap()
+                .as_array()
+                .unwrap()[self.indexes[method]];
+            let definition = native_tool_definition(
+                &self.catalog,
+                source,
+                Some(&JsString::from(self.catalog_hash.as_str())),
+            )?;
+            let _ = entry.value.set(definition);
+        }
+        Ok(entry.value.get().unwrap())
     }
     pub fn definitions(&self) -> Vec<(JsString, IvyJson)> {
         self.methods
             .iter()
-            .map(|(name, value)| (name.clone(), value.value.clone()))
+            .map(|(name, _)| {
+                (
+                    name.clone(),
+                    self.definition(name)
+                        .expect("validated native method definition")
+                        .clone(),
+                )
+            })
             .collect()
     }
     pub fn definition_hash(&self, method: &JsString) -> IvyResult<&str> {
         let entry = self.entry(method)?;
         if entry.hash.get().is_none() {
-            let hash = tool_definition_hash(&entry.value)?;
+            let hash = tool_definition_hash(self.definition(method)?)?;
             let _ = entry.hash.set(hash);
         }
         Ok(entry.hash.get().unwrap())
@@ -224,6 +250,7 @@ impl NativeContract {
             .schemas
             .lock()
             .map_err(|_| IvyError::internal())?
+            .values
             .get(&key)
         {
             return Ok(value.clone());
@@ -276,7 +303,20 @@ impl NativeContract {
         strip(&mut input);
         let value = Arc::new(input);
         let mut cache = self.schemas.lock().map_err(|_| IvyError::internal())?;
-        Ok(cache.entry(key).or_insert(value).clone())
+        if let Some(cached) = cache.values.get(&key) {
+            return Ok(cached.clone());
+        }
+        let bytes = value.retained_bytes().saturating_add(key.capacity());
+        const MAXIMUM_BYTES: usize = 8 * 1024 * 1024;
+        if bytes <= MAXIMUM_BYTES {
+            if cache.values.len() >= 128 || cache.bytes.saturating_add(bytes) > MAXIMUM_BYTES {
+                cache.values.clear();
+                cache.bytes = 0;
+            }
+            cache.values.insert(key, value.clone());
+            cache.bytes += bytes;
+        }
+        Ok(value)
     }
 
     pub fn validate_input(

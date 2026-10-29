@@ -34,6 +34,7 @@ pub mod executor;
 pub mod filesystem;
 pub mod exec_file;
 pub mod health;
+pub mod memory;
 pub mod host_config;
 pub mod journal;
 pub mod logs;

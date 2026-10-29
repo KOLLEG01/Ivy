@@ -93,6 +93,10 @@ windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Globali
 libc.workspace = true
 
 [[test]]
+name = "host-memory"
+path = "../../../tests/rust/host-memory.rs"
+
+[[test]]
 name = "host-build-identity"
 path = "../../../tests/rust/host-build-identity.rs"
 
@@ -132,3 +136,7 @@ path = "../../../tests/rust/host-windows-process-inspection.rs"
 [[test]]
 name = "native-rpc"
 path = "../../../tests/rust/agent-native-rpc.rs"
+
+[[test]]
+name = "native-catalog-memory"
+path = "../../../tests/rust/native-catalog-memory.rs"

@@ -14,13 +14,20 @@ mod evaluation;
 
 #[derive(Default)]
 struct Cache {
-    validators: HashMap<String, Arc<CompiledSchema>>,
-    compilations: usize,
+    validators: Vec<CachedValidator>,
+    bytes: usize,
 }
+struct CachedValidator {
+    identity: String,
+    validator: Arc<CompiledSchema>,
+}
+const CACHE_BYTES: usize = 8 * 1024 * 1024;
+const ENTRY_BYTES: usize = 2 * 1024 * 1024;
 
 /// Content-keyed validators for the lossless JSON domain. Retained compiled
-/// handles remain usable after a batch is evicted. Failed compiler attempts count
-/// toward the same 256-attempt batch; failed admission does not.
+/// handles remain usable after byte-budget eviction. The budget covers cache
+/// ownership; callers can retain handles independently. Failed compiles retain
+/// nothing and do not evict valid entries.
 #[derive(Default)]
 pub struct SchemaValidators {
     cache: Mutex<Cache>,
@@ -33,21 +40,43 @@ impl SchemaValidators {
     pub fn compile(&self, schema: &IvyJson) -> IvyResult<Arc<CompiledSchema>> {
         let identity = hash_json(schema)?;
         let mut cache = self.cache.lock().map_err(|_| IvyError::internal())?;
-        if let Some(existing) = cache.validators.get(&identity) {
-            return Ok(existing.clone());
-        }
+        let mut position = match cache
+            .validators
+            .binary_search_by(|entry| entry.identity.cmp(&identity))
+        {
+            Ok(position) => return Ok(cache.validators[position].validator.clone()),
+            Err(position) => position,
+        };
         let admitted = admit_schema(schema)?;
-        if cache.compilations == 256 {
-            cache.validators.clear();
-            cache.compilations = 0;
-        }
-        cache.compilations += 1;
         // Registration precedes meta-validation in the original compiler. Both
         // use registry_invalid, while admission keeps its own precise errors.
         admitted.registered_resources()?;
         admitted.validate_meta_schema()?;
         let validator = Arc::new(compile(admitted.schema())?);
-        cache.validators.insert(identity, validator.clone());
+        let bytes =
+            identity.capacity() + validator.retained_bytes() + 2 * std::mem::size_of::<usize>(); // Arc's strong/weak counters.
+        if bytes + std::mem::size_of::<CachedValidator>() <= ENTRY_BYTES {
+            cache.validators.reserve(1);
+            if cache.bytes
+                + bytes
+                + cache.validators.capacity() * std::mem::size_of::<CachedValidator>()
+                > CACHE_BYTES
+            {
+                // Drop the backing allocation too, rather than retaining its
+                // high-water capacity after clearing a batch.
+                *cache = Cache::default();
+                cache.validators.reserve(1);
+                position = 0;
+            }
+            cache.bytes += bytes;
+            cache.validators.insert(
+                position,
+                CachedValidator {
+                    identity,
+                    validator: validator.clone(),
+                },
+            );
+        }
         Ok(validator)
     }
 
@@ -72,25 +101,66 @@ impl SchemaValidators {
 pub struct CompiledSchema {
     nodes: Vec<Node>,
     root: usize,
-    patterns: HashMap<JsString, Re2Pattern>,
-    dynamic_targets: std::collections::HashSet<(usize, usize)>,
+    patterns: Vec<(JsString, Re2Pattern)>,
+    dynamic_targets: Vec<(usize, usize)>,
 }
 struct Node {
     schema: IvyJson,
-    children: HashMap<&'static str, Vec<(JsString, usize)>>,
-    additional_names: Vec<JsString>,
+    children: Vec<(&'static str, Vec<(JsString, usize)>)>,
     reference: Option<usize>,
     static_all: u8,
 }
 impl Node {
+    fn child_position(&self, keyword: &str) -> Option<usize> {
+        self.children
+            .binary_search_by_key(&keyword, |(key, _)| *key)
+            .ok()
+    }
+    fn has_children(&self, keyword: &str) -> bool {
+        self.child_position(keyword).is_some()
+    }
     fn children(&self, keyword: &str) -> &[(JsString, usize)] {
-        self.children.get(keyword).map(Vec::as_slice).unwrap_or(&[])
+        self.child_position(keyword)
+            .map(|position| self.children[position].1.as_slice())
+            .unwrap_or(&[])
     }
     fn child(&self, keyword: &str) -> Option<usize> {
         self.children(keyword).first().map(|(_, id)| *id)
     }
 }
 impl CompiledSchema {
+    /// Owned allocations, including container capacities and shared RE2 classes
+    /// once per allocation. Excludes an enclosing Arc and evaluation workspaces.
+    pub fn retained_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let mut bytes = size_of::<Self>()
+            + self.nodes.capacity() * size_of::<Node>()
+            + self.patterns.capacity() * size_of::<(JsString, Re2Pattern)>()
+            + self.dynamic_targets.capacity() * size_of::<(usize, usize)>();
+        for node in &self.nodes {
+            bytes += node.schema.retained_bytes() - size_of::<IvyJson>()
+                + node.children.capacity() * size_of::<(&str, Vec<(JsString, usize)>)>();
+            for (_, rows) in &node.children {
+                bytes += rows.capacity() * size_of::<(JsString, usize)>();
+                bytes += rows
+                    .iter()
+                    .map(|(key, _)| key.0.capacity() * size_of::<u16>())
+                    .sum::<usize>();
+            }
+        }
+        for (text, pattern) in &self.patterns {
+            bytes += text.0.capacity() * size_of::<u16>() + pattern.retained_bytes()
+                - size_of::<Re2Pattern>();
+        }
+        bytes
+    }
+    fn pattern(&self, pattern: &JsString) -> &Re2Pattern {
+        &self.patterns[self
+            .patterns
+            .binary_search_by(|(key, _)| key.cmp(pattern))
+            .expect("compiled pattern")]
+        .1
+    }
     /// Invoke the compiled predicate. Schema validation and value byte limits
     /// belong to SchemaValidators::validate, just as they do at the JS wrapper.
     pub fn matches(&self, value: &IvyJson) -> IvyResult<bool> {
@@ -104,8 +174,7 @@ fn compile(schema: &IvyJson) -> IvyResult<CompiledSchema> {
     let plan = compiler_plan::plan(schema)?;
     let constant = |accept| Node {
         schema: IvyJson::Bool(accept),
-        children: HashMap::new(),
-        additional_names: Vec::new(),
+        children: Vec::new(),
         reference: None,
         static_all: 0,
     };
@@ -257,12 +326,13 @@ fn compile(schema: &IvyJson) -> IvyResult<CompiledSchema> {
         {
             static_all |= 2;
         }
-        let declared = children.get("properties").map(Vec::as_slice).unwrap_or(&[]);
-        let additional_names = declared.iter().map(|(key, _)| key.clone()).collect();
         nodes[index] = Node {
             schema: IvyJson::object(fields),
-            children,
-            additional_names,
+            children: {
+                let mut children = children.into_iter().collect::<Vec<_>>();
+                children.sort_unstable_by_key(|(key, _)| *key);
+                children
+            },
             reference,
             static_all,
         };
@@ -301,8 +371,8 @@ fn compile(schema: &IvyJson) -> IvyResult<CompiledSchema> {
         let skip_patterns =
             all_patterns_valid && (additional == Some(0) || (additional.is_none() && prior_all));
         if skip_patterns {
-            if let Some(children) = nodes[index].children.get_mut("patternProperties") {
-                children.clear();
+            if let Some(position) = nodes[index].child_position("patternProperties") {
+                nodes[index].children[position].1 = Vec::new();
             }
         }
         let selected = nodes[index]
@@ -325,7 +395,14 @@ fn compile(schema: &IvyJson) -> IvyResult<CompiledSchema> {
             }
         }
     }
-    let dynamic_targets = dynamic_targets(&nodes, roots[0]);
+    // Mutable lookup tables are compilation workspaces. Retain compact sorted
+    // arrays so their allocation capacities can be budgeted directly.
+    let mut patterns = patterns.into_iter().collect::<Vec<_>>();
+    patterns.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    let mut dynamic_targets = dynamic_targets(&nodes, roots[0])
+        .into_iter()
+        .collect::<Vec<_>>();
+    dynamic_targets.sort_unstable();
     Ok(CompiledSchema {
         nodes,
         root: roots[0],

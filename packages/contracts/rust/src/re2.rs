@@ -658,6 +658,20 @@ pub struct Re2Pattern {
     start: usize,
 }
 impl Re2Pattern {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        use std::mem::{align_of, size_of, size_of_val};
+        let mut bytes = size_of::<Self>() + self.program.capacity() * size_of::<Instruction>();
+        let mut classes = HashSet::new();
+        for instruction in &self.program {
+            if let Instruction::Class(class, _) = instruction {
+                if classes.insert(class.as_ptr()) {
+                    bytes += (2 * size_of::<usize>() + size_of_val(class.as_ref()))
+                        .next_multiple_of(align_of::<usize>());
+                }
+            }
+        }
+        bytes
+    }
     pub fn compile(pattern: &JsString) -> IvyResult<Self> {
         if pattern.0.len() > 1024 {
             return Err(IvyError::new(

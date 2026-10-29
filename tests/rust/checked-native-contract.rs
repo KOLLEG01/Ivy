@@ -165,6 +165,20 @@ fn candidate_reuse_keeps_file_changes_errors_and_failed_selections_fresh() {
     // Reuse the validated candidate across selector cache keys.
     assert!(Arc::ptr_eq(&selected, &shared));
 
+    let platform = match std::env::consts::OS {
+        "windows" => "win32",
+        "macos" => "darwin",
+        other => other,
+    };
+    let architecture = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+    write(&directory.join(format!("catalog.{platform}-{architecture}.json")), &catalog);
+    let default = store.checked_native_contract(&version, None).unwrap();
+    assert!(Arc::ptr_eq(&selected, &default));
+
     std::fs::write(&first, "{").unwrap();
     assert_eq!(error().code, "internal_error");
     assert!(Arc::ptr_eq(

@@ -393,9 +393,12 @@ impl CompiledSchema {
                                     for (key, value) in
                                         entries(value).into_iter().filter(|_| child != 0)
                                     {
-                                        if !node.additional_names.contains(key)
+                                        if !node
+                                            .children("properties")
+                                            .iter()
+                                            .any(|(name, _)| name == key)
                                             && !node.children("patternProperties").iter().any(
-                                                |(pattern, _)| self.patterns[pattern].is_match(key),
+                                                |(pattern, _)| self.pattern(pattern).is_match(key),
                                             )
                                         {
                                             checks.push(Check::Child(
@@ -421,7 +424,7 @@ impl CompiledSchema {
                                 }
                                 for (pattern, child) in node.children("patternProperties") {
                                     for (key, value) in entries(value) {
-                                        if self.patterns[pattern].is_match(key) {
+                                        if self.pattern(pattern).is_match(key) {
                                             marks.properties.insert(key.clone());
                                             checks.push(Check::Child(
                                                 *child,
@@ -484,7 +487,11 @@ impl CompiledSchema {
                         .and_then(IvyJson::as_js_string)
                     {
                         let anchor = JsString(reference.0[1..].to_vec());
-                        let reference = if self.dynamic_targets.contains(&(id, input.root())) {
+                        let reference = if self
+                            .dynamic_targets
+                            .binary_search(&(id, input.root()))
+                            .is_ok()
+                        {
                             *anchors.get(&anchor).unwrap_or(&input.root())
                         } else {
                             input.root()
@@ -509,7 +516,7 @@ impl CompiledSchema {
                         ("oneOf", Group::One),
                         ("allOf", Group::All),
                     ] {
-                        if node.children.contains_key(keyword) {
+                        if node.has_children(keyword) {
                             checks.push(Check::Group(
                                 kind,
                                 node.children(keyword)
@@ -583,7 +590,7 @@ impl CompiledSchema {
                     return Ok(false);
                 }
                 if let Some(pattern) = schema.get("pattern").and_then(IvyJson::as_js_string) {
-                    if !self.patterns[pattern].is_match(value) {
+                    if !self.pattern(pattern).is_match(value) {
                         return Ok(false);
                     }
                 }
@@ -684,5 +691,5 @@ fn early_type(node: &Node) -> bool {
     };
     !keywords
         .iter()
-        .any(|keyword| node.schema.get(keyword).is_some() || node.children.contains_key(keyword))
+        .any(|keyword| node.schema.get(keyword).is_some() || node.has_children(keyword))
 }

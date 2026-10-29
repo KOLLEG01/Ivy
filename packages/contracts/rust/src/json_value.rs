@@ -2,6 +2,41 @@
 use super::{IvyJson, JsString};
 use std::fmt;
 
+impl IvyJson {
+    pub fn retained_bytes(&self) -> usize {
+        let mut bytes = std::mem::size_of::<Self>();
+        let mut pending = vec![self];
+        while let Some(value) = pending.pop() {
+            match value {
+                Self::String(text) => {
+                    bytes = bytes.saturating_add(text.0.capacity().saturating_mul(2));
+                }
+                Self::Array(values) => {
+                    bytes = bytes.saturating_add(
+                        values
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<Self>()),
+                    );
+                    pending.extend(values);
+                }
+                Self::Object(pairs) => {
+                    bytes = bytes.saturating_add(
+                        pairs
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<(JsString, Self)>()),
+                    );
+                    for (key, child) in pairs {
+                        bytes = bytes.saturating_add(key.0.capacity().saturating_mul(2));
+                        pending.push(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+        bytes
+    }
+}
+
 impl Drop for IvyJson {
     fn drop(&mut self) {
         fn children(value: &mut IvyJson, pending: &mut Vec<IvyJson>) {
