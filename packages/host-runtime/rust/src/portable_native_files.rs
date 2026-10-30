@@ -110,5 +110,7 @@ pub fn component_native_helper(
     {
         return Err(missing());
     }
-    Ok(actual_helper)
+    // Keep the admitted root's spelling after checking its resolved identity.
+    // Windows canonical paths add a verbatim prefix absent from the OS plan.
+    Ok(helper)
 }

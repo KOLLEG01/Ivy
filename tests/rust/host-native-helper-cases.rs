@@ -52,7 +52,10 @@ fn explicit_layout_keeps_legacy_and_current_target_admission_separate() {
             Layout::Target
         )
         .unwrap(),
-        target
+        PathBuf::from(root.to_string_lossy().to_uppercase())
+            .join("dist/native")
+            .join(platform())
+            .join("ivy-job.exe")
     );
     fs::remove_file(&target).unwrap();
     payload(&root, true, "unrelated-helper.exe", b"different executable");

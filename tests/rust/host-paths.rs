@@ -5,6 +5,8 @@ use std::{fs, path::PathBuf};
 mod service_fixture;
 use service_fixture::{ServiceFixture, fixture_node, host_configuration};
 
+#[path = "host-bootstrap-automatic-launch-cases.rs"]
+mod automatic_launch_cases;
 #[path = "host-backup-files-cases.rs"]
 mod backup_files_cases;
 #[path = "host-bootstrap-maintenance-cases.rs"]

@@ -1476,6 +1476,18 @@ export const rustTests = {
     "package": "ivy-host-runtime",
     "test": "host-paths"
   },
+  "tests/rust/host-native-helper-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "native_helper_cases::",
+    "testThreads": 1
+  },
+  "tests/rust/host-bootstrap-automatic-launch-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-paths",
+    "filter": "automatic_launch_cases::",
+    "testThreads": 1
+  },
   "tests/rust/host-codex-cases.rs": {
     "package": "ivy-host-runtime",
     "test": "host-paths",

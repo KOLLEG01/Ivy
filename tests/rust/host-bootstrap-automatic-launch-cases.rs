@@ -219,7 +219,7 @@ async fn systemd_native_launch_recipe_active_replay_and_admin_gate() {
         (calls[1].timeout, calls[1].maximum),
         (60_000, 2 * 1024 * 1024)
     );
-    let actual_worker = ivy_host_runtime::paths::realpath(&worker).unwrap();
+    let actual_worker = ivy_host_runtime::paths::absolute(&worker).unwrap();
     assert_eq!(
         calls[1].args,
         vec![
@@ -480,6 +480,7 @@ async fn native_package_factory_refuses_a_legacy_only_worker_before_scheduler_ac
 #[cfg(windows)]
 #[test]
 fn scheduler_native_and_legacy_recipes_use_the_actual_powershell_function() {
+    use ivy_host_runtime::portable_native_files::{NativeHelperLayout, component_native_helper};
     use std::{
         io::Write,
         os::windows::process::CommandExt,
@@ -596,6 +597,23 @@ fn scheduler_native_and_legacy_recipes_use_the_actual_powershell_function() {
         ("data", native_data),
         ("ok", false.into()),
     ]));
+    cases.push(J::object([
+        ("plan", plan.clone()),
+        (
+            "data",
+            data(
+                component_native_helper(
+                    &root,
+                    "ivy-bootstrap-auto-worker.exe",
+                    NativeHelperLayout::Target,
+                )
+                .unwrap(),
+                component_native_helper(&root, "ivy-host-job.exe", NativeHelperLayout::Target)
+                    .unwrap(),
+            ),
+        ),
+        ("ok", true.into()),
+    ]));
     let script = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../tests/fixtures/host-bootstrap-automatic-launch.ps1");
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -639,7 +657,7 @@ fn scheduler_native_and_legacy_recipes_use_the_actual_powershell_function() {
         ivy_contracts::json::parse(std::str::from_utf8(&output.stdout).unwrap(), 1024 * 1024)
             .unwrap();
     let rows = rows.as_array().unwrap();
-    assert_eq!(rows.len(), 9);
+    assert_eq!(rows.len(), 10);
     for (index, row) in rows.iter().enumerate() {
         assert_eq!(row.get("ok"), cases[index].get("ok"), "case {index}");
         if index == 7 {
