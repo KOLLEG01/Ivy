@@ -1,4 +1,5 @@
 use super::*;
+use ivy_contracts::limits::MANAGEMENT_FRAME_BYTES;
 
 #[test]
 fn retained_string_capacity_is_charged_through_send_and_receiver_drop() {

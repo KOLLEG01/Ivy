@@ -6,9 +6,7 @@ use crate::{
 use futures_util::{SinkExt, StreamExt};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult,
-    limits::{
-        CONNECTION_IN_FLIGHT_REQUESTS, MANAGEMENT_FRAME_BYTES, MANAGEMENT_SOCKET_BUFFER_BYTES,
-    },
+    limits::{CONNECTION_IN_FLIGHT_REQUESTS, MANAGEMENT_SOCKET_BUFFER_BYTES},
 };
 use std::sync::{
     Arc,
@@ -20,10 +18,7 @@ use tokio::{
 };
 use tokio_tungstenite::{
     WebSocketStream,
-    tungstenite::{
-        Message,
-        protocol::{Role, WebSocketConfig},
-    },
+    tungstenite::{Message, protocol::Role},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -167,12 +162,7 @@ impl Sockets {
         let peer = peers.connected(Box::new(socket), context);
         let connected = Connected { peers, peer, state };
         let mut in_flight: Option<Queued> = None;
-        let config = WebSocketConfig::default()
-            .read_buffer_size(16 * 1024)
-            .write_buffer_size(0)
-            .max_write_buffer_size(MANAGEMENT_SOCKET_BUFFER_BYTES)
-            .max_message_size(Some(MANAGEMENT_FRAME_BYTES))
-            .max_frame_size(Some(MANAGEMENT_FRAME_BYTES));
+        let config = ivy_sdk::websocket::config();
         let stream = WebSocketStream::from_raw_socket(transport, Role::Server, Some(config)).await;
         let (mut writer, mut reader) = stream.split();
         let closing = {
@@ -180,7 +170,9 @@ impl Sockets {
                 while let Some(queued) = receiver.recv().await {
                     in_flight = Some(queued);
                     let message = in_flight.as_mut().unwrap().message.take().unwrap();
-                    writer.send(message).await.map_err(failure)?;
+                    ivy_sdk::websocket::send(&mut writer, message)
+                        .await
+                        .map_err(failure)?;
                     in_flight.take();
                 }
                 Ok::<bool, IvyError>(false)

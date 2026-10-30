@@ -132,6 +132,11 @@ export const privateRepo = false;
 
 // Explicit Cargo targets keep --files narrow and do not infer service ownership.
 export const rustTests = {
+  "tests/rust/sdk-websocket.rs": {
+    "package": "ivy-sdk",
+    "test": "sdk-websocket",
+    "testThreads": 1
+  },
   "tests/rust/hive_ws_socket_queue.rs": {
     "package": "ivy-hive",
     "lib": true,

@@ -259,7 +259,7 @@ async fn shutdown_and_peer_termination_interrupt_a_blocked_production_send() {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(byte[0], 0x81);
+        assert_eq!(byte[0], 0x01); // First text fragment; FIN is on the last fragment.
         if global {
             // A blocked response must not stop ingress on the same connection.
             client

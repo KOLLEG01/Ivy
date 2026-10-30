@@ -2,7 +2,7 @@ use crate::{
     IvyError, IvyJson, IvyResult, JsString, Outcome,
     rpc::{OptionalRpcClient, RequestFuture, RequestOptions, RpcClient, base_url, response_value},
 };
-use futures_util::{FutureExt, SinkExt, StreamExt};
+use futures_util::{FutureExt, StreamExt};
 use ivy_contracts::{
     hash::tool_definition_hash,
     json::{parse, stringify},
@@ -25,7 +25,7 @@ use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio_tungstenite::{
     connect_async_with_config,
     tungstenite::{
-        Message, client::IntoClientRequest, http::HeaderValue, protocol::WebSocketConfig,
+        Message, client::IntoClientRequest, http::HeaderValue,
     },
 };
 use tokio_util::sync::CancellationToken;
@@ -211,10 +211,7 @@ impl ServiceConnection {
         options: ConnectionOptions,
         cancellation: CancellationToken,
     ) -> IvyResult<Self> {
-        let config = WebSocketConfig::default()
-            .max_message_size(Some(MANAGEMENT_FRAME_BYTES))
-            .max_frame_size(Some(MANAGEMENT_FRAME_BYTES))
-            .write_buffer_size(0);
+        let config = crate::websocket::config();
         let (socket, _) = tokio::select! {
             biased;
             _=cancellation.cancelled()=>return Err(stopping()),
@@ -244,7 +241,7 @@ impl ServiceConnection {
             loop {
                 let encoded = tokio::select! {biased;_=signal.cancelled()=>break,value=queue.recv()=>match value{Some(v)=>v,None=>break}};
                 let size = encoded.len();
-                let result = tokio::select! {biased;_=signal.cancelled()=>break,result=sink.send(Message::Text(encoded.into()))=>result};
+                let result = tokio::select! {biased;_=signal.cancelled()=>break,result=crate::websocket::send(&mut sink,Message::Text(encoded.into()))=>result};
                 if let Some(inner) = weak.upgrade() {
                     inner.buffered.fetch_sub(size, Ordering::AcqRel);
                     if result.is_err() {

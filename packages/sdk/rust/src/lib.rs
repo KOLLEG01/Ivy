@@ -28,6 +28,7 @@ pub mod native_turn_contents;
 pub mod rpc;
 pub mod tools;
 mod service_connection;
+pub mod websocket;
 pub mod service;
 pub mod connection_owner;
 mod native_project_path;
