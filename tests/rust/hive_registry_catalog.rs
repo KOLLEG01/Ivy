@@ -1,5 +1,25 @@
 use super::*;
 
+#[test]
+fn binding_wire_keeps_field_order_and_opaque_schema_values() {
+    for source in [
+        r#"{"before":"\ud800","inputSchema":{"description":"\udfff"},"extra":[1,true],"outputSchema":false,"after":17}"#,
+        r#"{"outputSchema":true,"inputSchema":false}"#,
+        r#"{"inputSchema":null,"outputSchema":null}"#,
+        r#"{"inputSchema":true,"extension":{"unknown":true}}"#,
+        r#"{"outputSchema":{"type":"string"}}"#,
+        r#"{"description":"No schemas"}"#,
+    ] {
+        let definition = ivy_contracts::json::parse(source, usize::MAX).unwrap();
+        let binding = ToolBinding::new("fixture.call".into(), "definition-hash".into(), definition.clone());
+        assert_eq!(binding.definition(), definition);
+        assert_eq!(binding.to_wire().get("definition"), Some(&definition));
+        assert_eq!(binding.to_wire().get("definitionHash"), Some(&"definition-hash".into()));
+        assert_eq!(ivy_contracts::hash::hash_json(&binding.definition()).unwrap(),
+            ivy_contracts::hash::hash_json(&definition).unwrap());
+    }
+}
+
 fn catalog(reserved_bytes: usize) -> Catalog {
     // A short serialized value with a large retained capacity distinguishes heap
     // accounting from a serialized-size or entry-count limit.

@@ -57,7 +57,7 @@ pub struct PreparedCall {
     pub operation_id: Option<IvyJson>,
 }
 struct Schemas {
-    input: IvyJson,
+    input: Arc<IvyJson>,
     output: Arc<IvyJson>,
 }
 struct Tool {
@@ -125,7 +125,7 @@ impl Route {
             self.tools.clear();
             for binding in &catalog.tools
             {
-                let definition = &binding.definition;
+                let definition = &binding.metadata;
                 self.tools.insert(
                     binding.qualified_name.clone(),
                     Tool {
@@ -141,8 +141,8 @@ impl Route {
                             == Some(true),
                         schemas: if validate {
                             Some(Schemas {
-                                input: field(definition, "inputSchema")?.clone(),
-                                output: Arc::new(field(definition, "outputSchema")?.clone()),
+                                input: binding.input_schema.as_ref().ok_or_else(IvyError::internal)?.clone(),
+                                output: binding.output_schema.as_ref().ok_or_else(IvyError::internal)?.clone(),
                             })
                         } else {
                             None

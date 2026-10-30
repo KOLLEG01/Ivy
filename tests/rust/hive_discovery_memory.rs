@@ -31,7 +31,7 @@ fn core_definitions_are_shared_without_internal_schema_copies() {
     // Use the largest real bundled definition, including its opaque schemas.
     let largest = core_methods().into_iter().map(|method| {
         CoreCalls.borrowed_binding(&format!("hive.{method}").as_str().into()).unwrap()
-    }).max_by_key(|binding| binding.definition.retained_bytes()).unwrap();
+    }).max_by_key(|binding| binding.retained_bytes()).unwrap();
     let params = IvyJson::object([
         ("qualifiedName", largest.qualified_name.clone().into()),
         ("expectedDefinitionHash", largest.definition_hash.clone().into()),
@@ -41,7 +41,7 @@ fn core_definitions_are_shared_without_internal_schema_copies() {
     PEAK.store(before, AtomicOrdering::Relaxed);
     let wire = CoreCalls.binding(&largest.qualified_name).unwrap();
     let copied_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
-    assert_eq!(wire.get("definition"), Some(&largest.definition));
+    assert_eq!(wire.get("definition"), Some(&largest.definition()));
     drop(wire);
     let first = CoreCalls;
     let second = CoreCalls;
@@ -51,7 +51,7 @@ fn core_definitions_are_shared_without_internal_schema_copies() {
         for owner in [&first, &second] {
             assert!(std::ptr::eq(largest, owner.borrowed_binding(&largest.qualified_name).unwrap()));
             let resolved = owner.resolve(&params).unwrap();
-            assert_eq!(resolved.get("method"), largest.definition.get("name"));
+            assert_eq!(resolved.get("method"), largest.metadata.get("name"));
             assert_eq!(resolved.get("params"), params.get("arguments"));
         }
     }

@@ -12,13 +12,13 @@ pub fn catalog_from_wire(value: &IvyJson) -> IvyResult<Catalog> {
             tools: 0..0,
         })).collect::<IvyResult<_>>()?;
     let tools = value.get("tools").and_then(IvyJson::as_array)
-        .into_iter().flatten().map(|binding| Ok(ToolBinding {
-            qualified_name: binding.required("qualifiedName")?.as_js_string()
+        .into_iter().flatten().map(|binding| Ok(ToolBinding::new(
+            binding.required("qualifiedName")?.as_js_string()
                 .ok_or_else(IvyError::internal)?.clone(),
-            definition_hash: binding.required("definitionHash")?.as_js_string()
+            binding.required("definitionHash")?.as_js_string()
                 .ok_or_else(IvyError::internal)?.clone(),
-            definition: binding.required("definition")?.clone(),
-        })).collect::<IvyResult<_>>()?;
+            binding.required("definition")?.clone(),
+        ))).collect::<IvyResult<_>>()?;
     Ok(Catalog {
         namespaces,
         tools,

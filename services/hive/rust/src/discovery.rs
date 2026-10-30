@@ -328,11 +328,11 @@ impl CoreCalls {
                 ]),
             ),
         ]);
-        Ok(ToolBinding {
-            qualified_name: qualified.clone(),
-            definition_hash: tool_definition_hash(&definition)?.into(),
+        Ok(ToolBinding::new(
+            qualified.clone(),
+            tool_definition_hash(&definition)?.into(),
             definition,
-        })
+        ))
     }
     pub fn resolve(&self, params: &IvyJson) -> IvyResult<IvyJson> {
         require(
@@ -363,7 +363,7 @@ impl CoreCalls {
         return Ok(IvyJson::object([
             (
                 "method",
-                field(&binding.definition, "name")?.clone(),
+                field(&binding.metadata, "name")?.clone(),
             ),
             ("params", arguments.clone()),
         ]));
@@ -581,7 +581,7 @@ impl Discovery {
                                 binding.qualified_name.clone(),
                             ))
                             .or_default()
-                            .insert(policy(&binding.definition)?);
+                            .insert(policy(&binding.metadata)?);
                     }
                 }
             }
@@ -610,13 +610,13 @@ impl Discovery {
                         string(&node, "serviceName")?.clone(),
                         binding.qualified_name.clone(),
                     ));
-                    let binding_policy = policy(&binding.definition)?;
+                    let binding_policy = policy(&binding.metadata)?;
                     if !available
                         && current.is_some_and(|v| v.len() == 1 && !v.contains(&binding_policy))
                     {
                         continue;
                     }
-                    if include(&binding.definition) {
+                    if include(&binding.metadata) {
                         let mut binding = binding.to_wire();
                         binding.insert("serviceName", field(&node, "serviceName")?.clone());
                         binding.insert("provider", provider(&node)?);

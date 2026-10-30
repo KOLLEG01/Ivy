@@ -43,6 +43,33 @@ fn params() -> IvyJson {
 }
 
 #[test]
+fn catalog_handoff_does_not_copy_opaque_schema_trees() {
+    use crate::retention::graph_tests::{LIVE, PEAK};
+    use std::sync::atomic::Ordering;
+    const CHILD: &str = "IVY_ROUTING_CATALOG_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "live_routing::ownership_tests::catalog_handoff_does_not_copy_opaque_schema_trees", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        return;
+    }
+    let owner = catalog("string", true, true);
+    let status = node();
+    let mut routing = LiveRouting::new(true, None);
+    let before = LIVE.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    routing.update(&status, Some(7.0), Some(&owner)).unwrap();
+    let peak = PEAK.load(Ordering::Relaxed) - before;
+    eprintln!("Hive routing catalog handoff Rust allocation peak: {peak} bytes for four 128 KiB opaque schema descriptions");
+    // Rust allocator requests only; validator compilation and process RSS are excluded.
+    assert!(peak < 64 * 1024, "Routing copied schema trees: {peak} bytes");
+    let call = routing.prepare(&context(), &params()).unwrap();
+    assert_eq!(routing.complete(&call.context, "reply".into()).unwrap(), "reply".into());
+}
+
+#[test]
 fn pending_calls_share_the_dispatched_schema_until_the_last_reply_releases_it() {
     let mut routing = LiveRouting::new(true, None);
     routing
@@ -103,14 +130,19 @@ fn retained_schemas_do_not_admit_replies_from_replaced_or_cleared_connections() 
     let error = routing.complete(&old, "reply".into()).unwrap_err();
     assert_eq!(error.code, "stale_generation");
     assert_eq!(error.outcome, Outcome::Unknown);
+    drop(catalog);
     drop(old);
-    assert!(schema.upgrade().is_none());
+    // The replacement connection shares this catalog's schema; it cannot admit
+    // an old reply merely because the contract owner is still alive.
+    assert_eq!(schema.strong_count(), 1);
 
     let current = routing.prepare(&context(), &params()).unwrap().context;
     routing.clear();
     let error = routing.complete(&current, "reply".into()).unwrap_err();
     assert_eq!(error.code, "stale_generation");
     assert_eq!(error.outcome, Outcome::Unknown);
+    drop(current);
+    assert!(schema.upgrade().is_none());
 }
 
 #[test]

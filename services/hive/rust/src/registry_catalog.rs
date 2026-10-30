@@ -10,21 +10,51 @@ const CACHE_ENTRIES: usize = 128;
 pub struct ToolBinding {
     pub qualified_name: JsString,
     pub definition_hash: JsString,
-    pub definition: IvyJson,
+    pub metadata: IvyJson,
+    pub input_schema: Option<Arc<IvyJson>>,
+    pub output_schema: Option<Arc<IvyJson>>,
 }
 impl ToolBinding {
+    pub fn new(qualified_name: JsString, definition_hash: JsString, mut definition: IvyJson) -> Self {
+        fn schema(definition: &mut IvyJson, key: &str) -> Option<Arc<IvyJson>> {
+            let IvyJson::Object(fields) = definition else { return None };
+            fields.iter_mut().find(|(name, _)| name.eq_str(key)).map(|(_, value)| {
+                Arc::new(std::mem::replace(value, IvyJson::Null))
+            })
+        }
+        // Keep the original field positions while the schema trees have one owner.
+        let input_schema = schema(&mut definition, "inputSchema");
+        let output_schema = schema(&mut definition, "outputSchema");
+        Self { qualified_name, definition_hash, metadata: definition, input_schema, output_schema }
+    }
+    pub fn definition(&self) -> IvyJson {
+        let mut definition = self.metadata.clone();
+        if let Some(schema) = &self.input_schema {
+            definition.insert("inputSchema", schema.as_ref().clone());
+        }
+        if let Some(schema) = &self.output_schema {
+            definition.insert("outputSchema", schema.as_ref().clone());
+        }
+        definition
+    }
     /// Materialize the external binding only at a response boundary.
     pub fn to_wire(&self) -> IvyJson {
         IvyJson::object([
             ("qualifiedName", self.qualified_name.clone().into()),
-            ("definition", self.definition.clone()),
+            ("definition", self.definition()),
             ("definitionHash", self.definition_hash.clone().into()),
         ])
     }
     fn heap_bytes(&self) -> usize {
         self.qualified_name.0.capacity() * 2
             + self.definition_hash.0.capacity() * 2
-            + self.definition.retained_bytes() - size_of::<IvyJson>()
+            + self.metadata.retained_bytes() - size_of::<IvyJson>()
+            + [&self.input_schema, &self.output_schema].into_iter().map(|schema| {
+                schema.as_ref().map_or(0, |schema| schema.retained_bytes() + 2 * size_of::<usize>())
+            }).sum::<usize>()
+    }
+    pub(crate) fn retained_bytes(&self) -> usize {
+        size_of::<Self>() + self.heap_bytes()
     }
 }
 
@@ -81,7 +111,7 @@ impl Catalog {
                     + ns.guide_markdown.as_ref().map_or(0, |v| v.0.capacity() * 2)
             }).sum::<usize>()
             + self.tools.capacity() * size_of::<ToolBinding>()
-            + self.tools.iter().map(ToolBinding::heap_bytes).sum::<usize>()
+            + self.tools.iter().map(|tool| tool.retained_bytes() - size_of::<ToolBinding>()).sum::<usize>()
             + self.notifications.capacity() * size_of::<IvyJson>()
             + self.notifications.iter().map(|v| v.retained_bytes() - size_of::<IvyJson>()).sum::<usize>()
     }

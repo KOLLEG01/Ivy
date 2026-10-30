@@ -207,7 +207,7 @@ pub(super) fn guide(value: &JsString, catalog: &crate::registry_catalog::Catalog
     }
     for ns in &catalog.namespaces {
         for binding in catalog.bindings(ns) {
-            let tool = &binding.definition;
+            let tool = &binding.metadata;
             if let Some(mcp) = mcp_name(tool).filter(|v| v.as_object().is_some()) {
                 names.insert(
                     concat(&[&ns.name, &".".into(), string(tool, "name")?]),

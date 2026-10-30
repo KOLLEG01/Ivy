@@ -815,15 +815,15 @@ fn tool_bindings(tools: &[IvyJson]) -> IvyResult<Vec<ToolBinding>> {
     tools
         .iter()
         .map(|tool| {
-            Ok(ToolBinding {
-                qualified_name: join([
+            Ok(ToolBinding::new(
+                join([
                         string(tool, "namespace")?.clone(),
                         ".".into(),
                         string(tool, "name")?.clone(),
                     ]),
-                definition: tool.clone(),
-                definition_hash: tool_definition_hash(tool)?.into(),
-            })
+                tool_definition_hash(tool)?.into(),
+                tool.clone(),
+            ))
         })
         .collect()
 }
