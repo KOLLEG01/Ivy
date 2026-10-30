@@ -13,6 +13,9 @@ ivy-host-runtime.workspace = true
 chrono.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+flate2.workspace = true
+
 [[test]]
 name = "service-manager-policy"
 path = "../../../tests/rust/service-manager-policy.rs"

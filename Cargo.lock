@@ -2410,6 +2410,7 @@ name = "ivy-service-manager"
 version = "0.2.40"
 dependencies = [
  "chrono",
+ "flate2",
  "ivy-contracts",
  "ivy-host-runtime",
  "ivy-sdk",
