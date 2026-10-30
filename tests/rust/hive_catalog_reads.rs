@@ -182,3 +182,101 @@ fn topic_page_identity_moves_schema_payloads_without_copying_them() {
     eprintln!("Hive topic-page identity Rust allocation peak: copied {copied_peak} bytes, moved {moved_peak} bytes for 1 MiB schema text");
     assert!(copied_peak > moved_peak + 1536 * 1024, "Topic identity copied schemas");
 }
+
+fn copied_contract_records(
+    catalog: Option<&IvyJson>, captured: Option<&IvyJson>, params: &IvyJson,
+) -> IvyResult<(String, Vec<IvyJson>)> {
+    let mut records = vec![];
+    for (index, value) in catalog.filter(|value| !value.is_null())
+        .map(|value| value.as_array().ok_or_else(IvyError::internal))
+        .transpose()?.unwrap_or(&[]).iter().enumerate()
+    {
+        if selected(params, "key", value.get("key")) {
+            records.push(IvyJson::object([
+                ("value", value.clone()), ("index", IvyJson::Number(index as f64)),
+            ]));
+        }
+    }
+    let mut identity = IvyJson::object([("records", IvyJson::Array(records.clone()))]);
+    if let Some(captured) = captured { identity.insert("capturedAt", captured.clone()); }
+    Ok((hash_json(&identity)?, records))
+}
+
+#[test]
+fn contract_page_identity_keeps_filters_original_indices_hashes_and_errors() {
+    let key = IvyJson::String(JsString(vec![0xd800]));
+    let catalog = IvyJson::Array(vec![
+        IvyJson::Null,
+        IvyJson::object([("key", "other".into())]),
+        IvyJson::object([("key", key.clone()), ("readScope", IvyJson::object([
+            (JsString(vec![0xd801]), IvyJson::String(JsString(vec![0xd802]))),
+            ("opaque".into(), IvyJson::Array(vec![false.into(), 9007199254740992.0.into()])),
+        ]))]),
+        IvyJson::object([("key", key.clone()), ("writeVersions", IvyJson::Array(vec![]))]),
+    ]);
+    for catalog in [None, Some(IvyJson::Null), Some(IvyJson::Bool(false)),
+        Some(IvyJson::object([] as [(&str, IvyJson); 0])), Some(catalog),
+        Some(IvyJson::Array(vec![IvyJson::Number(f64::NAN)]))]
+    {
+        for captured in [None, Some(IvyJson::Null), Some(key.clone()), Some(IvyJson::Number(f64::NAN))] {
+            for params in [IvyJson::Null, IvyJson::object([("key", "".into())]),
+                IvyJson::object([("key", key.clone())]), IvyJson::object([("key", "absent".into())])]
+            {
+                let expected = copied_contract_records(catalog.as_ref(), captured.as_ref(), &params)
+                    .map_err(|e| (e.code, e.message));
+                let actual = contract_page_records(catalog.clone(), captured.as_ref(), &params)
+                    .map_err(|e| (e.code, e.message));
+                assert_eq!(actual, expected);
+                if params.get("key") == Some(&key) && let Ok((_, records)) = actual
+                    && records.len() == 2
+                {
+                    assert_eq!(records[0].get("index"), Some(&2.0.into()));
+                    assert_eq!(records[1].get("index"), Some(&3.0.into()));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn contract_page_identity_moves_requirements_without_deep_copies() {
+    const CHILD: &str = "IVY_CONTRACT_PAGE_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "kernel::catalogs::read_tests::contract_page_identity_moves_requirements_without_deep_copies", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+        return;
+    }
+    let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+    let catalog = IvyJson::Array((0..16).map(|index| IvyJson::object([
+        ("key", format!("fixture/contract{index}").into()),
+        ("readScope", IvyJson::object([("roots", IvyJson::Array(vec!["r".repeat(64 * 1024).into()]))])),
+    ])).collect());
+    let payload = |value: &IvyJson| value.get("readScope").unwrap()
+        .get("roots").unwrap().as_array().unwrap()[0].as_js_string().unwrap().0.as_ptr() as usize;
+    let pointers: Vec<_> = catalog.as_array().unwrap().iter().map(payload).collect();
+    let captured = IvyJson::from("2026-01-01T00:00:00Z");
+    let before = LIVE.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    let (expected, copied) = copied_contract_records(Some(&catalog), Some(&captured), &IvyJson::Null).unwrap();
+    let copied_peak = PEAK.load(Ordering::Relaxed) - before;
+    drop(copied);
+    let before = LIVE.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    let (hash, records) = contract_page_records(Some(catalog), Some(&captured), &IvyJson::Null).unwrap();
+    let moved_peak = PEAK.load(Ordering::Relaxed) - before;
+    assert_eq!(hash, expected);
+    let identity = IvyJson::object([("snapshot", hash.into())]);
+    let page = crate::paging::catalog_page(&store, records, &identity,
+        |record| format!("{:08}", record.get("index").unwrap().as_f64().unwrap() as usize).into(), Some(3), None).unwrap();
+    let items = page.get("items").unwrap().as_array().unwrap();
+    assert_eq!(items.iter().map(|record| payload(record.get("value").unwrap())).collect::<Vec<_>>(), pointers[..3]);
+    let cursor = page.get("nextCursor").unwrap().as_js_string().unwrap();
+    assert_eq!(crate::paging::catalog_boundary(&store, &identity, cursor).unwrap(), JsString::from("00000002"));
+    assert!(crate::paging::catalog_boundary(&store, &IvyJson::Null, cursor).is_err());
+    eprintln!("Hive contract-page identity Rust allocation peak: copied {copied_peak} bytes, moved {moved_peak} bytes for 1 MiB read-scope text");
+    assert!(copied_peak > moved_peak + 3 * 1024 * 1024, "Contract identity copied requirements");
+}

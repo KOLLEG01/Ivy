@@ -134,6 +134,28 @@ fn tool_page_records(
     let tools = identity.remove("tools").and_then(IvyJson::into_array).ok_or_else(IvyError::internal)?;
     Ok((hash, tools.into_iter().zip(included).filter_map(|(tool, include)| include.then_some(tool)).collect()))
 }
+fn contract_page_records(
+    catalog: Option<IvyJson>,
+    captured: Option<&IvyJson>,
+    params: &IvyJson,
+) -> IvyResult<(String, Vec<IvyJson>)> {
+    let values = catalog.filter(|value| !value.is_null())
+        .map(|value| value.into_array().ok_or_else(IvyError::internal))
+        .transpose()?.unwrap_or_default();
+    let records = values.into_iter().enumerate().filter_map(|(index, value)| {
+        selected(params, "key", value.get("key")).then(|| IvyJson::object([
+            ("value", value), ("index", IvyJson::Number(index as f64)),
+        ]))
+    }).collect();
+    let mut identity = IvyJson::object([("records", IvyJson::Array(records))]);
+    if let Some(captured) = captured {
+        identity.insert("capturedAt", captured.clone());
+    }
+    let hash = hash_json(&identity)?;
+    let records = identity.remove("records").and_then(IvyJson::into_array)
+        .ok_or_else(IvyError::internal)?;
+    Ok((hash, records))
+}
 pub(super) fn handle(
     call: &mut Call<'_>,
     context: &IvyJson,
@@ -269,28 +291,11 @@ pub(super) fn handle(
                 .registry
                 .node(call.store, id, call.runtime, (call.clock)())?;
             let catalog = call.registry.required_contracts(call.store, id)?;
-            let mut records = vec![];
-            for (index, value) in catalog
-                .as_ref()
-                .filter(|value| !value.is_null())
-                .map(|value| value.as_array().ok_or_else(IvyError::internal))
-                .transpose()?
-                .unwrap_or(&[])
-                .iter()
-                .enumerate()
-            {
-                if selected(params, "key", value.get("key")) {
-                    records.push(IvyJson::object([
-                        ("value", value.clone()),
-                        ("index", IvyJson::Number(index as f64)),
-                    ]));
-                }
-            }
-            let mut identity = IvyJson::object([("records", IvyJson::Array(records.clone()))]);
-            if let Some(captured) = node.get("lastSuccessfulSyncAt") {
-                identity.insert("capturedAt", captured.clone());
-            }
-            let paged = page(
+            let has_catalog = catalog.is_some();
+            let (identity, records) = contract_page_records(
+                catalog, node.get("lastSuccessfulSyncAt"), params,
+            )?;
+            let mut paged = page(
                 call,
                 method,
                 params,
@@ -302,28 +307,18 @@ pub(super) fn handle(
                     )
                     .into()
                 },
-                Some(hash_json(&identity)?.into()),
+                Some(identity.into()),
             )?;
-            let mut result = IvyJson::object([
-                ("provider", provider(&node)),
-                ("hasCatalog", catalog.is_some().into()),
-                (
-                    "items",
-                    IvyJson::Array(
-                        field(&paged, "items")?
-                            .as_array()
-                            .ok_or_else(IvyError::internal)?
-                            .iter()
-                            .map(|v| v.get("value").cloned().unwrap_or(IvyJson::Null))
-                            .collect(),
-                    ),
-                ),
-                ("nextCursor", field(&paged, "nextCursor")?.clone()),
-            ]);
+            let items = paged.remove("items").and_then(IvyJson::into_array)
+                .ok_or_else(IvyError::internal)?;
+            paged.insert("items", IvyJson::Array(items.into_iter()
+                .map(|mut record| record.remove("value").unwrap_or(IvyJson::Null)).collect()));
+            paged.insert("provider", provider(&node));
+            paged.insert("hasCatalog", has_catalog.into());
             if let Some(captured) = node.get("lastSuccessfulSyncAt") {
-                result.insert("capturedAt", captured.clone());
+                paged.insert("capturedAt", captured.clone());
             }
-            Ok(result)
+            Ok(paged)
         }
         "namespaces.list" => {
             let mut records: Vec<IvyJson> = vec![];
