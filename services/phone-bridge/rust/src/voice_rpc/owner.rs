@@ -302,7 +302,7 @@ impl PhoneCodexVoice {
             .map(|(_, r)| {
                 let schema = rpc
                     .as_ref()
-                    .and_then(|rpc| rpc.catalog.get("serverRequests"))
+                    .and_then(|rpc| rpc.rpc.catalog().get("serverRequests"))
                     .and_then(IvyJson::as_array)
                     .and_then(|defs| {
                         defs.iter()
@@ -375,7 +375,8 @@ impl PhoneCodexVoice {
         let rpc = self.0.rpc()?;
         if let Some(result) = reply.get("result") {
             let definition = rpc
-                .catalog
+                .rpc
+                .catalog()
                 .get("serverRequests")
                 .and_then(IvyJson::as_array)
                 .and_then(|defs| {

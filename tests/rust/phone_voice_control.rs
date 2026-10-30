@@ -133,7 +133,7 @@ impl VoiceConnector for Connector {
                     "../../specs/native/codex-0.154.0/catalog.json"
                 ))
             });
-            let rpc = NativeRpc::start(&catalog, input, output, events)?;
+            let rpc = NativeRpc::start(Arc::new(catalog), input, output, events)?;
             let probe = Arc::new(CloseProbe::default());
             peers
                 .send(Peer {

@@ -40,6 +40,10 @@ name = "agent-state"
 path = "../../../tests/rust/agent-state.rs"
 
 [[test]]
+name = "agent-catalog-state"
+path = "../../../tests/rust/agent-catalog-state.rs"
+
+[[test]]
 name = "agent-runtime-entry"
 path = "../../../tests/rust/agent-runtime-entry.rs"
 

@@ -116,13 +116,18 @@ pub struct NativeRpc {
     catalog: Arc<IvyJson>,
 }
 impl NativeRpc {
-    pub fn start<W, R>(catalog: &IvyJson, input: W, output: R, events: Events) -> IvyResult<Self>
+    pub fn start<W, R>(
+        catalog: Arc<IvyJson>,
+        input: W,
+        output: R,
+        events: Events,
+    ) -> IvyResult<Self>
     where
         W: AsyncWrite + Unpin + Send + 'static,
         R: AsyncRead + Unpin + Send + 'static,
     {
-        validate_agent("Catalog", catalog)?;
-        let definitions = |name| -> IvyResult<BTreeMap<JsString, IvyJson>> {
+        validate_agent("Catalog", &catalog)?;
+        let definitions = |name| -> IvyResult<BTreeMap<JsString, MethodParameters>> {
             let mut map = BTreeMap::new();
             for definition in catalog
                 .get(name)
@@ -134,7 +139,11 @@ impl NativeRpc {
                     .and_then(IvyJson::as_js_string)
                     .ok_or_else(IvyError::internal)?
                     .clone();
-                if map.insert(method, definition.clone()).is_some() {
+                let parameters = MethodParameters {
+                    required: definition.get("paramsRequired") == Some(&IvyJson::Bool(true)),
+                    absent: definition.get("paramsAbsent") == Some(&IvyJson::Bool(true)),
+                };
+                if map.insert(method, parameters).is_some() {
                     return Err(IvyError::new(
                         "native_catalog_invalid",
                         "Native catalog has duplicate methods.",
@@ -177,7 +186,7 @@ impl NativeRpc {
         Ok(Self {
             commands,
             state,
-            catalog: Arc::new(catalog.clone()),
+            catalog,
         })
     }
     pub fn catalog(&self) -> &IvyJson {
@@ -313,15 +322,20 @@ async fn write_stream<W: AsyncWrite + Unpin>(
         }
     }
 }
+// The actor needs names and envelope rules, not copies of the catalog schemas.
+struct MethodParameters {
+    required: bool,
+    absent: bool,
+}
 struct Actor {
     admission: NativeAdmission,
     pending: Vec<Pending>,
     observation_prefix: String,
     observation_sequence: u64,
-    requests: BTreeMap<JsString, IvyJson>,
-    server: BTreeMap<JsString, IvyJson>,
-    notifications: BTreeMap<JsString, IvyJson>,
-    client_notifications: BTreeMap<JsString, IvyJson>,
+    requests: BTreeMap<JsString, MethodParameters>,
+    server: BTreeMap<JsString, MethodParameters>,
+    notifications: BTreeMap<JsString, MethodParameters>,
+    client_notifications: BTreeMap<JsString, MethodParameters>,
     events: Events,
     writes: mpsc::UnboundedSender<Vec<u8>>,
     buffered: Arc<AtomicUsize>,
@@ -537,7 +551,7 @@ impl Actor {
                         )
                     })?;
                     let mut frame = IvyJson::object([("method", IvyJson::String(method))]);
-                    if definition.get("paramsAbsent") != Some(&IvyJson::Bool(true)) {
+                    if !definition.absent {
                         frame.insert("params", params);
                     }
                     let bytes = encoded(&frame, NATIVE_ANSWER_FRAME_BYTES)?;
@@ -621,8 +635,7 @@ impl Actor {
                 )
             })?;
             require(
-                definition.get("paramsRequired") != Some(&IvyJson::Bool(true))
-                    || frame.get("params").is_some(),
+                !definition.required || frame.get("params").is_some(),
                 "native_invalid_frame",
                 "Native method is missing required parameters.",
             )?;

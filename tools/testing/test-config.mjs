@@ -1500,6 +1500,11 @@ export const rustTests = {
     "package": "ivy-agent-manager",
     "test": "agent-state"
   },
+  "tests/rust/agent-catalog-state.rs": {
+    "package": "ivy-agent-manager",
+    "test": "agent-catalog-state",
+    "testThreads": 1
+  },
   "tests/rust/agent-notifications.rs": {
     "package": "ivy-agent-manager",
     "test": "agent-notifications"

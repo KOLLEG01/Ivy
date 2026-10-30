@@ -1,4 +1,5 @@
-use ivy_contracts::IvyJson;
+use ivy_contracts::{IvyJson, agent_schema::validate_agent, json::parse};
+use ivy_host_runtime::codex_rpc::{Events, NativeRpc};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     sync::{
@@ -161,4 +162,91 @@ fn schema_cache_budgets_owned_allocations_and_preserves_caller_handles() {
         remaining.abs() < 256,
         "Dropped owners retained {remaining} bytes"
     );
+}
+
+#[test]
+fn transport_retains_one_catalog_and_small_envelope_tables() {
+    // Keep unrelated test/runtime allocations out of the retained-byte comparison.
+    if std::env::var_os("IVY_TEST_NATIVE_CATALOG_MEMORY").is_none() {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "transport_retains_one_catalog_and_small_envelope_tables",
+                "--test-threads=1",
+            ])
+            .env("IVY_TEST_NATIVE_CATALOG_MEMORY", "1")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut catalog = parse(
+            include_str!("../../specs/native/codex-0.154.0/catalog.json"),
+            32 * 1024 * 1024,
+        )
+        .unwrap();
+        let IvyJson::Object(fields) = &mut catalog else {
+            unreachable!()
+        };
+        let (_, IvyJson::Array(requests)) = fields
+            .iter_mut()
+            .find(|(name, _)| name == &"clientRequests".into())
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        requests[0].insert(
+            "inputSchema",
+            IvyJson::object([(
+                "enum",
+                IvyJson::Array(vec![IvyJson::Number(0.0); 256 * 1024]),
+            )]),
+        );
+        let catalog = Arc::new(catalog);
+        // Initialize the common catalog validator before measuring the transport.
+        validate_agent("Catalog", &catalog).unwrap();
+        let before_clone = LIVE_BYTES.load(Ordering::Relaxed);
+        let redundant = catalog.as_ref().clone();
+        let clone_bytes = LIVE_BYTES.load(Ordering::Relaxed) - before_clone;
+        assert!(
+            clone_bytes >= 8 * 1024 * 1024,
+            "Large catalog clone: {clone_bytes}"
+        );
+        drop(redundant);
+        let weak = Arc::downgrade(&catalog);
+        let (output, _peer) = tokio::io::duplex(64);
+        let baseline = LIVE_BYTES.load(Ordering::Relaxed);
+        let rpc = NativeRpc::start(
+            catalog.clone(),
+            tokio::io::sink(),
+            output,
+            Events::default(),
+        )
+        .unwrap();
+        tokio::task::yield_now().await;
+        let retained = LIVE_BYTES.load(Ordering::Relaxed) - baseline;
+        assert!(
+            retained < 512 * 1024,
+            "Transport retained {retained} extra bytes beside the shared catalog"
+        );
+        assert!(std::ptr::eq(catalog.as_ref(), rpc.catalog()));
+        drop(catalog);
+        assert!(weak.upgrade().is_some());
+        rpc.close("fixture_closed").await;
+        drop(rpc);
+        assert!(
+            weak.upgrade().is_none(),
+            "Closed transport retained the catalog"
+        );
+    });
 }

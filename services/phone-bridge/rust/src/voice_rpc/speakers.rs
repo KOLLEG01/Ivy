@@ -1,7 +1,7 @@
 //! Select the highest advertised catalog supported by the pinned start contract.
 use super::{VoiceModelControl, models::wall_time_ms};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
-use ivy_host_runtime::codex_rpc::RequestOptions;
+use ivy_host_runtime::codex_rpc::{NativeRpc, RequestOptions};
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex, Weak},
@@ -21,7 +21,7 @@ pub trait VoiceSpeakerControl: VoiceModelControl {
 
 type Loading = watch::Receiver<Option<IvyResult<IvyJson>>>;
 struct Cache {
-    connection: Weak<IvyJson>,
+    connection: Weak<NativeRpc>,
     catalog: IvyJson,
     expires_at: i128,
 }
@@ -66,10 +66,7 @@ impl VoiceSpeakerCatalog {
         let mut loading = {
             let mut state = self.0.state.lock().unwrap();
             if state.cache.as_ref().is_some_and(|cache| {
-                !current
-                    || !cache
-                        .connection
-                        .ptr_eq(&Arc::downgrade(&connection.catalog))
+                !current || !cache.connection.ptr_eq(&Arc::downgrade(&connection.rpc))
             }) {
                 state.cache = None;
             }
@@ -99,7 +96,7 @@ impl VoiceSpeakerCatalog {
                     let identity = owner
                         .control
                         .current()
-                        .map(|rpc| Arc::downgrade(&rpc.catalog))
+                        .map(|rpc| Arc::downgrade(&rpc.rpc))
                         .unwrap_or_default();
                     {
                         let mut state = owner.state.lock().unwrap();
@@ -156,7 +153,8 @@ async fn discover(owner: &Inner) -> IvyResult<IvyJson> {
     // The original selects the CURRENT advertised definition after the reply.
     let rpc = owner.control.current().ok_or_else(IvyError::internal)?;
     let definition = rpc
-        .catalog
+        .rpc
+        .catalog()
         .get("clientRequests")
         .and_then(IvyJson::as_array)
         .and_then(|items| {
@@ -197,7 +195,8 @@ async fn discover(owner: &Inner) -> IvyResult<IvyJson> {
         .map(|v| IvyJson::String(v.clone()))
         .or_else(|| configured.cloned());
     let start = rpc
-        .catalog
+        .rpc
+        .catalog()
         .required("clientRequests")?
         .as_array()
         .and_then(|defs| {

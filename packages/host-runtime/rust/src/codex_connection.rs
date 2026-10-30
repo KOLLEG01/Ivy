@@ -79,7 +79,7 @@ struct Owner {
     transport: Option<ProxyControl>,
 }
 impl Owner {
-    async fn initialize(&mut self, catalog: &IvyJson, events: Events) -> IvyResult<()> {
+    async fn initialize(&mut self, catalog: Arc<IvyJson>, events: Events) -> IvyResult<()> {
         let input = self.child.stdin.take().ok_or_else(IvyError::internal)?;
         let output = self.child.stdout.take().ok_or_else(IvyError::internal)?;
         self.rpc = Some(if self.identity.mode == Mode::ExternalProxy {
@@ -182,7 +182,7 @@ pub fn connect(
             })
         });
         let initialized = tokio::select! {
-            value = owner.initialize(&catalog, events) => value,
+            value = owner.initialize(Arc::new(catalog), events) => value,
             _ = ready.closed() => Err(IvyError::new("native_owner_stopping", "Native connection startup was cancelled.")),
         };
         if let Err(error) = initialized {

@@ -676,7 +676,7 @@ async fn start(config: InstanceConfig, bindings: AgentRuntimeBindings) -> IvyRes
             }
         });
         let inventory_source = Arc::new(NativeInventory::new(
-            native.catalog.clone(),
+            &native.catalog,
             native.epoch.clone(),
             native.rpc.clone(),
         )?);

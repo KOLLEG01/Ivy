@@ -275,15 +275,15 @@ async fn model_and_speaker_outputs_use_exact_pinned_documents_and_can_retry() {
     rpc.transport().close("fixture_done").await;
 }
 
-// Reuse Shared's existing cache failure/eviction case, through Phone's required
+// Reuse Shared's existing cache-failure case, through Phone's required
 // trait for the wrapper-admission assertion. The compiler stays Shared-owned.
 #[test]
-fn shared_cache_failure_bound_and_retained_handles_survive_phone_binding() {
+fn shared_cache_keeps_valid_entries_after_failures_through_phone_binding() {
     let validators = SchemaValidators::new();
     let schema = value(r#"{"type":"string"}"#);
     let first = validators.compile(&schema).unwrap();
     assert!(Arc::ptr_eq(&first, &validators.compile(&schema).unwrap()));
-    for i in 0..255 {
+    for i in 0..300 {
         assert!(
             validators
                 .compile(&IvyJson::object([
@@ -301,7 +301,7 @@ fn shared_cache_failure_bound_and_retained_handles_survive_phone_binding() {
     );
     assert!(Arc::ptr_eq(&first, &validators.compile(&schema).unwrap()));
     validators.compile(&value(r#"{"type":"integer"}"#)).unwrap();
-    assert!(!Arc::ptr_eq(&first, &validators.compile(&schema).unwrap()));
+    assert!(Arc::ptr_eq(&first, &validators.compile(&schema).unwrap()));
     assert!(first.matches(&"still usable".into()).unwrap());
     assert!(!first.matches(&IvyJson::Number(1.0)).unwrap());
     assert_eq!(

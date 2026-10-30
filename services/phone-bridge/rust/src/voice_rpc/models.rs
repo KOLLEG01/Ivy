@@ -2,7 +2,7 @@
 //! installed schema compilation stay with the Voice control connection owner.
 use super::VoiceRpc;
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
-use ivy_host_runtime::codex_rpc::RequestOptions;
+use ivy_host_runtime::codex_rpc::{NativeRpc, RequestOptions};
 use std::{
     collections::HashSet,
     future::Future,
@@ -23,7 +23,7 @@ pub trait VoiceModelControl: Send + Sync {
 type Loading = watch::Receiver<Option<IvyResult<IvyJson>>>;
 struct Cache {
     // Remember identity without extending the transport actor's lifetime.
-    connection: Weak<IvyJson>,
+    connection: Weak<NativeRpc>,
     models: IvyJson,
     expires_at: i128,
 }
@@ -71,10 +71,7 @@ impl VoiceModelCatalog {
         let mut loading = {
             let mut state = self.0.state.lock().unwrap();
             if state.cache.as_ref().is_some_and(|cache| {
-                !current
-                    || !cache
-                        .connection
-                        .ptr_eq(&Arc::downgrade(&connection.catalog))
+                !current || !cache.connection.ptr_eq(&Arc::downgrade(&connection.rpc))
             }) {
                 state.cache = None;
             }
@@ -103,7 +100,7 @@ impl VoiceModelCatalog {
                         let mut state = owner.state.lock().unwrap();
                         if let Ok(models) = &result {
                             state.cache = Some(Cache {
-                                connection: Arc::downgrade(&connection.catalog),
+                                connection: Arc::downgrade(&connection.rpc),
                                 models: models.clone(),
                                 expires_at: (owner.now)() + 60_000,
                             });
@@ -133,7 +130,8 @@ pub(super) fn wall_time_ms() -> i128 {
 
 async fn discover(owner: &Inner, connection: &VoiceRpc) -> IvyResult<IvyJson> {
     let definition = connection
-        .catalog
+        .rpc
+        .catalog()
         .get("clientRequests")
         .and_then(IvyJson::as_array)
         .and_then(|items| {

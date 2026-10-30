@@ -388,6 +388,7 @@ async fn agent_handshake_modes_and_payload_match_original_over_real_rpc_streams(
     }
     catalog.insert("serverRequests", IvyJson::Array(vec![]));
     catalog.insert("serverNotifications", IvyJson::Array(vec![]));
+    let catalog = Arc::new(catalog);
     for (row, expected_row) in rows.iter().zip(field(oracle, "rows").as_array().unwrap()) {
         let mode = match text(row, "mode").to_utf8().unwrap().as_str() {
             "external" => NativeMode::ExternalProxy,
@@ -396,7 +397,7 @@ async fn agent_handshake_modes_and_payload_match_original_over_real_rpc_streams(
         };
         let (input, read) = tokio::io::duplex(65536);
         let (mut write, output) = tokio::io::duplex(65536);
-        let rpc = NativeRpc::start(&catalog, input, output, Default::default()).unwrap();
+        let rpc = NativeRpc::start(catalog.clone(), input, output, Default::default()).unwrap();
         let connected = rpc.clone();
         let expected = expected.clone();
         let daemon = field(row, "daemon").clone();

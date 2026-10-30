@@ -34,7 +34,7 @@ pub(crate) fn native_read_timeout_ms(method: &JsString, params: &IvyJson) -> u64
 pub struct NativeManagementOwner {
     pub service_node_id: JsString,
     pub epoch: JsString,
-    pub catalog: IvyJson,
+    pub catalog: Arc<IvyJson>,
     pub rpc: NativeRpc,
     pub closing: Arc<AtomicBool>,
     pub platform: String,
@@ -299,7 +299,7 @@ impl NativeManagement {
         match name {
             "catalog" => {
                 state.dispatch.available()?;
-                Ok(state.owner.catalog.clone())
+                Ok(state.owner.catalog.as_ref().clone())
             }
             "discover" => {
                 state.dispatch.available()?;

@@ -378,7 +378,7 @@ async fn reconnect_uses_current_output_schema_and_preserves_original_unfenced_co
     let (speakers, control, mut first_peer, first_schemas, _) = fixture();
     // Validate the next peer's complete catalog before starting a timed request.
     let (rpc, mut next_peer, next_schemas) = connection(2, false);
-    let old = Arc::downgrade(&control.current.lock().unwrap().catalog);
+    let old = Arc::downgrade(&control.current.lock().unwrap().rpc);
     let first = read(&speakers);
     let request = first_peer.request(LIST).await;
     *control.current.lock().unwrap() = rpc;
@@ -407,7 +407,7 @@ async fn reconnect_uses_current_output_schema_and_preserves_original_unfenced_co
     assert_eq!(speakers.speaker_voices().await.unwrap(), expected);
     assert_eq!(next_peer.sent.len(), 1);
     assert!(old.upgrade().is_none());
-    let retired = Arc::downgrade(&control.current.lock().unwrap().catalog);
+    let retired = Arc::downgrade(&control.current.lock().unwrap().rpc);
     let (rpc, mut third_peer, _) = connection(3, false);
     *control.current.lock().unwrap() = rpc;
     assert!(

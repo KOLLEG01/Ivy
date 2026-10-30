@@ -598,7 +598,7 @@ async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection
         child,
         NativeConnectionSettings {
             epoch,
-            catalog,
+            catalog: Arc::new(catalog),
             expected_home,
             native_version: version.clone(),
             client_version: options.client_version,

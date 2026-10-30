@@ -21,7 +21,7 @@ pub type NativeStopEvidence = dyn for<'a> Fn(JsString, &'a OwnedProcess, NativeM
     + Sync;
 pub struct NativeConnectionSettings {
     pub epoch: JsString,
-    pub catalog: IvyJson,
+    pub catalog: Arc<IvyJson>,
     pub expected_home: PathBuf,
     pub native_version: JsString,
     pub client_version: JsString,
@@ -50,7 +50,7 @@ impl NativeCompletion {
 }
 pub struct AgentNativeConnection {
     pub rpc: NativeRpc,
-    pub catalog: IvyJson,
+    pub catalog: Arc<IvyJson>,
     pub epoch: JsString,
     pub initialized: IvyJson,
     pub native_home: PathBuf,
@@ -136,13 +136,13 @@ impl Owner {
             let transport = ProxyTransport::start(input, output).await?;
             self.transport = Some(transport.control);
             NativeRpc::start(
-                &self.settings.catalog,
+                self.settings.catalog.clone(),
                 transport.input,
                 transport.output,
                 events,
             )?
         } else {
-            NativeRpc::start(&self.settings.catalog, input, output, events)?
+            NativeRpc::start(self.settings.catalog.clone(), input, output, events)?
         });
         initialize_agent(
             self.rpc.as_ref().unwrap(),

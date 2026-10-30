@@ -69,7 +69,7 @@ fn resolve<'a>(root: &'a IvyJson, value: &'a IvyJson) -> IvyResult<&'a IvyJson> 
             .unwrap_or(&NULL),
     )
 }
-pub fn native_source_kinds(catalog: &IvyJson) -> IvyResult<Vec<IvyJson>> {
+pub fn native_source_kinds(catalog: &IvyJson) -> IvyResult<Vec<JsString>> {
     let requests = catalog
         .get("clientRequests")
         .and_then(IvyJson::as_array)
@@ -98,7 +98,11 @@ pub fn native_source_kinds(catalog: &IvyJson) -> IvyResult<Vec<IvyJson>> {
         "native_catalog_mismatch",
         "Installed thread source kinds are not an explicit native enum.",
     )?;
-    Ok(kinds.unwrap().to_vec())
+    Ok(kinds
+        .unwrap()
+        .iter()
+        .map(|kind| kind.as_js_string().unwrap().clone())
+        .collect())
 }
 
 /// Keep the actual context/generation close reason and cancellation token.
@@ -137,9 +141,9 @@ impl InventorySignal {
 }
 
 pub struct NativeInventory {
-    catalog: IvyJson,
+    supports_projects: bool,
     epoch: JsString,
-    source_kinds: Vec<IvyJson>,
+    source_kinds: Vec<JsString>,
     read: Arc<InventoryRead>,
     projects: Mutex<Vec<IvyJson>>,
     now: Arc<InventoryClock>,
@@ -152,7 +156,7 @@ struct Reader<'a> {
     deadline: f64,
 }
 impl NativeInventory {
-    pub fn new(catalog: IvyJson, epoch: JsString, rpc: NativeRpc) -> IvyResult<Self> {
+    pub fn new(catalog: &IvyJson, epoch: JsString, rpc: NativeRpc) -> IvyResult<Self> {
         Self::with_reader(
             catalog,
             epoch,
@@ -169,15 +173,21 @@ impl NativeInventory {
         )
     }
     pub fn with_reader(
-        catalog: IvyJson,
+        catalog: &IvyJson,
         epoch: JsString,
         read: Arc<InventoryRead>,
         now: Arc<InventoryClock>,
         observed_at: Arc<JournalClock>,
     ) -> IvyResult<Self> {
-        let source_kinds = native_source_kinds(&catalog)?;
+        let source_kinds = native_source_kinds(catalog)?;
+        let supports_projects = catalog
+            .get("clientRequests")
+            .and_then(IvyJson::as_array)
+            .unwrap()
+            .iter()
+            .any(|request| request.get("method") == Some(&"project/list".into()));
         Ok(Self {
-            catalog,
+            supports_projects,
             epoch,
             source_kinds,
             read,
@@ -216,7 +226,16 @@ impl NativeInventory {
                     "thread/list",
                     IvyJson::object([
                         ("archived", archived.into()),
-                        ("sourceKinds", IvyJson::Array(self.source_kinds.clone())),
+                        (
+                            "sourceKinds",
+                            IvyJson::Array(
+                                self.source_kinds
+                                    .iter()
+                                    .cloned()
+                                    .map(IvyJson::String)
+                                    .collect(),
+                            ),
+                        ),
                         ("modelProviders", IvyJson::Array(vec![])),
                         ("sortKey", "recency_at".into()),
                         ("sortDirection", "desc".into()),
@@ -320,13 +339,7 @@ impl NativeInventory {
     }
     pub async fn collect_projects(&self, signal: Option<&InventorySignal>) -> IvyResult<IvyJson> {
         require(
-            self.catalog
-                .get("clientRequests")
-                .and_then(IvyJson::as_array)
-                .is_some_and(|r| {
-                    r.iter()
-                        .any(|v| v.get("method") == Some(&"project/list".into()))
-                }),
+            self.supports_projects,
             "native_inventory_unavailable",
             "The connected Codex instance does not support project/list.",
         )?;

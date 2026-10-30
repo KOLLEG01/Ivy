@@ -234,7 +234,8 @@ async fn pages_coalesce_retain_cancelled_observers_and_copy_utf16_results() {
         .current
         .lock()
         .unwrap()
-        .catalog
+        .rpc
+        .catalog()
         .get("clientRequests")
         .unwrap()
         .as_array()
@@ -321,7 +322,7 @@ async fn reconnect_fences_inflight_load_uses_new_page_connection_and_retries_wit
         )
         .await;
     let expected = joined(retry).await.unwrap();
-    let previous = Arc::downgrade(&control.current.lock().unwrap().catalog);
+    let previous = Arc::downgrade(&control.current.lock().unwrap().rpc);
     // A cached result is also invalidated by a replacement identity with identical catalog bytes.
     let (rpc, mut third_peer, _) = connection(None);
     *control.current.lock().unwrap() = rpc;

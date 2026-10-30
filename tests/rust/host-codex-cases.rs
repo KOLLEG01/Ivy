@@ -13,7 +13,7 @@ use std::{
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -178,7 +178,7 @@ fn server_version_uses_the_leading_identity_and_native_whitespace() {
 async fn handshake(home: &Path, reply: J) -> (IvyResult<()>, Vec<J>) {
     let (client, server) = tokio::io::duplex(16_384);
     let (input, output) = tokio::io::split(client);
-    let rpc = NativeRpc::start(&catalog(), output, input, Events::default()).unwrap();
+    let rpc = NativeRpc::start(Arc::new(catalog()), output, input, Events::default()).unwrap();
     let peer = tokio::spawn(async move {
         let (input, mut output) = tokio::io::split(server);
         let mut lines = BufReader::new(input).lines();

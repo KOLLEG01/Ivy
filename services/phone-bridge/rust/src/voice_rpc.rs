@@ -38,8 +38,7 @@ impl VoiceSchemas for ivy_contracts::schema::SchemaValidators {
 
 #[derive(Clone)]
 pub struct VoiceRpc {
-    rpc: NativeRpc,
-    catalog: Arc<IvyJson>,
+    rpc: Arc<NativeRpc>,
     schemas: Arc<dyn VoiceSchemas>,
 }
 
@@ -65,7 +64,7 @@ impl VoiceRpc {
         W: AsyncWrite + Unpin + Send + 'static,
         R: AsyncRead + Unpin + Send + 'static,
     {
-        let rpc = NativeRpc::start(&catalog, input, output, events)?;
+        let rpc = NativeRpc::start(Arc::new(catalog), input, output, events)?;
         Ok(Self::from_native(rpc, schemas))
     }
 
@@ -73,8 +72,7 @@ impl VoiceRpc {
     /// Construct once per published connection, then retain identity by cloning.
     pub fn from_native(rpc: NativeRpc, schemas: Arc<dyn VoiceSchemas>) -> Self {
         Self {
-            catalog: Arc::new(rpc.catalog().clone()),
-            rpc,
+            rpc: Arc::new(rpc),
             schemas,
         }
     }
@@ -86,7 +84,7 @@ impl VoiceRpc {
     /// Clones identify the same control connection; a separately started RPC,
     /// even with identical catalog bytes, identifies a new connection.
     pub fn same_connection(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.catalog, &other.catalog)
+        Arc::ptr_eq(&self.rpc, &other.rpc)
     }
 
     /// Original IDs and durable hooks pass unchanged to the shared actor. A dropped
@@ -106,7 +104,8 @@ impl VoiceRpc {
             ));
         }
         let definition = self
-            .catalog
+            .rpc
+            .catalog()
             .get("clientRequests")
             .and_then(IvyJson::as_array)
             .and_then(|items| {

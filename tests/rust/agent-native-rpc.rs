@@ -55,7 +55,7 @@ fn fixture(events: Events) -> (NativeRpc, Peer) {
     let (input, sent) = tokio::io::duplex(65536);
     let (emit, output) = tokio::io::duplex(65536);
     (
-        NativeRpc::start(&catalog(), input, output, events).unwrap(),
+        NativeRpc::start(Arc::new(catalog()), input, output, events).unwrap(),
         Peer {
             input: BufReader::new(sent),
             output: emit,

@@ -173,7 +173,7 @@ fn local(root: &Root) -> Arc<Mutex<LocalAgentState>> {
     ))
 }
 fn native(
-    catalog: &IvyJson,
+    catalog: Arc<IvyJson>,
     events: Events,
 ) -> (NativeRpc, tokio::io::DuplexStream, tokio::io::DuplexStream) {
     let (writer, read) = tokio::io::duplex(1024 * 1024);
@@ -253,7 +253,7 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
 {
     for path in field(data(), "catalogs").as_array().unwrap() {
         let root = Root::new();
-        let catalog = catalog(&path.as_str().unwrap());
+        let catalog = Arc::new(catalog(&path.as_str().unwrap()));
         let config = config(&root, field(&catalog, "version").clone());
         let journal = journal(text(&catalog, "version"));
         journal
@@ -266,7 +266,8 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
             Arc::new(SqliteOperationStore::new(state.clone()).unwrap()),
             journal.clone(),
         );
-        let (rpc, _read, _write) = native(&catalog, Events::default());
+        let (rpc, _read, _write) = native(catalog.clone(), Events::default());
+        assert!(std::ptr::eq(catalog.as_ref(), rpc.catalog()));
         let closing = Arc::new(AtomicBool::new(false));
         let health = AgentHealth::new(
             Arc::new(HealthFile::with_launch_id(config.clone(), None)),
@@ -286,7 +287,7 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
             Arc::new(WorkspaceGit::new(root.0.clone(), None)),
         );
         let inventory = InventoryManager::new(
-            Arc::new(NativeInventory::new(catalog.clone(), "epoch".into(), rpc.clone()).unwrap()),
+            Arc::new(NativeInventory::new(&catalog, "epoch".into(), rpc.clone()).unwrap()),
             journal.clone(),
             Arc::new(Mutex::new(NativeNoticePolicy::default())),
             Arc::new(|_| Ok(())),
@@ -536,7 +537,7 @@ async fn service_state_health_matches_original_reconciliation_messages_and_closi
 #[tokio::test]
 async fn launch_time_clock_is_answered_after_attach_and_offline_notifications_remain_recoverable() {
     let root = Root::new();
-    let catalog = catalog("specs/native/codex-0.154.0/catalog.json");
+    let catalog = Arc::new(catalog("specs/native/codex-0.154.0/catalog.json"));
     let journal = journal(text(&catalog, "version"));
     let state = local(&root);
     let operations = NativeOperations::new(
@@ -571,7 +572,7 @@ async fn launch_time_clock_is_answered_after_attach_and_offline_notifications_re
     })
     .await
     .unwrap();
-    let (rpc, read, _write) = native(&catalog, callbacks.clone());
+    let (rpc, read, _write) = native(catalog.clone(), callbacks.clone());
     events.attach_native(rpc.clone()).unwrap();
     let mut lines = BufReader::new(read).lines();
     let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())

@@ -2,7 +2,7 @@ use ivy_contracts::{
     IvyError, IvyJson, IvyResult, Outcome,
     json::{parse, stringify},
 };
-use ivy_host_runtime::codex_rpc::{Events, RequestOptions};
+use ivy_host_runtime::codex_rpc::{Events, NativeRpc, RequestOptions};
 use ivy_phone_bridge::voice_rpc::{VoiceRpc, VoiceSchemas, call_timeout_ms};
 use std::{
     sync::{Arc, Mutex},
@@ -18,6 +18,47 @@ fn params() -> IvyJson {
 }
 const METHOD: &str = "thread/realtime/appendText";
 const ID: &str = "11234567-89ab-cdef-0123-456789abcdef";
+
+#[tokio::test]
+async fn shared_catalog_keeps_distinct_voice_connection_identities() {
+    let catalog = Arc::new(value(include_str!(
+        "../../specs/native/codex-0.154.0/catalog.json"
+    )));
+    let schemas = Arc::new(Schemas {
+        reject: false,
+        calls: Mutex::new(vec![]),
+    });
+    let (first_output, _first_peer) = tokio::io::duplex(64);
+    let (second_output, _second_peer) = tokio::io::duplex(64);
+    let first = VoiceRpc::from_native(
+        NativeRpc::start(
+            catalog.clone(),
+            tokio::io::sink(),
+            first_output,
+            Events::default(),
+        )
+        .unwrap(),
+        schemas.clone(),
+    );
+    let second = VoiceRpc::from_native(
+        NativeRpc::start(
+            catalog.clone(),
+            tokio::io::sink(),
+            second_output,
+            Events::default(),
+        )
+        .unwrap(),
+        schemas,
+    );
+    assert!(first.same_connection(&first.clone()));
+    assert!(!first.same_connection(&second));
+    assert!(std::ptr::eq(
+        first.transport().catalog(),
+        second.transport().catalog()
+    ));
+    first.transport().close("fixture_closed").await;
+    second.transport().close("fixture_closed").await;
+}
 
 #[test]
 fn model_selection_preserves_keypad_aliases_and_advertised_future_efforts() {
