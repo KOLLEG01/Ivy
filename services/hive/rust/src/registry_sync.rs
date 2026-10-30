@@ -82,7 +82,7 @@ impl Registry {
                     if let Some(group)=tool.get("discovery").and_then(|v|v.get("group")).filter(|v| v.as_js_string().is_some_and(|v| !v.0.is_empty())){require(group.as_js_string().is_some_and(|g|groups.contains(g)),"registry_invalid","A Tool discovery group must be declared by its namespace.")?;}
                     if let Some(method)=tool.get("nativeMethod"){require(Some(method)==tool.get("name"),"registry_invalid","Native methods must preserve their exact names.")?;}
                     admit_schema(field(tool,"inputSchema")?)?;admit_schema(field(tool,"outputSchema")?)?;
-                    bindings.extend(tool_bindings(std::slice::from_ref(tool))?);
+                    bindings.push(ToolBinding::from_definition(tool.clone())?);
                 }
                 next_bindings.insert(namespace.clone(),bindings);
                 let notifications=optional_array(ns,"notifications")?;

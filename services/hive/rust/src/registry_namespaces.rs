@@ -2,6 +2,8 @@
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
 use serde::{Deserialize, de::IgnoredAny};
 use serde_json::value::RawValue;
+use crate::registry_catalog::{Catalog as LiveCatalog, Namespace, NotificationDefinition, ToolBinding};
+use std::collections::HashMap;
 
 #[derive(Deserialize)]
 struct Catalog<'a> {
@@ -27,6 +29,18 @@ struct Named<'a> {
 struct Tools<'a> {
     #[serde(borrow)]
     tools: Vec<&'a RawValue>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LiveNamespace<'a> {
+    #[serde(borrow)]
+    namespace: &'a RawValue,
+    #[serde(borrow)]
+    tools: Vec<&'a RawValue>,
+    #[serde(borrow)]
+    guide_markdown: Option<&'a RawValue>,
+    #[serde(borrow)]
+    notifications: Option<&'a RawValue>,
 }
 #[derive(Deserialize)]
 struct ToolDiscovery<'a> {
@@ -77,6 +91,73 @@ pub(super) struct NamespaceSummary {
 
 pub(super) fn value(raw: &RawValue) -> IvyResult<IvyJson> {
     parse(raw.get(), usize::MAX).map_err(|_| IvyError::internal())
+}
+
+fn live_value(raw: &RawValue) -> IvyResult<IvyJson> {
+    let mut value = value(raw)?;
+    // Moving parsed schemas must not retain more spare capacity than the old
+    // cloned catalogs. Compact at this long-lived ownership boundary.
+    {
+        let mut pending = vec![&mut value];
+        while let Some(value) = pending.pop() {
+            match value {
+                IvyJson::String(text) => text.0.shrink_to_fit(),
+                IvyJson::Array(values) => {
+                    values.shrink_to_fit();
+                    pending.extend(values.iter_mut());
+                }
+                IvyJson::Object(fields) => {
+                    fields.shrink_to_fit();
+                    for (key, value) in fields { key.0.shrink_to_fit(); pending.push(value); }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(value)
+}
+
+pub(super) fn live_catalog(source: &str) -> IvyResult<Option<LiveCatalog>> {
+    let source = source.trim_matches([' ', '\t', '\r', '\n']);
+    if source == "null" {
+        return Ok(None);
+    }
+    if !source.starts_with('{') {
+        return Err(IvyError::internal());
+    }
+    let catalog: Catalog<'_> = serde_json::from_str(source).map_err(|_| IvyError::internal())?;
+    let mut namespaces = Vec::with_capacity(catalog.namespaces.len());
+    let mut bindings = HashMap::new();
+    // Hash all tools before reading notifications, as in the original builder.
+    for raw in catalog.namespaces {
+        if !raw.get().starts_with('{') {
+            return Err(IvyError::internal());
+        }
+        let ns: LiveNamespace<'_> = serde_json::from_str(raw.get()).map_err(|_| IvyError::internal())?;
+        let name = live_value(ns.namespace)?.into_js_string().ok_or_else(IvyError::internal)?;
+        let tools = ns.tools.into_iter().map(|raw| ToolBinding::from_definition(live_value(raw)?))
+            .collect::<IvyResult<Vec<_>>>()?;
+        bindings.insert(name.clone(), tools);
+        namespaces.push((name, ns.guide_markdown, ns.notifications));
+    }
+    let mut result = LiveCatalog { namespaces: Vec::with_capacity(namespaces.len()), tools: Vec::new(), notifications: Vec::new() };
+    for (name, guide, notifications) in namespaces {
+        if let Some(raw) = notifications {
+            let values: Vec<&RawValue> = serde_json::from_str(raw.get()).map_err(|_| IvyError::internal())?;
+            for raw in values {
+                result.notifications.push(NotificationDefinition::new(&name, live_value(raw)?)?);
+            }
+        }
+        let start = result.tools.len();
+        result.tools.extend(bindings.remove(&name).unwrap_or_default());
+        result.namespaces.push(Namespace {
+            name,
+            tools: start..result.tools.len(),
+            guide_markdown: guide.filter(|raw| raw.get().starts_with('"'))
+                .map(|raw| live_value(raw)?.into_js_string().ok_or_else(IvyError::internal)).transpose()?,
+        });
+    }
+    Ok(Some(result))
 }
 
 pub(super) fn names(source: &str) -> IvyResult<Vec<IvyJson>> {

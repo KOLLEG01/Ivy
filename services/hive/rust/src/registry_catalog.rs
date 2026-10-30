@@ -15,6 +15,13 @@ pub struct ToolBinding {
     pub output_schema: Option<Arc<IvyJson>>,
 }
 impl ToolBinding {
+    pub(crate) fn from_definition(definition: IvyJson) -> IvyResult<Self> {
+        let text = |key| definition.get(key).and_then(IvyJson::as_js_string).ok_or_else(IvyError::internal);
+        let qualified_name = JsString(text("namespace")?.0.iter().copied()
+            .chain([b'.' as u16]).chain(text("name")?.0.iter().copied()).collect());
+        let hash = ivy_contracts::hash::tool_definition_hash(&definition)?;
+        Ok(Self::new(qualified_name, hash.into(), definition))
+    }
     pub fn new(qualified_name: JsString, definition_hash: JsString, mut definition: IvyJson) -> Self {
         fn schema(definition: &mut IvyJson, key: &str) -> Option<Arc<IvyJson>> {
             let IvyJson::Object(fields) = definition else { return None };
@@ -73,15 +80,19 @@ pub struct NotificationDefinition {
     pub payload_schema: Arc<IvyJson>,
 }
 impl NotificationDefinition {
-    fn new(namespace: &JsString, definition: &IvyJson) -> IvyResult<Self> {
-        let text = |key| definition.required(key)?.as_js_string()
-            .cloned().ok_or_else(IvyError::internal);
+    pub(crate) fn new(namespace: &JsString, mut definition: IvyJson) -> IvyResult<Self> {
+        let take = |value: &mut IvyJson, key| -> IvyResult<IvyJson> {
+            value.required(key)?;
+            Ok(value.remove(key).unwrap())
+        };
+        let text = |value: &mut IvyJson, key| take(value, key)?
+            .into_js_string().ok_or_else(IvyError::internal);
         Ok(Self {
             namespace: namespace.clone(),
-            name: text("name")?,
-            version: text("version")?,
-            description: text("description")?,
-            payload_schema: Arc::new(definition.required("payloadSchema")?.clone()),
+            name: text(&mut definition, "name")?,
+            version: text(&mut definition, "version")?,
+            description: text(&mut definition, "description")?,
+            payload_schema: Arc::new(take(&mut definition, "payloadSchema")?),
         })
     }
     fn heap_bytes(&self) -> usize {
@@ -108,7 +119,7 @@ impl Catalog {
             let name = ns.required("namespace")?.as_js_string().ok_or_else(IvyError::internal)?.clone();
             if let Some(values) = ns.get("notifications").filter(|v| !v.is_null()) {
                 for notification in values.as_array().ok_or_else(IvyError::internal)? {
-                    notifications.push(NotificationDefinition::new(&name, notification)?);
+                    notifications.push(NotificationDefinition::new(&name, notification.clone())?);
                 }
             }
             let start = tools.len();

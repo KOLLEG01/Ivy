@@ -8,7 +8,7 @@ use crate::{
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     core_schema::validate_shared,
-    hash::{hash_json, tool_definition_hash},
+    hash::hash_json,
     json::{canonical, parse},
     limits::MANAGEMENT_FRAME_BYTES,
 };
@@ -716,14 +716,13 @@ impl Registry {
         if let Some(catalog) = self.catalogs.get(id) {
             return Ok(Some(catalog));
         }
-        let Some(registry) = self.get_registry(store, id)?.filter(|v| !v.is_null()) else {
-            return Ok(None);
-        };
-        let mut bindings = HashMap::new();
-        for ns in array(&registry, "namespaces")? {
-            bindings.insert(string(ns, "namespace")?.clone(), tool_bindings(array(ns, "tools")?)?);
-        }
-        Ok(Some(self.catalogs.insert(id.clone(), Catalog::new(&registry, bindings)?)))
+        let mut statement = sql(store, store.connection().prepare_cached(
+            "SELECT registry_json FROM registries WHERE node_id=?",
+        ))?;
+        let mut rows = sql(store, statement.query([text(id)]))?;
+        let Some(row) = sql(store, rows.next())? else { return Ok(None) };
+        let source = sql(store, row.get_ref(0))?.as_str().map_err(|_| IvyError::internal())?;
+        Ok(namespaces::live_catalog(source)?.map(|catalog| self.catalogs.insert(id.clone(), catalog)))
     }
     pub fn report_host(
         &mut self,
@@ -833,20 +832,4 @@ impl Registry {
         })
         .collect()
     }
-}
-fn tool_bindings(tools: &[IvyJson]) -> IvyResult<Vec<ToolBinding>> {
-    tools
-        .iter()
-        .map(|tool| {
-            Ok(ToolBinding::new(
-                join([
-                        string(tool, "namespace")?.clone(),
-                        ".".into(),
-                        string(tool, "name")?.clone(),
-                    ]),
-                tool_definition_hash(tool)?.into(),
-                tool.clone(),
-            ))
-        })
-        .collect()
 }

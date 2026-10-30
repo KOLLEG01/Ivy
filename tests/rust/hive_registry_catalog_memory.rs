@@ -14,6 +14,115 @@ fn namespace_store(source: &str) -> Store {
     store
 }
 
+fn full_registry_live_catalog(owner: &Registry, store: &Store, id: &JsString) -> IvyResult<Option<Catalog>> {
+    let Some(registry) = owner.get_registry(store, id)? else { return Ok(None) };
+    let mut bindings = HashMap::new();
+    for ns in array(&registry, "namespaces")? {
+        let name = string(ns, "namespace")?.clone();
+        let values = array(ns, "tools")?.iter().map(|tool| Ok(ToolBinding::new(
+            join([string(tool, "namespace")?.clone(), ".".into(), string(tool, "name")?.clone()]),
+            ivy_contracts::hash::tool_definition_hash(tool)?.into(), tool.clone(),
+        ))).collect::<IvyResult<Vec<_>>>()?;
+        bindings.insert(name, values);
+    }
+    let mut result = Catalog { namespaces: Vec::new(), tools: Vec::new(), notifications: Vec::new() };
+    for ns in array(&registry, "namespaces")? {
+        let name = string(ns, "namespace")?.clone();
+        for notification in optional_array(ns, "notifications")? {
+            let text = |key| notification.required(key)?.as_js_string().cloned().ok_or_else(IvyError::internal);
+            result.notifications.push(crate::registry_catalog::NotificationDefinition {
+                namespace: name.clone(), name: text("name")?,
+                version: text("version")?, description: text("description")?,
+                payload_schema: Arc::new(notification.required("payloadSchema")?.clone()),
+            });
+        }
+        let start = result.tools.len();
+        result.tools.extend(bindings.remove(&name).unwrap_or_default());
+        result.namespaces.push(crate::registry_catalog::Namespace {
+            name, tools: start..result.tools.len(),
+            guide_markdown: ns.get("guideMarkdown").and_then(IvyJson::as_js_string).cloned(),
+        });
+    }
+    Ok(Some(result))
+}
+
+#[test]
+fn cold_catalog_projection_preserves_definitions_ranges_and_error_order() {
+    let store = namespace_store("null");
+    let id = JsString::from("fixture");
+    for source in ["null", r#"{"namespaces":[]}"#,
+        r#"{"namespaces":[{"namespace":"\ud800","guideMarkdown":"\ud801","tools":[
+          {"namespace":"\ud800","name":"first","before":17,"inputSchema":{"\ud802":"\ud803"},"outputSchema":false,"discovery":{"unknown":true}},
+          {"namespace":"\ud800","name":"second","inputSchema":true,"outputSchema":null}],
+          "notifications":[{"name":"\ud804","version":"1.0.0","description":"\ud805","payloadSchema":{"unknown":[true,9007199254740992]}}]},
+          {"namespace":"empty","guideMarkdown":{"ignored":true},"tools":[],"notifications":null}]}"#,
+        r#"{"namespaces":[{"namespace":"same","tools":[{"namespace":"same","name":"first"}]},
+          {"namespace":"same","tools":[{"namespace":"same","name":"last","inputSchema":false}],"notifications":[]}]}"#,
+        "[]", "[[]]", "{}", "\u{2000}null", r#"{"namespaces":null}"#,
+        r#"{"namespaces":[null]}"#, r#"{"namespaces":[[]]}"#,
+        r#"{"namespaces":[{"tools":[]}]}"#, r#"{"namespaces":[{"namespace":17,"tools":[]}]}"#,
+        r#"{"namespaces":[{"namespace":"fixture","tools":null}]}"#,
+        r#"{"namespaces":[{"namespace":"fixture","tools":[null]}]}"#,
+        r#"{"namespaces":[{"namespace":"fixture","tools":[{"name":"x"}]}]}"#,
+        r#"{"namespaces":[{"namespace":"fixture","tools":[],"notifications":{}}]}"#,
+        r#"{"namespaces":[{"namespace":"fixture","tools":[],"notifications":[{}]}]}"#,
+        r#"{"namespaces":[{"namespace":"fixture","tools":[],"notifications":[{"name":"x","version":"1.0.0","description":"x"}]}]}"#,
+        r#"{"namespaces":[{"namespace":"early","tools":[],"notifications":[{}]},
+          {"namespace":"later","tools":[{"namespace":"later","name":"bad","inputSchema":9007199254740992}]}]}"#,
+        r#"{"namespaces":[]} trailing"#] {
+        store.connection().execute("UPDATE registries SET registry_json=?", [source]).unwrap();
+        let expected = full_registry_live_catalog(&Registry::default(), &store, &id).map_err(|e| e.to_wire());
+        let actual = Registry::default().live_catalog(&store, &id).map_err(|e| e.to_wire());
+        assert_eq!(actual.as_ref().map(|v| v.as_deref()), expected.as_ref().map(|v| v.as_ref()), "{source}");
+    }
+    store.connection().execute("DELETE FROM registries", []).unwrap();
+    assert!(Registry::default().live_catalog(&store, &id).unwrap().is_none());
+}
+
+#[test]
+fn cold_catalog_projection_reduces_peak_without_increasing_retained_schema_capacity() {
+    const CHILD: &str = "IVY_COLD_CATALOG_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "registry::catalog_memory_tests::cold_catalog_projection_reduces_peak_without_increasing_retained_schema_capacity", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+        return;
+    }
+    let schema_bytes = 48 * 1024 + 1;
+    let source = serde_json::json!({"namespaces":[{"namespace":"fixture","guideMarkdown":"Fixture guide.",
+        "tools":(0..4).map(|i| serde_json::json!({"namespace":"fixture","name":format!("call{i}"),
+            "inputSchema":{"description":"s".repeat(schema_bytes)},"outputSchema":{"description":"s".repeat(schema_bytes)}})).collect::<Vec<_>>(),
+        "notifications":(0..4).map(|i| serde_json::json!({"name":format!("changed{i}"),"version":"1.0.0","description":"Fixture notification.",
+            "payloadSchema":{"description":"s".repeat(schema_bytes*2)}})).collect::<Vec<_>>(),
+        "topics":[{"payloadSchema":{"description":"s".repeat(1024*1024)}}]}],
+        "contracts":[{"description":"s".repeat(1024*1024)}]}).to_string();
+    let store = namespace_store(&source);
+    drop(source);
+    let id = JsString::from("fixture");
+    let mut owner = Registry::default();
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    let old = full_registry_live_catalog(&owner, &store, &id).unwrap().unwrap();
+    let full_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    let full_retained = old.retained_bytes();
+    drop(old);
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    let catalog = owner.live_catalog(&store, &id).unwrap().unwrap();
+    let projected_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    let projected_retained = catalog.retained_bytes();
+    assert_eq!(catalog.tools.len(), 4);assert_eq!(catalog.notifications.len(), 4);
+    assert!(Arc::ptr_eq(&catalog, &owner.live_catalog(&store, &id).unwrap().unwrap()));
+    eprintln!("Hive cold catalog Rust allocation peak: full {full_peak} bytes, projected {projected_peak} bytes; retained full {full_retained} bytes, projected {projected_retained} bytes for 786448 bytes of retained schema text and 2 MiB unrelated text");
+    // Rust allocation requests only; SQLite's C heap and process RSS are excluded.
+    assert!(full_peak > 8 * 1024 * 1024);
+    assert!(projected_peak + 4 * 1024 * 1024 < full_peak, "Cold catalog copied or decoded unrelated schemas");
+    assert!(projected_retained <= full_retained + 1024, "Moved parser buffers retained excess capacity");
+}
+
 fn full_registry_mcp_names(owner: &Registry, store: &Store, id: &JsString) -> IvyResult<Vec<JsString>> {
     let mut names = Vec::new();
     if let Some(registry) = owner.get_registry(store, id)? {
