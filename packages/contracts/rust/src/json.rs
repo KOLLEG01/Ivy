@@ -152,6 +152,15 @@ impl IvyJson {
             _ => None,
         }
     }
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Self> {
+        match self {
+            Self::Object(pairs) => pairs
+                .iter_mut()
+                .find(|(name, _)| name.eq_str(key))
+                .map(|(_, value)| value),
+            _ => None,
+        }
+    }
     pub fn get_key(&self, key: &JsString) -> Option<&Self> {
         match self {
             Self::Object(pairs) => pairs.iter().find(|p| &p.0 == key).map(|p| &p.1),

@@ -67,15 +67,18 @@ fn protocol_error(
         error(code, message, data),
     )
 }
-fn ordered(value: &IvyJson, fields: &[&str]) -> IvyJson {
-    let mut result = IvyJson::object(
-        fields
-            .iter()
-            .filter_map(|name| value.get(name).map(|value| (*name, value.clone()))),
-    );
-    for (name, value) in value.as_object().unwrap_or(&[]) {
-        if result.get_key(name).is_none() {
-            result.insert(name.clone(), value.clone());
+fn ordered(value: IvyJson, fields: &[&str]) -> IvyJson {
+    let mut pairs = value.into_object().unwrap_or_default();
+    let mut result = empty();
+    for name in fields {
+        if let Some(index) = pairs.iter().position(|(key, _)| key.eq_str(name)) {
+            let (key, value) = pairs.remove(index);
+            result.insert(key, value);
+        }
+    }
+    for (name, value) in pairs {
+        if result.get_key(&name).is_none() {
+            result.insert(name, value);
         }
     }
     result
@@ -83,25 +86,21 @@ fn ordered(value: &IvyJson, fields: &[&str]) -> IvyJson {
 fn encode_result(method: &JsString, mut value: IvyJson, modern: bool, info: &IvyJson) -> IvyJson {
     // The SDK projects application tool results through its declared schema order.
     if method == &JsString::from("tools/call") {
-        if let Some(mut content) = value
-            .get("content")
-            .and_then(IvyJson::as_array)
-            .map(<[_]>::to_vec)
-        {
-            for item in &mut content {
+        if let Some(IvyJson::Array(content)) = value.get_mut("content") {
+            for item in content {
+                let image = item.get("type") == Some(&"image".into());
                 *item = ordered(
-                    item,
-                    if item.get("type") == Some(&"image".into()) {
+                    std::mem::replace(item, IvyJson::Null),
+                    if image {
                         &["type", "data", "mimeType", "annotations", "_meta"]
                     } else {
                         &["type", "text", "annotations", "_meta"]
                     },
                 );
             }
-            value.insert("content", IvyJson::Array(content));
         }
         value = ordered(
-            &value,
+            value,
             &["_meta", "content", "structuredContent", "isError"],
         );
     }
@@ -109,18 +108,14 @@ fn encode_result(method: &JsString, mut value: IvyJson, modern: bool, info: &Ivy
         return value;
     }
     if method == &JsString::from("tools/list") {
-        if let Some(mut tools) = value.get("tools").cloned() {
-            if let IvyJson::Array(items) = &mut tools {
-                for tool in items {
-                    tool.remove("execution");
-                }
+        if let Some(IvyJson::Array(items)) = value.get_mut("tools") {
+            for tool in items {
+                tool.remove("execution");
             }
-            value.insert("tools", tools);
         }
     }
-    if let Some(mut capabilities) = value.get("capabilities").cloned() {
+    if let Some(capabilities) = value.get_mut("capabilities") {
         capabilities.remove("tasks");
-        value.insert("capabilities", capabilities);
     }
     if value.get("resultType").is_none() {
         value.insert("resultType", "complete".into());
@@ -141,12 +136,11 @@ fn encode_result(method: &JsString, mut value: IvyJson, modern: bool, info: &Ivy
         }
     }
     let key = "io.modelcontextprotocol/serverInfo";
-    match value.get("_meta").cloned() {
-        Some(mut meta @ IvyJson::Object(_)) => {
+    match value.get_mut("_meta") {
+        Some(meta @ IvyJson::Object(_)) => {
             if meta.get(key).is_none() {
                 meta.insert(key, info.clone());
             }
-            value.insert("_meta", meta);
         }
         None => {
             value.insert("_meta", IvyJson::object([(key, info.clone())]));
@@ -155,6 +149,10 @@ fn encode_result(method: &JsString, mut value: IvyJson, modern: bool, info: &Ivy
     }
     value
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/rust/hive_mcp_response_ownership.rs"]
+mod ownership_tests;
 /// Serve a POST after the owning HTTP parser and Hive single-frame guard.
 pub async fn reply(
     request: &inbound::Request<'_>,
