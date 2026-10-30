@@ -114,6 +114,15 @@ fn provider_response(mut frame: IvyJson, provider_error: &ErrorConstructor) -> I
         Ok(Ok(frame.remove("result").unwrap()))
     }
 }
+fn notification_frame(mut params: IvyJson, context: &IvyJson) -> IvyResult<IvyJson> {
+    params.insert("serviceNodeId", context.required("serviceNodeId")?.clone());
+    params.insert("generation", context.required("generation")?.clone());
+    Ok(IvyJson::object([
+        ("jsonrpc", "2.0".into()),
+        ("method", "notifications.provider".into()),
+        ("params", params),
+    ]))
+}
 #[derive(Clone, Copy)]
 pub enum UnhandledKind {
     Callback,
@@ -718,10 +727,10 @@ impl Peers {
                     || filter.get("serviceNodeId") == params.get("serviceNodeId"))
         })
     }
-    fn notification(&self, peer: &Peer, frame: &IvyJson) {
+    fn notification(&self, peer: &Peer, mut frame: IvyJson) {
         let delivered = (|| -> IvyResult<()> {
-            validate_service_notification_frame(frame)?;
-            let mut params = frame.required("params")?.clone();
+            validate_service_notification_frame(&frame)?;
+            let params = frame.remove("params").unwrap();
             let context = peer.context();
             self.0
                 .owners
@@ -729,16 +738,11 @@ impl Peers {
                 .lock()
                 .unwrap()
                 .notification(&context, &params)?;
-            params.insert("serviceNodeId", context.required("serviceNodeId")?.clone());
-            params.insert("generation", context.required("generation")?.clone());
-            let value = IvyJson::object([
-                ("jsonrpc", "2.0".into()),
-                ("method", "notifications.provider".into()),
-                ("params", params.clone()),
-            ]);
+            let value = notification_frame(params, &context)?;
             let encoded = stringify(&value, 1024 * 1024)?;
+            let params = value.get("params").unwrap();
             for client in self.members() {
-                if !client.same(peer) && Self::subscribed(&client, &params) {
+                if !client.same(peer) && Self::subscribed(&client, params) {
                     client.send(&value, Some(&encoded))?;
                 }
             }
@@ -774,7 +778,7 @@ impl Peers {
             }
             if frame.get("id").is_none() {
                 if frame.get("method") == Some(&"service.notification".into()) {
-                    self.notification(peer, &frame);
+                    self.notification(peer, frame);
                 }
                 return Ok(());
             }

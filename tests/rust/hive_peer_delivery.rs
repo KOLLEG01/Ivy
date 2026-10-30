@@ -169,3 +169,79 @@ fn provider_response_moves_result_and_error_detail_buffers() {
         assert!(moved_peak < 32 * 1024, "Provider response copied its payload");
     }
 }
+
+fn incoming_notification(payload: IvyJson) -> IvyJson {
+    IvyJson::object([
+        ("jsonrpc", "2.0".into()), ("method", "service.notification".into()),
+        ("params", IvyJson::object([
+            ("namespace", "provider".into()), ("name", "changed".into()),
+            ("version", "1.0.0".into()), ("payload", payload),
+        ])),
+    ])
+}
+fn copied_notification_frame(frame: &IvyJson, context: &IvyJson) -> IvyResult<IvyJson> {
+    validate_service_notification_frame(frame)?;
+    let mut params = frame.required("params")?.clone();
+    params.insert("serviceNodeId", context.required("serviceNodeId")?.clone());
+    params.insert("generation", context.required("generation")?.clone());
+    Ok(IvyJson::object([
+        ("jsonrpc", "2.0".into()), ("method", "notifications.provider".into()),
+        ("params", params.clone()),
+    ]))
+}
+
+#[test]
+fn notification_ownership_preserves_wire_values_and_context_errors() {
+    let payload = IvyJson::object([
+        (JsString(vec![0xd800]), IvyJson::String(JsString(vec![0xdc00]))),
+        ("opaque".into(), IvyJson::Array(vec![false.into(), IvyJson::Number(f64::NAN), 9007199254740992.0.into()])),
+    ]);
+    for context in [IvyJson::Null, IvyJson::object([("serviceNodeId", "node".into())]),
+        IvyJson::object([("serviceNodeId", IvyJson::String(JsString(vec![0xd801]))), ("generation", 17.0.into())])]
+    {
+        let mut frame = incoming_notification(payload.clone());
+        let expected = copied_notification_frame(&frame, &context)
+            .and_then(|value| stringify(&value, usize::MAX)).map_err(|e| e.to_wire());
+        validate_service_notification_frame(&frame).unwrap();
+        let actual = notification_frame(frame.remove("params").unwrap(), &context)
+            .and_then(|value| stringify(&value, usize::MAX)).map_err(|e| e.to_wire());
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn notification_ownership_moves_the_payload_without_two_deep_copies() {
+    use crate::retention::graph_tests::{LIVE, PEAK};
+    use std::sync::atomic::Ordering;
+    const CHILD: &str = "IVY_PROVIDER_NOTIFICATION_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "server_peers::delivery_tests::notification_ownership_moves_the_payload_without_two_deep_copies", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+        return;
+    }
+    let context = IvyJson::object([("serviceNodeId", "node".into()), ("generation", 1.0.into())]);
+    let mut frame = incoming_notification(IvyJson::object([("opaque", "p".repeat(512 * 1024).into())]));
+    let pointer = |value: &IvyJson| value.get("params").unwrap().get("payload").unwrap()
+        .get("opaque").unwrap().as_js_string().unwrap().0.as_ptr() as usize;
+    let address = pointer(&frame);
+    let before = LIVE.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    let copied = copied_notification_frame(&frame, &context).unwrap();
+    let copied_peak = PEAK.load(Ordering::Relaxed) - before;
+    let expected = stringify(&copied, 1024 * 1024).unwrap();
+    drop(copied);
+    let before = LIVE.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    validate_service_notification_frame(&frame).unwrap();
+    let moved = notification_frame(frame.remove("params").unwrap(), &context).unwrap();
+    let moved_peak = PEAK.load(Ordering::Relaxed) - before;
+    assert_eq!(pointer(&moved), address);
+    assert_eq!(stringify(&moved, 1024 * 1024).unwrap(), expected);
+    eprintln!("Hive provider-notification Rust allocation peak: copied {copied_peak} bytes, moved {moved_peak} bytes for 512 KiB payload text");
+    assert!(copied_peak > 2 * 1024 * 1024);
+    assert!(moved_peak < 32 * 1024, "Notification frame copied its payload");
+}
