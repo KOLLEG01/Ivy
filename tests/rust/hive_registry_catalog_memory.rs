@@ -204,3 +204,54 @@ fn repeated_routing_handoff_shares_the_registered_catalog() {
     // Rust allocation requests only; SQLite's native heap and process RSS are excluded.
     assert!(peak < 64 * 1024, "Routing handoffs copied registered definitions: {peak} bytes");
 }
+
+#[test]
+fn routing_status_projection_does_not_retain_unneeded_node_details() {
+    const CHILD: &str = "IVY_ROUTING_STATUS_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "registry::catalog_memory_tests::routing_status_projection_does_not_retain_unneeded_node_details", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        return;
+    }
+    let mut node = IvyJson::object([
+        ("serviceNodeId", "fixture".into()),
+        ("hostId", "host".into()),
+        ("serviceName", "service".into()),
+        ("principalId", "principal".into()),
+        ("connected", true.into()),
+        ("synced", true.into()),
+        ("ready", true.into()),
+        ("desiredEnabled", true.into()),
+        ("diagnostic", IvyJson::object([("message", "d".repeat(1024 * 1024).into())])),
+    ]);
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    let full_nodes: Vec<_> = (0..32).map(|_| node.clone()).collect();
+    std::hint::black_box(&full_nodes);
+    let full_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    drop(full_nodes);
+
+    let mut routing = crate::live_routing::LiveRouting::new(false, None);
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    for round in 0..4 {
+        for index in 0..32 {
+            node.insert("serviceNodeId", format!("fixture-{index}").into());
+            routing.update(&node, (round == 0).then_some(1.0), None).unwrap();
+            routing.caller(&IvyJson::object([
+                ("serviceNodeId", format!("fixture-{index}").into()),
+                ("generation", 1.0.into()),
+            ])).unwrap();
+        }
+    }
+    let projected_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    assert_eq!(node.required("diagnostic").unwrap().required("message").unwrap()
+        .as_js_string().unwrap().utf16_len(), 1024 * 1024);
+    eprintln!("Hive routing status Rust allocation peak: full nodes {full_peak} bytes, native projection {projected_peak} bytes for 32 routes and four updates each with 1 MiB diagnostic text");
+    // Rust allocation requests only; the admitted status remains owned by its caller.
+    assert!(full_peak > 64 * 1024 * 1024);
+    assert!(projected_peak < 128 * 1024, "Routing retained unneeded status bodies: {projected_peak}");
+}

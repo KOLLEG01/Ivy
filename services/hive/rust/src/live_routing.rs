@@ -66,8 +66,50 @@ struct Tool {
     read_only: bool,
     schemas: Option<Schemas>,
 }
+/// Routing needs identities and availability, not the full registered status.
+struct Node {
+    id: JsString,
+    host: Option<JsString>,
+    service: Option<JsString>,
+    principal: Option<JsString>,
+    connected: bool,
+    synced: bool,
+    ready: bool,
+    enabled: bool,
+}
+impl Node {
+    fn from_status(value: &IvyJson, id: JsString) -> Self {
+        let text = |key| value.get(key).and_then(IvyJson::as_js_string).cloned();
+        let flag = |key| value.get(key).and_then(IvyJson::as_bool) == Some(true);
+        Self {
+            id,
+            host: text("hostId"),
+            service: text("serviceName"),
+            principal: text("principalId"),
+            connected: flag("connected"),
+            synced: flag("synced"),
+            ready: flag("ready"),
+            enabled: flag("desiredEnabled"),
+        }
+    }
+    fn eligible(&self) -> bool {
+        self.connected && self.synced && self.ready && self.enabled
+    }
+    fn disconnect(&mut self) {
+        self.connected = false;
+        self.synced = false;
+        self.ready = false;
+    }
+    fn target(&self) -> IvyJson {
+        IvyJson::object([
+            ("serviceNodeId", self.id.clone().into()),
+            ("hostId", self.host.clone().map_or(IvyJson::Null, Into::into)),
+            ("serviceName", self.service.clone().map_or(IvyJson::Null, Into::into)),
+        ])
+    }
+}
 struct Route {
-    node: IvyJson,
+    node: Node,
     generation: f64,
     namespaces: HashSet<JsString>,
     tools: HashMap<JsString, Tool>,
@@ -128,7 +170,7 @@ pub type RejectedBinding = Box<dyn Fn(IvyJson) -> IvyResult<()> + Send + Sync>;
 pub struct LiveRouting {
     validators: Option<SchemaValidators>,
     notification_validators: SchemaValidators,
-    routes: Vec<(JsString, Route)>,
+    routes: Vec<Route>,
     rejected: Option<RejectedBinding>,
 }
 impl LiveRouting {
@@ -143,29 +185,24 @@ impl LiveRouting {
     fn route(&self, id: &JsString) -> Option<&Route> {
         self.routes
             .iter()
-            .find(|(key, _)| key == id)
-            .map(|(_, value)| value)
+            .find(|route| &route.node.id == id)
     }
     fn route_mut(&mut self, id: &JsString) -> Option<&mut Route> {
         self.routes
             .iter_mut()
-            .find(|(key, _)| key == id)
-            .map(|(_, value)| value)
+            .find(|route| &route.node.id == id)
     }
     pub fn clear(&mut self) {
         self.routes.clear();
     }
     pub fn retire_unconfigured_principals(&mut self, principal_ids: &[JsString]) {
-        for (_, route) in &mut self.routes {
+        for route in &mut self.routes {
             if !route
                 .node
-                .get("principalId")
-                .and_then(IvyJson::as_js_string)
+                .principal.as_ref()
                 .is_some_and(|id| principal_ids.contains(id))
             {
-                for name in ["connected", "synced", "ready"] {
-                    route.node.insert(name, false.into());
-                }
+                route.node.disconnect();
             }
         }
     }
@@ -178,19 +215,19 @@ impl LiveRouting {
         catalog: Option<&Catalog>,
     ) -> IvyResult<()> {
         let id = string(node, "serviceNodeId")?;
-        let prior = self.routes.iter().position(|(key, _)| key == &id);
+        let prior = self.routes.iter().position(|route| route.node.id == id);
         if prior.is_none() && generation.is_none() {
             return Ok(());
         }
-        let generation = generation.unwrap_or_else(|| self.routes[prior.unwrap()].1.generation);
-        if let Some(index) = prior.filter(|i| self.routes[*i].1.generation == generation) {
-            self.routes[index].1.node = node.clone();
+        let generation = generation.unwrap_or_else(|| self.routes[prior.unwrap()].generation);
+        let node = Node::from_status(node, id);
+        if let Some(index) = prior.filter(|i| self.routes[*i].generation == generation) {
+            self.routes[index].node = node;
             return self.routes[index]
-                .1
                 .update(catalog, self.validators.is_some());
         }
         let mut route = Route {
-            node: node.clone(),
+            node,
             generation,
             namespaces: HashSet::new(),
             tools: HashMap::new(),
@@ -198,9 +235,9 @@ impl LiveRouting {
         };
         route.update(catalog, self.validators.is_some())?;
         if let Some(index) = prior {
-            self.routes[index] = (id, route);
+            self.routes[index] = route;
         } else {
-            self.routes.push((id, route));
+            self.routes.push(route);
         }
         Ok(())
     }
@@ -208,14 +245,12 @@ impl LiveRouting {
         let Some(route) = self.route_mut(id).filter(|r| r.generation == generation) else {
             return false;
         };
-        for name in ["connected", "synced", "ready"] {
-            route.node.insert(name, false.into());
-        }
+        route.node.disconnect();
         true
     }
     pub fn suspend(&mut self, id: &JsString, generation: f64) {
         if let Some(route) = self.route_mut(id).filter(|r| r.generation == generation) {
-            route.node.insert("synced", false.into());
+            route.node.synced = false;
         }
     }
     pub fn caller(&self, context: &IvyJson) -> IvyResult<()> {
@@ -227,7 +262,7 @@ impl LiveRouting {
             let id = string(context, "serviceNodeId")?;
             require(
                 self.route(&id).is_some_and(|r| {
-                    r.node.get("connected").and_then(IvyJson::as_bool) == Some(true)
+                    r.node.connected
                         && context.get("generation").and_then(IvyJson::as_f64) == Some(r.generation)
                 }),
                 "stale_generation",
@@ -293,17 +328,12 @@ impl LiveRouting {
                 .get("hostId")
                 .and_then(IvyJson::as_js_string)
                 .is_none_or(|v| v.0.is_empty())
-                || route.node.get("hostId") == params.get("hostId"))
+                || route.node.host.as_ref() == params.get("hostId").and_then(IvyJson::as_js_string))
                 && (params
                     .get("serviceName")
                     .and_then(IvyJson::as_js_string)
                     .is_none_or(|v| v.0.is_empty())
-                    || route.node.get("serviceName") == params.get("serviceName"))
-        };
-        let eligible = |route: &Route| {
-            ["connected", "synced", "ready", "desiredEnabled"]
-                .into_iter()
-                .all(|name| route.node.get(name).and_then(IvyJson::as_bool) == Some(true))
+                    || route.node.service.as_ref() == params.get("serviceName").and_then(IvyJson::as_js_string))
         };
         let route = if selected
             .and_then(IvyJson::as_js_string)
@@ -321,12 +351,12 @@ impl LiveRouting {
                 "Selected resource has a different owner.",
             )?;
             require(
-                route.node.get("connected").and_then(IvyJson::as_bool) == Some(true),
+                route.node.connected,
                 "service_unavailable",
                 "Provider connection is closed.",
             )?;
             require(
-                eligible(route),
+                route.node.eligible(),
                 "service_not_ready",
                 "Provider is not ready.",
             )?;
@@ -340,8 +370,7 @@ impl LiveRouting {
             let candidates: Vec<_> = self
                 .routes
                 .iter()
-                .map(|(_, r)| r)
-                .filter(|r| matches(r) && r.namespaces.contains(&namespace) && eligible(r))
+                .filter(|r| matches(r) && r.namespaces.contains(&namespace) && r.node.eligible())
                 .collect();
             if candidates.len() > 1 {
                 return Err(IvyError::new(
@@ -351,25 +380,7 @@ impl LiveRouting {
                 .with_details(IvyJson::Array(
                     candidates
                         .iter()
-                        .map(|r| {
-                            IvyJson::object([
-                                (
-                                    "serviceNodeId",
-                                    r.node
-                                        .get("serviceNodeId")
-                                        .cloned()
-                                        .unwrap_or(IvyJson::Null),
-                                ),
-                                (
-                                    "hostId",
-                                    r.node.get("hostId").cloned().unwrap_or(IvyJson::Null),
-                                ),
-                                (
-                                    "serviceName",
-                                    r.node.get("serviceName").cloned().unwrap_or(IvyJson::Null),
-                                ),
-                            ])
-                        })
+                        .map(|r| r.node.target())
                         .collect(),
                 )));
             }
@@ -398,7 +409,7 @@ impl LiveRouting {
                     ("callerPrincipalId", field(context, "principalId")?.clone()),
                     (
                         "serviceNodeId",
-                        field(&route.node, "serviceNodeId")?.clone(),
+                        route.node.id.clone().into(),
                     ),
                     ("qualifiedName", IvyJson::String(qualified)),
                 ]))?;
@@ -414,7 +425,7 @@ impl LiveRouting {
         }
         Ok(PreparedCall {
             context: CallContext {
-                service_node_id: string(&route.node, "serviceNodeId")?,
+                service_node_id: route.node.id.clone(),
                 generation: route.generation,
                 qualified_name: qualified,
                 output_schema: binding
@@ -462,7 +473,7 @@ impl LiveRouting {
     pub fn complete(&self, call: &CallContext, result: IvyJson) -> IvyResult<IvyJson> {
         require(
             self.route(&call.service_node_id).is_some_and(|r| {
-                r.node.get("connected").and_then(IvyJson::as_bool) == Some(true)
+                r.node.connected
                     && r.generation == call.generation
             }),
             "stale_generation",
