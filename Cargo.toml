@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
+exclude = ["packages/vendor/tungstenite"]
 members = ["packages/contracts/rust","packages/store","packages/sdk/rust","packages/host-runtime/rust","packages/cli/rust","services/agent-manager/rust","services/chat-bridge/rust","services/dashboards/rust","services/secretary/rust","services/service-manager/rust","services/host-executor/rust","services/hive/rust","services/data-collector/rust","services/task-board/rust","services/phone-bridge/rust"]
 
 [workspace.package]
@@ -69,3 +70,6 @@ str0m = { version = "=0.24.1", default-features = false, features = ["rust-crypt
 [profile.release]
 lto = "thin"
 strip = "debuginfo"
+
+[patch.crates-io]
+tungstenite = { path = "packages/vendor/tungstenite" }
