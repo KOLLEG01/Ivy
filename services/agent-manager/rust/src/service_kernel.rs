@@ -772,21 +772,23 @@ async fn start(config: InstanceConfig, bindings: AgentRuntimeBindings) -> IvyRes
             NativeInteractions::new(native.epoch.clone(), InteractionLimits::default()),
         )?;
         let registry = native_management.registry().clone();
-        let reconciliation = AgentReconciliation::new(ReconciliationSettings {
-            service_node_id: service_node.clone(),
-            registry: registry.clone(),
-            owner: ReconciliationOwner {
-                rpc: native.rpc.clone(),
-                epoch: native.epoch.clone(),
-                closing: closing.clone(),
+        let reconciliation = AgentReconciliation::new(
+            ReconciliationSettings {
+                service_node_id: service_node.clone(),
+                owner: ReconciliationOwner {
+                    rpc: native.rpc.clone(),
+                    epoch: native.epoch.clone(),
+                    closing: closing.clone(),
+                },
+                journal: journal.clone(),
+                state: state.clone(),
+                inventory: inventory.clone(),
+                environment: environment.synchronizers()?,
+                environment_at: environment.startup_at()?,
+                health: health.clone(),
             },
-            journal: journal.clone(),
-            state: state.clone(),
-            inventory: inventory.clone(),
-            environment: environment.synchronizers()?,
-            environment_at: environment.startup_at()?,
-            health: health.clone(),
-        })?;
+            &registry,
+        )?;
         let fresh_inventory = inventory.clone();
         let fresh_service = service_link.clone();
         let available = reconciliation.clone();

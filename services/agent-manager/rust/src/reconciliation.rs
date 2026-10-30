@@ -114,7 +114,6 @@ pub struct ReconciliationOwner {
 }
 pub struct ReconciliationSettings {
     pub service_node_id: JsString,
-    pub registry: IvyJson,
     pub owner: ReconciliationOwner,
     pub journal: Arc<Mutex<NativeJournal>>,
     pub state: Arc<Mutex<LocalAgentState>>,
@@ -139,9 +138,10 @@ struct Inner {
 #[derive(Clone)]
 pub struct AgentReconciliation(Arc<Inner>);
 impl AgentReconciliation {
-    pub fn new(settings: ReconciliationSettings) -> IvyResult<Self> {
+    pub fn new(settings: ReconciliationSettings, registry: &IvyJson) -> IvyResult<Self> {
         Self::with_clock(
             settings,
+            registry,
             Arc::new(|| chrono::Utc::now().timestamp_millis() as f64),
             Arc::new(|| {
                 chrono::Utc::now()
@@ -152,11 +152,11 @@ impl AgentReconciliation {
     }
     pub fn with_clock(
         settings: ReconciliationSettings,
+        registry: &IvyJson,
         now: Arc<InventoryClock>,
         iso_now: Arc<JournalClock>,
     ) -> IvyResult<Self> {
-        let probe =
-            NativeTransportProbe::new(settings.service_node_id.clone(), &settings.registry)?;
+        let probe = NativeTransportProbe::new(settings.service_node_id.clone(), registry)?;
         let state = State {
             connection: None,
             environment_at: settings.environment_at,

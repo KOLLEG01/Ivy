@@ -395,21 +395,23 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
         let mut actual_native = set.native.keys().cloned().collect::<Vec<_>>();
         actual_native.sort();
         assert_eq!(actual_native, expected_native);
-        let reconciliation = AgentReconciliation::new(ReconciliationSettings {
-            service_node_id: "fixture.agent".into(),
-            registry: registry.clone(),
-            owner: ReconciliationOwner {
-                rpc: rpc.clone(),
-                epoch: "epoch".into(),
-                closing: closing.clone(),
+        let reconciliation = AgentReconciliation::new(
+            ReconciliationSettings {
+                service_node_id: "fixture.agent".into(),
+                owner: ReconciliationOwner {
+                    rpc: rpc.clone(),
+                    epoch: "epoch".into(),
+                    closing: closing.clone(),
+                },
+                journal,
+                state: state.clone(),
+                inventory,
+                environment: None,
+                environment_at: 0.0,
+                health: health.clone(),
             },
-            journal,
-            state: state.clone(),
-            inventory,
-            environment: None,
-            environment_at: 0.0,
-            health: health.clone(),
-        })
+            &registry,
+        )
         .unwrap();
         let options = agent_service_options(
             &config,

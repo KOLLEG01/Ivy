@@ -3,19 +3,18 @@ use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     agent_schema::{NativeFrameKind, validate_agent, validate_agent_frame},
     hash::hash_json,
-    json::{canonical, stringify},
+    json::{canonical, parse, stringify},
     limits::{
         MANAGEMENT_FRAME_BYTES, NATIVE_ANSWER_FRAME_BYTES, NATIVE_FRAME_BYTES,
         NATIVE_REQUEST_FRAME_BYTES,
     },
     wire_schema::validate_shared,
 };
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, mem::size_of, sync::Arc};
 
 const OUTCOME_RESERVATION: usize = NATIVE_FRAME_BYTES + 65536;
+const OBSERVATION_BYTES: usize = 1024 * 1024;
+const OBSERVATION_ENTRY_BYTES: usize = 64 * 1024;
 type TerminalCallback = Box<dyn FnMut(&mut IvyJson) -> IvyResult<()> + Send>;
 pub type JournalClock = dyn Fn() -> JsString + Send + Sync;
 #[derive(Clone)]
@@ -52,22 +51,86 @@ impl Identity {
         ])
     }
 }
-struct Row {
-    value: IvyJson,
+// Keep unknown payloads as the lossless text already produced for frame sizing.
+// Only selected/read rows become temporary JSON trees at the API boundary.
+struct Row<S> {
+    json: Box<str>,
     charge: usize,
+    state: S,
 }
-// Retain Map insertion order without linear lookup or another dependency.
+impl<S> Row<S> {
+    fn read(&self) -> IvyResult<IvyJson> {
+        parse(&self.json, usize::MAX)
+    }
+}
+struct OperationState {
+    unfinished: bool,
+    clock: bool,
+    durable: bool,
+}
+impl OperationState {
+    fn new(value: &IvyJson, durable: bool) -> Self {
+        Self {
+            unfinished: !terminal(value),
+            clock: is(value, "callerPrincipalId", "ivy-native-clock"),
+            durable,
+        }
+    }
+}
+struct InputState {
+    pending: bool,
+    updated_at: JsString,
+}
+impl InputState {
+    fn new(value: &IvyJson) -> IvyResult<Self> {
+        Ok(Self {
+            pending: pending(value),
+            updated_at: text(value, "updatedAt")?.clone(),
+        })
+    }
+    fn bytes(&self) -> usize {
+        self.updated_at.0.capacity() * size_of::<u16>()
+    }
+}
+#[derive(Clone)]
+struct Observation {
+    method: JsString,
+    succeeded_at: Option<JsString>,
+    failed_at: Option<JsString>,
+    code: Option<JsString>,
+}
+impl Observation {
+    fn bytes(&self) -> usize {
+        [&self.method]
+            .into_iter()
+            .chain(self.succeeded_at.iter())
+            .chain(self.failed_at.iter())
+            .chain(self.code.iter())
+            .map(|value| value.0.capacity() * size_of::<u16>())
+            .sum()
+    }
+    fn value(&self) -> IvyJson {
+        let optional =
+            |value: &Option<JsString>| value.clone().map(IvyJson::String).unwrap_or(IvyJson::Null);
+        IvyJson::object([
+            ("method", IvyJson::String(self.method.clone())),
+            ("lastSucceededAt", optional(&self.succeeded_at)),
+            ("lastFailedAt", optional(&self.failed_at)),
+            ("lastCode", optional(&self.code)),
+        ])
+    }
+}
+// One ordered row allocation and shared keys. Batch removal compacts the vector
+// once; capacity accounting includes both containers, even after eviction.
 struct Rows<V> {
-    indices: HashMap<String, u64>,
-    rows: BTreeMap<u64, (String, V)>,
-    next: u64,
+    indices: HashMap<Arc<str>, usize>,
+    rows: Vec<(Arc<str>, V)>,
 }
 impl<V> Rows<V> {
     fn new() -> Self {
         Self {
             indices: HashMap::new(),
-            rows: BTreeMap::new(),
-            next: 0,
+            rows: Vec::new(),
         }
     }
     fn len(&self) -> usize {
@@ -76,35 +139,81 @@ impl<V> Rows<V> {
     fn get(&self, key: &str) -> Option<&V> {
         self.indices
             .get(key)
-            .and_then(|index| self.rows.get(index))
+            .and_then(|index| self.rows.get(*index))
+            .map(|(_, value)| value)
+    }
+    fn get_mut(&mut self, key: &str) -> Option<&mut V> {
+        self.indices
+            .get(key)
+            .and_then(|index| self.rows.get_mut(*index))
             .map(|(_, value)| value)
     }
     fn insert(&mut self, key: String, value: V) {
-        let index = if let Some(index) = self.indices.get(&key) {
-            *index
-        } else {
-            let index = self.next;
-            self.next += 1;
-            self.indices.insert(key.clone(), index);
-            index
-        };
-        self.rows.insert(index, (key, value));
+        if let Some(index) = self.indices.get(key.as_str()) {
+            self.rows[*index].1 = value;
+            return;
+        }
+        let key: Arc<str> = key.into();
+        self.indices.insert(key.clone(), self.rows.len());
+        self.rows.push((key, value));
     }
     fn remove(&mut self, key: &str) {
         if let Some(index) = self.indices.remove(key) {
-            self.rows.remove(&index);
+            self.rows.remove(index);
+            self.reindex();
         }
     }
-    fn values(&self) -> impl DoubleEndedIterator<Item = &V> {
-        self.rows.values().map(|(_, value)| value)
+    fn retain(&mut self, mut keep: impl FnMut(&V) -> bool) {
+        let previous = self.rows.len();
+        self.rows.retain(|(key, value)| {
+            if keep(value) {
+                true
+            } else {
+                self.indices.remove(key);
+                false
+            }
+        });
+        if previous == self.rows.len() {
+            return;
+        }
+        self.reindex();
+        if self.rows.len() < self.rows.capacity() / 4 {
+            self.shrink();
+        }
     }
-    fn entries(&self) -> impl Iterator<Item = (&String, &V)> {
-        self.rows.values().map(|(key, value)| (key, value))
+    fn reindex(&mut self) {
+        for (index, (key, _)) in self.rows.iter().enumerate() {
+            *self.indices.get_mut(key).unwrap() = index;
+        }
+    }
+    fn shrink(&mut self) {
+        self.rows.shrink_to_fit();
+        self.indices.shrink_to_fit();
+    }
+    fn bytes(&self, charge: impl Fn(&V) -> usize) -> usize {
+        // HashMap capacity excludes spare buckets/control bytes. A conservative
+        // two buckets per usable slot avoids depending on its private layout.
+        self.rows.capacity() * size_of::<(Arc<str>, V)>()
+            + if self.indices.capacity() == 0 {
+                0
+            } else {
+                self.indices.capacity() * 2 * (size_of::<(Arc<str>, usize)>() + 1) + 16
+            }
+            + self
+                .rows
+                .iter()
+                // Shared-key counters and their alignment padding.
+                .map(|(key, value)| key.len() + 3 * size_of::<usize>() + charge(value))
+                .sum::<usize>()
+    }
+    fn values(&self) -> impl DoubleEndedIterator<Item = &V> {
+        self.rows.iter().map(|(_, value)| value)
+    }
+    fn entries(&self) -> impl Iterator<Item = (&Arc<str>, &V)> {
+        self.rows.iter().map(|(key, value)| (key, value))
     }
     fn clear(&mut self) {
-        self.indices.clear();
-        self.rows.clear();
-        self.next = 0;
+        *self = Self::new();
     }
 }
 fn require(condition: bool, code: &str, message: &str) -> IvyResult<()> {
@@ -159,12 +268,11 @@ fn merge_object(mut base: IvyJson, value: &IvyJson) -> IvyResult<IvyJson> {
 pub struct NativeJournal {
     owner: Owner,
     limits: Limits,
-    operations: Rows<Row>,
-    inputs: Rows<Row>,
-    observations: Rows<IvyJson>,
+    operations: Rows<Row<OperationState>>,
+    inputs: Rows<Row<InputState>>,
+    observations: Rows<Observation>,
     revisions: HashMap<String, f64>,
     epoch: Option<JsString>,
-    durable: HashSet<String>,
     clock: Arc<JournalClock>,
     on_terminal: Option<TerminalCallback>,
 }
@@ -197,7 +305,6 @@ impl NativeJournal {
             observations: Rows::new(),
             revisions: HashMap::new(),
             epoch: None,
-            durable: HashSet::new(),
             clock,
             on_terminal: None,
         })
@@ -209,9 +316,8 @@ impl NativeJournal {
         self.operations.clear();
         self.inputs.clear();
         self.observations.clear();
-        self.revisions.clear();
+        self.revisions = HashMap::new();
         self.epoch = None;
-        self.durable.clear();
         self.on_terminal = None;
     }
     pub fn epoch(&self) -> Option<&JsString> {
@@ -241,11 +347,9 @@ impl NativeJournal {
         ])
     }
     fn bytes(&self) -> usize {
-        self.operations
-            .values()
-            .chain(self.inputs.values())
-            .map(|row| row.charge)
-            .sum()
+        self.operations.bytes(|row| row.charge)
+            + self.inputs.bytes(|row| row.charge)
+            + self.observations.bytes(Observation::bytes)
     }
     fn key(identity: &Identity) -> IvyResult<String> {
         validate_shared(
@@ -259,17 +363,19 @@ impl NativeJournal {
         canonical(&identity.value(), MANAGEMENT_FRAME_BYTES)
     }
     pub fn get(&self, identity: &Identity) -> IvyResult<Option<IvyJson>> {
-        Ok(self
-            .operations
+        self.operations
             .get(&Self::key(identity)?)
-            .map(|row| row.value.clone()))
+            .map(Row::read)
+            .transpose()
     }
     pub fn forget(&mut self, identity: &Identity) -> IvyResult<()> {
         self.operations.remove(&Self::key(identity)?);
         Ok(())
     }
     pub fn retained_in_hive(&mut self, identity: &Identity) -> IvyResult<()> {
-        self.durable.insert(Self::key(identity)?);
+        if let Some(row) = self.operations.get_mut(&Self::key(identity)?) {
+            row.state.durable = true;
+        }
         Ok(())
     }
     fn existing(&self, identity: &Identity) -> IvyResult<IvyJson> {
@@ -277,33 +383,14 @@ impl NativeJournal {
             .ok_or_else(|| IvyError::new("not_found", "Operation is not in this connection."))
     }
     fn compact(&mut self) {
-        let keys = self
-            .operations
-            .entries()
-            .filter(|(key, row)| {
-                terminal(&row.value)
-                    && (self.durable.contains(*key)
-                        || is(&row.value, "callerPrincipalId", "ivy-native-clock"))
-            })
-            .map(|(key, _)| key.clone())
-            .collect::<Vec<_>>();
-        for key in keys {
-            self.operations.remove(&key);
-            self.durable.remove(&key);
-        }
-        let keys = self
-            .inputs
-            .entries()
-            .filter(|(_, row)| !pending(&row.value))
-            .map(|(key, _)| key.clone())
-            .collect::<Vec<_>>();
-        for key in keys {
-            self.inputs.remove(&key);
-        }
+        self.operations
+            .retain(|row| row.state.unfinished || !(row.state.durable || row.state.clock));
+        self.inputs.retain(|row| row.state.pending);
     }
     fn save(&mut self, mut value: IvyJson) -> IvyResult<IvyJson> {
         let key = Self::key(&Identity::from_operation(&value)?)?;
-        let size = stringify(&value, usize::MAX)?.len();
+        let json = stringify(&value, usize::MAX)?.into_boxed_str();
+        let size = json.len();
         let row = self.operations.get(&key);
         require(
             row.is_some_and(|row| size <= row.charge),
@@ -312,48 +399,56 @@ impl NativeJournal {
         )?;
         let completed = terminal(&value);
         let charge = if completed { size } else { row.unwrap().charge };
+        let state = OperationState::new(&value, row.unwrap().state.durable);
         self.operations.insert(
             key,
             Row {
-                value: value.clone(),
+                json,
                 charge,
+                state,
             },
         );
         if completed {
             let method = text(&value, "method")?;
             let key = canonical(&IvyJson::String(method.clone()), MANAGEMENT_FRAME_BYTES)?;
-            let mut observed = self.observations.get(&key).cloned().unwrap_or_else(|| {
-                IvyJson::object([
-                    ("method", IvyJson::String(method.clone())),
-                    ("lastSucceededAt", IvyJson::Null),
-                    ("lastFailedAt", IvyJson::Null),
-                    ("lastCode", IvyJson::Null),
-                ])
-            });
-            if is(&value, "phase", "succeeded") {
-                set(
-                    &mut observed,
-                    "lastSucceededAt",
-                    field(&value, "updatedAt")?.clone(),
-                )?;
-            } else {
-                set(
-                    &mut observed,
-                    "lastFailedAt",
-                    field(&value, "updatedAt")?.clone(),
-                )?;
-                set(&mut observed, "lastCode", field(&value, "code")?.clone())?;
-            }
-            self.observations.insert(key, observed);
-            if self.observations.len() > 256 {
-                let key = self.observations.entries().next().unwrap().0.clone();
-                self.observations.remove(&key);
-            }
+            self.observe_method(key, method, &value)?;
             if let Some(callback) = self.on_terminal.as_mut() {
                 callback(&mut value)?;
             }
         }
         Ok(value)
+    }
+    fn observe_method(&mut self, key: String, method: &JsString, value: &IvyJson) -> IvyResult<()> {
+        let mut observed = self
+            .observations
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| Observation {
+                method: method.clone(),
+                succeeded_at: None,
+                failed_at: None,
+                code: None,
+            });
+        let now = text(value, "updatedAt")?.clone();
+        if is(value, "phase", "succeeded") {
+            observed.succeeded_at = Some(now);
+        } else {
+            observed.failed_at = Some(now);
+            observed.code = field(value, "code")?.as_js_string().cloned();
+        }
+        if key.len() + observed.bytes() > OBSERVATION_ENTRY_BYTES {
+            return Ok(());
+        }
+        self.observations.insert(key, observed);
+        while self.observations.len() > 256
+            || self.observations.bytes(Observation::bytes) > OBSERVATION_BYTES
+            || self.bytes() > self.limits.max_journal_bytes
+        {
+            let key = self.observations.entries().next().unwrap().0.clone();
+            self.observations.remove(&key);
+            self.observations.shrink();
+        }
+        Ok(())
     }
     pub fn accept(
         &mut self,
@@ -472,32 +567,43 @@ impl NativeJournal {
                 },
             ),
         ]);
-        let charge =
-            stringify(&value, usize::MAX)?.len() + if prevent { 0 } else { OUTCOME_RESERVATION };
+        let json = stringify(&value, usize::MAX)?.into_boxed_str();
+        let charge = json.len() + if prevent { 0 } else { OUTCOME_RESERVATION };
         let cleanup = prevent
             || ["thread/unsubscribe", "turn/interrupt", "agent.answer"]
                 .iter()
                 .any(|name| method == &JsString::from(*name));
         require(
-            self.operations.len() + if cleanup { 0 } else { 4 } < self.limits.max_operations
-                && self.bytes()
-                    + charge
-                    + if cleanup {
-                        0
-                    } else {
-                        OUTCOME_RESERVATION + 65536
-                    }
-                    <= self.limits.max_journal_bytes,
+            self.operations.len() + if cleanup { 0 } else { 4 } < self.limits.max_operations,
             "native_journal_capacity",
             "Connection memory is full; no native request sent.",
         )?;
+        let key = Self::key(identity)?;
         self.operations.insert(
-            Self::key(identity)?,
+            key.clone(),
             Row {
-                value: value.clone(),
+                json,
                 charge,
+                state: OperationState::new(&value, false),
             },
         );
+        // Check the capacities actually allocated, including any table growth.
+        // Admission precedes native effects; rollback releases spare containers.
+        if self.bytes()
+            + if cleanup {
+                0
+            } else {
+                OUTCOME_RESERVATION + 65536
+            }
+            > self.limits.max_journal_bytes
+        {
+            self.operations.remove(&key);
+            self.operations.shrink();
+            return Err(IvyError::new(
+                "native_journal_capacity",
+                "Connection memory is full; no native request sent.",
+            ));
+        }
         Ok((value, true))
     }
     pub fn begin_epoch(&mut self, epoch: &JsString) -> IvyResult<()> {
@@ -523,15 +629,14 @@ impl NativeJournal {
         Ok(())
     }
     fn lose_unfinished(&mut self, code: &JsString) -> IvyResult<()> {
-        let values = self
+        let keys = self
             .operations
-            .values()
-            .filter(|row| {
-                is(&row.value, "phase", "accepted") || is(&row.value, "phase", "dispatched")
-            })
-            .map(|row| row.value.clone())
+            .entries()
+            .filter(|(_, row)| row.state.unfinished)
+            .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
-        for mut value in values {
+        for key in keys {
+            let mut value = self.operations.get(&key).unwrap().read()?;
             let accepted = is(&value, "phase", "accepted");
             set(
                 &mut value,
@@ -656,16 +761,13 @@ impl NativeJournal {
         hash_json(identity)
     }
     pub fn input(&self, identity: &IvyJson) -> IvyResult<Option<IvyJson>> {
-        Ok(self
-            .inputs
+        self.inputs
             .get(&self.input_key(identity)?)
-            .map(|row| row.value.clone()))
+            .map(Row::read)
+            .transpose()
     }
     pub fn pending_input_count(&self) -> usize {
-        self.inputs
-            .values()
-            .filter(|row| pending(&row.value))
-            .count()
+        self.inputs.values().filter(|row| row.state.pending).count()
     }
     pub fn observe_input(
         &mut self,
@@ -741,31 +843,40 @@ impl NativeJournal {
             ("reply", IvyJson::Null),
             ("code", IvyJson::Null),
         ]);
-        let charge = stringify(&value, usize::MAX)?.len() + OUTCOME_RESERVATION;
-        require(
-            self.bytes() + charge + OUTCOME_RESERVATION + 65536 <= self.limits.max_journal_bytes,
-            "native_input_capacity",
-            "Native journal cannot reserve this pending input, its answer and cleanup.",
-        )?;
+        let json = stringify(&value, usize::MAX)?.into_boxed_str();
+        let state = InputState::new(&value)?;
+        let charge = json.len() + state.bytes() + OUTCOME_RESERVATION;
+        let key = self.input_key(identity)?;
         self.inputs.insert(
-            self.input_key(identity)?,
+            key.clone(),
             Row {
-                value: value.clone(),
+                json,
                 charge,
+                state,
             },
         );
+        if self.bytes() + OUTCOME_RESERVATION + 65536 > self.limits.max_journal_bytes {
+            self.inputs.remove(&key);
+            self.inputs.shrink();
+            return Err(IvyError::new(
+                "native_input_capacity",
+                "Native journal cannot reserve this pending input, its answer and cleanup.",
+            ));
+        }
         Ok(value)
     }
     fn save_input(&mut self, value: IvyJson) -> IvyResult<IvyJson> {
         let key = self.input_key(field(&value, "identity")?)?;
         let row = self.inputs.get(&key);
-        let size = stringify(&value, usize::MAX)?.len();
+        let json = stringify(&value, usize::MAX)?.into_boxed_str();
+        let state = InputState::new(&value)?;
+        let size = json.len() + state.bytes();
         require(
             row.is_some_and(|row| size <= row.charge),
             "native_input_capacity",
             "Input result exceeds its reserved memory.",
         )?;
-        let charge = if pending(&value) {
+        let charge = if state.pending {
             row.unwrap().charge
         } else {
             size
@@ -773,8 +884,9 @@ impl NativeJournal {
         self.inputs.insert(
             key,
             Row {
-                value: value.clone(),
+                json,
                 charge,
+                state,
             },
         );
         Ok(value)
@@ -929,13 +1041,14 @@ impl NativeJournal {
         self.save_input(value).map(Some)
     }
     fn retire_inputs(&mut self, code: &JsString) -> IvyResult<()> {
-        let values = self
+        let keys = self
             .inputs
-            .values()
-            .filter(|row| pending(&row.value))
-            .map(|row| row.value.clone())
+            .entries()
+            .filter(|(_, row)| row.state.pending)
+            .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
-        for mut value in values {
+        for key in keys {
+            let mut value = self.inputs.get(&key).unwrap().read()?;
             let answering = is(&value, "state", "answering");
             set(
                 &mut value,
@@ -973,18 +1086,14 @@ impl NativeJournal {
         let mut values = self
             .inputs
             .values()
-            .map(|row| &row.value)
-            .filter(|value| include_expired || pending(value))
+            .filter(|row| include_expired || row.state.pending)
             .collect::<Vec<_>>();
         // All generated timestamps are fixed-width UTC ISO strings, so their
         // descending ordinal order is their localeCompare order.
         values.sort_by(|left, right| {
-            (!pending(left)).cmp(&!pending(right)).then_with(|| {
-                right
-                    .get("updatedAt")
-                    .and_then(IvyJson::as_js_string)
-                    .cmp(&left.get("updatedAt").and_then(IvyJson::as_js_string))
-            })
+            (!left.state.pending)
+                .cmp(&!right.state.pending)
+                .then_with(|| right.state.updated_at.cmp(&left.state.updated_at))
         });
         let limit = query
             .get("limit")
@@ -992,12 +1101,12 @@ impl NativeJournal {
             .unwrap_or(128.0) as usize;
         let mut items = Vec::new();
         let mut bytes = 0;
-        for value in &values {
-            let size = stringify(value, usize::MAX)?.len();
+        for row in &values {
+            let size = row.json.len();
             if items.len() >= limit || bytes + size > MANAGEMENT_FRAME_BYTES - 1024 * 1024 {
                 break;
             }
-            items.push((*value).clone());
+            items.push(row.read()?);
             bytes += size;
         }
         let truncated = items.len() < values.len();
@@ -1021,16 +1130,6 @@ impl NativeJournal {
         ])
     }
     pub fn observed_methods(&self) -> IvyJson {
-        IvyJson::Array(
-            self.observations
-                .values()
-                .rev()
-                .take(256)
-                .cloned()
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect(),
-        )
+        IvyJson::Array(self.observations.values().map(Observation::value).collect())
     }
 }

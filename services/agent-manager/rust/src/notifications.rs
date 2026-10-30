@@ -2,7 +2,9 @@
 
 use crate::native_journal::NativeJournal;
 use ivy_contracts::{
-    IvyError, IvyJson, IvyResult, JsString, agent_schema::validate_agent, json::stringify,
+    IvyError, IvyJson, IvyResult, JsString,
+    agent_schema::validate_agent,
+    json::{parse, stringify},
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::service::ToolHandler;
@@ -35,8 +37,7 @@ pub fn notification_handler(
 
 struct Event {
     sequence: u64,
-    value: IvyJson,
-    bytes: usize,
+    json: Box<str>,
     charge: usize,
 }
 
@@ -46,7 +47,7 @@ pub struct NativeNotifications {
     sequence: u64,
     end: u64,
     maximum_bytes: usize,
-    bytes: usize,
+    json_bytes: usize,
     events: VecDeque<Event>,
 }
 
@@ -80,7 +81,7 @@ impl NativeNotifications {
             sequence: start,
             end,
             maximum_bytes,
-            bytes: 0,
+            json_bytes: 0,
             events: VecDeque::new(),
         }
     }
@@ -126,24 +127,37 @@ impl NativeNotifications {
         ]);
         let encoded = stringify(&value, usize::MAX)?;
         let bytes = encoded.len();
-        let charge = bytes + stringify(&IvyJson::from(encoded), usize::MAX)?.len();
-        if bytes <= self.maximum_bytes {
+        if bytes.saturating_add(std::mem::size_of::<Event>()) <= self.maximum_bytes {
+            let charge = bytes + stringify(&IvyJson::from(encoded.as_str()), usize::MAX)?.len();
             self.events.push_back(Event {
                 sequence: self.sequence,
-                value: value.clone(),
-                bytes,
+                json: encoded.into_boxed_str(),
                 charge,
             });
-            self.bytes += bytes;
-        }
-        while self.bytes > self.maximum_bytes || self.events.len() > 10_000 {
-            self.bytes -= self
-                .events
-                .pop_front()
-                .expect("retained bytes belong to an event")
-                .bytes;
+            self.json_bytes += bytes;
+            while self.retained_bytes() > self.maximum_bytes || self.events.len() > 10_000 {
+                // Release spare slots before discarding a row that would fit.
+                if self.events.len() <= self.events.capacity() / 2 {
+                    self.events.shrink_to_fit();
+                    if self.retained_bytes() <= self.maximum_bytes && self.events.len() <= 10_000 {
+                        break;
+                    }
+                }
+                let event = self
+                    .events
+                    .pop_front()
+                    .expect("retained bytes belong to an event");
+                self.json_bytes -= event.json.len();
+                if self.events.is_empty() {
+                    self.events = VecDeque::new();
+                }
+            }
         }
         Ok(value)
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.json_bytes + self.events.capacity() * std::mem::size_of::<Event>()
     }
 
     /// The handler validates NotificationQuery before passing its typed fields.
@@ -189,7 +203,7 @@ impl NativeNotifications {
             }
             if items.len() == limit
                 || (!items.is_empty()
-                    && (bytes + event.bytes > 9 * 1024 * 1024
+                    && (bytes + event.json.len() > 9 * 1024 * 1024
                         || transport + event.charge > MANAGEMENT_FRAME_BYTES - 1024 * 1024))
             {
                 has_more = true;
@@ -204,9 +218,9 @@ impl NativeNotifications {
             if event.sequence != last + 1 {
                 gap = true;
             }
-            items.push(event.value.clone());
+            items.push(parse(&event.json, usize::MAX)?);
             last = event.sequence;
-            bytes += event.bytes;
+            bytes += event.json.len();
             transport += event.charge;
         }
         if !has_more && last != self.sequence {
