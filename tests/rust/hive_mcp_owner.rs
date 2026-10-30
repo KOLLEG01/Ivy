@@ -566,7 +566,7 @@ async fn exchange(
                         reply.insert("id", frame.get("id").unwrap().clone());
                         trace.lock().unwrap().push(obj([("kind", "provider-reply".into()), ("frame", reply.clone())]));
                     }
-                    server.network.peers.provider_result(&peer, &reply);
+                    server.network.peers.provider_result(&peer, reply);
                 }
             }
         }

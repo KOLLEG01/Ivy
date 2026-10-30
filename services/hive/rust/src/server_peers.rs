@@ -98,6 +98,22 @@ pub struct ProviderError {
     pub details: Option<IvyJson>,
 }
 pub type ErrorConstructor = Arc<dyn Fn(ProviderError) -> IvyError + Send + Sync>;
+fn provider_response(mut frame: IvyJson, provider_error: &ErrorConstructor) -> IvyResult<IvyResult<IvyJson>> {
+    validate_response_frame(&frame)?;
+    // The admitted envelope owns its payload. Keep the raw outcome and optional
+    // details while moving them across the provider error boundary.
+    if let Some(mut error) = frame.remove("error") {
+        let mut data = error.remove("data").unwrap();
+        Ok(Err(provider_error(ProviderError {
+            code: data.remove("code").and_then(IvyJson::into_js_string).unwrap(),
+            message: error.remove("message").and_then(IvyJson::into_js_string).unwrap(),
+            outcome: data.remove("outcome").unwrap(),
+            details: data.remove("details"),
+        })))
+    } else {
+        Ok(Ok(frame.remove("result").unwrap()))
+    }
+}
 #[derive(Clone, Copy)]
 pub enum UnhandledKind {
     Callback,
@@ -598,7 +614,7 @@ impl Peers {
         });
         Ok(receive(receiver))
     }
-    pub fn provider_result(&self, peer: &Peer, frame: &IvyJson) {
+    pub fn provider_result(&self, peer: &Peer, frame: IvyJson) {
         let Some(id) = frame.get("id").and_then(IvyJson::as_js_string) else {
             self.protocol_diagnostic(
                 peer,
@@ -627,19 +643,8 @@ impl Peers {
             );
             return;
         };
-        let result = (|| -> IvyResult<IvyResult<IvyJson>> {
-            validate_response_frame(frame)?;
-            if let Some(error) = frame.get("error") {
-                let data = error.required("data")?;
-                return Ok(Err((self.0.owners.provider_error)(ProviderError {
-                    code: text(data, "code")?,
-                    message: text(error, "message")?,
-                    outcome: data.required("outcome")?.clone(),
-                    details: data.get("details").cloned(),
-                })));
-            }
-            Ok(Ok(frame.required("result")?.clone()))
-        })();
+        let id = id.clone();
+        let result = provider_response(frame, &self.0.owners.provider_error);
         pending.reply.finish(result.unwrap_or_else(|_| {
             Err(IvyError::new(
                 "provider_contract_error",
@@ -653,7 +658,7 @@ impl Peers {
             .lock()
             .unwrap()
             .forwarded
-            .retain(|(key, _)| key != id);
+            .retain(|(key, _)| key != &id);
     }
     pub fn reject_all(&self, error: IvyError) {
         let pending = std::mem::take(&mut self.0.state.lock().unwrap().forwarded);
@@ -764,7 +769,7 @@ impl Peers {
             if (frame.get("result").is_some() || frame.get("error").is_some())
                 && frame.get("id").and_then(IvyJson::as_js_string).is_some()
             {
-                self.provider_result(peer, &frame);
+                self.provider_result(peer, frame);
                 return Ok(());
             }
             if frame.get("id").is_none() {

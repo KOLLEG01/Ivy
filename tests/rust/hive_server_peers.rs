@@ -774,7 +774,7 @@ async fn run_trace(trace: &Value, source: &IvyJson) -> IvyJson {
                     if let Some(name) = step["call"].as_str() {
                         frame.insert("id", IvyJson::String(call_ids[name].clone()));
                     }
-                    owner.provider_result(peer.as_ref().unwrap(), &frame);
+                    owner.provider_result(peer.as_ref().unwrap(), frame);
                 }
                 "message" => {
                     let bytes = if let Some(bytes) = step["bytes"].as_array() {

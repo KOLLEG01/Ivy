@@ -1390,6 +1390,12 @@ export const rustTests = {
     "filter": "store::query::",
     "testThreads": 1
   },
+  "tests/rust/hive_peer_delivery.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "server_peers::delivery_tests::",
+    "testThreads": 1
+  },
   "tests/rust/hive_server_peers.rs": {
     "package": "ivy-hive",
     "test": "hive-network",
