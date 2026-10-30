@@ -165,6 +165,10 @@ async fn uncertain_resume_matches_original_with_real_owner_transport_and_journal
     let mut count = 0;
     for group in groups.as_array().unwrap() {
         let base = group.required("base").unwrap();
+        // The transcript keeps only driver fields; stored reads also run record upgrades.
+        let mut task_template = base.required("task").unwrap().clone();
+        task_template.insert("fields", Json::Object(vec![]));
+        task_template.insert("comments", Json::Array(vec![]));
         for row in group.required("rows").unwrap().as_array().unwrap() {
             count += 1;
             let input = row.required("input").unwrap();
@@ -176,7 +180,7 @@ async fn uncertain_resume_matches_original_with_real_owner_transport_and_journal
                 root_object_id: Some("root".into()),
             };
             let mut run = merge(base.required("run").unwrap(), input.get("run"));
-            let task = merge(base.required("task").unwrap(), input.get("task"));
+            let task = merge(&task_template, input.get("task"));
             let call = merge(base.required("call").unwrap(), input.get("call"));
             let turn = merge(base.required("turn").unwrap(), input.get("turn"));
             if flag(input, "attachedTurn") {
