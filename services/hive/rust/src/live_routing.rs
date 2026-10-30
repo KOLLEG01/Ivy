@@ -113,7 +113,7 @@ struct Route {
     generation: f64,
     namespaces: HashSet<JsString>,
     tools: HashMap<JsString, Tool>,
-    notifications: HashMap<JsString, IvyJson>,
+    notifications: HashMap<JsString, Arc<IvyJson>>,
 }
 impl Route {
     fn update(&mut self, catalog: Option<&Catalog>, validate: bool) -> IvyResult<()> {
@@ -154,11 +154,11 @@ impl Route {
             for notification in &catalog.notifications {
                 notifications.insert(
                     key([
-                        string(notification, "namespace")?,
-                        string(notification, "name")?,
-                        string(notification, "version")?,
+                        notification.namespace.clone(),
+                        notification.name.clone(),
+                        notification.version.clone(),
                     ]),
-                    field(notification, "payloadSchema")?.clone(),
+                    notification.payload_schema.clone(),
                 );
             }
             self.notifications = notifications;

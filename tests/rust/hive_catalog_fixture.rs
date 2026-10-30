@@ -1,7 +1,7 @@
 //! Project historical JSON traces onto the native internal catalog in tests only.
 #![allow(dead_code)]
 use ivy_contracts::{IvyError, IvyJson, IvyResult};
-use ivy_hive::{registry_catalog::{Catalog, Namespace, ToolBinding}, storage::RoutingUpdate};
+use ivy_hive::{registry_catalog::{Catalog, Namespace, NotificationDefinition, ToolBinding}, storage::RoutingUpdate};
 use std::sync::Arc;
 
 pub fn catalog_from_wire(value: &IvyJson) -> IvyResult<Catalog> {
@@ -23,14 +23,30 @@ pub fn catalog_from_wire(value: &IvyJson) -> IvyResult<Catalog> {
         namespaces,
         tools,
         notifications: value.get("notifications").and_then(IvyJson::as_array)
-            .map_or_else(Vec::new, |v| v.to_vec()),
+            .into_iter().flatten().map(|notification| {
+                let text = |key| notification.required(key)?.as_js_string()
+                    .cloned().ok_or_else(IvyError::internal);
+                Ok(NotificationDefinition {
+                    namespace: text("namespace")?, name: text("name")?, version: text("version")?,
+                    // Historical routing-only fixtures omit the registry description.
+                    description: notification.get("description").and_then(IvyJson::as_js_string)
+                        .cloned().unwrap_or_else(|| "".into()),
+                    payload_schema: Arc::new(notification.required("payloadSchema")?.clone()),
+                })
+            }).collect::<IvyResult<_>>()?,
     })
 }
 pub fn catalog_to_wire(value: &Catalog) -> IvyJson {
     IvyJson::object([
         ("namespaces", IvyJson::Array(value.namespaces.iter().map(|ns| ns.name.clone().into()).collect())),
         ("tools", IvyJson::Array(value.tools.iter().map(ToolBinding::to_wire).collect())),
-        ("notifications", IvyJson::Array(value.notifications.clone())),
+        ("notifications", IvyJson::Array(value.notifications.iter().map(|notification| IvyJson::object([
+            ("namespace", notification.namespace.clone().into()),
+            ("name", notification.name.clone().into()),
+            ("version", notification.version.clone().into()),
+            ("description", notification.description.clone().into()),
+            ("payloadSchema", notification.payload_schema.as_ref().clone()),
+        ])).collect())),
     ])
 }
 pub fn routing_from_wire(value: &IvyJson) -> IvyResult<RoutingUpdate> {

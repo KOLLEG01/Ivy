@@ -69,6 +69,91 @@ fn catalog_handoff_does_not_copy_opaque_schema_trees() {
     assert_eq!(routing.complete(&call.context, "reply".into()).unwrap(), "reply".into());
 }
 
+fn notification_catalog() -> Catalog {
+    let notifications: Vec<_> = (0..4).map(|index| json!({
+        "namespace":"provider", "name":format!("changed{index}"), "version":"1.0.0",
+        "description":"Fixture notification.",
+        "payloadSchema":{"type":"integer", "description":"n".repeat(128 * 1024)}
+    })).collect();
+    catalog_fixture::catalog_from_wire(&value(json!({
+        "namespaces":["provider"], "tools":[], "notifications":notifications
+    }))).unwrap()
+}
+fn notification_context(generation: f64) -> IvyJson {
+    value(json!({"serviceNodeId":"provider", "generation":generation}))
+}
+fn notice(payload: IvyJson) -> IvyJson {
+    IvyJson::object([
+        ("namespace", "provider".into()), ("name", "changed0".into()),
+        ("version", "1.0.0".into()), ("payload", payload),
+    ])
+}
+
+#[test]
+fn notification_handoff_does_not_copy_opaque_schema_trees() {
+    use crate::retention::graph_tests::{LIVE, PEAK};
+    use std::sync::atomic::Ordering;
+    const CHILD: &str = "IVY_ROUTING_NOTIFICATION_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "live_routing::ownership_tests::notification_handoff_does_not_copy_opaque_schema_trees", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        return;
+    }
+    let owner = notification_catalog();
+    let status = node();
+    let mut peaks = vec![];
+    for validate in [false, true] {
+        let mut routing = LiveRouting::new(validate, None);
+        let before = LIVE.load(Ordering::Relaxed);
+        PEAK.store(before, Ordering::Relaxed);
+        routing.update(&status, Some(7.0), Some(&owner)).unwrap();
+        let peak = PEAK.load(Ordering::Relaxed) - before;
+        eprintln!("Hive notification catalog handoff Rust allocation peak: {peak} bytes; validateMessages={validate}; four 128 KiB opaque schema descriptions");
+        // Rust allocator requests only; validator compilation and process RSS are excluded.
+        peaks.push(peak);
+        routing.notification(&notification_context(7.0), &notice(1.0.into())).unwrap();
+        assert!(routing.notification(&notification_context(7.0), &notice("invalid".into())).is_err());
+    }
+    assert!(peaks.iter().all(|peak| *peak < 64 * 1024), "Routing copied notification schema trees: {peaks:?}");
+}
+
+#[test]
+fn notification_schema_owners_follow_catalog_changes_and_connection_guards() {
+    for validate in [false, true] {
+        let mut routing = LiveRouting::new(validate, None);
+        let owner = notification_catalog();
+        let schema = Arc::downgrade(&owner.notifications[0].payload_schema);
+        routing.update(&node(), Some(7.0), Some(&owner)).unwrap();
+        let name = key(["provider".into(), "changed0".into(), "1.0.0".into()]);
+        assert!(Arc::ptr_eq(&owner.notifications[0].payload_schema,
+            &routing.route(&"provider".into()).unwrap().notifications[&name]));
+        drop(owner);
+        assert_eq!(schema.strong_count(), 1);
+        routing.notification(&notification_context(7.0), &notice(1.0.into())).unwrap();
+
+        let mut replacement = notification_catalog();
+        replacement.notifications[0].payload_schema = Arc::new(value(json!({"type":"string"})));
+        routing.update(&node(), Some(7.0), Some(&replacement)).unwrap();
+        assert!(schema.upgrade().is_none());
+        assert!(routing.notification(&notification_context(7.0), &notice(1.0.into())).is_err());
+        routing.notification(&notification_context(7.0), &notice("changed".into())).unwrap();
+        routing.update(&node(), Some(7.0), None).unwrap();
+        routing.notification(&notification_context(7.0), &notice("same connection".into())).unwrap();
+
+        routing.update(&node(), Some(8.0), None).unwrap();
+        assert_eq!(routing.notification(&notification_context(7.0), &notice("old".into()))
+            .unwrap_err().code, "stale_generation");
+        assert_eq!(routing.notification(&notification_context(8.0), &notice("unregistered".into()))
+            .unwrap_err().code, "not_found");
+        routing.clear();
+        assert_eq!(routing.notification(&notification_context(8.0), &notice("cleared".into()))
+            .unwrap_err().code, "stale_generation");
+    }
+}
+
 #[test]
 fn pending_calls_share_the_dispatched_schema_until_the_last_reply_releases_it() {
     let mut routing = LiveRouting::new(true, None);

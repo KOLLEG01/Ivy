@@ -1,4 +1,4 @@
-//! One immutable tool catalog shared by registry readers and routing handoffs.
+//! One immutable catalog shared by registry readers and routing handoffs.
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use std::{collections::HashMap, mem::size_of, ops::Range, sync::Arc};
 
@@ -65,11 +65,36 @@ pub struct Namespace {
     pub tools: Range<usize>,
 }
 #[derive(Debug, PartialEq)]
+pub struct NotificationDefinition {
+    pub namespace: JsString,
+    pub name: JsString,
+    pub version: JsString,
+    pub description: JsString,
+    pub payload_schema: Arc<IvyJson>,
+}
+impl NotificationDefinition {
+    fn new(namespace: &JsString, definition: &IvyJson) -> IvyResult<Self> {
+        let text = |key| definition.required(key)?.as_js_string()
+            .cloned().ok_or_else(IvyError::internal);
+        Ok(Self {
+            namespace: namespace.clone(),
+            name: text("name")?,
+            version: text("version")?,
+            description: text("description")?,
+            payload_schema: Arc::new(definition.required("payloadSchema")?.clone()),
+        })
+    }
+    fn heap_bytes(&self) -> usize {
+        [&self.namespace, &self.name, &self.version, &self.description].into_iter()
+            .map(|value| value.0.capacity() * 2).sum::<usize>()
+            + self.payload_schema.retained_bytes() + 2 * size_of::<usize>()
+    }
+}
+#[derive(Debug, PartialEq)]
 pub struct Catalog {
     pub namespaces: Vec<Namespace>,
     pub tools: Vec<ToolBinding>,
-    // Notification definitions contain external payload schemas.
-    pub notifications: Vec<IvyJson>,
+    pub notifications: Vec<NotificationDefinition>,
 }
 impl Catalog {
     pub(crate) fn new(
@@ -83,11 +108,7 @@ impl Catalog {
             let name = ns.required("namespace")?.as_js_string().ok_or_else(IvyError::internal)?.clone();
             if let Some(values) = ns.get("notifications").filter(|v| !v.is_null()) {
                 for notification in values.as_array().ok_or_else(IvyError::internal)? {
-                    let mut value = IvyJson::object([("namespace", name.clone().into())]);
-                    for (key, child) in notification.as_object().ok_or_else(IvyError::internal)? {
-                        value.insert(key.clone(), child.clone());
-                    }
-                    notifications.push(value);
+                    notifications.push(NotificationDefinition::new(&name, notification)?);
                 }
             }
             let start = tools.len();
@@ -112,8 +133,8 @@ impl Catalog {
             }).sum::<usize>()
             + self.tools.capacity() * size_of::<ToolBinding>()
             + self.tools.iter().map(|tool| tool.retained_bytes() - size_of::<ToolBinding>()).sum::<usize>()
-            + self.notifications.capacity() * size_of::<IvyJson>()
-            + self.notifications.iter().map(|v| v.retained_bytes() - size_of::<IvyJson>()).sum::<usize>()
+            + self.notifications.capacity() * size_of::<NotificationDefinition>()
+            + self.notifications.iter().map(NotificationDefinition::heap_bytes).sum::<usize>()
     }
 }
 
