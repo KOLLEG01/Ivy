@@ -788,22 +788,49 @@ async fn outbound_limits_reject_without_closing_and_bindings_require_exactly_one
     assert!(!connection.signal().is_cancelled());
     let payload = IvyJson::String(JsString(vec![97; 18 * 1024 * 1024]));
     // Current-thread execution keeps the socket writer from draining between these sends.
-    for _ in 0..3 {
-        connection
-            .notification(
-                "fixture".into(),
-                "large".into(),
-                "1.0.0".into(),
-                payload.clone(),
-            )
-            .unwrap();
-    }
-    let error = connection
-        .notification("fixture".into(), "large".into(), "1.0.0".into(), payload)
-        .unwrap_err();
+    let mut admitted = 0;
+    let error = loop {
+        match connection.notification(
+            "fixture".into(),
+            "large".into(),
+            "1.0.0".into(),
+            payload.clone(),
+        ) {
+            Ok(()) => {
+                admitted += 1;
+                assert!(admitted <= 3);
+            }
+            Err(error) => break error,
+        }
+    };
+    // The reservation includes String capacity, which can exceed wire length.
+    assert!(admitted > 0);
     assert_eq!(error.code, "limit_exceeded");
     assert_eq!(error.message, "Service socket buffer is full.");
+    assert_eq!(error.outcome, Outcome::NotExecuted);
     assert!(!connection.signal().is_cancelled());
     connection.close();
+    let next = peer.open(options()).await;
+    for _ in 0..2 * ivy_contracts::limits::CONNECTION_IN_FLIGHT_REQUESTS {
+        next.notification(
+            "fixture".into(),
+            "small".into(),
+            "1.0.0".into(),
+            IvyJson::Null,
+        )
+        .unwrap();
+    }
+    let error = next
+        .notification(
+            "fixture".into(),
+            "small".into(),
+            "1.0.0".into(),
+            IvyJson::Null,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "limit_exceeded");
+    assert_eq!(error.outcome, Outcome::NotExecuted);
+    assert!(!next.signal().is_cancelled());
+    next.close();
     peer.finish().await;
 }

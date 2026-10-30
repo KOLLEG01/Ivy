@@ -17,16 +17,14 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex, OnceLock, Weak,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
-use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
+use tokio::sync::{Notify, Semaphore, oneshot};
 use tokio_tungstenite::{
     connect_async_with_config,
-    tungstenite::{
-        Message, client::IntoClientRequest, http::HeaderValue,
-    },
+    tungstenite::{Message, client::IntoClientRequest, http::HeaderValue},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -117,8 +115,7 @@ struct Inner {
     close_reason: Arc<OnceLock<IvyError>>,
     generation: AtomicU64,
     ready: AtomicBool,
-    outbound: mpsc::UnboundedSender<String>,
-    buffered: AtomicUsize,
+    outbound: crate::websocket::Outgoing,
     available: AtomicU64,
     events: Notify,
 }
@@ -217,7 +214,16 @@ impl ServiceConnection {
             _=cancellation.cancelled()=>return Err(stopping()),
             result=tokio::time::timeout(Duration::from_secs(10),connect_async_with_config(request,Some(config),true))=>result.map_err(|_|websocket_failed())?.map_err(|_|websocket_failed())?,
         };
-        let (outbound, mut queue) = mpsc::unbounded_channel::<String>();
+        Ok(Self::connected(socket, options))
+    }
+    pub(crate) fn connected<S>(
+        socket: tokio_tungstenite::WebSocketStream<S>,
+        options: ConnectionOptions,
+    ) -> Self
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let (outbound, mut queue) = crate::websocket::service_budget().channel();
         let connection = Self(Arc::new(Inner {
             options,
             state: Mutex::new(State {
@@ -230,67 +236,77 @@ impl ServiceConnection {
             generation: AtomicU64::new(0),
             ready: AtomicBool::new(false),
             outbound,
-            buffered: AtomicUsize::new(0),
             available: AtomicU64::new(0),
             events: Notify::new(),
         }));
-        let (mut sink, mut stream) = socket.split();
         let weak = Arc::downgrade(&connection.0);
         let signal = connection.signal();
         tokio::spawn(async move {
-            loop {
-                let encoded = tokio::select! {biased;_=signal.cancelled()=>break,value=queue.recv()=>match value{Some(v)=>v,None=>break}};
-                let size = encoded.len();
-                let result = tokio::select! {biased;_=signal.cancelled()=>break,result=crate::websocket::send(&mut sink,Message::Text(encoded.into()))=>result};
-                if let Some(inner) = weak.upgrade() {
-                    inner.buffered.fetch_sub(size, Ordering::AcqRel);
-                    if result.is_err() {
-                        Self(inner).close_with(unknown("outcome_unknown", "Hive write failed."));
-                        break;
+            // Drop both I/O halves before releasing the active send reservation.
+            let mut in_flight: Option<crate::websocket::Pending> = None;
+            let (mut sink, mut stream) = socket.split();
+            let write = async {
+                while let Some(pending) = queue.recv().await {
+                    if signal.is_cancelled() {
+                        return;
                     }
-                } else {
-                    break;
+                    in_flight = Some(pending);
+                    let message = in_flight.as_mut().unwrap().take_message();
+                    if crate::websocket::send(&mut sink, message).await.is_err() {
+                        if let Some(inner) = weak.upgrade() {
+                            Self(inner)
+                                .close_with(unknown("outcome_unknown", "Hive write failed."));
+                        }
+                        return;
+                    }
+                    in_flight.take();
                 }
-            }
-        });
-        let weak = Arc::downgrade(&connection.0);
-        let signal = connection.signal();
-        tokio::spawn(async move {
-            loop {
-                let item =
-                    tokio::select! {biased;_=signal.cancelled()=>break,item=stream.next()=>item};
-                let Some(inner) = weak.upgrade() else { break };
-                let connection = Self(inner);
-                match item {
-                    Some(Ok(Message::Text(text))) => {
-                        if connection.receive(text.as_str()).is_err() {
+            };
+            let read = async {
+                loop {
+                    let item = stream.next().await;
+                    if signal.is_cancelled() {
+                        return;
+                    }
+                    let Some(inner) = weak.upgrade() else { return };
+                    let connection = Self(inner);
+                    match item {
+                        Some(Ok(Message::Text(text))) => {
+                            if connection.receive(text.as_str()).is_err() {
+                                connection.close_with(unknown(
+                                    "invalid_frame",
+                                    "Hive sent malformed protocol data.",
+                                ));
+                                return;
+                            }
+                        }
+                        Some(Ok(Message::Binary(_))) => {
                             connection.close_with(unknown(
                                 "invalid_frame",
-                                "Hive sent malformed protocol data.",
+                                "Hive sent a binary protocol frame.",
                             ));
-                            break;
+                            return;
                         }
+                        Some(Ok(Message::Close(_))) | None => {
+                            connection.close_with(socket_closed());
+                            return;
+                        }
+                        Some(Err(_)) => {
+                            connection.close_with(websocket_failed());
+                            return;
+                        }
+                        _ => {}
                     }
-                    Some(Ok(Message::Binary(_))) => {
-                        connection.close_with(unknown(
-                            "invalid_frame",
-                            "Hive sent a binary protocol frame.",
-                        ));
-                        break;
-                    }
-                    Some(Ok(Message::Close(_))) | None => {
-                        connection.close_with(socket_closed());
-                        break;
-                    }
-                    Some(Err(_)) => {
-                        connection.close_with(websocket_failed());
-                        break;
-                    }
-                    _ => {}
                 }
+            };
+            tokio::select! {
+                biased;
+                _ = signal.cancelled() => {},
+                _ = write => {},
+                _ = read => {},
             }
         });
-        Ok(connection)
+        connection
     }
     pub fn service_node_id(&self) -> &JsString {
         &self.0.options.service_node_id
@@ -461,29 +477,14 @@ impl ServiceConnection {
             ));
         }
         let encoded = stringify(value, MANAGEMENT_FRAME_BYTES)?;
-        let size = encoded.len();
-        if self
-            .0
-            .buffered
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                n.checked_add(size)
-                    .filter(|n| *n <= MANAGEMENT_SOCKET_BUFFER_BYTES)
-            })
-            .is_err()
-        {
-            return Err(IvyError::new(
-                "limit_exceeded",
-                "Service socket buffer is full.",
-            ));
-        }
-        if self.0.outbound.send(encoded).is_err() {
-            self.0.buffered.fetch_sub(size, Ordering::AcqRel);
-            return Err(IvyError::new(
-                "service_unavailable",
-                "Hive connection is unavailable.",
-            ));
-        }
-        Ok(())
+        self.0.outbound.text(encoded).map_err(|error| match error {
+            crate::websocket::SendError::Full => {
+                IvyError::new("limit_exceeded", "Service socket buffer is full.")
+            }
+            crate::websocket::SendError::Closed => {
+                IvyError::new("service_unavailable", "Hive connection is unavailable.")
+            }
+        })
     }
     pub fn notification(
         &self,
