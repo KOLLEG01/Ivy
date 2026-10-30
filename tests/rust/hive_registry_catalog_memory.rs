@@ -524,3 +524,38 @@ fn routing_status_projection_does_not_retain_unneeded_node_details() {
     assert!(full_peak > 64 * 1024 * 1024);
     assert!(projected_peak < 128 * 1024, "Routing retained unneeded status bodies: {projected_peak}");
 }
+
+#[test]
+fn tool_definition_hash_borrows_schemas_without_a_deep_copy() {
+    const CHILD: &str = "IVY_TOOL_HASH_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "registry::catalog_memory_tests::tool_definition_hash_borrows_schemas_without_a_deep_copy", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+        return;
+    }
+    let definition = IvyJson::object([
+        ("name", "fixture".into()),
+        ("inputSchema", IvyJson::object([("description", "i".repeat(512 * 1024).into())])),
+        ("outputSchema", IvyJson::object([("description", "o".repeat(512 * 1024).into())])),
+        ("discovery", IvyJson::object([("description", "d".repeat(2 * 1024 * 1024).into())])),
+    ]);
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    let copied = IvyJson::object(definition.as_object().unwrap().iter()
+        .filter(|(key, _)| !key.eq_str("discovery")).cloned());
+    let expected = ivy_contracts::hash::hash_json(&copied).unwrap();
+    let copied_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    drop(copied);
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    let actual = ivy_contracts::hash::tool_definition_hash(&definition).unwrap();
+    let borrowed_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    assert_eq!(actual, expected);
+    eprintln!("Hive tool-definition hash Rust allocation peak: copied {copied_peak} bytes, borrowed {borrowed_peak} bytes for 1 MiB schema text");
+    // Allocator requests above the owned definition, excluding SQLite's heap and RSS.
+    assert!(copied_peak > borrowed_peak + 1536 * 1024, "Tool hashing copied schemas");
+}

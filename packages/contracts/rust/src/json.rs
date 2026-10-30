@@ -550,6 +550,30 @@ impl Parser<'_> {
 pub fn canonical(value: &IvyJson, maximum_bytes: usize) -> IvyResult<String> {
     encode(value, maximum_bytes, true, true)
 }
+/// Canonicalize a borrowed object projection with IvyJson::object's last-value rule.
+/// Field values retain their original depth, shared node budget and error order.
+pub(crate) fn canonical_object<'a>(
+    pairs: impl IntoIterator<Item = (&'a JsString, &'a IvyJson)>,
+    maximum_bytes: usize,
+) -> IvyResult<String> {
+    let mut pairs: Vec<_> = pairs.into_iter().collect();
+    pairs.reverse();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+    pairs.dedup_by(|a, b| a.0 == b.0);
+    let mut encoder = Encoder {
+        out: String::new(), maximum_bytes, nodes: 1, sorted: true, validate: true, accounted: 0,
+    };
+    encoder.punctuation("{")?;
+    for (index, (key, value)) in pairs.iter().enumerate() {
+        if index > 0 { encoder.punctuation(",")?; }
+        encoder.string(key)?;
+        encoder.emit(":")?;
+        encoder.value(value, 1)?;
+    }
+    encoder.punctuation("}")?;
+    encoder.account(2 + pairs.len().saturating_sub(1))?;
+    Ok(encoder.out)
+}
 pub fn stringify(value: &IvyJson, maximum_bytes: usize) -> IvyResult<String> {
     encode(value, maximum_bytes, false, false)
 }
@@ -581,7 +605,7 @@ fn encode(
         validate,
         accounted: 0,
     };
-    encoder.value(value)?;
+    encoder.value(value, 0)?;
     Ok(encoder.out)
 }
 struct Encoder {
@@ -636,7 +660,7 @@ impl Encoder {
         }
         self.emit("\"")
     }
-    fn value(&mut self, value: &IvyJson) -> IvyResult<()> {
+    fn value(&mut self, value: &IvyJson, depth: usize) -> IvyResult<()> {
         enum Part<'a> {
             Value(&'a IvyJson, usize),
             Key(&'a JsString),
@@ -644,7 +668,7 @@ impl Encoder {
             Colon,
             Account(usize),
         }
-        let mut pending = vec![Part::Value(value, 0)];
+        let mut pending = vec![Part::Value(value, depth)];
         while let Some(part) = pending.pop() {
             let (value, depth) = match part {
                 Part::Punctuation(text) => {

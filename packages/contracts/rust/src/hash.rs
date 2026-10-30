@@ -1,4 +1,4 @@
-use crate::{IvyJson, IvyResult, json::canonical, limits::MANAGEMENT_FRAME_BYTES};
+use crate::{IvyJson, IvyResult, json::{canonical, canonical_object}, limits::MANAGEMENT_FRAME_BYTES};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
@@ -35,12 +35,11 @@ pub fn tool_definition_hash(definition: &IvyJson) -> IvyResult<String> {
             "Expected a tool definition.",
         ));
     };
-    hash_json(&IvyJson::object(
-        pairs
-            .iter()
-            .filter(|(k, _)| k != &crate::JsString::from("discovery"))
-            .cloned(),
-    ))
+    Ok(digest(canonical_object(
+        pairs.iter().filter(|(key, _)| !key.eq_str("discovery"))
+            .map(|(key, value)| (key, value)),
+        MANAGEMENT_FRAME_BYTES,
+    )?))
 }
 pub fn hash_json(value: &IvyJson) -> IvyResult<String> {
     Ok(digest(canonical(value, MANAGEMENT_FRAME_BYTES)?))
