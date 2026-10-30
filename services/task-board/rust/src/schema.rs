@@ -148,7 +148,13 @@ impl Contracts for RuntimeContracts {
         if schema.matches("#", value)? {
             Ok(())
         } else {
-            Err(Self::invalid())
+            Err(IvyError::new(
+                "invalid_arguments",
+                format!(
+                    "Value does not match TaskBoard record {key} version {}.",
+                    version.to_utf8()?
+                ),
+            ))
         }
     }
     fn validate_definition(&self, name: &str, value: &IvyJson) -> IvyResult<()> {
@@ -159,7 +165,10 @@ impl Contracts for RuntimeContracts {
         {
             Ok(())
         } else {
-            Err(Self::invalid())
+            Err(IvyError::new(
+                "invalid_arguments",
+                format!("Value does not match TaskBoard definition {name}."),
+            ))
         }
     }
 }

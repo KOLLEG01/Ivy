@@ -291,8 +291,18 @@ impl<R: RpcClient> LocalRetention<'_, R> {
                     return Ok(false);
                 }
                 let selected: HashSet<_> = ids.iter().cloned().collect();
-                let rows=self.journal.connection.prepare("SELECT d.id,d.key,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision").map_err(error)?.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?))).map_err(error)?.collect::<Result<Vec<_>,_>>().map_err(error)?;
-                for (id, key, encoded) in rows {
+                let mut statement = self.journal.connection.prepare("SELECT d.id,d.key,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision").map_err(error)?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })
+                    .map_err(error)?;
+                for row in rows {
+                    let (id, key, encoded) = row.map_err(error)?;
                     let value = parse(&encoded, MANAGEMENT_FRAME_BYTES)?;
                     if selected.contains(&id) {
                         if has_unresolved_workflow_outcome(&value)?
@@ -314,6 +324,7 @@ impl<R: RpcClient> LocalRetention<'_, R> {
                         }
                     }
                 }
+                drop(statement);
                 if let Some((_, key, name)) = &before {
                     if key == "task-board/operation" {
                         let operation = self

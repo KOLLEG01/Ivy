@@ -16,6 +16,10 @@ use std::{
 };
 use tokio::runtime::Handle;
 
+#[cfg(test)]
+#[path = "../../../../tests/fixtures/task-board-cache.rs"]
+mod memory_tests;
+
 /// Bound each persisted header and conversation entry independently.
 pub fn validate_task_content(task: &Json, task_id: &JsString) -> IvyResult<()> {
     let mut header = task.clone();
@@ -110,32 +114,50 @@ impl<S: CommentSource + ?Sized> CommentSource for ReadSource<S> {
     }
 }
 pub(super) struct ProjectionCache<T = Json> {
-    pub(super) values: HashMap<String, T>,
+    values: HashMap<String, (T, usize)>,
     order: VecDeque<String>,
+    bytes: usize,
+    maximum_entries: usize,
+    maximum_bytes: usize,
 }
 impl<T> ProjectionCache<T> {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(maximum_entries: usize, maximum_bytes: usize) -> Self {
         Self {
             values: HashMap::new(),
             order: VecDeque::new(),
+            bytes: 0,
+            maximum_entries,
+            maximum_bytes,
         }
     }
-    pub(super) fn remember(&mut self, key: String, value: T, maximum: usize) {
-        self.evict_if_full(maximum);
-        self.insert(key, value)
+    pub(super) fn get(&self, key: &str) -> Option<&T> {
+        self.values.get(key).map(|(value, _)| value)
     }
-    pub(super) fn evict_if_full(&mut self, maximum: usize) {
-        if self.values.len() >= maximum {
-            if let Some(oldest) = self.order.pop_front() {
-                self.values.remove(&oldest);
+    pub(super) fn remember(&mut self, key: String, value: T, bytes: usize) {
+        let bytes = bytes
+            .saturating_add(key.capacity())
+            .saturating_add(key.len())
+            .saturating_add(3 * std::mem::size_of::<(String, (T, usize))>());
+        if self.maximum_entries == 0 || bytes > self.maximum_bytes {
+            return;
+        }
+        if let Some((_, previous)) = self.values.remove(&key) {
+            self.bytes -= previous;
+            self.order.retain(|saved| saved != &key);
+        }
+        while self.values.len() >= self.maximum_entries
+            || self.bytes.saturating_add(bytes) > self.maximum_bytes
+        {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some((_, charged)) = self.values.remove(&oldest) {
+                self.bytes -= charged;
             }
         }
-    }
-    pub(super) fn insert(&mut self, key: String, value: T) {
-        if !self.values.contains_key(&key) {
-            self.order.push_back(key.clone());
-        }
-        self.values.insert(key, value);
+        self.order.push_back(key.clone());
+        self.values.insert(key, (value, bytes));
+        self.bytes += bytes;
     }
 }
 struct Fingerprint {
@@ -150,14 +172,14 @@ pub struct TaskComments<S: CommentSource + ?Sized> {
 }
 impl<S: CommentSource + ?Sized> TaskComments<S> {
     pub fn new(source: Arc<S>, executor: Handle) -> Self {
-        let pins = Arc::new(Mutex::new(ProjectionCache::new()));
+        let pins = Arc::new(Mutex::new(ProjectionCache::new(16384, 1024 * 1024)));
         let observed = pins.clone();
         let reader = CommentReader::new(Arc::new(ReadSource(source)), executor).with_node_observer(
             Arc::new(move |pin, node| {
                 observed.lock().unwrap_or_else(|p| p.into_inner()).remember(
                     hash_json(node).map_err(CommentFailure::Ivy)?,
                     pin.clone(),
-                    16384,
+                    pin.retained_bytes(),
                 );
                 Ok(())
             }),
@@ -165,8 +187,8 @@ impl<S: CommentSource + ?Sized> TaskComments<S> {
         Self {
             reader,
             pins,
-            summaries: Mutex::new(ProjectionCache::new()),
-            fingerprints: Mutex::new(ProjectionCache::new()),
+            summaries: Mutex::new(ProjectionCache::new(128, 1024 * 1024)),
+            fingerprints: Mutex::new(ProjectionCache::new(128, 1024 * 1024)),
         }
     }
     /// The generation stops new callers before awaiting detached sibling reads.
@@ -177,7 +199,6 @@ impl<S: CommentSource + ?Sized> TaskComments<S> {
         self.pins
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .values
             .get(hash)
             .cloned()
     }
@@ -191,7 +212,7 @@ impl<S: CommentSource + ?Sized> TaskComments<S> {
         self.pins
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .remember(hash, pin.clone(), 16384);
+            .remember(hash, pin.clone(), pin.retained_bytes());
         Ok(())
     }
     pub async fn node(
@@ -339,13 +360,22 @@ impl<S: CommentSource + ?Sized> TaskComments<S> {
         let attachments = stringify(&Json::Array(attachments.clone()), 64 * 1024)
             .ok()
             .map(|_| attachments);
+        let bytes = std::mem::size_of::<Fingerprint>()
+            + hash.capacity()
+            + attachments.as_ref().map_or(0, |values| {
+                values.capacity() * std::mem::size_of::<Json>()
+                    + values
+                        .iter()
+                        .map(|value| value.retained_bytes() - std::mem::size_of::<Json>())
+                        .sum::<usize>()
+            });
         self.fingerprints
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remember(
                 Self::tree_key(tree, owner)?,
                 Fingerprint { hash, attachments },
-                128,
+                bytes,
             );
         Ok(())
     }
@@ -356,7 +386,6 @@ impl<S: CommentSource + ?Sized> TaskComments<S> {
             .fingerprints
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .values
             .get(&key)
             .is_some_and(|v| v.hash == hash))
     }
@@ -389,7 +418,6 @@ impl<S: CommentSource + ?Sized> TaskComments<S> {
             .fingerprints
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .values
             .get(&key)
             .and_then(|v| v.attachments.clone()))
     }

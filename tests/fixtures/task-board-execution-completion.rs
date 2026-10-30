@@ -311,6 +311,7 @@ async fn execution_inherits_each_action_scope_and_drains_on_the_existing_local_o
                     object_id: original.clone(),
                     document: None,
                     materialized: Some(original.clone()),
+                    retained_bytes: 0,
                 },
             ));
             queue.execute_graph(&"one".into(), original.clone())

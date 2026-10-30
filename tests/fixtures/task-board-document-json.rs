@@ -176,6 +176,27 @@ async fn remote_documents_enforce_scope_version_and_pins_and_isolate_action_cach
         3,
         "independent actions read again"
     );
+    let mut expanded = snapshot();
+    let mut content = expanded.remove("content").unwrap();
+    content.insert("value", Json::Array(vec![Json::Null; 4096]));
+    expanded.insert("content", content);
+    assert!(canonical(&expanded, MANAGEMENT_FRAME_BYTES).unwrap().len() < 65536);
+    *objects.value.borrow_mut() = expanded;
+    scopes
+        .with_read_cache(async {
+            for _ in 0..2 {
+                store
+                    .read_document("task-board/history", &pin(), true, false, false)
+                    .await
+                    .unwrap();
+            }
+        })
+        .await;
+    assert_eq!(
+        objects.calls.borrow().len(),
+        5,
+        "expanded documents are read without retaining an oversized cache entry"
+    );
     for (field, value, expected) in [
         ("parentId", "foreign".into(), "task_board_scope_mismatch"),
         (

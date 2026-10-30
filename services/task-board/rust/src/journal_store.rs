@@ -24,7 +24,7 @@ use ivy_sdk::{
 };
 use ivy_store::sqlite::error;
 use std::{
-    cell::RefCell,
+    cell::{OnceCell, RefCell},
     collections::HashSet,
     future::Future,
     pin::Pin,
@@ -91,6 +91,41 @@ struct CachedRecord {
     object_id: Json,
     document: Option<ReadRecord>,
     materialized: Option<Json>,
+    retained_bytes: usize,
+}
+fn remember_record(entries: &mut Vec<(Json, CachedRecord)>, key: Json, mut record: CachedRecord) {
+    let mut bytes = std::mem::size_of::<CachedRecord>()
+        + key.retained_bytes()
+        + record.object_id.retained_bytes();
+    if let Some(read) = &record.document {
+        bytes += read.document.pin.retained_bytes()
+            + read.document.value.retained_bytes()
+            + read.document.content_hash.capacity()
+            + read
+                .document
+                .parent_id
+                .as_ref()
+                .map_or(0, |id| id.0.capacity() * 2)
+            + read.metadata.as_ref().map_or(0, Json::retained_bytes);
+    }
+    bytes += record.materialized.as_ref().map_or(0, Json::retained_bytes);
+    if bytes > 64 * 1024 || entries.len() >= 256 {
+        return;
+    }
+    let retained: usize = entries
+        .iter()
+        .filter(|(saved, _)| saved != &key)
+        .map(|(_, record)| record.retained_bytes)
+        .sum();
+    if retained.saturating_add(bytes) > 4 * 1024 * 1024 {
+        return;
+    }
+    record.retained_bytes = bytes;
+    if let Some((_, existing)) = entries.iter_mut().find(|(saved, _)| saved == &key) {
+        *existing = record;
+    } else {
+        entries.push((key, record));
+    }
 }
 type CacheEntries = Rc<RefCell<Vec<(Json, CachedRecord)>>>;
 enum CacheBinding {
@@ -99,13 +134,33 @@ enum CacheBinding {
 }
 /// An explicit cache for one action. A service owner uses ReadScopes::cache
 /// instead, so independent asynchronous actions cannot share cached pins.
-pub struct ReadCache(CacheBinding);
+pub struct ReadCache(
+    CacheBinding,
+    OnceCell<
+        persistent_reads::task_comments::TaskComments<ivy_sdk::task_comments::RpcCommentSource>,
+    >,
+);
 impl Default for ReadCache {
     fn default() -> Self {
-        Self(CacheBinding::Fixed(CacheEntries::default()))
+        Self(
+            CacheBinding::Fixed(CacheEntries::default()),
+            OnceCell::new(),
+        )
     }
 }
 impl ReadCache {
+    pub(crate) fn comments(
+        &self,
+        client: Arc<dyn RpcClient>,
+    ) -> &persistent_reads::task_comments::TaskComments<ivy_sdk::task_comments::RpcCommentSource>
+    {
+        self.1.get_or_init(|| {
+            persistent_reads::task_comments::TaskComments::new(
+                Arc::new(ivy_sdk::task_comments::RpcCommentSource::new(client)),
+                tokio::runtime::Handle::current(),
+            )
+        })
+    }
     fn entries(&self) -> Option<CacheEntries> {
         match &self.0 {
             CacheBinding::Fixed(entries) => Some(entries.clone()),
@@ -122,7 +177,7 @@ pub(crate) struct CapturedReadScope(Option<CacheEntries>);
 impl Default for ReadScopes {
     fn default() -> Self {
         Self {
-            cache: ReadCache(CacheBinding::Scoped(RefCell::default())),
+            cache: ReadCache(CacheBinding::Scoped(RefCell::default()), OnceCell::new()),
         }
     }
 }
@@ -267,6 +322,47 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
             .record(key, address, primary, include_archived)
             .await?
             .document)
+    }
+
+    pub(crate) async fn materialize_document(
+        &self,
+        key: &str,
+        mut document: Document,
+    ) -> IvyResult<Document> {
+        let mut value = document.value;
+        if key == "task-board/task" {
+            let owner = document.pin.required("objectId")?;
+            value = match persistent_reads::read_legacy_conversation(
+                self.client.as_ref(),
+                &value,
+                owner.as_js_string().ok_or_else(IvyError::internal)?,
+            )
+            .await?
+            {
+                Some(full) => full,
+                None => {
+                    let uncached = ReadCache::default();
+                    let cache = self.cache.unwrap_or(&uncached);
+                    let comments = cache.comments(self.client.clone());
+                    let full = comments
+                        .hydrate(&value, owner.as_js_string().ok_or_else(IvyError::internal)?)
+                        .await;
+                    if self.cache.is_none() {
+                        comments.settled().await;
+                    }
+                    full.map_err(|failure| match failure {
+                        persistent_reads::task_comments::CommentFailure::Source(error)
+                        | persistent_reads::task_comments::CommentFailure::Ivy(error) => error,
+                    })?
+                    .ok_or_else(IvyError::internal)?
+                }
+            };
+        }
+        document.value =
+            persistent_reads::record_upgrades::upgrade_stored(self.client.as_ref(), key, &value)
+                .await?
+                .into_owned();
+        Ok(document)
     }
 
     /// Preserve the observed Object metadata for lifecycle membership fences.
@@ -630,12 +726,9 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                     object_id: record.document.pin.required("objectId")?.clone(),
                     document: Some(record.clone()),
                     materialized: None,
+                    retained_bytes: 0,
                 };
-                if let Some((_, existing)) = entries.iter_mut().find(|(key, _)| key == &cache_key) {
-                    *existing = cached;
-                } else {
-                    entries.push((cache_key, cached));
-                }
+                remember_record(&mut entries, cache_key, cached);
             }
         }
         Ok(record)
@@ -941,14 +1034,16 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                 // bounded slot but pinned reads use a different key; preserve it.
                 let primary =
                     object.get("parentId") == Some(&nullable(self.journal.root_object_id.as_ref()));
-                entries.push((
+                remember_record(
+                    &mut entries,
                     Json::Array(vec![key.into(), pin(&result)?, primary.into()]),
                     CachedRecord {
                         object_id: id.clone(),
                         document: None,
                         materialized: None,
+                        retained_bytes: 0,
                     },
-                ));
+                );
             }
         }
         pin(&result)
@@ -1008,7 +1103,8 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         .await
     }
     async fn read(&self, key: &str, address: &Json, primary: bool) -> IvyResult<Document> {
-        Ok(self.record(key, address, primary, false).await?.document)
+        let document = self.record(key, address, primary, false).await?.document;
+        self.materialize_document(key, document).await
     }
     async fn write(
         &self,

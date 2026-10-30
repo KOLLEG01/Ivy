@@ -132,6 +132,27 @@ export const privateRepo = false;
 
 // Explicit Cargo targets keep --files narrow and do not infer service ownership.
 export const rustTests = {
+  "tests/fixtures/task-board-document-json.rs": {
+    package: "ivy-task-board", test: "task-board-host-runtime", filter: "document_json::",
+  },
+  "tests/fixtures/task-board-execution-completion.rs": {
+    package: "ivy-task-board", lib: true, filter: "journal_store::execution_completion_tests::",
+  },
+  "tests/fixtures/task-board-cache.rs": {
+    package: "ivy-task-board", lib: true,
+    filter: "journal_store::persistent_reads::task_comments::memory_tests",
+  },
+  "tests/fixtures/task-board-journal-memory.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-blobs",
+    "filter": "journal_memory::",
+    "testThreads": 1
+  },
+  "tests/secretary-rust/journal-memory.rs": {
+    "package": "ivy-secretary",
+    "test": "journal",
+    "filter": "retention_memory::"
+  },
   "tests/rust/hive_storage_thread.rs": { "package": "ivy-hive", "test": "hive-storage-thread" },
   "tests/rust/hive_query_cache.rs": {
     "package": "ivy-hive",

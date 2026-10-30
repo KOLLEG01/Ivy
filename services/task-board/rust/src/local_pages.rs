@@ -201,7 +201,7 @@ impl LocalJournal<'_> {
             .prepare(
                 "SELECT d.id,d.parent_id,d.current_revision,r.value_json FROM documents d
              JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision
-             WHERE d.key=? ORDER BY d.id",
+             WHERE d.key=?",
             )
             .map_err(error)?;
         let rows = statement
@@ -246,9 +246,9 @@ impl LocalJournal<'_> {
                 .iter()
                 .map(|selector| Scalar::read(selector.read(&row)))
                 .collect::<IvyResult<Vec<_>>>()?;
-            selected.push((row, keys));
+            selected.push((row.id, row.revision, keys));
         }
-        selected.sort_by(|(left, left_keys), (right, right_keys)| {
+        selected.sort_by(|(left_id, _, left_keys), (right_id, _, right_keys)| {
             for ((left, right), order) in left_keys.iter().zip(right_keys).zip(orders) {
                 let result = left.compare(right);
                 if result != Ordering::Equal {
@@ -259,10 +259,10 @@ impl LocalJournal<'_> {
                     };
                 }
             }
-            left.id
+            left_id
                 .as_js_string()
                 .unwrap()
-                .cmp(right.id.as_js_string().unwrap())
+                .cmp(right_id.as_js_string().unwrap())
         });
         let offset = offset(options, selected.len())?;
         let limit = options
@@ -279,10 +279,10 @@ impl LocalJournal<'_> {
         let end = ((offset as f64 + limit).min(selected.len() as f64)) as usize;
         let items = selected[offset..end]
             .iter()
-            .map(|(row, _)| {
+            .map(|(id, revision, _)| {
                 Json::object([
-                    ("objectId", row.id.clone()),
-                    ("revision", Json::Number(row.revision as f64)),
+                    ("objectId", id.clone()),
+                    ("revision", Json::Number(*revision as f64)),
                     ("values", Json::Object(vec![])),
                 ])
             })

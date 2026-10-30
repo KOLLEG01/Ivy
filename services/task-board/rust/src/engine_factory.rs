@@ -31,7 +31,6 @@ use crate::{
             local_history::{HistoryCollections, LocalHistory},
             local_reads::SqliteReads,
             store::RpcObjectReads,
-            task_comments::TaskComments,
         },
     },
     lifecycle_journal::LifecycleJournal,
@@ -71,7 +70,6 @@ use ivy_contracts::{
 };
 use ivy_sdk::{
     service::{InvocationContext, ServiceConnection},
-    task_comments::RpcCommentSource,
     tools::ToolClients,
 };
 use ivy_store::rusqlite::Connection;
@@ -462,10 +460,7 @@ impl<
             client: journal.client.as_ref(),
         };
         let history_collections = HistoryCollections::default();
-        let current_comments = TaskComments::new(
-            Arc::new(RpcCommentSource::new(journal.client.clone())),
-            tokio::runtime::Handle::current(),
-        );
+        let current_comments = scopes.cache().comments(journal.client.clone());
         let read_condition = |task: &Json, wake: Option<&Json>| {
             condition_policy::task_condition(&read_local, task, wake)
         };

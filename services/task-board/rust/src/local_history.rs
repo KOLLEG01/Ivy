@@ -88,10 +88,13 @@ impl Ids {
     }
 }
 fn references(value: &Json, found: &mut Ids) {
+    references_matching(value, found, |_| true);
+}
+fn references_matching(value: &Json, found: &mut Ids, include: impl Fn(&JsString) -> bool) {
     let mut pending = vec![value];
     while let Some(value) = pending.pop() {
         match value {
-            Json::String(id) => found.add(id.clone()),
+            Json::String(id) if include(id) => found.add(id.clone()),
             Json::Array(values) => pending.extend(values.iter().rev()),
             Json::Object(fields) => pending.extend(fields.iter().rev().map(|(_, value)| value)),
             _ => {}
@@ -127,6 +130,7 @@ struct Head {
 struct Index {
     documents: HashMap<JsString, Head>,
     referrers: HashMap<JsString, HashSet<JsString>>,
+    targets: HashSet<JsString>,
     version: Option<(String, String)>,
 }
 impl Index {
@@ -238,15 +242,28 @@ impl<D, R, C: Contracts, Parse, Failure> LocalHistory<'_, D, R, C, Parse, Failur
         let heads = self
             .local
             .rows::<ReadFailure<E>>("SELECT id,key,current_revision FROM documents", &[])?;
+        let mut targets = HashSet::new();
+        for head in &heads {
+            targets.insert(JsString::from(head[0].string()?));
+        }
+        for root in self
+            .local
+            .rows::<ReadFailure<E>>("SELECT root_id FROM cleanup_roots", &[])?
+        {
+            targets.insert(JsString::from(root[0].string()?));
+        }
+        let added_targets = !targets.is_subset(&index.targets);
+        let longest_target = targets.iter().map(|id| id.0.len()).max().unwrap_or(0);
         let mut live = HashSet::new();
         for (offset, head) in heads.iter().enumerate() {
             let id = JsString::from(head[0].string()?);
             let revision = head[2].number()?;
             live.insert(id.clone());
-            if index
-                .documents
-                .get(&id)
-                .is_none_or(|old| old.revision != revision)
+            if added_targets
+                || index
+                    .documents
+                    .get(&id)
+                    .is_none_or(|old| old.revision != revision)
             {
                 let row = self.local.row::<ReadFailure<E>>(
                     "SELECT value_json FROM revisions WHERE id=? AND revision=?",
@@ -258,7 +275,9 @@ impl<D, R, C: Contracts, Parse, Failure> LocalHistory<'_, D, R, C, Parse, Failur
                 if let Some(row) = row {
                     let value = (self.local.parse)(&row[0].string()?)?;
                     let mut found = Ids::default();
-                    references(&value, &mut found);
+                    references_matching(&value, &mut found, |id| {
+                        id.0.len() <= longest_target && targets.contains(id)
+                    });
                     index.forget(&id);
                     let key = head[1].string()?;
                     let unresolved = self.local.contracts.local(&key)?
@@ -301,6 +320,7 @@ impl<D, R, C: Contracts, Parse, Failure> LocalHistory<'_, D, R, C, Parse, Failur
         {
             index.forget(&id);
         }
+        index.targets = targets;
         index.version = Some(version);
         Ok(())
     }

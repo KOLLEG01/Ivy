@@ -9,7 +9,7 @@ use super::{
 use crate::{
     engine_read::read_policy::TaskReadStore,
     engine_read::{comment_reads::CommentReadStore, condition_policy::ConditionStore},
-    journal_store::{CacheEntries, CachedRecord, Contracts, ReadCache},
+    journal_store::{CacheEntries, CachedRecord, Contracts, ReadCache, remember_record},
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, JsString, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
@@ -230,13 +230,10 @@ impl<R, C, Parse, SqlFailure, M> DocumentReads<'_, R, C, Parse, SqlFailure, M> {
                     object_id: pin.required("objectId")?.clone(),
                     document: None,
                     materialized: Some(document.clone()),
+                    retained_bytes: 0,
                 };
                 let mut entries = cache.borrow_mut();
-                if let Some((_, existing)) = entries.iter_mut().find(|(key, _)| key == &cache_key) {
-                    *existing = record;
-                } else {
-                    entries.push((cache_key, record));
-                }
+                remember_record(&mut entries, cache_key, record);
             }
         }
         Ok(document)

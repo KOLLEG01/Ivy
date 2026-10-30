@@ -78,7 +78,6 @@ pub(super) fn summary_cached(
     Ok(summaries
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .values
         .get(&key)
         .cloned())
 }
@@ -119,10 +118,11 @@ pub(super) fn finish(
     if tree.get("summary").is_none_or(Json::is_null) {
         let summary = summary(&header, owner, open)?;
         if stringify(&summary, 64 * 1024).is_ok() {
+            let bytes = summary.retained_bytes();
             summaries
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .remember(summary_key(tree, owner)?, summary, 128);
+                .remember(summary_key(tree, owner)?, summary, bytes);
         }
     }
     Ok(header)

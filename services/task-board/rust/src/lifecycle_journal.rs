@@ -100,6 +100,7 @@ impl<
         archived: bool,
     ) -> IvyResult<LifecycleDocument> {
         let (document, metadata) = self.journal.read_with_metadata(k, a, p, archived).await?;
+        let document = self.journal.materialize_document(k, document).await?;
         Ok(LifecycleDocument { document, metadata })
     }
     async fn page(&self, k: &str, o: &Json) -> IvyResult<Json> {

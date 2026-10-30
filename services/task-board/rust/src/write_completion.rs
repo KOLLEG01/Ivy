@@ -1,5 +1,5 @@
 //! Refresh the action cache after a confirmed remote write.
-use super::{CachedRecord, ReadCache};
+use super::{CachedRecord, ReadCache, remember_record};
 use ivy_contracts::{IvyJson as Json, IvyResult, json::canonical, limits::MANAGEMENT_FRAME_BYTES};
 
 pub(crate) fn complete_write(
@@ -40,14 +40,16 @@ pub(crate) fn complete_write(
                 ("metadata", object.clone()),
                 ("revision", revision.clone()),
             ]);
-            entries.push((
+            remember_record(
+                &mut entries,
                 cache_key,
                 CachedRecord {
                     object_id: id.clone(),
                     document: None,
                     materialized: Some(document),
+                    retained_bytes: 0,
                 },
-            ));
+            );
         }
     }
     Ok(pin)

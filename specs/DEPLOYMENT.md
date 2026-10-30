@@ -126,6 +126,34 @@ accounts created by the host. Install the OS ACL tools and provision a readable
 Chromium executable for Dashboards, or its service account's Playwright cache.
 Keep Chromium's sandbox enabled.
 
+In-memory caches charge retained strings and container capacities. JSON trees
+use UTF-16 storage; lossless JSON text rows charge their encoded text.
+AgentManager's `maxNotificationBytes` bounds this
+retained event data; transport page limits remain separate. Evicted notifications
+report sequence gaps so callers recover from native history. The SDK comment
+reader applies the same accounting to `with_maximum_bytes`; oversized nodes remain
+readable without being cached. TaskBoard limits each action's record cache to
+4 MiB and byte-bounds its derived projections. Native catalogs share immutable
+file aliases, release unselected candidates and build method projections on demand.
+AgentManager shares its immutable launch catalog with native management and the
+native transport. Inventory retains only source kinds and project capability;
+the transport retains method names and envelope flags instead of schema copies.
+Phone Voice uses the transport's catalog and tracks connection identity separately.
+Submitted-schema caches charge graph and pattern buffer capacities, UTF-16 data
+and each shared regex class allocation once. Oversized validators remain caller-owned;
+failed compiles retain no entries. Caller-held handles and compilation/evaluation
+workspaces remain separate from the cache budget.
+AgentManager's journal retains lossless JSON text and small native state fields;
+its byte limit includes owned keys, metadata, reserved container capacities and
+space for unfinished native replies. Method observations share that budget and
+retain at most 256 entries, 1 MiB total and 64 KiB per entry. Oversized observations
+are skipped without dropping operation outcomes. Decoded responses and work in
+flight are separate allocations, not covered by the journal's retained-data limit.
+On glibc-based Linux hosts, health initialization starts one small process-wide
+allocator worker. It returns free pages to the OS at most once every 30 seconds,
+independently of the service event loop and readiness-file I/O. Live data,
+transport limits and the host's aggregate memory budget are unchanged.
+
 Account-, device- and network-specific values remain mandatory installation inputs.
 Configure non-loopback listeners and trusted proxies explicitly when required by the
 host topology. Verify optional services before enabling them. TaskBoard's initial

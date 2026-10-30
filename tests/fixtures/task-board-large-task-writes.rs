@@ -420,11 +420,26 @@ async fn exercise(fixture: Json) {
     let previous_comments = full.required("comments").unwrap().as_array().unwrap();
     let mut proposed = full.clone();
     let mut comments = previous_comments.to_vec();
-    comments.push(comment(
-        comments.len() + 1,
-        "Continue the approved work.".into(),
-    ));
+    let appended = comment(comments.len() + 1, "Continue the approved work.".into());
+    comments.push(appended.clone());
     proposed.insert("comments", Json::Array(comments));
+    let mut receipts = full
+        .required("commentDeliveries")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .to_vec();
+    receipts.push(Json::object([
+        ("commentId", appended.required("commentId").unwrap().clone()),
+        ("state", "queued".into()),
+        (
+            "operationId",
+            appended.required("operationId").unwrap().clone(),
+        ),
+        ("updatedAt", TIME.into()),
+        ("code", Json::Null),
+    ]));
+    proposed.insert("commentDeliveries", Json::Array(receipts));
     let db = Connection::open_in_memory().unwrap();
     initialize(&db).unwrap();
     let contracts = runtime_inputs::contracts().unwrap();
@@ -530,17 +545,25 @@ async fn exercise(fixture: Json) {
             .unwrap()
             .get("object")
     );
-    let roundtrip = hydrated(hive.clone(), stored, id).await;
+    let domain = Store::read(&store, "task-board/task", &Json::String(id.clone()), true)
+        .await
+        .unwrap();
+    store
+        .contracts
+        .validate_definition("Task", &domain.value)
+        .unwrap();
+    assert!(ivy_task_board::wake::comments_pending(&domain.value));
+    let roundtrip = domain.value;
     assert_eq!(
         roundtrip.required("comments").unwrap().as_array().unwrap(),
         proposed.required("comments").unwrap().as_array().unwrap()
     );
     assert_eq!(
         roundtrip.required("commentDeliveries").unwrap(),
-        full.required("commentDeliveries").unwrap()
+        proposed.required("commentDeliveries").unwrap()
     );
     for (key, value) in full.as_object().unwrap() {
-        if !key.eq_str("comments") {
+        if !key.eq_str("comments") && !key.eq_str("commentDeliveries") {
             assert_eq!(
                 roundtrip.get_key(key),
                 Some(value),

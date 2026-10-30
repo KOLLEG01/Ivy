@@ -615,8 +615,7 @@ async fn current_history_pruned_recovery_requires_the_same_confirmed_terminal_li
     }
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn current_history_rechecks_references_changed_during_its_cooperative_index_scan() {
+async fn recheck_cooperative_references(new_target: bool) {
     let db = Connection::open_in_memory().unwrap();
     seed(&db);
     for index in 0..38 {
@@ -625,7 +624,10 @@ async fn current_history_rechecks_references_changed_during_its_cooperative_inde
             &format!("filler-{index:02}"),
             "task-board/coordination",
             "root",
-            &Json::object([("note", "original".into())]),
+            &Json::object([(
+                "note",
+                if new_target { "late-child" } else { "original" }.into(),
+            )]),
         );
     }
     let parses = Cell::new(0);
@@ -653,20 +655,106 @@ async fn current_history_rechecks_references_changed_during_its_cooperative_inde
     let mut work = Box::pin(history.collect::<IvyError>(0, 0, None, None));
     assert!(futures_util::poll!(work.as_mut()).is_pending());
     assert_eq!(parses.get(), 32);
-    let changed = canonical(&Json::object([("objectId", "child".into())]), usize::MAX).unwrap();
-    db.execute(
-        "INSERT INTO revisions VALUES('filler-00',2,?,?)",
-        params![changed, AT],
-    )
-    .unwrap();
-    db.execute(
-        "UPDATE documents SET current_revision=2 WHERE id='filler-00'",
-        [],
-    )
-    .unwrap();
+    if new_target {
+        row(
+            &db,
+            "late-child",
+            "task-board/coordination",
+            "closed",
+            &Json::object([("note", "created during collection".into())]),
+        );
+    } else {
+        let changed = canonical(&Json::object([("objectId", "child".into())]), usize::MAX).unwrap();
+        db.execute(
+            "INSERT INTO revisions VALUES('filler-00',2,?,?)",
+            params![changed, AT],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE documents SET current_revision=2 WHERE id='filler-00'",
+            [],
+        )
+        .unwrap();
+    }
     work.await.unwrap();
     assert!(parses.get() > 40);
-    assert_eq!(count(&db, "documents"), 40);
+    assert_eq!(count(&db, "documents"), 40 + i64::from(new_target));
     assert_eq!(count(&db, "retired_operations"), 0);
+    assert_released(&db);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn current_history_rechecks_references_changed_during_its_cooperative_index_scan() {
+    recheck_cooperative_references(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn current_history_rechecks_unchanged_references_when_new_targets_appear() {
+    recheck_cooperative_references(true).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "current_thread")]
+async fn current_history_does_not_retain_comment_bodies_as_reference_ids() {
+    const NAME: &str =
+        "current_history::current_history_does_not_retain_comment_bodies_as_reference_ids";
+    const CHILD: &str = "IVY_HISTORY_MEMORY_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    fn peak_bytes() -> usize {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find(|line| line.starts_with("VmHWM:"))
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            * 1024
+    }
+    let db = Connection::open_in_memory().unwrap();
+    initialize(&db).unwrap();
+    let body = Json::object([("body", "x".repeat(1024 * 1024).into())]);
+    for index in 0..32 {
+        row(
+            &db,
+            &format!("record-{index:02}"),
+            "task-board/task",
+            "root",
+            &body,
+        );
+    }
+    let local = local(&db);
+    let source = Source::ready();
+    let collections = HistoryCollections::default();
+    let history = LocalHistory::new(
+        &local,
+        &NoDocuments,
+        &source,
+        &collections,
+        HistoryLimits { count: 0, bytes: 0 },
+    );
+    let before = peak_bytes();
+    history.collect::<IvyError>(0, 0, None, None).await.unwrap();
+    let after = peak_bytes();
+    assert!(
+        after < before + 16 * 1024 * 1024,
+        "before={before}, after={after}"
+    );
+    assert_eq!(count(&db, "documents"), 32);
     assert_released(&db);
 }

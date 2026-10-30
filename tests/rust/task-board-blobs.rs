@@ -12,6 +12,9 @@ mod context_recovery;
 mod gates;
 #[path = "../fixtures/task-board-journal-store.rs"]
 mod journal_store;
+#[cfg(target_os = "linux")]
+#[path = "../fixtures/task-board-journal-memory.rs"]
+mod journal_memory;
 #[path = "../fixtures/task-board-native-driver.rs"]
 mod native_driver;
 #[path = "../fixtures/task-board-native-intent.rs"]

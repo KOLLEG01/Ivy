@@ -5,6 +5,9 @@ use std::{
     process::Command,
 };
 
+#[path = "journal-memory.rs"]
+mod retention_memory;
+
 fn value(s: &str) -> IvyJson {
     parse(s, 1_048_576).unwrap()
 }
@@ -378,12 +381,11 @@ fn current_checkpoint_completion_and_acknowledgements_commit_atomically() {
 }
 
 #[test]
-fn fallible_receipt_inspection_rolls_back_prior_cleanup_and_fences() {
+fn storage_failure_rolls_back_prior_cleanup_and_fences() {
     for technical in [false, true] {
         let mut journal = memory(Limits::default());
         let good = operation(10, "checkpoint", "succeeded");
-        let mut bad = operation(11, "checkpoint", "succeeded");
-        bad.insert("errorCode", value(r#"{"toString":null}"#));
+        let bad = operation(11, "checkpoint", "succeeded");
         let (first, second) = if technical {
             let first = journal
                 .create_technical("workflow", "first", &good)
@@ -422,18 +424,15 @@ fn fallible_receipt_inspection_rolls_back_prior_cleanup_and_fences() {
             .unwrap()
             .value;
         let before = journal.usage().unwrap();
+        let table = if technical {
+            "technical_documents"
+        } else {
+            "documents"
+        };
+        journal.db.execute_batch(&format!("CREATE TRIGGER refuse_second_cleanup BEFORE DELETE ON {table} WHEN OLD.name='second' BEGIN SELECT RAISE(ABORT,'fixture cleanup refusal'); END;")).unwrap();
         journal.limits.count = 0;
-        let expected = ivy_store::receipts::has_unresolved_outcome(&bad).unwrap_err();
         let actual = journal.cleanup(0, 0, None, None).unwrap_err();
-        assert_eq!(
-            (actual.code, actual.message, actual.outcome, actual.details),
-            (
-                expected.code,
-                expected.message,
-                expected.outcome,
-                expected.details
-            )
-        );
+        assert_eq!(actual.code, "storage_unavailable");
         assert_eq!(
             journal
                 .read(key, &first.object_id, Some(first.revision), technical)
@@ -472,7 +471,7 @@ fn fallible_receipt_inspection_rolls_back_prior_cleanup_and_fences() {
 }
 
 #[test]
-fn protected_cleanup_short_circuits_fallible_receipt_inspection() {
+fn protected_cleanup_keeps_malformed_receipts_and_pending_contexts() {
     for technical in [false, true] {
         for incoming in [false, true] {
             let mut journal = memory(Limits::default());
@@ -548,6 +547,163 @@ fn protected_cleanup_short_circuits_fallible_receipt_inspection() {
             .unwrap()
             .value,
         persisted
+    );
+}
+
+#[test]
+fn malformed_receipt_codes_keep_original_records() {
+    for technical in [false, true] {
+        let mut journal = memory(Limits::default());
+        let mut original = operation(13, "checkpoint", "succeeded");
+        original.insert("errorCode", value(r#"{"toString":null}"#));
+        assert!(ivy_store::receipts::has_unresolved_outcome(&original).unwrap());
+        let key = if technical {
+            "workflow"
+        } else {
+            "secretary/operation"
+        };
+        let pin = if technical {
+            let saved = journal
+                .create_technical(key, "unresolved", &original)
+                .unwrap();
+            journal
+                .complete_technical_workflow(&saved.pin.object_id, 0)
+                .unwrap();
+            saved.pin
+        } else {
+            journal
+                .create_local(key, "unresolved", &original, 0)
+                .unwrap()
+        };
+        let persisted = journal
+            .read(key, &pin.object_id, None, technical)
+            .unwrap()
+            .value;
+        let before = journal.usage().unwrap();
+        journal.limits.count = 0;
+        journal.cleanup(0, 0, None, None).unwrap();
+        assert_eq!(journal.usage().unwrap(), before);
+        assert_eq!(
+            journal
+                .read(key, &pin.object_id, None, technical)
+                .unwrap()
+                .value,
+            persisted
+        );
+        assert_eq!(journal.expired_before().unwrap(), 0);
+    }
+}
+
+#[test]
+fn later_technical_roots_ignore_domain_references_from_evicted_operations() {
+    let mut journal = memory(Limits::default());
+    let later = journal
+        .create_technical("workflow", "later", &value(r#"{"phase":"succeeded"}"#))
+        .unwrap();
+    let first = journal
+        .create_technical("workflow", "first", &value(r#"{"phase":"succeeded"}"#))
+        .unwrap();
+    let mut completed = operation(20, "checkpoint", "succeeded");
+    completed.insert("target", later.pin.object_id.clone().into());
+    journal
+        .create_local("secretary/operation", "between", &completed, 1)
+        .unwrap();
+    journal
+        .complete_technical_workflow(&first.pin.object_id, 0)
+        .unwrap();
+    journal
+        .complete_technical_workflow(&later.pin.object_id, 2)
+        .unwrap();
+    journal.limits.count = 0;
+    journal.cleanup(0, 0, None, None).unwrap();
+    assert_eq!(journal.usage().unwrap().count, 0);
+    assert_eq!(journal.expired_before().unwrap(), 1_800_000_000_020);
+}
+
+#[test]
+fn follow_up_identity_projection_preserves_missing_null_and_utf16() {
+    for (context, follow_up, retained) in [
+        (
+            r#"{"itemId":"\ud800","threadId":"thread"}"#,
+            r#"{"phase":"running","request":{"itemId":"\ud800"}}"#,
+            true,
+        ),
+        (
+            r#"{"itemId":"\ud800","threadId":"thread"}"#,
+            r#"{"phase":"running","request":{"itemId":"\ud801"}}"#,
+            false,
+        ),
+        (
+            r#"{"itemId":null,"threadId":"thread"}"#,
+            r#"{"phase":"running","request":{}}"#,
+            false,
+        ),
+        (
+            r#"{"threadId":"thread"}"#,
+            r#"{"phase":"running","request":{}}"#,
+            true,
+        ),
+        (
+            r#"{"itemId":null,"threadId":"thread"}"#,
+            r#"{"phase":"running","request":{"itemId":null}}"#,
+            true,
+        ),
+    ] {
+        let mut journal = memory(Limits::default());
+        let saved = journal
+            .create_technical("secretary/follow-up-context", "context", &value(context))
+            .unwrap();
+        journal
+            .create_technical("secretary/follow-up", "active", &value(follow_up))
+            .unwrap();
+        journal
+            .complete_technical_workflow(&saved.pin.object_id, 0)
+            .unwrap();
+        journal.limits.count = 0;
+        journal.cleanup(0, 0, None, None).unwrap();
+        assert_eq!(
+            journal
+                .named("secretary/follow-up-context", "context", true)
+                .unwrap()
+                .is_some(),
+            retained,
+            "{context} / {follow_up}"
+        );
+        assert!(
+            journal
+                .named("secretary/follow-up", "active", true)
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
+#[test]
+fn cleanup_removes_orphan_revisions_without_a_head_record() {
+    let mut journal = memory(Limits::default());
+    let saved = journal
+        .create_technical("workflow", "orphan", &IvyJson::Null)
+        .unwrap();
+    journal
+        .complete_technical_workflow(&saved.pin.object_id, 0)
+        .unwrap();
+    journal
+        .db
+        .execute(
+            "DELETE FROM technical_documents WHERE id=?",
+            [&saved.pin.object_id],
+        )
+        .unwrap();
+    journal.limits.count = 0;
+    journal.cleanup(0, 0, None, None).unwrap();
+    assert_eq!(journal.usage().unwrap().count, 0);
+    assert_eq!(
+        journal
+            .db
+            .query_row("SELECT COUNT(*) FROM technical_cleanup", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
     );
 }
 
