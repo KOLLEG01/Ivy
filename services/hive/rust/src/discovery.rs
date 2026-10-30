@@ -1,5 +1,5 @@
 //! Catalog navigation, provider-bound descriptions and retained definition identities.
-use crate::{registry::Registry, store::Store};
+use crate::{registry::Registry, registry_catalog::ToolBinding, store::Store};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     core_bundle::{bundled_schema, operation_input_schema},
@@ -243,22 +243,33 @@ impl Index {
                 .sum::<usize>()
     }
 }
-/// Retained core definitions and calls do not require a search/locale runtime.
+/// The finite bundled core catalog is immutable and shared by both ingress paths.
 #[derive(Default)]
-pub struct CoreCalls(HashMap<JsString, IvyJson>);
+pub struct CoreCalls;
 impl CoreCalls {
-    pub fn binding(&mut self, qualified: &JsString) -> IvyResult<IvyJson> {
+    fn borrowed_binding(&self, qualified: &JsString) -> IvyResult<&'static ToolBinding> {
+        static BINDINGS: OnceLock<HashMap<JsString, OnceLock<IvyResult<ToolBinding>>>> =
+            OnceLock::new();
+        let bindings = BINDINGS.get_or_init(|| {
+            core_methods()
+                .into_iter()
+                .map(|method| (format!("hive.{method}").as_str().into(), OnceLock::new()))
+                .collect()
+        });
+        let entry = bindings.get(qualified).ok_or_else(|| {
+            IvyError::new("not_found", "Unknown discoverable Hive operation.")
+        })?;
+        entry
+            .get_or_init(|| Self::build(qualified))
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+    pub fn binding(&self, qualified: &JsString) -> IvyResult<IvyJson> {
+        Ok(self.borrowed_binding(qualified)?.to_wire())
+    }
+    fn build(qualified: &JsString) -> IvyResult<ToolBinding> {
         let name = text(qualified);
-        let method = name.strip_prefix("hive.");
-        require(
-            method.is_some_and(|m| core_methods().iter().any(|v| v == m)),
-            "not_found",
-            "Unknown discoverable Hive operation.",
-        )?;
-        if let Some(binding) = self.0.get(qualified) {
-            return Ok(binding.clone());
-        }
-        let method = method.unwrap();
+        let method = name.strip_prefix("hive.").unwrap();
         let op = operation_definition(method).ok_or_else(IvyError::internal)?;
         let read_only = op.get("mutation").and_then(|v| v.as_bool()) != Some(true);
         let input = operation_input_schema(method)?;
@@ -317,16 +328,13 @@ impl CoreCalls {
                 ]),
             ),
         ]);
-        let hash = tool_definition_hash(&definition)?;
-        let binding = IvyJson::object([
-            ("qualifiedName", IvyJson::String(qualified.clone())),
-            ("definition", definition),
-            ("definitionHash", hash.into()),
-        ]);
-        self.0.insert(qualified.clone(), binding.clone());
-        Ok(binding)
+        Ok(ToolBinding {
+            qualified_name: qualified.clone(),
+            definition_hash: tool_definition_hash(&definition)?.into(),
+            definition,
+        })
     }
-    pub fn resolve(&mut self, params: &IvyJson) -> IvyResult<IvyJson> {
+    pub fn resolve(&self, params: &IvyJson) -> IvyResult<IvyJson> {
         require(
             params
                 .get("serviceNodeId")
@@ -339,9 +347,10 @@ impl CoreCalls {
             "invalid_arguments",
             "Hive core uses its declared arguments and mutationId, not a service node or outer operationId.",
         )?;
-        let binding = self.binding(string(params, "qualifiedName")?)?;
+        let binding = self.borrowed_binding(string(params, "qualifiedName")?)?;
         require(
-            binding.get("definitionHash") == params.get("expectedDefinitionHash"),
+            params.get("expectedDefinitionHash").and_then(IvyJson::as_js_string)
+                == Some(&binding.definition_hash),
             "tool_definition_changed",
             "The retained Hive definition changed; describe and reassess.",
         )?;
@@ -354,7 +363,7 @@ impl CoreCalls {
         return Ok(IvyJson::object([
             (
                 "method",
-                field(field(&binding, "definition")?, "name")?.clone(),
+                field(&binding.definition, "name")?.clone(),
             ),
             ("params", arguments.clone()),
         ]));

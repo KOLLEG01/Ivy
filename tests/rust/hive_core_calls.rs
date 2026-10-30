@@ -5,7 +5,7 @@ use ivy_hive::discovery::CoreCalls;
 #[test]
 fn core_calls_original_definitions_hashes_and_resolution_order() {
     let original = construction_reference("coreCalls");
-    let mut owner = CoreCalls::default();
+    let owner = CoreCalls;
     let rows = original.required("rows").unwrap().as_array().unwrap();
     assert_eq!(
         original

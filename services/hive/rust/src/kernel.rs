@@ -370,9 +370,15 @@ impl Call<'_> {
                 "Return to the original caller before reconciling or repeating this action.",
             )?;
             let resolved = self.discovery.resolve_call(params)?;
-            let mut request = value.clone();
-            for (key, value) in resolved.as_object().ok_or_else(IvyError::internal)? {
-                request.insert(key.clone(), value.clone());
+            // Keep envelope extensions, but do not clone the old arguments only
+            // to overwrite them with the resolved parameter owner.
+            let mut request = IvyJson::object(
+                value.as_object().ok_or_else(IvyError::internal)?.iter()
+                    .filter(|(key, _)| !key.eq_str("params"))
+                    .cloned(),
+            );
+            for (key, value) in resolved.into_object().ok_or_else(IvyError::internal)? {
+                request.insert(key, value);
             }
             return self.execute(context, &request);
         }

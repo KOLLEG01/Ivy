@@ -11,7 +11,7 @@ use ivy_contracts::{
     core_schema::{validate_input, validate_output},
     validation::{validate_request, validate_tool_routing},
 };
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[derive(Default)]
 pub struct Options {
@@ -19,7 +19,7 @@ pub struct Options {
     pub package_publisher_principal_ids: Vec<JsString>,
 }
 struct Parts {
-    core: Mutex<CoreCalls>,
+    core: CoreCalls,
     packages: Option<PackageRegistry>,
     now: Clock,
     options: Options,
@@ -36,7 +36,7 @@ fn require(value: bool, code: &str, message: &str) -> IvyResult<()> {
 impl Dispatcher {
     pub fn new(now: Clock, packages: Option<PackageRegistry>, options: Options) -> Self {
         Self(Arc::new(Parts {
-            core: Mutex::new(CoreCalls::default()),
+            core: CoreCalls,
             packages,
             now,
             options,
@@ -123,7 +123,7 @@ impl Dispatcher {
                     "caller_changed",
                     "Return to the original caller before reconciling or repeating this action.",
                 )?;
-                let resolved = self.0.core.lock().unwrap().resolve(params)?;
+                let mut resolved = self.0.core.resolve(params)?;
                 if ![
                     "notifications.subscribe",
                     "packages.catalog",
@@ -138,8 +138,8 @@ impl Dispatcher {
                     ("jsonrpc", "2.0".into()),
                     ("id", request.required("id")?.clone()),
                 ]);
-                next.insert("method", resolved.required("method")?.clone());
-                next.insert("params", resolved.required("params")?.clone());
+                next.insert("method", resolved.remove("method").ok_or_else(IvyError::internal)?);
+                next.insert("params", resolved.remove("params").ok_or_else(IvyError::internal)?);
                 require_fresh(context, &*self.0.now)?;
                 return self.dispatch(peers, context, &next, peer);
             }

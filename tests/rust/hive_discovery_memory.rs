@@ -9,6 +9,59 @@ fn discovery() -> Discovery {
 }
 
 #[test]
+fn core_definitions_are_shared_without_internal_schema_copies() {
+    const CHILD: &str = "IVY_CORE_BINDING_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "discovery::memory_tests::core_definitions_are_shared_without_internal_schema_copies", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        return;
+    }
+    let barrier = std::sync::Barrier::new(8);
+    let concurrent = std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..8).map(|_| scope.spawn(|| {
+            barrier.wait();
+            CoreCalls.borrowed_binding(&"hive.objects.read".into()).unwrap()
+        })).collect();
+        threads.into_iter().map(|t| t.join().unwrap()).collect::<Vec<_>>()
+    });
+    assert!(concurrent.iter().all(|binding| std::ptr::eq(*binding, concurrent[0])));
+    // Use the largest real bundled definition, including its opaque schemas.
+    let largest = core_methods().into_iter().map(|method| {
+        CoreCalls.borrowed_binding(&format!("hive.{method}").as_str().into()).unwrap()
+    }).max_by_key(|binding| binding.definition.retained_bytes()).unwrap();
+    let params = IvyJson::object([
+        ("qualifiedName", largest.qualified_name.clone().into()),
+        ("expectedDefinitionHash", largest.definition_hash.clone().into()),
+        ("arguments", empty()),
+    ]);
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    let wire = CoreCalls.binding(&largest.qualified_name).unwrap();
+    let copied_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    assert_eq!(wire.get("definition"), Some(&largest.definition));
+    drop(wire);
+    let first = CoreCalls;
+    let second = CoreCalls;
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    for _ in 0..16 {
+        for owner in [&first, &second] {
+            assert!(std::ptr::eq(largest, owner.borrowed_binding(&largest.qualified_name).unwrap()));
+            let resolved = owner.resolve(&params).unwrap();
+            assert_eq!(resolved.get("method"), largest.definition.get("name"));
+            assert_eq!(resolved.get("params"), params.get("arguments"));
+        }
+    }
+    let shared_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    eprintln!("Core binding Rust allocation peaks: wire copy {copied_peak} bytes; 32 shared internal resolutions {shared_peak} bytes");
+    assert!(copied_peak > 16 * 1024, "The real definition must exercise a substantial copy");
+    assert!(shared_peak < 16 * 1024, "Internal calls copied the core schema: {shared_peak} bytes");
+}
+
+#[test]
 fn search_index_does_not_retain_or_copy_the_registry_source() {
     const CHILD: &str = "IVY_DISCOVERY_MEMORY_CHILD";
     if std::env::var_os(CHILD).is_none() {
