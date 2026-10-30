@@ -232,12 +232,12 @@ fn routing(input: &IvyJson) -> IvyJson {
                 }
                 "prepare" | "dashboard" => {
                     let call = if text(step, "op") == "prepare" {
-                        owner.prepare(step.required("context")?, step.required("params")?)?
+                        owner.prepare(step.required("context")?, step.required("params")?.clone())?
                     } else {
                         owner.prepare_dashboard_image(
                             step.required("context")?,
                             step.required("node")?.as_js_string().unwrap(),
-                            step.required("args")?,
+                            step.required("args")?.clone(),
                         )?
                     };
                     let value = prepared_snapshot(&call);

@@ -282,7 +282,7 @@ impl LiveRouting {
         self.notification_validators
             .validate(schema, field(params, "payload")?, 1024 * 1024)
     }
-    pub fn prepare(&self, context: &IvyJson, params: &IvyJson) -> IvyResult<PreparedCall> {
+    pub fn prepare(&self, context: &IvyJson, mut params: IvyJson) -> IvyResult<PreparedCall> {
         self.caller(context)?;
         require(
             context
@@ -294,7 +294,7 @@ impl LiveRouting {
             "caller_changed",
             "Caller identity differs from the connected principal.",
         )?;
-        let qualified = string(params, "qualifiedName")?;
+        let qualified = string(&params, "qualifiedName")?;
         let namespace = JsString(
             qualified
                 .0
@@ -304,7 +304,7 @@ impl LiveRouting {
                 .to_vec(),
         );
         let resource = params.get("resourceRef");
-        let selected = nullable(params, "serviceNodeId")
+        let selected = nullable(&params, "serviceNodeId")
             .or_else(|| resource.and_then(|r| r.get("serviceNodeId")));
         require(
             params
@@ -419,7 +419,7 @@ impl LiveRouting {
                 "Tool definition changed.",
             ));
         }
-        let arguments = field(params, "arguments")?;
+        let arguments = field(&params, "arguments")?;
         if let (Some(validators), Some(schemas)) = (&self.validators, &binding.schemas) {
             validators.validate(&schemas.input, arguments, MANAGEMENT_FRAME_BYTES)?;
         }
@@ -435,15 +435,15 @@ impl LiveRouting {
                 caller_principal_id: string(context, "principalId")?,
             },
             definition_hash: binding.definition_hash.clone(),
-            arguments: arguments.clone(),
-            operation_id: params.get("operationId").cloned(),
+            arguments: params.remove("arguments").unwrap(),
+            operation_id: params.remove("operationId"),
         })
     }
     pub fn prepare_dashboard_image(
         &self,
         context: &IvyJson,
         node: &JsString,
-        args: &IvyJson,
+        args: IvyJson,
     ) -> IvyResult<PreparedCall> {
         let binding = self
             .route(node)
@@ -458,7 +458,7 @@ impl LiveRouting {
         )?;
         self.prepare(
             context,
-            &IvyJson::object([
+            IvyJson::object([
                 ("serviceNodeId", IvyJson::String(node.clone())),
                 ("serviceName", "dashboards".into()),
                 ("qualifiedName", "dashboards.image".into()),
@@ -466,7 +466,7 @@ impl LiveRouting {
                     "expectedDefinitionHash",
                     IvyJson::String(binding.definition_hash.clone()),
                 ),
-                ("arguments", args.clone()),
+                ("arguments", args),
             ]),
         )
     }

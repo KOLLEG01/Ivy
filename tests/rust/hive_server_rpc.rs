@@ -266,7 +266,7 @@ fn compare(group: &str, traces: Vec<Value>) {
             let direct_controls = controls.clone();
             let tool_routing = trace["toolRouting"] == true;
             let direct = Arc::new(
-                move |context: &IvyJson, request: &IvyJson| -> IvyResult<Option<Reply>> {
+                move |context: &IvyJson, request: &mut IvyJson| -> IvyResult<Option<Reply>> {
                     if tool_routing {
                         if request.get("method") == Some(&"tools.call".into())
                             || request.get("method") == Some(&"discovery.call".into())

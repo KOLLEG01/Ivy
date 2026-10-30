@@ -545,7 +545,7 @@ async fn native(trace: &Value) -> Value {
                             &routing
                                 .lock()
                                 .unwrap()
-                                .prepare(&wire(&step["context"]), &wire(&step["params"]))?,
+                                .prepare(&wire(&step["context"]), wire(&step["params"]))?,
                         ),
                     ),
                 ])),

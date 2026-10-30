@@ -730,7 +730,7 @@ async fn run_trace(trace: &Value, source: &IvyJson) -> IvyJson {
                     let call = routing
                         .lock()
                         .unwrap()
-                        .prepare(&wire(&step["context"]), &wire(&step["params"]))?;
+                        .prepare(&wire(&step["context"]), wire(&step["params"]))?;
                     let value = super::prepared_snapshot(&call);
                     events.lock().unwrap().push(IvyJson::object([
                         ("kind", "prepared".into()),
@@ -788,7 +788,7 @@ async fn run_trace(trace: &Value, source: &IvyJson) -> IvyJson {
                 }
                 "direct" => {
                     let work = invocation
-                        .direct(&expanded(&step["context"]), &expanded(&step["frame"]))?;
+                        .direct(&expanded(&step["context"]), &mut expanded(&step["frame"]))?;
                     events.lock().unwrap().push(IvyJson::object([
                         ("kind", "direct-return".into()),
                         ("name", name.into()),

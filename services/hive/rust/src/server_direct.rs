@@ -66,7 +66,7 @@ impl Dispatcher {
         &self,
         peers: &Peers,
         context: &IvyJson,
-        request: &IvyJson,
+        request: &mut IvyJson,
         peer: Option<&Peer>,
     ) -> IvyResult<Option<Reply>> {
         let Some(method) = request.get("method").and_then(IvyJson::as_js_string) else {
@@ -141,7 +141,7 @@ impl Dispatcher {
                 next.insert("method", resolved.remove("method").ok_or_else(IvyError::internal)?);
                 next.insert("params", resolved.remove("params").ok_or_else(IvyError::internal)?);
                 require_fresh(context, &*self.0.now)?;
-                return self.dispatch(peers, context, &next, peer);
+                return self.dispatch(peers, context, &mut next, peer);
             }
             require(
                 params
@@ -152,6 +152,6 @@ impl Dispatcher {
                 "Service calls require the exact described serviceNodeId.",
             )?;
         }
-        peers.call(context, params).map(Some)
+        peers.call(context, request.remove("params").unwrap()).map(Some)
     }
 }

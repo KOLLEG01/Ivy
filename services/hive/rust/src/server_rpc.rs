@@ -35,7 +35,7 @@ impl Storage for StorageClient {
 }
 /// Direct routing starts eagerly and may throw before returning its promise.
 /// Freshness and tool/discovery routing fields are checked before this callback.
-pub type Direct = Arc<dyn Fn(&IvyJson, &IvyJson) -> IvyResult<Option<Reply>> + Send + Sync>;
+pub type Direct = Arc<dyn Fn(&IvyJson, &mut IvyJson) -> IvyResult<Option<Reply>> + Send + Sync>;
 pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
 
 #[derive(Default)]
@@ -118,12 +118,12 @@ impl Invocation {
             options,
         }))
     }
-    pub fn direct(&self, context: &IvyJson, request: &IvyJson) -> IvyResult<Option<Reply>> {
+    pub fn direct(&self, context: &IvyJson, request: &mut IvyJson) -> IvyResult<Option<Reply>> {
         require_fresh(context, &*self.0.now)?;
         validate_direct_tool_request(request)?;
         (self.0.direct)(context, request)
     }
-    pub fn invoke(&self, context: IvyJson, request: IvyJson, received_bytes: usize) -> Reply {
+    pub fn invoke(&self, context: IvyJson, mut request: IvyJson, received_bytes: usize) -> Reply {
         if let Err(error) = require_fresh(&context, &*self.0.now) {
             return ready(Err(error));
         }
@@ -162,7 +162,7 @@ impl Invocation {
                 }
             }
             require_fresh(&context, &*self.0.now)?;
-            if let Some(direct) = self.direct(&context, &request)? {
+            if let Some(direct) = self.direct(&context, &mut request)? {
                 return Ok(direct);
             }
             Ok(self.0.storage.dispatch(

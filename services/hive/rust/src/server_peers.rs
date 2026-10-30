@@ -85,7 +85,7 @@ impl crate::browser_session::Peers for Peers {
 /// The real direct dispatcher is entered synchronously after its freshness
 /// check. Its tool/discovery validator remains a separate contract owner.
 pub type Direct =
-    Arc<dyn Fn(&Peers, &IvyJson, &IvyJson, &Peer) -> IvyResult<Option<Reply>> + Send + Sync>;
+    Arc<dyn Fn(&Peers, &IvyJson, &mut IvyJson, &Peer) -> IvyResult<Option<Reply>> + Send + Sync>;
 pub type Ids = Arc<dyn Fn() -> JsString + Send + Sync>;
 pub fn native_ids() -> Ids {
     Arc::new(|| uuid::Uuid::new_v4().to_string().into())
@@ -446,7 +446,7 @@ impl Peers {
             ("message", message.into()),
         ]));
     }
-    pub fn call(&self, context: &IvyJson, params: &IvyJson) -> IvyResult<Reply> {
+    pub fn call(&self, context: &IvyJson, params: IvyJson) -> IvyResult<Reply> {
         let call = self
             .0
             .owners
@@ -466,7 +466,7 @@ impl Peers {
         &self,
         context: &IvyJson,
         node: &JsString,
-        args: &IvyJson,
+        args: IvyJson,
     ) -> IvyResult<Reply> {
         let call = self
             .0
@@ -765,7 +765,7 @@ impl Peers {
             "Hive WebSocket frames must be JSON text.",
         )
         .and_then(|()| http_common::json_body(bytes));
-        let frame = match parsed {
+        let mut frame = match parsed {
             Ok(frame) => frame,
             Err(error) => return peer.send(&rpc::failure(&error, IvyJson::Null), None),
         };
@@ -809,7 +809,7 @@ impl Peers {
         let direct = (|| {
             require_fresh(&context, &*self.0.owners.now)?;
             validate_direct_tool_request(&frame)?;
-            let direct = (self.0.owners.direct)(self, &context, &frame, peer)?;
+            let direct = (self.0.owners.direct)(self, &context, &mut frame, peer)?;
             if direct.is_none() {
                 let mut routing = self.0.owners.routing.lock().unwrap();
                 if context

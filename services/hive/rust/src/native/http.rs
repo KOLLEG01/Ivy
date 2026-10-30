@@ -284,7 +284,7 @@ async fn handle(
                             ("principalId", "hive.dashboard-image".into()),
                             ("credentialDigest", "dashboard-image".into()),
                         ]);
-                        peers.dashboard_image(&context, &node, &args)?.await
+                        peers.dashboard_image(&context, &node, args)?.await
                     }
                 },
                 &mut output,
