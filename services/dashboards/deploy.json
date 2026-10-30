@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "dashboards",
   "kind": "service",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "HTML dashboards with live Hive data and PNG rendering",
   "connectsToHive": true,
   "requirements": {
