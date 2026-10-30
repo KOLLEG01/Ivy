@@ -465,6 +465,15 @@ impl Registry {
                 .map_err(|_| IvyError::internal())?,
         ))
     }
+    pub(crate) fn mcp_names(&self, store: &Store, id: &JsString) -> IvyResult<Vec<JsString>> {
+        let mut statement = sql(store, store.connection().prepare_cached(
+            "SELECT registry_json FROM registries WHERE node_id=?",
+        ))?;
+        let mut rows = sql(store, statement.query([text(id)]))?;
+        let Some(row) = sql(store, rows.next())? else { return Ok(Vec::new()) };
+        let source = sql(store, row.get_ref(0))?.as_str().map_err(|_| IvyError::internal())?;
+        namespaces::mcp_names(source)
+    }
     pub(crate) fn topic_namespaces(
         &self,
         store: &Store,

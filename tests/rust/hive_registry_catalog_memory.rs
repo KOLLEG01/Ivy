@@ -14,6 +14,88 @@ fn namespace_store(source: &str) -> Store {
     store
 }
 
+fn full_registry_mcp_names(owner: &Registry, store: &Store, id: &JsString) -> IvyResult<Vec<JsString>> {
+    let mut names = Vec::new();
+    if let Some(registry) = owner.get_registry(store, id)? {
+        for ns in array(&registry, "namespaces")? {
+            for tool in array(ns, "tools")? {
+                require_object(tool)?;
+                if let Some(name) = tool.get("discovery").and_then(|v| v.get("mcp"))
+                    .and_then(|v| v.get("name")).and_then(IvyJson::as_js_string)
+                    .filter(|v| !v.0.is_empty()) {
+                    names.push(name.clone());
+                }
+            }
+        }
+    }
+    Ok(names)
+}
+
+#[test]
+fn mcp_name_projection_preserves_names_optional_metadata_and_catalog_errors() {
+    let store = namespace_store("null");
+    let owner = Registry::default();
+    let id = JsString::from("fixture");
+    for source in ["null", " \t\r\nnull ", r#"{"namespaces":[]}"#,
+        r#"{"namespaces":[{"tools":[{},
+          {"discovery":null},{"discovery":[]},{"discovery":"ignored"},{"discovery":17},
+          {"discovery":{}},{"discovery":{"mcp":null}},{"discovery":{"mcp":[]}},
+          {"discovery":{"mcp":17}},{"discovery":{"mcp":{}}},
+          {"discovery":{"mcp":{"name":null}}},{"discovery":{"mcp":{"name":false}}},
+          {"discovery":{"mcp":{"name":[]}}},{"discovery":{"mcp":{"name":""}}},
+          {"discovery":{"mcp":{"name":"fixture_read"}},"inputSchema":{"unknown":"\ud802"}},
+          {"discovery":{"mcp":{"name":"fixture_read"}},"description":"\ud803"},
+          {"discovery":{"mcp":{"name":"\ud800"}}}
+        ]},{"namespace":null,"tools":[{"discovery":{"mcp":{"name":"second"}}}]}]}"#,
+        "[]", "[[]]", "1", "{}", "\u{2000}null", r#"{"namespaces":null}"#,
+        r#"{"namespaces":{}}"#, r#"{"namespaces":[null]}"#,
+        r#"{"namespaces":[[]]}"#, r#"{"namespaces":[{}]}"#,
+        r#"{"namespaces":[{"tools":null}]}"#, r#"{"namespaces":[{"tools":{}}]}"#,
+        r#"{"namespaces":[{"tools":[null]}]}"#, r#"{"namespaces":[{"tools":[[]]}]}"#,
+        r#"{"namespaces":[{"tools":[1]}]}"#, r#"{"namespaces":[]} trailing"#] {
+        store.connection().execute("UPDATE registries SET registry_json=?", [source]).unwrap();
+        let expected = full_registry_mcp_names(&owner, &store, &id).map_err(|e| e.code);
+        assert_eq!(owner.mcp_names(&store, &id).map_err(|e| e.code), expected, "{source}");
+    }
+    store.connection().execute("DELETE FROM registries", []).unwrap();
+    assert!(owner.mcp_names(&store, &id).unwrap().is_empty());
+}
+
+#[test]
+fn mcp_name_projection_does_not_materialize_unrelated_definitions() {
+    const CHILD: &str = "IVY_MCP_NAMES_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "registry::catalog_memory_tests::mcp_name_projection_does_not_materialize_unrelated_definitions", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+        return;
+    }
+    let source = serde_json::json!({"namespaces":[{"tools":[{
+        "discovery":{"mcp":{"name":"fixture_read"}},
+        "inputSchema":{"description":"s".repeat(2*1024*1024)},
+        "outputSchema":false
+    }],"topics":[{"payloadSchema":{"description":"s".repeat(1024*1024)}}]}]}).to_string();
+    let store = namespace_store(&source);
+    drop(source);
+    let owner = Registry::default();
+    let id = JsString::from("fixture");
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    let expected = full_registry_mcp_names(&owner, &store, &id).unwrap();
+    let full_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    for _ in 0..8 { assert_eq!(owner.mcp_names(&store, &id).unwrap(), expected); }
+    let projected_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    eprintln!("Hive MCP name projection Rust allocation peak: full {full_peak} bytes, projected {projected_peak} bytes across eight reads with 3 MiB unrelated schema text");
+    // Rust allocator requests; excludes SQLite's C heap and process RSS.
+    assert!(full_peak > 8 * 1024 * 1024);
+    assert!(projected_peak < 32 * 1024, "MCP name selection decoded definitions: {projected_peak}");
+}
+
 #[test]
 fn namespace_names_projection_only_allocates_names() {
     const CHILD: &str = "IVY_NAMESPACE_NAMES_MEMORY_CHILD";

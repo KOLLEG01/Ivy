@@ -58,9 +58,7 @@ impl Registry {
             let mut other_names=HashSet::new();
             for owner in self.nodes(store,runtime,now)?{
                 if owner.get("serviceName").and_then(IvyJson::as_js_string)==Some(&service){continue;}
-                if let Some(registry)=self.get_registry(store,string(&owner,"serviceNodeId")?)?.filter(|v|!v.is_null()){
-                    for ns in array(&registry,"namespaces")?{for tool in array(ns,"tools")?{require_object(tool)?;if let Some(name)=mcp_name(tool){other_names.insert(name.clone());}}}
-                }
+                other_names.extend(self.mcp_names(store,string(&owner,"serviceNodeId")?)?);
             }
             for ns in namespaces{
                 let namespace=string(ns,"namespace")?;

@@ -1,4 +1,4 @@
-//! Read namespace names and summaries without decoding opaque definitions.
+//! Read registry metadata without decoding unrelated definitions.
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
 use serde::{Deserialize, de::IgnoredAny};
 use serde_json::value::RawValue;
@@ -22,6 +22,26 @@ struct Names<'a> {
 struct Named<'a> {
     #[serde(borrow)]
     namespace: &'a RawValue,
+}
+#[derive(Deserialize)]
+struct Tools<'a> {
+    #[serde(borrow)]
+    tools: Vec<&'a RawValue>,
+}
+#[derive(Deserialize)]
+struct ToolDiscovery<'a> {
+    #[serde(borrow)]
+    discovery: Option<&'a RawValue>,
+}
+#[derive(Deserialize)]
+struct DiscoveryMcp<'a> {
+    #[serde(borrow)]
+    mcp: Option<&'a RawValue>,
+}
+#[derive(Deserialize)]
+struct McpName<'a> {
+    #[serde(borrow)]
+    name: Option<&'a RawValue>,
 }
 #[derive(Deserialize)]
 struct TopicFields<'a> {
@@ -75,6 +95,39 @@ pub(super) fn names(source: &str) -> IvyResult<Vec<IvyJson>> {
         let named: Named<'_> = serde_json::from_str(raw.get()).map_err(|_| IvyError::internal())?;
         value(named.namespace)
     }).collect()
+}
+
+pub(super) fn mcp_names(source: &str) -> IvyResult<Vec<JsString>> {
+    let source = source.trim_matches([' ', '\t', '\r', '\n']);
+    if source == "null" {
+        return Ok(Vec::new());
+    }
+    if !source.starts_with('{') {
+        return Err(IvyError::internal());
+    }
+    let catalog: Catalog<'_> = serde_json::from_str(source).map_err(|_| IvyError::internal())?;
+    let mut names = Vec::new();
+    for raw in catalog.namespaces {
+        if !raw.get().starts_with('{') {
+            return Err(IvyError::internal());
+        }
+        let namespace: Tools<'_> = serde_json::from_str(raw.get()).map_err(|_| IvyError::internal())?;
+        for raw in namespace.tools {
+            if !raw.get().starts_with('{') {
+                return Err(IvyError::internal());
+            }
+            let tool: ToolDiscovery<'_> = serde_json::from_str(raw.get()).map_err(|_| IvyError::internal())?;
+            let Some(raw) = tool.discovery.filter(|raw| raw.get().starts_with('{')) else { continue };
+            let discovery: DiscoveryMcp<'_> = serde_json::from_str(raw.get()).map_err(|_| IvyError::internal())?;
+            let Some(raw) = discovery.mcp.filter(|raw| raw.get().starts_with('{')) else { continue };
+            let mcp: McpName<'_> = serde_json::from_str(raw.get()).map_err(|_| IvyError::internal())?;
+            if let Some(raw) = mcp.name.filter(|raw| raw.get().starts_with('"')) {
+                let name = value(raw)?.into_js_string().ok_or_else(IvyError::internal)?;
+                if !name.0.is_empty() { names.push(name); }
+            }
+        }
+    }
+    Ok(names)
 }
 
 pub(super) fn find<'a>(source: &'a str, namespace: &JsString) -> IvyResult<Option<&'a RawValue>> {
