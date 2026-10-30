@@ -24,6 +24,21 @@ struct Named<'a> {
     namespace: &'a RawValue,
 }
 #[derive(Deserialize)]
+struct TopicFields<'a> {
+    #[serde(default, borrow, deserialize_with = "present_raw")]
+    namespace: Option<&'a RawValue>,
+    #[serde(borrow)]
+    topics: Option<&'a RawValue>,
+}
+fn present_raw<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<&'de RawValue>, D::Error> {
+    <&RawValue>::deserialize(de).map(Some)
+}
+
+pub(crate) struct TopicNamespace {
+    pub namespace: Option<IvyJson>,
+    pub topics: Vec<IvyJson>,
+}
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Summary<'a> {
     #[serde(borrow)]
@@ -85,6 +100,35 @@ pub(super) fn find<'a>(source: &'a str, namespace: &JsString) -> IvyResult<Optio
         }
     }
     Ok(None)
+}
+
+pub(super) fn topics(source: &str, namespace: Option<&JsString>) -> IvyResult<Vec<TopicNamespace>> {
+    let source = source.trim_matches([' ', '\t', '\r', '\n']);
+    if source == "null" {
+        return Ok(Vec::new());
+    }
+    if !source.starts_with('{') {
+        return Err(IvyError::internal());
+    }
+    let catalog: Names<'_> = serde_json::from_str(source).map_err(|_| IvyError::internal())?;
+    let mut selected = Vec::new();
+    for raw in catalog.namespaces.unwrap_or_default() {
+        if !raw.get().starts_with('{') {
+            continue;
+        }
+        let named: TopicFields<'_> = serde_json::from_str(raw.get()).map_err(|_| IvyError::internal())?;
+        let name = named.namespace.map(value).transpose()?;
+        if namespace.is_some_and(|namespace| name.as_ref().and_then(IvyJson::as_js_string) != Some(namespace)) {
+            continue;
+        }
+        let topics = named.topics.map(|raw| serde_json::from_str::<Vec<&RawValue>>(raw.get())
+            .map_err(|_| IvyError::internal())).transpose()?.unwrap_or_default();
+        selected.push(TopicNamespace {
+            namespace: name,
+            topics: topics.into_iter().map(value).collect::<IvyResult<_>>()?,
+        });
+    }
+    Ok(selected)
 }
 
 pub(super) fn summary(raw: &RawValue) -> IvyResult<NamespaceSummary> {

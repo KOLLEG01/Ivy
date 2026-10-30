@@ -76,6 +76,84 @@ fn namespace_names_preserve_values_and_malformed_catalog_errors() {
 }
 
 #[test]
+fn topic_projection_preserves_namespace_presence_filters_and_errors() {
+    let store = namespace_store("null");
+    let owner = Registry::default();
+    let id = JsString::from("fixture");
+    for source in ["null", "{}", r#"{"namespaces":null}"#, r#"{"namespaces":[]}"#,
+        r#"{"namespaces":[null,[],7,"name",{},
+          {"topics":[{"topic":"missing"}]},
+          {"namespace":null,"topics":[{"topic":"null-name"}]},
+          {"namespace":"fixture","topics":[{"topic":"value","payloadSchema":{"unknown":"\ud800"}}]},
+          {"namespace":"\ud801","topics":[true,null]}]}"#] {
+        store.connection().execute("UPDATE registries SET registry_json=?", [source]).unwrap();
+        let full = owner.get_registry(&store, &id).unwrap();
+        let expected: Vec<_> = full.as_ref().and_then(|v| v.get("namespaces"))
+            .and_then(IvyJson::as_array).into_iter().flatten().flat_map(|ns| {
+                ns.get("topics").and_then(IvyJson::as_array).into_iter().flatten()
+                    .map(|topic| (ns.get("namespace").cloned(), topic.clone()))
+            }).collect();
+        let actual: Vec<_> = owner.topic_namespaces(&store, &id, None).unwrap().into_iter()
+            .flat_map(|ns| ns.topics.into_iter().map(move |topic| (ns.namespace.clone(), topic))).collect();
+        assert_eq!(actual, expected, "{source}");
+    }
+    let source = r#"{"namespaces":[{"namespace":"other","topics":17},
+      {"namespace":"fixture","topics":[{"topic":"selected"}]}]}"#;
+    store.connection().execute("UPDATE registries SET registry_json=?", [source]).unwrap();
+    let selected = owner.topic_namespaces(&store, &id, Some(&"fixture".into())).unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].topics[0].get("topic"), Some(&"selected".into()));
+    assert_eq!(owner.topic_namespaces(&store, &id, None).err().unwrap().code, "internal_error");
+    for source in ["[]", "1", "\u{2000}null", r#"{"namespaces":{}}"#,
+        r#"{"namespaces":[{"topics":{}}]}"#, r#"{"namespaces":[]} trailing"#] {
+        store.connection().execute("UPDATE registries SET registry_json=?", [source]).unwrap();
+        assert_eq!(owner.topic_namespaces(&store, &id, None).err().unwrap().code, "internal_error", "{source}");
+    }
+    store.connection().execute("DELETE FROM registries", []).unwrap();
+    assert!(owner.topic_namespaces(&store, &id, None).unwrap().is_empty());
+}
+
+#[test]
+fn topic_projection_does_not_decode_tool_or_unselected_topic_schemas() {
+    const CHILD: &str = "IVY_TOPIC_PROJECTION_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "registry::catalog_memory_tests::topic_projection_does_not_decode_tool_or_unselected_topic_schemas", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+        return;
+    }
+    let source = serde_json::json!({"namespaces":[
+        {"namespace":"other","topics":[{"topic":"other","payloadSchema":{"description":"s".repeat(1024*1024)}}]},
+        {"namespace":"fixture","tools":[{"inputSchema":{"description":"s".repeat(2*1024*1024)}}],
+         "topics":[{"topic":"selected","payloadSchema":{"type":"object"}}]}
+    ]}).to_string();
+    let store = namespace_store(&source);
+    drop(source);
+    let owner = Registry::default();
+    let id = JsString::from("fixture");
+    let namespace = JsString::from("fixture");
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    let full = owner.get_registry(&store, &id).unwrap().unwrap();
+    let full_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    drop(full);
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    for _ in 0..4 {
+        let selected = owner.topic_namespaces(&store, &id, Some(&namespace)).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].topics.len(), 1);
+    }
+    let projected_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    eprintln!("Hive topic projection Rust allocation peak: full {full_peak} bytes, projected {projected_peak} bytes with 3 MiB unneeded schema text");
+    assert!(full_peak > 6 * 1024 * 1024);
+    assert!(projected_peak < 128 * 1024, "Topic reads decoded unneeded schemas: {projected_peak}");
+}
+
+#[test]
 fn namespace_selection_and_summary_do_not_materialize_definitions() {
     const CHILD: &str = "IVY_NAMESPACE_MEMORY_CHILD";
     if std::env::var_os(CHILD).is_none() {

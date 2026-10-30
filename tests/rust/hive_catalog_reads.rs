@@ -108,3 +108,77 @@ fn tool_page_identity_does_not_clone_the_full_tool_vector() {
     // Compare allocator requests above the already-owned input, excluding RSS.
     assert!(cloned_peak > moved_peak + isize::try_from(copied_schema_bytes * 3 / 4).unwrap());
 }
+
+fn fixture_topics(schema_bytes: usize) -> Vec<TopicRecord> {
+    (0..8).map(|index| TopicRecord {
+        provider: if index == 7 { IvyJson::Null } else {
+            IvyJson::object([("node", IvyJson::object([("serviceNodeId", format!("fixture-{index}").into())]))])
+        },
+        namespace: "fixture".into(),
+        definition: IvyJson::object([
+            ("topic", format!("changed{index}").into()),
+            ("version", "1.0.0".into()),
+            ("payloadSchema", IvyJson::object([("description", "s".repeat(schema_bytes).into())])),
+        ]),
+    }).collect()
+}
+
+fn copied_topic_identity(records: &[TopicRecord]) -> IvyJson {
+    IvyJson::Array(records.iter().map(|record| IvyJson::object([
+        ("serviceNodeId", record.provider.get("node").and_then(|node| node.get("serviceNodeId"))
+            .cloned().unwrap_or_else(|| "hive".into())),
+        ("namespace", record.namespace.clone()),
+        ("definition", record.definition.clone()),
+    ])).collect())
+}
+
+#[test]
+fn topic_page_identity_preserves_payloads_hashes_and_native_ownership() {
+    for schema in [IvyJson::Bool(true), IvyJson::Bool(false), IvyJson::object([
+        (JsString(vec![0xd800]), IvyJson::String(JsString(vec![0xd801]))),
+        ("unknown".into(), IvyJson::Array(vec![IvyJson::Null, 17.0.into()])),
+    ]), 9007199254740992.0.into()] {
+        let mut records = fixture_topics(0);
+        records[0].definition.insert("payloadSchema", schema);
+        let expected_hash = hash_json(&copied_topic_identity(&records)).map_err(|e| e.code);
+        let expected: Vec<_> = records.iter().map(|record| IvyJson::object([
+            ("provider", record.provider.clone()), ("namespace", record.namespace.clone()),
+            ("definition", record.definition.clone()),
+        ])).collect();
+        let actual = topic_page_records(records).map_err(|e| e.code);
+        assert_eq!(actual.as_ref().map(|(hash, _)| hash).map_err(|code| code.clone()), expected_hash.as_ref().map_err(|code| code.clone()));
+        if let Ok((_, returned)) = actual { assert_eq!(returned, expected); }
+    }
+}
+
+#[test]
+fn topic_page_identity_moves_schema_payloads_without_copying_them() {
+    const CHILD: &str = "IVY_TOPIC_PAGE_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "kernel::catalogs::read_tests::topic_page_identity_moves_schema_payloads_without_copying_them", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+        return;
+    }
+    let records = fixture_topics(128 * 1024);
+    let payload = |value: &IvyJson| value.get("payloadSchema").unwrap()
+        .get("description").unwrap().as_js_string().unwrap().0.as_ptr() as usize;
+    let pointers: Vec<_> = records.iter().map(|record| payload(&record.definition)).collect();
+    let before = LIVE.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    let identity = copied_topic_identity(&records);
+    let expected = hash_json(&identity).unwrap();
+    let copied_peak = PEAK.load(Ordering::Relaxed) - before;
+    drop(identity);
+    let before = LIVE.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    let (hash, returned) = topic_page_records(records).unwrap();
+    let moved_peak = PEAK.load(Ordering::Relaxed) - before;
+    assert_eq!(hash, expected);
+    assert_eq!(returned.iter().map(|record| payload(record.get("definition").unwrap())).collect::<Vec<_>>(), pointers);
+    eprintln!("Hive topic-page identity Rust allocation peak: copied {copied_peak} bytes, moved {moved_peak} bytes for 1 MiB schema text");
+    assert!(copied_peak > moved_peak + 1536 * 1024, "Topic identity copied schemas");
+}

@@ -391,6 +391,30 @@ pub(super) fn handle(
         _ => Err(IvyError::internal()),
     }
 }
+struct TopicRecord {
+    provider: IvyJson,
+    namespace: IvyJson,
+    definition: IvyJson,
+}
+fn topic_page_records(records: Vec<TopicRecord>) -> IvyResult<(String, Vec<IvyJson>)> {
+    let mut providers = Vec::with_capacity(records.len());
+    let identity = IvyJson::Array(records.into_iter().map(|record| {
+        let id = record.provider.get("node").and_then(|node| node.get("serviceNodeId"))
+            .cloned().unwrap_or_else(|| "hive".into());
+        providers.push(record.provider);
+        IvyJson::object([
+            ("serviceNodeId", id), ("namespace", record.namespace), ("definition", record.definition),
+        ])
+    }).collect());
+    let hash = hash_json(&identity)?;
+    let records = identity.into_array().ok_or_else(IvyError::internal)?
+        .into_iter().zip(providers).map(|(mut record, provider)| IvyJson::object([
+            ("provider", provider),
+            ("namespace", record.remove("namespace").unwrap_or(IvyJson::Null)),
+            ("definition", record.remove("definition").unwrap_or(IvyJson::Null)),
+        ])).collect();
+    Ok((hash, records))
+}
 fn topics(call: &Call<'_>, params: &IvyJson) -> IvyResult<IvyJson> {
     let resource = params.get("resourceRef");
     let id = params
@@ -467,24 +491,15 @@ fn topics(call: &Call<'_>, params: &IvyJson) -> IvyResult<IvyJson> {
         selected(params, "hostId", n.get("hostId"))
             && selected(params, "serviceName", n.get("serviceName"))
     }) {
-        let catalog = call
-            .registry
-            .get_registry(call.store, string(&node, "serviceNodeId")?)?;
-        for ns in array(catalog.as_ref().unwrap_or(&IvyJson::Null), "namespaces")? {
-            if namespace
-                .and_then(IvyJson::as_js_string)
-                .is_some_and(|v| !v.0.is_empty())
-                && ns.get("namespace") != namespace
-            {
-                continue;
-            }
-            for topic in array(ns, "topics")? {
-                if prefixed(topic, "topic", params.get("topicPrefix"))? {
-                    records.push(IvyJson::object([
-                        ("provider", provider(&node)),
-                        ("namespace", field(ns, "namespace")?.clone()),
-                        ("definition", topic.clone()),
-                    ]));
+        let selected = namespace.and_then(IvyJson::as_js_string).filter(|name| !name.0.is_empty());
+        for ns in call.registry.topic_namespaces(call.store, string(&node, "serviceNodeId")?, selected)? {
+            for topic in ns.topics {
+                if prefixed(&topic, "topic", params.get("topicPrefix"))? {
+                    records.push(TopicRecord {
+                        provider: provider(&node),
+                        namespace: ns.namespace.as_ref().ok_or_else(IvyError::internal)?.clone(),
+                        definition: topic,
+                    });
                 }
             }
         }
@@ -523,38 +538,14 @@ fn topics(call: &Call<'_>, params: &IvyJson) -> IvyResult<IvyJson> {
             topic.insert("title", "Object changes".into());
             topic.insert("description","A Hive object is written, moved, archived or deleted according to the selected topic version.".into());
             topic.insert("eventKinds", IvyJson::Array(vec![]));
-            records.push(IvyJson::object([
-                ("provider", IvyJson::Null),
-                ("namespace", "hive".into()),
-                ("definition", topic),
-            ]));
+            records.push(TopicRecord {
+                provider: IvyJson::Null,
+                namespace: "hive".into(),
+                definition: topic,
+            });
         }
     }
-    let identity = IvyJson::Array(
-        records
-            .iter()
-            .map(|v| {
-                IvyJson::object([
-                    (
-                        "serviceNodeId",
-                        v.get("provider")
-                            .and_then(|v| v.get("node"))
-                            .and_then(|v| v.get("serviceNodeId"))
-                            .cloned()
-                            .unwrap_or_else(|| "hive".into()),
-                    ),
-                    (
-                        "namespace",
-                        v.get("namespace").cloned().unwrap_or(IvyJson::Null),
-                    ),
-                    (
-                        "definition",
-                        v.get("definition").cloned().unwrap_or(IvyJson::Null),
-                    ),
-                ])
-            })
-            .collect(),
-    );
+    let (identity, records) = topic_page_records(records)?;
     page(
         call,
         "topics.list",
@@ -576,7 +567,7 @@ fn topics(call: &Call<'_>, params: &IvyJson) -> IvyResult<IvyJson> {
             }
             out
         },
-        Some(hash_json(&identity)?.into()),
+        Some(identity.into()),
     )
 }
 fn report(call: &mut Call<'_>, context: &IvyJson, params: &IvyJson) -> IvyResult<IvyJson> {
