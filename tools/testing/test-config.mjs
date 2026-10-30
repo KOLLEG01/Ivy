@@ -132,6 +132,12 @@ export const privateRepo = false;
 
 // Explicit Cargo targets keep --files narrow and do not infer service ownership.
 export const rustTests = {
+  "tests/rust/hive_ws_socket_queue.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "ws_socket_io::queue_tests::",
+    "testThreads": 1
+  },
   "tests/rust/data-collector-native-mcp.rs": {
     "package": "ivy-data-collector",
     "lib": true,

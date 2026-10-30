@@ -53,6 +53,7 @@ pub(super) struct App {
     server: Server,
     assets: ivy_hive::http_static::Assets,
     body_buffers: ivy_hive::http_body::BodyBuffers,
+    sockets: ivy_hive::ws_socket_io::Sockets,
     reset_bootstrap: bool,
 }
 impl App {
@@ -356,6 +357,7 @@ pub async fn run(
             console_root: Some(artifact.join("dist/console")),
         },
         body_buffers: Default::default(),
+        sockets: Default::default(),
         reset_bootstrap: reset.is_some(),
     });
     holder

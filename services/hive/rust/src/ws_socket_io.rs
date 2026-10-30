@@ -1,358 +1,234 @@
-//! Real upgraded TCP I/O for the Hive WebSocket owner. The receive-protocol
-//! owner reads `Stream` and owns frame admission, automatic replies and closing
-//! handshakes. HTTP upgrade/authentication and that protocol are separate.
+//! The production WebSocket owner, including retained sends and exact-peer cleanup.
 use crate::{
-    server_peers::{PeerSocket, UnhandledKind},
-    ws_send::Socket as SendSocket,
+    server_peers::{Peer, PeerSocket, Peers},
+    ws_send::Socket as SocketPort,
 };
-use futures_util::task::AtomicWaker;
-use ivy_contracts::{IvyError, IvyResult};
-use std::{
-    borrow::Cow,
-    collections::VecDeque,
-    future::poll_fn,
-    io,
-    pin::Pin,
-    sync::{Arc, Mutex},
-    task::{Context, Poll},
-};
-use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf},
-    net::{
-        TcpStream,
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
+use futures_util::{SinkExt, StreamExt};
+use ivy_contracts::{
+    IvyError, IvyJson, IvyResult,
+    limits::{
+        CONNECTION_IN_FLIGHT_REQUESTS, MANAGEMENT_FRAME_BYTES, MANAGEMENT_SOCKET_BUFFER_BYTES,
     },
 };
-use tokio_tungstenite::tungstenite::protocol::frame::{
-    Frame,
-    coding::{Data, OpCode},
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
 };
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
+};
+use tokio_tungstenite::{
+    WebSocketStream,
+    tungstenite::{
+        Message,
+        protocol::{Role, WebSocketConfig},
+    },
+};
+use tokio_util::sync::CancellationToken;
 
-pub type Closed = Box<dyn FnOnce() -> IvyResult<()> + Send>;
-pub type Unhandled = Arc<dyn Fn(UnhandledKind, IvyError) + Send + Sync>;
-pub struct Owners {
-    /// Install the existing exact-peer/generation cleanup and connection lease.
-    pub closed: Closed,
-    pub unhandled: Unhandled,
-}
-struct Write {
-    bytes: Vec<u8>,
-    offset: usize,
+const QUEUED_MESSAGES: usize = 2 * CONNECTION_IN_FLIGHT_REQUESTS;
+const OUTBOUND_BYTES: usize = 2 * MANAGEMENT_SOCKET_BUFFER_BYTES;
+
+/// All connections share this retained-payload budget, independent of DB admission.
+#[derive(Clone)]
+pub struct Sockets(Arc<Semaphore>);
+impl Default for Sockets {
+    fn default() -> Self {
+        Self(Arc::new(Semaphore::new(OUTBOUND_BYTES)))
+    }
 }
 struct State {
-    reader: Option<OwnedReadHalf>,
-    writer: Option<OwnedWriteHalf>,
-    queued: VecDeque<Write>,
-    buffered: usize,
-    write_failed: bool,
-    terminating: bool,
-    read_ended: bool,
-    ending: bool,
-    write_ended: bool,
-    closed: bool,
+    closed: CancellationToken,
+    buffered: AtomicUsize,
 }
-struct Inner {
-    state: Mutex<State>,
-    drive: AtomicWaker,
-    read: AtomicWaker,
-    flush: AtomicWaker,
+struct Queued {
+    message: Option<Message>,
+    state: Arc<State>,
+    bytes: usize,
+    _permit: OwnedSemaphorePermit,
 }
-#[derive(Clone)]
-pub struct Socket(Arc<Inner>);
-/// The protocol owner's actual duplex stream. Its writes (including automatic
-/// pong/close frames) use the same queue as synchronous Hive response sends.
-pub struct Stream {
-    socket: Socket,
-    eof: bool,
+impl Drop for Queued {
+    fn drop(&mut self) {
+        self.state.buffered.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
 }
-
-/// The caller runs this on the one network executor and supplies an upgraded
-/// TCP stream whose HTTP head is retained separately. Initial write readiness
-/// is established before installing the peer, without a detached setup task.
-/// `connected` installs the actual peer synchronously and returns its cleanup.
-/// Dropping a socket clone or a flush observer does not cancel retained I/O.
-pub async fn attach(
-    stream: TcpStream,
-    connected: impl FnOnce(Socket) -> Owners,
-) -> IvyResult<Stream> {
-    stream.set_nodelay(true).map_err(|_| IvyError::internal())?;
-    stream.writable().await.map_err(|_| IvyError::internal())?;
-    let (reader, writer) = stream.into_split();
-    let socket = Socket(Arc::new(Inner {
-        state: Mutex::new(State {
-            reader: Some(reader),
-            writer: Some(writer),
-            queued: VecDeque::new(),
-            buffered: 0,
-            write_failed: false,
-            terminating: false,
-            read_ended: false,
-            ending: false,
-            write_ended: false,
-            closed: false,
-        }),
-        drive: AtomicWaker::new(),
-        read: AtomicWaker::new(),
-        flush: AtomicWaker::new(),
-    }));
-    let owners = connected(socket.clone());
-    let retained = socket.clone();
-    tokio::spawn(async move {
-        poll_fn(|cx| retained.poll_drive(cx)).await;
-        // Peer callbacks run after the native close transition, outside every
-        // transport lock. Preserve callback failures through the runtime owner.
-        if let Err(error) = (owners.closed)() {
-            (owners.unhandled)(UnhandledKind::Callback, error);
-        }
-    });
-    Ok(Stream { socket, eof: false })
+struct Socket {
+    outgoing: mpsc::Sender<Queued>,
+    state: Arc<State>,
+    budget: Arc<Semaphore>,
 }
-
 impl Socket {
-    fn write(&self, bytes: Cow<'_, [u8]>) -> io::Result<usize> {
-        let mut state = self.0.state.lock().unwrap();
-        if state.closed || state.terminating || state.ending {
-            return Err(io::ErrorKind::BrokenPipe.into());
-        }
-        if state.write_failed {
-            return Ok(bytes.len());
-        }
-        let mut offset = 0;
-        if state.queued.is_empty() {
-            loop {
-                match state.writer.as_ref().unwrap().try_write(&bytes) {
-                    Ok(size) if size == bytes.len() => return Ok(size),
-                    Ok(0) => {
-                        state.write_failed = true;
-                        drop(state);
-                        self.0.drive.wake();
-                        return Ok(bytes.len());
-                    }
-                    Ok(size) => {
-                        offset = size;
-                        break;
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                    // Node's socket write reports the I/O error through the
-                    // completion callback; send() has already returned.
-                    Err(_) => {
-                        // A synchronously failed write has no outstanding
-                        // native write charge. The completion still closes
-                        // asynchronously, after this network turn returns.
-                        state.write_failed = true;
-                        drop(state);
-                        self.0.drive.wake();
-                        return Ok(bytes.len());
-                    }
-                }
-            }
-        }
-        // Retain the entire outstanding write's charge until it completes,
-        // including a prefix already accepted by the operating system.
-        let length = bytes.len();
-        state.buffered += length;
-        state.queued.push_back(Write {
-            bytes: bytes.into_owned(),
-            offset,
-        });
-        drop(state);
-        self.0.drive.wake();
-        Ok(length)
+    fn new(budget: &Sockets) -> (Self, mpsc::Receiver<Queued>) {
+        let (outgoing, receiver) = mpsc::channel(QUEUED_MESSAGES);
+        (
+            Self {
+                outgoing,
+                state: Arc::new(State {
+                    closed: CancellationToken::new(),
+                    buffered: AtomicUsize::new(0),
+                }),
+                budget: budget.0.clone(),
+            },
+            receiver,
+        )
     }
-    fn frame(&mut self, frame: Frame) -> IvyResult<()> {
-        let mut bytes = Vec::with_capacity(frame.len());
-        frame.format(&mut bytes).map_err(|_| IvyError::internal())?;
-        // Callers use the OPEN admission fence. An intervening asynchronous
-        // close is an I/O completion failure and retains its close notification.
-        if self.write(Cow::Owned(bytes)).is_err() {
-            self.terminate()?;
+    fn enqueue(&self, message: Message, capacity: usize) {
+        if self.state.closed.is_cancelled() {
+            return;
         }
-        Ok(())
-    }
-    fn poll_drive(&self, cx: &mut Context<'_>) -> Poll<()> {
-        self.0.drive.register(cx.waker());
-        let mut state = self.0.state.lock().unwrap();
-        if state.write_failed {
-            state.terminating = true;
+        let bytes = capacity.saturating_add(std::mem::size_of::<Queued>());
+        if bytes > MANAGEMENT_SOCKET_BUFFER_BYTES {
+            self.state.closed.cancel();
+            return;
         }
-        if !state.terminating {
-            loop {
-                let Some(write) = state.queued.front() else {
-                    break;
-                };
-                let result = state
-                    .writer
-                    .as_ref()
-                    .unwrap()
-                    .try_write(&write.bytes[write.offset..]);
-                match result {
-                    Ok(0) => {
-                        state.terminating = true;
-                        break;
-                    }
-                    Ok(size) => {
-                        let write = state.queued.front_mut().unwrap();
-                        write.offset += size;
-                        if write.offset == write.bytes.len() {
-                            let complete = state.queued.pop_front().unwrap();
-                            state.buffered -= complete.bytes.len();
-                        }
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        match state.writer.as_ref().unwrap().as_ref().poll_write_ready(cx) {
-                            Poll::Pending => break,
-                            Poll::Ready(Ok(())) => continue,
-                            Poll::Ready(Err(_)) => {
-                                state.terminating = true;
-                                break;
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        state.terminating = true;
-                        break;
-                    }
-                }
-            }
-            if state.queued.is_empty() {
-                self.0.flush.wake();
-                if state.ending && !state.write_ended {
-                    match Pin::new(state.writer.as_mut().unwrap()).poll_shutdown(cx) {
-                        Poll::Ready(Ok(())) => state.write_ended = true,
-                        Poll::Ready(Err(_)) => state.terminating = true,
-                        Poll::Pending => {}
-                    }
-                }
-            }
+        let Ok(permit) = self.budget.clone().try_acquire_many_owned(bytes as u32) else {
+            self.state.closed.cancel();
+            return;
+        };
+        if self
+            .state
+            .buffered
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+                held.checked_add(bytes)
+                    .filter(|sum| *sum <= MANAGEMENT_SOCKET_BUFFER_BYTES)
+            })
+            .is_err()
+        {
+            self.state.closed.cancel();
+            return;
         }
-        if state.terminating || (state.read_ended && state.write_ended) {
-            state.closed = true;
-            state.queued.clear();
-            state.buffered = 0;
-            state.reader.take();
-            state.writer.take();
-            drop(state);
-            self.0.read.wake();
-            self.0.flush.wake();
-            Poll::Ready(())
-        } else {
-            Poll::Pending
+        let queued = Queued {
+            message: Some(message),
+            state: self.state.clone(),
+            bytes,
+            _permit: permit,
+        };
+        if self.outgoing.try_send(queued).is_err() {
+            self.state.closed.cancel();
         }
-    }
-    fn ended(&self) {
-        let mut state = self.0.state.lock().unwrap();
-        state.read_ended = true;
-        state.ending = true;
-        drop(state);
-        self.0.drive.wake();
     }
 }
-impl SendSocket for Socket {
+impl SocketPort for Socket {
     fn is_open(&self) -> bool {
-        let state = self.0.state.lock().unwrap();
-        !state.closed && !state.terminating && !state.ending
+        !self.state.closed.is_cancelled()
     }
     fn buffered_amount(&self) -> f64 {
-        self.0.state.lock().unwrap().buffered as f64
+        self.state.buffered.load(Ordering::Acquire) as f64
     }
     fn send_text(&mut self, text: String) -> IvyResult<()> {
-        self.frame(Frame::message(text, OpCode::Data(Data::Text), true))
+        let capacity = text.capacity();
+        self.enqueue(Message::Text(text.into()), capacity);
+        Ok(())
     }
     fn terminate(&mut self) -> IvyResult<()> {
-        let mut state = self.0.state.lock().unwrap();
-        if !state.closed {
-            state.terminating = true;
-        }
-        drop(state);
-        self.0.drive.wake();
-        self.0.read.wake();
+        self.state.closed.cancel();
         Ok(())
     }
 }
 impl PeerSocket for Socket {
     fn ping(&mut self) -> IvyResult<()> {
-        if self.is_open() {
-            self.frame(Frame::ping(Vec::new()))?;
+        self.enqueue(Message::Ping(Vec::new().into()), 0);
+        Ok(())
+    }
+}
+struct Connected {
+    peers: Peers,
+    peer: Peer,
+    state: Arc<State>,
+}
+impl Drop for Connected {
+    fn drop(&mut self) {
+        self.state.closed.cancel();
+        if let Err(error) = self.peers.closed(&self.peer) {
+            eprintln!("Hive peer cleanup: {error:?}");
+        }
+    }
+}
+fn failure(error: impl std::fmt::Display) -> IvyError {
+    IvyError::new("internal_error", error.to_string())
+}
+
+impl Sockets {
+    pub async fn run<S: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        transport: S,
+        peers: Peers,
+        context: IvyJson,
+        mut stopping: watch::Receiver<bool>,
+    ) -> IvyResult<()> {
+        if *stopping.borrow() {
+            return Ok(());
+        }
+        let (socket, mut receiver) = Socket::new(self);
+        let state = socket.state.clone();
+        // Declare cleanup before the actual transport owner: I/O closes first,
+        // including when the connection future is dropped during a blocked send.
+        let peer = peers.connected(Box::new(socket), context);
+        let connected = Connected { peers, peer, state };
+        let mut in_flight: Option<Queued> = None;
+        let config = WebSocketConfig::default()
+            .read_buffer_size(16 * 1024)
+            .write_buffer_size(0)
+            .max_write_buffer_size(MANAGEMENT_SOCKET_BUFFER_BYTES)
+            .max_message_size(Some(MANAGEMENT_FRAME_BYTES))
+            .max_frame_size(Some(MANAGEMENT_FRAME_BYTES));
+        let stream = WebSocketStream::from_raw_socket(transport, Role::Server, Some(config)).await;
+        let (mut writer, mut reader) = stream.split();
+        let closing = {
+            let write = async {
+                while let Some(queued) = receiver.recv().await {
+                    in_flight = Some(queued);
+                    let message = in_flight.as_mut().unwrap().message.take().unwrap();
+                    writer.send(message).await.map_err(failure)?;
+                    in_flight.take();
+                }
+                Ok::<bool, IvyError>(false)
+            };
+            let read = async {
+                while let Some(message) = reader.next().await {
+                    if connected.state.closed.is_cancelled() {
+                        return Ok(false);
+                    }
+                    match message {
+                        Ok(Message::Text(text)) => {
+                            connected
+                                .peers
+                                .message(&connected.peer, text.as_bytes(), false)?
+                        }
+                        Ok(Message::Binary(bytes)) => {
+                            connected.peers.message(&connected.peer, &bytes, true)?
+                        }
+                        Ok(Message::Pong(_)) => connected.peers.pong(&connected.peer),
+                        Ok(Message::Close(_)) => return Ok(true),
+                        Err(error) => return Err(failure(error)),
+                        _ => {}
+                    }
+                }
+                Ok::<bool, IvyError>(false)
+            };
+            // Both halves keep progressing under backpressure. Neither task is
+            // detached; closing cancels the actual I/O owner, not accepted DB work.
+            tokio::select! {
+                biased;
+                _ = stopping.changed() => Ok(false),
+                _ = connected.state.closed.cancelled() => Ok(false),
+                result = write => result,
+                result = read => result,
+            }
+        }?;
+        if closing {
+            tokio::select! {
+                biased;
+                _ = stopping.changed() => {},
+                _ = connected.state.closed.cancelled() => {},
+                sent = writer.flush() => { let _ = sent; },
+            }
         }
         Ok(())
     }
 }
-impl AsyncRead for Stream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        self.socket.0.read.register(cx.waker());
-        if self.eof {
-            return Poll::Ready(Ok(()));
-        }
-        let before = buf.filled().len();
-        let result = {
-            let mut state = self.socket.0.state.lock().unwrap();
-            if state.closed || state.terminating {
-                return Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()));
-            }
-            Pin::new(state.reader.as_mut().unwrap()).poll_read(cx, buf)
-        };
-        match &result {
-            Poll::Ready(Ok(())) if before == buf.filled().len() && buf.remaining() != 0 => {
-                self.eof = true;
-                self.socket.ended();
-            }
-            Poll::Ready(Err(_)) => {
-                let _ = self.socket.terminate();
-            }
-            _ => {}
-        }
-        result
-    }
-}
-impl AsyncWrite for Stream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        bytes: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        Poll::Ready(self.socket.write(Cow::Borrowed(bytes)))
-    }
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.socket.0.flush.register(cx.waker());
-        let state = self.socket.0.state.lock().unwrap();
-        if state.closed || state.terminating {
-            Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
-        } else if state.write_failed {
-            Poll::Pending
-        } else if state.queued.is_empty() {
-            Poll::Ready(Ok(()))
-        } else {
-            Poll::Pending
-        }
-    }
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.socket.0.flush.register(cx.waker());
-        let mut state = self.socket.0.state.lock().unwrap();
-        state.ending = true;
-        let result = if state.closed || state.terminating {
-            Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
-        } else if state.write_ended {
-            Poll::Ready(Ok(()))
-        } else {
-            Poll::Pending
-        };
-        drop(state);
-        self.socket.0.drive.wake();
-        result
-    }
-}
-impl Drop for Stream {
-    fn drop(&mut self) {
-        // A completed read half leaves accepted writes to drain. Abandoning the
-        // actual receive owner closes the connection, not just its observer.
-        if !self.eof {
-            let _ = self.socket.terminate();
-        }
-    }
-}
+
+#[cfg(test)]
+#[path = "../../../../tests/rust/hive_ws_socket_queue.rs"]
+mod queue_tests;
