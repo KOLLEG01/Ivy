@@ -239,11 +239,7 @@ async fn catalog(storage: &mut impl Storage, name: Option<&JsString>) -> IvyResu
     if let Some(name) = name.filter(|v| !v.0.is_empty()) {
         request.insert("name", IvyJson::String(name.clone()));
     }
-    let result = storage.request(request).await?;
-    result
-        .as_array()
-        .map(|v| v.to_vec())
-        .ok_or_else(IvyError::internal)
+    storage.request(request).await?.into_array().ok_or_else(IvyError::internal)
 }
 async fn create_cursor(
     storage: &mut impl Storage,
@@ -266,15 +262,21 @@ async fn list(
     cursor: Option<&JsString>,
     runtime: &dyn mcp::Runtime,
 ) -> IvyResult<IvyJson> {
-    let bindings = mcp::surface_bindings(&catalog(storage, None).await?, &options.surface)?;
-    let mut descriptors = mcp::direct_descriptors(&bindings, runtime)?;
+    let mut descriptors = {
+        let bindings = mcp::surface_bindings(catalog(storage, None).await?, &options.surface)?;
+        mcp::direct_descriptors(&bindings, runtime)?
+    };
     if options.surface == JsString::from("ivy") { mcp::sort_common_tools(&mut descriptors); }
+    let catalog = IvyJson::Array(descriptors);
+    let catalog_hash = hash_json(&catalog)?;
+    let descriptors = catalog.into_array().unwrap();
+    let total = descriptors.len();
     let identity = IvyJson::object([
         ("method", "tools/list".into()),
         ("surface", IvyJson::String(options.surface.clone())),
         (
             "catalog",
-            hash_json(&IvyJson::Array(descriptors.clone()))?.into(),
+            catalog_hash.into(),
         ),
     ]);
     let offset = if let Some(cursor) = cursor.filter(|v| !v.0.is_empty()) {
@@ -290,16 +292,16 @@ async fn list(
         0.0
     };
     require(
-        offset <= descriptors.len() as f64,
+        offset <= total as f64,
         "invalid_cursor",
         "MCP discovery cursor does not match the current catalog.",
     )?;
     let offset = offset as usize;
     let mut with_cursor = IvyJson::object([("tools", IvyJson::Array(vec![]))]);
-    if offset < descriptors.len() {
+    if offset < total {
         with_cursor.insert(
             "nextCursor",
-            IvyJson::String(create_cursor(storage, &identity, descriptors.len()).await?),
+            IvyJson::String(create_cursor(storage, &identity, total).await?),
         );
     }
     let fixed_with = stringify(&measured_list_result(&with_cursor, server_info), usize::MAX)?.len();
@@ -313,10 +315,10 @@ async fn list(
     .len();
     let mut tools = vec![];
     let mut tool_bytes = 0;
-    for (index, descriptor) in descriptors.iter().enumerate().skip(offset) {
+    for (index, descriptor) in descriptors.into_iter().enumerate().skip(offset) {
         let candidate =
-            tool_bytes + usize::from(!tools.is_empty()) + stringify(descriptor, usize::MAX)?.len();
-        let fixed = if index + 1 < descriptors.len() {
+            tool_bytes + usize::from(!tools.is_empty()) + stringify(&descriptor, usize::MAX)?.len();
+        let fixed = if index + 1 < total {
             fixed_with
         } else {
             fixed_without
@@ -324,17 +326,17 @@ async fn list(
         if fixed + candidate > MCP_DISCOVERY_RESULT_BYTES {
             break;
         }
-        tools.push(descriptor.clone());
+        tools.push(descriptor);
         tool_bytes = candidate;
     }
     require(
-        !tools.is_empty() || offset == descriptors.len(),
+        !tools.is_empty() || offset == total,
         "result_too_large",
         "One MCP descriptor exceeds the discovery page budget.",
     )?;
     let next_offset = offset + tools.len();
     let mut result = IvyJson::object([("tools", IvyJson::Array(tools))]);
-    if next_offset < descriptors.len() {
+    if next_offset < total {
         let cursor = create_cursor(storage, &identity, next_offset).await?;
         if !cursor.0.is_empty() {
             result.insert("nextCursor", IvyJson::String(cursor));
@@ -508,7 +510,7 @@ pub async fn call_tool(
     let mut internal = vec![];
     let result = async {
         let bindings =
-            mcp::surface_bindings(&catalog(storage, Some(name)).await?, &options.surface)?;
+            mcp::surface_bindings(catalog(storage, Some(name)).await?, &options.surface)?;
         if bindings.is_empty() {
             code = "method_not_found".into();
             outcome = Outcome::NotExecuted.into();
@@ -527,7 +529,7 @@ pub async fn call_tool(
             .invoke(envelope(id, "discovery.call", params))
             .await?;
         Ok(mcp::success(
-            &result,
+            result,
             mcp::has_structured_output(&bindings)?,
         )?)
     }
@@ -559,3 +561,7 @@ pub async fn call_tool(
     }
     result
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/rust/hive_mcp_delivery_ownership.rs"]
+mod ownership_tests;

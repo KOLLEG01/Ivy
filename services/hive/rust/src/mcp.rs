@@ -15,7 +15,7 @@ pub trait Runtime: crate::discovery::Runtime {
     fn uppercase(&self, value: &JsString) -> IvyResult<JsString>;
 }
 
-pub fn surface_bindings(bindings: &[IvyJson], surface: &JsString) -> IvyResult<Vec<IvyJson>> {
+pub fn surface_bindings(bindings: Vec<IvyJson>, surface: &JsString) -> IvyResult<Vec<IvyJson>> {
     fn mcp(b: &IvyJson) -> Option<&IvyJson> {
         definition(b)
             .ok()
@@ -34,7 +34,7 @@ pub fn surface_bindings(bindings: &[IvyJson], surface: &JsString) -> IvyResult<V
         .collect::<Vec<_>>();
     let mut result = vec![];
     for binding in bindings {
-        let descriptor = mcp(binding);
+        let descriptor = mcp(&binding);
         let declared = descriptor
             .and_then(|m| m.get("surface"))
             .filter(|v| !v.is_null())
@@ -53,12 +53,12 @@ pub fn surface_bindings(bindings: &[IvyJson], surface: &JsString) -> IvyResult<V
                 continue;
             }
         }
-        result.push(binding.clone());
+        result.push(binding);
     }
     Ok(result)
 }
 
-pub fn success(result: &IvyJson, structured: bool) -> IvyResult<IvyJson> {
+pub fn success(mut result: IvyJson, structured: bool) -> IvyResult<IvyJson> {
     if !structured {
         return Ok(IvyJson::object([("content", IvyJson::Array(vec![]))]));
     }
@@ -83,20 +83,17 @@ pub fn success(result: &IvyJson, structured: bool) -> IvyResult<IvyJson> {
                         || [43, 47].contains(v)
                 })
         });
-    let mut metadata = result.clone();
-    if png {
-        metadata.remove("data");
-    }
-    let envelope = IvyJson::object([("result", metadata)]);
+    let data = png.then(|| result.remove("data").unwrap());
+    let envelope = IvyJson::object([("result", result)]);
     let mut content = vec![IvyJson::object([
         ("type", "text".into()),
         ("text", stringify(&envelope, usize::MAX)?.into()),
     ])];
-    if png {
+    if let Some(data) = data {
         content.push(IvyJson::object([
             ("type", "image".into()),
             ("mimeType", "image/png".into()),
-            ("data", IvyJson::String(data.unwrap().clone())),
+            ("data", data),
         ]));
     }
     Ok(IvyJson::object([

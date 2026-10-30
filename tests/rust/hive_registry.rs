@@ -150,7 +150,7 @@ impl Trace {
                         )?,
                     };
                     ivy_hive::mcp::surface_bindings(
-                        &bindings,
+                        bindings,
                         parameters
                             .get("surface")
                             .and_then(IvyJson::as_js_string)
@@ -159,7 +159,7 @@ impl Trace {
                     .map(IvyJson::Array)
                 }
                 "mcpSuccess" => ivy_hive::mcp::success(
-                    parameters.get("result").ok_or_else(IvyError::internal)?,
+                    parameters.get("result").ok_or_else(IvyError::internal)?.clone(),
                     parameters.get("structured") == Some(&IvyJson::Bool(true)),
                 ),
                 "mcpRequest" => {
