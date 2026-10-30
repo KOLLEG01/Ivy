@@ -8,7 +8,7 @@ fn argument<T>(value: Option<T>) -> IvyResult<T> {
 fn text(value: &JsString) -> String {
     String::from_utf16_lossy(&value.0)
 }
-pub(super) fn identity(method: &str, params: &IvyJson) -> IvyResult<IvyJson> {
+pub(crate) fn identity(method: &str, params: &IvyJson) -> IvyResult<IvyJson> {
     let mut identity = IvyJson::object([("method", IvyJson::from(method))]);
     for (key, value) in argument(params.as_object())? {
         if key != &JsString::from("cursor") {

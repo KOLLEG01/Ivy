@@ -1,4 +1,4 @@
-//! Single-connection storage foundation. Network callers use the storage worker;
+//! Single-connection storage foundation. Network callers use the DB thread;
 //! a Store is created and used only by its database-owning execution context.
 use crate::storage_read::STORAGE_FORMAT;
 use ivy_contracts::{
@@ -102,8 +102,12 @@ impl Store {
             validators: ivy_contracts::schema::SchemaValidators::new(),
         };
         store.initialize()?;
-        store.set_metadata("storage_compaction_pending", pending.as_deref().unwrap_or(""))?;
+        store.set_metadata(
+            "storage_compaction_pending",
+            pending.as_deref().unwrap_or(""),
+        )?;
         store.install_query_functions()?;
+        crate::discovery::install_identities(&store.db).map_err(sql_error)?;
         Ok(store)
     }
     /// Consume the storage owner only after its yielding backup tasks finish.
@@ -112,7 +116,9 @@ impl Store {
         connection.close().map_err(|(_, error)| sql_error(error))
     }
     pub fn reclaim_storage_pages(&self) -> IvyResult<()> {
-        if self.active_backups.get() == 0 { crate::storage_compaction::reclaim_pages(&self.db)?; }
+        if self.active_backups.get() == 0 {
+            crate::storage_compaction::reclaim_pages(&self.db)?;
+        }
         Ok(())
     }
     fn initialize(&mut self) -> IvyResult<()> {
@@ -155,6 +161,14 @@ impl Store {
         self.db
             .execute_batch("DROP INDEX IF EXISTS mutations_expiry")
             .map_err(sql_error)?;
+        self.db.execute_batch(
+            "CREATE INDEX IF NOT EXISTS diagnostics_source_status ON diagnostics(
+               json_extract(diagnostic_json,'$.source'),json_extract(diagnostic_json,'$.status'),identity);
+             CREATE INDEX IF NOT EXISTS diagnostics_status_time ON diagnostics(
+               json_extract(diagnostic_json,'$.status'),json_extract(diagnostic_json,'$.lastObservedAt'),identity);
+             CREATE INDEX IF NOT EXISTS diagnostics_expiry ON diagnostics(
+               json_extract(diagnostic_json,'$.status'),julianday(json_extract(diagnostic_json,'$.lastObservedAt')),identity);"
+        ).map_err(sql_error)?;
         self.cursor_secret = self
             .metadata("cursor_secret")?
             .ok_or_else(IvyError::internal)?;

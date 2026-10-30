@@ -66,13 +66,13 @@ impl FamilyStore for WorkerFamilies {
                 "activeCredentialReferences",
                 IvyJson::Array(active.into_iter().map(IvyJson::String).collect()),
             ),
-        ]))
+        ]).into())
     }
     fn rotate(&self, rotation: IvyJson) -> RequestFuture {
         self.0.request(IvyJson::object([
             ("action", "oauth.family.rotate".into()),
             ("rotation", rotation),
-        ]))
+        ]).into())
     }
 }
 /// Apply ordered URLSearchParams.set operations to an already validated URL.

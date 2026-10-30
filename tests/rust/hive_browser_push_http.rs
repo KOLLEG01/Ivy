@@ -146,7 +146,8 @@ struct Bridge {
     actor: Option<mpsc::UnboundedSender<Posted>>,
 }
 impl Worker for Bridge {
-    fn request(&self, payload: IvyJson) -> RequestFuture {
+    fn request(&self, payload: ivy_hive::storage::Payload) -> RequestFuture {
+        let payload = crate::payload_fixture::json(payload);
         self.trace
             .lock()
             .unwrap()

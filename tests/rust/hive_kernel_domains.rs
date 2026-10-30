@@ -923,7 +923,12 @@ fn kernel_deployment_reports_preserve_batch_rollback_terminal_identity_and_updat
             json!({"hostId":"unrelated","deploymentId":"missing"}),
         ),
     );
-    let result = compare(&s);
+    // Bounded reads no longer inspect unrelated bodies before cursor admission
+    // or a missing identity lookup. Keep the historical trace otherwise exact.
+    let result = compare_with_error_codes(
+        &s,
+        &[(corrupt_list, "invalid_cursor"), (corrupt_get, "not_found")],
+    );
     for index in [identity, target, rolled_back] {
         error(&result, index, "target_conflict");
     }
@@ -931,9 +936,9 @@ fn kernel_deployment_reports_preserve_batch_rollback_terminal_identity_and_updat
         error(&result, index, "revision_conflict");
     }
     error(&result, date_before_owner, "invalid_arguments");
-    for index in [failed, corrupt_list, corrupt_get] {
-        error(&result, index, "internal_error");
-    }
+    error(&result, failed, "internal_error");
+    error(&result, corrupt_list, "invalid_cursor");
+    error(&result, corrupt_get, "not_found");
     assert_eq!(
         result["rows"][rolled_back]["state"]["deploymentReports"],
         result["rows"][rolled_back - 1]["state"]["deploymentReports"]

@@ -137,10 +137,10 @@ fn native(path: &Path, steps: &[Value], retained: bool) -> Value {
                             })?,
                         )
                     } else {
-                        let mut records = field(step, "records").into_array().unwrap();
+                        let records = field(step, "records").into_array().unwrap();
                         Some(catalog_page(
                             &store,
-                            &mut records,
+                            records,
                             &field(step, "identity"),
                             |r| r.get("key").unwrap().as_js_string().unwrap().clone(),
                             params

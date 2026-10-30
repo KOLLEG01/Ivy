@@ -132,6 +132,83 @@ export const privateRepo = false;
 
 // Explicit Cargo targets keep --files narrow and do not infer service ownership.
 export const rustTests = {
+  "tests/rust/hive_storage_thread.rs": { "package": "ivy-hive", "test": "hive-storage-thread" },
+  "tests/rust/hive_query_cache.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "store::query::cache_tests::"
+  },
+  "tests/rust/hive_contract_catalog.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "contract_catalog::tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_routing_ownership.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "live_routing::ownership_tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_discovery_cache.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "discovery::cache_tests::"
+  },
+  "tests/rust/hive_discovery_memory.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "discovery::memory_tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_retention_graph.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "retention::graph_tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_retention_catalog.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "retention::catalog_tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_registry_catalog_memory.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "registry::catalog_memory_tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_catalog_reads.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "kernel::catalogs::read_tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_deployment_catalog.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "kernel::catalogs::deployments::tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_storage_payload_memory.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "storage::payload_tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_oauth_retention.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "worker_identity::retention_tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_registry_catalog.rs": {
+    package: "ivy-hive",
+    lib: true,
+    filter: "registry_catalog::tests::",
+    testThreads: 1,
+  },
   "tests/rust/host-memory.rs": { package: "ivy-host-runtime", test: "host-memory" },
   "tests/rust/native-catalog-memory.rs": { package: "ivy-host-runtime", test: "native-catalog-memory", testThreads: 1 },
   "tests/rust/chat-files.rs": {
@@ -1094,7 +1171,7 @@ export const rustTests = {
   },
   "tests/rust/hive_admission.rs": {
     "package": "ivy-hive",
-    "test": "hive-worker-client",
+    "test": "hive-storage-thread",
     "filter": "admission::"
   },
   "tests/rust/hive_browser_push.rs": {
@@ -1216,26 +1293,6 @@ export const rustTests = {
     "test": "hive-storage-worker",
     "filter": "store::kernel::startup::native_",
     "testThreads": 1
-  },
-  "tests/rust/hive_worker_startup.rs": {
-    "package": "ivy-hive",
-    "test": "hive-storage-worker",
-    "filter": "store::kernel::worker_startup::",
-    "testThreads": 1
-  },
-  "tests/fixtures/hive-startup-profile.rs": {
-    "package": "ivy-hive",
-    "test": "hive-worker-client",
-    "filter": "worker_process::initialized_kernel_",
-    "testThreads": 1,
-    "prerequisites": [
-      { "package": "ivy-hive", "example": "ivy-hive-worker-fixture" },
-      {
-        "platform": "win32",
-        "package": "ivy-host-runtime",
-        "bin": "ivy-job"
-      }
-    ]
   },
   "tests/rust/hive_browser_push_sender.rs": {
     "package": "ivy-hive",
@@ -1742,41 +1799,6 @@ export const rustTests = {
   "tests/rust/hive_storage_worker.rs": {
     "package": "ivy-hive",
     "test": "hive-storage-worker"
-  },
-  "tests/rust/hive_worker_client.rs": {
-    "package": "ivy-hive",
-    "test": "hive-worker-client",
-    "prerequisites": [
-      { "package": "ivy-hive", "example": "ivy-hive-worker-fixture" },
-      {
-        "platform": "win32",
-        "package": "ivy-host-runtime",
-        "bin": "ivy-job"
-      }
-    ]
-  },
-  "tests/rust/hive_worker_process.rs": {
-    "package": "ivy-hive",
-    "test": "hive-worker-client",
-    "filter": "worker_process::real_",
-    "testThreads": 1,
-    "prerequisites": [
-      { "package": "ivy-hive", "example": "ivy-hive-worker-fixture" },
-      { "package": "ivy-host-runtime", "bin": "ivy-job", "platform": "win32" }
-    ]
-  },
-  "tests/rust/hive_worker_online_backup.rs": {
-    "package": "ivy-hive",
-    "test": "hive-worker-client",
-    "filter": "worker_process::online_backup::",
-    "prerequisites": [
-      { "package": "ivy-hive", "example": "ivy-hive-worker-fixture" },
-      {
-        "platform": "win32",
-        "package": "ivy-host-runtime",
-        "bin": "ivy-job"
-      }
-    ]
   },
   "tests/secretary-rust/document.rs": {
     "package": "ivy-secretary",

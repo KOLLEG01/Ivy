@@ -1,5 +1,5 @@
 use super::{
-    AuthContext, AuthenticatedContext, IvyError, IvyJson, Root, Store, native, reference_data,
+    AuthContext, IvyError, IvyJson, Root, Store, native, reference_data,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ivy_contracts::{IvyResult, hash::digest};
@@ -103,19 +103,14 @@ pub(super) fn native_identity(store: &mut Store, step: &Value) -> IvyResult<IvyJ
             let c = params.get("context").unwrap();
             identity::end_session(
                 store,
-                &AuthenticatedContext {
-                    principal_id: c
-                        .get("principalId")
-                        .and_then(IvyJson::as_js_string)
-                        .unwrap()
-                        .clone(),
+                &AuthContext {
+                    session_digest: c.get("sessionDigest").and_then(IvyJson::as_js_string).cloned(),
                     credential_digest: c
                         .get("credentialDigest")
                         .and_then(IvyJson::as_js_string)
                         .unwrap()
                         .clone(),
                 },
-                c.get("sessionDigest").and_then(IvyJson::as_js_string),
             )
         }
         "execute" => {

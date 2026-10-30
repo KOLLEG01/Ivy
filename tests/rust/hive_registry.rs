@@ -6,6 +6,8 @@ use ivy_contracts::IvyResult;
 use ivy_hive::registry::{ConnectionContext, Registry};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
+#[path = "hive_catalog_fixture.rs"]
+mod catalog_fixture;
 #[path = "hive_configurations.rs"]
 mod configurations;
 #[path = "hive_discovery.rs"]
@@ -384,11 +386,12 @@ impl Trace {
                 now,
             ),
             "bindings" => registry
-                .bindings(store, &id()?, field("namespace")?)
-                .map(|v| IvyJson::Array(v.to_vec())),
+                .bindings(store, &id()?, field("namespace")?.required("namespace")?
+                    .as_js_string().ok_or_else(IvyError::internal)?)
+                .map(IvyJson::Array),
             "liveCatalog" => registry
                 .live_catalog(store, &id()?)
-                .map(|v| v.unwrap_or(IvyJson::Null)),
+                .map(|v| v.map_or(IvyJson::Null, |v| catalog_fixture::catalog_to_wire(&v))),
             "reportHost" => registry.report_host(store, &id()?, &parameters, runtime, now),
             "hostObservations" => registry
                 .host_observations(
@@ -1117,6 +1120,166 @@ fn registry_heartbeat_diagnostics_utc_and_notification_thresholds_match_original
         assert_eq!(code(&rows, index), "invalid_arguments");
     }
     assert_eq!(value(&rows, invalid_date)["stale"], false);
+}
+
+#[test]
+fn registry_heartbeat_selects_lossless_sources_and_skips_resolved_history() {
+    use ivy_hive::{native_runtime::NativeRuntime, store::Credential};
+    let root = Root::new();
+    let mut store = Store::open(&root.0.join("heartbeat-selection.sqlite")).unwrap();
+    store
+        .configure_credentials(&[Credential {
+            principal_id: "alpha".into(),
+            digest: digest(true).into(),
+        }])
+        .unwrap();
+    let principal = AuthenticatedContext {
+        principal_id: "alpha".into(),
+        credential_digest: digest(true).into(),
+    };
+    let json = |value: Value| IvyJson::from_serde(&value).unwrap();
+    let mut registry = Registry::new(&mut store, &NativeRuntime, 100000.0).unwrap();
+    store.connection().execute_batch(&format!(
+        "WITH RECURSIVE history(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM history WHERE n<10000)
+         INSERT INTO diagnostics SELECT 'history-'||n,json_set({},'$.code','history-'||n) FROM history;",
+        quote(&diagnostic("history", "elsewhere", "resolved", "1970-01-01T00:01:40Z", "1970-01-01T00:01:40Z").to_string()),
+    )).unwrap();
+    let ids = [
+        "worker".into(),
+        "nul\0tail".into(),
+        JsString(vec![0x78, 0xd800]),
+    ];
+    for id in &ids {
+        let mut parameters = json(connect("worker", "sample", "own-host", 1)["params"].clone());
+        parameters.insert("serviceNodeId", IvyJson::String(id.clone()));
+        registry
+            .connect(
+                &mut store,
+                &ConnectionContext {
+                    principal: &principal,
+                    session_digest: None,
+                    generation: Some(1.0),
+                },
+                &parameters,
+                &NativeRuntime,
+                100000.0,
+            )
+            .unwrap();
+        let source = JsString(
+            "service:"
+                .encode_utf16()
+                .chain(id.0.iter().copied())
+                .collect(),
+        );
+        let mut alert = json(diagnostic(
+            "problem",
+            "worker",
+            "current",
+            "1970-01-01T00:01:40Z",
+            "1970-01-01T00:01:40Z",
+        ));
+        alert.insert("source", IvyJson::String(source.clone()));
+        alert.insert(
+            "resource",
+            IvyJson::object([("serviceNodeId", IvyJson::String(id.clone()))]),
+        );
+        registry
+            .diagnostic(&mut store, &alert, &NativeRuntime, 100000.0)
+            .unwrap();
+        let neighbour = JsString(
+            source
+                .0
+                .iter()
+                .copied()
+                .chain("-other".encode_utf16())
+                .collect(),
+        );
+        alert.insert("source", IvyJson::String(neighbour.clone()));
+        registry
+            .diagnostic(&mut store, &alert, &NativeRuntime, 100000.0)
+            .unwrap();
+        registry
+            .heartbeat(
+                &mut store,
+                id,
+                Some(1.0),
+                &json(json!({"ready":false,"diagnostics":[]})),
+                &NativeRuntime,
+                101000.0,
+            )
+            .unwrap();
+        let current = registry
+            .diagnostics(&store, Some(&"current".into()))
+            .unwrap();
+        assert!(
+            current
+                .iter()
+                .all(|value| value.get("source").and_then(IvyJson::as_js_string) != Some(&source))
+        );
+        assert!(
+            current.iter().any(
+                |value| value.get("source").and_then(IvyJson::as_js_string) == Some(&neighbour)
+            )
+        );
+    }
+    // A quiet heartbeat must not scan or decode ten thousand retained records.
+    // SQLite instruction admission makes this deterministic without a time limit.
+    let mut remaining = 100;
+    store
+        .connection()
+        .progress_handler(
+            100,
+            Some(move || {
+                remaining -= 1;
+                remaining == 0
+            }),
+        )
+        .unwrap();
+    for id in &ids {
+        registry
+            .heartbeat(
+                &mut store,
+                id,
+                Some(1.0),
+                &json(json!({"ready":false,"diagnostics":[]})),
+                &NativeRuntime,
+                102000.0,
+            )
+            .unwrap();
+    }
+    store
+        .connection()
+        .progress_handler(0, None::<fn() -> bool>)
+        .unwrap();
+}
+
+#[test]
+fn registry_diagnostic_retention_keeps_millisecond_age_boundary() {
+    use ivy_hive::native_runtime::NativeRuntime;
+    let root = Root::new();
+    let mut store = Store::open(&root.0.join("diagnostic-age.sqlite")).unwrap();
+    let mut registry = Registry::new(&mut store, &NativeRuntime, 100000.0).unwrap();
+    for (code, observed) in [
+        ("whole", "1970-01-01T00:01:40Z"),
+        ("millis", "1970-01-01T00:01:40.000Z"),
+        ("before", "1970-01-01T00:01:39.999Z"),
+        ("after", "1970-01-01T00:01:40.001Z"),
+    ] {
+        let value =
+            IvyJson::from_serde(&diagnostic(code, "worker", "resolved", observed, observed))
+                .unwrap();
+        registry
+            .diagnostic(&mut store, &value, &NativeRuntime, 100000.0)
+            .unwrap();
+    }
+    registry
+        .collect_diagnostics(&mut store, &NativeRuntime, 7.0 * 86_400_000.0 + 100000.0)
+        .unwrap();
+    let retained = registry
+        .diagnostics(&store, Some(&"resolved".into()))
+        .unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].get("code"), Some(&IvyJson::from("after")));
 }
 
 #[test]

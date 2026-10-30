@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 struct Unused;
 impl Worker for Unused {
-    fn request(&self, _: IvyJson) -> RequestFuture {
+    fn request(&self, _: ivy_hive::storage::Payload) -> RequestFuture {
         panic!("Unexpected worker")
     }
 }

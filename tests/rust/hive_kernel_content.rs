@@ -309,7 +309,9 @@ fn kernel_contract_summaries_preserve_ecmascript_whitespace_utf16_slice_latest_a
             json!({"key":"fixture/summary","cursor":"invalid"}),
         ),
     );
-    let result = compare(&s);
+    // Catalog cursors are now admitted before reading any selected bodies.
+    // Retain the original trace; only this corrupt-storage error order changes.
+    let result = compare_with_error_codes(&s, &[(corrupt, "invalid_cursor")]);
     assert_eq!(
         value(&result, first)["items"][0]["description"],
         "first second\u{85}third"
@@ -326,7 +328,7 @@ fn kernel_contract_summaries_preserve_ecmascript_whitespace_utf16_slice_latest_a
     assert!(encoded.contains("3.0.0"));
     assert!(!encoded.contains("tail"));
     error(&result, changed, "invalid_cursor");
-    error(&result, corrupt, "internal_error");
+    error(&result, corrupt, "invalid_cursor");
 }
 
 fn asset(bytes: &str) -> Value {

@@ -11,6 +11,7 @@ pub enum Location<'a> {
 #[path = "object_pages.rs"]
 mod pages;
 pub use pages::{history, list, tree};
+pub(crate) use pages::identity as page_identity;
 #[path = "object_search.rs"]
 mod searching;
 pub use searching::search;

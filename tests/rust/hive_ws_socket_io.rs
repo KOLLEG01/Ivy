@@ -166,12 +166,12 @@ fn actual_tcp_send_buffers_flush_and_close_match_original_ws() {
 #[test]
 fn actual_close_releases_connection_but_retains_accepted_peer_work() {
     use ivy_hive::{
-        admission::{DispatchGate, RequestBudget, RequestBudgetOptions},
+        admission::{RequestBudget, RequestBudgetOptions},
         live_routing::LiveRouting,
         server_peers::{self, Peers},
         server_rpc::{Reply, Storage},
         tool_binding_diagnostics::ToolBindingDiagnostics,
-        worker_client::RequestOptions,
+        storage::RequestOptions,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::oneshot;
@@ -192,6 +192,13 @@ fn actual_close_releases_connection_but_retains_accepted_peer_work() {
         cancelled: Arc<AtomicBool>,
     }
     impl Storage for Worker {
+    fn dispatch(&self, mut request: ivy_hive::storage::Request, options: RequestOptions) -> Reply {
+        if let Err(error) = request.prepare() {
+            return Box::pin(async move { Err(error) });
+        }
+        let reply = self.request(crate::payload_fixture::json(request.take_payload()), options);
+        Box::pin(async move { request.complete(reply.await) })
+    }
         fn request(&self, payload: IvyJson, _options: RequestOptions) -> Reply {
             assert_eq!(payload.get("action"), Some(&"execute".into()));
             let (send, receive) = oneshot::channel();
@@ -231,7 +238,6 @@ fn actual_close_releases_connection_but_retains_accepted_peer_work() {
                 )),
             ))),
             requests: requests.clone(),
-            dispatch: DispatchGate::default(),
             direct: Arc::new(|_, _, _, _| Ok(None)),
             now: Arc::new(|| 10000.0),
             ids: Arc::new(|| "fixture-id".into()),

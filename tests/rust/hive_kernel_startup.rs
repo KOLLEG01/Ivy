@@ -4,6 +4,17 @@ use ivy_hive::objects;
 use ivy_host_runtime::native_path;
 use rusqlite::{Connection, types::ValueRef};
 
+fn locked(filename: &Path) -> bool {
+    let db = Connection::open_with_flags(filename, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    db.busy_timeout(Duration::ZERO).unwrap();
+    match db.query_row("SELECT COUNT(*) FROM sqlite_schema", [], |row| row.get::<_, i64>(0)) {
+        Ok(_) => false,
+        Err(rusqlite::Error::SqliteFailure(error, _))
+            if matches!(error.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => true,
+        Err(error) => panic!("Unexpected independent lock-probe failure: {error}"),
+    }
+}
+
 fn sql_rows(db: &Connection, sql: &str) -> Value {
     let mut statement = db.prepare(sql).unwrap();
     let names = statement
@@ -314,9 +325,9 @@ fn native_constructor_preserves_initialization_order_legacy_reopen_credentials_a
                 "empty-root"
                 | "memory-empty-root"
                 | "ui-before-contracts"
-                | "store-directory"
                 | "opaque-db-high"
                 | "opaque-db-low" => Some("internal_error"),
+                "store-directory" => Some("storage_invalid"),
                 "settings-contract-conflict" => Some("contract_definition_conflict"),
                 "provider-error" => Some("fixture_temp"),
                 _ => None,
@@ -327,7 +338,7 @@ fn native_constructor_preserves_initialization_order_legacy_reopen_credentials_a
                     assert_eq!(Some(error.code.as_str()), expected_error, "{name}");
                     if filename.is_file() {
                         assert_eq!(
-                            super::worker_startup::locked(&filename),
+                            locked(&filename),
                             name != "bad-credential-before-ui",
                             "{name}: retained owner"
                         );
@@ -335,7 +346,7 @@ fn native_constructor_preserves_initialization_order_legacy_reopen_credentials_a
                     drop(failure.into_error());
                     if filename.is_file() {
                         assert!(
-                            !super::worker_startup::locked(&filename),
+                            !locked(&filename),
                             "{name}: owner released"
                         );
                     }
@@ -391,7 +402,7 @@ fn native_constructor_preserves_initialization_order_legacy_reopen_credentials_a
                     );
                     if filename.is_file() {
                         assert!(
-                            super::worker_startup::locked(&filename),
+                            locked(&filename),
                             "{name}: live owner"
                         );
                     }
@@ -422,9 +433,8 @@ fn native_constructor_preserves_initialization_order_legacy_reopen_credentials_a
                             &IvyJson::from_serde(
                                 &json!({"action":"package.catalog","after":0,"includeUis":false}),
                             )
-                            .unwrap(),
+                            .unwrap().into(),
                         )
-                        .unwrap()
                         .unwrap_err();
                     assert_eq!(catalog_error.code, "service_unavailable", "{name}");
                     drop(actions);
@@ -465,7 +475,7 @@ fn native_constructor_preserves_initialization_order_legacy_reopen_credentials_a
                     }
                     if filename.is_file() {
                         assert!(
-                            !super::worker_startup::locked(&filename),
+                            !locked(&filename),
                             "{name}: close released storage"
                         );
                     }

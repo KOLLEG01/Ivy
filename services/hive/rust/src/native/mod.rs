@@ -10,15 +10,14 @@ use ivy_hive::{
     server_constructor::{Constructed, Dependencies, Options, Prepared},
     server_lifecycle::Listener as ListenerPort,
     server_rpc::Reply,
-    worker_runtime::{StorageClient, WorkerLaunch},
+    storage::StorageClient,
 };
 use ivy_host_runtime::{
     config::{configuration_path, native_instance_config},
     health::HealthFile,
 };
 use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex, OnceLock, Weak},
     time::Duration,
 };
@@ -61,7 +60,7 @@ impl App {
         ivy_hive::server_rpc::Storage::request(
             self.server.worker.as_ref(),
             IvyJson::object([("action", "health".into())]),
-            ivy_hive::worker_client::RequestOptions {
+            ivy_hive::storage::RequestOptions {
                 timeout_ms,
                 terminate_on_timeout: false,
                 ..Default::default()
@@ -305,28 +304,18 @@ pub async fn run(
     let holder = Arc::new(OnceLock::new());
     let listener = Listener::new(holder.clone());
     let sender = sender()?;
-    let executable = std::env::current_exe().map_err(failure)?;
-    let job = std::env::var_os("IVY_JOB_LAUNCHER")
-        .map(PathBuf::from)
-        .or_else(|| {
-            let file = executable.with_file_name(if cfg!(windows) {
-                "ivy-job.exe"
-            } else {
-                "ivy-job"
-            });
-            file.is_file().then_some(file)
-        });
     let server = Prepared::new(Options::from_json(options)?)
         .map_err(configuration_error)?
         .native(
-            WorkerLaunch {
-                root: data.clone(),
-                executable,
-                args: vec!["--storage-worker".into()],
-                options: IvyJson::Null,
-                job_launcher: job,
-                environment: BTreeMap::new(),
-            },
+            Box::new(|options| {
+                ivy_hive::worker_kernel::KernelWorker::open_worker_data(
+                    options,
+                    native_runtime::startup_ports(),
+                    std::rc::Rc::new(ivy_hive::browser_push_native::NativeCrypto),
+                )
+                .map(|worker| Box::new(worker) as Box<dyn ivy_hive::storage::StorageService>)
+                .map_err(|error| std::borrow::Borrow::<IvyError>::borrow(&error).clone())
+            }),
             Dependencies {
                 sender,
                 redirects: Arc::new(ivy_hive::oauth::UrlRedirects),
@@ -392,10 +381,13 @@ pub async fn run(
             tokio::select! {
                 result = &mut interrupt => break result.map_err(failure),
                 _ = &mut background => break Err(IvyError::new("internal_error", "Hive maintenance stopped unexpectedly.")),
-                _ = tick.tick() => match health.control().await {
+                _ = tick.tick() => match app.server.worker.failure() {
+                    Some(error) => break Err(error),
+                    None => match health.control().await {
                     Ok(Some(control)) if matches!(control.get("action").and_then(|v| v.as_str().ok()).as_deref(), Some("shutdown" | "drain")) => break Ok(()),
                     Ok(_) => {},
                     Err(error) => break Err(error),
+                    },
                 },
             }
         }

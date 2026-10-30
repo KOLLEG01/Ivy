@@ -5,14 +5,13 @@ use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     core_schema::validate_shared,
     hash::digest,
-    json::{canonical, compare_versions, parse},
+    json::{canonical, compare_versions},
     limits::{
         BINARY_OBJECT_CONTENT_BYTES, JSON_OBJECT_CONTENT_BYTES, MANAGEMENT_FRAME_BYTES,
         TEXT_OBJECT_CONTENT_BYTES,
     },
 };
 use rusqlite::{OptionalExtension, params};
-use std::cmp::Ordering;
 
 fn require(condition: bool, code: &str, message: &str) -> IvyResult<()> {
     if condition {
@@ -190,30 +189,7 @@ pub fn get_contract(
     if let Some(version) = version {
         return store.contract(key, version);
     }
-    let mut query = store
-        .connection()
-        .prepare_cached("SELECT definition FROM contracts WHERE key=?")
-        .map_err(|_| IvyError::internal())?;
-    let definitions = query
-        .query_map([String::from_utf16_lossy(&key.0)], |r| {
-            r.get::<_, String>(0)
-        })
-        .map_err(|_| IvyError::internal())?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|_| IvyError::internal())?;
-    let mut latest = None;
-    for encoded in definitions {
-        let next = parse(&encoded, MANAGEMENT_FRAME_BYTES).map_err(|_| IvyError::internal())?;
-        if latest
-            .as_ref()
-            .map(|previous| compare_versions(&text(&next, "version")?, &text(previous, "version")?))
-            .transpose()?
-            .is_none_or(|order| order == Ordering::Greater)
-        {
-            latest = Some(next);
-        }
-    }
-    latest.ok_or_else(|| IvyError::new("contract_not_found", "Data Contract not found."))
+    crate::contract_catalog::latest(store, key)
 }
 
 pub enum ContentData {

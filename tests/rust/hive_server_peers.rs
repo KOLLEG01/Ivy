@@ -1,3 +1,9 @@
+use super::FixtureMut;
+#[path = "hive_catalog_fixture.rs"]
+mod catalog_fixture;
+#[path = "../fixtures/hive-dispatch-queue.rs"]
+mod fixture_dispatch;
+use fixture_dispatch::DispatchGate;
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, Outcome,
     hash::digest,
@@ -5,14 +11,14 @@ use ivy_contracts::{
     validation::validate_request,
 };
 use ivy_hive::{
-    admission::{DispatchGate, RequestBudget, RequestBudgetOptions},
+    admission::{RequestBudget, RequestBudgetOptions},
     live_routing::{LiveRouting, PreparedCall},
     packages::{PackageClock, PackageOptions, PackageRegistry, PackageRequest, PackageStorage},
     server_direct::{Dispatcher, Options as DirectOptions},
     server_peers::{Options, Owners, Peer, PeerSocket, Peers, UnhandledKind},
     server_rpc::{Clock, Invocation, Options as InvocationOptions, Reply, Storage},
+    storage::RequestOptions,
     tool_binding_diagnostics::ToolBindingDiagnostics,
-    worker_client::RequestOptions,
     ws_send::Socket,
 };
 use serde_json::{Value, json};
@@ -90,9 +96,11 @@ fn post(controls: &Controls, events: &Events, key: String, event: IvyJson) -> Re
     assert!(controls.lock().unwrap().insert(key, sender).is_none());
     Box::pin(async move { reply.await.expect("Fixture must retain accepted controls") })
 }
+#[derive(Clone)]
 struct Worker {
     events: Events,
     controls: Controls,
+    dispatch: DispatchGate,
 }
 struct RegistryClock {
     now: Clock,
@@ -129,6 +137,15 @@ impl PackageStorage for PackageWorker {
     }
 }
 impl Storage for Worker {
+    fn dispatch(&self, mut request: ivy_hive::storage::Request, options: RequestOptions) -> Reply {
+        let this = self.clone();
+        let reply = self.dispatch.run(move || async move {
+            request.prepare()?;
+            let result = this.request(crate::payload_fixture::json(request.take_payload()), options).await;
+            request.complete(result)
+        });
+        Box::pin(async move { reply.await.map_err(|_| IvyError::internal())? })
+    }
     fn request(&self, payload: IvyJson, options: RequestOptions) -> Reply {
         let execute = payload.get("action") == Some(&"execute".into());
         let key = payload
@@ -159,7 +176,7 @@ impl Storage for Worker {
                         "reservedBytes",
                         IvyJson::Number(options.reserved_bytes as f64),
                     ),
-                    ("backup", options.backup.into()),
+                    ("backup", false.into()),
                 ]),
             ),
         ]);
@@ -247,30 +264,7 @@ impl PeerSocket for TestSocket {
     }
 }
 fn prepared(value: &IvyJson) -> PreparedCall {
-    PreparedCall {
-        service_node_id: value
-            .get("serviceNodeId")
-            .unwrap()
-            .as_js_string()
-            .unwrap()
-            .clone(),
-        generation: value.get("generation").unwrap().as_f64().unwrap(),
-        definition: value.get("definition").unwrap().clone(),
-        definition_hash: value
-            .get("definitionHash")
-            .unwrap()
-            .as_js_string()
-            .unwrap()
-            .clone(),
-        arguments: value.get("arguments").unwrap().clone(),
-        caller_principal_id: value
-            .get("callerPrincipalId")
-            .unwrap()
-            .as_js_string()
-            .unwrap()
-            .clone(),
-        operation_id: value.get("operationId").cloned(),
-    }
+    super::prepared_from_reference(value, true)
 }
 fn summary(value: IvyJson) -> IvyJson {
     if let Some(s) = value.as_js_string().filter(|s| s.0.len() > 4096) {
@@ -306,6 +300,27 @@ fn compared(value: &IvyJson, trace: &Value) -> IvyJson {
     let mut value = value.clone();
     let mut rows = value.get("rows").unwrap().as_array().unwrap().to_vec();
     for (row, step) in rows.iter_mut().zip(trace["steps"].as_array().unwrap()) {
+        // Consecutive reads of an unchanged clock are internal checks. Keep
+        // distinct times, authentication outcomes and every other event exact.
+        if let IvyJson::Array(events) = row {
+            events.dedup_by(|a, b| a == b && a.get("kind") == Some(&"now".into()));
+            if step["op"] == "complete" && step["name"] == "credentials.configure" {
+                // The credential commit, cache reset and retirement still
+                // precede the next DB action. Its caller observes asynchronously.
+                let mut observed = Vec::new();
+                events.retain(|event| {
+                    if matches!(event.get("kind").and_then(|v| v.as_str().ok()).as_deref(),
+                        Some("credentials-ok" | "credentials-error"))
+                    {
+                        observed.push(event.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                events.extend(observed);
+            }
+        }
         if step["op"] == "complete"
             && step["name"]
                 .as_str()
@@ -368,7 +383,12 @@ fn compare_sources(group: &str, traces: &[Value], original: &IvyJson) {
             count
         );
         let actual = compared(&actual, trace);
-        let expected = compared(expected, trace);
+        let mut expected = expected.clone();
+        super::project_prepared_events(
+            expected.get_mut("rows").unwrap(),
+            trace["options"]["validateMessages"] == true,
+        );
+        let expected = compared(&expected, trace);
         if actual != expected {
             let rows = actual.get("rows").unwrap().as_array().unwrap();
             let original = expected.get("rows").unwrap().as_array().unwrap();
@@ -515,16 +535,16 @@ async fn run_trace(trace: &Value, source: &IvyJson) -> IvyJson {
     let storage = Arc::new(Worker {
         events: events.clone(),
         controls: controls.clone(),
+        dispatch: DispatchGate::new(
+            trace["dispatch"]["maximum"].as_u64().unwrap_or(1024) as usize,
+            trace["dispatch"]["waitMs"].as_u64().unwrap_or(30000),
+        ),
     });
     let peer_owners = Owners {
         storage: storage.clone(),
         routing: routing.clone(),
         diagnostics: diagnostics.clone(),
         requests: requests.clone(),
-        dispatch: DispatchGate::new(
-            trace["dispatch"]["maximum"].as_u64().unwrap_or(1024) as usize,
-            trace["dispatch"]["waitMs"].as_u64().unwrap_or(30000),
-        ),
         now: now.clone(),
         ids,
         direct: Arc::new(move |owner, context, request, peer| {
@@ -661,7 +681,6 @@ async fn run_trace(trace: &Value, source: &IvyJson) -> IvyJson {
             }),
             now,
             requests.clone(),
-            DispatchGate::new(1024, 30_000),
             InvocationOptions::default(),
         )
     };
@@ -706,13 +725,13 @@ async fn run_trace(trace: &Value, source: &IvyJson) -> IvyJson {
                     peers.insert(name.to_owned(), peer);
                     sockets.insert(name.to_owned(), state);
                 }
-                "update" => owner.routing_update(&wire(step))?,
+                "update" => owner.routing_update(&catalog_fixture::routing_from_wire(&wire(step))?)?,
                 "prepare" => {
-                    let value = routing
+                    let call = routing
                         .lock()
                         .unwrap()
-                        .prepare(&wire(&step["context"]), &wire(&step["params"]))?
-                        .to_json();
+                        .prepare(&wire(&step["context"]), &wire(&step["params"]))?;
+                    let value = super::prepared_snapshot(&call);
                     events.lock().unwrap().push(IvyJson::object([
                         ("kind", "prepared".into()),
                         ("value", value),
@@ -905,9 +924,10 @@ async fn run_trace(trace: &Value, source: &IvyJson) -> IvyJson {
                 }
                 "changes" => {
                     if let Some(server) = &server {
-                        server.lifecycle.worker_event(
-                            ivy_hive::worker_runtime::Event::Notification(
-                                ivy_hive::worker_protocol::Notification::Changes(
+                        server
+                            .lifecycle
+                            .worker_event(ivy_hive::storage::Event::Notification(
+                                ivy_hive::storage::Notification::Changes(
                                     step["scopes"]
                                         .as_array()
                                         .unwrap()
@@ -915,8 +935,7 @@ async fn run_trace(trace: &Value, source: &IvyJson) -> IvyJson {
                                         .map(|v| v.as_str().unwrap().into())
                                         .collect(),
                                 ),
-                            ),
-                        );
+                            ));
                     } else {
                         owner.changes(
                             &step["scopes"]
@@ -931,16 +950,13 @@ async fn run_trace(trace: &Value, source: &IvyJson) -> IvyJson {
                 "health" => owner.health()?,
                 "events" => {
                     if let Some(server) = &server {
-                        server.lifecycle.worker_event(
-                            ivy_hive::worker_runtime::Event::Notification(
-                                ivy_hive::worker_protocol::Notification::EventsAvailable(
-                                    IvyJson::object([(
-                                        "throughSequence",
-                                        expanded(&step["through"]),
-                                    )]),
-                                ),
-                            ),
-                        );
+                        server
+                            .lifecycle
+                            .worker_event(ivy_hive::storage::Event::Notification(
+                                ivy_hive::storage::Notification::EventsAvailable(IvyJson::object(
+                                    [("throughSequence", expanded(&step["through"]))],
+                                )),
+                            ));
                     } else {
                         publication =
                             owner.events_available(number(step.get("through"), 0.0)) || publication;
@@ -962,9 +978,7 @@ async fn run_trace(trace: &Value, source: &IvyJson) -> IvyJson {
                     if let Some(server) = &server {
                         server
                             .lifecycle
-                            .worker_event(ivy_hive::worker_runtime::Event::Failure(
-                                IvyError::internal(),
-                            ));
+                            .worker_event(ivy_hive::storage::Event::Failure(IvyError::internal()));
                     } else {
                         owner.storage_failed()?;
                         events
@@ -1559,7 +1573,7 @@ fn native_provider_outcomes_use_the_typed_contract_and_preserve_error_fields() {
 }
 
 #[test]
-fn original_replacement_fences_queued_frames_and_prior_provider_responses() {
+fn replacement_preserves_global_fifo_and_fences_prior_provider_responses() {
     let registration = |label: &str| {
         message(
             "old",
@@ -1591,13 +1605,37 @@ fn original_replacement_fences_queued_frames_and_prior_provider_responses() {
         result("old", "prior", json!("stale")),
         json!({"op":"advance","ms":30000}),
     ]);
-    compare(
-        "generation-races",
-        vec![
+    let traces = vec![
             json!({"name":"replacement-overtakes-peer-chain-before-global-dispatch","steps":queued}),
             json!({"name":"same-peer-rebind-rejects-old-correlation-until-deadline","steps":pending}),
-        ],
-    );
+        ];
+    let sources = original(&traces).as_array().unwrap();
+    compare_sources("generation-races", &traces[1..], &IvyJson::Array(sources[1..].to_vec()));
+
+    // There is one shared dispatch queue. A frame admitted before replacement
+    // runs first; a stale frame received after replacement must never reach DB.
+    let mut trace = traces[0].clone();
+    trace["requests"] = json!({"perConsumerBytes":134217728});
+    let steps = trace["steps"].as_array_mut().unwrap();
+    let after_active = steps.iter().position(|s| s["op"] == "complete" && s["name"] == "worker:active").unwrap() + 1;
+    steps.insert(after_active, complete("queued", false, json!(2)));
+    steps.extend([
+        message("old", request("stale", false)),
+        message("replacement", request("current", false)),
+        complete("current", false, json!(3)),
+        json!({"op":"probe","key":"other","bytes":134217728}),
+    ]);
+    let runtime = Builder::new_current_thread().enable_time().start_paused(true).build().unwrap();
+    let actual = runtime.block_on(run_trace(&trace, &sources[0]));
+    let rows = actual.get("rows").unwrap().as_array().unwrap();
+    let calls: Vec<_> = rows.iter().flat_map(|row| row.as_array().unwrap()).filter_map(|event| {
+        if event.get("kind") != Some(&"worker".into()) { return None; }
+        let payload = event.get("payload")?;
+        let label = payload.get("request")?.get("params")?.get("label")?.as_str().ok()?;
+        Some((label, payload.get("context")?.get("generation")?.as_f64().unwrap()))
+    }).collect();
+    assert_eq!(calls, vec![("boot".into(), 1.0), ("active".into(), 1.0), ("queued".into(), 1.0), ("replace".into(), 2.0), ("current".into(), 2.0)]);
+    assert!(rows.last().unwrap().as_array().unwrap().iter().any(|event| event.get("kind") == Some(&"probe".into()) && event.get("ok") == Some(&true.into())));
 }
 
 #[test]

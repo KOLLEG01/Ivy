@@ -8,7 +8,9 @@ SHOULD denotes a default that needs a reason to deviate.
 - Hive owns generic persistence, discovery and routing. Domain services own workflows,
   native resources and external effects. Hive MUST NOT execute uploaded service code,
   validators, workflows or build commands.
-- One Hive storage owner opens its local SQLite database. Each component has one process
+- Hive MUST run in one process. A dedicated thread owns its local SQLite connection;
+  bounded commands keep blocking database work off the network executor. Storage failure
+  requires process recovery, never a second database owner. Each component has one process
   owner; replacement must not create a second writer or duplicate external work.
 - Public builds MUST work without external source checkouts, personal runtime data or
   credentials. Optional integrations use ordinary SDK contracts without Hive special cases.

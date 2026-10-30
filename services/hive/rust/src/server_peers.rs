@@ -1,15 +1,16 @@
 //! Network-side peer lifetime, provider correlation and request dispatch.
 //! The transport owns socket readiness, flushing, close events and publication
 //! turns; storage, routing, diagnostics and admission retain their own owners.
-//! Ingress and event callbacks run on one network executor, as in the source.
+//! DB request effects share its scheduling boundary; direct provider calls stay
+//! on the network executor.
 use crate::{
-    admission::{DispatchGate, RequestBudget, RequestLease},
+    admission::{RequestBudget, RequestLease},
     http_common,
     live_routing::{LiveRouting, PreparedCall},
     rpc,
     server_rpc::{Clock, Reply, Storage, require_fresh, validate_direct_tool_request},
+    storage::{Payload, Request, RequestEffects, RequestOptions},
     tool_binding_diagnostics::ToolBindingDiagnostics,
-    worker_client::RequestOptions,
     ws_send::{self, Socket},
 };
 use ivy_contracts::{
@@ -40,7 +41,6 @@ struct Connection {
     socket: Mutex<Box<dyn PeerSocket>>,
     context: Mutex<IvyJson>,
     session: Mutex<Session>,
-    chain: DispatchGate,
 }
 /// Identity is the connection itself, never a caller-supplied ID or node name.
 #[derive(Clone)]
@@ -108,7 +108,6 @@ pub struct Owners {
     pub routing: Arc<Mutex<LiveRouting>>,
     pub diagnostics: Arc<Mutex<ToolBindingDiagnostics>>,
     pub requests: RequestBudget,
-    pub dispatch: DispatchGate,
     pub direct: Direct,
     pub now: Clock,
     pub ids: Ids,
@@ -136,7 +135,7 @@ impl Settlement {
 #[derive(Clone)]
 struct Pending {
     peer: Peer,
-    call: PreparedCall,
+    generation: f64,
     reply: Settlement,
     timer: AbortHandle,
 }
@@ -157,6 +156,110 @@ struct Parts {
 }
 #[derive(Clone)]
 pub struct Peers(Arc<Parts>);
+
+struct PeerEffects {
+    peers: Peers,
+    peer: Peer,
+    connecting: bool,
+    delivery: Arc<Mutex<PeerDelivery>>,
+}
+struct PeerDelivery {
+    peer: Peer,
+    id: IvyJson,
+    lease: RequestLease,
+    finished: bool,
+    error: Option<IvyError>,
+}
+impl PeerDelivery {
+    fn reject(&mut self, error: IvyError) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        let sent = self.peer.send(&rpc::failure(&error, self.id.clone()), None);
+        self.settle(sent);
+    }
+    fn finish(&mut self, result: IvyResult<IvyJson>) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        let sent = match result {
+            Ok(value) => self.peer.send(&result_frame(self.id.clone(), value), None),
+            Err(error) => Err(error),
+        };
+        // Preserve the transport's existing fallback and unhandled-error policy.
+        let sent = sent.or_else(|error| self.peer.send(&rpc::failure(&error, self.id.clone()), None));
+        let sent = sent.or_else(|error| self.peer.send(&rpc::failure(&error, self.id.clone()), None));
+        self.settle(sent);
+    }
+    fn settle(&mut self, sent: IvyResult<()>) {
+        match sent {
+            Ok(()) => {
+                self.peer.0.session.lock().unwrap().active -= 1;
+                self.lease.release();
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+}
+impl RequestEffects for PeerEffects {
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + std::mem::size_of::<Mutex<PeerDelivery>>() + 2 * std::mem::size_of::<usize>()
+            + self.delivery.lock().unwrap().id.retained_bytes()
+    }
+    fn prepare(&self, payload: &mut Payload) -> IvyResult<()> {
+        let Payload::Execute { context: prepared, .. } = payload else { return Err(IvyError::internal()); };
+        let mut context = self.peer.context();
+        require_fresh(&context, &*self.peers.0.owners.now)?;
+        if !self.connecting
+            && context.get("serviceNodeId").and_then(IvyJson::as_js_string)
+                .is_some_and(|v| !v.0.is_empty())
+        {
+            self.peers.0.owners.routing.lock().unwrap().caller(&context)?;
+        }
+        if self.connecting {
+            let mut state = self.peers.0.state.lock().unwrap();
+            state.generation = if state.generation == 9_007_199_254_740_991.0 {
+                1.0
+            } else {
+                state.generation + 1.0
+            };
+            context.insert("generation", IvyJson::Number(state.generation));
+        }
+        *prepared = context;
+        Ok(())
+    }
+    fn complete(self: Box<Self>, result: IvyResult<IvyJson>) -> IvyResult<IvyJson> {
+        let result = self.bind(result);
+        self.delivery.lock().unwrap().finish(result);
+        Ok(IvyJson::Null)
+    }
+}
+impl PeerEffects {
+    fn bind(&self, result: IvyResult<IvyJson>) -> IvyResult<IvyJson> {
+        let mut prepared = result?;
+        let connected = self.connecting && prepared.get("kind") == Some(&"result".into());
+        let value = prepared.remove("value").ok_or_else(IvyError::internal)?;
+        if connected {
+            {
+                let mut context = self.peer.0.context.lock().unwrap();
+                for (key, value) in value.as_object().ok_or_else(IvyError::internal)? {
+                    context.insert(key.clone(), value.clone());
+                }
+            }
+            for old in self.peers.members() {
+                if !old.same(&self.peer)
+                    && old.context().get("serviceNodeId") == value.get("serviceNodeId")
+                {
+                    old.terminate()?;
+                }
+            }
+        }
+        Ok(value)
+    }
+}
 fn require(value: bool, code: &str, message: &str) -> IvyResult<()> {
     if value {
         Ok(())
@@ -185,12 +288,6 @@ fn ready<T: Send + 'static>(value: IvyResult<T>) -> Reply<T> {
 }
 fn receive<T: Send + 'static>(reply: oneshot::Receiver<IvyResult<T>>) -> Reply<T> {
     Box::pin(async move { reply.await.map_err(|_| IvyError::internal())? })
-}
-fn qualified(call: &PreparedCall) -> IvyResult<JsString> {
-    let mut name = text(&call.definition, "namespace")?;
-    name.0.push(46);
-    name.0.extend(text(&call.definition, "name")?.0);
-    Ok(name)
 }
 fn result_frame(id: IvyJson, result: IvyJson) -> IvyJson {
     IvyJson::object([("jsonrpc", "2.0".into()), ("id", id), ("result", result)])
@@ -242,7 +339,6 @@ impl Peers {
                 changes: vec![],
                 expiry: None,
             }),
-            chain: DispatchGate::new(CONNECTION_IN_FLIGHT_REQUESTS, 30_000),
         }));
         if let Some(expires) = context.get("expiresAt") {
             let duration = expires
@@ -358,6 +454,12 @@ impl Peers {
     }
     fn start_forward(&self, context: &IvyJson, call: PreparedCall) -> IvyResult<Reply> {
         require_fresh(context, &*self.0.owners.now)?;
+        let PreparedCall {
+            context: call,
+            definition_hash,
+            arguments,
+            operation_id,
+        } = call;
         let mut state = self.0.state.lock().unwrap();
         let peer = state
             .peers
@@ -393,25 +495,24 @@ impl Peers {
         let mut id = JsString::from("hive-call-");
         id.0.extend((self.0.owners.ids)().0);
         let mut params = IvyJson::object([
-            ("qualifiedName", IvyJson::String(qualified(&call)?)),
-            ("arguments", call.arguments.clone()),
             (
-                "definitionHash",
-                IvyJson::String(call.definition_hash.clone()),
+                "qualifiedName",
+                IvyJson::String(call.qualified_name.clone()),
             ),
+            ("arguments", arguments),
+            ("definitionHash", IvyJson::String(definition_hash)),
             ("generation", IvyJson::Number(call.generation)),
             (
                 "callerPrincipalId",
                 IvyJson::String(call.caller_principal_id.clone()),
             ),
         ]);
-        if call
-            .operation_id
+        if operation_id
             .as_ref()
             .and_then(IvyJson::as_js_string)
             .is_some_and(|v| !v.0.is_empty())
         {
-            params.insert("operationId", call.operation_id.as_ref().unwrap().clone());
+            params.insert("operationId", operation_id.unwrap());
         }
         let request = IvyJson::object([
             ("jsonrpc", "2.0".into()),
@@ -446,7 +547,7 @@ impl Peers {
         });
         let pending = Pending {
             peer: peer.clone(),
-            call: call.clone(),
+            generation: call.generation,
             reply: settlement,
             timer: timer.abort_handle(),
         };
@@ -485,7 +586,10 @@ impl Peers {
                             "serviceNodeId",
                             IvyJson::String(call.service_node_id.clone()),
                         ),
-                        ("qualifiedName", IvyJson::String(qualified(&call)?)),
+                        (
+                            "qualifiedName",
+                            IvyJson::String(call.qualified_name.clone()),
+                        ),
                     ]))?;
                 Ok(completed)
             }
@@ -514,7 +618,7 @@ impl Peers {
             .map(|(_, p)| p.clone());
         let Some(pending) = pending.filter(|p| {
             p.peer.same(peer)
-                && peer.context().get("generation") == Some(&IvyJson::Number(p.call.generation))
+                && peer.context().get("generation") == Some(&IvyJson::Number(p.generation))
         }) else {
             self.protocol_diagnostic(
                 peer,
@@ -753,103 +857,35 @@ impl Peers {
         Ok(())
     }
     fn queued(&self, peer: &Peer, frame: IvyJson, bytes: usize, lease: RequestLease) {
-        let admitted = Arc::new(Mutex::new(lease));
-        let job_lease = admitted.clone();
-        let this = self.clone();
-        let job_peer = peer.clone();
-        let outer_id = rpc::valid_request_id(frame.get("id"));
-        let reply = peer.0.chain.run(move || async move {
-            require_fresh(&job_peer.context(), &*this.0.owners.now)?;
-            let id = rpc::valid_request_id(frame.get("id"));
-            let gate = this.0.owners.dispatch.clone();
-            let dispatch_owner = this.clone();
-            let dispatch_peer = job_peer.clone();
-            let result = receive(gate.run(move || async move {
-                dispatch_owner.execute(&dispatch_peer, frame, bytes).await
-            }))
-            .await;
-            let sent = match result {
-                Ok(value) => job_peer.send(&result_frame(id.clone(), value), None),
-                Err(error) => Err(error),
-            };
-            if let Err(error) = sent {
-                job_peer.send(&rpc::failure(&error, id), None)?;
-            }
-            job_peer.0.session.lock().unwrap().active -= 1;
-            job_lease.lock().unwrap().release();
-            Ok(())
-        });
-        let peer = peer.clone();
+        let delivery = Arc::new(Mutex::new(PeerDelivery {
+            peer: peer.clone(), id: rpc::valid_request_id(frame.get("id")), lease,
+            finished: false, error: None,
+        }));
+        let connecting = frame.get("method") == Some(&"service.connect".into());
+        let reply = self.0.owners.storage.dispatch(
+            Request::with_effects(
+                Payload::Execute { context: IvyJson::Null, request: frame },
+                PeerEffects {
+                    peers: self.clone(), peer: peer.clone(), connecting,
+                    delivery: delivery.clone(),
+                },
+            ),
+            RequestOptions { reserved_bytes: bytes as u64, ..Default::default() },
+        );
         let unhandled = self.0.owners.unhandled.clone();
         tokio::spawn(async move {
-            let work = async {
-                if let Err(error) = receive(reply).await {
-                    peer.send(&rpc::failure(&error, outer_id), None)?;
-                    peer.0.session.lock().unwrap().active -= 1;
-                    admitted.lock().unwrap().release();
+            let result = reply.await;
+            let error = {
+                let mut delivery = delivery.lock().unwrap();
+                if let Err(error) = result {
+                    delivery.reject(error);
                 }
-                Ok::<(), IvyError>(())
-            }
-            .await;
-            if let Err(error) = work {
+                delivery.error.take()
+            };
+            if let Some(error) = error {
                 unhandled(UnhandledKind::Promise, error);
             }
         });
-    }
-    async fn execute(&self, peer: &Peer, frame: IvyJson, bytes: usize) -> IvyResult<IvyJson> {
-        let mut context = peer.context();
-        require_fresh(&context, &*self.0.owners.now)?;
-        let connecting = frame.get("method") == Some(&"service.connect".into());
-        if !connecting
-            && context
-                .get("serviceNodeId")
-                .and_then(IvyJson::as_js_string)
-                .is_some_and(|v| !v.0.is_empty())
-        {
-            self.0.owners.routing.lock().unwrap().caller(&context)?;
-        }
-        if connecting {
-            let mut state = self.0.state.lock().unwrap();
-            state.generation = if state.generation == 9_007_199_254_740_991.0 {
-                1.0
-            } else {
-                state.generation + 1.0
-            };
-            context.insert("generation", IvyJson::Number(state.generation));
-        }
-        let prepared = self
-            .0
-            .owners
-            .storage
-            .request(
-                IvyJson::object([
-                    ("action", "execute".into()),
-                    ("context", context),
-                    ("request", frame),
-                ]),
-                RequestOptions {
-                    reserved_bytes: bytes as u64,
-                    ..Default::default()
-                },
-            )
-            .await?;
-        let value = prepared.required("value")?.clone();
-        if connecting && prepared.get("kind") == Some(&"result".into()) {
-            {
-                let mut context = peer.0.context.lock().unwrap();
-                for (key, value) in value.as_object().ok_or_else(IvyError::internal)? {
-                    context.insert(key.clone(), value.clone());
-                }
-            }
-            for old in self.members() {
-                if !old.same(peer)
-                    && old.context().get("serviceNodeId") == value.get("serviceNodeId")
-                {
-                    old.terminate()?;
-                }
-            }
-        }
-        Ok(value)
     }
     pub fn changes(&self, scopes: &[JsString]) -> IvyResult<()> {
         fn below(a: &JsString, b: &JsString) -> bool {
@@ -926,11 +962,11 @@ impl Peers {
             .restore(values.as_array().ok_or_else(IvyError::internal)?)
     }
     /// The storage client already owns private notification admission.
-    pub fn routing_update(&self, value: &IvyJson) -> IvyResult<()> {
+    pub fn routing_update(&self, value: &crate::storage::RoutingUpdate) -> IvyResult<()> {
         self.0.owners.routing.lock().unwrap().update(
-            value.required("node")?,
-            value.get("generation").and_then(IvyJson::as_f64),
-            value.get("catalog"),
+            &value.node,
+            value.generation,
+            value.catalog.as_deref(),
         )
     }
     /// Invoked only after storage accepts the replacement and the HTTP cache,
@@ -1070,3 +1106,7 @@ impl Peers {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/rust/hive_peer_delivery.rs"]
+mod delivery_tests;

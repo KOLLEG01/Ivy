@@ -37,10 +37,14 @@ impl Registry {
         let node = self.node(store, id, runtime, now)?;
         let node_id = string(&node, "serviceNodeId")?.clone();
         let service = string(&node, "serviceName")?.clone();
-        let mut next_bindings = HashMap::new();
         let contacted = iso(runtime, now)?;
-        self.contact_times.insert(node_id.clone(), contacted);
+        self.record_contact(node_id.clone(), contacted);
+        self.contacts
+            .get_mut(&node_id)
+            .unwrap()
+            .contracts_acknowledged = false;
         let result=store.transaction(|store|{
+            let mut next_bindings = HashMap::new();
             validate_shared("RegistrySync",parameters)?;
             let namespaces=array(parameters,"namespaces")?;
             require(unique(namespaces,|ns|Ok(string(ns,"namespace")?.clone()))?,"registry_invalid","Duplicate namespace.")?;
@@ -108,23 +112,24 @@ impl Registry {
                     sql(store,store.connection().execute("INSERT OR IGNORE INTO inventory_schemas VALUES (?,?,?,?)",params![text(namespace),text(string(kind,"kind")?),text(string(kind,"version")?),candidate]))?;
                 }
             }
-            let at=iso(runtime,now)?;self.contact_times.insert(node_id.clone(),at.clone());
+            let catalog = Catalog::new(parameters, next_bindings)?;
+            let at=iso(runtime,now)?;self.record_contact(node_id.clone(),at.clone());
             sql(store,store.connection().execute("INSERT INTO registries VALUES (?,?) ON CONFLICT(node_id) DO UPDATE SET registry_json=excluded.registry_json",params![text(&node_id),encoded(parameters)?]))?;
             let mut updated=node.clone();updated.insert("synced",true.into());updated.insert("lastSuccessfulSyncAt",IvyJson::String(at.clone()));updated.insert("lastContactAt",IvyJson::String(at.clone()));self.save(store,&updated,true)?;
             self.diagnostic(store,&registry_diagnostic(&node_id,&at,true),runtime,now)?;
             let mut result=IvyJson::object(std::iter::empty::<(&str,IvyJson)>());
             if let Some(generation)=generation {result.insert("generation",IvyJson::Number(generation));}
             result.insert("syncedAt",IvyJson::String(at));
-            Ok(result)
+            Ok((result,catalog))
         });
         match result {
-            Ok(result) => {
-                self.binding_catalog.insert(node_id, next_bindings);
+            Ok((result,catalog)) => {
+                self.catalogs.insert(node_id, catalog);
                 Ok(result)
             }
             Err(error) => {
                 let at = iso(runtime, now)?;
-                self.contact_times.insert(node_id.clone(), at.clone());
+                self.record_contact(node_id.clone(), at.clone());
                 let mut updated = node;
                 updated.insert("synced", false.into());
                 updated.insert("ready", false.into());

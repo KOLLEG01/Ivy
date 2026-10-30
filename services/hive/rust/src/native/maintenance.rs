@@ -1,7 +1,7 @@
 //! Periodic health, retention, snapshots and credential-only configuration reload.
 use super::{App, backup, failure, require, string};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, hash::digest, json::canonical};
-use ivy_hive::{server_rpc::Storage, store::Credential, worker_client::RequestOptions};
+use ivy_hive::{server_rpc::Storage, storage::RequestOptions, store::Credential};
 use ivy_host_runtime::{
     config::{CONFIGURATION_BYTES, json_file},
     health::HealthFile,
@@ -133,7 +133,17 @@ impl Maintenance {
                 )]),
             ),
             ("source", "hive".into()),
-            ("severity", if resolved { "info" } else if code == "storage_pressure" { "warning" } else { "error" }.into()),
+            (
+                "severity",
+                if resolved {
+                    "info"
+                } else if code == "storage_pressure" {
+                    "warning"
+                } else {
+                    "error"
+                }
+                .into(),
+            ),
             (
                 "status",
                 if resolved { "resolved" } else { "current" }.into(),

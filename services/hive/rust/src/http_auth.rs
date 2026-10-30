@@ -3,6 +3,8 @@
 use crate::{
     admission::{AuthenticationRate, RequestBudget, RequestBudgetOptions, RequestLease},
     browser_push::{RequestFuture, Worker},
+    storage::Payload,
+    store::AuthContext,
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::digest, json::stringify};
 use std::{
@@ -317,39 +319,33 @@ impl Inner {
                 {
                     return Ok(Prepared::Ready(with_transport(&value, &request.transport)));
                 }
-                let context = IvyJson::object([
-                    (
-                        "credentialDigest",
-                        digest(String::from_utf16_lossy(&token.0)).into(),
-                    ),
-                    ("transport", IvyJson::String(request.transport.clone())),
-                ]);
-                let posted = self.worker.request(IvyJson::object([
-                    ("action", "authenticate".into()),
-                    ("context", context.clone()),
-                ]));
-                return Ok(Prepared::Bearer(context, posted));
+                let credential = JsString::from(digest(String::from_utf16_lossy(&token.0)));
+                let posted = self.worker.request(Payload::Authenticate(AuthContext {
+                    credential_digest: credential.clone(),
+                    session_digest: None,
+                }));
+                return Ok(Prepared::Bearer(credential, posted));
             }
             let token = session_token(request.headers.cookie.as_ref());
             require(token.is_some(), "unauthenticated", "Sign in to Hive.")?;
-            let posted = self.worker.request(IvyJson::object([
-                ("action", "session.resolve".into()),
-                (
-                    "sessionDigest",
-                    digest(String::from_utf16_lossy(&token.unwrap().0)).into(),
-                ),
-            ]));
+            let posted = self.worker.request(Payload::ResolveSession(
+                digest(String::from_utf16_lossy(&token.unwrap().0)).into(),
+            ));
             Ok(Prepared::Session(posted))
         })();
         let owner = self.clone();
         Box::pin(async move {
             match initial? {
                 Prepared::Ready(value) => Ok(value),
-                Prepared::Bearer(mut context, posted) => {
+                Prepared::Bearer(credential, posted) => {
                     let principal = posted.await?;
                     if principal.is_null() {
                         return Err(IvyError::internal());
                     }
+                    let mut context = IvyJson::object([
+                        ("credentialDigest", credential.into()),
+                        ("transport", request.transport.into()),
+                    ]);
                     if let Some(id) = principal.get("principalId") {
                         context.insert("principalId", id.clone());
                     }
@@ -368,7 +364,7 @@ impl Inner {
 }
 enum Prepared {
     Ready(IvyJson),
-    Bearer(IvyJson, RequestFuture),
+    Bearer(JsString, RequestFuture),
     Session(RequestFuture),
 }
 async fn wait(mut pending: Pending) -> IvyResult<IvyJson> {

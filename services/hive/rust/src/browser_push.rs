@@ -1,5 +1,5 @@
 //! Browser push delivery coordination. Encryption and HTTPS are required providers.
-use crate::{worker_client::RequestOptions, worker_runtime::StorageClient};
+use crate::storage::{Payload, RequestOptions, StorageClient};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::stringify};
 use std::{
     future::Future,
@@ -20,12 +20,11 @@ pub type CloseFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Issue the request when called; its future observes that posted operation.
 pub trait Worker: Send + Sync {
-    fn request(&self, payload: IvyJson) -> RequestFuture;
+    fn request(&self, payload: Payload) -> RequestFuture;
 }
 impl Worker for StorageClient {
-    fn request(&self, payload: IvyJson) -> RequestFuture {
-        let receiver = StorageClient::request(self, payload, RequestOptions::default());
-        Box::pin(async move { receiver.await.map_err(|_| IvyError::internal())? })
+    fn request(&self, payload: Payload) -> RequestFuture {
+        StorageClient::request(self, payload, RequestOptions::default())
     }
 }
 #[derive(Clone)]
@@ -133,7 +132,7 @@ impl BrowserPush {
     fn next(&self) -> RequestFuture {
         self.0
             .worker
-            .request(IvyJson::object([("action", "browserPush.next".into())]))
+            .request(IvyJson::object([("action", "browserPush.next".into())]).into())
     }
     async fn drain(&self, mut next: RequestFuture) -> IvyResult<()> {
         loop {
@@ -148,7 +147,7 @@ impl BrowserPush {
                 let keys = self
                     .0
                     .worker
-                    .request(IvyJson::object([("action", "browserPush.keys".into())]))
+                    .request(IvyJson::object([("action", "browserPush.keys".into())]).into())
                     .await?;
                 let details = VapidDetails::from_keys(&keys, &self.0.subject)?;
                 // Validate the batch before starting deliveries. Invalid worker
@@ -186,7 +185,7 @@ impl BrowserPush {
                                 ("id", id),
                                 ("status", IvyJson::Number(status as f64)),
                             ]);
-                            worker.request(request).await.map(|_| ())
+                            worker.request(request.into()).await.map(|_| ())
                         }
                         .await;
                         let _ = completed.send(result);

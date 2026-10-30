@@ -1,4 +1,6 @@
 //! Hive service implementation. Storage policy is independent of the network executor.
+#[cfg(test)]
+extern crate self as ivy_hive;
 pub mod admission;
 pub mod auth_pages;
 pub mod browser_push;
@@ -41,6 +43,7 @@ pub mod packages;
 pub mod paging;
 pub mod query;
 pub mod registry;
+pub mod registry_catalog;
 pub mod retention;
 pub mod rpc;
 pub mod runtime_reset;
@@ -65,12 +68,9 @@ pub mod ui_security;
 pub mod uis;
 pub mod wiki;
 pub mod worker_actions;
-pub mod worker_client;
-pub mod worker_entry;
 pub mod worker_identity;
 pub mod worker_kernel;
-pub mod worker_protocol;
-pub mod worker_runtime;
-pub mod worker_server;
+pub mod storage;
 pub mod ws_send;
 pub mod ws_socket_io;
+mod contract_catalog;

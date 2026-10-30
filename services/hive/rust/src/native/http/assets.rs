@@ -11,7 +11,7 @@ use ivy_hive::{
     http_static::{AssetResponse, decode_relative},
     oauth::Parameters,
     server_rpc::Storage,
-    worker_client::RequestOptions,
+    storage::RequestOptions,
 };
 use std::{
     future::Future,

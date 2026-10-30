@@ -62,7 +62,7 @@ impl Handler<'_> {
                 ("action", "browserPush.request".into()),
                 ("context", context.clone()),
                 ("request", input.clone()),
-            ]))
+            ]).into())
             .await?;
         http_response::json(response, 200, &result)?;
         if action == Some(&JsString::from("test")) {

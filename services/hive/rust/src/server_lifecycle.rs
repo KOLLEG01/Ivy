@@ -1,17 +1,16 @@
-//! Startup, recovery, shutdown and credential changes on the network executor.
+//! Network lifecycle with credential effects applied at the DB action boundary.
 //! HTTP/WS listening and runtime error policy remain explicit owners; no listener
 //! or production-runtime fallback is constructed here.
 use crate::{
-    admission::DispatchGate,
     browser_push::BrowserPush,
     oauth::{HiveOAuth, Secrets},
     packages::PackageRegistry,
     server_peers::{Peers, UnhandledKind},
     server_rpc::{Reply, Storage},
     store::Credential,
-    worker_client::RequestOptions,
-    worker_protocol::Notification,
-    worker_runtime::{Event, EventSink, StorageClient},
+    storage::{Payload, Request, RequestEffects, RequestOptions},
+    storage::Notification,
+    storage::{Event, EventSink, StorageClient},
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use std::{
@@ -110,7 +109,6 @@ pub struct Owners {
     /// Shares routing, diagnostics, HTTP authentication reset and push wake with
     /// the actual request/connection composition.
     pub peers: Peers,
-    pub dispatch: DispatchGate,
     pub oauth: Arc<dyn OAuth>,
     pub push: Arc<dyn Push>,
     pub packages: Option<Arc<dyn Packages>>,
@@ -127,9 +125,7 @@ pub struct Options {
 }
 struct State {
     credentials: Vec<Credential>,
-    stopped: bool,
     health: Option<AbortHandle>,
-    recovery: Option<AbortHandle>,
 }
 struct Parts {
     owners: Owners,
@@ -139,6 +135,26 @@ struct Parts {
 }
 #[derive(Clone)]
 pub struct Lifecycle(Arc<Parts>);
+
+struct CredentialsEffects {
+    lifecycle: Lifecycle,
+    credentials: Arc<Vec<Credential>>,
+}
+impl RequestEffects for CredentialsEffects {
+    fn retained_bytes(&self) -> usize {
+        // Payload::ConfigureCredentials accounts for the shared vector once.
+        std::mem::size_of::<Self>()
+    }
+    fn complete(self: Box<Self>, result: IvyResult<IvyJson>) -> IvyResult<IvyJson> {
+        let value = result?;
+        let owners = &self.lifecycle.0.owners;
+        owners.peers.clear_authentication();
+        self.lifecycle.0.state.lock().unwrap().credentials = self.credentials.as_ref().clone();
+        owners.oauth.set_credentials(self.credentials.as_ref().clone())?;
+        owners.peers.retire_credentials(&self.credentials)?;
+        Ok(value)
+    }
+}
 fn retained<T: Send + 'static>(
     work: impl std::future::Future<Output = IvyResult<T>> + Send + 'static,
 ) -> Reply<T> {
@@ -148,21 +164,9 @@ fn retained<T: Send + 'static>(
     });
     Box::pin(async move { receiver.await.map_err(|_| IvyError::internal())? })
 }
-fn credentials_json(credentials: &[Credential]) -> IvyJson {
-    IvyJson::Array(
-        credentials
-            .iter()
-            .map(|c| {
-                IvyJson::object([
-                    ("principalId", IvyJson::String(c.principal_id.clone())),
-                    ("digest", IvyJson::String(c.digest.clone())),
-                ])
-            })
-            .collect(),
-    )
-}
 impl Lifecycle {
-    /// Entry points and owner callbacks run on the single network executor.
+    /// Entry points run on the network executor; committed credential effects
+    /// run on the DB owner before it starts the next action.
     /// Abandoning a returned future never cancels accepted lifecycle work.
     pub fn new(owners: Owners, options: Options) -> Self {
         Self(Arc::new(Parts {
@@ -171,9 +175,7 @@ impl Lifecycle {
             listen_port: options.listen_port,
             state: Mutex::new(State {
                 credentials: options.credentials,
-                stopped: false,
                 health: None,
-                recovery: None,
             }),
         }))
     }
@@ -181,13 +183,7 @@ impl Lifecycle {
         self.0.state.lock().unwrap().credentials.clone()
     }
     fn stop(&self) {
-        self.0.state.lock().unwrap().stopped = true;
         self.0.owners.peers.stop_publication();
-    }
-    fn cancel_recovery(&self) {
-        if let Some(timer) = self.0.state.lock().unwrap().recovery.take() {
-            timer.abort();
-        }
     }
     fn cancel_health(&self) {
         if let Some(timer) = self.0.state.lock().unwrap().health.take() {
@@ -243,7 +239,6 @@ impl Lifecycle {
             .await;
             if let Err(error) = initializing {
                 this.stop();
-                this.cancel_recovery();
                 // A failed close replaces the original startup error, as await
                 // worker.close in the source catch block does.
                 this.0.owners.storage.close().await?;
@@ -294,39 +289,6 @@ impl Lifecycle {
             previous.abort();
         }
     }
-    pub fn schedule_recovery(&self) {
-        let mut state = self.0.state.lock().unwrap();
-        if state.stopped || state.recovery.is_some() {
-            return;
-        }
-        let this = self.clone();
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let task = tokio::spawn(async move {
-            tokio::time::sleep_until(deadline).await;
-            // Clear before starting: close cancels scheduled timers, not an
-            // already posted recovery or its diagnostic restoration.
-            this.0.state.lock().unwrap().recovery = None;
-            let startup = this.0.owners.storage.start();
-            let result = async {
-                startup.await?;
-                let values = this
-                    .0
-                    .owners
-                    .storage
-                    .request(
-                        IvyJson::object([("action", "binding.diagnostics".into())]),
-                        RequestOptions::default(),
-                    )
-                    .await?;
-                this.0.owners.peers.restore_diagnostics(&values)
-            }
-            .await;
-            if result.is_err() {
-                this.schedule_recovery();
-            }
-        });
-        state.recovery = Some(task.abort_handle());
-    }
     pub fn events_available(&self, through: f64) {
         if self.0.owners.peers.events_available(through) {
             let this = self.clone();
@@ -348,12 +310,7 @@ impl Lifecycle {
     }
     pub fn worker_event(&self, event: Event) {
         let result = match event {
-            Event::Failure(_) => self
-                .0
-                .owners
-                .peers
-                .storage_failed()
-                .map(|()| self.schedule_recovery()),
+            Event::Failure(_) => self.0.owners.peers.storage_failed(),
             Event::Notification(Notification::Routing(value)) => {
                 self.0.owners.peers.routing_update(&value)
             }
@@ -381,7 +338,6 @@ impl Lifecycle {
         retained(async move {
             push.await?;
             this.cancel_health();
-            this.cancel_recovery();
             this.0.owners.peers.reject_for_shutdown()?;
             this.0.owners.listener.close_websockets()?;
             this.0.owners.listener.close_connections()?;
@@ -390,25 +346,15 @@ impl Lifecycle {
         })
     }
     pub fn set_credentials(&self, credentials: Vec<Credential>) -> Reply<()> {
-        let this = self.clone();
-        let reply = self.0.owners.dispatch.run(move || async move {
-            this.0
-                .owners
-                .storage
-                .request(
-                    IvyJson::object([
-                        ("action", "credentials.configure".into()),
-                        ("credentials", credentials_json(&credentials)),
-                    ]),
-                    RequestOptions::default(),
-                )
-                .await?;
-            this.0.owners.peers.clear_authentication();
-            this.0.state.lock().unwrap().credentials = credentials.clone();
-            this.0.owners.oauth.set_credentials(credentials.clone())?;
-            this.0.owners.peers.retire_credentials(&credentials)
-        });
-        Box::pin(async move { reply.await.map_err(|_| IvyError::internal())? })
+        let credentials = Arc::new(credentials);
+        let reply = self.0.owners.storage.dispatch(
+            Request::with_effects(
+                Payload::ConfigureCredentials(credentials.clone()),
+                CredentialsEffects { lifecycle: self.clone(), credentials },
+            ),
+            RequestOptions::default(),
+        );
+        retained(async move { reply.await.map(|_| ()) })
     }
     pub fn collect_package_artifacts(&self) -> Reply<()> {
         let reply = self

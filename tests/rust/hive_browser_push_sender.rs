@@ -67,7 +67,8 @@ impl Fixture {
     }
 }
 impl Worker for Fixture {
-    fn request(&self, payload: IvyJson) -> RequestFuture {
+    fn request(&self, payload: ivy_hive::storage::Payload) -> RequestFuture {
+        let payload = crate::payload_fixture::json(payload);
         self.trace
             .lock()
             .unwrap()
@@ -199,21 +200,15 @@ fn actor(input: &Value) -> Option<mpsc::UnboundedSender<Posted>> {
                     let context = request.get("context").unwrap();
                     ivy_hive::worker_identity::end_session(
                         &store,
-                        &ivy_hive::store::AuthenticatedContext {
+                        &ivy_hive::store::AuthContext {
                             credential_digest: context
                                 .get("credentialDigest")
                                 .unwrap()
                                 .as_js_string()
                                 .unwrap()
                                 .clone(),
-                            principal_id: context
-                                .get("principalId")
-                                .unwrap()
-                                .as_js_string()
-                                .unwrap()
-                                .clone(),
+                            session_digest: context.get("sessionDigest").and_then(IvyJson::as_js_string).cloned(),
                         },
-                        context.get("sessionDigest").and_then(IvyJson::as_js_string),
                     )
                 }
                 "fixture.sessions" => Ok(IvyJson::from_serde(&rows(

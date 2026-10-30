@@ -11,8 +11,10 @@ pub fn auth_reference(subject: &str, input: &Value) -> Value {
         .unwrap()
     });
     let key = ivy_contracts::hash::digest(format!("{subject}\n{input}"));
-    cases["traces"]
+    let mut trace = cases["traces"]
         .get(&key)
         .unwrap_or_else(|| panic!("Missing original Hive {subject} trace: {key}"))
-        .clone()
+        .clone();
+    crate::payload_fixture::project_auth_requests(&mut trace);
+    trace
 }

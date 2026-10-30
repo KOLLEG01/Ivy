@@ -1,20 +1,25 @@
 use super::FixtureMut;
+#[path = "hive_catalog_fixture.rs"]
+mod catalog_fixture;
+#[path = "../fixtures/hive-dispatch-queue.rs"]
+mod fixture_dispatch;
+use fixture_dispatch::DispatchGate;
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, Outcome,
     hash::digest,
     json::{parse, stringify},
 };
 use ivy_hive::{
-    admission::{DispatchGate, RequestBudget},
+    admission::{RequestBudget},
     live_routing::{LiveRouting, PreparedCall},
     server_lifecycle::{Lifecycle, Listener, OAuth, Packages, Push, StorageLifecycle},
     server_peers::{Peer, PeerSocket, Peers, UnhandledKind},
     server_rpc::{Reply, Storage},
+    storage::Event,
+    storage::Notification,
+    storage::RequestOptions,
     store::Credential,
     tool_binding_diagnostics::ToolBindingDiagnostics,
-    worker_client::RequestOptions,
-    worker_protocol::Notification,
-    worker_runtime::Event,
     ws_send::Socket,
 };
 use serde_json::{Value, json};
@@ -73,11 +78,13 @@ fn credentials_value(value: &[Credential]) -> IvyJson {
     )
 }
 type Events = Arc<Mutex<Vec<IvyJson>>>;
+#[derive(Clone)]
 struct Fixture {
     events: Events,
-    controls: Mutex<HashMap<String, oneshot::Sender<IvyResult<IvyJson>>>>,
-    counters: Mutex<HashMap<String, u64>>,
+    controls: Arc<Mutex<HashMap<String, oneshot::Sender<IvyResult<IvyJson>>>>>,
+    counters: Arc<Mutex<HashMap<String, u64>>>,
     trace: Value,
+    dispatch: DispatchGate,
 }
 impl Fixture {
     fn emit(&self, event: IvyJson) {
@@ -116,6 +123,15 @@ impl Fixture {
     }
 }
 impl Storage for Fixture {
+    fn dispatch(&self, mut request: ivy_hive::storage::Request, options: RequestOptions) -> Reply {
+        let this = self.clone();
+        let reply = self.dispatch.run(move || async move {
+            request.prepare()?;
+            let result = this.request(crate::payload_fixture::json(request.take_payload()), options).await;
+            request.complete(result)
+        });
+        Box::pin(async move { reply.await.map_err(|_| IvyError::internal())? })
+    }
     fn request(&self, payload: IvyJson, options: RequestOptions) -> Reply {
         let key = payload.get("action").unwrap().as_str().unwrap();
         self.post(
@@ -132,7 +148,7 @@ impl Storage for Fixture {
                             "reservedBytes",
                             IvyJson::Number(options.reserved_bytes as f64),
                         ),
-                        ("backup", options.backup.into()),
+                        ("backup", false.into()),
                     ]),
                 ),
             ]),
@@ -292,30 +308,7 @@ impl PeerSocket for TestSocket {
     }
 }
 fn prepared(value: &IvyJson) -> PreparedCall {
-    PreparedCall {
-        service_node_id: value
-            .get("serviceNodeId")
-            .unwrap()
-            .as_js_string()
-            .unwrap()
-            .clone(),
-        generation: value.get("generation").unwrap().as_f64().unwrap(),
-        definition: value.get("definition").unwrap().clone(),
-        definition_hash: value
-            .get("definitionHash")
-            .unwrap()
-            .as_js_string()
-            .unwrap()
-            .clone(),
-        arguments: value.get("arguments").unwrap().clone(),
-        caller_principal_id: value
-            .get("callerPrincipalId")
-            .unwrap()
-            .as_js_string()
-            .unwrap()
-            .clone(),
-        operation_id: value.get("operationId").cloned(),
-    }
+    super::prepared_from_reference(value, true)
 }
 fn observe<T: Send + 'static>(
     work: Reply<T>,
@@ -351,9 +344,13 @@ async fn native(trace: &Value) -> Value {
     let events: Events = Arc::default();
     let fixture = Arc::new(Fixture {
         events: events.clone(),
-        controls: Mutex::default(),
-        counters: Mutex::default(),
+        controls: Arc::default(),
+        counters: Arc::default(),
         trace: trace.clone(),
+        dispatch: DispatchGate::new(
+            trace["dispatch"]["maximum"].as_u64().unwrap_or(1024) as usize,
+            trace["dispatch"]["waitMs"].as_u64().unwrap_or(30000),
+        ),
     });
     let diagnostics = Arc::new(Mutex::new(ToolBindingDiagnostics::new(
         {
@@ -370,10 +367,6 @@ async fn native(trace: &Value) -> Value {
         Arc::new(TestRuntime),
     )));
     let routing = Arc::new(Mutex::new(LiveRouting::new(false, None)));
-    let dispatch = DispatchGate::new(
-        trace["dispatch"]["maximum"].as_u64().unwrap_or(1024) as usize,
-        trace["dispatch"]["waitMs"].as_u64().unwrap_or(30000),
-    );
     let unhandled: ivy_hive::server_lifecycle::Unhandled = {
         let events = events.clone();
         Arc::new(move |kind, error| {
@@ -397,7 +390,6 @@ async fn native(trace: &Value) -> Value {
             routing: routing.clone(),
             diagnostics: diagnostics.clone(),
             requests: RequestBudget::default(),
-            dispatch: dispatch.clone(),
             direct: Arc::new(|_, _, _, _| Ok(None)),
             now: Arc::new(|| 10000.0),
             ids: {
@@ -439,7 +431,6 @@ async fn native(trace: &Value) -> Value {
         ivy_hive::server_lifecycle::Owners {
             storage: fixture.clone(),
             peers: peers.clone(),
-            dispatch,
             oauth: fixture.clone(),
             push: fixture.clone(),
             packages: trace["packages"]
@@ -521,11 +512,10 @@ async fn native(trace: &Value) -> Value {
                         Err(error(step.get("error")))
                     });
                 }
-                "recover" => lifecycle.schedule_recovery(),
                 "failure" => worker_events(Event::Failure(IvyError::internal())),
-                "routing" => worker_events(Event::Notification(Notification::Routing(wire(
-                    &step["value"],
-                )))),
+                "routing" => worker_events(Event::Notification(Notification::Routing(
+                    catalog_fixture::routing_from_wire(&wire(&step["value"])).unwrap(),
+                ))),
                 "events" => worker_events(Event::Notification(Notification::EventsAvailable(
                     IvyJson::object([("throughSequence", wire(&step["through"]))]),
                 ))),
@@ -551,11 +541,12 @@ async fn native(trace: &Value) -> Value {
                     ("kind", "prepared".into()),
                     (
                         "value",
-                        routing
-                            .lock()
-                            .unwrap()
-                            .prepare(&wire(&step["context"]), &wire(&step["params"]))?
-                            .to_json(),
+                        super::prepared_snapshot(
+                            &routing
+                                .lock()
+                                .unwrap()
+                                .prepare(&wire(&step["context"]), &wire(&step["params"]))?,
+                        ),
                     ),
                 ])),
                 "connect" => {
@@ -610,6 +601,15 @@ async fn native(trace: &Value) -> Value {
     }
     Value::Array(rows)
 }
+fn credential_observations(rows: &Value) -> Value {
+    // Preserve every event and step, and the order of all commits, effects and
+    // replies. Observing a future can interleave with the next DB action's start.
+    Value::Array(rows.as_array().unwrap().iter().map(|row| {
+        let (replies, owner): (Vec<_>, Vec<_>) = row.as_array().unwrap().iter().cloned()
+            .partition(|event| matches!(event["kind"].as_str(), Some("ok" | "failed")));
+        json!({"owner": owner, "replies": replies})
+    }).collect())
+}
 fn compare(group: &str, traces: Vec<Value>) {
     let old = super::lifetime_reference("lifecycle", &traces);
     assert_eq!(old.len(), traces.len());
@@ -623,7 +623,15 @@ fn compare(group: &str, traces: Vec<Value>) {
         let steps = input["steps"].as_array().unwrap().len();
         assert_eq!(original.as_array().unwrap().len(), steps);
         assert_eq!(native.as_array().unwrap().len(), steps);
-        assert_eq!(native, original, "lifecycle group={group} input={input}");
+        let mut expected = wire(&original);
+        super::project_prepared_events(&mut expected, false);
+        let expected: Value = serde_json::from_str(&encode(&expected)).unwrap();
+        if group == "credentials" {
+            assert_eq!(credential_observations(&native), credential_observations(&expected),
+                "lifecycle group={group} input={input}");
+        } else {
+            assert_eq!(native, expected, "lifecycle group={group} input={input}");
+        }
     }
 }
 fn settle(key: &str, value: Value) -> Value {
@@ -682,8 +690,6 @@ fn original_startup_cleanup_and_post_listen_boundaries() {
         let mut steps = steps[..stop].to_vec();
         steps.push(reject(stage));
         steps.push(settle("storage-close:1", Value::Null));
-        steps.push(json!({"op":"recover"}));
-        steps.push(json!({"op":"advance","ms":1000}));
         cases.push(json!({"name":format!("failed-{stage}"),"steps":steps}));
     }
     let mut steps = boot()[..1].to_vec();
@@ -698,8 +704,7 @@ fn original_startup_cleanup_and_post_listen_boundaries() {
         json!({"name":"oauth-initialize-throws","fail":{"oauth-initialize":{}},"steps":steps}),
     );
     for stage in ["push-start", "address"] {
-        let mut steps = boot();
-        steps.extend([json!({"op":"recover"}), json!({"op":"advance","ms":1000})]);
+        let steps = boot();
         cases.push(
             json!({"name":format!("post-listen-{stage}-throws"),"fail":{stage:{}},"steps":steps}),
         );
@@ -769,57 +774,41 @@ fn original_shutdown_callback_errors_and_abandonment() {
 }
 
 #[test]
-fn original_recovery_coalescing_failures_and_close_races() {
-    let mut cases = vec![];
-    let steps = vec![
-        json!({"op":"recover"}),
-        json!({"op":"recover"}),
-        json!({"op":"advance","ms":999}),
-        json!({"op":"advance","ms":1}),
-        reject("start:1"),
-        json!({"op":"advance","ms":999}),
-        json!({"op":"advance","ms":1}),
-        settle("start:2", Value::Null),
-        reject("binding.diagnostics:1"),
-        json!({"op":"advance","ms":1000}),
-        settle("start:3", Value::Null),
-        settle("binding.diagnostics:2", json!([])),
-    ];
-    cases.push(json!({"name":"retry-start-and-restore-failures","steps":steps}));
-    let mut steps = vec![json!({"op":"recover"})];
-    steps.extend(shutdown());
-    steps.push(json!({"op":"advance","ms":1000}));
-    cases.push(json!({"name":"close-cancels-scheduled-recovery","steps":steps}));
+fn startup_restores_the_shared_diagnostic_owner() {
     let resource = json!({"callerPrincipalId":"caller","serviceNodeId":"node","qualifiedName":"provider.call"});
     let diagnostic = json!({"source":"hive.tool-bindings","code":"tool_definition_changed","status":"current","resource":resource,"firstObservedAt":"retained"});
-    let mut steps = vec![json!({"op":"recover"}), json!({"op":"advance","ms":1000})];
-    steps.extend(shutdown());
-    steps.extend([
-        settle("start:1", Value::Null),
-        settle("binding.diagnostics:1", json!([diagnostic.clone()])),
-        json!({"op":"diagnostic-completed","resource":resource.clone()}),
-    ]);
-    cases.push(json!({"name":"posted-recovery-restores-after-close","steps":steps}));
-    let mut steps = vec![json!({"op":"recover"}), json!({"op":"advance","ms":1000})];
-    steps.extend(shutdown());
-    steps.extend([reject("start:1"), json!({"op":"advance","ms":2000})]);
-    cases.push(json!({"name":"posted-recovery-failure-after-close-does-not-retry","steps":steps}));
-    let mut steps = vec![
-        json!({"op":"recover"}),
-        json!({"op":"close","name":"close"}),
-        reject("push-close:1"),
-        json!({"op":"advance","ms":1000}),
-        settle("start:1", Value::Null),
-        settle("binding.diagnostics:1", json!([])),
-    ];
-    steps.push(json!({"op":"recover"}));
-    cases.push(json!({"name":"failed-push-close-does-not-cancel-existing-recovery","steps":steps}));
     let mut steps = boot();
     steps[2] = settle("binding.diagnostics:1", json!([diagnostic]));
     steps.push(json!({"op":"diagnostic-completed","resource":resource}));
     steps.extend(shutdown());
-    cases.push(json!({"name":"startup-restores-the-shared-diagnostic-owner","steps":steps}));
-    compare("recovery", cases);
+    compare(
+        "recovery",
+        vec![json!({"name":"startup-restores-the-shared-diagnostic-owner","steps":steps})],
+    );
+}
+
+#[test]
+fn storage_failure_terminates_peers_without_starting_a_second_storage_owner() {
+    let steps = vec![
+        connect("provider", "old", Some(("node", 1.0))),
+        json!({"op":"failure"}),
+        json!({"op":"failure"}),
+        json!({"op":"advance","ms":1000}),
+    ];
+    let rows = Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap()
+        .block_on(native(&json!({"steps":steps})));
+    let events: Vec<_> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|row| row.as_array().unwrap())
+        .collect();
+    assert!(events.iter().any(|event| event["kind"] == "terminate"));
+    assert!(events.iter().all(|event| event["kind"] != "storage-start"));
 }
 
 #[test]
@@ -914,18 +903,6 @@ fn original_network_timer_publication_and_failure_dispatch() {
         json!({"op":"advance","ms":10000}),
     ]);
     cases.push(json!({"name":"health-callback-error-reaches-runtime-owner-and-interval-remains","fail":{"ping":{}},"steps":steps}));
-    let mut steps = vec![
-        connect("provider", "old", Some(("node", 1.0))),
-        forward(),
-        json!({"op":"failure"}),
-        json!({"op":"failure"}),
-        json!({"op":"advance","ms":1000}),
-        settle("start:1", Value::Null),
-        settle("binding.diagnostics:1", json!([])),
-    ];
-    steps.extend(shutdown());
-    cases
-        .push(json!({"name":"worker-failure-clears-peer-state-before-one-recovery","steps":steps}));
     cases.push(json!({"name":"worker-failure-callback-error-prevents-recovery","fail":{"terminate":{}},"steps":[connect("provider","old",None),json!({"op":"failure"}),json!({"op":"advance","ms":1000})]}));
     let value = super::update("node", 1.0);
     let update: Value = serde_json::from_str(&encode(&value)).unwrap();

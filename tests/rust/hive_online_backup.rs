@@ -65,11 +65,22 @@ fn outcome(result: Result<ivy_hive::store::BackupSnapshot, IvyError>, progress: 
         }
     }
 }
-fn compare(native: &Value, original: &Value) {
+fn compare(native: &Value, original: &Value, snapshot: &Value) {
     assert_eq!(native["error"], original["error"]);
-    assert_eq!(native["progress"], original["progress"]);
     if native["error"].is_null() {
-        assert_eq!(native["value"]["pages"], original["value"]["pages"]);
+        // Physical layout changes with storage indexes and auto-vacuum. Verify
+        // the returned page count and hash against the actual SQLite snapshot;
+        // the frozen original still specifies errors and logical data. Both
+        // layouts must follow the original 100-page/64-KiB progress contract.
+        let progress = |pages: &Value, bytes: &Value| {
+            (pages.as_u64().unwrap() - 1) / 100 + bytes.as_u64().unwrap().div_ceil(64 * 1024)
+        };
+        assert_eq!(original["progress"], progress(&original["value"]["pages"], &original["state"]["bytes"]));
+        assert_eq!(native["progress"], progress(&snapshot["pages"], &snapshot["bytes"]));
+        assert_eq!(native["value"]["pages"], snapshot["pages"]);
+        assert_eq!(native["value"]["bytesHash"], snapshot["digest"]);
+    } else {
+        assert_eq!(native["progress"], original["progress"]);
     }
 }
 fn pending(task: &mut OnlineBackup) -> impl Future<Output = ()> + '_ {
@@ -121,7 +132,7 @@ fn online_backup_copy_hash_and_progress_match_original_across_page_boundaries() 
             }
             let expected = reference(cases, paths.clone());
             for (index, result) in native.iter().enumerate() {
-                compare(result, &expected["results"][index]);
+                compare(result, &expected["results"][index], &expected["verified"][index]);
                 let actual = &expected["verified"][index];
                 assert_eq!(result["value"]["bytesHash"], actual["digest"]);
                 assert_eq!(result["value"]["pages"], actual["pages"]);
@@ -187,7 +198,7 @@ fn online_backup_interleaves_mutable_store_credentials_and_transactions_on_the_s
                 vec![json!({"source":node,"destination":node_target,"mutate":true})],
                 vec![target],
             );
-            compare(&result, &expected["results"][0]);
+            compare(&result, &expected["results"][0], &expected["verified"][0]);
             let actual = &expected["verified"][0];
             assert_eq!(result["value"]["bytesHash"], actual["digest"]);
             assert_eq!(actual["probe"], "after");
@@ -235,7 +246,7 @@ fn online_backup_transient_source_lock_yields_without_repeating_progress() {
                 vec![json!({"source":node,"destination":node_target,"transientLock":true})],
                 vec![target],
             );
-            compare(&result, &expected["results"][0]);
+            compare(&result, &expected["results"][0], &expected["verified"][0]);
             assert_eq!(
                 result["value"]["bytesHash"],
                 expected["verified"][0]["digest"]
@@ -266,7 +277,7 @@ fn online_backup_callback_failures_and_dropped_copy_restore_destination_and_rele
         }
         let expected=reference(cases,paths.clone());
         for (index,result) in native.iter().enumerate() {
-            compare(result,&expected["results"][index]);
+            compare(result,&expected["results"][index],&expected["verified"][index]);
             assert_eq!(result["error"]["data"]["outcome"],"completed");
             let actual=&expected["verified"][index];let node=&expected["results"][index]["state"];
             assert_eq!(actual.get("sentinel"),node.get("sentinel"));
@@ -410,7 +421,7 @@ fn online_backup_destination_errors_match_original_without_stricter_path_or_clea
             }
             let expected = reference(cases, paths);
             for (index, result) in native.iter().enumerate() {
-                compare(result, &expected["results"][index]);
+                compare(result, &expected["results"][index], &expected["verified"][index]);
                 let actual = &expected["verified"][index];
                 let node = &expected["results"][index]["state"];
                 for key in [

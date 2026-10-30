@@ -136,7 +136,7 @@ pub struct Application {
 struct Storage(Arc<dyn Worker>);
 impl mcp_request::Storage for Storage {
     async fn request(&mut self, message: IvyJson) -> IvyResult<IvyJson> {
-        self.0.request(message).await
+        self.0.request(message.into()).await
     }
 }
 struct Calls<'a>(&'a Application);

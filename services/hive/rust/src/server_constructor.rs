@@ -15,7 +15,7 @@ use crate::{
     server_runtime::{self, Admission, Server},
     store::Credential,
     ui_files::UiFiles,
-    worker_runtime::{EventSink, StorageClient, WorkerLaunch},
+    storage::{EventSink, Initializer, StorageClient},
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_host_runtime::native_path;
@@ -218,12 +218,6 @@ impl Prepared {
             options,
         })
     }
-    /// Preserve the caller's exact native executable, arguments, environment and
-    /// process owner. Only the original constructor's worker data is supplied.
-    pub fn launch_options(&self, mut launch: WorkerLaunch) -> WorkerLaunch {
-        launch.options = self.worker_options.clone();
-        launch
-    }
     /// Bind all business owners to one initialized storage-client identity. A
     /// caller supplying storage must use these exact prepared worker options.
     pub fn bind<S>(
@@ -366,14 +360,15 @@ impl Prepared {
     /// bind before the client is returned; weak lifecycle ownership avoids a cycle.
     pub fn native(
         self,
-        launch: WorkerLaunch,
+        initialize: Initializer,
         dependencies: Dependencies,
         admission: Admission,
     ) -> Result<Constructed<StorageClient>, server_options::Error> {
         let events = Arc::new(OnceLock::<EventSink>::new());
         let target = events.clone();
         let worker = Arc::new(StorageClient::new(
-            self.launch_options(launch),
+            self.worker_options.clone(),
+            initialize,
             Arc::new(move |event| {
                 target.get().expect("Storage events bind before startup")(event);
             }),

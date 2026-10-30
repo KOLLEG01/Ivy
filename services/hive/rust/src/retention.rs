@@ -17,6 +17,13 @@ const DAY: f64 = 86_400_000.0;
 const REVISION_BATCH_SIZE: usize = 500;
 const EVENT_MAX_BYTES: i64 = 64 * 1024 * 1024;
 
+#[cfg(test)]
+#[path = "../../../../tests/rust/hive_retention_graph.rs"]
+pub(crate) mod graph_tests;
+#[cfg(test)]
+#[path = "../../../../tests/rust/hive_retention_catalog.rs"]
+mod catalog_tests;
+
 /// Date and contract ordering services used by the retention policy.
 pub trait Runtime {
     fn parse_date(&self, value: &JsString) -> f64;
@@ -63,7 +70,7 @@ fn iso(runtime: &dyn Runtime, now: f64) -> IvyResult<String> {
 
 struct Contract {
     key: JsString,
-    version: IvyJson,
+    version: String,
     policy: IvyJson,
 }
 fn waiting_for_owner(store: &Store, contract: &Contract) -> IvyResult<bool> {
@@ -78,74 +85,103 @@ fn waiting_for_owner(store: &Store, contract: &Contract) -> IvyResult<bool> {
     let key = format!(
         "retention_owner_ready:{}:{}",
         text(&contract.key),
-        contract.version.as_str()?
+        contract.version
     );
     let acknowledgement = hash_json(&IvyJson::object([
-        ("version", contract.version.clone()),
+        ("version", IvyJson::from(contract.version.as_str())),
         ("policy", contract.policy.clone()),
     ]))?;
     Ok(store.metadata(&key)?.as_deref() != Some(acknowledgement.as_str()))
 }
 fn contracts(store: &Store, runtime: &dyn Runtime) -> IvyResult<Vec<Contract>> {
-    let mut latest: Vec<(JsString, String, IvyJson)> = vec![];
-    let mut indices: HashMap<JsString, usize> = HashMap::new();
-    let mut statement = sql(
-        store,
-        store
-            .connection()
-            .prepare_cached("SELECT definition FROM contracts"),
-    )?;
-    let rows = sql(store, statement.query_map([], |r| r.get::<_, String>(0)))?;
-    for row in rows {
-        let value = decode(&sql(store, row)?)?;
-        let key = field(&value, "key")?
-            .as_js_string()
-            .ok_or_else(IvyError::internal)?
-            .clone();
-        let version = field(&value, "version")?.as_str()?;
-        let index = indices.get(&key).copied();
-        if let Some(index) = index {
-            if compare_versions(&version, &latest[index].1)? == Ordering::Greater {
-                latest[index] = (key, version, value);
+    let mut latest: Vec<(JsString, String, i64)> = vec![];
+    {
+        let mut indices: HashMap<JsString, usize> = HashMap::new();
+        // Registered definitions are canonical JSON. Read identities without
+        // copying their schemas/docs; -> preserves escaped UTF-16 key units.
+        let mut statement = sql(
+            store,
+            store.connection().prepare_cached(
+                "SELECT rowid,definition -> '$.key',definition -> '$.version'
+                 FROM contracts ORDER BY rowid",
+            ),
+        )?;
+        let rows = sql(
+            store,
+            statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            }),
+        )?;
+        for row in rows {
+            let (rowid, key, version) = sql(store, row)?;
+            let key = decode(&key.ok_or_else(IvyError::internal)?)?
+                .into_js_string()
+                .ok_or_else(IvyError::internal)?;
+            let version = decode(&version.ok_or_else(IvyError::internal)?)?.as_str()?;
+            let index = indices.get(&key).copied();
+            if let Some(index) = index {
+                if compare_versions(&version, &latest[index].1)? == Ordering::Greater {
+                    latest[index] = (key, version, rowid);
+                }
+            } else {
+                indices.insert(key.clone(), latest.len());
+                latest.push((key, version, rowid));
             }
-        } else {
-            indices.insert(key.clone(), latest.len());
-            latest.push((key, version, value));
         }
     }
     latest.sort_by(|a, b| runtime.compare_contract_keys(&a.0, &b.0));
+    // Definitions are immutable and this connection has one DB owner. Fetch
+    // only the selected policies, retaining the original first-seen tie order.
+    let mut statement = sql(
+        store,
+        store.connection().prepare_cached(
+            "SELECT definition -> '$.retention' FROM contracts WHERE rowid=?",
+        ),
+    )?;
     latest
         .into_iter()
-        .map(|(key, _, value)| {
+        .map(|(key, version, rowid)| {
+            let policy = sql(
+                store,
+                statement.query_row([rowid], |row| row.get::<_, Option<String>>(0)),
+            )?
+            .ok_or_else(IvyError::internal)?;
             Ok(Contract {
                 key,
-                version: field(&value, "version")?.clone(),
-                policy: field(&value, "retention")?.clone(),
+                version,
+                policy: decode(&policy)?,
             })
         })
         .collect()
 }
 
-struct CandidatePlan {
-    initial: Vec<(String, JsString)>,
-    requirements: HashMap<String, HashSet<String>>,
-    dependents: HashMap<String, HashSet<String>>,
+struct CandidatePlan<'a> {
+    identities: Vec<String>,
+    initial: Vec<(usize, &'a JsString)>,
+    requirements: Vec<Vec<usize>>,
+    dependents: Vec<Vec<usize>>,
 }
-impl CandidatePlan {
+impl<'a> CandidatePlan<'a> {
     fn new(
         store: &Store,
-        contracts: &[Contract],
+        contracts: &'a [Contract],
         runtime: &dyn Runtime,
         now: f64,
     ) -> IvyResult<Self> {
         let mut result = Self {
+            identities: vec![],
             initial: vec![],
-            requirements: HashMap::new(),
-            dependents: HashMap::new(),
+            requirements: vec![],
+            dependents: vec![],
         };
+        let mut ids = HashMap::new();
         let policies: HashMap<_, _> = contracts
             .iter()
-            .map(|c| Ok((c.key.clone(), field(&c.policy, "objects")?)))
+            .map(|c| Ok((c.key.clone(), (&c.key, field(&c.policy, "objects")?))))
             .collect::<IvyResult<_>>()?;
         let mut statement=sql(store,store.connection().prepare_cached("SELECT id,parent_id,owner_object_id,contract_key,created_at,updated_at FROM objects ORDER BY id"))?;
         let rows = sql(
@@ -164,7 +200,7 @@ impl CandidatePlan {
         for row in rows {
             let (id, parent, owner, key, created, updated) = sql(store, row)?;
             let key = JsString::from(key);
-            if let Some(policy) = policies.get(&key) {
+            let eligible = if let Some((key, policy)) = policies.get(&key) {
                 let mode = policy.get("mode");
                 if (mode == Some(&"owned".into())
                     && runtime.parse_date(&created.into()) <= now - DAY)
@@ -172,15 +208,30 @@ impl CandidatePlan {
                         && runtime.parse_date(&updated.into())
                             <= now - number(field(policy, "maximumAgeDays")?)? * DAY)
                 {
-                    result.initial.push((id.clone(), key));
+                    Some(*key)
+                } else {
+                    None
                 }
+            } else {
+                None
+            };
+            if eligible.is_none()
+                && parent.as_deref().is_none_or(str::is_empty)
+                && owner.as_deref().is_none_or(str::is_empty)
+            {
+                continue;
+            }
+            let id = result.intern(&mut ids, id);
+            if let Some(key) = eligible {
+                result.initial.push((id, key));
             }
             for target in [parent, owner]
                 .into_iter()
                 .flatten()
                 .filter(|v| !v.is_empty())
             {
-                result.require(target, id.clone());
+                let target = result.intern(&mut ids, target);
+                result.require(target, id);
             }
         }
         let mut statement = sql(
@@ -194,53 +245,70 @@ impl CandidatePlan {
             statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))),
         )? {
             let (source, target) = sql(store, row)?;
+            let source = result.intern(&mut ids, source);
+            let target = result.intern(&mut ids, target);
             result.require(target, source);
+        }
+        for edges in result.requirements.iter_mut().chain(&mut result.dependents) {
+            edges.sort_unstable();
+            edges.dedup();
+        }
+        // Move each ID into its final slot; construction's lookup table can go away.
+        result.identities = vec![String::new(); ids.len()];
+        for (id, index) in ids {
+            result.identities[index] = id;
         }
         Ok(result)
     }
-    fn require(&mut self, target: String, required: String) {
-        self.requirements
-            .entry(target.clone())
-            .or_default()
-            .insert(required.clone());
-        self.dependents.entry(required).or_default().insert(target);
+    fn intern(&mut self, ids: &mut HashMap<String, usize>, id: String) -> usize {
+        let next = ids.len();
+        *ids.entry(id).or_insert_with(|| {
+            self.requirements.push(vec![]);
+            self.dependents.push(vec![]);
+            next
+        })
+    }
+    fn require(&mut self, target: usize, required: usize) {
+        self.requirements[target].push(required);
+        self.dependents[required].push(target);
     }
     fn candidates(&self, enabled: Option<&HashSet<JsString>>) -> Vec<(String, JsString)> {
-        let initial: Vec<_> = self
+        let mut candidates = vec![false; self.identities.len()];
+        for (id, key) in &self.initial {
+            candidates[*id] = enabled.is_none_or(|set| set.contains(*key));
+        }
+        let mut queue: Vec<_> = self
             .initial
             .iter()
-            .filter(|(_, key)| enabled.is_none_or(|set| set.contains(key)))
-            .collect();
-        let mut candidates: HashSet<_> = initial.iter().map(|(id, _)| id.clone()).collect();
-        let mut queue: Vec<_> = initial
-            .iter()
             .filter(|(id, _)| {
-                self.requirements
-                    .get(id)
-                    .is_some_and(|required| !required.is_subset(&candidates))
+                candidates[*id]
+                    && self.requirements[*id]
+                        .iter()
+                        .any(|required| !candidates[*required])
             })
-            .map(|(id, _)| id.clone())
+            .map(|(id, _)| *id)
             .collect();
+        for id in &queue {
+            candidates[*id] = false;
+        }
         let mut index = 0;
         while index < queue.len() {
-            let id = queue[index].clone();
+            let id = queue[index];
             index += 1;
-            if !candidates.remove(&id) {
-                continue;
-            }
-            for target in self.dependents.get(&id).into_iter().flatten() {
-                if candidates.contains(target) {
-                    queue.push(target.clone());
+            for target in &self.dependents[id] {
+                if std::mem::replace(&mut candidates[*target], false) {
+                    queue.push(*target);
                 }
             }
         }
-        initial
-            .into_iter()
-            .filter(|(id, _)| candidates.contains(id))
-            .cloned()
+        self.initial
+            .iter()
+            .filter(|(id, _)| candidates[*id])
+            .map(|(id, key)| (self.identities[*id].clone(), (*key).clone()))
             .collect()
     }
 }
+
 #[derive(Default)]
 struct Summary {
     objects: i64,

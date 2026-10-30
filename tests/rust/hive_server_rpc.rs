@@ -1,12 +1,15 @@
+#[path = "../fixtures/hive-dispatch-queue.rs"]
+mod fixture_dispatch;
+use fixture_dispatch::DispatchGate;
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, Outcome,
     hash::digest,
     json::{parse, stringify},
 };
 use ivy_hive::{
-    admission::{DispatchGate, RequestBudget, RequestBudgetOptions},
+    admission::{RequestBudget, RequestBudgetOptions},
     server_rpc::{Invocation, Options, Reply, Storage},
-    worker_client::RequestOptions,
+    storage::RequestOptions,
 };
 use serde_json::{Value, json};
 use std::{
@@ -117,11 +120,22 @@ fn post(controls: &Controls, events: &Events, name: String, event: IvyJson) -> R
             .expect("Fixture must retain every accepted input")
     })
 }
+#[derive(Clone)]
 struct Worker {
     events: Events,
     controls: Controls,
+    dispatch: DispatchGate,
 }
 impl Storage for Worker {
+    fn dispatch(&self, mut request: ivy_hive::storage::Request, options: RequestOptions) -> Reply {
+        let this = self.clone();
+        let reply = self.dispatch.run(move || async move {
+            request.prepare()?;
+            let result = this.request(crate::payload_fixture::json(request.take_payload()), options).await;
+            request.complete(result)
+        });
+        Box::pin(async move { reply.await.map_err(|_| IvyError::internal())? })
+    }
     fn request(&self, payload: IvyJson, options: RequestOptions) -> Reply {
         let label = payload
             .required("request")
@@ -148,7 +162,7 @@ impl Storage for Worker {
                             "reservedBytes",
                             IvyJson::Number(options.reserved_bytes as f64),
                         ),
-                        ("backup", options.backup.into()),
+                        ("backup", false.into()),
                     ]),
                 ),
             ]),
@@ -306,14 +320,14 @@ fn compare(group: &str, traces: Vec<Value>) {
                 Arc::new(Worker {
                     events: events.clone(),
                     controls: controls.clone(),
+                    dispatch: DispatchGate::new(
+                        trace["dispatch"]["maximum"].as_u64().unwrap_or(1024) as usize,
+                        trace["dispatch"]["waitMs"].as_u64().unwrap_or(30000),
+                    ),
                 }),
                 direct,
                 now,
                 requests.clone(),
-                DispatchGate::new(
-                    trace["dispatch"]["maximum"].as_u64().unwrap_or(1024) as usize,
-                    trace["dispatch"]["waitMs"].as_u64().unwrap_or(30000),
-                ),
                 Options {
                     reset_bootstrap_credential_digest:
                         trace["options"]["resetBootstrapCredentialDigest"]

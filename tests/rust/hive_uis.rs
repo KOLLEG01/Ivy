@@ -50,7 +50,7 @@ pub(super) fn execute(
                 .resolve_slug(store, text(parameters, "slug")?)
                 .map(|s| s.map(IvyJson::String).unwrap_or(IvyJson::Null)),
             "inspect" => owner.inspect(store, parameters, runtime, &clock),
-            "entry" => owner.entry(store, text(parameters, "uiId")?, runtime, &clock),
+            "entry" => owner.entry(store, text(parameters, "uiId")?),
             "asset" => owner.asset(
                 store,
                 text(parameters, "uiId")?,
@@ -61,8 +61,6 @@ pub(super) fn execute(
                 store,
                 text(parameters, "uiId")?,
                 parameters.get("path").and_then(IvyJson::as_js_string),
-                runtime,
-                &clock,
             ),
             "stageAsset" => owner.stage_asset(store, context.as_ref().unwrap(), parameters, now),
             "deploy" => owner.deploy(store, context.as_ref().unwrap(), parameters, now),
@@ -306,7 +304,11 @@ fn uis_catalog_filters_metadata_fills_pages_and_preserves_priority_utf8_cursor_a
     let t = token(&mut s, "uis.catalog", json!({}), json!(["1000000:a"]));
     let invalid = push(&mut s, from_token(operation("catalog", json!({})), t));
     let root = Root::new();
-    let actual = native_with_runtime(&root.0.join("native.sqlite"), &s, Some(&r["registryRuntime"]));
+    let actual = native_with_runtime(
+        &root.0.join("native.sqlite"),
+        &s,
+        Some(&r["registryRuntime"]),
+    );
     error(&actual, invalid, "invalid_cursor");
 }
 
@@ -658,8 +660,8 @@ fn uis_requirements_use_actual_registry_catalog_versions_readiness_contracts_and
     let reopened = push(&mut s, inspect());
     let r = compare(&s);
     success(&r, deployed);
-    error(&r, entry, "service_unavailable");
-    error(&r, no_entry, "service_interface_changed");
+    success(&r, entry);
+    success(&r, no_entry);
     success(&r, ready_entry);
     assert_eq!(value(&r, absent)["status"], "incompatible");
     assert_eq!(
@@ -697,6 +699,94 @@ fn uis_requirements_use_actual_registry_catalog_versions_readiness_contracts_and
 }
 
 #[test]
+fn uis_entry_and_current_asset_survive_backend_absence_incompatibility_and_reconnection() {
+    let mut s = setup();
+    let mut manifest = release("r1", "x");
+    manifest["requirements"]["services"] =
+        json!([{"serviceName":"sample","namespace":"fixture","interfaceVersion":"1.0.0"}]);
+    s.push(stage("r1", "x", "stage"));
+    s.push(mutation(
+        "deploy",
+        json!({"metadata":metadata("sample-ui"),"release":manifest,"expectedReleaseId":null}),
+        "deploy",
+    ));
+    let mut incompatible = catalog("fixture");
+    incompatible["namespaces"][0]["tools"][0]["interfaceVersion"] = "2.0.0".into();
+    let mut resync = action("sync", Some("node"), catalog("fixture"));
+    resync["generation"] = 2.into();
+    let mut reready = heartbeat("node", true, vec![]);
+    reready["generation"] = 2.into();
+    let mut checks = vec![];
+    for (steps, status) in [
+        (vec![], "unavailable"),
+        (vec![connect("node", "sample", "host", 1)], "unavailable"),
+        (
+            vec![action("sync", Some("node"), incompatible)],
+            "incompatible",
+        ),
+        (vec![heartbeat("node", true, vec![])], "incompatible"),
+        (
+            vec![
+                action("sync", Some("node"), catalog("fixture")),
+                heartbeat("node", false, vec![]),
+            ],
+            "unavailable",
+        ),
+        (vec![heartbeat("node", true, vec![])], "ready"),
+        (
+            vec![action("disconnect", Some("node"), json!({}))],
+            "unavailable",
+        ),
+        (vec![json!({"op":"reopen"})], "unavailable"),
+        (
+            vec![connect("node", "sample", "host", 2), resync, reready],
+            "ready",
+        ),
+    ] {
+        s.extend(steps);
+        let entry = push(&mut s, operation("entry", json!({"uiId":"sample-ui"})));
+        let asset = push(
+            &mut s,
+            operation("currentAsset", json!({"uiId":"sample-ui"})),
+        );
+        let inspection = push(&mut s, inspect());
+        checks.push((entry, asset, inspection, status));
+    }
+    let root = Root::new();
+    let now = "1970-01-01T00:01:40.000Z";
+    let runtime = json!({
+        "iso": [[100000, now]],
+        "dates": [[now.encode_utf16().collect::<Vec<_>>(), 100000]],
+        "localeOrder": [],
+    });
+    let r = native_with_runtime(&root.0.join("native.sqlite"), &s, Some(&runtime));
+    for (i, step) in s.iter().enumerate() {
+        if matches!(
+            step["op"].as_str(),
+            Some("sql" | "configure" | "reopen" | "registry")
+        ) || step["method"] == "stageAsset"
+            || step["method"] == "deploy"
+        {
+            success(&r, i);
+        }
+    }
+    for (entry, asset, inspection, status) in checks {
+        success(&r, entry);
+        success(&r, asset);
+        success(&r, inspection);
+        assert_eq!(
+            value(&r, entry),
+            &json!({"releaseId":"r1","entryPath":"index.html"})
+        );
+        assert_eq!(
+            value(&r, asset)["asset"]["contentHash"],
+            ivy_contracts::hash::digest("x")
+        );
+        assert_eq!(value(&r, inspection)["status"], status);
+    }
+}
+
+#[test]
 fn uis_rollback_uses_availability_and_saved_receipts_before_later_state_and_rejects_missing_releases()
  {
     let mut s = setup();
@@ -706,7 +796,10 @@ fn uis_rollback_uses_availability_and_saved_receipts_before_later_state_and_reje
     s.push(deploy("r2", "b", json!("r1"), "d2"));
     let retired = push(&mut s, rollback("r1", "r2", "retired"));
     // Legacy retained releases can still be selected explicitly.
-    s.push(sql(format!("INSERT INTO app_releases VALUES('sample-ui','r1',{});", quote(&release("r1", "a").to_string()))));
+    s.push(sql(format!(
+        "INSERT INTO app_releases VALUES('sample-ui','r1',{});",
+        quote(&release("r1", "a").to_string())
+    )));
     s.push(fixture(vec![write("private/sample-ui/r1/index.html", "z")]));
     let req = rollback("r1", "r2", "rollback");
     let rolled = push(&mut s, req.clone());

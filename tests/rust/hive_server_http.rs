@@ -7,6 +7,8 @@ use ivy_hive::{
 };
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
+#[path = "../fixtures/hive-dispatch-queue.rs"]
+mod fixture_dispatch;
 
 type Log = Arc<Mutex<Vec<Value>>>;
 type Controls = Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>;
@@ -26,15 +28,17 @@ fn failure(spec: &Value) -> IvyError {
             .unwrap_or("Isolated storage failure."),
     )
 }
+#[derive(Clone)]
 struct HttpWorker {
     credential: JsString,
     log: Log,
     controls: Controls,
-    replies: Mutex<HashMap<String, VecDeque<Value>>>,
+    replies: Arc<Mutex<HashMap<String, VecDeque<Value>>>>,
+    dispatch: fixture_dispatch::DispatchGate,
 }
 impl HttpWorker {
     fn post(&self, payload: IvyJson, options: RequestOptions) -> Reply {
-        self.log.lock().unwrap().push(json!({"kind":"worker","payload":payload.to_serde().unwrap(),"options":{"timeoutMs":options.timeout_ms,"terminateOnTimeout":options.terminate_on_timeout,"reservedBytes":options.reserved_bytes,"backup":options.backup}}));
+        self.log.lock().unwrap().push(json!({"kind":"worker","payload":payload.to_serde().unwrap(),"options":{"timeoutMs":options.timeout_ms,"terminateOnTimeout":options.terminate_on_timeout,"reservedBytes":options.reserved_bytes,"backup":false}}));
         let action = payload.get("action").unwrap().as_str().unwrap();
         let spec = self
             .replies
@@ -73,11 +77,21 @@ impl HttpWorker {
     }
 }
 impl Worker for HttpWorker {
-    fn request(&self, payload: IvyJson) -> browser_push::RequestFuture {
+    fn request(&self, payload: ivy_hive::storage::Payload) -> browser_push::RequestFuture {
+        let payload = crate::payload_fixture::json(payload);
         self.post(payload, RequestOptions::default())
     }
 }
 impl Storage for HttpWorker {
+    fn dispatch(&self, mut request: ivy_hive::storage::Request, options: RequestOptions) -> Reply {
+        let this = self.clone();
+        let reply = self.dispatch.run(move || async move {
+            request.prepare()?;
+            let result = this.post(crate::payload_fixture::json(request.take_payload()), options).await;
+            request.complete(result)
+        });
+        Box::pin(async move { reply.await.map_err(|_| IvyError::internal())? })
+    }
     fn request(&self, payload: IvyJson, options: RequestOptions) -> Reply {
         self.post(payload, options)
     }
@@ -456,7 +470,8 @@ async fn native(trace: &Value) -> Value {
             .into(),
         log: log.clone(),
         controls: controls.clone(),
-        replies: Mutex::new(
+        dispatch: fixture_dispatch::DispatchGate::default(),
+        replies: Arc::new(Mutex::new(
             trace["replies"]
                 .as_object()
                 .map(|m| {
@@ -465,7 +480,7 @@ async fn native(trace: &Value) -> Value {
                         .collect()
                 })
                 .unwrap_or_default(),
-        ),
+        )),
     });
     let b = trace["budget"].as_array();
     let number = |index: usize, default: f64| {
@@ -640,7 +655,8 @@ fn compare(group: &str, traces: Vec<Value>) -> Vec<Value> {
     let original = lifetime_reference("http", &traces);
     assert_eq!(original.len(), traces.len());
     let mut rows = vec![];
-    for (input, original) in traces.into_iter().zip(original) {
+    for (input, mut original) in traces.into_iter().zip(original) {
+        crate::payload_fixture::project_auth_requests(&mut original);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .start_paused(true)

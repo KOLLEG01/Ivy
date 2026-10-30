@@ -7,7 +7,7 @@ fn diagnostic_identity(value: &IvyJson) -> IvyResult<String> {
         ("source", field(value, "source")?.clone()),
     ]))
 }
-fn invalidate(store: &mut Store, value: &IvyJson) -> IvyResult<()> {
+fn diagnostic_scope(store: &Store, value: &IvyJson) -> IvyResult<JsString> {
     let resource = value.get("resource");
     let id = resource
         .filter(|v| v.as_object().is_some())
@@ -38,7 +38,7 @@ fn invalidate(store: &mut Store, value: &IvyJson) -> IvyResult<()> {
     } else {
         None
     };
-    store.invalidate(if let Some(service) = service {
+    Ok(if let Some(service) = service {
         join([
             "services/".into(),
             service.into(),
@@ -50,8 +50,188 @@ fn invalidate(store: &mut Store, value: &IvyJson) -> IvyResult<()> {
         ])
     } else {
         "services".into()
-    });
+    })
+}
+
+struct DiagnosticChange {
+    identity: String,
+    scope: JsString,
+}
+
+fn read_diagnostic(store: &Store, identity: &str) -> IvyResult<Option<IvyJson>> {
+    sql(
+        store,
+        store
+            .connection()
+            .query_row(
+                "SELECT diagnostic_json FROM diagnostics WHERE identity=?",
+                [identity],
+                |row| row.get::<_, String>(0),
+            )
+            .optional(),
+    )?
+    .map(|value| decode(&value))
+    .transpose()
+}
+
+fn validate_diagnostic(value: &IvyJson, runtime: &dyn Runtime) -> IvyResult<()> {
+    validate_shared("Diagnostic", value)?;
+    crate::paging::utc(field(value, "firstObservedAt")?, runtime)?;
+    crate::paging::utc(field(value, "lastObservedAt")?, runtime)?;
     Ok(())
+}
+
+fn report_diagnostic(
+    store: &mut Store,
+    identity: String,
+    mut value: IvyJson,
+    changes: &mut Vec<DiagnosticChange>,
+) -> IvyResult<()> {
+    let prior = read_diagnostic(store, &identity)?;
+    if let Some(first) = prior
+        .as_ref()
+        .and_then(|v| v.get("firstObservedAt"))
+        .filter(|v| !v.is_null())
+    {
+        value.insert("firstObservedAt", first.clone());
+    }
+    let notify = prior.as_ref().is_none_or(|prior| {
+        ["status", "message", "severity"]
+            .iter()
+            .any(|key| prior.get(key) != value.get(key))
+    });
+    let next = encoded(&value)?;
+    if prior.as_ref().map(encoded).transpose()?.as_deref() != Some(next.as_str()) {
+        sql(store, store.connection().execute(
+            "INSERT INTO diagnostics VALUES (?,?) ON CONFLICT(identity) DO UPDATE SET diagnostic_json=excluded.diagnostic_json",
+            params![identity, next],
+        ))?;
+    }
+    if notify {
+        changes.push(DiagnosticChange {
+            identity,
+            scope: diagnostic_scope(store, &value)?,
+        });
+    }
+    Ok(())
+}
+
+fn current_diagnostic_ids(store: &Store, source: &JsString) -> IvyResult<Vec<String>> {
+    // SQLite strings can select ordinary sources directly. Keep the lossless
+    // boundary for lone surrogates and NUL by checking the selected JSON below.
+    let source = source.to_utf8().ok().filter(|v| !v.contains('\0'));
+    let query = if source.is_some() {
+        "SELECT identity FROM diagnostics WHERE json_extract(diagnostic_json,'$.source')=? AND json_extract(diagnostic_json,'$.status')='current' ORDER BY rowid"
+    } else {
+        "SELECT identity FROM diagnostics WHERE json_extract(diagnostic_json,'$.status')='current' ORDER BY rowid"
+    };
+    let mut statement = sql(store, store.connection().prepare_cached(query))?;
+    sql(
+        store,
+        statement.query_map(rusqlite::params_from_iter(source.iter()), |row| {
+            row.get::<_, String>(0)
+        }),
+    )?
+    .map(|row| sql(store, row))
+    .collect()
+}
+
+fn check_diagnostic_capacity(store: &Store) -> IvyResult<()> {
+    let active: i64 = sql(store, store.connection().query_row(
+        "SELECT count(*) FROM diagnostics WHERE json_extract(diagnostic_json,'$.status') IS NOT 'resolved'", [],
+        |row| row.get(0),
+    ))?;
+    require(
+        active <= ACTIVE_DIAGNOSTIC_LIMIT as i64,
+        "limit_exceeded",
+        "Active diagnostic capacity is full.",
+    )
+}
+
+fn remove_diagnostics(store: &mut Store, identities: Vec<String>) -> IvyResult<()> {
+    for identity in identities {
+        let value = read_diagnostic(store, &identity)?.ok_or_else(IvyError::internal)?;
+        store.invalidate(diagnostic_scope(store, &value)?);
+        sql(
+            store,
+            store
+                .connection()
+                .execute("DELETE FROM diagnostics WHERE identity=?", [identity]),
+        )?;
+    }
+    Ok(())
+}
+
+fn prune_diagnostics(store: &mut Store, now: f64) -> IvyResult<()> {
+    let expired = {
+        let mut statement = sql(store, store.connection().prepare_cached(
+            "SELECT identity FROM diagnostics WHERE json_extract(diagnostic_json,'$.status')='resolved'
+             AND julianday(json_extract(diagnostic_json,'$.lastObservedAt')) <= julianday(? / 1000.0,'unixepoch')
+             ORDER BY json_extract(diagnostic_json,'$.lastObservedAt'),identity",
+        ))?;
+        sql(
+            store,
+            statement.query_map([now - 7.0 * 86_400_000.0], |row| row.get::<_, String>(0)),
+        )?
+        .map(|row| sql(store, row))
+        .collect::<IvyResult<Vec<_>>>()?
+    };
+    remove_diagnostics(store, expired)?;
+    let resolved: i64 = sql(store, store.connection().query_row(
+        "SELECT count(*) FROM diagnostics WHERE json_extract(diagnostic_json,'$.status')='resolved'", [],
+        |row| row.get(0),
+    ))?;
+    let excess = resolved - RESOLVED_DIAGNOSTIC_LIMIT as i64;
+    if excess > 0 {
+        // Admitted UTC strings and SHA-256 identities have the same restricted
+        // ASCII order here as the registry runtime's contract-key ordering.
+        let oldest = {
+            let mut statement = sql(store, store.connection().prepare_cached(
+                "SELECT identity FROM diagnostics WHERE json_extract(diagnostic_json,'$.status')='resolved'
+                 ORDER BY json_extract(diagnostic_json,'$.lastObservedAt'),identity LIMIT ?",
+            ))?;
+            sql(
+                store,
+                statement.query_map([excess], |row| row.get::<_, String>(0)),
+            )?
+            .map(|row| sql(store, row))
+            .collect::<IvyResult<Vec<_>>>()?
+        };
+        remove_diagnostics(store, oldest)?;
+    }
+    Ok(())
+}
+
+fn finish_diagnostics(
+    store: &mut Store,
+    changes: Vec<DiagnosticChange>,
+    now: f64,
+) -> IvyResult<()> {
+    check_diagnostic_capacity(store)?;
+    prune_diagnostics(store, now)?;
+    for change in changes {
+        let retained: bool = sql(
+            store,
+            store.connection().query_row(
+                "SELECT EXISTS(SELECT 1 FROM diagnostics WHERE identity=?)",
+                [change.identity],
+                |row| row.get(0),
+            ),
+        )?;
+        if retained {
+            store.invalidate(change.scope);
+        }
+    }
+    Ok(())
+}
+fn readiness_contract(store: &Store, key: &JsString, version: &JsString) -> IvyResult<IvyJson> {
+    let value = sql(store, store.connection().query_row(
+        "SELECT json_object('key',definition -> '$.key','version',definition -> '$.version',
+             'owner',definition -> '$.owner','retention',definition -> '$.retention')
+         FROM contracts WHERE key=? AND version=?", params![text(key), text(version)],
+        |row| row.get::<_, String>(0),
+    ).optional())?.ok_or_else(|| IvyError::new("contract_not_found", "The exact Data Contract is not registered."))?;
+    decode(&value)
 }
 impl Registry {
     pub fn diagnostic(
@@ -61,194 +241,55 @@ impl Registry {
         runtime: &dyn Runtime,
         now: f64,
     ) -> IvyResult<()> {
-        self.commit_diagnostics(store, std::slice::from_ref(value), runtime, now)
+        validate_diagnostic(value, runtime)?;
+        let identity = diagnostic_identity(value)?;
+        let work = |store: &mut Store| {
+            let mut changes = Vec::new();
+            report_diagnostic(store, identity, value.clone(), &mut changes)?;
+            finish_diagnostics(store, changes, now)
+        };
+        if store.connection().is_autocommit() {
+            store.transaction(work)
+        } else {
+            work(store)
+        }
     }
     pub fn diagnostics(&self, store: &Store, status: Option<&JsString>) -> IvyResult<Vec<IvyJson>> {
-        let mut statement = sql(
-            store,
-            store
-                .connection()
-                .prepare_cached("SELECT diagnostic_json FROM diagnostics ORDER BY identity"),
-        )?;
+        let status = status.filter(|value| !value.0.is_empty());
+        let query = match status {
+            Some(value) if value == &JsString::from("unresolved") => {
+                "SELECT diagnostic_json FROM diagnostics WHERE json_extract(diagnostic_json,'$.status') IS NOT 'resolved' ORDER BY identity"
+            }
+            Some(_) => {
+                "SELECT diagnostic_json FROM diagnostics WHERE json_extract(diagnostic_json,'$.status')=? ORDER BY identity"
+            }
+            None => "SELECT diagnostic_json FROM diagnostics ORDER BY identity",
+        };
+        let selected = status
+            .filter(|value| *value != &JsString::from("unresolved"))
+            .map(text);
+        let mut statement = sql(store, store.connection().prepare_cached(query))?;
         let mut result = vec![];
-        for row in sql(store, statement.query_map([], |r| r.get::<_, String>(0)))? {
+        for row in sql(
+            store,
+            statement.query_map(rusqlite::params_from_iter(selected.iter()), |r| {
+                r.get::<_, String>(0)
+            }),
+        )? {
             let value = decode(&sql(store, row)?)?;
-            if status.is_some_and(|v| !v.0.is_empty()) {
-                require_object(&value)?;
-            }
-            if match status {
-                Some(s) if s == &JsString::from("unresolved") => {
-                    !is_text(value.get("status"), "resolved")
-                }
-                Some(s) if !s.0.is_empty() => {
-                    value.get("status").and_then(IvyJson::as_js_string) == Some(s)
-                }
-                _ => true,
-            } {
-                result.push(value);
-            }
+            result.push(value);
         }
         Ok(result)
     }
     pub fn collect_diagnostics(
         &mut self,
         store: &mut Store,
-        runtime: &dyn Runtime,
+        _runtime: &dyn Runtime,
         now: f64,
     ) -> IvyResult<()> {
-        self.commit_diagnostics(store, &[], runtime, now)
-    }
-    fn commit_diagnostics(
-        &mut self,
-        store: &mut Store,
-        values: &[IvyJson],
-        runtime: &dyn Runtime,
-        now: f64,
-    ) -> IvyResult<()> {
-        let mut updates = vec![];
-        let mut identities = HashSet::new();
-        for value in values {
-            validate_shared("Diagnostic", value)?;
-            crate::paging::utc(field(value, "firstObservedAt")?, runtime)?;
-            crate::paging::utc(field(value, "lastObservedAt")?, runtime)?;
-            let identity = diagnostic_identity(value)?;
-            require(
-                identities.insert(identity.clone()),
-                "invalid_arguments",
-                "A diagnostic identity may be reported once per heartbeat.",
-            )?;
-            updates.push((identity, value.clone()));
-        }
         let work = |store: &mut Store| -> IvyResult<()> {
-            let mut retained = {
-                let mut statement = sql(
-                    store,
-                    store
-                        .connection()
-                        .prepare_cached("SELECT identity,diagnostic_json FROM diagnostics"),
-                )?;
-                sql(
-                    store,
-                    statement
-                        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))),
-                )?
-                .map(|r| {
-                    let (id, value) = sql(store, r)?;
-                    Ok((id, decode(&value)?))
-                })
-                .collect::<IvyResult<Vec<_>>>()?
-            };
-            let mut indices: HashMap<String, usize> = retained
-                .iter()
-                .enumerate()
-                .map(|(i, (id, _))| (id.clone(), i))
-                .collect();
-            let originals: HashMap<_, _> = retained.iter().cloned().collect();
-            for (id, value) in &updates {
-                let mut value = value.clone();
-                if let Some(index) = indices.get(id) {
-                    let prior = &retained[*index].1;
-                    if let Some(first) = prior.get("firstObservedAt").filter(|v| !v.is_null()) {
-                        value.insert("firstObservedAt", first.clone());
-                    }
-                    retained[*index].1 = value;
-                } else {
-                    indices.insert(id.clone(), retained.len());
-                    retained.push((id.clone(), value));
-                }
-            }
-            let mut active = 0;
-            for (_, value) in &retained {
-                require_object(value)?;
-                if !is_text(value.get("status"), "resolved") {
-                    active += 1;
-                }
-            }
-            require(
-                active <= ACTIVE_DIAGNOSTIC_LIMIT,
-                "limit_exceeded",
-                "Active diagnostic capacity is full.",
-            )?;
-            let mut resolved: Vec<_> = retained
-                .iter()
-                .filter(|(_, v)| is_text(v.get("status"), "resolved"))
-                .collect();
-            let mut sort_error = None;
-            resolved.sort_by(|(left_id, left), (right_id, right)| {
-                let value: IvyResult<Ordering> = (|| {
-                    let order = runtime.compare_contract_keys(
-                        string(left, "lastObservedAt")?,
-                        &string(right, "lastObservedAt")?.clone(),
-                    );
-                    Ok(if order == Ordering::Equal {
-                        runtime.compare_contract_keys(
-                            &left_id.as_str().into(),
-                            &right_id.as_str().into(),
-                        )
-                    } else {
-                        order
-                    })
-                })();
-                match value {
-                    Ok(value) => value,
-                    Err(error) => {
-                        sort_error = Some(error);
-                        Ordering::Equal
-                    }
-                }
-            });
-            if let Some(error) = sort_error {
-                return Err(error);
-            }
-            let mut removed = vec![];
-            let mut removed_set = HashSet::new();
-            for (id, value) in &resolved {
-                if runtime.parse_date(&string(value, "lastObservedAt")?.clone())
-                    <= now - 7.0 * 86_400_000.0
-                {
-                    removed_set.insert(id.as_str());
-                    removed.push(id.as_str());
-                }
-            }
-            let excess = resolved
-                .len()
-                .saturating_sub(removed.len() + RESOLVED_DIAGNOSTIC_LIMIT);
-            for (id, _) in resolved
-                .iter()
-                .filter(|(id, _)| !removed_set.contains(id.as_str()))
-                .take(excess)
-            {
-                removed.push(id.as_str());
-            }
-            for id in &removed {
-                invalidate(store, &retained[indices[*id]].1)?;
-                sql(
-                    store,
-                    store
-                        .connection()
-                        .execute("DELETE FROM diagnostics WHERE identity=?", [id]),
-                )?;
-            }
-            let removed: HashSet<_> = removed.into_iter().collect();
-            for (id, _) in &updates {
-                if removed.contains(id.as_str()) {
-                    continue;
-                }
-                let next = &retained[indices[id]].1;
-                let prior = originals.get(id);
-                if prior.is_none_or(|prior| {
-                    ["status", "message", "severity"]
-                        .iter()
-                        .any(|key| prior.get(key) != next.get(key))
-                }) {
-                    invalidate(store, next)?;
-                }
-                let encoded = encoded(next)?;
-                if prior.map(encoded_original).transpose()?.as_deref() != Some(&encoded) {
-                    sql(store,store.connection().execute("INSERT INTO diagnostics VALUES (?,?) ON CONFLICT(identity) DO UPDATE SET diagnostic_json=excluded.diagnostic_json",params![id,encoded]))?;
-                }
-            }
-            Ok(())
+            check_diagnostic_capacity(store)?;
+            prune_diagnostics(store, now)
         };
         if store.connection().is_autocommit() {
             store.transaction(work)
@@ -266,8 +307,10 @@ impl Registry {
         now: f64,
     ) -> IvyResult<IvyJson> {
         let at = iso(runtime, now)?;
-        self.contact_times.insert(id.clone(), at.clone());
-        store.transaction(|store| {
+        self.record_contact(id.clone(), at.clone());
+        let ready = parameters.get("ready").and_then(IvyJson::as_bool) == Some(true);
+        let acknowledge_contracts = ready && !self.contacts[id].contracts_acknowledged;
+        let result = store.transaction(|store| {
             let mut node = self.node(store, id, runtime, now)?;
             require(
                 parameters.get("ready").and_then(IvyJson::as_bool) != Some(true)
@@ -277,50 +320,59 @@ impl Registry {
             )?;
             let source = join(["service:".into(), id.clone()]);
             let mut reported = HashSet::new();
-            let mut updates = vec![];
+            let mut changes = vec![];
             for value in array(parameters, "diagnostics")? {
                 require_object(value)?;
                 let mut value = value.clone();
                 value.insert("source", IvyJson::String(source.clone()));
-                reported.insert(diagnostic_identity(&value)?);
-                updates.push(value);
-            }
-            {
-                let mut statement = sql(
-                    store,
-                    store
-                        .connection()
-                        .prepare_cached("SELECT identity,diagnostic_json FROM diagnostics"),
+                validate_diagnostic(&value, runtime)?;
+                let identity = diagnostic_identity(&value)?;
+                require(
+                    reported.insert(identity.clone()),
+                    "invalid_arguments",
+                    "A diagnostic identity may be reported once per heartbeat.",
                 )?;
-                for row in sql(
-                    store,
-                    statement
-                        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))),
-                )? {
-                    let (identity, value) = sql(store, row)?;
-                    let mut value = decode(&value)?;
-                    require_object(&value)?;
-                    if value.get("source").and_then(IvyJson::as_js_string) == Some(&source)
-                        && is_text(value.get("status"), "current")
-                        && !reported.contains(&identity)
-                    {
-                        value.insert("lastObservedAt", IvyJson::String(at.clone()));
-                        value.insert("status", "resolved".into());
-                        updates.push(value);
-                    }
-                }
+                report_diagnostic(store, identity, value, &mut changes)?;
             }
-            self.commit_diagnostics(store, &updates, runtime, now)?;
+            for identity in current_diagnostic_ids(store, &source)? {
+                if reported.contains(&identity) {
+                    continue;
+                }
+                let mut value =
+                    read_diagnostic(store, &identity)?.ok_or_else(IvyError::internal)?;
+                if value.get("source").and_then(IvyJson::as_js_string) != Some(&source) {
+                    continue;
+                }
+                value.insert("lastObservedAt", IvyJson::String(at.clone()));
+                value.insert("status", "resolved".into());
+                validate_diagnostic(&value, runtime)?;
+                sql(
+                    store,
+                    store.connection().execute(
+                        "UPDATE diagnostics SET diagnostic_json=? WHERE identity=?",
+                        params![encoded(&value)?, identity],
+                    ),
+                )?;
+                changes.push(DiagnosticChange {
+                    identity,
+                    scope: diagnostic_scope(store, &value)?,
+                });
+            }
+            // Quiet heartbeats leave age collection to periodic retention.
+            if !reported.is_empty() || !changes.is_empty() {
+                finish_diagnostics(store, changes, now)?;
+            }
             if node.get("ready") != parameters.get("ready") {
                 node.insert("ready", field(parameters, "ready")?.clone());
                 node.insert("lastContactAt", IvyJson::String(at.clone()));
                 self.save(store, &node, true)?;
             }
-            if parameters.get("ready").and_then(IvyJson::as_bool) == Some(true) {
-                if let Some(registry) = self.get_registry(store, id)? {
-                    for required in array(&registry, "requiredContracts")? {
+            if acknowledge_contracts {
+                if let Some(requirements) = self.required_contracts(store, id)? {
+                    for required in requirements.as_array().ok_or_else(IvyError::internal)? {
                         for version in array(required, "writeVersions")? {
-                            let contract = store.contract(
+                            let contract = readiness_contract(
+                                store,
                                 string(required, "key")?,
                                 version.as_js_string().ok_or_else(IvyError::internal)?,
                             )?;
@@ -359,9 +411,11 @@ impl Registry {
                     ("observedAt", IvyJson::String(at.clone())),
                 ],
             ))
-        })
+        });
+        // A failed commit must leave the current catalog unacknowledged.
+        if result.is_ok() {
+            self.contacts.get_mut(id).unwrap().contracts_acknowledged = ready;
+        }
+        result
     }
-}
-fn encoded_original(value: &IvyJson) -> IvyResult<String> {
-    encoded(value)
 }

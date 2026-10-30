@@ -1,7 +1,7 @@
 //! Shared network state for admitted server work. Settings and I/O providers are
 //! supplied by their owners; no listener or error-policy fallback is selected.
 use crate::{
-    admission::{DispatchGate, RequestBudget},
+    admission::RequestBudget,
     browser_push::BrowserPush,
     live_routing::LiveRouting,
     packages::PackageRegistry,
@@ -12,7 +12,7 @@ use crate::{
     server_peers::{self, ErrorConstructor, Ids, Peers},
     server_rpc::{Clock, Invocation, Options as InvocationOptions},
     tool_binding_diagnostics::ToolBindingDiagnostics,
-    worker_client::RequestOptions,
+    storage::RequestOptions,
 };
 use ivy_contracts::{IvyJson, JsString};
 use std::sync::{Arc, Mutex};
@@ -25,17 +25,15 @@ impl Push for BrowserPush {
         BrowserPush::wake(self);
     }
 }
-/// These exact reservations/gate are shared by HTTP invocation, socket ingress
-/// and credential changes. The HTTP adapter retains its other admission owners.
+/// HTTP invocation and socket ingress share these request reservations. All DB
+/// actions, including credential changes, use the storage owner's bounded queue.
 pub struct Admission {
     pub requests: RequestBudget,
-    pub dispatch: DispatchGate,
 }
 impl Default for Admission {
     fn default() -> Self {
         Self {
             requests: RequestBudget::default(),
-            dispatch: DispatchGate::default(),
         }
     }
 }
@@ -133,7 +131,6 @@ impl Server {
                 routing,
                 diagnostics,
                 requests: admission.requests.clone(),
-                dispatch: admission.dispatch.clone(),
                 direct: Arc::new({
                     let direct = direct.clone();
                     move |peers, context, request, peer| {
@@ -163,14 +160,12 @@ impl Server {
             }),
             owners.now,
             admission.requests,
-            admission.dispatch.clone(),
             options.invocation,
         );
         let lifecycle = Lifecycle::new(
             server_lifecycle::Owners {
                 storage: owners.storage,
                 peers: peers.clone(),
-                dispatch: admission.dispatch,
                 oauth: owners.oauth,
                 push: owners.push,
                 packages: owners

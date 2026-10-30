@@ -1,6 +1,7 @@
 //! Durable registry state and the storage lifetime's contact/binding mirrors.
 //! Live generation authority is supplied by dispatch, never the legacy column.
 use crate::{
+    registry_catalog::{Catalog, CatalogCache, ToolBinding},
     retention::Runtime,
     store::{AuthenticatedContext, Store},
 };
@@ -12,14 +13,16 @@ use ivy_contracts::{
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use rusqlite::{OptionalExtension, params};
-use std::{
-    cmp::Ordering,
-    collections::{HashMap, HashSet},
-};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 #[path = "registry_diagnostics.rs"]
 mod diagnostics;
 #[path = "registry_sync.rs"]
 mod syncing;
+#[path = "registry_namespaces.rs"]
+mod namespaces;
+#[cfg(test)]
+#[path = "../../../../tests/rust/hive_registry_catalog_memory.rs"]
+mod catalog_memory_tests;
 
 pub const RESOLVED_DIAGNOSTIC_LIMIT: usize = 10_000;
 pub const ACTIVE_DIAGNOSTIC_LIMIT: usize = 4_096;
@@ -30,13 +33,18 @@ pub struct ConnectionContext<'a> {
     pub generation: Option<f64>,
 }
 #[derive(Default)]
+struct Contact {
+    at: JsString,
+    contracts_acknowledged: bool,
+}
+#[derive(Default)]
 pub struct Registry {
     changed_nodes: Vec<JsString>,
     changed_node_set: HashSet<JsString>,
     changed_generations: Vec<(JsString, f64)>,
     generation_indices: HashMap<JsString, usize>,
-    binding_catalog: HashMap<JsString, HashMap<JsString, Vec<IvyJson>>>,
-    contact_times: HashMap<JsString, JsString>,
+    catalogs: CatalogCache,
+    contacts: HashMap<JsString, Contact>,
 }
 fn sql<T>(store: &Store, value: rusqlite::Result<T>) -> IvyResult<T> {
     value.map_err(|e| store.query_error(e))
@@ -104,6 +112,9 @@ fn generation_result(
 }
 
 impl Registry {
+    fn record_contact(&mut self, id: JsString, at: JsString) {
+        self.contacts.entry(id).or_default().at = at;
+    }
     pub fn new(store: &mut Store, runtime: &dyn Runtime, now: f64) -> IvyResult<Self> {
         let mut result = Self::default();
         let at = iso(runtime, now)?;
@@ -112,7 +123,11 @@ impl Registry {
                 store,
                 store
                     .connection()
-                    .prepare_cached("SELECT diagnostic_json FROM diagnostics"),
+                    .prepare_cached("SELECT diagnostic_json FROM diagnostics
+                        WHERE json_extract(diagnostic_json,'$.source')='hive'
+                        AND json_extract(diagnostic_json,'$.status')='current'
+                        AND json_extract(diagnostic_json,'$.code') IN ('invalid_frame','stale_generation')
+                        ORDER BY rowid"),
             )?;
             sql(
                 store,
@@ -176,7 +191,7 @@ impl Registry {
         require_object(node)?;
         let id = node.get("serviceNodeId").and_then(IvyJson::as_js_string);
         let last = id
-            .and_then(|id| self.contact_times.get(id))
+            .and_then(|id| self.contacts.get(id).map(|contact| &contact.at))
             .or_else(|| node.get("lastContactAt").and_then(IvyJson::as_js_string))
             .cloned();
         let stale = node
@@ -191,10 +206,25 @@ impl Registry {
             diagnostics
         } else {
             let id = id.ok_or_else(IvyError::internal)?;
-            let mut statement=sql(store,store.connection().prepare_cached("SELECT diagnostic_json FROM diagnostics WHERE json_extract(diagnostic_json,'$.resource.serviceNodeId')=?"))?;
+            let source = join(["service:".into(), id.clone()])
+                .to_utf8()
+                .ok()
+                .filter(|v| !v.contains('\0'));
+            let query = if source.is_some() {
+                "SELECT diagnostic_json FROM diagnostics WHERE json_extract(diagnostic_json,'$.source')=?
+                 AND json_extract(diagnostic_json,'$.status')='current'
+                 AND json_extract(diagnostic_json,'$.resource.serviceNodeId')=? ORDER BY rowid"
+            } else {
+                "SELECT diagnostic_json FROM diagnostics WHERE json_extract(diagnostic_json,'$.status')='current'
+                 AND json_extract(diagnostic_json,'$.resource.serviceNodeId')=? ORDER BY rowid"
+            };
+            let mut statement = sql(store, store.connection().prepare_cached(query))?;
             stored = sql(
                 store,
-                statement.query_map([text(id)], |r| r.get::<_, String>(0)),
+                statement.query_map(
+                    rusqlite::params_from_iter(source.iter().cloned().chain([text(id)])),
+                    |r| r.get::<_, String>(0),
+                ),
             )?
             .map(|r| decode(&sql(store, r)?))
             .collect::<IvyResult<Vec<_>>>()?;
@@ -269,7 +299,7 @@ impl Registry {
         self.current_node(store, &decode(&value)?, None, runtime, now)
     }
     pub fn nodes(&self, store: &Store, runtime: &dyn Runtime, now: f64) -> IvyResult<Vec<IvyJson>> {
-        let mut statement=sql(store,store.connection().prepare_cached("SELECT diagnostic_json FROM diagnostics WHERE json_extract(diagnostic_json,'$.status')='current'"))?;
+        let mut statement=sql(store,store.connection().prepare_cached("SELECT diagnostic_json FROM diagnostics WHERE json_extract(diagnostic_json,'$.status')='current' ORDER BY rowid"))?;
         let diagnostics = sql(store, statement.query_map([], |r| r.get::<_, String>(0)))?
             .map(|r| decode(&sql(store, r)?))
             .collect::<IvyResult<Vec<_>>>()?;
@@ -359,7 +389,13 @@ impl Registry {
             sql(store,store.connection().execute("INSERT INTO service_connections VALUES (?,?,?) ON CONFLICT(node_id) DO UPDATE SET credential_digest=excluded.credential_digest,session_digest=excluded.session_digest",params![text(&id),text(&context.principal.credential_digest),context.session_digest.map(text)]))?;
             Ok(generation_result(context.generation,[("serviceNodeId",IvyJson::String(id.clone()))]))
         })?;
-        self.contact_times.insert(id, at);
+        self.contacts.insert(
+            id,
+            Contact {
+                at,
+                contracts_acknowledged: false,
+            },
+        );
         Ok(result)
     }
     pub fn disconnect(
@@ -374,7 +410,7 @@ impl Registry {
             node.insert(key, false.into());
         }
         self.save(store, &node, true)?;
-        self.contact_times.remove(id);
+        self.contacts.remove(id);
         Ok(())
     }
     pub fn eligible(node: &IvyJson) -> bool {
@@ -406,29 +442,66 @@ impl Registry {
         .transpose()
         .map(Option::flatten)
     }
+    pub(crate) fn required_contracts(
+        &self,
+        store: &Store,
+        id: &JsString,
+    ) -> IvyResult<Option<IvyJson>> {
+        let row = sql(store, store.connection().query_row(
+            "SELECT json_type(registry_json),registry_json -> '$.requiredContracts' FROM registries WHERE node_id=?",
+            [text(id)], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        ).optional())?;
+        let Some((kind, value)) = row else {
+            return Ok(None);
+        };
+        if kind == "null" {
+            return Ok(None);
+        }
+        if kind != "object" {
+            return Err(IvyError::internal());
+        }
+        Ok(Some(
+            parse(value.as_deref().unwrap_or("null"), usize::MAX)
+                .map_err(|_| IvyError::internal())?,
+        ))
+    }
+    pub fn namespace_names(&self, store: &Store, id: &JsString) -> IvyResult<Vec<IvyJson>> {
+        let mut statement = sql(store, store.connection().prepare_cached(
+            "SELECT registry_json FROM registries WHERE node_id=?",
+        ))?;
+        let mut rows = sql(store, statement.query([text(id)]))?;
+        let Some(row) = sql(store, rows.next())? else {
+            return Ok(Vec::new());
+        };
+        let source = sql(store, row.get_ref(0))?.as_str().map_err(|_| IvyError::internal())?;
+        namespaces::names(source)
+    }
     pub fn namespace(
         &self,
         store: &Store,
         id: &JsString,
         namespace: &JsString,
     ) -> IvyResult<IvyJson> {
-        let registry = self.get_registry(store, id)?;
-        let mut selected = None;
-        if let Some(registry) = registry.as_ref().filter(|v| !v.is_null()) {
-            for value in array(registry, "namespaces")? {
-                require_object(value)?;
-                if value.get("namespace").and_then(IvyJson::as_js_string) == Some(namespace) {
-                    selected = Some(value.clone());
-                    break;
-                }
-            }
-        }
-        selected.ok_or_else(|| {
-            IvyError::new(
-                "not_found",
-                "Namespace is not in the selected provider catalog.",
-            )
+        self.read_namespace(store, id, namespace, |selected| {
+            namespaces::value(selected.ok_or_else(namespaces::not_found)?)
         })
+    }
+    fn read_namespace<T>(
+        &self,
+        store: &Store,
+        id: &JsString,
+        namespace: &JsString,
+        read: impl FnOnce(Option<&serde_json::value::RawValue>) -> IvyResult<T>,
+    ) -> IvyResult<T> {
+        let mut statement = sql(store, store.connection().prepare_cached(
+            "SELECT registry_json FROM registries WHERE node_id=?",
+        ))?;
+        let mut rows = sql(store, statement.query([text(id)]))?;
+        let Some(row) = sql(store, rows.next())? else {
+            return read(None);
+        };
+        let source = sql(store, row.get_ref(0))?.as_str().map_err(|_| IvyError::internal())?;
+        read(namespaces::find(source, namespace)?)
     }
     pub fn check_requirements(
         &self,
@@ -528,7 +601,9 @@ impl Registry {
                 "target_conflict",
                 "The selected resource has a different owner.",
             )?;
-            self.namespace(store, string(&node, "serviceNodeId")?, namespace)?;
+            self.read_namespace(store, string(&node, "serviceNodeId")?, namespace, |selected| {
+                selected.ok_or_else(namespaces::not_found).map(|_| ())
+            })?;
             return Ok(node);
         }
         let mut eligible = vec![];
@@ -543,17 +618,8 @@ impl Registry {
             }) {
                 continue;
             }
-            let registry = self.get_registry(store, string(&node, "serviceNodeId")?)?;
-            let mut contains = false;
-            if let Some(registry) = registry.as_ref().filter(|v| !v.is_null()) {
-                for value in array(registry, "namespaces")? {
-                    require_object(value)?;
-                    if value.get("namespace").and_then(IvyJson::as_js_string) == Some(namespace) {
-                        contains = true;
-                        break;
-                    }
-                }
-            }
+            let contains = self.read_namespace(store, string(&node, "serviceNodeId")?, namespace,
+                |selected| Ok(selected.is_some()))?;
             if contains && Self::eligible(&node) {
                 eligible.push(node);
             }
@@ -591,22 +657,24 @@ impl Registry {
         now: f64,
     ) -> IvyResult<IvyJson> {
         let node = self.select(store, namespace, target, runtime, now)?;
-        let ns = self.namespace(store, string(&node, "serviceNodeId")?, namespace)?;
+        let ns = self.read_namespace(store, string(&node, "serviceNodeId")?, namespace, |selected| {
+            namespaces::summary(selected.ok_or_else(namespaces::not_found)?)
+        })?;
         Ok(IvyJson::object([
             ("namespace", IvyJson::String(namespace.clone())),
-            ("description", field(&ns, "description")?.clone()),
-            ("guideMarkdown", field(&ns, "guideMarkdown")?.clone()),
+            ("description", ns.description),
+            ("guideMarkdown", ns.guide_markdown),
             (
                 "provider",
                 IvyJson::object([("eligible", Self::eligible(&node).into()), ("node", node)]),
             ),
             (
                 "toolCount",
-                IvyJson::Number(array(&ns, "tools")?.len() as f64),
+                IvyJson::Number(ns.tool_count as f64),
             ),
             (
                 "topicCount",
-                IvyJson::Number(array(&ns, "topics")?.len() as f64),
+                IvyJson::Number(ns.topic_count as f64),
             ),
         ]))
     }
@@ -614,48 +682,25 @@ impl Registry {
         &mut self,
         store: &Store,
         id: &JsString,
-        namespace: &IvyJson,
-    ) -> IvyResult<&[IvyJson]> {
-        if !self.binding_catalog.contains_key(id) {
-            let mut cache = HashMap::new();
-            if let Some(registry) = self.get_registry(store, id)?.filter(|v| !v.is_null()) {
-                for ns in array(&registry, "namespaces")? {
-                    cache.insert(
-                        string(ns, "namespace")?.clone(),
-                        tool_bindings(array(ns, "tools")?)?,
-                    );
-                }
-            }
-            self.binding_catalog.insert(id.clone(), cache);
-        }
-        Ok(self.binding_catalog[id]
-            .get(string(namespace, "namespace")?)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]))
+        namespace: &JsString,
+    ) -> IvyResult<Vec<IvyJson>> {
+        let catalog = self.live_catalog(store, id)?;
+        Ok(catalog.and_then(|catalog| catalog.namespaces.iter()
+            .find(|ns| &ns.name == namespace).map(|ns| catalog.bindings(ns).iter()
+                .map(ToolBinding::to_wire).collect())).unwrap_or_default())
     }
-    pub fn live_catalog(&mut self, store: &Store, id: &JsString) -> IvyResult<Option<IvyJson>> {
+    pub fn live_catalog(&mut self, store: &Store, id: &JsString) -> IvyResult<Option<Arc<Catalog>>> {
+        if let Some(catalog) = self.catalogs.get(id) {
+            return Ok(Some(catalog));
+        }
         let Some(registry) = self.get_registry(store, id)?.filter(|v| !v.is_null()) else {
             return Ok(None);
         };
-        let mut namespaces = vec![];
-        let mut tools = vec![];
-        let mut notifications = vec![];
+        let mut bindings = HashMap::new();
         for ns in array(&registry, "namespaces")? {
-            namespaces.push(field(ns, "namespace")?.clone());
-            tools.extend_from_slice(self.bindings(store, id, ns)?);
-            for notification in optional_array(ns, "notifications")? {
-                let mut value = IvyJson::object([("namespace", field(ns, "namespace")?.clone())]);
-                for (key, child) in notification.as_object().ok_or_else(IvyError::internal)? {
-                    value.insert(key.clone(), child.clone());
-                }
-                notifications.push(value);
-            }
+            bindings.insert(string(ns, "namespace")?.clone(), tool_bindings(array(ns, "tools")?)?);
         }
-        Ok(Some(IvyJson::object([
-            ("namespaces", IvyJson::Array(namespaces)),
-            ("tools", IvyJson::Array(tools)),
-            ("notifications", IvyJson::Array(notifications)),
-        ])))
+        Ok(Some(self.catalogs.insert(id.clone(), Catalog::new(&registry, bindings)?)))
     }
     pub fn report_host(
         &mut self,
@@ -766,22 +811,19 @@ impl Registry {
         .collect()
     }
 }
-fn tool_bindings(tools: &[IvyJson]) -> IvyResult<Vec<IvyJson>> {
+fn tool_bindings(tools: &[IvyJson]) -> IvyResult<Vec<ToolBinding>> {
     tools
         .iter()
         .map(|tool| {
-            Ok(IvyJson::object([
-                (
-                    "qualifiedName",
-                    IvyJson::String(join([
+            Ok(ToolBinding {
+                qualified_name: join([
                         string(tool, "namespace")?.clone(),
                         ".".into(),
                         string(tool, "name")?.clone(),
-                    ])),
-                ),
-                ("definition", tool.clone()),
-                ("definitionHash", tool_definition_hash(tool)?.into()),
-            ]))
+                    ]),
+                definition: tool.clone(),
+                definition_hash: tool_definition_hash(tool)?.into(),
+            })
         })
         .collect()
 }

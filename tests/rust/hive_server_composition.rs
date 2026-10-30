@@ -159,7 +159,6 @@ pub(super) fn compose(
         },
         server_runtime::Admission {
             requests: base.requests,
-            dispatch: base.dispatch,
         },
     )
     .unwrap();
@@ -287,36 +286,8 @@ fn original_composed_shared_admission_dispatch_credentials_and_reset() {
 }
 
 #[test]
-fn original_composed_worker_recovery_events_and_subscription_identity() {
+fn original_composed_events_and_subscription_identity() {
     let mut traces = vec![];
-    let mut steps = registered();
-    steps.extend([
-        connect("c", None),
-        invoke("pending-http", tool('a')),
-        message("c", tool('a')),
-        json!({"op":"failure"}),
-        invoke("cleared", tool('a')),
-        json!({"op":"failure"}),
-        json!({"op":"advance","ms":1000}),
-        finish("start", Value::Null),
-        finish("binding.diagnostics", json!([])),
-        connect("p", Some(("node", 2.0))),
-        update("node", 2.0),
-        invoke("recovered", tool('a')),
-        response(3),
-    ]);
-    let mut t = composed(
-        "failure-clears-shared-http-ws-state-and-coalesces-recovery",
-        steps,
-    );
-    t["expectKinds"] = json!([
-        "cache-clear",
-        "terminate",
-        "invoke-error",
-        "storage-start",
-        "invoke-ok"
-    ]);
-    traces.push(t);
     let mut t = composed(
         "worker-events-share-subscription-session-and-immediate-turn",
         vec![

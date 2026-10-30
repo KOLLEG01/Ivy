@@ -8,13 +8,12 @@ use ivy_hive::{
     server_options::Error,
     server_rpc::{Reply, Storage},
     server_runtime::Admission,
+    storage::Event,
+    storage::RequestOptions,
     store::Credential,
-    worker_client::RequestOptions,
-    worker_runtime::{Event, WorkerLaunch},
 };
 use ivy_host_runtime::{native_path, node_path};
 use std::{
-    collections::BTreeMap,
     path::PathBuf,
     sync::atomic::{AtomicU8, Ordering as AtomicOrdering},
 };
@@ -56,12 +55,20 @@ impl WorkerEffects {
     }
 }
 impl Storage for WorkerEffects {
+    fn dispatch(&self, mut request: ivy_hive::storage::Request, options: RequestOptions) -> Reply {
+        if let Err(error) = request.prepare() {
+            return Box::pin(async move { Err(error) });
+        }
+        let reply = Storage::request(self, crate::payload_fixture::json(request.take_payload()), options);
+        Box::pin(async move { request.complete(reply.await) })
+    }
     fn request(&self, payload: IvyJson, _: RequestOptions) -> Reply {
         self.post(payload)
     }
 }
 impl Worker for WorkerEffects {
-    fn request(&self, payload: IvyJson) -> browser_push::RequestFuture {
+    fn request(&self, payload: ivy_hive::storage::Payload) -> browser_push::RequestFuture {
+        let payload = crate::payload_fixture::json(payload);
         self.post(payload)
     }
 }
@@ -308,23 +315,13 @@ async fn execute(input: &IvyJson) -> Result<IvyJson, Error> {
         "A stored worker callback retained its owner"
     );
     callback(Event::Notification(
-        ivy_hive::worker_protocol::Notification::Changes(vec![]),
+        ivy_hive::storage::Notification::Changes(vec![]),
     ));
     Ok(result)
 }
 fn redirect_query(value: &JsString) -> JsString {
     let at = value.0.iter().position(|c| *c == b'?' as u16).unwrap();
     JsString(value.0[at + 1..].to_vec())
-}
-fn launch() -> WorkerLaunch {
-    WorkerLaunch {
-        root: PathBuf::from("constructor-unused-root"),
-        executable: PathBuf::from("constructor-unused-executable"),
-        args: vec!["--storage".into()],
-        options: IvyJson::Null,
-        job_launcher: Some("constructor-unused-job".into()),
-        environment: BTreeMap::from([("CONSTRUCTOR_FIXTURE".into(), "retained".into())]),
-    }
 }
 #[test]
 fn native_constructor_is_inert_and_does_not_retain_lifecycle() {
@@ -465,27 +462,20 @@ fn native_constructor_is_inert_and_does_not_retain_lifecycle() {
             &expected,
             "{name}: exact worker data"
         );
-        let original = launch();
-        let actual = prepared.launch_options(original.clone());
-        assert_eq!(actual.options, expected, "{name}");
-        assert_eq!(actual.root, original.root);
-        assert_eq!(actual.executable, original.executable);
-        assert_eq!(actual.args, original.args);
-        assert_eq!(actual.job_launcher, original.job_launcher);
-        assert_eq!(actual.environment, original.environment);
         let events = Events::default();
         let server = prepared
-            .native(original, dependencies(events.clone()), Admission::default())
+            .native(
+                Box::new(|_| panic!("Inert constructor must not open storage")),
+                dependencies(events.clone()),
+                Admission::default(),
+            )
             .unwrap();
         assert_eq!(
             server.ui_files.root.as_os_str(),
             path.as_os_str(),
             "{name}: exact private native path"
         );
-        assert_eq!(
-            server.worker.lifecycle(),
-            ivy_hive::worker_client::Lifecycle::Stopped
-        );
+        assert!(!server.worker.is_ready());
         assert_eq!(server.worker.pending_count(), 0);
         assert!(
             events.lock().unwrap().is_empty(),
@@ -496,7 +486,7 @@ fn native_constructor_is_inert_and_does_not_retain_lifecycle() {
         drop(server);
         assert!(weak.upgrade().is_none(), "{name}: retained lifecycle owner");
         callback(Event::Notification(
-            ivy_hive::worker_protocol::Notification::Changes(vec![]),
+            ivy_hive::storage::Notification::Changes(vec![]),
         ));
     }
 }

@@ -1,5 +1,7 @@
 use ivy_contracts::IvyError;
-use ivy_hive::admission::DispatchGate;
+#[path = "../fixtures/hive-dispatch-queue.rs"]
+mod fixture_dispatch;
+use fixture_dispatch::DispatchGate;
 use std::{
     sync::{
         Arc, Mutex,
@@ -12,6 +14,20 @@ async fn flush() {
     for _ in 0..32 {
         tokio::task::yield_now().await;
     }
+}
+
+#[test]
+fn dispatch_does_not_start_expired_work_before_its_timer_is_polled() {
+    Builder::new_current_thread().enable_time().start_paused(true).build().unwrap().block_on(async {
+        let gate = DispatchGate::new(1, 2);
+        let called = Arc::new(AtomicUsize::new(0));
+        let observed = called.clone();
+        let reply = gate.run(move || async move { observed.fetch_add(1, Ordering::SeqCst); Ok(()) });
+        // Advance the clock before polling the initially admitted task.
+        tokio::time::advance(Duration::from_millis(2)).await;
+        assert_eq!(reply.await.unwrap().unwrap_err().outcome, ivy_contracts::Outcome::NotExecuted);
+        assert_eq!(called.load(Ordering::SeqCst), 0);
+    });
 }
 
 #[test]
@@ -57,10 +73,17 @@ fn dispatch_is_eager_releases_completed_slots_and_retains_work_without_receivers
                 released: tokio::sync::watch::Receiver<bool>,
             }
             impl ivy_hive::server_rpc::Storage for Stalled {
+                fn dispatch(&self, mut request: ivy_hive::storage::Request, options: ivy_hive::storage::RequestOptions) -> ivy_hive::server_rpc::Reply {
+                    if let Err(error) = request.prepare() {
+                        return Box::pin(async move { Err(error) });
+                    }
+                    let reply = self.request(crate::payload_fixture::json(request.take_payload()), options);
+                    Box::pin(async move { request.complete(reply.await) })
+                }
                 fn request(
                     &self,
                     _: ivy_contracts::IvyJson,
-                    _: ivy_hive::worker_client::RequestOptions,
+                    _: ivy_hive::storage::RequestOptions,
                 ) -> ivy_hive::server_rpc::Reply {
                     self.executions.fetch_add(1, Ordering::SeqCst);
                     let mut released = self.released.clone();
@@ -86,7 +109,6 @@ fn dispatch_is_eager_releases_completed_slots_and_retains_work_without_receivers
                 Arc::new(|_, _| Ok(None)),
                 Arc::new(|| 100000.0),
                 ivy_hive::admission::RequestBudget::default(),
-                DispatchGate::default(),
                 ivy_hive::server_rpc::Options::default(),
             );
             for bytes in [usize::MAX - 1024, usize::MAX - 1023, usize::MAX] {
@@ -119,7 +141,7 @@ fn dispatch_is_eager_releases_completed_slots_and_retains_work_without_receivers
                 })
                 .collect::<Vec<_>>();
             flush().await;
-            assert_eq!(storage.executions.load(Ordering::SeqCst), 1);
+            assert_eq!(storage.executions.load(Ordering::SeqCst), 2048);
             release.send(true).unwrap();
             let (mut completed, mut requests, mut dispatches) = (0, 0, 0);
             for call in calls {
@@ -148,8 +170,8 @@ fn dispatch_is_eager_releases_completed_slots_and_retains_work_without_receivers
                     }
                 }
             }
-            assert_eq!((completed, requests, dispatches), (1024, 52, 1024));
-            assert_eq!(storage.executions.load(Ordering::SeqCst), 1024);
+            assert_eq!((completed, requests, dispatches), (2048, 52, 0));
+            assert_eq!(storage.executions.load(Ordering::SeqCst), 2048);
         });
 }
 

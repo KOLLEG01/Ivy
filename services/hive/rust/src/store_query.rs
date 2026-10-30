@@ -10,6 +10,13 @@ use std::{
     time::Instant,
 };
 
+const JSON_CACHE_BYTES: usize = 4 * 1024 * 1024;
+const JSON_CACHE_ENTRY_BYTES: usize = 1024 * 1024;
+
+#[cfg(test)]
+#[path = "../../../../tests/rust/hive_query_cache.rs"]
+mod cache_tests;
+
 /// The process owner supplies the exact JavaScript runtime primitives. SQL
 /// policy and pointer lookup remain in Hive; no locale/date fallback is used.
 pub trait QueryRuntime: Send + Sync {
@@ -21,6 +28,7 @@ pub trait QueryRuntime: Send + Sync {
 struct State {
     deadline: Option<Instant>,
     cache: HashMap<String, IvyJson>,
+    cache_bytes: usize,
     error: Option<IvyError>,
     runtime: Option<Arc<dyn QueryRuntime>>,
 }
@@ -32,6 +40,7 @@ impl Drop for BudgetReset {
         let mut state = self.0.0.lock().unwrap();
         state.deadline = None;
         state.cache.clear();
+        state.cache_bytes = 0;
         state.error = None;
     }
 }
@@ -51,16 +60,24 @@ impl State {
         };
         let content = std::str::from_utf8(content).map_err(sql_error)?;
         let pointer = std::str::from_utf8(pointer).map_err(sql_error)?;
+        let mut uncached = None;
         if !self.cache.contains_key(content) {
             let Ok(root) = parse(content, usize::MAX) else {
                 return Ok(IvyJson::Null);
             };
-            if self.cache.len() >= 8 {
-                self.cache.clear();
+            let bytes = content.len() + std::mem::size_of::<String>() + root.retained_bytes();
+            if bytes > JSON_CACHE_ENTRY_BYTES {
+                uncached = Some(root);
+            } else {
+                if self.cache.len() >= 8 || self.cache_bytes + bytes > JSON_CACHE_BYTES {
+                    self.cache.clear();
+                    self.cache_bytes = 0;
+                }
+                self.cache.insert(content.to_owned(), root);
+                self.cache_bytes += bytes;
             }
-            self.cache.insert(content.to_string(), root);
         }
-        let mut value = &self.cache[content];
+        let mut value = uncached.as_ref().unwrap_or_else(|| &self.cache[content]);
         for key in pointer_parts(&pointer.into())? {
             value = match value {
                 IvyJson::Object(_) => match value.get_key(&key) {
@@ -109,6 +126,7 @@ impl Store {
     }
 
     pub(super) fn install_query_functions(&self) -> IvyResult<()> {
+        crate::contract_catalog::install_functions(&self.db).map_err(sql_error)?;
         let state = self.query_state.0.clone();
         self.db
             .create_scalar_function("ivy_budget", 0, FunctionFlags::SQLITE_UTF8, move |_| {
@@ -238,6 +256,7 @@ impl Store {
             let mut state = self.query_state.0.lock().unwrap();
             state.deadline = Instant::now().checked_add(duration);
             state.cache.clear();
+            state.cache_bytes = 0;
             state.error = None;
         }
         BudgetReset(self.query_state.clone())

@@ -71,11 +71,19 @@ impl AuthWorker {
     }
 }
 impl Worker for AuthWorker {
-    fn request(&self, payload: IvyJson) -> browser_push::RequestFuture {
+    fn request(&self, payload: ivy_hive::storage::Payload) -> browser_push::RequestFuture {
+        let payload = crate::payload_fixture::json(payload);
         self.post(payload)
     }
 }
 impl Storage for AuthWorker {
+    fn dispatch(&self, mut request: ivy_hive::storage::Request, options: RequestOptions) -> Reply {
+        if let Err(error) = request.prepare() {
+            return Box::pin(async move { Err(error) });
+        }
+        let reply = Storage::request(self, crate::payload_fixture::json(request.take_payload()), options);
+        Box::pin(async move { request.complete(reply.await) })
+    }
     fn request(&self, payload: IvyJson, _: RequestOptions) -> Reply {
         self.post(payload)
     }
@@ -266,7 +274,8 @@ fn compare(group: &str, traces: Vec<Value>) -> Vec<Value> {
     let original = lifetime_reference("authentication", &traces);
     assert_eq!(original.len(), traces.len());
     let mut observed = vec![];
-    for (input, original) in traces.into_iter().zip(original) {
+    for (input, mut original) in traces.into_iter().zip(original) {
+        crate::payload_fixture::project_auth_requests(&mut original);
         let native = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .start_paused(true)

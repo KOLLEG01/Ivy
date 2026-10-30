@@ -1,14 +1,19 @@
-//! Network-process routing mirror. Storage publishes admitted node/catalog updates;
+//! Network routing index. The DB owner publishes admitted node/catalog updates;
 //! only the live socket generation can accept or complete a provider call.
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, Outcome, limits::MANAGEMENT_FRAME_BYTES,
     schema::SchemaValidators,
 };
-use std::collections::{HashMap, HashSet};
+use crate::registry_catalog::Catalog;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 fn field<'a>(value: &'a IvyJson, key: &str) -> IvyResult<&'a IvyJson> {
     value.get(key).ok_or_else(IvyError::internal)
 }
+
 fn string(value: &IvyJson, key: &str) -> IvyResult<JsString> {
     field(value, key)?
         .as_js_string()
@@ -36,71 +41,75 @@ fn nullable<'a>(value: &'a IvyJson, name: &str) -> Option<&'a IvyJson> {
     value.get(name).filter(|v| !v.is_null())
 }
 
-#[derive(Clone, Debug)]
-pub struct PreparedCall {
+#[derive(Debug)]
+pub struct CallContext {
     pub service_node_id: JsString,
     pub generation: f64,
-    pub definition: IvyJson,
+    pub qualified_name: JsString,
+    pub output_schema: Option<Arc<IvyJson>>,
+    pub caller_principal_id: JsString,
+}
+#[derive(Debug)]
+pub struct PreparedCall {
+    pub context: CallContext,
     pub definition_hash: JsString,
     pub arguments: IvyJson,
-    pub caller_principal_id: JsString,
     pub operation_id: Option<IvyJson>,
 }
-impl PreparedCall {
-    pub fn to_json(&self) -> IvyJson {
-        let mut value = IvyJson::object([
-            (
-                "serviceNodeId",
-                IvyJson::String(self.service_node_id.clone()),
-            ),
-            ("generation", IvyJson::Number(self.generation)),
-            ("definition", self.definition.clone()),
-            (
-                "definitionHash",
-                IvyJson::String(self.definition_hash.clone()),
-            ),
-            ("arguments", self.arguments.clone()),
-            (
-                "callerPrincipalId",
-                IvyJson::String(self.caller_principal_id.clone()),
-            ),
-        ]);
-        if let Some(id) = &self.operation_id {
-            value.insert("operationId", id.clone());
-        }
-        value
-    }
+struct Schemas {
+    input: IvyJson,
+    output: Arc<IvyJson>,
+}
+struct Tool {
+    definition_hash: JsString,
+    mcp: bool,
+    read_only: bool,
+    schemas: Option<Schemas>,
 }
 struct Route {
     node: IvyJson,
     generation: f64,
     namespaces: HashSet<JsString>,
-    tools: HashMap<JsString, IvyJson>,
+    tools: HashMap<JsString, Tool>,
     notifications: HashMap<JsString, IvyJson>,
 }
 impl Route {
-    fn update(&mut self, node: &IvyJson, catalog: Option<&IvyJson>) -> IvyResult<()> {
-        self.node = node.clone();
+    fn update(&mut self, catalog: Option<&Catalog>, validate: bool) -> IvyResult<()> {
         if let Some(catalog) = catalog {
-            self.namespaces = field(catalog, "namespaces")?
-                .as_array()
-                .ok_or_else(IvyError::internal)?
+            self.namespaces = catalog.namespaces
                 .iter()
-                .map(|v| v.as_js_string().cloned().ok_or_else(IvyError::internal))
-                .collect::<IvyResult<_>>()?;
+                .map(|ns| ns.name.clone())
+                .collect();
             self.tools.clear();
-            for binding in field(catalog, "tools")?
-                .as_array()
-                .ok_or_else(IvyError::internal)?
+            for binding in &catalog.tools
             {
-                self.tools
-                    .insert(string(binding, "qualifiedName")?, binding.clone());
+                let definition = &binding.definition;
+                self.tools.insert(
+                    binding.qualified_name.clone(),
+                    Tool {
+                        definition_hash: binding.definition_hash.clone(),
+                        mcp: definition
+                            .get("discovery")
+                            .and_then(|d| d.get("mcp"))
+                            .is_some_and(|value| value.as_object().is_some()),
+                        read_only: definition
+                            .get("annotations")
+                            .and_then(|a| a.get("readOnlyHint"))
+                            .and_then(IvyJson::as_bool)
+                            == Some(true),
+                        schemas: if validate {
+                            Some(Schemas {
+                                input: field(definition, "inputSchema")?.clone(),
+                                output: Arc::new(field(definition, "outputSchema")?.clone()),
+                            })
+                        } else {
+                            None
+                        },
+                    },
+                );
             }
             let mut notifications = HashMap::new();
-            for notification in field(catalog, "notifications")?
-                .as_array()
-                .ok_or_else(IvyError::internal)?
-            {
+            for notification in &catalog.notifications {
                 notifications.insert(
                     key([
                         string(notification, "namespace")?,
@@ -166,7 +175,7 @@ impl LiveRouting {
         &mut self,
         node: &IvyJson,
         generation: Option<f64>,
-        catalog: Option<&IvyJson>,
+        catalog: Option<&Catalog>,
     ) -> IvyResult<()> {
         let id = string(node, "serviceNodeId")?;
         let prior = self.routes.iter().position(|(key, _)| key == &id);
@@ -175,7 +184,10 @@ impl LiveRouting {
         }
         let generation = generation.unwrap_or_else(|| self.routes[prior.unwrap()].1.generation);
         if let Some(index) = prior.filter(|i| self.routes[*i].1.generation == generation) {
-            return self.routes[index].1.update(node, catalog);
+            self.routes[index].1.node = node.clone();
+            return self.routes[index]
+                .1
+                .update(catalog, self.validators.is_some());
         }
         let mut route = Route {
             node: node.clone(),
@@ -184,7 +196,7 @@ impl LiveRouting {
             tools: HashMap::new(),
             notifications: HashMap::new(),
         };
-        route.update(node, catalog)?;
+        route.update(catalog, self.validators.is_some())?;
         if let Some(index) = prior {
             self.routes[index] = (id, route);
         } else {
@@ -371,17 +383,16 @@ impl LiveRouting {
         let binding = route.tools.get(&qualified).ok_or_else(|| {
             IvyError::new("not_found", "Tool is absent from the selected provider.")
         })?;
-        let definition = field(binding, "definition")?;
         require(
-            context.get("transport") != Some(&"mcp".into())
-                || definition
-                    .get("discovery")
-                    .and_then(|d| d.get("mcp"))
-                    .is_some_and(|v| v.as_object().is_some()),
+            context.get("transport") != Some(&"mcp".into()) || binding.mcp,
             "not_found",
             "Tool is not published through MCP.",
         )?;
-        if binding.get("definitionHash") != params.get("expectedDefinitionHash") {
+        if Some(&binding.definition_hash)
+            != params
+                .get("expectedDefinitionHash")
+                .and_then(IvyJson::as_js_string)
+        {
             if let Some(rejected) = &self.rejected {
                 rejected(IvyJson::object([
                     ("callerPrincipalId", field(context, "principalId")?.clone()),
@@ -398,20 +409,22 @@ impl LiveRouting {
             ));
         }
         let arguments = field(params, "arguments")?;
-        if let Some(validators) = &self.validators {
-            validators.validate(
-                field(definition, "inputSchema")?,
-                arguments,
-                MANAGEMENT_FRAME_BYTES,
-            )?;
+        if let (Some(validators), Some(schemas)) = (&self.validators, &binding.schemas) {
+            validators.validate(&schemas.input, arguments, MANAGEMENT_FRAME_BYTES)?;
         }
         Ok(PreparedCall {
-            service_node_id: string(&route.node, "serviceNodeId")?,
-            generation: route.generation,
-            definition: definition.clone(),
-            definition_hash: string(binding, "definitionHash")?,
+            context: CallContext {
+                service_node_id: string(&route.node, "serviceNodeId")?,
+                generation: route.generation,
+                qualified_name: qualified,
+                output_schema: binding
+                    .schemas
+                    .as_ref()
+                    .map(|schemas| schemas.output.clone()),
+                caller_principal_id: string(context, "principalId")?,
+            },
+            definition_hash: binding.definition_hash.clone(),
             arguments: arguments.clone(),
-            caller_principal_id: string(context, "principalId")?,
             operation_id: params.get("operationId").cloned(),
         })
     }
@@ -428,11 +441,7 @@ impl LiveRouting {
                 IvyError::new("not_found", "Dashboard image endpoint is unavailable.")
             })?;
         require(
-            binding
-                .get("definition")
-                .and_then(|d| d.get("annotations"))
-                .and_then(|a| a.get("readOnlyHint"))
-                == Some(&true.into()),
+            binding.read_only,
             "provider_contract_error",
             "Dashboard image handler must be read-only.",
         )?;
@@ -444,13 +453,13 @@ impl LiveRouting {
                 ("qualifiedName", "dashboards.image".into()),
                 (
                     "expectedDefinitionHash",
-                    field(binding, "definitionHash")?.clone(),
+                    IvyJson::String(binding.definition_hash.clone()),
                 ),
                 ("arguments", args.clone()),
             ]),
         )
     }
-    pub fn complete(&self, call: &PreparedCall, result: IvyJson) -> IvyResult<IvyJson> {
+    pub fn complete(&self, call: &CallContext, result: IvyJson) -> IvyResult<IvyJson> {
         require(
             self.route(&call.service_node_id).is_some_and(|r| {
                 r.node.get("connected").and_then(IvyJson::as_bool) == Some(true)
@@ -461,7 +470,10 @@ impl LiveRouting {
         )
         .map_err(|e| e.with_outcome(Outcome::Unknown))?;
         if let Some(validators) = &self.validators {
-            if field(&call.definition, "outputSchema")
+            if call
+                .output_schema
+                .as_deref()
+                .ok_or_else(IvyError::internal)
                 .and_then(|schema| validators.validate(schema, &result, MANAGEMENT_FRAME_BYTES))
                 .is_err()
             {
@@ -475,3 +487,7 @@ impl LiveRouting {
         Ok(result)
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/rust/hive_routing_ownership.rs"]
+mod ownership_tests;

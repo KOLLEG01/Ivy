@@ -1,7 +1,4 @@
 //! Arrival bounds and retained request reservations, independent of transport.
-mod dispatch;
-pub use dispatch::DispatchGate;
-
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, limits::CONSUMER_IN_FLIGHT_REQUESTS};
 use std::{
     collections::HashMap,

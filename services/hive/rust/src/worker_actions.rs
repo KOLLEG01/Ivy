@@ -7,10 +7,10 @@ use crate::{
     mcp_request,
     package_kernel::{self, KernelCatalog},
     retention,
-    store::{AuthContext, AuthenticatedContext, Credential},
+    storage::{Notification, Payload},
+    store::Credential,
     uis::Uis,
     worker_identity,
-    worker_protocol::Notification,
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 
@@ -94,9 +94,33 @@ impl WorkerActions {
     pub fn bind_browser_push(&mut self, push: BrowserPushStore) {
         self.browser_push = Some(push);
     }
+    pub fn handle(&self, kernel: &mut Kernel, payload: &Payload) -> IvyResult<IvyJson> {
+        match payload {
+            Payload::Execute { context, request } => {
+                worker_identity::check_access_expiry(context, (kernel.clock)() as u64)?;
+                kernel.execute(context, request)
+            }
+            Payload::ConfigureCredentials(credentials) => worker_identity::configure_credentials(
+                &mut kernel.parts.store, credentials, (kernel.clock)() as u64,
+            ),
+            Payload::Authenticate(context) => {
+                let principal = kernel.parts.store.authenticate(context)?;
+                Ok(IvyJson::object([
+                    ("principalId", principal.principal_id.into()),
+                    ("credentialDigest", principal.credential_digest.into()),
+                ]))
+            }
+            Payload::CreateSession(credential) => worker_identity::create_session_with_date(
+                &kernel.parts.store, credential, || kernel.runtime.iso_date((kernel.clock)()),
+            ),
+            Payload::ResolveSession(session) => worker_identity::resolve_session(&kernel.parts.store, session),
+            Payload::EndSession(context) => worker_identity::end_session(&kernel.parts.store, context),
+            Payload::Json(message) => self.handle_json(kernel, message).unwrap_or_else(|| Err(IvyError::internal())),
+        }
+    }
     /// None leaves an action with its other owner. It never fabricates a result
     /// or supplies a replacement policy for an unfinished action.
-    pub fn handle(&self, kernel: &mut Kernel, message: &IvyJson) -> Option<IvyResult<IvyJson>> {
+    fn handle_json(&self, kernel: &mut Kernel, message: &IvyJson) -> Option<IvyResult<IvyJson>> {
         let action = message.get("action")?.as_str().ok()?;
         if action.starts_with("mcp.") {
             return mcp_request::worker_action(
@@ -137,23 +161,6 @@ impl WorkerActions {
                 worker_identity::check_access_expiry(context, (kernel.clock)() as u64)?;
                 kernel.execute(context, field(message, "request")?)
             })()),
-            "authenticate" => Some((|| {
-                let context = field(message, "context")?;
-                let principal = kernel.parts.store.authenticate(&AuthContext {
-                    credential_digest: string(context, "credentialDigest")?.clone(),
-                    session_digest: context
-                        .get("sessionDigest")
-                        .and_then(IvyJson::as_js_string)
-                        .cloned(),
-                })?;
-                Ok(IvyJson::object([
-                    ("principalId", IvyJson::String(principal.principal_id)),
-                    (
-                        "credentialDigest",
-                        IvyJson::String(principal.credential_digest),
-                    ),
-                ]))
-            })()),
             "credentials.configure" => Some((|| {
                 let IvyJson::Array(values) = field(message, "credentials")? else {
                     return Err(IvyError::internal());
@@ -189,34 +196,6 @@ impl WorkerActions {
                     (kernel.clock)() as u64,
                 )
             })()),
-            "session.resolve" => Some((|| {
-                worker_identity::resolve_session(
-                    &kernel.parts.store,
-                    string(message, "sessionDigest")?,
-                )
-            })()),
-            "session.create" => Some((|| {
-                worker_identity::create_session_with_date(
-                    &kernel.parts.store,
-                    string(message, "credentialDigest")?,
-                    || kernel.runtime.iso_date((kernel.clock)()),
-                )
-            })()),
-            "session.end" => Some((|| {
-                let context = field(message, "context")?;
-                worker_identity::end_session(
-                    &kernel.parts.store,
-                    &AuthenticatedContext {
-                        principal_id: context
-                            .get("principalId")
-                            .and_then(IvyJson::as_js_string)
-                            .cloned()
-                            .unwrap_or_default(),
-                        credential_digest: string(context, "credentialDigest")?.clone(),
-                    },
-                    context.get("sessionDigest").and_then(IvyJson::as_js_string),
-                )
-            })()),
             "disconnect" => Some((|| {
                 kernel.parts.registry.borrow_mut().disconnect(
                     &mut kernel.parts.store,
@@ -240,18 +219,11 @@ impl WorkerActions {
                         &kernel.parts.store,
                         string(message, "uiId")?,
                         message.get("path").and_then(IvyJson::as_js_string),
-                        kernel.runtime.as_ref(),
-                        kernel.clock.as_ref(),
                     ),
                     "ui.resolveSlug" => uis
                         .resolve_slug(&kernel.parts.store, string(message, "slug")?)
                         .map(|v| v.map(IvyJson::String).unwrap_or(IvyJson::Null)),
-                    _ => uis.entry(
-                        &kernel.parts.store,
-                        string(message, "uiId")?,
-                        kernel.runtime.as_ref(),
-                        kernel.clock.as_ref(),
-                    ),
+                    _ => uis.entry(&kernel.parts.store, string(message, "uiId")?),
                 }
             })()),
             "ui.pointers" => Some((|| {
@@ -434,13 +406,19 @@ impl WorkerActions {
     pub fn publish(
         &mut self,
         kernel: &mut Kernel,
-        payload: &IvyJson,
+        payload: &Payload,
         mut emit: impl FnMut(Notification),
     ) -> IvyResult<()> {
         let mut registry = kernel.parts.registry.borrow_mut();
-        if payload.get("action") != Some(&IvyJson::from("close")) {
+        let execution = match payload {
+            Payload::Execute { context, request } => Some((context, request)),
+            Payload::Json(value) if value.get("action") == Some(&IvyJson::from("execute")) =>
+                value.get("context").zip(value.get("request")),
+            _ => None,
+        };
+        if !matches!(payload, Payload::Json(value) if value.get("action") == Some(&IvyJson::from("close"))) {
             for id in registry.changed_nodes().to_vec() {
-                let route = (|| -> IvyResult<IvyJson> {
+                let route = (|| -> IvyResult<crate::storage::RoutingUpdate> {
                     // Hints may outlive a rolled-back node or failed catalog read.
                     let node = registry.node(
                         &kernel.parts.store,
@@ -448,32 +426,21 @@ impl WorkerActions {
                         kernel.runtime.as_ref(),
                         (kernel.clock)(),
                     )?;
-                    let catalog = if payload.get("action") == Some(&IvyJson::from("execute"))
-                        && payload.get("request").and_then(|v| v.get("method"))
-                            == Some(&IvyJson::from("registry.sync"))
-                        && payload
-                            .get("context")
-                            .and_then(|v| v.get("serviceNodeId"))
-                            .and_then(IvyJson::as_js_string)
-                            == Some(&id)
+                    let catalog = if execution.is_some_and(|(context, request)|
+                        request.get("method") == Some(&IvyJson::from("registry.sync"))
+                        && context.get("serviceNodeId").and_then(IvyJson::as_js_string) == Some(&id))
                         && node.get("synced") == Some(&IvyJson::Bool(true))
                     {
                         registry.live_catalog(&kernel.parts.store, &id)?
                     } else {
                         None
                     };
-                    let mut route = IvyJson::object([("node", node)]);
-                    if let Some((_, generation)) = registry
+                    let generation = registry
                         .changed_generations()
                         .iter()
                         .find(|(changed, _)| changed == &id)
-                    {
-                        route.insert("generation", IvyJson::Number(*generation));
-                    }
-                    if let Some(catalog) = catalog {
-                        route.insert("catalog", catalog);
-                    }
-                    Ok(route)
+                        .map(|(_, generation)| *generation);
+                    Ok(crate::storage::RoutingUpdate { node, generation, catalog })
                 })();
                 if let Ok(route) = route {
                     emit(Notification::Routing(route));

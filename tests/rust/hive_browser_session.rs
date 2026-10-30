@@ -48,7 +48,8 @@ struct Providers {
     actor: Option<mpsc::UnboundedSender<Posted>>,
 }
 impl Worker for Providers {
-    fn request(&self, payload: IvyJson) -> RequestFuture {
+    fn request(&self, payload: ivy_hive::storage::Payload) -> RequestFuture {
+        let payload = crate::payload_fixture::json(payload);
         self.events
             .lock()
             .unwrap()
@@ -623,7 +624,13 @@ async fn browser_session_logout_cookie_origin_peer_selection_and_live_iteration_
     }
     compare_session("logout-live-set-addition-removal",json!({"peers":[{"id":"first","context":{"sessionDigest":"yes","credentialDigest":"credential"},"remove":["unvisited"],"append":[{"id":"appended","context":{"sessionDigest":"yes","credentialDigest":"credential"}}]},{"id":"unvisited","context":{"sessionDigest":"yes","credentialDigest":"credential"}}],"steps":[connect(),logout("logout")]})).await;
     compare_session("logout-peer-error-stops-before-cookie-clear",json!({"peers":[{"id":"first","context":{"sessionDigest":"yes","credentialDigest":"credential"},"error":"internal_error"},{"id":"later","context":{"sessionDigest":"yes","credentialDigest":"credential"}}],"steps":[connect(),logout("logout")]})).await;
-    for (i, context) in [
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn browser_session_logout_requires_a_typed_credential_before_posting() {
+    // These contexts cannot come from successful authentication. The old fake
+    // worker accepted them, although the real storage action required a string.
+    for context in [
         Value::Null,
         json!({}),
         json!({"sessionDigest":true}),
@@ -631,11 +638,20 @@ async fn browser_session_logout_cookie_origin_peer_selection_and_live_iteration_
         json!({"sessionDigest":"s","credentialDigest":{"a":1}}),
     ]
     .into_iter()
-    .enumerate()
     {
+        let refreshed = context.get("sessionDigest").is_some();
         let mut step = logout("logout");
         step["context"] = context;
-        compare_session(&format!("logout-json-context-{i}"),json!({"peers":[{"id":"missing","context":{"sessionDigest":"s"}},{"id":"null","context":{"sessionDigest":"s","credentialDigest":null}},{"id":"object","context":{"sessionDigest":"s","credentialDigest":{"a":1}}}],"steps":[connect(),step]})).await;
+        let result = tokio::task::LocalSet::new().run_until(native_session(&json!({
+            "peers":[{"id":"missing","context":{"sessionDigest":"s"}}],
+            "steps":[connect(),step],
+        }))).await;
+        let snapshot = result["snapshots"].as_array().unwrap().last().unwrap();
+        assert_eq!(snapshot["results"]["logout"]["error"]["data"]["code"], "internal_error");
+        let events = snapshot["events"].as_array().unwrap();
+        assert_eq!(events.len(), usize::from(refreshed));
+        assert!(events.iter().all(|event| event["kind"] == "header"
+            && event["valueEncoded"].as_str().unwrap().contains("ivy_session=token;")));
     }
 }
 

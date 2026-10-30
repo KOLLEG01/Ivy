@@ -68,7 +68,7 @@ pub(crate) fn catalog_boundary(store: &Store, identity: &IvyJson, cursor: &JsStr
 
 pub fn catalog_page(
     store: &Store,
-    records: &mut [IvyJson],
+    records: Vec<IvyJson>,
     identity: &IvyJson,
     key: impl Fn(&IvyJson) -> JsString,
     limit: Option<usize>,
@@ -88,7 +88,7 @@ pub fn catalog_page(
 /// after cursor admission, before response sizing, without a second pager.
 pub fn try_catalog_page(
     store: &Store,
-    records: &mut [IvyJson],
+    records: Vec<IvyJson>,
     identity: &IvyJson,
     key: impl Fn(&IvyJson) -> IvyResult<JsString>,
     limit: Option<usize>,
@@ -98,42 +98,29 @@ pub fn try_catalog_page(
         Some(cursor) => catalog_boundary(store, identity, cursor)?,
         None => JsString::default(),
     };
-    let bytes = |s: JsString| String::from_utf16_lossy(&s.0).into_bytes();
-    let keys = records
-        .iter()
+    let bytes = |s: &JsString| String::from_utf16_lossy(&s.0).into_bytes();
+    let mut keyed = records
+        .into_iter()
         .map(|record| {
-            let key = key(record)?;
-            Ok((bytes(key.clone()), key))
+            let key = key(&record)?;
+            Ok((bytes(&key), key, record))
         })
         .collect::<IvyResult<Vec<_>>>()?;
-    let mut keyed = keys
-        .into_iter()
-        .zip(
-            records
-                .iter_mut()
-                .map(|record| std::mem::replace(record, IvyJson::Null)),
-        )
-        .collect::<Vec<_>>();
-    keyed.sort_by(|a, b| a.0.0.cmp(&b.0.0));
-    let mut keys = Vec::with_capacity(records.len());
-    for (record, (key, value)) in records.iter_mut().zip(keyed) {
-        *record = value;
-        keys.push(key);
-    }
-    let after = bytes(after);
-    let remaining = records
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| keys[*index].0 > after)
-        .collect::<Vec<_>>();
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    let after = bytes(&after);
     let mut items = vec![];
     let mut used = 128;
     let mut boundary = None;
-    for (index, record) in &remaining {
+    let mut truncated = false;
+    for (bytes, key, record) in keyed {
+        if bytes <= after {
+            continue;
+        }
         if items.len() == limit.unwrap_or(50) {
+            truncated = true;
             break;
         }
-        let size = canonical(record, MANAGEMENT_FRAME_BYTES)?.len();
+        let size = canonical(&record, MANAGEMENT_FRAME_BYTES)?.len();
         if used + size > PAGE_BYTES {
             if items.is_empty() {
                 return Err(IvyError::new(
@@ -141,17 +128,15 @@ pub fn try_catalog_page(
                     "A catalog entry exceeds the response limit.",
                 ));
             }
+            truncated = true;
             break;
         }
         used += size;
-        items.push((*record).clone());
-        boundary = Some(*index);
+        items.push(record);
+        boundary = Some(key);
     }
-    let next = if !items.is_empty() && remaining.len() > items.len() {
-        Some(store.cursor(
-            identity,
-            &IvyJson::String(keys[boundary.unwrap()].1.clone()),
-        )?)
+    let next = if truncated && let Some(boundary) = boundary {
+        Some(store.cursor(identity, &IvyJson::String(boundary))?)
     } else {
         None
     };

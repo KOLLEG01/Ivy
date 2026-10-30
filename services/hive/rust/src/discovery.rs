@@ -7,16 +7,54 @@ use ivy_contracts::{
     hash::{digest, hash_json, tool_definition_hash},
     json::{canonical, parse, stringify},
 };
-use rusqlite::OptionalExtension;
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     sync::{Arc, OnceLock},
 };
+use rusqlite::{Connection, OptionalExtension, functions::FunctionFlags};
+
+pub(crate) fn install_identities(connection: &Connection) -> rusqlite::Result<()> {
+    connection.create_scalar_function(
+        "ivy_registry_identity",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |context| Ok(digest(context.get_raw(0).as_str()?.as_bytes())),
+    )?;
+    // Connection-local derived data: rebuild on open, then update atomically with
+    // the registry, including savepoint/transaction rollbacks. No stored format change.
+    connection.execute_batch(
+        "CREATE TEMP TABLE registry_identities (node_id TEXT PRIMARY KEY, identity TEXT NOT NULL) STRICT;
+         INSERT INTO registry_identities SELECT node_id,ivy_registry_identity(registry_json) FROM main.registries;
+         CREATE TEMP TRIGGER registry_identity_insert AFTER INSERT ON main.registries BEGIN
+             INSERT OR REPLACE INTO registry_identities VALUES(NEW.node_id,ivy_registry_identity(NEW.registry_json));
+         END;
+         CREATE TEMP TRIGGER registry_identity_update AFTER UPDATE ON main.registries BEGIN
+             DELETE FROM registry_identities WHERE node_id=OLD.node_id;
+             INSERT INTO registry_identities VALUES(NEW.node_id,ivy_registry_identity(NEW.registry_json));
+         END;
+         CREATE TEMP TRIGGER registry_identity_delete AFTER DELETE ON main.registries BEGIN
+             DELETE FROM registry_identities WHERE node_id=OLD.node_id;
+         END;",
+    )
+}
 #[path = "discovery_text.rs"]
 mod strings;
+#[path = "discovery_catalog.rs"]
+mod catalog;
 pub(crate) use strings::collapse_whitespace;
 use strings::*;
+
+const INDEX_CACHE_BYTES: usize = 16 * 1024 * 1024;
+const INDEX_CACHE_ENTRY_BYTES: usize = 8 * 1024 * 1024;
+
+#[cfg(test)]
+#[path = "../../../../tests/rust/hive_discovery_cache.rs"]
+mod cache_tests;
+
+#[cfg(test)]
+#[path = "../../../../tests/rust/hive_discovery_memory.rs"]
+mod memory_tests;
 
 /// Text and date services used by catalog/search policy.
 pub trait Runtime: crate::retention::Runtime {
@@ -97,29 +135,26 @@ struct IndexedTool {
     mcp: Option<IvyJson>,
 }
 impl IndexedTool {
-    fn json(&self) -> IvyJson {
-        let mut v = IvyJson::object([
-            (
-                "qualifiedName",
-                IvyJson::String(self.qualified_name.clone()),
-            ),
-            ("namespace", IvyJson::String(self.namespace.clone())),
-            ("group", IvyJson::String(self.group.clone())),
-            (
-                "groupDescription",
-                IvyJson::String(self.group_description.clone()),
-            ),
-            ("description", IvyJson::String(self.description.clone())),
-            ("effect", self.effect.into()),
-            (
-                "words",
-                IvyJson::Array(self.words.iter().cloned().map(IvyJson::String).collect()),
-            ),
-        ]);
-        if let Some(mcp) = &self.mcp {
-            v.insert("mcp", mcp.clone());
-        }
-        v
+    fn heap_bytes(&self) -> usize {
+        [
+            &self.qualified_name,
+            &self.namespace,
+            &self.group,
+            &self.group_description,
+            &self.description,
+        ]
+        .into_iter()
+        .map(|value| value.0.capacity() * 2)
+        .sum::<usize>()
+            + self.words.capacity() * std::mem::size_of::<JsString>()
+            + self
+                .words
+                .iter()
+                .map(|word| word.0.capacity() * 2)
+                .sum::<usize>()
+            + self.mcp.as_ref().map_or(0, |value| {
+                value.retained_bytes() - std::mem::size_of::<IvyJson>()
+            })
     }
 }
 fn indexed(
@@ -182,26 +217,31 @@ fn indexed(
         mcp: None,
     })
 }
-fn groups(ns: &IvyJson) -> IvyResult<Vec<(JsString, JsString)>> {
-    let mut result = vec![];
-    for g in optional_array(ns, "discoveryGroups")? {
-        let key = string(g, "group")?.clone();
-        let value = string(g, "description")?.clone();
-        if let Some((_, prior)) = result.iter_mut().find(|(k, _)| k == &key) {
-            *prior = value;
-        } else {
-            result.push((key, value));
-        }
-    }
-    Ok(result)
-}
 struct Index {
-    source: String,
     identity: String,
     tools: Vec<IndexedTool>,
     groups: Vec<(JsString, JsString)>,
     description: JsString,
     bytes: usize,
+}
+impl Index {
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.identity.capacity()
+            + self.description.0.capacity() * 2
+            + self.tools.capacity() * std::mem::size_of::<IndexedTool>()
+            + self
+                .tools
+                .iter()
+                .map(IndexedTool::heap_bytes)
+                .sum::<usize>()
+            + self.groups.capacity() * std::mem::size_of::<(JsString, JsString)>()
+            + self
+                .groups
+                .iter()
+                .map(|(key, value)| (key.0.capacity() + value.0.capacity()) * 2)
+                .sum::<usize>()
+    }
 }
 /// Retained core definitions and calls do not require a search/locale runtime.
 #[derive(Default)]
@@ -422,6 +462,28 @@ impl Discovery {
             self.index_bytes -= self.indexes.remove(i).1.bytes;
         }
     }
+    fn retain_index(&mut self, id: &JsString, mut index: Index) -> Arc<Index> {
+        let owner = id.clone();
+        index.bytes = index.retained_bytes()
+            + owner.0.capacity() * 2
+            + std::mem::size_of::<(JsString, Arc<Index>)>()
+            + 2 * std::mem::size_of::<usize>();
+        let bytes = index.bytes;
+        let result = Arc::new(index);
+        self.evict(id);
+        if bytes > INDEX_CACHE_ENTRY_BYTES {
+            return result;
+        }
+        while !self.indexes.is_empty()
+            && (self.index_bytes + bytes > INDEX_CACHE_BYTES || self.indexes.len() >= 128)
+        {
+            let oldest = self.indexes[0].0.clone();
+            self.evict(&oldest);
+        }
+        self.indexes.push((owner, result.clone()));
+        self.index_bytes += bytes;
+        result
+    }
     fn index(
         &mut self,
         store: &Store,
@@ -429,102 +491,40 @@ impl Discovery {
         runtime: &dyn Runtime,
     ) -> IvyResult<Arc<Index>> {
         let id = string(node, "serviceNodeId")?;
-        let source = store
-            .connection()
-            .query_row(
-                "SELECT registry_json FROM registries WHERE node_id=?",
-                [text(id)],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .optional()
+        let identity = store.connection()
+            .prepare_cached("SELECT identity FROM registry_identities WHERE node_id=?")
+            .and_then(|mut statement| statement.query_row([text(id)], |row| row.get::<_, String>(0)).optional())
             .map_err(|e| store.query_error(e))?
-            .flatten()
-            .unwrap_or_default();
-        if let Some(i) = self
-            .indexes
-            .iter()
-            .position(|(k, v)| k == id && v.source == source)
-        {
+            .unwrap_or_else(|| digest(b""));
+        if let Some(i) = self.indexes.iter().position(|(k, v)| k == id && v.identity == identity) {
             let item = self.indexes.remove(i);
             let result = item.1.clone();
             self.indexes.push(item);
             return Ok(result);
         }
-        let catalog = if source.is_empty() {
-            IvyJson::Null
-        } else {
-            parse(&source, usize::MAX).map_err(|_| IvyError::internal())?
-        };
-        let mut declared = vec![];
-        let mut tools = vec![];
-        let mut descriptions = vec![];
-        for ns in if catalog.is_null() {
-            &[][..]
-        } else {
-            array(&catalog, "namespaces")?
-        } {
-            let ns_groups = groups(ns)?;
-            for (key, value) in &ns_groups {
-                if let Some((_, prior)) = declared.iter_mut().find(|(k, _)| k == key) {
-                    *prior = value.clone();
-                } else {
-                    declared.push((key.clone(), value.clone()));
+        let index = {
+            let mut statement = store
+                .connection()
+                .prepare_cached("SELECT registry_json FROM registries WHERE node_id=?")
+                .map_err(|e| store.query_error(e))?;
+            let mut rows = statement
+                .query([text(id)])
+                .map_err(|e| store.query_error(e))?;
+            let row = rows.next().map_err(|e| store.query_error(e))?;
+            let source = match row
+                .map(|row| row.get_ref(0))
+                .transpose()
+                .map_err(|e| store.query_error(e))?
+            {
+                Some(rusqlite::types::ValueRef::Text(bytes)) => {
+                    std::str::from_utf8(bytes).map_err(|_| IvyError::internal())?
                 }
-            }
-            descriptions.push(string(ns, "description")?.clone());
-            for tool in array(ns, "tools")? {
-                let mut value = indexed(
-                    string(ns, "namespace")?,
-                    string(tool, "name")?,
-                    string(tool, "description")?,
-                    tool.get("annotations").and_then(|v| v.get("readOnlyHint")),
-                    tool.get("discovery"),
-                    &ns_groups,
-                    runtime,
-                )?;
-                value.mcp = mcp_name(tool).filter(|v| v.as_object().is_some()).cloned();
-                tools.push(value);
-            }
-        }
-        let hint = catalog
-            .get("discoveryHint")
-            .and_then(IvyJson::as_js_string)
-            .map(JsString::trim_ecmascript)
-            .filter(|v| !v.0.is_empty());
-        let descriptions = joined(&descriptions, "; ");
-        let description = compact(&hint.unwrap_or_else(|| {
-            if descriptions.0.is_empty() {
-                "No synchronized tool catalog.".into()
-            } else {
-                descriptions
-            }
-        }));
-        let bytes = source.len()
-            + stringify(
-                &IvyJson::Array(tools.iter().map(IndexedTool::json).collect()),
-                usize::MAX,
-            )?
-            .len();
-        let result = Arc::new(Index {
-            identity: digest(source.as_bytes()),
-            source,
-            groups: declared,
-            description,
-            tools,
-            bytes,
-        });
-        self.evict(id);
-        while !self.indexes.is_empty()
-            && (self.index_bytes + bytes > 16 * 1024 * 1024 || self.indexes.len() >= 128)
-        {
-            let id = self.indexes[0].0.clone();
-            self.evict(&id);
-        }
-        if bytes <= 16 * 1024 * 1024 {
-            self.indexes.push((id.clone(), result.clone()));
-            self.index_bytes += bytes;
-        }
-        Ok(result)
+                Some(rusqlite::types::ValueRef::Null) | None => "",
+                _ => return Err(IvyError::internal()),
+            };
+            catalog::read(source, identity, runtime)?
+        };
+        Ok(self.retain_index(id, index))
     }
     pub fn mcp_catalog(
         &mut self,
@@ -547,8 +547,8 @@ impl Discovery {
                 None => Ok("".into()),
             }
         }
-        let include = |binding: &IvyJson| -> bool {
-            mcp_name(binding.get("definition").unwrap_or(&IvyJson::Null)).is_some_and(|mcp| {
+        let include = |definition: &IvyJson| -> bool {
+            mcp_name(definition).is_some_and(|mcp| {
                 mcp.as_object().is_some()
                     && name.is_none_or(|n| {
                         n.0.is_empty() || mcp.get("name").and_then(IvyJson::as_js_string) == Some(n)
@@ -562,22 +562,17 @@ impl Discovery {
             .filter(|v| Registry::eligible(v))
         {
             if let Some(catalog) = registry
-                .get_registry(store, string(node, "serviceNodeId")?)?
-                .filter(|v| v.as_object().is_some())
+                .live_catalog(store, string(node, "serviceNodeId")?)?
             {
-                for ns in array(&catalog, "namespaces")? {
-                    for definition in array(ns, "tools")? {
+                for ns in &catalog.namespaces {
+                    for binding in catalog.bindings(ns) {
                         active
                             .entry((
                                 string(node, "serviceName")?.clone(),
-                                concat(&[
-                                    string(ns, "namespace")?,
-                                    &".".into(),
-                                    string(definition, "name")?,
-                                ]),
+                                binding.qualified_name.clone(),
                             ))
                             .or_default()
-                            .insert(policy(definition)?);
+                            .insert(policy(&binding.definition)?);
                     }
                 }
             }
@@ -585,7 +580,7 @@ impl Discovery {
         let mut result = vec![];
         for method in core_methods() {
             let mut binding = self.core_binding(&format!("hive.{method}").as_str().into())?;
-            if include(&binding) {
+            if include(binding.get("definition").unwrap_or(&IvyJson::Null)) {
                 binding.insert("serviceName", "hive".into());
                 binding.insert("provider", IvyJson::Null);
                 binding.insert("guideMarkdown", "".into());
@@ -594,27 +589,26 @@ impl Discovery {
         }
         for node in registry.nodes(store, runtime, now)? {
             let Some(catalog) = registry
-                .get_registry(store, string(&node, "serviceNodeId")?)?
-                .filter(|v| v.as_object().is_some())
+                .live_catalog(store, string(&node, "serviceNodeId")?)?
             else {
                 continue;
             };
-            for ns in array(&catalog, "namespaces")? {
-                let guide = guide(string(ns, "guideMarkdown")?, &catalog)?;
-                for binding in registry.bindings(store, string(&node, "serviceNodeId")?, ns)? {
+            for ns in &catalog.namespaces {
+                let guide = guide(ns.guide_markdown.as_ref().ok_or_else(IvyError::internal)?, &catalog)?;
+                for binding in catalog.bindings(ns) {
                     let available = Registry::eligible(&node);
                     let current = active.get(&(
                         string(&node, "serviceName")?.clone(),
-                        string(binding, "qualifiedName")?.clone(),
+                        binding.qualified_name.clone(),
                     ));
-                    let binding_policy = policy(field(binding, "definition")?)?;
+                    let binding_policy = policy(&binding.definition)?;
                     if !available
                         && current.is_some_and(|v| v.len() == 1 && !v.contains(&binding_policy))
                     {
                         continue;
                     }
-                    if include(binding) {
-                        let mut binding = binding.clone();
+                    if include(&binding.definition) {
+                        let mut binding = binding.to_wire();
                         binding.insert("serviceName", field(&node, "serviceName")?.clone());
                         binding.insert("provider", provider(&node)?);
                         binding.insert("guideMarkdown", IvyJson::String(guide.clone()));

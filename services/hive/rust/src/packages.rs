@@ -1,5 +1,5 @@
 //! Package grants, private upload staging and authoritative catalog file collection.
-use crate::{store::sql_error, worker_client::RequestOptions, worker_runtime::StorageClient};
+use crate::{store::sql_error, storage::RequestOptions, storage::StorageClient};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
@@ -38,8 +38,7 @@ pub trait PackageStorage: Send + Sync {
 }
 impl PackageStorage for StorageClient {
     fn request(&self, request: IvyJson) -> PackageRequest {
-        let reply = self.request(request, RequestOptions::default());
-        Box::pin(async move { reply.await.map_err(sql_error)? })
+        StorageClient::request(self, request, RequestOptions::default())
     }
 }
 /// The kernel binds its existing UTC clock and JavaScript-compatible ISO formatter.

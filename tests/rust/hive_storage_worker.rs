@@ -1,4 +1,6 @@
 //! Native SQLite, storage-owner and local operator checks.
+#[path = "../fixtures/hive-storage-payload.rs"]
+mod payload_fixture;
 
 #[path = "hive_storage_read.rs"]
 mod storage_read;

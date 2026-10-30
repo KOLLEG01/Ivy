@@ -790,7 +790,7 @@ fn domain(
             )
         }
         "hostConfigurations.list" => {
-            let mut records = call.configurations.list(call.store, call.runtime)?;
+            let records = call.configurations.list(call.store, call.runtime)?;
             let mut identity = IvyJson::object([("method", method.into())]);
             for (key, value) in params.as_object().ok_or_else(IvyError::internal)? {
                 if key != &JsString::from("cursor") {
@@ -799,7 +799,7 @@ fn domain(
             }
             crate::paging::catalog_page(
                 call.store,
-                &mut records,
+                records,
                 &identity,
                 |value| {
                     value

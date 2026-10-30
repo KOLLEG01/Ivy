@@ -1,8 +1,8 @@
 //! Hive MCP request policy. The HTTP/MCP protocol adapter owns admission and close;
 //! the existing storage client and kernel invocation own their asynchronous work.
 use crate::{
-    discovery::Discovery, mcp, registry::Registry, store::Store, worker_client::RequestOptions,
-    worker_runtime::StorageClient,
+    discovery::Discovery, mcp, registry::Registry, store::Store, storage::RequestOptions,
+    storage::StorageClient,
 };
 use ivy_contracts::{
     ErrorOutcome, IvyError, IvyJson, IvyResult, JsString, Outcome, hash::hash_json,
@@ -210,10 +210,6 @@ impl Storage for StorageClient {
     async fn request(&mut self, message: IvyJson) -> IvyResult<IvyJson> {
         StorageClient::request(self, message, RequestOptions::default())
             .await
-            .map_err(|_| {
-                IvyError::new("storage_unavailable", "Hive storage worker failed.")
-                    .with_outcome(Outcome::Unknown)
-            })?
     }
 }
 /// In-worker access to the same actions, also useful for isolated domain checks.

@@ -1,4 +1,6 @@
 use super::*;
+#[path = "hive_catalog_fixture.rs"]
+mod catalog_fixture;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_hive::{
     admission::{RequestBudget, RequestBudgetOptions},
@@ -148,12 +150,20 @@ impl Backend {
     }
 }
 impl Storage for Backend {
+    fn dispatch(&self, mut request: ivy_hive::storage::Request, options: RequestOptions) -> Reply {
+        if let Err(error) = request.prepare() {
+            return Box::pin(async move { Err(error) });
+        }
+        let reply = Storage::request(self, crate::payload_fixture::json(request.take_payload()), options);
+        Box::pin(async move { request.complete(reply.await) })
+    }
     fn request(&self, payload: IvyJson, options: RequestOptions) -> Reply {
         self.post(payload, options)
     }
 }
 impl Worker for Backend {
-    fn request(&self, payload: IvyJson) -> browser_push::RequestFuture {
+    fn request(&self, payload: ivy_hive::storage::Payload) -> browser_push::RequestFuture {
+        let payload = crate::payload_fixture::json(payload);
         self.post(payload, RequestOptions::default())
     }
 }
@@ -474,11 +484,11 @@ async fn exchange(
         .unwrap();
     let (send, mut receive) = mpsc::unbounded_channel();
     let peer = server.network.peers.connected(Box::new(Provider { sent: send, trace: trace.clone() }), crate::json(r#"{"principalId":"provider-principal","credentialDigest":"provider-credential","transport":"ws","serviceNodeId":"node","generation":1}"#));
-    server.network.peers.routing_update(&obj([
+    server.network.peers.routing_update(&catalog_fixture::routing_from_wire(&obj([
         ("node", crate::json(r#"{"serviceNodeId":"node","hostId":"host-node","serviceName":"sample","principalId":"provider-principal","connected":true,"synced":true,"ready":true,"desiredEnabled":true}"#)),
         ("generation", IvyJson::Number(1.0)),
         ("catalog", obj([("namespaces", crate::json(r#"["fixture"]"#)), ("tools", IvyJson::Array(vec![crate::mcp_dispatch::binding()])), ("notifications", IvyJson::Array(vec![]))])),
-    ])).unwrap();
+    ])).unwrap()).unwrap();
     let connection = server.http.connection(1, Some("192.0.2.1".into()));
     if let Some(inspection) = inspection {
         let _ = inspection.send((connection.clone(), budget.clone()));

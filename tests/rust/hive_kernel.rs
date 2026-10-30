@@ -1,4 +1,6 @@
 use super::*;
+#[path = "hive_catalog_fixture.rs"]
+mod catalog_fixture;
 use ivy_contracts::IvyResult;
 use ivy_hive::{
     configurations::Configurations,
@@ -29,8 +31,6 @@ mod startup;
 mod worker_actions;
 #[path = "hive_worker_kernel.rs"]
 mod worker_kernel;
-#[path = "hive_worker_startup.rs"]
-mod worker_startup;
 
 fn options() -> Options {
     Options {
@@ -171,8 +171,7 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
                     "dispatch" => worker
                         .as_ref()
                         .unwrap()
-                        .handle(kernel, &IvyJson::from_serde(&step["payload"]).unwrap())
-                        .expect("Qualified worker action"),
+                        .handle(kernel, &crate::payload_fixture::native(IvyJson::from_serde(&step["payload"]).unwrap())),
                     _ => panic!("Unexpected worker fixture method"),
                 },
                 "kernel" => match step["method"].as_str().unwrap() {
@@ -221,7 +220,7 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
                         }
                         ivy_hive::paging::try_catalog_page(
                             &kernel.parts.store,
-                            &mut [
+                            vec![
                                 IvyJson::object([("id", "a".into())]),
                                 IvyJson::object([("id", "b".into())]),
                             ],
@@ -278,8 +277,12 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
                 .unwrap()
                 .publish(
                     kernel,
-                    &IvyJson::from_serde(&step["payload"]).unwrap(),
-                    |value| notifications.push(wire(value.to_json())),
+                    &crate::payload_fixture::native(IvyJson::from_serde(&step["payload"]).unwrap()),
+                    |value| notifications.push(wire(match value {
+                        ivy_hive::storage::Notification::Routing(value) => IvyJson::object([("routing", catalog_fixture::routing_to_wire(&value))]),
+                        ivy_hive::storage::Notification::EventsAvailable(value) => IvyJson::object([("eventsAvailable", value)]),
+                        ivy_hive::storage::Notification::Changes(values) => IvyJson::object([("changes", IvyJson::Array(values.into_iter().map(IvyJson::String).collect()))]),
+                    })),
                 )
                 .unwrap();
         }
@@ -401,6 +404,9 @@ fn receipt_hash(request: &Value, step: &Value) -> String {
     .unwrap()
 }
 fn compare(steps: &[Value]) -> Value {
+    compare_with_error_codes(steps, &[])
+}
+fn compare_with_error_codes(steps: &[Value], changed: &[(usize, &str)]) -> Value {
     use super::object_create::{normalized, substitute};
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use std::collections::BTreeMap;
@@ -543,9 +549,16 @@ fn compare(steps: &[Value]) -> Value {
         }
     }
     for (index, (a, b)) in actual_rows.iter().zip(original_rows).enumerate() {
+        let mut native = normalized(a, &aliases, &requests, false);
+        let mut original = normalized(b, &no_aliases, &requests, true);
+        if let Some((_, code)) = changed.iter().find(|(step, _)| *step == index) {
+            assert_eq!(a["error"]["data"]["code"], *code);
+            native["error"] = Value::Null;
+            original["error"] = Value::Null;
+        }
         assert_eq!(
-            normalized(a, &aliases, &requests, false),
-            normalized(b, &no_aliases, &requests, true),
+            native,
+            original,
             "Kernel step {index}: {}",
             steps[index]
         );

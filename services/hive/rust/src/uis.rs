@@ -299,7 +299,7 @@ impl<'a> Uis<'a> {
         }
         catalog_page(
             store,
-            &mut summaries,
+            summaries,
             &identity,
             catalog_key,
             limit(parameters),
@@ -353,7 +353,7 @@ impl<'a> Uis<'a> {
         }
         catalog_page(
             store,
-            &mut items,
+            items,
             &identity,
             |v| {
                 string(v, "releaseId")
@@ -598,48 +598,7 @@ impl<'a> Uis<'a> {
         }
         Ok(report.finish())
     }
-    fn check_services(
-        &self,
-        store: &Store,
-        requirements: &IvyJson,
-        runtime: &dyn Runtime,
-        clock: &dyn Fn() -> f64,
-    ) -> IvyResult<()> {
-        if requirements.is_null() {
-            return Err(IvyError::internal());
-        }
-        require(
-            requirements.get("hiveProtocol") == Some(&IvyJson::Number(1.0)),
-            "unsupported_protocol",
-            "UI requires an unsupported Hive protocol.",
-        )?;
-        for required in array(requirements, "services")? {
-            let states = self.service_states(store, required, runtime, clock)?;
-            require(
-                !states.is_empty(),
-                "service_unavailable",
-                "Required ui service has not registered.",
-            )?;
-            require(
-                states.iter().any(|s| s.compatible),
-                "service_interface_changed",
-                "Required ui service interface is incompatible.",
-            )?;
-            require(
-                states.iter().any(|s| s.compatible && s.eligible),
-                "service_not_ready",
-                "Required ui service has no eligible compatible provider.",
-            )?;
-        }
-        Ok(())
-    }
-    pub fn entry(
-        &self,
-        store: &Store,
-        ui: &JsString,
-        runtime: &dyn Runtime,
-        clock: &dyn Fn() -> f64,
-    ) -> IvyResult<IvyJson> {
+    pub fn entry(&self, store: &Store, ui: &JsString) -> IvyResult<IvyJson> {
         let id = pointer(store, ui)?
             .current
             .filter(|s| !s.is_empty())
@@ -647,7 +606,17 @@ impl<'a> Uis<'a> {
         let encoded = retained(store, ui, &id.clone().into())?
             .ok_or_else(|| IvyError::new("not_found", "Selected UI release is not retained."))?;
         let release = parse(&encoded, usize::MAX).map_err(sql_error)?;
-        self.check_services(store, field(&release, "requirements")?, runtime, clock)?;
+        let requirements = field(&release, "requirements")?;
+        if requirements.is_null() {
+            return Err(IvyError::internal());
+        }
+        // Backend availability belongs to inspection and actual service calls.
+        // The installed entry must remain reachable while a provider recovers.
+        require(
+            requirements.get("hiveProtocol") == Some(&IvyJson::Number(1.0)),
+            "unsupported_protocol",
+            "UI requires an unsupported Hive protocol.",
+        )?;
         let mut entry = IvyJson::object([("releaseId", id.into())]);
         if let Some(path) = release.get("entryPath") {
             entry.insert("entryPath", path.clone());
@@ -776,8 +745,6 @@ impl<'a> Uis<'a> {
         store: &Store,
         ui: &JsString,
         path: Option<&JsString>,
-        runtime: &dyn Runtime,
-        clock: &dyn Fn() -> f64,
     ) -> IvyResult<IvyJson> {
         if let Some(path) = path.filter(|p| !p.0.is_empty()) {
             let id = pointer(store, ui)?
@@ -786,7 +753,7 @@ impl<'a> Uis<'a> {
                 .ok_or_else(|| IvyError::new("not_found", "UI has no active release."))?;
             self.asset(store, ui, &id.into(), path)
         } else {
-            let entry = self.entry(store, ui, runtime, clock)?;
+            let entry = self.entry(store, ui)?;
             self.asset(
                 store,
                 ui,
@@ -804,7 +771,13 @@ impl<'a> Uis<'a> {
                 |r| r.get::<_, Option<String>>(0),
             ),
         )?;
-        sql(store,store.connection().execute("DELETE FROM app_releases WHERE app_id=? AND release_id IS NOT ?",params![text(ui),current]))?;
+        sql(
+            store,
+            store.connection().execute(
+                "DELETE FROM app_releases WHERE app_id=? AND release_id IS NOT ?",
+                params![text(ui), current],
+            ),
+        )?;
         Ok(())
     }
     pub fn collect_files(&self, store: &Store, clock: &dyn Fn() -> f64) -> IvyResult<()> {

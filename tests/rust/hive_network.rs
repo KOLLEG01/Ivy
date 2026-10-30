@@ -3,8 +3,10 @@ use ivy_contracts::{
     hash::digest,
     json::{parse, stringify},
 };
+#[path = "../fixtures/hive-storage-payload.rs"]
+mod payload_fixture;
 use ivy_hive::{
-    live_routing::{LiveRouting, PreparedCall},
+    live_routing::{CallContext, LiveRouting, PreparedCall},
     retention::Runtime,
     tool_binding_diagnostics::ToolBindingDiagnostics,
     ws_send::{self, Socket},
@@ -15,6 +17,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[path = "hive_catalog_fixture.rs"]
+mod catalog_fixture;
 #[path = "hive_core_calls.rs"]
 mod core_calls;
 #[path = "hive_dispatch_gate.rs"]
@@ -98,6 +102,108 @@ fn error(error: IvyError) -> IvyJson {
 fn injected() -> IvyError {
     IvyError::new("fixture_callback", "Isolated callback failed.").with_outcome(Outcome::Unknown)
 }
+// Historical traces include the former full definition. Compare the fields the
+// routing owner retains now; provider wire frames are compared without projection.
+fn prepared_from_reference(value: &IvyJson, validate: bool) -> PreparedCall {
+    let definition = value.get("definition").unwrap();
+    let mut qualified = definition
+        .get("namespace")
+        .unwrap()
+        .as_js_string()
+        .unwrap()
+        .clone();
+    qualified.0.push(b'.' as u16);
+    qualified
+        .0
+        .extend(&definition.get("name").unwrap().as_js_string().unwrap().0);
+    PreparedCall {
+        context: CallContext {
+            service_node_id: value
+                .get("serviceNodeId")
+                .unwrap()
+                .as_js_string()
+                .unwrap()
+                .clone(),
+            generation: value.get("generation").unwrap().as_f64().unwrap(),
+            qualified_name: qualified,
+            output_schema: validate
+                .then(|| Arc::new(definition.get("outputSchema").unwrap().clone())),
+            caller_principal_id: value
+                .get("callerPrincipalId")
+                .unwrap()
+                .as_js_string()
+                .unwrap()
+                .clone(),
+        },
+        definition_hash: value
+            .get("definitionHash")
+            .unwrap()
+            .as_js_string()
+            .unwrap()
+            .clone(),
+        arguments: value.get("arguments").unwrap().clone(),
+        operation_id: value.get("operationId").cloned(),
+    }
+}
+fn prepared_snapshot(call: &PreparedCall) -> IvyJson {
+    let context = &call.context;
+    let mut value = obj([
+        (
+            "serviceNodeId",
+            IvyJson::String(context.service_node_id.clone()),
+        ),
+        ("generation", context.generation.into()),
+        (
+            "qualifiedName",
+            IvyJson::String(context.qualified_name.clone()),
+        ),
+        (
+            "definitionHash",
+            IvyJson::String(call.definition_hash.clone()),
+        ),
+        ("arguments", call.arguments.clone()),
+        (
+            "callerPrincipalId",
+            IvyJson::String(context.caller_principal_id.clone()),
+        ),
+    ]);
+    if let Some(schema) = &context.output_schema {
+        value.insert("outputSchema", (**schema).clone());
+    }
+    if let Some(operation) = &call.operation_id {
+        value.insert("operationId", operation.clone());
+    }
+    value
+}
+fn routing_reference(input: &IvyJson, original: &IvyJson) -> IvyJson {
+    let mut expected = original.clone();
+    for (step, row) in input
+        .get("steps")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(expected.get_mut("steps").unwrap().as_array_mut().unwrap())
+    {
+        if matches!(text(step, "op").as_str(), "prepare" | "dashboard") {
+            if let Some(value) = row.get_mut("value") {
+                *value =
+                    prepared_snapshot(&prepared_from_reference(value, flag(input, "validate")));
+            }
+        }
+    }
+    expected
+}
+fn project_prepared_events(rows: &mut IvyJson, validate: bool) {
+    for row in rows.as_array_mut().unwrap() {
+        for event in row.as_array_mut().unwrap() {
+            if event.get("kind") == Some(&"prepared".into()) {
+                let value = event.get_mut("value").unwrap();
+                *value = prepared_snapshot(&prepared_from_reference(value, validate));
+            }
+        }
+    }
+}
 fn routing(input: &IvyJson) -> IvyJson {
     let events = Arc::new(Mutex::new(vec![]));
     let callback = events.clone();
@@ -115,10 +221,12 @@ fn routing(input: &IvyJson) -> IvyJson {
         let result = (|| -> IvyResult<IvyJson> {
             let row = match text(step, "op").as_str() {
                 "update" => {
+                    let catalog = step.get("catalog").filter(|v| !v.is_null())
+                        .map(catalog_fixture::catalog_from_wire).transpose()?;
                     owner.update(
                         step.required("node")?,
                         step.get("generation").and_then(IvyJson::as_f64),
-                        step.get("catalog"),
+                        catalog.as_ref(),
                     )?;
                     ok()
                 }
@@ -132,7 +240,7 @@ fn routing(input: &IvyJson) -> IvyJson {
                             step.required("args")?,
                         )?
                     };
-                    let value = call.to_json();
+                    let value = prepared_snapshot(&call);
                     if let Some(name) = step.get("save") {
                         calls.insert(name.as_str()?, call);
                     }
@@ -141,7 +249,7 @@ fn routing(input: &IvyJson) -> IvyJson {
                 "complete" => obj([(
                     "value",
                     owner.complete(
-                        &calls[&text(step, "call")],
+                        &calls[&text(step, "call")].context,
                         step.required("result")?.clone(),
                     )?,
                 )]),
@@ -423,7 +531,7 @@ fn compare(label: &str, cases: Vec<IvyJson>) {
     assert_eq!(expected.len(), cases.len());
     for (index, (input, original)) in cases.iter().zip(expected).enumerate() {
         let (actual, expected) = match text(input, "kind").as_str() {
-            "routing" => (routing(input), original.clone()),
+            "routing" => (routing(input), routing_reference(input, original)),
             "diagnostics" => (
                 diagnostics(input, original.get("profile").unwrap()),
                 original.get("value").unwrap().clone(),

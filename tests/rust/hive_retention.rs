@@ -1079,6 +1079,16 @@ fn native_owner_readiness_fences_collection_and_survives_storage_restart() {
         registry::{ConnectionContext, Registry},
         store::Credential,
     };
+    use rusqlite::hooks::{AuthAction, Authorization};
+    fn deny_catalogs(context: rusqlite::hooks::AuthContext<'_>) -> Authorization {
+        match context.action {
+            AuthAction::Read {
+                table_name: "registries" | "contracts",
+                ..
+            } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }
+    }
     let root = Root::new();
     let path = root.0.join("owner-readiness.sqlite");
     let now = 1_800_000_000_000.0;
@@ -1205,6 +1215,49 @@ fn native_owner_readiness_fences_collection_and_survives_storage_restart() {
         )
         .unwrap();
     heartbeat(&mut registry, &mut store, "reader", true);
+    store.connection().execute_batch(
+        "CREATE TABLE fixture_owner_ack(value TEXT REFERENCES metadata(key) DEFERRABLE INITIALLY DEFERRED) STRICT;
+         CREATE TRIGGER fixture_owner_ack_failure AFTER INSERT ON metadata
+         WHEN NEW.key='retention_owner_ready:fixture/readiness:1.0.0'
+         BEGIN INSERT INTO fixture_owner_ack VALUES('missing'); END;",
+    ).unwrap();
+    assert_eq!(
+        registry
+            .heartbeat(
+                &mut store,
+                &"owner".into(),
+                Some(1.0),
+                &json(json!({"ready":true,"diagnostics":[]})),
+                &NativeRuntime,
+                now
+            )
+            .unwrap_err()
+            .code,
+        "internal_error"
+    );
+    store
+        .connection()
+        .execute_batch("DROP TRIGGER fixture_owner_ack_failure; DROP TABLE fixture_owner_ack;")
+        .unwrap();
+    // A failed commit must not confirm the catalog in memory. A retry still
+    // needs its contract data; successful steady heartbeats below do not.
+    store.connection().authorizer(Some(deny_catalogs)).unwrap();
+    assert!(
+        registry
+            .heartbeat(
+                &mut store,
+                &"owner".into(),
+                Some(1.0),
+                &json(json!({"ready":true,"diagnostics":[]})),
+                &NativeRuntime,
+                now
+            )
+            .is_err()
+    );
+    store
+        .connection()
+        .authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> Authorization>)
+        .unwrap();
     heartbeat(&mut registry, &mut store, "owner", true);
     assert!(waiting(&store));
     assert!(
@@ -1240,6 +1293,12 @@ fn native_owner_readiness_fences_collection_and_survives_storage_restart() {
     let acknowledgement = store
         .metadata("retention_owner_ready:fixture/readiness:2.0.0")
         .unwrap()
+        .unwrap();
+    store.connection().authorizer(Some(deny_catalogs)).unwrap();
+    heartbeat(&mut registry, &mut store, "owner", true);
+    store
+        .connection()
+        .authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> Authorization>)
         .unwrap();
     // Admit the actual unchanged TaskBoard contract set through the native Hive owner.
     connect(&mut registry, &mut store, "task-owner", "task-board");

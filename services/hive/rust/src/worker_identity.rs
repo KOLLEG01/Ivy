@@ -1,6 +1,6 @@
 //! Session and durable OAuth state used by the storage worker. Network token
 //! admission and the kernel remain separate from these single-owner operations.
-use crate::store::{AuthContext, AuthenticatedContext, Credential, Store};
+use crate::store::{AuthContext, Credential, Store};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
@@ -152,30 +152,6 @@ pub fn credential_reference(store: &Store, credential_digest: &JsString) -> IvyR
     )
     .into())
 }
-fn families(store: &Store) -> IvyResult<Vec<(String, IvyJson)>> {
-    let mut statement = store
-        .connection()
-        .prepare_cached("SELECT key,value FROM metadata WHERE key LIKE 'oauth_refresh:%'")
-        .map_err(|e| store.query_error(e))?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|e| store.query_error(e))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| store.query_error(e))?;
-    rows.into_iter()
-        .map(|(key, encoded)| {
-            let invalid =
-                || IvyError::new("storage_invalid", "Retained OAuth family state is invalid.");
-            let state = parse(&encoded, usize::MAX).map_err(|_| invalid())?;
-            if state.as_object().is_none() {
-                return Err(invalid());
-            }
-            Ok((key, state))
-        })
-        .collect()
-}
 /// The caller supplies the original transaction boundary (retention and credential
 /// rotation use this inside their own cleanup transaction).
 pub fn collect_oauth_families(
@@ -185,27 +161,49 @@ pub fn collect_oauth_families(
 ) -> IvyResult<usize> {
     let active = active.map(|values| values.iter().collect::<HashSet<_>>());
     let mut retained = 0;
-    for (key, state) in families(store)? {
-        let inactive = active.as_ref().is_some_and(|values| {
-            !state
-                .get("credentialReference")
-                .and_then(IvyJson::as_js_string)
-                .is_some_and(|v| values.contains(&v))
-        });
-        if state.get("revoked") == Some(&true.into())
-            || expiry_number(state.get("expiresAt"))? <= now_ms as f64
-            || inactive
-        {
-            store
-                .connection()
-                .execute("DELETE FROM metadata WHERE key=?", [key])
-                .map_err(|e| store.query_error(e))?;
-        } else {
-            retained += 1;
+    let mut deletions = Vec::new();
+    let mut field_error = None;
+    {
+        let mut statement = store.connection()
+            .prepare_cached("SELECT key,value FROM metadata WHERE key LIKE 'oauth_refresh:%'")
+            .map_err(|e| store.query_error(e))?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }).map_err(|e| store.query_error(e))?;
+        for row in rows {
+            let (key, encoded) = row.map_err(|e| store.query_error(e))?;
+            let invalid = || IvyError::new("storage_invalid", "Retained OAuth family state is invalid.");
+            let state = parse(&encoded, usize::MAX).map_err(|_| invalid())?;
+            if state.as_object().is_none() { return Err(invalid()); }
+            if field_error.is_some() { continue; }
+            let remove = (|| {
+                let inactive = active.as_ref().is_some_and(|values| {
+                    !state.get("credentialReference").and_then(IvyJson::as_js_string)
+                        .is_some_and(|v| values.contains(&v))
+                });
+                Ok(state.get("revoked") == Some(&true.into())
+                    || expiry_number(state.get("expiresAt"))? <= now_ms as f64 || inactive)
+            })();
+            match remove {
+                Ok(false) => retained += 1,
+                Ok(true) => deletions.push(key),
+                Err(error) => field_error = Some(error),
+            }
         }
     }
+    // Validate every JSON object before any delete. A field error follows the
+    // same deletion prefix as before, without retaining complete family states.
+    for key in deletions {
+        store.connection().execute("DELETE FROM metadata WHERE key=?", [key])
+            .map_err(|e| store.query_error(e))?;
+    }
+    if let Some(error) = field_error { return Err(error); }
     Ok(retained)
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/rust/hive_oauth_retention.rs"]
+mod retention_tests;
 pub fn create_oauth_family(
     store: &mut Store,
     state: &IvyJson,
@@ -400,11 +398,10 @@ pub fn resolve_session(store: &Store, session_digest: &JsString) -> IvyResult<Iv
 }
 pub fn end_session(
     store: &Store,
-    context: &AuthenticatedContext,
-    session_digest: Option<&JsString>,
+    context: &AuthContext,
 ) -> IvyResult<IvyJson> {
     require(
-        session_digest.is_some_and(|v| !v.0.is_empty()),
+        context.session_digest.as_ref().is_some_and(|v| !v.0.is_empty()),
         "unauthenticated",
         "Logout requires the browser session.",
     )?;
@@ -412,7 +409,7 @@ pub fn end_session(
         .connection()
         .execute(
             "DELETE FROM browser_sessions WHERE digest=?",
-            [text(session_digest.unwrap())],
+            [text(context.session_digest.as_ref().unwrap())],
         )
         .map_err(|e| store.query_error(e))?;
     Ok(IvyJson::object([(

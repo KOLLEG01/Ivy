@@ -1,12 +1,11 @@
-//! Same-owner worker binding over initialized native domains. Startup providers,
-//! temporary UI ownership and the process/retirement topology stay with startup.
+//! Native storage domains bound to their owning database thread.
 use crate::{
     kernel::Kernel,
+    storage::Notification,
+    storage::{BackupTask, Completion, Dispatch, Payload, StorageService},
     worker_actions::WorkerActions,
-    worker_protocol::Notification,
-    worker_server::{BackupTask, Completion, Dispatch, Progress, WorkerService},
 };
-use ivy_contracts::{IvyError, IvyJson, IvyResult};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 #[path = "worker_startup.rs"]
 mod startup;
 
@@ -15,7 +14,6 @@ pub struct KernelWorker {
     actions: WorkerActions,
     notifications: Vec<Notification>,
     fatal: Option<IvyError>,
-    initialize_announcements: bool,
 }
 impl KernelWorker {
     /// Actions and Kernel must come from the same initialized storage owner.
@@ -26,7 +24,6 @@ impl KernelWorker {
             actions,
             notifications: vec![],
             fatal: None,
-            initialize_announcements: false,
         }
     }
     pub fn kernel(&self) -> Option<&Kernel> {
@@ -35,49 +32,22 @@ impl KernelWorker {
     pub fn kernel_mut(&mut self) -> Option<&mut Kernel> {
         self.kernel.as_mut()
     }
-    fn publish(&mut self, payload: &IvyJson) -> IvyResult<()> {
+    fn publish(&mut self, payload: &Payload) -> IvyResult<()> {
         let kernel = self.kernel.as_mut().ok_or_else(IvyError::internal)?;
         self.actions
             .publish(kernel, payload, |value| self.notifications.push(value))
     }
-    fn close(&mut self) -> IvyResult<IvyJson> {
-        let mut kernel = self.kernel.take().ok_or_else(IvyError::internal)?;
-        let changes = kernel.parts.store.take_changes();
-        let result = kernel
-            .close()
-            .map(|_| IvyJson::object([("closed", true.into())]));
-        // The original handle closes SQLite before publishing events. Changes
-        // can still be posted, but both subsequent head queries fail and reject
-        // the chain without a close reply. Preserve this observed behavior;
-        // correcting it requires a separate compatibility decision.
-        if !changes.is_empty() {
-            self.notifications.push(Notification::Changes(changes));
-        }
-        self.fatal = Some(IvyError::internal());
-        result
-    }
 }
-impl WorkerService for KernelWorker {
-    fn after_ready(&mut self) -> IvyResult<()> {
-        if self.initialize_announcements {
-            self.actions
-                .initialize_announcements(self.kernel.as_ref().ok_or_else(IvyError::internal)?)?;
-            self.initialize_announcements = false;
-        }
-        Ok(())
+impl StorageService for KernelWorker {
+    fn close(&mut self) -> IvyResult<()> {
+        self.kernel.take().ok_or_else(IvyError::internal)?.close()
     }
-    fn handle(&mut self, payload: IvyJson) -> IvyResult<IvyJson> {
+    fn handle(&mut self, payload: Payload) -> IvyResult<IvyJson> {
         if let Some(error) = &self.fatal {
             return Err(error.clone());
         }
-        if payload.get("action") == Some(&IvyJson::from("close")) {
-            return self.close();
-        }
         let kernel = self.kernel.as_mut().ok_or_else(IvyError::internal)?;
-        let result = self
-            .actions
-            .handle(kernel, &payload)
-            .unwrap_or_else(|| Err(IvyError::internal()));
+        let result = self.actions.handle(kernel, &payload);
         match result {
             Ok(value) => match self.publish(&payload) {
                 Ok(()) => Ok(value),
@@ -96,20 +66,12 @@ impl WorkerService for KernelWorker {
             }
         }
     }
-    fn backup(&mut self, payload: IvyJson, progress: Progress) -> IvyResult<BackupTask> {
+    fn backup(&mut self, destination: JsString) -> IvyResult<BackupTask> {
         if let Some(error) = &self.fatal {
             return Err(error.clone());
         }
         let kernel = self.kernel.as_ref().ok_or_else(IvyError::internal)?;
-        let destination = payload
-            .get("destination")
-            .and_then(IvyJson::as_js_string)
-            .cloned()
-            .ok_or_else(IvyError::internal)?;
-        let task = kernel.parts.store.backup_to(destination, move || {
-            progress();
-            Ok(())
-        });
+        let task = kernel.parts.store.backup_to(destination, || Ok(()));
         Ok(Box::pin(async move {
             task.await.map(|snapshot| snapshot.to_json())
         }))
@@ -117,7 +79,7 @@ impl WorkerService for KernelWorker {
     fn notifications(&mut self) -> Vec<Notification> {
         std::mem::take(&mut self.notifications)
     }
-    fn dispatch(&mut self, payload: IvyJson) -> Dispatch {
+    fn dispatch(&mut self, payload: Payload) -> Dispatch {
         let result = self.handle(payload);
         Dispatch {
             notifications: self.notifications(),

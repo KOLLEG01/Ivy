@@ -35,6 +35,7 @@ where
 struct Pending {
     work: Box<dyn Work>,
     runtime: Handle,
+    deadline: Instant,
 }
 struct Waiting {
     key: Arc<()>,
@@ -76,6 +77,15 @@ impl DispatchGate {
         Fut: Future<Output = IvyResult<T>> + Send + 'static,
         T: Send + 'static,
     {
+        self.run_with_deadline(move |_| work())
+    }
+    /// One absolute execution deadline can follow accepted work into storage.
+    pub fn run_with_deadline<F, Fut, T>(&self, work: F) -> oneshot::Receiver<IvyResult<T>>
+    where
+        F: FnOnce(std::time::Instant) -> Fut + Send + 'static,
+        Fut: Future<Output = IvyResult<T>> + Send + 'static,
+        T: Send + 'static,
+    {
         let (result, receiver) = oneshot::channel();
         let mut state = self.0.state.lock().unwrap();
         let count = state.waiting.len() + usize::from(state.active);
@@ -91,15 +101,16 @@ impl DispatchGate {
             ]))));
             return receiver;
         }
+        let deadline = Instant::now() + self.0.wait;
         let pending = Pending {
-            work: Box::new(Job { work, result }),
+            deadline,
+            work: Box::new(Job { work: move || work(deadline.into_std()), result }),
             runtime: Handle::current(),
         };
         if state.active {
             let key = Arc::new(());
             let timer_key = key.clone();
             let gate = Arc::downgrade(&self.0);
-            let deadline = Instant::now() + self.0.wait;
             let timer = pending.runtime.spawn(async move {
                 tokio::time::sleep_until(deadline).await;
                 let Some(gate) = gate.upgrade() else {
@@ -136,7 +147,13 @@ impl DispatchGate {
         let completion = Completion(self.clone());
         pending.runtime.spawn(async move {
             let _completion = completion;
-            pending.work.start().await;
+            if Instant::now() >= pending.deadline {
+                pending.work.reject(IvyError::new(
+                    "deadline_exceeded", "Hive dispatch wait expired before execution.",
+                ));
+            } else {
+                pending.work.start().await;
+            }
         });
     }
     fn finish(&self) {

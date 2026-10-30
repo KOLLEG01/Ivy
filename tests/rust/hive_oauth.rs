@@ -50,7 +50,8 @@ impl Redirects for Providers {
     }
 }
 impl Worker for Providers {
-    fn request(&self, payload: IvyJson) -> RequestFuture {
+    fn request(&self, payload: ivy_hive::storage::Payload) -> RequestFuture {
+        let payload = crate::payload_fixture::json(payload);
         self.events
             .lock()
             .unwrap()

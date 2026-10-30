@@ -6,6 +6,8 @@ use crate::{
     http_auth::{self, Connection, Headers},
     http_body::{BodyBuffers, BodyStream, require_form},
     oauth::Parameters,
+    storage::Payload,
+    store::AuthContext,
 };
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
@@ -85,13 +87,9 @@ impl Session<'_> {
         let mut admission = self.connection.admit_authentication(headers)?;
         let result = self
             .worker
-            .request(IvyJson::object([
-                ("action", "session.create".into()),
-                (
-                    "credentialDigest",
-                    digest(String::from_utf16_lossy(&token.unwrap().0)).into(),
-                ),
-            ]))
+            .request(Payload::CreateSession(
+                digest(String::from_utf16_lossy(&token.unwrap().0)).into(),
+            ))
             .await;
         let result = match result {
             Err(error) if error.code == "unauthenticated" => {
@@ -147,10 +145,11 @@ impl Session<'_> {
         let owner = self.connection.authentication();
         http_auth::same_origin(owner.canonical_origin(), headers.origin.as_ref())?;
         self.worker
-            .request(IvyJson::object([
-                ("action", "session.end".into()),
-                ("context", context.clone()),
-            ]))
+            .request(Payload::EndSession(AuthContext {
+                credential_digest: context.get("credentialDigest")
+                    .and_then(IvyJson::as_js_string).cloned().ok_or_else(IvyError::internal)?,
+                session_digest: context.get("sessionDigest").and_then(IvyJson::as_js_string).cloned(),
+            }))
             .await?;
         owner.reset();
         let credential = context.get("credentialDigest");

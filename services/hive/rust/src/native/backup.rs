@@ -3,7 +3,7 @@ use super::{failure, require, string};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
 };
-use ivy_hive::{server_rpc::Storage, worker_client::RequestOptions, worker_runtime::StorageClient};
+use ivy_hive::{server_rpc::Storage, storage::RequestOptions, storage::StorageClient};
 use regex::Regex;
 use std::{
     collections::HashSet,
@@ -267,7 +267,6 @@ pub(super) async fn snapshot(
             ]),
             RequestOptions {
                 timeout_ms: 600_000,
-                backup: true,
                 ..Default::default()
             },
         )

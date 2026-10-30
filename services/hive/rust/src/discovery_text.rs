@@ -186,7 +186,7 @@ fn add_word(result: &mut Vec<JsString>, word: Vec<u16>) {
 pub(super) fn mcp_name(value: &IvyJson) -> Option<&IvyJson> {
     value.get("discovery").and_then(|v| v.get("mcp"))
 }
-pub(super) fn guide(value: &JsString, catalog: &IvyJson) -> IvyResult<JsString> {
+pub(super) fn guide(value: &JsString, catalog: &crate::registry_catalog::Catalog) -> IvyResult<JsString> {
     let mut names: HashMap<JsString, JsString> = HashMap::new();
     for (method, name) in meta("coreMcpNames")
         .as_object()
@@ -205,11 +205,12 @@ pub(super) fn guide(value: &JsString, catalog: &IvyJson) -> IvyResult<JsString> 
             ]),
         );
     }
-    for ns in array(catalog, "namespaces")? {
-        for tool in array(ns, "tools")? {
+    for ns in &catalog.namespaces {
+        for binding in catalog.bindings(ns) {
+            let tool = &binding.definition;
             if let Some(mcp) = mcp_name(tool).filter(|v| v.as_object().is_some()) {
                 names.insert(
-                    concat(&[string(ns, "namespace")?, &".".into(), string(tool, "name")?]),
+                    concat(&[&ns.name, &".".into(), string(tool, "name")?]),
                     concat(&[
                         string(mcp, "name")?,
                         &if is_text(mcp.get("surface"), "ivy_dev") {

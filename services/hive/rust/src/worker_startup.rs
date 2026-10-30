@@ -8,9 +8,7 @@ use crate::{
 use std::rc::Rc;
 
 impl KernelWorker {
-    /// Consume the existing ServerOptions worker frame after typed configuration
-    /// admission. Unknown server fields are ignored; dynamic JS object coercion
-    /// and external configuration validation are not replaced here.
+    /// Read storage settings from the admitted server configuration.
     pub fn open_worker_data(
         data: IvyJson,
         ports: StartupPorts,
@@ -72,7 +70,7 @@ impl KernelWorker {
     ) -> Result<Self, StartupFailure> {
         let credentials = options.credentials.clone();
         let mut kernel = Kernel::open_retained(options, ports)?;
-        let actions = (|| -> IvyResult<WorkerActions> {
+        let mut actions = (|| -> IvyResult<WorkerActions> {
             let clock = kernel.clock.clone();
             let push = BrowserPushStore::new(
                 &kernel.parts.store,
@@ -101,8 +99,8 @@ impl KernelWorker {
             Ok(actions)
         })()
         .map_err(|error| StartupFailure::retain(error, &kernel.parts.store))?;
-        let mut worker = Self::new(kernel, actions);
-        worker.initialize_announcements = true;
-        Ok(worker)
+        actions.initialize_announcements(&kernel)
+            .map_err(|error| StartupFailure::retain(error, &kernel.parts.store))?;
+        Ok(Self::new(kernel, actions))
     }
 }

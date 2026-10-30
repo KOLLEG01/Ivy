@@ -268,7 +268,9 @@ test('native Hive starts storage, serves authenticated Console/MCP and restarts'
     const wikiRetention = retention.families.find(family => family.contractKey === 'wiki/page');
     assert.equal(wikiRetention.objectCount, 2); assert.equal(wikiRetention.revisionCount, 4); assert.ok(retention.mutations.count >= 4);
     const metadata = { uiId: 'reference-ui', slug: 'reference', displayName: 'Reference UI', description: 'Isolated native route check.', iconKey: 'ui' };
-    const requirements = { hiveProtocol: 1, contracts: [], services: [] };
+    const requirements = { hiveProtocol: 1, contracts: [], services: [
+      { serviceName: 'reference-backend', namespace: 'reference', interfaceVersion: '1.0.0' },
+    ] };
     const files = [
       ['index.html', 'text/html', '<!doctype html><h1>Published reference UI</h1>'],
       ['demo.sandbox.html', 'text/html', '<!doctype html><p>Isolated sandbox</p>'],
@@ -278,6 +280,9 @@ test('native Hive starts storage, serves authenticated Console/MCP and restarts'
     const assets = files.map(([path, mediaType, bytes]) => ({ path, mediaType, contentHash: hash(bytes), byteLength: Buffer.byteLength(bytes) }));
     for (let i = 0; i < files.length; i++) await mutation('uis.stageAsset', { uiId: metadata.uiId, releaseId: 'r1', asset: assets[i], base64: Buffer.from(files[i][2]).toString('base64') });
     await mutation('uis.deploy', { metadata, release: { releaseId: 'r1', entryPath: 'index.html', requirements, assets }, expectedReleaseId: null });
+    const unavailableUi = await rpc('uis.inspect', { uiId: metadata.uiId });
+    assert.equal(unavailableUi.status, 'unavailable');
+    assert.equal(unavailableUi.issues[0].code, 'service_unavailable');
     const mounted = await request('/ui/reference-ui/', { headers: authenticated });
     assert.equal(mounted.status, 200); assert.match(await mounted.text(), /Published reference UI/);
     assert.equal(mounted.headers.get('etag'), '"' + assets[0].contentHash + '"');

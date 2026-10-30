@@ -1,10 +1,10 @@
 //! Server invocation admission and JSON-RPC batches over the storage owner.
 //! The network executor supplies its direct dispatcher and authenticated context.
 use crate::{
-    admission::{DispatchGate, RequestBudget},
+    admission::RequestBudget,
     rpc,
-    worker_client::RequestOptions,
-    worker_runtime::StorageClient,
+    storage::{Payload, Request, RequestEffects, RequestOptions},
+    storage::StorageClient,
     ws_send::encode,
 };
 use ivy_contracts::{
@@ -23,12 +23,14 @@ pub type Reply<T = IvyJson> = Pin<Box<dyn Future<Output = IvyResult<T>> + Send>>
 /// Posting is eager, including its reservation. The returned future only observes
 /// the posted work; abandoning it must not cancel the storage request.
 pub trait Storage: Send + Sync {
-    fn request(&self, payload: IvyJson, options: RequestOptions) -> Reply;
+    fn dispatch(&self, request: Request, options: RequestOptions) -> Reply;
+    fn request(&self, payload: IvyJson, options: RequestOptions) -> Reply {
+        self.dispatch(Request::new(payload), options)
+    }
 }
 impl Storage for StorageClient {
-    fn request(&self, payload: IvyJson, options: RequestOptions) -> Reply {
-        let reply = StorageClient::request(self, payload, options);
-        Box::pin(async move { reply.await.map_err(|_| IvyError::internal())? })
+    fn dispatch(&self, request: Request, options: RequestOptions) -> Reply {
+        StorageClient::dispatch(self, request, options)
     }
 }
 /// Direct routing starts eagerly and may throw before returning its promise.
@@ -45,13 +47,23 @@ struct Parts {
     direct: Direct,
     now: Clock,
     requests: RequestBudget,
-    dispatch: DispatchGate,
     options: Options,
 }
-/// Invoke and the socket dispatcher share these exact admission owners. Accepted
-/// work runs on the network executor even when its caller drops the result.
+/// Invoke and socket ingress share admission. The storage owner retains accepted
+/// DB work even when its caller drops the result.
 #[derive(Clone)]
 pub struct Invocation(Arc<Parts>);
+
+struct InvocationEffects(Clock);
+impl RequestEffects for InvocationEffects {
+    fn prepare(&self, payload: &mut Payload) -> IvyResult<()> {
+        let Payload::Execute { context, .. } = payload else { return Err(IvyError::internal()); };
+        require_fresh(context, &*self.0)
+    }
+    fn complete(self: Box<Self>, result: IvyResult<IvyJson>) -> IvyResult<IvyJson> {
+        result?.remove("value").ok_or_else(IvyError::internal)
+    }
+}
 
 pub fn require_fresh(context: &IvyJson, now: &dyn Fn() -> f64) -> IvyResult<()> {
     if let Some(expires_at) = context.get("expiresAt") {
@@ -96,7 +108,6 @@ impl Invocation {
         direct: Direct,
         now: Clock,
         requests: RequestBudget,
-        dispatch: DispatchGate,
         options: Options,
     ) -> Self {
         Self(Arc::new(Parts {
@@ -104,7 +115,6 @@ impl Invocation {
             direct,
             now,
             requests,
-            dispatch,
             options,
         }))
     }
@@ -155,29 +165,16 @@ impl Invocation {
             if let Some(direct) = self.direct(&context, &request)? {
                 return Ok(direct);
             }
-            let this = self.clone();
-            Ok(receive(self.0.dispatch.run(move || async move {
-                require_fresh(&context, &*this.0.now)?;
-                let prepared = this
-                    .0
-                    .storage
-                    .request(
-                        IvyJson::object([
-                            ("action", "execute".into()),
-                            ("context", context),
-                            ("request", request),
-                        ]),
-                        RequestOptions {
-                            reserved_bytes: request_bytes as u64,
-                            ..Default::default()
-                        },
-                    )
-                    .await?;
-                prepared
-                    .get("value")
-                    .cloned()
-                    .ok_or_else(IvyError::internal)
-            })))
+            Ok(self.0.storage.dispatch(
+                Request::with_effects(
+                    Payload::Execute { context, request },
+                    InvocationEffects(self.0.now.clone()),
+                ),
+                RequestOptions {
+                    reserved_bytes: request_bytes as u64,
+                    ..Default::default()
+                },
+            ))
         })();
         match work {
             Err(error) => {
