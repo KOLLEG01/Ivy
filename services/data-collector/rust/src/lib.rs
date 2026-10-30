@@ -9,6 +9,7 @@ pub mod model;
 pub mod mcp_result;
 pub mod mcp_bridge;
 pub mod native_mcp;
+mod mcp_context;
 pub mod ingress;
 pub mod lifecycle;
 mod http;

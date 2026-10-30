@@ -276,26 +276,6 @@ pub async fn start(path: PathBuf, options: StartOptions) -> IvyResult<Collector>
         .unwrap_or_else(|| config.data_root().to_owned())
         .join("tasks");
     let client: ClientSlot = Arc::new(Mutex::new(None));
-    let current = client.clone();
-    let mcp = Arc::new(NativeMcpFactory::new(Arc::new(move || {
-        current.lock().unwrap().clone().ok_or_else(|| {
-            IvyError::new(
-                "provider_unavailable",
-                "Hive connection is not ready for MCP calls.",
-            )
-        })
-    })));
-    let runner = Arc::new(
-        TaskRunner::new(
-            work_root,
-            config.artifact_root().to_owned(),
-            options.node_executable.as_deref(),
-            settings.clone(),
-            options.job_launcher,
-            Some(mcp),
-        )
-        .await?,
-    );
     let database = config.data_root().join("data-collector.sqlite");
     let now = engine::iso(SystemClock.utc_millis())?;
     let store = StoreOwner::new(
@@ -304,6 +284,29 @@ pub async fn start(path: PathBuf, options: StartOptions) -> IvyResult<Collector>
         })
         .await
         .map_err(|_| IvyError::internal())??,
+    );
+    let current = client.clone();
+    let mcp = Arc::new(NativeMcpFactory::new(
+        Arc::new(move || {
+            current.lock().unwrap().clone().ok_or_else(|| {
+                IvyError::new(
+                    "provider_unavailable",
+                    "Hive connection is not ready for MCP calls.",
+                )
+            })
+        }),
+        store.clone(),
+    ));
+    let runner = Arc::new(
+        TaskRunner::new(
+            work_root,
+            config.artifact_root().to_owned(),
+            options.node_executable.as_deref(),
+            settings.clone(),
+            options.job_launcher,
+            Some(mcp.clone()),
+        )
+        .await?,
     );
     let engine = Engine::new(
         store.clone(),
@@ -376,7 +379,9 @@ pub async fn start(path: PathBuf, options: StartOptions) -> IvyResult<Collector>
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut tick: Option<JoinHandle<()>> = None;
         let mut sync: Option<JoinHandle<()>> = None;
+        let mut cleanup: Option<JoinHandle<()>> = None;
         let mut next_sync = tokio::time::Instant::now();
+        let mut next_cleanup = tokio::time::Instant::now();
         loop {
             tokio::select! { biased; _ = runtime.0.closing.cancelled() => break, _ = interval.tick() => {} }
             if runtime.0.service.ready()
@@ -395,12 +400,25 @@ pub async fn start(path: PathBuf, options: StartOptions) -> IvyResult<Collector>
                     let _ = engine.tick(false).await;
                 }));
             }
+            if runtime.0.service.ready()
+                && cleanup.as_ref().is_none_or(JoinHandle::is_finished)
+                && tokio::time::Instant::now() >= next_cleanup
+            {
+                next_cleanup = tokio::time::Instant::now() + Duration::from_secs(5);
+                let mcp = mcp.clone();
+                cleanup = Some(tokio::spawn(async move {
+                    let _ = mcp.recover().await;
+                }));
+            }
         }
         if let Some(tick) = tick {
             let _ = tick.await;
         }
         if let Some(sync) = sync {
             let _ = sync.await;
+        }
+        if let Some(cleanup) = cleanup {
+            let _ = cleanup.await;
         }
     });
     let runtime = collector.clone();

@@ -132,6 +132,16 @@ export const privateRepo = false;
 
 // Explicit Cargo targets keep --files narrow and do not infer service ownership.
 export const rustTests = {
+  "tests/rust/data-collector-native-mcp.rs": {
+    "package": "ivy-data-collector",
+    "lib": true,
+    "filter": "native_mcp::tests::",
+    "testThreads": 1
+  },
+  "tests/rust/data-collector-http.rs": {
+    "package": "ivy-data-collector",
+    "test": "data-collector-http"
+  },
   "tests/fixtures/task-board-document-json.rs": {
     package: "ivy-task-board", test: "task-board-host-runtime", filter: "document_json::",
   },

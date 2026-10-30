@@ -30,6 +30,10 @@ MCP `server` and explicit `tools` list. The worker receives `mcp.call(tool, args
 DataCollector forwards granted calls through the existing native owner in an
 ephemeral context without starting a model turn. Hive and plugin credentials stay
 in their owning processes. The bridge exists only for that run and closes with it.
+Native context ownership and outstanding operation identities are saved in the
+local database before dispatch. Cleanup reconciles the originals after cancellation
+or restart; unknown outcomes authorize neither replay nor unloading. At most 64
+unretired contexts are admitted per instance, including unresolved cleanup.
 The [Microsoft 365 example](../../docs/examples/data-collector/m365/README.md)
 shows account identity checks, status results and stable activity for object watchers.
 Use assigned secret names, never literal credentials in task configuration or output.
