@@ -133,7 +133,9 @@ pub struct NativeDispatch {
     epoch: JsString,
     operations: NativeOperations,
     closing: Arc<AtomicBool>,
+    preparation: Arc<std::sync::Mutex<ThreadPreparation>>,
 }
+pub type ThreadPreparation = Arc<dyn Fn() -> HookFuture + Send + Sync>;
 impl NativeDispatch {
     pub fn new(
         rpc: NativeRpc,
@@ -146,7 +148,13 @@ impl NativeDispatch {
             epoch,
             operations,
             closing,
+            preparation: Arc::new(std::sync::Mutex::new(Arc::new(|| {
+                Box::pin(async { Ok(()) })
+            }))),
         }
+    }
+    pub fn set_thread_preparation(&self, preparation: ThreadPreparation) {
+        *self.preparation.lock().unwrap() = preparation;
     }
     pub fn available(&self) -> IvyResult<()> {
         if !self.closing.load(Ordering::SeqCst)
@@ -179,6 +187,14 @@ impl NativeDispatch {
                 let memory = owner.operations.journal();
                 let result = async {
                     owner.available()?;
+                    if ["thread/start", "thread/resume", "thread/fork"]
+                        .iter()
+                        .any(|m| action_method.eq_str(m))
+                    {
+                        let prepare = owner.preparation.lock().unwrap().clone();
+                        prepare().await?;
+                        owner.available()?;
+                    }
                     let before_send = {
                         let memory = memory.clone();
                         let identity = action_id.clone();

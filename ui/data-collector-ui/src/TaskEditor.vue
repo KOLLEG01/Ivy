@@ -11,11 +11,12 @@ import {
   FieldLegend,
   FieldSet,
   Input,
+  OptionSelect,
   Switch,
   Textarea,
 } from "@ivy/ui";
 import { newTask, slugOf, tr } from "./collector";
-import type { Task, TasksView } from "./collector";
+import type { IvyBinding, Task, TasksView } from "./collector";
 
 // A structured form for every task setting; only config and dependencies remain JSON.
 const props = defineProps<{
@@ -26,6 +27,9 @@ const props = defineProps<{
 const emit = defineEmits<{ save: [task: Task]; cancel: [] }>();
 const creating = !props.task;
 const initial = props.task ?? newTask();
+const direct = initial.mcp && "transport" in initial.mcp ? initial.mcp : null;
+const native =
+  initial.mcp && !("transport" in initial.mcp) ? initial.mcp : null;
 const form = reactive({
   ...initial,
   secretList: initial.secretNames.join(", "),
@@ -33,10 +37,46 @@ const form = reactive({
   allowUnauthenticated: initial.allowUnauthenticatedInput === true,
   retentionMb: Math.round(initial.retention.maximumBytes / 1048576),
   useMcp: !!initial.mcp,
-  mcpNode: initial.mcp?.serviceNodeId ?? "",
-  mcpDirectory: initial.mcp?.cwd ?? "",
-  mcpServer: initial.mcp?.server ?? "",
-  mcpTools: initial.mcp?.tools.join("\n") ?? "",
+  mcpTransport: direct ? "ivy" : "codex",
+  mcpCaller: direct?.callerPrincipalId ?? "",
+  mcpBindings: JSON.stringify(direct?.bindings ?? [], null, 2),
+  mcpNode: native?.serviceNodeId ?? "",
+  mcpDirectory: native?.cwd ?? "",
+  mcpServer: native?.server ?? "",
+  mcpTools: native?.tools.join("\n") ?? "",
+});
+const bindingsState = computed(() => {
+  try {
+    const value: unknown = JSON.parse(form.mcpBindings);
+    if (
+      !Array.isArray(value) ||
+      !value.length ||
+      value.length > 100 ||
+      !value.every(
+        (b) =>
+          b &&
+          typeof b === "object" &&
+          ((b.kind === "core" && b.tool === "hive_status") ||
+            (b.kind === "service" &&
+              [
+                "tool",
+                "serviceNodeId",
+                "qualifiedName",
+                "interfaceVersion",
+              ].every((k) => typeof b[k] === "string" && b[k].trim()))),
+      )
+    )
+      throw Error();
+    return { value: value as IvyBinding[], error: "" };
+  } catch {
+    return {
+      value: null,
+      error: tr(
+        "Eine Liste gültiger Ivy-Bindungen angeben.",
+        "Enter a list of valid Ivy bindings.",
+      ),
+    };
+  }
 });
 const config = ref(JSON.stringify(initial.config, null, 2)),
   dependencies = ref(JSON.stringify(initial.dependencies, null, 2));
@@ -80,10 +120,12 @@ const valid = computed(
     !configState.value.error &&
     !dependencyState.value.error &&
     (!form.useMcp ||
-      (!!form.mcpNode.trim() &&
-        !!form.mcpDirectory.trim() &&
-        !!form.mcpServer.trim() &&
-        !!form.mcpTools.trim())) &&
+      (form.mcpTransport === "ivy"
+        ? !!form.mcpCaller.trim() && !bindingsState.value.error
+        : !!form.mcpNode.trim() &&
+          !!form.mcpDirectory.trim() &&
+          !!form.mcpServer.trim() &&
+          !!form.mcpTools.trim())) &&
     !!form.script.trim(),
 );
 const submit = () => {
@@ -105,12 +147,21 @@ const submit = () => {
     secretNames,
     ...(form.useMcp
       ? {
-          mcp: {
-            serviceNodeId: form.mcpNode.trim(),
-            cwd: form.mcpDirectory.trim(),
-            server: form.mcpServer.trim(),
-            tools: [...new Set(form.mcpTools.split(/[\s,]+/).filter(Boolean))],
-          },
+          mcp:
+            form.mcpTransport === "ivy"
+              ? {
+                  transport: "ivy",
+                  callerPrincipalId: form.mcpCaller.trim(),
+                  bindings: bindingsState.value.value!,
+                }
+              : {
+                  serviceNodeId: form.mcpNode.trim(),
+                  cwd: form.mcpDirectory.trim(),
+                  server: form.mcpServer.trim(),
+                  tools: [
+                    ...new Set(form.mcpTools.split(/[\s,]+/).filter(Boolean)),
+                  ],
+                },
         }
       : {}),
     ...(form.inputSecret ? { inputSecretName: form.inputSecret } : {}),
@@ -187,44 +238,95 @@ const submit = () => {
         }}</FieldLabel>
       </Field>
       <FieldGroup v-if="form.useMcp" class="grid gap-4 md:grid-cols-2">
-        <Field
-          ><FieldLabel for="task-mcp-node">AgentManager</FieldLabel
-          ><Input id="task-mcp-node" v-model="form.mcpNode" :disabled="busy"
-        /></Field>
-        <Field
-          ><FieldLabel for="task-mcp-directory">{{
-            tr("Projektverzeichnis", "Project directory")
-          }}</FieldLabel
-          ><Input
-            id="task-mcp-directory"
-            v-model="form.mcpDirectory"
+        <Field class="md:col-span-2">
+          <FieldLabel for="task-mcp-transport">{{
+            tr("Zugriff", "Access")
+          }}</FieldLabel>
+          <OptionSelect
+            id="task-mcp-transport"
+            v-model="form.mcpTransport"
             :disabled="busy"
-        /></Field>
-        <Field
-          ><FieldLabel for="task-mcp-server">{{
-            tr("MCP-Server", "MCP server")
-          }}</FieldLabel
-          ><Input
-            id="task-mcp-server"
-            v-model="form.mcpServer"
-            :disabled="busy"
-        /></Field>
-        <Field
-          ><FieldLabel for="task-mcp-tools">{{
-            tr("Freigegebene Tools", "Granted tools")
-          }}</FieldLabel
-          ><Textarea
-            id="task-mcp-tools"
-            v-model="form.mcpTools"
-            :disabled="busy"
-          />
-          <FieldDescription>{{
-            tr(
-              "Ein Toolname pro Zeile. Verwendet die bestehende Plugin-Anmeldung ohne Model-Turn.",
-              "One tool name per line. Uses the existing plugin sign-in without a model turn.",
-            )
-          }}</FieldDescription>
+          >
+            <option value="codex">
+              {{ tr("Account- und Plugin-MCP", "Account and plugin MCP") }}
+            </option>
+            <option value="ivy">{{ tr("Ivy-Dienste", "Ivy services") }}</option>
+          </OptionSelect>
         </Field>
+        <template v-if="form.mcpTransport === 'ivy'">
+          <Field class="md:col-span-2">
+            <FieldLabel for="task-mcp-caller">{{
+              tr("Collector-Principal", "Collector principal")
+            }}</FieldLabel>
+            <Input
+              id="task-mcp-caller"
+              v-model="form.mcpCaller"
+              :disabled="busy"
+            />
+            <FieldDescription>{{
+              tr(
+                "Verwendet die Ivy-Berechtigungen dieses Collectors.",
+                "Uses this collector's Ivy permissions.",
+              )
+            }}</FieldDescription>
+          </Field>
+          <Field class="md:col-span-2">
+            <FieldLabel for="task-mcp-bindings">{{
+              tr(
+                "Freigegebene Ivy-Bindungen (JSON)",
+                "Granted Ivy bindings (JSON)",
+              )
+            }}</FieldLabel>
+            <Textarea
+              id="task-mcp-bindings"
+              v-model="form.mcpBindings"
+              :disabled="busy"
+            />
+            <FieldError v-if="bindingsState.error">{{
+              bindingsState.error
+            }}</FieldError>
+          </Field>
+        </template>
+        <template v-else>
+          <Field
+            ><FieldLabel for="task-mcp-node">AgentManager</FieldLabel
+            ><Input id="task-mcp-node" v-model="form.mcpNode" :disabled="busy"
+          /></Field>
+          <Field
+            ><FieldLabel for="task-mcp-directory">{{
+              tr("Projektverzeichnis", "Project directory")
+            }}</FieldLabel
+            ><Input
+              id="task-mcp-directory"
+              v-model="form.mcpDirectory"
+              :disabled="busy"
+          /></Field>
+          <Field
+            ><FieldLabel for="task-mcp-server">{{
+              tr("MCP-Server", "MCP server")
+            }}</FieldLabel
+            ><Input
+              id="task-mcp-server"
+              v-model="form.mcpServer"
+              :disabled="busy"
+          /></Field>
+          <Field
+            ><FieldLabel for="task-mcp-tools">{{
+              tr("Freigegebene Tools", "Granted tools")
+            }}</FieldLabel
+            ><Textarea
+              id="task-mcp-tools"
+              v-model="form.mcpTools"
+              :disabled="busy"
+            />
+            <FieldDescription>{{
+              tr(
+                "Ein Toolname pro Zeile. Verwendet die bestehende Plugin-Anmeldung ohne Model-Turn.",
+                "One tool name per line. Uses the existing plugin sign-in without a model turn.",
+              )
+            }}</FieldDescription>
+          </Field>
+        </template>
       </FieldGroup>
     </FieldSet>
 

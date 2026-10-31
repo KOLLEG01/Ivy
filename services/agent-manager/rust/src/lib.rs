@@ -1,6 +1,7 @@
 //! AgentManager's local receipts and native connection ownership.
 pub mod agent_health;
 pub mod browser_notices;
+pub mod bundled_tools;
 pub mod capabilities;
 pub mod claude;
 pub mod claude_launch;

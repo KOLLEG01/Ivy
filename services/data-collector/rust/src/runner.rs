@@ -29,11 +29,7 @@ pub trait McpBridge: Send + Sync {
     fn close(&self) -> ServiceFuture<()>;
 }
 pub trait McpBridgeFactory: Send + Sync {
-    fn open(
-        &self,
-        configuration: IvyJson,
-        signal: CancellationToken,
-    ) -> ServiceFuture<Arc<dyn McpBridge>>;
+    fn open(&self, task: IvyJson, signal: CancellationToken) -> ServiceFuture<Arc<dyn McpBridge>>;
 }
 
 pub struct TaskRunner {
@@ -399,11 +395,11 @@ impl TaskRunner {
             }
         }
         let _timer = Timer(timer);
-        let bridge = if let Some(configuration) = task.get("mcp") {
+        let bridge = if task.get("mcp").is_some() {
             let factory = self.mcp.as_ref().ok_or_else(|| {
                 IvyError::new("configuration_invalid", "Task MCP is not configured.")
             })?;
-            Some(factory.open(configuration.clone(), task_signal).await?)
+            Some(factory.open(task.clone(), task_signal).await?)
         } else {
             None
         };

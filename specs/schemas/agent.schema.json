@@ -1121,6 +1121,78 @@
         "patcherEnabled": {
           "type": "boolean"
         },
+        "bundledTools": {
+          "type": "object",
+          "properties": {
+            "nodeExecutable": {
+              "type": "string",
+              "maxLength": 2048,
+              "minLength": 1
+            },
+            "nodeEnvironment": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 16384
+              },
+              "maxProperties": 64
+            },
+            "cuaEnvironment": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 16384
+              },
+              "maxProperties": 64
+            },
+            "inheritedEnvironment": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 256,
+                "minLength": 1
+              },
+              "maxItems": 64
+            },
+            "nodeArgs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "maxItems": 64
+            },
+            "cuaArgs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "maxItems": 64
+            },
+            "startupTimeoutSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 300
+            },
+            "toolTimeoutSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3600
+            }
+          },
+          "required": [
+            "nodeExecutable",
+            "nodeEnvironment",
+            "cuaEnvironment",
+            "inheritedEnvironment",
+            "nodeArgs",
+            "cuaArgs",
+            "startupTimeoutSeconds",
+            "toolTimeoutSeconds"
+          ],
+          "additionalProperties": false
+        },
         "projectRoot": {
           "type": "string",
           "maxLength": 2048,

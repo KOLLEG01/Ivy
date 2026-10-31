@@ -6,7 +6,11 @@ import { expect } from "@playwright/test";
 import { fixture, fixtureToken } from "./fixtures/fixture.mjs";
 import { startNativeService } from "../../tools/testing/native-service.mjs";
 import { publishUi } from "../../dist/packages/cli/src/publish-ui.js";
-import { newOperationId, discover, callBound } from "../../dist/packages/sdk/src/client.js";
+import {
+  newOperationId,
+  discover,
+  callBound,
+} from "../../dist/packages/sdk/src/client.js";
 
 for (const viewport of [
   { width: 1440, height: 1000 },
@@ -43,7 +47,14 @@ for (const viewport of [
       };
       const runtime = await startNativeService(config);
       t.after(() => runtime.close());
-      const readTask = async () => callBound(f.client, await discover(f.client, 'data-collector.read', { serviceNodeId: config.serviceNodeId }), { view: 'task', id: 'browser-fixture' });
+      const readTask = async () =>
+        callBound(
+          f.client,
+          await discover(f.client, "data-collector.read", {
+            serviceNodeId: config.serviceNodeId,
+          }),
+          { view: "task", id: "browser-fixture" },
+        );
       await publishUi(f.client, {
         directory: resolve("dist/apps/data-collector-ui"),
         definition: JSON.parse(
@@ -94,7 +105,11 @@ for (const viewport of [
           exact: true,
         }),
       ).toBeVisible();
-      assert.equal((await readTask()).status, 'draft', 'saving creates a draft');
+      assert.equal(
+        (await readTask()).status,
+        "draft",
+        "saving creates a draft",
+      );
       assert.equal((await readTask()).adoptedRevision, null);
       await f.page
         .getByRole("button", {
@@ -103,11 +118,13 @@ for (const viewport of [
         })
         .click();
       await expect
-        .poll(async () => { const task = await readTask(); return task.adoptedRevision === task.revision; })
+        .poll(async () => {
+          const task = await readTask();
+          return task.adoptedRevision === task.revision;
+        })
         .toBe(true);
       for (let n = 0; n < 2; n++) {
-        const previousRunId =
-          (await readTask()).lastRunId;
+        const previousRunId = (await readTask()).lastRunId;
         await f.page
           .getByRole("button", {
             name: label("Run now", "Jetzt ausführen"),
@@ -145,7 +162,46 @@ for (const viewport of [
       await f.page
         .getByRole("button", { name: label("Edit", "Bearbeiten"), exact: true })
         .click();
-      await expect(f.page.getByLabel('JavaScript (ESM)', { exact: true })).toBeEditable();
+      await expect(
+        f.page.getByLabel("JavaScript (ESM)", { exact: true }),
+      ).toBeEditable();
+      await f.page
+        .getByLabel(
+          label(
+            "Grant this script MCP access",
+            "MCP-Zugriff für dieses Script freigeben",
+          ),
+          { exact: true },
+        )
+        .click();
+      await f.page
+        .getByRole("combobox", {
+          name: label("Access", "Zugriff"),
+          exact: true,
+        })
+        .click();
+      await f.page
+        .getByRole("option", {
+          name: label("Ivy services", "Ivy-Dienste"),
+          exact: true,
+        })
+        .click();
+      const principal = (await f.client.request("system.status", {}))
+        .callerPrincipalId;
+      await f.page
+        .getByLabel(label("Collector principal", "Collector-Principal"), {
+          exact: true,
+        })
+        .fill(principal);
+      await f.page
+        .getByLabel(
+          label(
+            "Granted Ivy bindings (JSON)",
+            "Freigegebene Ivy-Bindungen (JSON)",
+          ),
+          { exact: true },
+        )
+        .fill('[{"kind":"core","tool":"hive_status"}]');
       assert.ok(
         await f.page.evaluate(
           () => document.documentElement.scrollWidth <= innerWidth + 2,
@@ -155,14 +211,20 @@ for (const viewport of [
       await f.page
         .getByLabel("JavaScript (ESM)", { exact: true })
         .fill(
-          "export default async () => { throw Object.assign(new Error('secret-fixture'), {code:'interaction_required'}); };",
+          "export default async ({mcp}) => { if (!(await mcp.call('hive_status', {})).result.runtimeEpoch) throw Error('status missing'); throw Object.assign(new Error('secret-fixture'), {code:'interaction_required'}); };",
         );
       await f.page
         .getByRole("button", { name: label("Save", "Speichern"), exact: true })
         .click();
-      await expect.poll(async () => (await readTask()).revision).not.toBe(row.adoptedRevision);
+      await expect
+        .poll(async () => (await readTask()).revision)
+        .not.toBe(row.adoptedRevision);
       const draft = await readTask();
-      assert.equal(draft.adoptedRevision, row.adoptedRevision, 'saved draft leaves accepted execution unchanged');
+      assert.equal(
+        draft.adoptedRevision,
+        row.adoptedRevision,
+        "saved draft leaves accepted execution unchanged",
+      );
       assert.notEqual(draft.revision, draft.adoptedRevision);
       await f.page
         .getByRole("button", {
@@ -189,6 +251,28 @@ for (const viewport of [
         false,
       );
       await expect(f.page.getByText("21.5", { exact: true })).toBeVisible();
+      await f.page
+        .getByRole("button", { name: label("Edit", "Bearbeiten"), exact: true })
+        .click();
+      await expect(
+        f.page.getByLabel(label("Collector principal", "Collector-Principal"), {
+          exact: true,
+        }),
+      ).toHaveValue(principal);
+      await expect(
+        f.page.getByLabel(
+          label(
+            "Granted Ivy bindings (JSON)",
+            "Freigegebene Ivy-Bindungen (JSON)",
+          ),
+          { exact: true },
+        ),
+      ).toHaveValue(/hive_status/);
+      assert.ok(
+        await f.page.evaluate(
+          () => document.documentElement.scrollWidth <= innerWidth + 2,
+        ),
+      );
       assert.deepEqual(f.pageErrors, []);
       assert.deepEqual(f.externalRequests, []);
     },

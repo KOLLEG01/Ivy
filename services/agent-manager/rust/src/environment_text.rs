@@ -10,6 +10,8 @@ pub const END_MCP: &str = "# <<< Ivy AgentManager MCP configuration";
 pub const BEGIN_PERMISSIONS: &str =
     "# >>> Ivy AgentManager Codex permissions (managed; edit in AgentUI)";
 pub const END_PERMISSIONS: &str = "# <<< Ivy AgentManager Codex permissions";
+pub const BEGIN_BUNDLED: &str = "# >>> Ivy bundled tool runtime";
+pub const END_BUNDLED: &str = "# <<< Ivy bundled tool runtime";
 const APPROVAL: &str = "approval_policy = \"never\"";
 const PERMISSIONS: &str = "default_permissions = \":danger-full-access\"";
 
@@ -228,6 +230,11 @@ pub fn with_block(source: &str, block: Option<&str>) -> String {
         .first()
         .copied()
         .unwrap_or(outside.len());
+    // The bundled runtime owns a separate tables-only block. Insert before its
+    // opening marker when it contains the first table, keeping both hashes stable.
+    let first = outside
+        .find(BEGIN_BUNDLED)
+        .map_or(first, |start| first.min(start));
     let root = outside[..first].trim_end();
     let tables = outside[first..].trim_start();
     let parts: Vec<_> = [Some(root), block, Some(tables)]

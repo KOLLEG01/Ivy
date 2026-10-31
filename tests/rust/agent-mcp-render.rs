@@ -4,6 +4,58 @@ use ivy_agent_manager::{
     mcp_manager::{McpManager, McpSettings},
     mcp_render::hive_mcp_urls,
 };
+
+#[test]
+fn bundled_tools_keep_browser_settings_and_replace_runtime_paths_as_one_configuration() {
+    use ivy_contracts::json::parse;
+    let runtime = parse(r#"{"servers":{"node_repl":{"command":"repl.exe","args":[],"env":{"CODEX_HOME":"home","CUA_REPL_NODE_REPL_PATH":"repl.exe"}},"cua_repl":{"command":"node.exe","args":["cua.mjs"],"env":{"CODEX_HOME":"home","CUA_REPL_NODE_REPL_PATH":"repl.exe"}}}}"#,usize::MAX).unwrap();
+    let settings=parse(r#"{"nodeEnvironment":{"NODE_REPL_TRUSTED_SERVICES":"sky","CODEX_CLI_PATH":"pinned-cli.exe"},"cuaEnvironment":{"NODE_REPL_TRUSTED_SERVICES":"browser","BROWSER_USE_AVAILABLE_BACKENDS":"chrome,edge"},"nodeArgs":[],"cuaArgs":[],"inheritedEnvironment":["REGISTERED_CORE"],"startupTimeoutSeconds":120,"toolTimeoutSeconds":60,"nativeExecutable":"current-cli.exe"}"#,usize::MAX).unwrap();
+    let rendered = ivy_agent_manager::bundled_tools::render(&runtime, &settings).unwrap();
+    assert!(rendered.contains("command = \"repl.exe\""));
+    assert!(rendered.contains("args = [\"cua.mjs\"]"));
+    assert!(rendered.contains("\"NODE_REPL_TRUSTED_SERVICES\" = \"browser\""));
+    assert!(rendered.contains("\"CODEX_CLI_PATH\" = \"pinned-cli.exe\""));
+    assert!(!rendered.contains("launch-cua"));
+    let original = "# >>> Ivy AgentManager Codex configuration (managed; edit in AgentUI)\napproval_policy = \"never\"\n[mcp_servers.ivy]\nurl = \"https://example.invalid/mcp\"\n# <<< Ivy AgentManager Codex configuration\n";
+    let after = ivy_agent_manager::bundled_tools::append_block(original, &rendered);
+    let managed = ivy_agent_manager::environment_text::managed_block(
+        &after,
+        ivy_agent_manager::environment_text::BEGIN_CODEX,
+        ivy_agent_manager::environment_text::END_CODEX,
+    )
+    .unwrap();
+    assert_eq!(managed.block.as_deref(), Some(original.trim_end()));
+    let bundled = ivy_agent_manager::environment_text::managed_block(
+        &after,
+        "# >>> Ivy bundled tool runtime",
+        "# <<< Ivy bundled tool runtime",
+    )
+    .unwrap();
+    assert_eq!(
+        ivy_agent_manager::bundled_tools::append_block(&bundled.outside, &rendered),
+        after
+    );
+    let refreshed =
+        ivy_agent_manager::environment_text::with_block(&managed.outside, managed.block.as_deref());
+    let bundled = ivy_agent_manager::environment_text::managed_block(
+        &refreshed,
+        "# >>> Ivy bundled tool runtime",
+        "# <<< Ivy bundled tool runtime",
+    )
+    .unwrap();
+    assert_eq!(bundled.block.as_deref(), Some(rendered.as_str()));
+    let managed = ivy_agent_manager::environment_text::managed_block(
+        &refreshed,
+        ivy_agent_manager::environment_text::BEGIN_CODEX,
+        ivy_agent_manager::environment_text::END_CODEX,
+    )
+    .unwrap();
+    assert_eq!(managed.block.as_deref(), Some(original.trim_end()));
+    assert_eq!(
+        ivy_agent_manager::environment_text::with_block(&managed.outside, managed.block.as_deref()),
+        refreshed
+    );
+}
 use ivy_contracts::{IvyError, IvyJson as Json, agent_schema::validate_agent, json::stringify};
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use std::{fs, path::PathBuf, sync::Arc};

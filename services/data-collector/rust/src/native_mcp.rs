@@ -1,4 +1,4 @@
-//! Ephemeral native MCP contexts. No model turn is started by this transport.
+//! Task-owned native MCP contexts. No model turn is started by this transport.
 use crate::{
     mcp_bridge::{LocalBridge, TaskMcp},
     mcp_context::{Context, Contexts, text},
@@ -20,6 +20,7 @@ use ivy_sdk::{
     tools::{InterfaceRequirement, ToolCallOptions, ToolClients},
 };
 use std::{
+    collections::HashMap,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -94,8 +95,9 @@ struct Inner {
     configuration: IvyJson,
     signal: CancellationToken,
     closed: CancellationToken,
-    state: AsyncMutex<State>,
+    state: Arc<AsyncMutex<State>>,
     contexts: Contexts,
+    task_id: Option<String>,
 }
 #[derive(Clone)]
 pub struct NativeMcpSession(Arc<Inner>);
@@ -122,9 +124,22 @@ impl NativeMcpSession {
             configuration,
             signal,
             closed: CancellationToken::new(),
-            state: AsyncMutex::new(State::default()),
+            state: Arc::new(AsyncMutex::new(State::default())),
             contexts,
+            task_id: None,
         })))
+    }
+    fn for_run(&self, signal: CancellationToken, task_id: String) -> Self {
+        Self(Arc::new(Inner {
+            client: self.0.client.clone(),
+            tools: self.0.tools.clone(),
+            configuration: self.0.configuration.clone(),
+            signal,
+            closed: self.0.closed.clone(),
+            state: self.0.state.clone(),
+            contexts: self.0.contexts.clone(),
+            task_id: Some(task_id),
+        }))
     }
     fn options(signal: &CancellationToken) -> RequestOptions {
         RequestOptions {
@@ -135,6 +150,11 @@ impl NativeMcpSession {
     }
     async fn initialize(&self, state: &mut State) -> IvyResult<()> {
         if let Some(context) = &mut state.context {
+            same_epoch(
+                &owner(context, self.0.tools.clone(), &self.0.signal),
+                &context.epoch,
+            )
+            .await?;
             if context.thread.is_none() {
                 let owner = owner(context, self.0.tools.clone(), &self.0.signal);
                 let operation = owner.operation(&context.start).await?;
@@ -191,6 +211,13 @@ impl NativeMcpSession {
                 ("ephemeral", true.into()),
                 ("permissions", ":read-only".into()),
                 ("approvalPolicy", "never".into()),
+                (
+                    "config",
+                    IvyJson::object([
+                        ("mcp_servers.node_repl.enabled", false.into()),
+                        ("mcp_servers.cua_repl.enabled", false.into()),
+                    ]),
+                ),
             ]))
             .await?;
         let start = prepare(&owner, self.0.client.clone(), "thread/start", params).await?;
@@ -207,6 +234,7 @@ impl NativeMcpSession {
             pending: None,
             unsubscribe: None,
             closing: false,
+            task_id: self.0.task_id.clone(),
         });
         let context = state.context.as_mut().unwrap();
         self.0.contexts.insert(context, &self.0.closed).await?;
@@ -520,11 +548,95 @@ impl TaskMcp for NativeMcpSession {
 }
 
 pub type CurrentClient = Arc<dyn Fn() -> IvyResult<Arc<dyn RpcClient>> + Send + Sync>;
+struct Slot {
+    busy: AtomicBool,
+    retained: Mutex<Option<Retained>>,
+}
+struct Retained {
+    session: NativeMcpSession,
+    selection: IvyJson,
+    until: tokio::time::Instant,
+}
+struct Lease {
+    session: NativeMcpSession,
+    slot: Arc<Slot>,
+    keep: bool,
+    retention: Duration,
+    finished: AtomicBool,
+}
+impl Drop for Lease {
+    fn drop(&mut self) {
+        if !self.finished.swap(true, Ordering::AcqRel) {
+            let session = self.session.clone();
+            let slot = self.slot.clone();
+            session.0.signal.cancel();
+            tokio::spawn(async move {
+                let _ = session.close().await;
+                slot.busy.store(false, Ordering::Release);
+            });
+        }
+    }
+}
+struct SlotClaim(Option<Arc<Slot>>);
+impl Drop for SlotClaim {
+    fn drop(&mut self) {
+        if let Some(slot) = &self.0 {
+            slot.busy.store(false, Ordering::Release);
+        }
+    }
+}
+impl TaskMcp for Lease {
+    fn call(&self, tool: JsString, args: IvyJson) -> ServiceFuture<IvyJson> {
+        self.session.call(tool, args)
+    }
+    fn close(&self) -> ServiceFuture<()> {
+        let session = self.session.clone();
+        let slot = self.slot.clone();
+        if self.finished.swap(true, Ordering::AcqRel) {
+            return Box::pin(async { Ok(()) });
+        }
+        let keep = self.keep;
+        let retention = self.retention;
+        Box::pin(async move {
+            let _claim = SlotClaim(Some(slot.clone()));
+            session.0.signal.cancel();
+            let healthy = {
+                let state = session.0.state.lock().await;
+                !state.closed
+                    && state
+                        .context
+                        .as_ref()
+                        .is_none_or(|c| c.pending.is_none() && c.thread.is_some())
+            };
+            if !keep || !healthy {
+                session.close().await?;
+                slot.retained.lock().unwrap().take();
+            } else if let Some(retained) = slot.retained.lock().unwrap().as_mut() {
+                retained.until = tokio::time::Instant::now() + retention;
+            }
+            Ok(())
+        })
+    }
+}
+fn selection(row: &IvyJson) -> IvyJson {
+    IvyJson::object([
+        ("task", row.get("task").cloned().unwrap_or(IvyJson::Null)),
+        (
+            "definition",
+            row.get("definition").cloned().unwrap_or(IvyJson::Null),
+        ),
+        (
+            "revision",
+            row.get("revision").cloned().unwrap_or(IvyJson::Null),
+        ),
+    ])
+}
 /// Reuse tool bindings for the same live RPC connection, across task runs.
 pub struct NativeMcpFactory {
     client: CurrentClient,
     cached: Mutex<Option<(Arc<dyn RpcClient>, Arc<ToolClients>)>>,
     contexts: Contexts,
+    slots: Arc<Mutex<HashMap<String, Arc<Slot>>>>,
 }
 impl NativeMcpFactory {
     pub fn new(client: CurrentClient, store: StoreOwner) -> Self {
@@ -532,6 +644,7 @@ impl NativeMcpFactory {
             client,
             cached: Mutex::new(None),
             contexts: Contexts::new(store),
+            slots: Arc::new(Mutex::new(HashMap::new())),
         }
     }
     fn selected(&self) -> IvyResult<(Arc<dyn RpcClient>, Arc<ToolClients>)> {
@@ -549,6 +662,62 @@ impl NativeMcpFactory {
     }
     pub async fn recover(&self) -> IvyResult<()> {
         let (client, tools) = self.selected()?;
+        // Reuse follows accepted local ownership, including disable/delete/adoption.
+        // No Hive fetch, model turn, or background pool is required.
+        let slots: Vec<_> = self
+            .slots
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, slot)| (id.clone(), slot.clone()))
+            .collect();
+        for (id, slot) in slots {
+            if slot
+                .busy
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                continue;
+            }
+            let claim = SlotClaim(Some(slot.clone()));
+            let lookup = id.clone();
+            let row = self
+                .contexts
+                .store
+                .call(move |s| s.get(&lookup, false))
+                .await;
+            let retired = {
+                let mut retained = slot.retained.lock().unwrap();
+                if retained.as_ref().is_some_and(|r| {
+                    tokio::time::Instant::now() >= r.until
+                        || !Arc::ptr_eq(&r.session.0.client, &client)
+                        || row
+                            .as_ref()
+                            .ok()
+                            .and_then(Option::as_ref)
+                            .is_none_or(|row| {
+                                !model::truth(row.get("task").unwrap_or(&IvyJson::Null), "enabled")
+                                    || selection(row) != r.selection
+                            })
+                }) {
+                    retained.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(retired) = retired {
+                let _ = retired.session.close().await;
+            }
+            drop(claim);
+            if slot.retained.lock().unwrap().is_none()
+                && !self.contexts.task_pending(id.clone()).await?
+            {
+                let mut current = self.slots.lock().unwrap();
+                if !slot.busy.load(Ordering::Acquire) && Arc::strong_count(&slot) == 2 {
+                    current.remove(&id);
+                }
+            }
+        }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let mut cursor = tokio::time::timeout_at(deadline, self.contexts.cleanup.lock())
             .await
@@ -572,20 +741,119 @@ impl NativeMcpFactory {
         }
         outcome?
     }
+    pub async fn close(&self) {
+        let slots: Vec<_> = self.slots.lock().unwrap().values().cloned().collect();
+        for slot in slots {
+            let retained = slot.retained.lock().unwrap().take();
+            if let Some(retained) = retained {
+                let _ = retained.session.close().await;
+            }
+        }
+    }
 }
 impl McpBridgeFactory for NativeMcpFactory {
-    fn open(
-        &self,
-        configuration: IvyJson,
-        signal: CancellationToken,
-    ) -> ServiceFuture<Arc<dyn McpBridge>> {
+    fn open(&self, task: IvyJson, signal: CancellationToken) -> ServiceFuture<Arc<dyn McpBridge>> {
         let selected = self.selected();
         let contexts = self.contexts.clone();
+        let slots = self.slots.clone();
         Box::pin(async move {
             let (client, tools) = selected?;
-            let session =
-                NativeMcpSession::new(client, tools, configuration, signal.clone(), contexts)?;
-            Ok(Arc::new(LocalBridge::open(Arc::new(session), signal).await?) as Arc<dyn McpBridge>)
+            let configuration = task.required("mcp")?.clone();
+            let session: Arc<dyn TaskMcp> = if configuration.get("transport") == Some(&"ivy".into())
+            {
+                Arc::new(crate::ivy_mcp::IvyMcp::new(
+                    client,
+                    tools,
+                    configuration,
+                    signal.clone(),
+                ))
+            } else {
+                let id = model::text(&task, "id")?;
+                let lookup = id.clone();
+                let row = contexts
+                    .store
+                    .call(move |s| s.get(&lookup, false))
+                    .await?
+                    .ok_or_else(unresolved)?;
+                if row.get("task") != Some(&task) {
+                    return Err(unresolved());
+                }
+                let selected = selection(&row);
+                let slot = {
+                    let mut slots = slots.lock().unwrap();
+                    if slots.len() >= 64 && !slots.contains_key(&id) {
+                        return Err(unresolved());
+                    }
+                    slots
+                        .entry(id.clone())
+                        .or_insert_with(|| {
+                            Arc::new(Slot {
+                                busy: AtomicBool::new(false),
+                                retained: Mutex::new(None),
+                            })
+                        })
+                        .clone()
+                };
+                if slot
+                    .busy
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    return Err(unresolved());
+                }
+                let mut claim = SlotClaim(Some(slot.clone()));
+                let opened = async {
+                    let previous = slot.retained.lock().unwrap().take();
+                    let reusable = if let Some(previous) = previous {
+                        if previous.selection == selected
+                            && Arc::ptr_eq(&previous.session.0.client, &client)
+                            && !previous.session.0.closed.is_cancelled()
+                            && tokio::time::Instant::now() < previous.until
+                        {
+                            Some(previous.session)
+                        } else {
+                            previous.session.close().await?;
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    let session = if let Some(session) = reusable {
+                        session
+                    } else {
+                        if contexts.task_pending(id.clone()).await? {
+                            return Err(unresolved());
+                        }
+                        NativeMcpSession::new(
+                            client,
+                            tools,
+                            configuration,
+                            CancellationToken::new(),
+                            contexts,
+                        )?
+                    };
+                    let interval = model::number(&task, "intervalSeconds")? as u64;
+                    let keep = model::truth(&task, "enabled") && interval > 0 && interval < 1800;
+                    let retention = Duration::from_secs((interval + 60).min(1800));
+                    *slot.retained.lock().unwrap() = Some(Retained {
+                        session: session.clone(),
+                        selection: selected,
+                        until: tokio::time::Instant::now() + retention,
+                    });
+                    Ok::<_, IvyError>(Arc::new(Lease {
+                        session: session.for_run(signal.clone(), id),
+                        slot: slot.clone(),
+                        keep,
+                        retention,
+                        finished: AtomicBool::new(false),
+                    }) as Arc<dyn TaskMcp>)
+                }
+                .await;
+                let opened = opened?;
+                claim.0 = None;
+                opened
+            };
+            Ok(Arc::new(LocalBridge::open(session, signal).await?) as Arc<dyn McpBridge>)
         })
     }
 }

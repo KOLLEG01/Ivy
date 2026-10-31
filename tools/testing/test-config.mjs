@@ -43,6 +43,7 @@ export function scope(file) {
   return "host";
 }
 export function kind(file) {
+  if (file === 'tests/host-codex-cases.test.mjs') return 'native';
   if (/^tests\/rust\/phone_(?:media_codec|realtime(?:_native)?|micro_(?:transport|attachment|client_files|command_output|client)|desktop_(?:controls|actions|activation|process|application)|process_ownership|windows_controls|windows_(?:audio|route|render(?:_(?:pump|format|device|owner|status))?|capture(?:_(?:device|owner))?)|voice_input(?:_owner)?|voice_runtime|call_desktop(?:_faults)?|call_voice(?:_faults)?|audio_mute(?:_windows)?|inventory_windows|loopback_(?:probe|windows)|native_(?:audio|codec|inventory|composition(?:_entry)?|probe|voice_input|bootstrap|desktop|process|call_desktop(?:_faults|_entry)?))\.rs$/.test(file))
     return "native";
   if (file === 'tests/secretary-rust/document_process_cases.rs') return 'native';
@@ -52,6 +53,7 @@ export function kind(file) {
   return "core";
 }
 export function affected(file) {
+  if (file.startsWith('services/codex-server/')) return ['host'];
   if (isRustRootInput(file) || /^packages\/store\//.test(file)) return scopes.filter(s => s !== 'tooling');
   if (/^(services\/data-collector|docs\/examples\/data-collector|ui\/data-collector-ui)/.test(file)) return ["data-collector"];
   if (/^(services\/dashboards|ui\/dashboards-ui)/.test(file)) return ["dashboards"];
@@ -132,6 +134,11 @@ export const privateRepo = false;
 
 // Explicit Cargo targets keep --files narrow and do not infer service ownership.
 export const rustTests = {
+  "tests/rust/host-shared-server.rs": { package: "ivy-codex-server", test: "shared-server" },
+  "tests/rust/agent-native-connection.rs": {
+    package: "ivy-agent-manager", test: "agent-interactions", filter: "native_connection_cases::", testThreads: 1,
+    prerequisites: [{ platform: "win32", package: "ivy-host-runtime", bin: "ivy-job" }],
+  },
   "tests/rust/sdk-websocket-queue.rs": {
     "package": "ivy-sdk",
     "lib": true,
