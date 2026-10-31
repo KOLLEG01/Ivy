@@ -493,7 +493,7 @@ fn mcp_provider_projection_keeps_utf16_flags_policies_and_order() {
         ("b", [false.into(),true.into(),true.into(),true.into()],Some(("old_read","ivy_dev"))),
         ("c", [true.into(),true.into(),true.into(),true.into()],Some(("other_read","ivy_dev"))),
         ("d", [true.into(),IvyJson::Null,true.into(),true.into()],Some(("old_read","ivy_dev"))),
-        ("e", [true.into(),true.into(),true.into(),1.into()],None),
+        ("e", [true.into(),true.into(),true.into(),1.0.into()],None),
     ] { insert_catalog_provider(&store,id,flags,mcp,0); }
     store.connection().execute("UPDATE service_nodes SET status_json=json_remove(status_json,'$.ready') WHERE id='e'",[]).unwrap();
     let mut owner=Registry::default();
