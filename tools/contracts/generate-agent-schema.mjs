@@ -655,6 +655,8 @@ const definitions = {
       }),
     ],
   },
+  TaskOutputCleanupInput: object({ taskKey: { ...id, pattern: "^TASK-[0-9]{4,}$" } }),
+  TaskOutputCleanup: object({ path: { ...text(2048), minLength: 1 }, removed: bool }),
   WorkspaceResolveInput: object(
     {
       taskKey: { ...id, pattern: "^TASK-[0-9]{4,}$" },

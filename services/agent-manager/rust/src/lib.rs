@@ -63,3 +63,4 @@ pub mod skills_prepare;
 pub mod staged_files;
 pub mod startup;
 pub mod status;
+pub mod task_outputs;

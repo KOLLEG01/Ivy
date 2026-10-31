@@ -3,7 +3,7 @@ use ivy_contracts::{
     json::{parse, stringify},
 };
 use ivy_host_runtime::codex_rpc::{Events, NativeRpc, RequestOptions};
-use ivy_phone_bridge::voice_rpc::{VoiceRpc, VoiceSchemas, call_timeout_ms};
+use crate::voice_rpc::{VoiceRpc, VoiceSchemas, call_timeout_ms};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -62,7 +62,7 @@ async fn shared_catalog_keeps_distinct_voice_connection_identities() {
 
 #[test]
 fn model_selection_preserves_keypad_aliases_and_advertised_future_efforts() {
-    use ivy_phone_bridge::voice_selection::{VoiceSelection, selected_keypad_model};
+    use crate::voice_selection::{VoiceSelection, selected_keypad_model};
     assert_eq!(
         VoiceSelection::default().to_wire(),
         value(r#"{"model":"gpt-6.1-sol","reasoningEffort":"high"}"#)

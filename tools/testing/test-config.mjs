@@ -149,15 +149,9 @@ export const rustTests = {
     "filter": "ws_socket_io::queue_tests::",
     "testThreads": 1
   },
-  "tests/rust/data-collector-native-mcp.rs": {
-    "package": "ivy-data-collector",
-    "lib": true,
-    "filter": "native_mcp::tests::",
-    "testThreads": 1
-  },
-  "tests/rust/data-collector-http.rs": {
-    "package": "ivy-data-collector",
-    "test": "data-collector-http"
+  "tests/rust/hive_storage_thread.rs": { "package": "ivy-hive", "test": "hive-storage-thread" },
+  "tests/rust/host-memory.rs": {
+    package: "ivy-host-runtime", test: "host-memory",
   },
   "tests/fixtures/task-board-document-json.rs": {
     package: "ivy-task-board", test: "task-board-host-runtime", filter: "document_json::",
@@ -169,96 +163,6 @@ export const rustTests = {
     package: "ivy-task-board", lib: true,
     filter: "journal_store::persistent_reads::task_comments::memory_tests",
   },
-  "tests/fixtures/task-board-journal-memory.rs": {
-    "package": "ivy-task-board",
-    "test": "task-board-blobs",
-    "filter": "journal_memory::",
-    "testThreads": 1
-  },
-  "tests/secretary-rust/journal-memory.rs": {
-    "package": "ivy-secretary",
-    "test": "journal",
-    "filter": "retention_memory::"
-  },
-  "tests/rust/hive_storage_thread.rs": { "package": "ivy-hive", "test": "hive-storage-thread" },
-  "tests/rust/hive_query_cache.rs": {
-    "package": "ivy-hive",
-    "lib": true,
-    "filter": "store::query::cache_tests::"
-  },
-  "tests/rust/hive_contract_catalog.rs": {
-    "package": "ivy-hive",
-    "lib": true,
-    "filter": "contract_catalog::tests::",
-    "testThreads": 1
-  },
-  "tests/rust/hive_routing_ownership.rs": {
-    "package": "ivy-hive",
-    "lib": true,
-    "filter": "live_routing::ownership_tests::",
-    "testThreads": 1
-  },
-  "tests/rust/hive_discovery_cache.rs": {
-    "package": "ivy-hive",
-    "lib": true,
-    "filter": "discovery::cache_tests::"
-  },
-  "tests/rust/hive_discovery_memory.rs": {
-    "package": "ivy-hive",
-    "lib": true,
-    "filter": "discovery::memory_tests::",
-    "testThreads": 1
-  },
-  "tests/rust/hive_retention_graph.rs": {
-    "package": "ivy-hive",
-    "lib": true,
-    "filter": "retention::graph_tests::",
-    "testThreads": 1
-  },
-  "tests/rust/hive_retention_catalog.rs": {
-    "package": "ivy-hive",
-    "lib": true,
-    "filter": "retention::catalog_tests::",
-    "testThreads": 1
-  },
-  "tests/rust/hive_registry_catalog_memory.rs": {
-    "package": "ivy-hive",
-    "lib": true,
-    "filter": "registry::catalog_memory_tests::",
-    "testThreads": 1
-  },
-  "tests/rust/hive_catalog_reads.rs": {
-    "package": "ivy-hive",
-    "lib": true,
-    "filter": "kernel::catalogs::read_tests::",
-    "testThreads": 1
-  },
-  "tests/rust/hive_deployment_catalog.rs": {
-    "package": "ivy-hive",
-    "lib": true,
-    "filter": "kernel::catalogs::deployments::tests::",
-    "testThreads": 1
-  },
-  "tests/rust/hive_storage_payload_memory.rs": {
-    "package": "ivy-hive",
-    "lib": true,
-    "filter": "storage::payload_tests::",
-    "testThreads": 1
-  },
-  "tests/rust/hive_oauth_retention.rs": {
-    "package": "ivy-hive",
-    "lib": true,
-    "filter": "worker_identity::retention_tests::",
-    "testThreads": 1
-  },
-  "tests/rust/hive_registry_catalog.rs": {
-    package: "ivy-hive",
-    lib: true,
-    filter: "registry_catalog::tests::",
-    testThreads: 1,
-  },
-  "tests/rust/host-memory.rs": { package: "ivy-host-runtime", test: "host-memory" },
-  "tests/rust/native-catalog-memory.rs": { package: "ivy-host-runtime", test: "native-catalog-memory", testThreads: 1 },
   "tests/rust/chat-files.rs": {
     "package": "ivy-chat-bridge",
     "lib": true,
@@ -361,6 +265,11 @@ export const rustTests = {
   "tests/rust/agent-native-rpc.rs": {
     "package": "ivy-host-runtime",
     "test": "native-rpc"
+  },
+  "tests/rust/native-catalog-memory.rs": {
+    "package": "ivy-host-runtime",
+    "test": "native-catalog-memory",
+    "testThreads": 1
   },
   "tests/secretary-rust/assignment_tick_cases.rs": {
     "package": "ivy-secretary",
@@ -828,6 +737,12 @@ export const rustTests = {
     "filter": "retention::",
     "testThreads": 1
   },
+  "tests/fixtures/task-board-journal-memory.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-blobs",
+    "filter": "journal_memory::",
+    "testThreads": 1
+  },
   "tests/fixtures/task-board-evidence-support.rs": {
     "package": "ivy-task-board",
     "test": "task-board-blobs",
@@ -1246,10 +1161,50 @@ export const rustTests = {
     "filter": "store::events::",
     "testThreads": 1
   },
+  "tests/rust/hive_query_cache.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "store::query::cache_tests::"
+  },
+  "tests/rust/hive_contract_catalog.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "contract_catalog::tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_routing_ownership.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "live_routing::ownership_tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_discovery_cache.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "discovery::cache_tests::"
+  },
+  "tests/rust/hive_discovery_memory.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "discovery::memory_tests::",
+    "testThreads": 1
+  },
   "tests/rust/hive_retention.rs": {
     "package": "ivy-hive",
     "test": "hive-storage-worker",
     "filter": "store::retention::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_retention_graph.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "retention::graph_tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_retention_catalog.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "retention::catalog_tests::",
     "testThreads": 1
   },
   "tests/rust/hive_registry.rs": {
@@ -1257,6 +1212,42 @@ export const rustTests = {
     "test": "hive-storage-worker",
     "filter": "store::registry::registry_",
     "testThreads": 1
+  },
+  "tests/rust/hive_registry_catalog_memory.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "registry::catalog_memory_tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_catalog_reads.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "kernel::catalogs::read_tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_deployment_catalog.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "kernel::catalogs::deployments::tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_storage_payload_memory.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "storage::payload_tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_oauth_retention.rs": {
+    "package": "ivy-hive",
+    "lib": true,
+    "filter": "worker_identity::retention_tests::",
+    "testThreads": 1
+  },
+  "tests/rust/hive_registry_catalog.rs": {
+    package: "ivy-hive",
+    lib: true,
+    filter: "registry_catalog::tests::",
+    testThreads: 1,
   },
   "tests/rust/hive_search.rs": {
     "package": "ivy-hive",
@@ -1765,6 +1756,12 @@ export const rustTests = {
     "package": "ivy-data-collector",
     "test": "data-collector-store"
   },
+  "tests/rust/data-collector-native-mcp.rs": {
+    "package": "ivy-data-collector",
+    "lib": true,
+    "filter": "native_mcp::tests::",
+    "testThreads": 1
+  },
   "tests/rust/data-collector-policy.rs": {
     "package": "ivy-data-collector",
     "test": "data-collector-policy"
@@ -1772,6 +1769,10 @@ export const rustTests = {
   "tests/rust/data-collector-worker.rs": {
     "package": "ivy-data-collector",
     "test": "data-collector-worker"
+  },
+  "tests/rust/data-collector-http.rs": {
+    "package": "ivy-data-collector",
+    "test": "data-collector-http"
   },
   "tests/rust/data-collector-publication.rs": {
     "package": "ivy-data-collector",
@@ -1891,6 +1892,11 @@ export const rustTests = {
   "tests/secretary-rust/journal.rs": {
     "package": "ivy-secretary",
     "test": "journal"
+  },
+  "tests/secretary-rust/journal-memory.rs": {
+    "package": "ivy-secretary",
+    "test": "journal",
+    "filter": "retention_memory::"
   },
   "tests/secretary-rust/schedule-policy.rs": {
     "package": "ivy-secretary",
@@ -2264,8 +2270,8 @@ export const rustTests = {
   },
   "tests/rust/phone_voice_rpc.rs": {
     "package": "ivy-phone-bridge",
-    "test": "phone_native_rpc",
-    "filter": "voice_rpc::",
+    "lib": true,
+    "filter": "voice_rpc::rpc_tests::",
     "testThreads": 1
   },
   "tests/rust/phone_voice_schemas.rs": {

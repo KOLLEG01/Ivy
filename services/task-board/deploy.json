@@ -22,7 +22,7 @@
     {
       "executable": "node",
       "args": [
-        "tools/build/build-deployment.mjs",
+        "tools/build/build-native-deployment.mjs",
         "--component",
         "task-board"
       ],

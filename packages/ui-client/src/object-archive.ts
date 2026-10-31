@@ -1,12 +1,13 @@
 import { computed, ref } from 'vue';
 import { useRemote } from '@ivy/ui';
-import { callBound, canonical, discover, IvyError, newOperationId } from '../../sdk/src/client.js';
+import { callBound, discover, IvyError, newOperationId } from '../../sdk/src/client.js';
 import type { Result, RpcClient } from '../../sdk/src/client.js';
 import type { TaskBoard, Wire } from '../../sdk/src/client.js';
+import { hashJson } from './hash';
 
 export interface PendingArchive { objectId: string; archived: boolean; mutationId: string; call?: Wire.ToolCall }
-type ArchiveOutcome = { phase: 'succeeded'; archive: Result<'objects.archive'>; operation?: TaskBoard.Operation }
-  | { phase: 'failed'; message: string; operation: TaskBoard.Operation };
+type ArchiveOutcome = { phase: 'succeeded'; archive: Result<'objects.archive'>; operation?: TaskBoard.OperationReceipt }
+  | { phase: 'failed'; message: string; operation: TaskBoard.OperationReceipt };
 
 const matchesArchive = (object: Result<'objects.stat'>, pending: PendingArchive) =>
   object.id === pending.objectId && (object.archivedAt !== null) === pending.archived && (!pending.call || object.effectivelyArchived === pending.archived);
@@ -23,10 +24,10 @@ export async function readArchiveOutcome(client: RpcClient, pending: PendingArch
     const workspace = await callBound(client, await discover(client, 'task-board.workspace', { serviceNodeId: call.serviceNodeId }), {}, undefined, options) as TaskBoard.WorkspaceInfo;
     if (workspace.callerPrincipalId !== expected.callerPrincipalId || workspace.principalId !== expected.principalId || workspace.rootObjectId !== expected.rootObjectId)
       throw new Error('The original archive belongs to another caller or workspace.');
-    let operation: TaskBoard.Operation;
+    let operation: TaskBoard.OperationReceipt;
     try {
       operation = await callBound(client, await discover(client, 'task-board.operation', { serviceNodeId: call.serviceNodeId }),
-        { operationId: call.operationId }, undefined, options) as TaskBoard.Operation;
+        { operationId: call.operationId }, undefined, options) as TaskBoard.OperationReceipt;
     } catch (cause) {
       // Only the owner's eviction guard proves this workflow is terminal. A not-found
       // or unavailable operation can still be awaiting acceptance or resolution.
@@ -35,8 +36,9 @@ export async function readArchiveOutcome(client: RpcClient, pending: PendingArch
       if (object.parentId === expected.rootObjectId && matchesArchive(object, pending)) return { phase: 'succeeded', archive: object };
       return null;
     }
-    if (operation.operationId !== call.operationId || operation.callerPrincipalId !== expected.callerPrincipalId ||
-        canonical(operation.request) !== canonical(call.arguments))
+    if (operation.receipt !== true || operation.operationId !== call.operationId || operation.callerPrincipalId !== expected.callerPrincipalId ||
+        operation.action !== 'archive' || operation.taskId !== pending.objectId ||
+        (operation.submittedHash ?? operation.requestHash) !== await hashJson(call.arguments))
       throw new Error('The archive receipt differs from the original caller or request.');
     if (operation.phase === 'succeeded' && operation.outcome?.archive && matchesArchive(operation.outcome.archive, pending))
       return { phase: 'succeeded', archive: operation.outcome.archive, operation };

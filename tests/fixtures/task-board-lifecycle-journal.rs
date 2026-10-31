@@ -76,6 +76,15 @@ impl Contracts for Policy {
                 ];
                 let mut a = v.clone();
                 let mut b = self.task.clone();
+                for task in [&mut a, &mut b] {
+                    task.remove("blocker");
+                    if task.get("wakeAt").is_none() {
+                        task.insert("wakeAt", Json::Null);
+                    }
+                    if task.get("dependencies").is_none() {
+                        task.insert("dependencies", Json::Array(vec![]));
+                    }
+                }
                 for k in dynamic {
                     a.remove(k);
                     b.remove(k);

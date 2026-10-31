@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ArchiveOutputsHint from "./ArchiveOutputsHint.vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { crossAgentComment, openQuestions } from '../../../packages/ui-client/src/task-board';
 import {
@@ -774,6 +775,7 @@ const showArrived = () => {
                     : "Archive task"
                 }}</DropdownMenuItem
               >
+              <ArchiveOutputsHint v-if="!task.value.value.archived && !task.value.value.value.claim" />
               <DropdownMenuItem
                 v-if="canDelete"
                 variant="destructive"
