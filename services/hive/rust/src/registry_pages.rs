@@ -41,7 +41,7 @@ impl Registry {
         let count = sql(store,store.connection().query_row(
             "SELECT count(*) FROM (SELECT 1 FROM host_reports
              WHERE (?1 IS NULL OR host_id=?1) LIMIT 1001)", [host.as_deref()],
-            |row| row.get::<_,usize>(0),
+            |row| row.get::<_,i64>(0),
         ))?;
         require(count<=1000,"limit_exceeded","Host observation catalog exceeds its operating bound.")?;
         let identity = objects::page_identity("hosts.observations",params)?;
