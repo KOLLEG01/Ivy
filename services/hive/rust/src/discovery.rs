@@ -664,7 +664,6 @@ impl Discovery {
             for ns in &catalog.namespaces {
                 let guide = guide(ns.guide_markdown.as_ref().ok_or_else(IvyError::internal)?, &catalog)?;
                 for binding in catalog.bindings(ns) {
-                    let available = node.available;
                     if !mcp_policy_selected(&active, &node, binding)? {
                         continue;
                     }

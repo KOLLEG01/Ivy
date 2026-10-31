@@ -792,11 +792,11 @@ fn instruction_guides_keep_tool_order_when_presentation_collation_ties() {
         insert_catalog_provider(&store, id, [true.into(), true.into(), true.into(), true.into()], Some((name, "ivy")), 0);
         store.connection().execute("UPDATE registries SET registry_json=json_set(registry_json,'$.namespaces[0].guideMarkdown',?) WHERE node_id=?", rusqlite::params![format!("{id} guide"), id]).unwrap();
     }
-    let mut registry = Registry::default();
+    let registry = Registry::default();
     let mut catalog = registry.get_registry(&store, &"z".into()).unwrap().unwrap();
-    let IvyJson::Array(mut namespaces) = catalog.remove("namespaces").unwrap() else { unreachable!() };
+    let mut namespaces = catalog.remove("namespaces").unwrap().into_array().unwrap();
     let mut ns = namespaces.remove(0);
-    let IvyJson::Array(mut tools) = ns.remove("tools").unwrap() else { unreachable!() };
+    let mut tools = ns.remove("tools").unwrap().into_array().unwrap();
     let base = tools.remove(0);
     for (namespace, name, mcp) in [("x", "one", "z_read"), ("y", "two", "tie_b"), ("x", "three", "tie_a")] {
         let mut tool = base.clone();
@@ -839,9 +839,9 @@ fn instruction_guides_avoid_schema_and_repeated_guide_copies() {
         let id = format!("provider{index:02}");
         insert_catalog_provider(&store, &id, [true.into(), true.into(), true.into(), true.into()], Some(("fixture_read", "ivy")), 0);
         let mut catalog = Registry::default().get_registry(&store, &id.as_str().into()).unwrap().unwrap();
-        let IvyJson::Array(mut namespaces) = catalog.remove("namespaces").unwrap() else { unreachable!() };
+        let mut namespaces = catalog.remove("namespaces").unwrap().into_array().unwrap();
         let mut ns = namespaces.remove(0);
-        let IvyJson::Array(mut tools) = ns.remove("tools").unwrap() else { unreachable!() };
+        let mut tools = ns.remove("tools").unwrap().into_array().unwrap();
         let base = tools.remove(0);
         for i in 0..8 {
             let mut tool = base.clone();
