@@ -499,11 +499,15 @@ fn measured_inventory_pages(steps: &[Value]) {
         .find(|record| {
             record
                 .sql
-                .starts_with("SELECT i.*,s.revision AS snapshot_revision")
+                .starts_with("SELECT i.rowid,")
         })
         .unwrap();
     assert_eq!(query.rows, 8);
     assert!(query.sql.contains("LIMIT ?"));
+    let payloads = large.iter().filter(|record|
+        record.sql.starts_with("SELECT i.*,s.revision AS snapshot_revision")).collect::<Vec<_>>();
+    assert_eq!(payloads.len(), 7);
+    assert!(payloads.iter().all(|record| record.rows == 1 && record.sql.contains("WHERE i.rowid=?1")));
     let plan = kernel
         .parts
         .store
