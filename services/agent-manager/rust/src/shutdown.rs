@@ -16,6 +16,7 @@ pub type FinalHealth = dyn Fn(JsString) -> ServiceFuture<()> + Send + Sync;
 /// which have not been created yet. There are no alternate stop/force paths.
 pub struct ShutdownPhases {
     pub stop_timer: Arc<dyn Fn() + Send + Sync>,
+    pub admissions: Arc<ShutdownStep>,
     pub native: Arc<ShutdownStep>,
     pub work: Arc<ShutdownStep>,
     pub service: Arc<ShutdownStep>,
@@ -118,8 +119,10 @@ impl AgentShutdown {
         if let Some(run) = running.as_ref() {
             return Ok(run.clone());
         }
-        self.0.closing.store(true, Ordering::Release);
         (self.0.phases.stop_timer)();
+        // Retire admission synchronously, before close returns. Calls already
+        // admitted still need the native owner, including dispatch availability.
+        let admissions = (self.0.phases.admissions)();
         let (sender, receiver) = watch::channel(None);
         let run = ShutdownRun(Arc::new(receiver));
         *running = Some(run.clone());
@@ -132,6 +135,8 @@ impl AgentShutdown {
                 sender: Some(sender),
             };
             let phases = &owner.phases;
+            attempt(admissions, &first).await;
+            owner.closing.store(true, Ordering::Release);
             attempt((phases.native)(), &first).await;
             attempt((phases.work)(), &first).await;
             attempt((phases.service)(), &first).await;

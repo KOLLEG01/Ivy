@@ -29,6 +29,8 @@ mod native_rpc_cases;
 mod native_shell_cases;
 #[path = "agent-service-kernel.rs"]
 mod service_kernel;
+#[path = "agent-shutdown.rs"]
+mod shutdown_cases;
 
 fn json(s: &str) -> IvyJson {
     parse(s, 1024 * 1024).unwrap()

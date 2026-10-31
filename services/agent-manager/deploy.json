@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "agent-manager",
   "kind": "service",
-  "version": "0.4.23",
+  "version": "0.4.24",
   "description": "Pinned public native Codex owner, complete projections, inventory and durable outcomes",
   "connectsToHive": true,
   "requirements": {
@@ -38,7 +38,7 @@
     }
   },
   "shutdown": {
-    "timeoutMs": 15000
+    "timeoutMs": 150000
   },
   "restart": {
     "policy": "always",

@@ -3026,6 +3026,12 @@ export const rustTests = {
     "filter": "artifact_inventory_cases::",
     "testThreads": 1
   },
+  "tests/rust/agent-shutdown.rs": {
+    "test": "agent-interactions",
+    "package": "ivy-agent-manager",
+    "filter": "shutdown_cases::",
+    "testThreads": 1
+  },
   "tests/rust/chat-desktop-host-cases.rs": {
     "test": "chat-journal",
     "testThreads": 1,

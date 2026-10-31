@@ -112,19 +112,20 @@ impl AgentHandlers {
                         "agent.resolveProject",
                         "agent.stageFile",
                         "agent.invoke",
+                        "agent.prevent",
                         "agent.interact",
                         "agent.read",
                     ]
                     .iter()
                     .any(|v| name == JsString::from(*v));
-                    (
-                        name,
-                        if tracked {
-                            work.handler(handler)
-                        } else {
-                            handler
-                        },
-                    )
+                    let handler = if name == JsString::from("agent.answer") {
+                        work.reply_handler(handler)
+                    } else if tracked {
+                        work.handler(handler)
+                    } else {
+                        handler
+                    };
+                    (name, handler)
                 })
                 .collect(),
             native: self
@@ -284,6 +285,7 @@ impl Resources {
     fn shutdown(self: &Arc<Self>, closing: Arc<AtomicBool>) -> AgentShutdown {
         let resources = self.clone();
         let native = self.clone();
+        let admissions = self.clone();
         let work = self.clone();
         let service = self.clone();
         let locations = self.clone();
@@ -314,6 +316,7 @@ impl Resources {
                 stop_timer: Arc::new(move || {
                     resources.stop_timer.send_replace(true);
                 }),
+                admissions: Arc::new(move || admissions.work.close()),
                 native: Arc::new(move || {
                     // Signal the native owner at phase admission, before its waiter.
                     let run = get(&native.native).map(|owner| owner.map(|owner| owner.close()));
@@ -325,11 +328,10 @@ impl Resources {
                     })
                 }),
                 work: Arc::new(move || {
-                    let invocations = work.work.drain_snapshot();
                     let receipts = work.receipts.clone();
                     let inventory = get(&work.inventory);
                     Box::pin(async move {
-                        let _ = tokio::join!(invocations, receipts.drain(), async {
+                        let _ = tokio::join!(receipts.drain(), async {
                             if let Some(inventory) = inventory? {
                                 inventory.drain().await?;
                             }
