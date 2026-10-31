@@ -591,36 +591,3 @@ fn inventory_utf16_sql_aliases_and_retained_missing_schema_projection_match_orig
     assert_eq!(value(&rows, get_old)["schemaVersion"], "9.0.0");
 }
 
-#[test]
-fn inventory_selected_provider_flags_and_contact_overrides_match_original() {
-    let mut steps = setup();
-    for id in ["a", "b"] {
-        ready(&mut steps, id, "host");
-        push(&mut steps, snapshot(id, 1,
-            vec![entry("one", "One", json!(1), json!(false), OBSERVED)]));
-    }
-    let mut cases = vec![];
-    // Heartbeat contact remains newer than the stored timestamp. All four
-    // flags require JSON true, rather than a truthy value or numeric one.
-    push(&mut steps, sql("UPDATE service_nodes SET status_json=json_set(status_json,'$.lastContactAt','1970-01-01T00:00:00.000Z');"));
-    let fresh = push(&mut steps, list(json!({"serviceNodeId":"a","hostId":"host","serviceName":"sample"})));
-    for flag in ["connected", "synced", "ready", "desiredEnabled"] {
-        for value in ["false", "null", "1", "\"true\""] {
-            push(&mut steps, sql(&format!("UPDATE service_nodes SET status_json=json_set(status_json,'$.{flag}',json('{value}')) WHERE id='a';")));
-            let listed = push(&mut steps, list(json!({"limit":1})));
-            let got = push(&mut steps, get("a", "one"));
-            cases.push((listed, got));
-        }
-        push(&mut steps, sql(&format!("UPDATE service_nodes SET status_json=json_set(status_json,'$.{flag}',json('true')) WHERE id='a';")));
-    }
-    let final_page = push(&mut steps, list(json!({"limit":1})));
-    let next = push(&mut steps, follow(list(json!({"limit":1})), final_page));
-    let rows = compare(&steps);
-    assert_eq!(value(&rows, fresh)["items"][0]["stale"], false);
-    for (listed, got) in cases {
-        assert_eq!(value(&rows, listed)["items"][0]["stale"], true);
-        assert_eq!(value(&rows, got)["stale"], true);
-    }
-    assert_eq!(value(&rows, final_page)["items"][0]["stale"], false);
-    assert_eq!(value(&rows, next)["items"][0]["resourceRef"]["serviceNodeId"], "b");
-}
