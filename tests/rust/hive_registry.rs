@@ -1125,6 +1125,121 @@ fn registry_heartbeat_diagnostics_utc_and_notification_thresholds_match_original
 }
 
 #[test]
+fn registry_node_and_list_select_service_diagnostics_independently_of_the_resource() {
+    use ivy_hive::{native_runtime::NativeRuntime, store::Credential};
+    let root = Root::new();
+    let mut store = Store::open(&root.0.join("node-diagnostics.sqlite")).unwrap();
+    store
+        .configure_credentials(&[Credential {
+            principal_id: "alpha".into(),
+            digest: digest(true).into(),
+        }])
+        .unwrap();
+    let principal = AuthenticatedContext {
+        principal_id: "alpha".into(),
+        credential_digest: digest(true).into(),
+    };
+    let json = |value: Value| IvyJson::from_serde(&value).unwrap();
+    let mut registry = Registry::new(&mut store, &NativeRuntime, 100000.0).unwrap();
+    for id in [
+        "worker".into(),
+        "nul\0tail".into(),
+        JsString(vec![0x78, 0xd800]),
+    ] {
+        let mut parameters = json(connect("worker", "sample", "own-host", 1)["params"].clone());
+        parameters.insert("serviceNodeId", IvyJson::String(id.clone()));
+        registry
+            .connect(
+                &mut store,
+                &ConnectionContext {
+                    principal: &principal,
+                    session_digest: None,
+                    generation: Some(1.0),
+                },
+                &parameters,
+                &NativeRuntime,
+                100000.0,
+            )
+            .unwrap();
+        let source = JsString(
+            "service:"
+                .encode_utf16()
+                .chain(id.0.iter().copied())
+                .collect(),
+        );
+        let mut unrelated = json(diagnostic(
+            "unrelated",
+            "worker",
+            "current",
+            "1970-01-01T00:01:40Z",
+            "1970-01-01T00:01:49Z",
+        ));
+        unrelated.insert(
+            "source",
+            JsString(
+                source
+                    .0
+                    .iter()
+                    .copied()
+                    .chain("-other".encode_utf16())
+                    .collect(),
+            )
+            .into(),
+        );
+        unrelated.insert(
+            "resource",
+            IvyJson::object([("serviceNodeId", id.clone().into())]),
+        );
+        registry
+            .diagnostic(&mut store, &unrelated, &NativeRuntime, 100000.0)
+            .unwrap();
+        let mut resolved = unrelated.clone();
+        resolved.insert("source", source.clone().into());
+        resolved.insert("status", "resolved".into());
+        registry
+            .diagnostic(&mut store, &resolved, &NativeRuntime, 100000.0)
+            .unwrap();
+        for (index, resource) in [
+            IvyJson::Null,
+            IvyJson::object([("objectId", "record".into())]),
+            IvyJson::object([("serviceNodeId", "different-worker".into())]),
+            IvyJson::object([("serviceNodeId", id.clone().into())]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let code = format!("problem-{index}");
+            let mut alert = json(diagnostic(
+                &code,
+                "worker",
+                "current",
+                "1970-01-01T00:01:40Z",
+                &format!("1970-01-01T00:01:{:02}Z", 40 + index),
+            ));
+            alert.insert("source", source.clone().into());
+            alert.insert("resource", resource);
+            registry
+                .diagnostic(&mut store, &alert, &NativeRuntime, 100000.0)
+                .unwrap();
+            let single = registry
+                .node(&store, &id, &NativeRuntime, 100000.0)
+                .unwrap();
+            let listed = registry
+                .nodes(&store, &NativeRuntime, 100000.0)
+                .unwrap()
+                .into_iter()
+                .find(|value| value.get("serviceNodeId") == Some(&id.clone().into()))
+                .unwrap();
+            assert_eq!(single.get("diagnostic"), listed.get("diagnostic"));
+            assert_eq!(
+                single.get("diagnostic").and_then(|value| value.get("code")),
+                Some(&IvyJson::from(code))
+            );
+        }
+    }
+}
+
+#[test]
 fn registry_heartbeat_selects_lossless_sources_and_skips_resolved_history() {
     use ivy_hive::{native_runtime::NativeRuntime, store::Credential};
     let root = Root::new();

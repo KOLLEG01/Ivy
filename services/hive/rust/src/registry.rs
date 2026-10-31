@@ -212,17 +212,16 @@ impl Registry {
                 .filter(|v| !v.contains('\0'));
             let query = if source.is_some() {
                 "SELECT diagnostic_json FROM diagnostics WHERE json_extract(diagnostic_json,'$.source')=?
-                 AND json_extract(diagnostic_json,'$.status')='current'
-                 AND json_extract(diagnostic_json,'$.resource.serviceNodeId')=? ORDER BY rowid"
+                 AND json_extract(diagnostic_json,'$.status')='current' ORDER BY rowid"
             } else {
-                "SELECT diagnostic_json FROM diagnostics WHERE json_extract(diagnostic_json,'$.status')='current'
-                 AND json_extract(diagnostic_json,'$.resource.serviceNodeId')=? ORDER BY rowid"
+                // Compare lossless non-UTF-8/NUL sources below; skip resolved history in SQL.
+                "SELECT diagnostic_json FROM diagnostics WHERE json_extract(diagnostic_json,'$.status')='current' ORDER BY rowid"
             };
             let mut statement = sql(store, store.connection().prepare_cached(query))?;
             stored = sql(
                 store,
                 statement.query_map(
-                    rusqlite::params_from_iter(source.iter().cloned().chain([text(id)])),
+                    rusqlite::params_from_iter(source.iter()),
                     |r| r.get::<_, String>(0),
                 ),
             )?
