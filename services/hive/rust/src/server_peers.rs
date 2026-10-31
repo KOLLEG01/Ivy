@@ -29,11 +29,35 @@ use tokio::{sync::oneshot, task::AbortHandle, time::Instant};
 pub trait PeerSocket: Socket + Send {
     fn ping(&mut self) -> IvyResult<()>;
 }
+struct NotificationFilter {
+    namespace: JsString,
+    name: JsString,
+    version: JsString,
+    service_node_id: Option<JsString>,
+}
+impl NotificationFilter {
+    fn from_validated(value: &IvyJson) -> IvyResult<Self> {
+        Ok(Self {
+            namespace: text(value, "namespace")?,
+            name: text(value, "name")?,
+            version: text(value, "version")?,
+            service_node_id: value.get("serviceNodeId")
+                .map(|_| text(value, "serviceNodeId")).transpose()?,
+        })
+    }
+    fn matches(&self, params: &IvyJson) -> bool {
+        params.get("namespace").and_then(IvyJson::as_js_string) == Some(&self.namespace)
+            && params.get("name").and_then(IvyJson::as_js_string) == Some(&self.name)
+            && params.get("version").and_then(IvyJson::as_js_string) == Some(&self.version)
+            && self.service_node_id.as_ref().is_none_or(|id|
+                params.get("serviceNodeId").and_then(IvyJson::as_js_string) == Some(id))
+    }
+}
 struct Session {
     active: usize,
     alive: bool,
     diagnosed_at: f64,
-    filters: Vec<IvyJson>,
+    filters: Vec<NotificationFilter>,
     changes: Vec<JsString>,
     expiry: Option<AbortHandle>,
 }
@@ -693,7 +717,9 @@ impl Peers {
             .required("filters")?
             .as_array()
             .ok_or_else(IvyError::internal)?
-            .to_vec();
+            .iter()
+            .map(NotificationFilter::from_validated)
+            .collect::<IvyResult<Vec<_>>>()?;
         let changes = params
             .get("changes")
             .and_then(IvyJson::as_array)
@@ -719,13 +745,7 @@ impl Peers {
         }))
     }
     fn subscribed(peer: &Peer, params: &IvyJson) -> bool {
-        peer.0.session.lock().unwrap().filters.iter().any(|filter| {
-            ["namespace", "name", "version"]
-                .iter()
-                .all(|key| filter.get(key) == params.get(key))
-                && (filter.get("serviceNodeId").is_none()
-                    || filter.get("serviceNodeId") == params.get("serviceNodeId"))
-        })
+        peer.0.session.lock().unwrap().filters.iter().any(|filter| filter.matches(params))
     }
     fn notification(&self, peer: &Peer, mut frame: IvyJson) {
         let delivered = (|| -> IvyResult<()> {
@@ -901,17 +921,18 @@ impl Peers {
             a.0.starts_with(&b.0) && a.0.get(b.0.len()) == Some(&47)
         }
         for peer in self.members() {
-            let watched = peer.0.session.lock().unwrap().changes.clone();
+            let session = peer.0.session.lock().unwrap();
             let selected: Vec<_> = scopes
                 .iter()
                 .filter(|scope| {
-                    watched
+                    session.changes
                         .iter()
                         .any(|watch| scope == &watch || below(scope, watch) || below(watch, scope))
                 })
                 .cloned()
                 .map(IvyJson::String)
                 .collect();
+            drop(session);
             if !selected.is_empty() {
                 peer.send(
                     &IvyJson::object([
