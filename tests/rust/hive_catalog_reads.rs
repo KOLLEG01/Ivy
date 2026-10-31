@@ -488,6 +488,139 @@ fn node_and_host_pages_load_only_selected_status_and_skip_unreturned_diagnostics
 }
 
 
+fn full_observation_catalog(store: &Store, registry: &Registry, params: &IvyJson, now: f64) -> IvyResult<IvyJson> {
+    let host=optional_string(params,"hostId").map(text);
+    let mut statement=sql(store,store.connection().prepare_cached(
+        "SELECT node_id,reported_at,snapshot_json FROM host_reports WHERE (?1 IS NULL OR host_id=?1) ORDER BY host_id LIMIT 1001"))?;
+    let records=sql(store,statement.query_map([host],|row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?))))?
+        .map(|row| {
+            let (id,at,snapshot)=sql(store,row)?;
+            let snapshot=decode(&snapshot)?;
+            let reporter=registry.node(store,&id.into(),&crate::native_runtime::NativeRuntime,now)?;
+            Ok(IvyJson::object([("snapshot",snapshot),("serviceNodeId",reporter.get("serviceNodeId").unwrap().clone()),
+                ("reportedAt",at.into()),("stale",(reporter.get("connected").and_then(IvyJson::as_bool)!=Some(true)
+                    ||reporter.get("ready").and_then(IvyJson::as_bool)!=Some(true)
+                    ||reporter.get("stale").and_then(IvyJson::as_bool)==Some(true)).into())]))
+        }).collect::<IvyResult<Vec<_>>>()?;
+    require(records.len()<=1000,"limit_exceeded","Host observation catalog exceeds its operating bound.")?;
+    crate::paging::catalog_page(store,records,&objects::page_identity("hosts.observations",params)?,
+        |record|key(record.get("snapshot").and_then(|v|v.get("status")).unwrap_or(&IvyJson::Null),"hostId"),
+        params.get("limit").and_then(IvyJson::as_f64).map(|v|v as usize),optional_string(params,"cursor"))
+}
+fn compare_observation_catalog(store: &Store, registry: &Registry, params: &IvyJson, now: f64) -> IvyResult<IvyJson> {
+    let expected=full_observation_catalog(store,registry,params,now).map_err(|error|error.to_wire());
+    let actual=registry.observation_page(store,params,&crate::native_runtime::NativeRuntime,now);
+    assert!(actual.as_ref().map_err(IvyError::to_wire)==expected.as_ref().map_err(Clone::clone),
+        "Host observation page differs: {:?}",actual.as_ref().err().map(|e|&e.code));
+    actual
+}
+fn insert_host_report(store: &Store, host: &str, id: &str, key: IvyJson, body_bytes: usize) {
+    let snapshot=IvyJson::object([("status",IvyJson::object([("hostId",key),
+        ("opaque","s".repeat(body_bytes).into())]))]);
+    store.connection().execute("INSERT INTO host_reports VALUES(?1,?2,1,'1970-01-01T00:00:00.000Z',?3)",
+        params![host,id,canonical(&snapshot,MANAGEMENT_FRAME_BYTES).unwrap()]).unwrap();
+}
+
+#[test]
+fn observation_pages_keep_live_fields_host_filters_exact_cursors_and_sort_ties() {
+    let store=node_page_store();let registry=Registry::default();
+    let keys=vec!["z".into(),"nul\0tail".into(),IvyJson::String(JsString(vec![0xd800])),
+        IvyJson::String(JsString(vec![0xd801])),"�".into(),"😀".into(),"é".into(),
+        "z".into(),"".into(),IvyJson::Null,false.into(),"empty filter".into()];
+    for (index,key) in keys.into_iter().enumerate() {
+        let id=format!("node{index:03}");
+        let mut node=IvyJson::object([("serviceNodeId",id.clone().into()),("hostId","host".into()),
+            ("connected",(index%3!=0).into()),("ready",(index%2==0).into()),
+            ("stale",true.into()),("lastContactAt","1970-01-01T00:00:00.000Z".into())]);
+        if index==1 {node.remove("lastContactAt");}
+        if index==4 {node.insert("lastContactAt","invalid date".into());}
+        insert_page_node(&store,&id,&node);
+        insert_host_report(&store,if index==11 {""} else {&id},&id,key,0);
+    }
+    for now in [0.0,10_000.0,10_001.0] {
+        for host in [None,Some("".into()),Some("node003".into()),Some("absent".into()),
+            Some(JsString(vec![0xd800]))] {
+            for limit in [1,2,50] {
+                let mut params=IvyJson::object([("limit",(limit as f64).into())]);
+                if let Some(host)=host.clone() {params.insert("hostId",host.into());}
+                let mut page=compare_observation_catalog(&store,&registry,&params,now).unwrap();
+                let mut pages=1;
+                while !page.get("nextCursor").unwrap().is_null() {
+                    params.insert("cursor",page.get("nextCursor").unwrap().clone());
+                    page=compare_observation_catalog(&store,&registry,&params,now).unwrap();
+                    pages+=1;assert!(pages<=13);
+                }
+                params.insert("cursor","invalid".into());
+                assert_eq!(compare_observation_catalog(&store,&registry,&params,now).unwrap_err().code,"invalid_cursor");
+            }
+        }
+    }
+    let all=registry.host_observations(&store,None,&crate::native_runtime::NativeRuntime,0.0).unwrap();
+    let page=compare_observation_catalog(&store,&registry,&IvyJson::Null,0.0).unwrap();
+    for entry in page.get("items").unwrap().as_array().unwrap() {
+        assert!(all.contains(entry));
+    }
+}
+
+#[test]
+fn observation_pages_keep_operating_and_response_bounds() {
+    let store=node_page_store();let registry=Registry::default();
+    insert_page_node(&store,"reporter",&IvyJson::object([("serviceNodeId","reporter".into()),("connected",true.into())]));
+    for index in 0..1001 {
+        let host=format!("host{index:04}");insert_host_report(&store,&host,"reporter",host.clone().into(),0);
+    }
+    for cursor in [None,Some("invalid")] {
+        let mut params=IvyJson::object([("limit",1.0.into())]);
+        if let Some(cursor)=cursor {params.insert("cursor",cursor.into());}
+        assert_eq!(compare_observation_catalog(&store,&registry,&params,0.0).unwrap_err().code,"limit_exceeded");
+    }
+    let filtered=IvyJson::object([("hostId","host1000".into())]);
+    assert_eq!(compare_observation_catalog(&store,&registry,&filtered,0.0).unwrap().get("items").unwrap().as_array().unwrap().len(),1);
+    store.connection().execute("DELETE FROM host_reports WHERE host_id='host1000'",[]).unwrap();
+    compare_observation_catalog(&store,&registry,&IvyJson::Null,0.0).unwrap();
+    store.connection().execute("DELETE FROM host_reports",[]).unwrap();
+    for index in 0..3 {let host=format!("host{index}");insert_host_report(&store,&host,"reporter",host.clone().into(),1100*1024);}
+    let mut params=IvyJson::Null;
+    for _ in 0..3 {
+        let page=compare_observation_catalog(&store,&registry,&params,0.0).unwrap();
+        assert_eq!(page.get("items").unwrap().as_array().unwrap().len(),1);
+        params=IvyJson::object([("cursor",page.get("nextCursor").unwrap().clone())]);
+    }
+    store.connection().execute("DELETE FROM host_reports",[]).unwrap();
+    insert_host_report(&store,"huge","reporter","huge".into(),2*1024*1024);
+    assert_eq!(compare_observation_catalog(&store,&registry,&IvyJson::Null,0.0).unwrap_err().code,"result_too_large");
+    assert_eq!(compare_observation_catalog(&store,&registry,&IvyJson::object([("cursor","invalid".into())]),0.0).unwrap_err().code,"invalid_cursor");
+}
+
+#[test]
+fn observation_pages_load_selected_snapshots_without_reporter_diagnostics() {
+    const CHILD: &str="IVY_OBSERVATION_PAGE_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output=std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","kernel::catalogs::read_tests::observation_pages_load_selected_snapshots_without_reporter_diagnostics","--nocapture"])
+            .env(CHILD,"1").output().unwrap();
+        eprint!("{}",String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));return;
+    }
+    let store=node_page_store();let registry=Registry::default();
+    for index in 0..64 {
+        let id=format!("node{index:03}");insert_namespace_provider(&store,&id,true,vec!["fixture".into()],32*1024,0);
+        insert_host_report(&store,&id,&id,id.clone().into(),32*1024);
+    }
+    let params=IvyJson::object([("limit",1.0.into())]);
+    let before=LIVE.load(Ordering::Relaxed);PEAK.store(before,Ordering::Relaxed);
+    let expected=full_observation_catalog(&store,&registry,&params,0.0).unwrap();
+    let full_peak=PEAK.load(Ordering::Relaxed)-before;
+    let before=LIVE.load(Ordering::Relaxed);PEAK.store(before,Ordering::Relaxed);
+    let actual=registry.observation_page(&store,&params,&crate::native_runtime::NativeRuntime,0.0).unwrap();
+    let projected_peak=PEAK.load(Ordering::Relaxed)-before;
+    assert_eq!(actual,expected);
+    eprintln!("Hive host observation Rust allocation peak: full {full_peak} bytes, paged {projected_peak} bytes for 64 reports, 2 MiB snapshots and 2 MiB diagnostics");
+    // Rust requests only; SQLite's C heap and process RSS are excluded.
+    assert!(full_peak>4*1024*1024);assert!(projected_peak<512*1024,"Unreturned snapshots or reporter diagnostics retained");
+}
+
 fn full_namespace_catalog(store: &Store, registry: &Registry, params: &IvyJson, now: f64) -> IvyResult<IvyJson> {
     let mut records: Vec<IvyJson> = Vec::new();
     for node in registry.nodes(store,&crate::native_runtime::NativeRuntime,now)? {

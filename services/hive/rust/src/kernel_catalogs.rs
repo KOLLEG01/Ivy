@@ -48,23 +48,6 @@ fn provider(node: &IvyJson) -> IvyJson {
         ("eligible", Registry::eligible(node).into()),
     ])
 }
-fn page(
-    call: &Call<'_>,
-    method: &str,
-    params: &IvyJson,
-    records: Vec<IvyJson>,
-    key: impl Fn(&IvyJson) -> JsString,
-    snapshot: Option<IvyJson>,
-) -> IvyResult<IvyJson> {
-    try_page(
-        call,
-        method,
-        params,
-        records,
-        |record| Ok(key(record)),
-        snapshot,
-    )
-}
 pub(super) fn try_page(
     call: &Call<'_>,
     method: &str,
@@ -165,34 +148,9 @@ pub(super) fn handle(
         "contracts.list" | "contracts.summaries" => {
             crate::contract_catalog::list(call.store, method, params)
         }
-        "hosts.observations" => {
-            let records = call.registry.host_observations(
-                call.store,
-                optional_string(params, "hostId"),
-                call.runtime,
-                (call.clock)(),
-            )?;
-            require(
-                records.len() <= 1000,
-                "limit_exceeded",
-                "Host observation catalog exceeds its operating bound.",
-            )?;
-            page(
-                call,
-                method,
-                params,
-                records,
-                |v| {
-                    key(
-                        v.get("snapshot")
-                            .and_then(|v| v.get("status"))
-                            .unwrap_or(&IvyJson::Null),
-                        "hostId",
-                    )
-                },
-                None,
-            )
-        }
+        "hosts.observations" => call.registry.observation_page(
+            call.store, params, call.runtime, (call.clock)(),
+        ),
         "hosts.list" => call.registry.host_page(call.store, params),
         "serviceNodes.list" => call.registry.node_page(
             call.store, params, call.runtime, (call.clock)(),

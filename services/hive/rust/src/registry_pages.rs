@@ -32,6 +32,47 @@ fn page_key(source: &str) -> IvyResult<JsString> {
 }
 
 impl Registry {
+    pub(crate) fn observation_page(
+        &self, store: &Store, params: &IvyJson, runtime: &dyn Runtime, now: f64,
+    ) -> IvyResult<IvyJson> {
+        // Host-report filtering historically uses the stored host ID, including
+        // its lossy UTF-8 representation and the empty-string filter.
+        let host = params.get("hostId").and_then(IvyJson::as_js_string).map(text);
+        let count = sql(store,store.connection().query_row(
+            "SELECT count(*) FROM (SELECT 1 FROM host_reports
+             WHERE (?1 IS NULL OR host_id=?1) LIMIT 1001)", [host.as_deref()],
+            |row| row.get::<_,usize>(0),
+        ))?;
+        require(count<=1000,"limit_exceeded","Host observation catalog exceeds its operating bound.")?;
+        let identity = objects::page_identity("hosts.observations",params)?;
+        let after = boundary(store,&identity,params)?;
+        let limit = params.get("limit").and_then(IvyJson::as_f64).unwrap_or(50.0) as usize;
+        let mut statement = sql(store,store.connection().prepare_cached(
+            // Keep snapshots out of the sort. The original host_id order breaks
+            // ties between distinct UTF-16 keys with equal lossy UTF-8 bytes.
+            "SELECT host_id,metadata -> '$.hostId' FROM (
+                 SELECT host_id,CASE WHEN json_type(snapshot_json,'$.status.hostId')='text'
+                     THEN json_object('hostId',snapshot_json -> '$.status.hostId')
+                     ELSE '{\"hostId\":\"\"}' END AS metadata
+                 FROM host_reports WHERE (?1 IS NULL OR host_id=?1) LIMIT -1
+             ) WHERE ivy_value(metadata,'/hostId')>?2
+             ORDER BY ivy_value(metadata,'/hostId'),host_id LIMIT ?3",
+        ))?;
+        let keys = sql(store,statement.query_map(params![host,after,(limit+1) as i64],
+            |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))))?
+            .map(|row| {
+                let (id,key) = sql(store,row)?;
+                Ok((id,page_key(&key)?))
+            }).collect::<IvyResult<Vec<_>>>()?;
+        paging::catalog_page_with(store,keys,&identity,|(_,key)| Ok(key.clone()),|(host,_)| {
+            let (id,at,snapshot) = sql(store,store.connection().query_row(
+                "SELECT node_id,reported_at,snapshot_json FROM host_reports WHERE host_id=?1",
+                [host],|row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)),
+            ))?;
+            self.host_observation(store,&id,at,snapshot,runtime,now)
+        },Some(limit),None)
+    }
+
     pub(crate) fn namespace_page(
         &self, store: &Store, params: &IvyJson, runtime: &dyn Runtime, now: f64,
     ) -> IvyResult<IvyJson> {

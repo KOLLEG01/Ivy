@@ -818,21 +818,34 @@ impl Registry {
         )?
         .map(|row| {
             let (id, at, snapshot) = sql(store, row)?;
-            let snapshot = decode(&snapshot)?;
-            let reporter = self.node(store, &id.into(), runtime, now)?;
-            Ok(IvyJson::object([
-                ("snapshot", snapshot),
-                ("serviceNodeId", field(&reporter, "serviceNodeId")?.clone()),
-                ("reportedAt", at.into()),
-                (
-                    "stale",
-                    (reporter.get("connected").and_then(IvyJson::as_bool) != Some(true)
-                        || reporter.get("ready").and_then(IvyJson::as_bool) != Some(true)
-                        || reporter.get("stale").and_then(IvyJson::as_bool) == Some(true))
-                    .into(),
-                ),
-            ]))
+            self.host_observation(store, &id, at, snapshot, runtime, now)
         })
         .collect()
+    }
+
+    fn host_observation(
+        &self, store: &Store, id: &str, at: String, snapshot: String,
+        runtime: &dyn Runtime, now: f64,
+    ) -> IvyResult<IvyJson> {
+        let snapshot = decode(&snapshot)?;
+        // Observations expose only reporter identity and liveness. Project
+        // those fields before decoding; diagnostics and catalog bodies are not
+        // part of this response. Reuse contact/staleness rules without copying
+        // the full live node or reading its diagnostic history.
+        let reporter = sql(store,store.connection().query_row(
+            "SELECT json_object('serviceNodeId',status_json -> '$.serviceNodeId',
+                 'connected',status_json -> '$.connected','ready',status_json -> '$.ready',
+                 'lastContactAt',status_json -> '$.lastContactAt')
+             FROM service_nodes WHERE id=?1", [id], |row| row.get::<_,String>(0),
+        ).optional())?.ok_or_else(|| IvyError::new("not_found", "Service Node not found."))?;
+        let reporter = self.current_node(store, &decode(&reporter)?, Some(&[]), runtime, now)?;
+        Ok(IvyJson::object([
+            ("snapshot", snapshot),
+            ("serviceNodeId", field(&reporter, "serviceNodeId")?.clone()),
+            ("reportedAt", at.into()),
+            ("stale", (reporter.get("connected").and_then(IvyJson::as_bool) != Some(true)
+                || reporter.get("ready").and_then(IvyJson::as_bool) != Some(true)
+                || reporter.get("stale").and_then(IvyJson::as_bool) == Some(true)).into()),
+        ]))
     }
 }
