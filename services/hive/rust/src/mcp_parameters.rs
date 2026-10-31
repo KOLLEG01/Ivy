@@ -32,6 +32,12 @@ impl Issue {
     }
 }
 #[derive(Clone)]
+enum ObjectMode {
+    Strip,
+    Preserve,
+    Metadata,
+}
+#[derive(Clone)]
 enum Schema {
     Any,
     Json,
@@ -42,12 +48,29 @@ enum Schema {
     Enum(&'static [&'static str]),
     Array(Box<Schema>),
     Record(Box<Schema>),
-    Object(Vec<(&'static str, Schema, bool)>, bool),
+    Object(Vec<(&'static str, Schema, bool)>, ObjectMode),
     Intersection(Box<Schema>, Box<Schema>),
     Elicitation(Box<Schema>),
 }
 fn object(fields: Vec<(&'static str, Schema, bool)>, loose: bool) -> Schema {
-    Schema::Object(fields, loose)
+    Schema::Object(
+        fields,
+        if loose {
+            ObjectMode::Preserve
+        } else {
+            ObjectMode::Strip
+        },
+    )
+}
+fn wire_metadata_key(key: &JsString) -> bool {
+    [
+        mcp_inbound::VERSION_META,
+        mcp_inbound::INFO_META,
+        mcp_inbound::CAPABILITIES_META,
+        mcp_inbound::LOG_META,
+    ]
+    .iter()
+    .any(|name| key.eq_str(name))
 }
 fn record(value: Schema) -> Schema {
     Schema::Record(Box::new(value))
@@ -213,7 +236,7 @@ fn walk(
                     }),
             )
         }
-        Schema::Object(fields, loose) => {
+        Schema::Object(fields, mode) => {
             let Some(value @ IvyJson::Object(_)) = value else {
                 return fail("object", issues);
             };
@@ -223,13 +246,21 @@ fn walk(
                 if raw.is_none() && !required {
                     continue;
                 }
+                // Lifting removes _meta only when stripping wire fields emptied it.
+                // An originally empty object still reaches the handler.
+                if matches!(schema, Schema::Object(_, ObjectMode::Metadata))
+                    && raw.and_then(IvyJson::as_object).is_some_and(|pairs| {
+                        !pairs.is_empty() && pairs.iter().all(|(key, _)| wire_metadata_key(key))
+                    })
+                {
+                    continue;
+                }
                 result.insert(*key, walk(schema, raw, &child(path, (*key).into()), issues));
             }
-            if *loose {
+            if !matches!(mode, ObjectMode::Strip) {
                 for (key, value) in value.as_object().unwrap() {
-                    if !fields
-                        .iter()
-                        .any(|(name, _, _)| key == &JsString::from(*name))
+                    if !(matches!(mode, ObjectMode::Metadata) && wire_metadata_key(key))
+                        && !fields.iter().any(|(name, _, _)| key.eq_str(name))
                     {
                         result.insert(key.clone(), value.clone());
                     }
@@ -427,7 +458,7 @@ fn metadata(modern: bool) -> Schema {
             false,
         ));
     }
-    object(fields, true)
+    Schema::Object(fields, ObjectMode::Metadata)
 }
 struct Schemas {
     envelope: Schema,
@@ -561,34 +592,12 @@ pub fn request(body: &IvyJson, modern: bool) -> Option<Result<IvyJson, Vec<Issue
         }
         _ => return None,
     };
-    let mut lifted = body.clone();
-    if let Some(params) = body.get("params") {
-        let mut params = params.clone();
-        if let Some(meta) = params.get("_meta") {
-            let mut meta = meta.clone();
-            let mut found = false;
-            for key in [
-                mcp_inbound::VERSION_META,
-                mcp_inbound::INFO_META,
-                mcp_inbound::CAPABILITIES_META,
-                mcp_inbound::LOG_META,
-            ] {
-                found |= meta.remove(key).is_some();
-            }
-            if found {
-                if meta.as_object().is_some_and(|v| v.is_empty()) {
-                    params.remove("_meta");
-                } else {
-                    params.insert("_meta", meta);
-                }
-            }
-        }
-        params.remove("inputResponses");
-        params.remove("requestState");
-        lifted.insert("params", params);
-    }
-    Some(parse(schema, &lifted))
+    Some(parse(schema, body))
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/rust/hive_mcp_parameters_ownership.rs"]
+mod ownership_tests;
 /// The SDK serializes its issue list with JSON.stringify(..., null, 2).
 pub fn diagnostic(issues: &[Issue]) -> IvyResult<JsString> {
     fn pretty(value: &IvyJson, level: usize) -> IvyResult<String> {

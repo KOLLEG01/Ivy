@@ -31,8 +31,6 @@ mod mcp_inbound;
 mod mcp_parameters;
 #[path = "hive_mcp_protocol.rs"]
 mod mcp_protocol;
-#[path = "hive_mcp_subscription.rs"]
-mod mcp_subscription;
 #[path = "hive_network_cases.rs"]
 mod network_cases;
 #[path = "../fixtures/reference-data.rs"]

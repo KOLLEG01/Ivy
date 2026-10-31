@@ -1480,10 +1480,10 @@ export const rustTests = {
     "filter": "mcp_schema::ownership_tests::",
     "testThreads": 1
   },
-  "tests/rust/hive_mcp_subscription.rs": {
+  "tests/rust/hive_mcp_parameters_ownership.rs": {
     "package": "ivy-hive",
-    "test": "hive-network",
-    "filter": "mcp_subscription::",
+    "lib": true,
+    "filter": "mcp_parameters::ownership_tests::",
     "testThreads": 1
   },
   "tests/rust/hive_mcp_owner.rs": {

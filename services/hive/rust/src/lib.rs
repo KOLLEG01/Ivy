@@ -31,7 +31,6 @@ pub mod mcp_parameters;
 pub mod mcp_protocol;
 pub mod mcp_request;
 pub mod mcp_schema;
-pub mod mcp_subscription;
 pub mod native_runtime;
 pub mod oauth;
 pub mod oauth_http;
