@@ -339,3 +339,228 @@ fn call_resolution_and_schema_projection_avoid_large_tree_copies() {
         }
     }
 }
+
+// Previous full-node catalog path, retained only as a comparison oracle.
+fn reference_mcp_catalog(
+    owner: &mut Discovery,
+    store: &Store,
+    registry: &mut Registry,
+    name: Option<&JsString>,
+    runtime: &dyn Runtime,
+    now: f64,
+) -> IvyResult<Vec<IvyJson>> {
+    fn policy(definition: &IvyJson) -> IvyResult<JsString> {
+        match mcp_name(definition).filter(|v| v.as_object().is_some()) {
+            Some(mcp) => Ok(concat(&[
+                string(mcp, "name")?,
+                &"\0".into(),
+                mcp.get("surface")
+                    .filter(|v| !v.is_null())
+                    .and_then(IvyJson::as_js_string)
+                    .unwrap_or(&"ivy_dev".into()),
+            ])),
+            None => Ok("".into()),
+        }
+    }
+    let include = |definition: &IvyJson| -> bool {
+        mcp_name(definition).is_some_and(|mcp| {
+            mcp.as_object().is_some()
+                && name.is_none_or(|n| {
+                    n.0.is_empty() || mcp.get("name").and_then(IvyJson::as_js_string) == Some(n)
+                })
+        })
+    };
+    let mut active: HashMap<(JsString, JsString), HashSet<JsString>> = HashMap::new();
+    for node in registry
+        .nodes(store, runtime, now)?
+        .iter()
+        .filter(|v| Registry::eligible(v))
+    {
+        if let Some(catalog) = registry
+            .live_catalog(store, string(node, "serviceNodeId")?)?
+        {
+            for ns in &catalog.namespaces {
+                for binding in catalog.bindings(ns) {
+                    active
+                        .entry((
+                            string(node, "serviceName")?.clone(),
+                            binding.qualified_name.clone(),
+                        ))
+                        .or_default()
+                        .insert(policy(&binding.metadata)?);
+                }
+            }
+        }
+    }
+    let mut result = vec![];
+    for method in core_methods() {
+        let mut binding = owner.core_binding(&format!("hive.{method}").as_str().into())?;
+        if include(binding.get("definition").unwrap_or(&IvyJson::Null)) {
+            binding.insert("serviceName", "hive".into());
+            binding.insert("provider", IvyJson::Null);
+            binding.insert("guideMarkdown", "".into());
+            result.push(binding);
+        }
+    }
+    for node in registry.nodes(store, runtime, now)? {
+        let Some(catalog) = registry
+            .live_catalog(store, string(&node, "serviceNodeId")?)?
+        else {
+            continue;
+        };
+        for ns in &catalog.namespaces {
+            let guide = guide(ns.guide_markdown.as_ref().ok_or_else(IvyError::internal)?, &catalog)?;
+            for binding in catalog.bindings(ns) {
+                let available = Registry::eligible(&node);
+                let current = active.get(&(
+                    string(&node, "serviceName")?.clone(),
+                    binding.qualified_name.clone(),
+                ));
+                let binding_policy = policy(&binding.metadata)?;
+                if !available
+                    && current.is_some_and(|v| v.len() == 1 && !v.contains(&binding_policy))
+                {
+                    continue;
+                }
+                if include(&binding.metadata) {
+                    let mut binding = binding.to_wire();
+                    binding.insert("serviceName", field(&node, "serviceName")?.clone());
+                    binding.insert("provider", provider(&node)?);
+                    binding.insert("guideMarkdown", IvyJson::String(guide.clone()));
+                    result.push(binding);
+                }
+            }
+        }
+    }
+    result.sort_by(|a, b| {
+        let a_name = mcp_name(a.get("definition").unwrap())
+            .unwrap()
+            .get("name")
+            .unwrap()
+            .as_js_string()
+            .unwrap();
+        let b_name = mcp_name(b.get("definition").unwrap())
+            .unwrap()
+            .get("name")
+            .unwrap()
+            .as_js_string()
+            .unwrap();
+        runtime.compare_english(a_name, b_name).then_with(|| {
+            runtime.compare_english(
+                a.get("provider")
+                    .and_then(|v| v.get("serviceNodeId"))
+                    .and_then(IvyJson::as_js_string)
+                    .unwrap_or(&"".into()),
+                b.get("provider")
+                    .and_then(|v| v.get("serviceNodeId"))
+                    .and_then(IvyJson::as_js_string)
+                    .unwrap_or(&"".into()),
+            )
+        })
+    });
+    Ok(result)
+}
+
+fn insert_catalog_provider(store: &Store, id: &str, flags: [IvyJson; 4], mcp: Option<(&str, &str)>, padding: usize) {
+    let mut node = IvyJson::object([
+        ("serviceNodeId", id.into()), ("serviceName", IvyJson::String(JsString(vec![b's' as u16,0,0xd800]))),
+        ("hostId", IvyJson::String(JsString(vec![0xd801,0,b'h' as u16]))),
+        ("lastContactAt", "1970-01-01T00:00:00.000Z".into()), ("padding", "p".repeat(padding).into()),
+    ]);
+    for (key, value) in ["connected","synced","ready","desiredEnabled"].into_iter().zip(flags) { node.insert(key,value); }
+    store.connection().execute("INSERT INTO service_nodes VALUES(?1,'fixture','host','service',1,?2)",
+        rusqlite::params![id,canonical(&node,usize::MAX).unwrap()]).unwrap();
+    let mut tool = IvyJson::object([
+        ("namespace", "fixture".into()), ("name", "read".into()), ("description", "Read a fixture.".into()),
+        ("inputSchema", empty()), ("outputSchema", IvyJson::Null),
+    ]);
+    if let Some((name,surface))=mcp { tool.insert("discovery",IvyJson::object([("mcp",IvyJson::object([
+        ("name",name.into()),("surface",surface.into()),
+    ]))])); }
+    let catalog=IvyJson::object([("namespaces",IvyJson::Array(vec![IvyJson::object([
+        ("namespace","fixture".into()),("guideMarkdown","Fixture guide.".into()),("tools",IvyJson::Array(vec![tool])),
+    ])]))]);
+    store.connection().execute("INSERT INTO registries VALUES(?1,?2)",
+        rusqlite::params![id,canonical(&catalog,usize::MAX).unwrap()]).unwrap();
+}
+
+#[test]
+fn mcp_provider_projection_keeps_utf16_flags_policies_and_order() {
+    let store=Store::open(Path::new(":memory:")).unwrap();
+    store.connection().execute("INSERT INTO principals VALUES('fixture')",[]).unwrap();
+    for (id,flags,mcp) in [
+        ("a", [true.into(),true.into(),true.into(),true.into()],Some(("fixture_read","ivy"))),
+        ("b", [false.into(),true.into(),true.into(),true.into()],Some(("old_read","ivy_dev"))),
+        ("c", [true.into(),true.into(),true.into(),true.into()],Some(("other_read","ivy_dev"))),
+        ("d", [true.into(),IvyJson::Null,true.into(),true.into()],Some(("old_read","ivy_dev"))),
+        ("e", [true.into(),true.into(),true.into(),1.into()],None),
+    ] { insert_catalog_provider(&store,id,flags,mcp,0); }
+    store.connection().execute("UPDATE service_nodes SET status_json=json_remove(status_json,'$.ready') WHERE id='e'",[]).unwrap();
+    let mut owner=Registry::default();
+    for phase in 0..3 {
+        if phase==1 { store.connection().execute("UPDATE service_nodes SET status_json=json_set(status_json,'$.connected',json('false')) WHERE id='c'",[]).unwrap(); }
+        if phase==2 { store.connection().execute("UPDATE service_nodes SET status_json=json_set(status_json,'$.desiredEnabled',json('false')) WHERE id='a'",[]).unwrap(); }
+        let full=owner.nodes(&store,&NativeRuntime,1_000_000.0).unwrap();
+        let compact=owner.catalog_providers(&store).unwrap();
+        assert_eq!(full.len(),compact.len());
+        for (old,new) in full.iter().zip(&compact) {
+            assert_eq!(old.get("serviceNodeId").unwrap().as_js_string(),Some(&new.service_node_id));
+            assert_eq!(old.get("serviceName").unwrap().as_js_string(),Some(&new.service_name));
+            assert_eq!(old.get("hostId").unwrap().as_js_string(),Some(&new.host_id));
+            assert_eq!(Registry::eligible(old),new.available);
+        }
+        for name in [None,Some(""),Some("fixture_read"),Some("old_read"),Some("absent")] {
+            let name=name.map(JsString::from);
+            let old=reference_mcp_catalog(&mut discovery(),&store,&mut owner,name.as_ref(),&NativeRuntime,1_000_000.0).unwrap();
+            let new=discovery().mcp_catalog(&store,&mut owner,name.as_ref(),&NativeRuntime,1_000_000.0).unwrap();
+            assert_eq!(stringify(&IvyJson::Array(new.clone()),usize::MAX).unwrap(),stringify(&IvyJson::Array(old.clone()),usize::MAX).unwrap(),"phase {phase}, name {name:?}");
+            for surface in ["ivy","ivy_dev"] {
+                assert_eq!(crate::mcp::surface_bindings(new.clone(),&surface.into()).map(IvyJson::Array).map_err(|e|e.to_wire()),
+                    crate::mcp::surface_bindings(old.clone(),&surface.into()).map(IvyJson::Array).map_err(|e|e.to_wire()));
+            }
+            if name.as_ref().is_some_and(|n|n.eq_str("old_read")) {
+                assert_eq!(new.is_empty(),phase==1,"One live policy suppresses the different offline policy");
+            }
+        }
+    }
+}
+
+#[test]
+fn mcp_catalog_avoids_full_status_and_diagnostic_working_sets() {
+    const CHILD:&str="IVY_MCP_PROVIDER_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output=std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","discovery::memory_tests::mcp_catalog_avoids_full_status_and_diagnostic_working_sets","--nocapture"])
+            .env(CHILD,"1").output().unwrap();
+        eprint!("{}",String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));return;
+    }
+    let store=Store::open(Path::new(":memory:")).unwrap();
+    store.connection().execute("INSERT INTO principals VALUES('fixture')",[]).unwrap();
+    for i in 0..64 { insert_catalog_provider(&store,&format!("provider{i:02}"),[true.into(),true.into(),true.into(),true.into()],Some(("fixture_read","ivy")),32*1024); }
+    let diagnostic=serde_json::json!({"source":"unrelated","status":"current","message":"d".repeat(2*1024*1024)}).to_string();
+    store.connection().execute("INSERT INTO diagnostics VALUES('large',?)",[diagnostic]).unwrap();
+    let mut owner=Registry::default();let name=JsString::from("fixture_read");let mut catalog=discovery();
+    drop(catalog.mcp_catalog(&store,&mut owner,Some(&name),&NativeRuntime,0.0).unwrap());
+    let before=LIVE.load(AtomicOrdering::Relaxed);PEAK.store(before,AtomicOrdering::Relaxed);
+    let started=std::time::Instant::now();
+    let old=reference_mcp_catalog(&mut catalog,&store,&mut owner,Some(&name),&NativeRuntime,0.0).unwrap();
+    let old_elapsed=started.elapsed();let old_peak=PEAK.load(AtomicOrdering::Relaxed)-before;
+    let expected=hash_json(&IvyJson::Array(old)).unwrap();
+    store.connection().authorizer(Some(|context:rusqlite::hooks::AuthContext<'_>| {
+        match context.action {
+            rusqlite::hooks::AuthAction::Read{table_name:"diagnostics",..}=>rusqlite::hooks::Authorization::Deny,
+            _=>rusqlite::hooks::Authorization::Allow,
+        }
+    })).unwrap();
+    let before=LIVE.load(AtomicOrdering::Relaxed);PEAK.store(before,AtomicOrdering::Relaxed);
+    let started=std::time::Instant::now();
+    let new=catalog.mcp_catalog(&store,&mut owner,Some(&name),&NativeRuntime,0.0).unwrap();
+    let elapsed=started.elapsed();let peak=PEAK.load(AtomicOrdering::Relaxed)-before;
+    store.connection().authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>)->rusqlite::hooks::Authorization>).unwrap();
+    assert_eq!(new.len(),64);assert_eq!(hash_json(&IvyJson::Array(new)).unwrap(),expected);
+    eprintln!("Hive MCP catalog Rust allocation peak: full nodes {old_peak} bytes, compact providers {peak} bytes for 64 providers, 2 MiB status and 2 MiB diagnostics; elapsed {old_elapsed:?} / {elapsed:?}");
+    assert!(old_peak>peak+2*1024*1024,"Provider projection retained status bodies: {old_peak} / {peak}");
+    assert!(peak<1024*1024,"Compact catalog unexpectedly large: {peak}");
+}

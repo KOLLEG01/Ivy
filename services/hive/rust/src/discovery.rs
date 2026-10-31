@@ -550,7 +550,7 @@ impl Discovery {
         registry: &mut Registry,
         name: Option<&JsString>,
         runtime: &dyn Runtime,
-        now: f64,
+        _now: f64,
     ) -> IvyResult<Vec<IvyJson>> {
         fn policy(definition: &IvyJson) -> IvyResult<JsString> {
             match mcp_name(definition).filter(|v| v.as_object().is_some()) {
@@ -573,20 +573,18 @@ impl Discovery {
                     })
             })
         };
+        let nodes = registry.catalog_providers(store)?;
         let mut active: HashMap<(JsString, JsString), HashSet<JsString>> = HashMap::new();
-        for node in registry
-            .nodes(store, runtime, now)?
-            .iter()
-            .filter(|v| Registry::eligible(v))
+        for node in nodes.iter().filter(|node| node.available)
         {
             if let Some(catalog) = registry
-                .live_catalog(store, string(node, "serviceNodeId")?)?
+                .live_catalog(store, &node.service_node_id)?
             {
                 for ns in &catalog.namespaces {
                     for binding in catalog.bindings(ns) {
                         active
                             .entry((
-                                string(node, "serviceName")?.clone(),
+                                node.service_name.clone(),
                                 binding.qualified_name.clone(),
                             ))
                             .or_default()
@@ -605,18 +603,18 @@ impl Discovery {
                 result.push(binding);
             }
         }
-        for node in registry.nodes(store, runtime, now)? {
+        for node in nodes {
             let Some(catalog) = registry
-                .live_catalog(store, string(&node, "serviceNodeId")?)?
+                .live_catalog(store, &node.service_node_id)?
             else {
                 continue;
             };
             for ns in &catalog.namespaces {
                 let guide = guide(ns.guide_markdown.as_ref().ok_or_else(IvyError::internal)?, &catalog)?;
                 for binding in catalog.bindings(ns) {
-                    let available = Registry::eligible(&node);
+                    let available = node.available;
                     let current = active.get(&(
-                        string(&node, "serviceName")?.clone(),
+                        node.service_name.clone(),
                         binding.qualified_name.clone(),
                     ));
                     let binding_policy = policy(&binding.metadata)?;
@@ -627,8 +625,12 @@ impl Discovery {
                     }
                     if include(&binding.metadata) {
                         let mut binding = binding.to_wire();
-                        binding.insert("serviceName", field(&node, "serviceName")?.clone());
-                        binding.insert("provider", provider(&node)?);
+                        binding.insert("serviceName", node.service_name.clone().into());
+                        binding.insert("provider", IvyJson::object([
+                            ("serviceNodeId", node.service_node_id.clone().into()),
+                            ("hostId", node.host_id.clone().into()),
+                            ("available", node.available.into()),
+                        ]));
                         binding.insert("guideMarkdown", IvyJson::String(guide.clone()));
                         result.push(binding);
                     }

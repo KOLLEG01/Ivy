@@ -34,6 +34,13 @@ pub struct ConnectionContext<'a> {
     pub session_digest: Option<&'a JsString>,
     pub generation: Option<f64>,
 }
+#[derive(Debug, PartialEq)]
+pub(crate) struct CatalogProvider {
+    pub service_node_id: JsString,
+    pub service_name: JsString,
+    pub host_id: JsString,
+    pub available: bool,
+}
 #[derive(Default)]
 struct Contact {
     at: JsString,
@@ -309,6 +316,33 @@ impl Registry {
              FROM service_nodes WHERE id=?1", [text(id)], |row| row.get::<_,String>(0),
         ).optional())?.ok_or_else(|| IvyError::new("not_found", "Service Node not found."))?;
         self.current_node(store, &decode(&value)?, Some(&[]), runtime, now)
+    }
+    pub(crate) fn catalog_providers(&self, store: &Store) -> IvyResult<Vec<CatalogProvider>> {
+        // Availability uses the four stored flags, just like eligible(). Contact
+        // age and diagnostics do not affect MCP catalog availability.
+        let mut statement = sql(store, store.connection().prepare_cached(
+            "SELECT status_json -> '$.serviceNodeId',status_json -> '$.serviceName',
+                    status_json -> '$.hostId',
+                    coalesce(json_type(status_json,'$.connected')='true'
+                        AND json_type(status_json,'$.synced')='true'
+                        AND json_type(status_json,'$.ready')='true'
+                        AND json_type(status_json,'$.desiredEnabled')='true',0)
+             FROM service_nodes ORDER BY id",
+        ))?;
+        let rows = sql(store, statement.query_map([], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?, row.get::<_, bool>(3)?,
+        ))))?;
+        let string = |value: &str| parse(value, usize::MAX)
+            .map_err(|_| IvyError::internal())?
+            .into_js_string().ok_or_else(IvyError::internal);
+        rows.map(|row| {
+            let (id, service, host, available) = sql(store, row)?;
+            Ok(CatalogProvider {
+                service_node_id: string(&id)?, service_name: string(&service)?,
+                host_id: string(&host)?, available,
+            })
+        }).collect()
     }
     pub fn nodes(&self, store: &Store, runtime: &dyn Runtime, now: f64) -> IvyResult<Vec<IvyJson>> {
         let mut statement=sql(store,store.connection().prepare_cached("SELECT diagnostic_json FROM diagnostics WHERE json_extract(diagnostic_json,'$.status')='current' ORDER BY rowid"))?;
