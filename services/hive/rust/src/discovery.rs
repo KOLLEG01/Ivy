@@ -1,5 +1,5 @@
 //! Catalog navigation, provider-bound descriptions and retained definition identities.
-use crate::{registry::Registry, registry_catalog::ToolBinding, store::Store};
+use crate::{registry::{CatalogProvider, Registry}, registry_catalog::ToolBinding, store::Store};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     core_bundle::{bundled_schema, operation_input_schema},
@@ -123,6 +123,90 @@ fn provider(node: &IvyJson) -> IvyResult<IvyJson> {
         ("available", Registry::eligible(node).into()),
     ]))
 }
+type McpPolicies = HashMap<(JsString, JsString), HashSet<JsString>>;
+
+fn mcp_policy(definition: &IvyJson) -> IvyResult<JsString> {
+    match mcp_name(definition).filter(|v| v.as_object().is_some()) {
+        Some(mcp) => Ok(concat(&[
+            string(mcp, "name")?,
+            &"\0".into(),
+            mcp.get("surface")
+                .filter(|v| !v.is_null())
+                .and_then(IvyJson::as_js_string)
+                .unwrap_or(&"ivy_dev".into()),
+        ])),
+        None => Ok("".into()),
+    }
+}
+
+fn active_mcp_policies(store: &Store, registry: &mut Registry, nodes: &[CatalogProvider]) -> IvyResult<McpPolicies> {
+    let mut active = McpPolicies::new();
+    for node in nodes.iter().filter(|node| node.available) {
+        if let Some(catalog) = registry.live_catalog(store, &node.service_node_id)? {
+            for binding in &catalog.tools {
+                active.entry((node.service_name.clone(), binding.qualified_name.clone()))
+                    .or_default().insert(mcp_policy(&binding.metadata)?);
+            }
+        }
+    }
+    Ok(active)
+}
+
+fn mcp_policy_selected(active: &McpPolicies, node: &CatalogProvider, binding: &ToolBinding) -> IvyResult<bool> {
+    let current = active.get(&(node.service_name.clone(), binding.qualified_name.clone()));
+    let policy = mcp_policy(&binding.metadata)?;
+    Ok(node.available || !current.is_some_and(|values| values.len() == 1 && !values.contains(&policy)))
+}
+
+fn mcp_guides(store: &Store, registry: &mut Registry, nodes: &[CatalogProvider], runtime: &dyn Runtime) -> IvyResult<Vec<JsString>> {
+    struct Guide {
+        mcp_name: JsString,
+        provider_id: JsString,
+        position: usize,
+        text: JsString,
+    }
+    let active = active_mcp_policies(store, registry, nodes)?;
+    let mut guides = vec![];
+    let mut position = 0;
+    for node in nodes {
+        let Some(catalog) = registry.live_catalog(store, &node.service_node_id)? else { continue };
+        for ns in &catalog.namespaces {
+            let guide = guide(ns.guide_markdown.as_ref().ok_or_else(IvyError::internal)?, &catalog)?;
+            let mut first: Vec<(&JsString, &JsString, usize)> = vec![];
+            for binding in catalog.bindings(ns) {
+                let selected = mcp_policy_selected(&active, node, binding)?;
+                if selected && !guide.0.is_empty()
+                    && let Some(mcp) = mcp_name(&binding.metadata).filter(|v| v.as_object().is_some())
+                {
+                    let namespace = string(&binding.metadata, "namespace")?;
+                    let name = string(mcp, "name")?;
+                    if let Some((_, current, order)) = first.iter_mut().find(|(ns, _, _)| *ns == namespace) {
+                        if runtime.compare_english(name, current) == Ordering::Less {
+                            *current = name;
+                            *order = position;
+                        }
+                    } else {
+                        first.push((namespace, name, position));
+                    }
+                }
+                position += 1;
+            }
+            // Keep each guide's first occurrence in the original MCP tool order,
+            // including stable ties, without copying schemas or the guide per tool.
+            for (namespace, name, position) in first {
+                guides.push(Guide {
+                    mcp_name: name.clone(), provider_id: node.service_node_id.clone(), position,
+                    text: concat(&[&node.service_name, &"/".into(), namespace, &": ".into(), &guide]),
+                });
+            }
+        }
+    }
+    guides.sort_by(|a, b| runtime.compare_english(&a.mcp_name, &b.mcp_name)
+        .then_with(|| runtime.compare_english(&a.provider_id, &b.provider_id))
+        .then(a.position.cmp(&b.position)));
+    Ok(guides.into_iter().map(|guide| guide.text).collect())
+}
+
 fn tool_schema_result(mut tool: IvyJson) -> IvyResult<IvyJson> {
     let output = tool.remove("outputSchema").unwrap_or(IvyJson::Null);
     field(&tool, "inputSchema")?;
@@ -551,19 +635,6 @@ impl Discovery {
         runtime: &dyn Runtime,
         _now: f64,
     ) -> IvyResult<Vec<IvyJson>> {
-        fn policy(definition: &IvyJson) -> IvyResult<JsString> {
-            match mcp_name(definition).filter(|v| v.as_object().is_some()) {
-                Some(mcp) => Ok(concat(&[
-                    string(mcp, "name")?,
-                    &"\0".into(),
-                    mcp.get("surface")
-                        .filter(|v| !v.is_null())
-                        .and_then(IvyJson::as_js_string)
-                        .unwrap_or(&"ivy_dev".into()),
-                ])),
-                None => Ok("".into()),
-            }
-        }
         let include = |definition: &IvyJson| -> bool {
             mcp_name(definition).is_some_and(|mcp| {
                 mcp.as_object().is_some()
@@ -573,25 +644,7 @@ impl Discovery {
             })
         };
         let nodes = registry.catalog_providers(store)?;
-        let mut active: HashMap<(JsString, JsString), HashSet<JsString>> = HashMap::new();
-        for node in nodes.iter().filter(|node| node.available)
-        {
-            if let Some(catalog) = registry
-                .live_catalog(store, &node.service_node_id)?
-            {
-                for ns in &catalog.namespaces {
-                    for binding in catalog.bindings(ns) {
-                        active
-                            .entry((
-                                node.service_name.clone(),
-                                binding.qualified_name.clone(),
-                            ))
-                            .or_default()
-                            .insert(policy(&binding.metadata)?);
-                    }
-                }
-            }
-        }
+        let active = active_mcp_policies(store, registry, &nodes)?;
         let mut result = vec![];
         for method in core_methods() {
             let mut binding = self.core_binding(&format!("hive.{method}").as_str().into())?;
@@ -612,14 +665,7 @@ impl Discovery {
                 let guide = guide(ns.guide_markdown.as_ref().ok_or_else(IvyError::internal)?, &catalog)?;
                 for binding in catalog.bindings(ns) {
                     let available = node.available;
-                    let current = active.get(&(
-                        node.service_name.clone(),
-                        binding.qualified_name.clone(),
-                    ));
-                    let binding_policy = policy(&binding.metadata)?;
-                    if !available
-                        && current.is_some_and(|v| v.len() == 1 && !v.contains(&binding_policy))
-                    {
+                    if !mcp_policy_selected(&active, &node, binding)? {
                         continue;
                     }
                     if include(&binding.metadata) {
@@ -1334,30 +1380,12 @@ impl Discovery {
         store: &Store,
         registry: &mut Registry,
         runtime: &dyn Runtime,
-        now: f64,
+        _now: f64,
     ) -> IvyResult<IvyJson> {
-        let catalog = self.mcp_catalog(store, registry, None, runtime, now)?;
-        let mut guides = vec![];
-        for binding in &catalog {
-            if (binding
-                .get("provider")
-                .is_some_and(|v| v.as_object().is_some()))
-                && binding
-                    .get("guideMarkdown")
-                    .and_then(IvyJson::as_js_string)
-                    .is_some_and(|v| !v.0.is_empty())
-            {
-                guides.push(concat(&[
-                    string(binding, "serviceName")?,
-                    &"/".into(),
-                    string(field(binding, "definition")?, "namespace")?,
-                    &": ".into(),
-                    string(binding, "guideMarkdown")?,
-                ]));
-            }
-        }
+        let nodes = registry.catalog_providers(store)?;
+        let mut guides = mcp_guides(store, registry, &nodes, runtime)?;
         let mut hints: Vec<(JsString, Vec<JsString>)> = vec![];
-        for node in registry.catalog_providers(store)? {
+        for node in nodes {
             if !self
                 .index(store, &node.service_node_id, runtime)?
                 .tools

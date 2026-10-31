@@ -701,6 +701,182 @@ fn instructions_avoid_full_status_and_registry_working_sets() {
     assert!(peak < 2 * 1024 * 1024, "Projected instructions unexpectedly large: {peak}");
 }
 
+fn catalog_instruction_guides(owner: &mut Discovery, store: &Store, registry: &mut Registry, runtime: &dyn Runtime) -> IvyResult<Vec<JsString>> {
+    let catalog = owner.mcp_catalog(store, registry, None, runtime, 0.0)?;
+    let mut guides = vec![];
+    for binding in &catalog {
+        if binding.get("provider").is_some_and(|v| v.as_object().is_some())
+            && binding.get("guideMarkdown").and_then(IvyJson::as_js_string).is_some_and(|v| !v.0.is_empty())
+        {
+            guides.push(concat(&[
+                string(binding, "serviceName")?, &"/".into(),
+                string(field(binding, "definition")?, "namespace")?, &": ".into(),
+                string(binding, "guideMarkdown")?,
+            ]));
+        }
+    }
+    Ok(guides)
+}
+
+#[test]
+fn instruction_guides_keep_offline_policies_rewrites_and_errors() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store.connection().execute("INSERT INTO principals VALUES('fixture')", []).unwrap();
+    for (id, active, mcp) in [
+        ("old", false, Some(("old_read", "ivy_dev"))),
+        ("current", true, Some(("current_read", "ivy"))),
+        ("second", false, Some(("other_read", "ivy_dev"))),
+        ("internal", true, None),
+    ] {
+        insert_catalog_provider(&store, id, [active.into(), true.into(), true.into(), true.into()], mcp, 0);
+        store.connection().execute(
+            "UPDATE registries SET registry_json=json_set(registry_json,'$.namespaces[0].guideMarkdown',?) WHERE node_id=?",
+            rusqlite::params![format!("{id}: Use fixture.read, hive.objects.list and hive.system.status. Keep fixture.read_extra."), id],
+        ).unwrap();
+    }
+    store.connection().execute("UPDATE service_nodes SET status_json=json_set(status_json,'$.serviceName','internal-service') WHERE id='internal'", []).unwrap();
+    for phase in 0..7 {
+        if phase == 1 {
+            store.connection().execute("UPDATE service_nodes SET status_json=json_set(status_json,'$.connected',json('true')) WHERE id='second'", []).unwrap();
+        }
+        if phase == 2 {
+            store.connection().execute("UPDATE service_nodes SET status_json=json_set(status_json,'$.connected',json('false')) WHERE id='current'", []).unwrap();
+        }
+        if phase == 3 {
+            store.connection().execute("UPDATE service_nodes SET status_json=json_set(status_json,'$.connected',json('false')) WHERE id='second'", []).unwrap();
+        }
+        if phase == 4 {
+            store.connection().execute("UPDATE registries SET registry_json=json_set(registry_json,'$.namespaces[0].guideMarkdown','')", []).unwrap();
+        }
+        if phase == 5 {
+            store.connection().execute("UPDATE registries SET registry_json=json_set(registry_json,'$.namespaces[0].guideMarkdown',json('null')) WHERE node_id='internal'", []).unwrap();
+        }
+        if phase == 6 {
+            store.connection().execute("UPDATE registries SET registry_json=json_set(registry_json,'$.namespaces[0].guideMarkdown','')", []).unwrap();
+            store.connection().execute("UPDATE registries SET registry_json=json_set(registry_json,'$.namespaces[0].guideMarkdown','', '$.namespaces[0].tools[0].discovery.mcp',json('{}')) WHERE node_id='current'", []).unwrap();
+        }
+        let old = original_instructions(&mut discovery(), &store, &mut Registry::default(), &NativeRuntime, 0.0).map_err(|e| e.to_wire());
+        let new = discovery().instructions(&store, &mut Registry::default(), &NativeRuntime, 0.0).map_err(|e| e.to_wire());
+        assert_eq!(new, old, "phase {phase}");
+        if phase < 4 {
+            let text = text(string(new.as_ref().unwrap(), "instructions").unwrap());
+            assert!(text.contains("hive_object_list"));
+            assert!(text.contains("fixture.read_extra"));
+            assert_eq!(text.contains("old: Use old_read (ivy_dev only)"), phase == 1 || phase == 3);
+        }
+        assert_eq!(new.is_err(), phase >= 5);
+    }
+}
+
+struct GuideTies;
+impl crate::retention::Runtime for GuideTies {
+    fn parse_date(&self, value: &JsString) -> f64 { crate::retention::Runtime::parse_date(&NativeRuntime, value) }
+    fn iso_date(&self, value: f64) -> IvyResult<JsString> { crate::retention::Runtime::iso_date(&NativeRuntime, value) }
+    fn compare_contract_keys(&self, a: &JsString, b: &JsString) -> Ordering { crate::retention::Runtime::compare_contract_keys(&NativeRuntime, a, b) }
+}
+impl Runtime for GuideTies {
+    fn lowercase(&self, value: &JsString) -> IvyResult<JsString> { Runtime::lowercase(&NativeRuntime, value) }
+    fn word_character(&self, value: u32) -> bool { Runtime::word_character(&NativeRuntime, value) }
+    fn compare_english(&self, a: &JsString, b: &JsString) -> Ordering {
+        if (text(a).contains(": ") && text(b).contains(": "))
+            || (text(a).starts_with("tie_") && text(b).starts_with("tie_")) { Ordering::Equal }
+        else { Runtime::compare_english(&NativeRuntime, a, b) }
+    }
+}
+
+#[test]
+fn instruction_guides_keep_tool_order_when_presentation_collation_ties() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store.connection().execute("INSERT INTO principals VALUES('fixture')", []).unwrap();
+    for (id, name) in [("z", "z_read"), ("a", "a_read")] {
+        insert_catalog_provider(&store, id, [true.into(), true.into(), true.into(), true.into()], Some((name, "ivy")), 0);
+        store.connection().execute("UPDATE registries SET registry_json=json_set(registry_json,'$.namespaces[0].guideMarkdown',?) WHERE node_id=?", rusqlite::params![format!("{id} guide"), id]).unwrap();
+    }
+    let mut registry = Registry::default();
+    let mut catalog = registry.get_registry(&store, &"z".into()).unwrap().unwrap();
+    let IvyJson::Array(mut namespaces) = catalog.remove("namespaces").unwrap() else { unreachable!() };
+    let mut ns = namespaces.remove(0);
+    let IvyJson::Array(mut tools) = ns.remove("tools").unwrap() else { unreachable!() };
+    let base = tools.remove(0);
+    for (namespace, name, mcp) in [("x", "one", "z_read"), ("y", "two", "tie_b"), ("x", "three", "tie_a")] {
+        let mut tool = base.clone();
+        tool.insert("namespace", namespace.into()); tool.insert("name", name.into());
+        tool.insert("discovery", IvyJson::object([("mcp", IvyJson::object([("name", mcp.into()), ("surface", "ivy".into())]))]));
+        tools.push(tool);
+    }
+    ns.insert("tools", IvyJson::Array(tools));
+    ns.insert("guideMarkdown", IvyJson::String(JsString(vec![b'z' as u16, 0, 0xd800])));
+    catalog.insert("namespaces", IvyJson::Array(vec![ns]));
+    store.connection().execute("UPDATE registries SET registry_json=? WHERE node_id='z'", [canonical(&catalog, usize::MAX).unwrap()]).unwrap();
+    for (runtime, order) in [(&NativeRuntime as &dyn Runtime, ["x", "y"]), (&GuideTies as &dyn Runtime, ["y", "x"])] {
+        let old = original_instructions(&mut discovery(), &store, &mut Registry::default(), runtime, 0.0).unwrap();
+        let new = discovery().instructions(&store, &mut Registry::default(), runtime, 0.0).unwrap();
+        assert_eq!(new, old);
+        let mut registry = Registry::default();
+        let nodes = registry.catalog_providers(&store).unwrap();
+        let guides = mcp_guides(&store, &mut registry, &nodes, runtime).unwrap();
+        assert_eq!(guides.len(), 3);
+        assert!(text(&guides[0]).contains("a guide"));
+        assert!(text(&guides[1]).contains(&format!("/{}: ", order[0])));
+        assert!(text(&guides[2]).contains(&format!("/{}: ", order[1])));
+    }
+}
+
+#[test]
+fn instruction_guides_avoid_schema_and_repeated_guide_copies() {
+    const CHILD: &str = "IVY_INSTRUCTION_GUIDE_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "discovery::memory_tests::instruction_guides_avoid_schema_and_repeated_guide_copies", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;")); return;
+    }
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store.connection().execute("INSERT INTO principals VALUES('fixture')", []).unwrap();
+    for index in 0..16 {
+        let id = format!("provider{index:02}");
+        insert_catalog_provider(&store, &id, [true.into(), true.into(), true.into(), true.into()], Some(("fixture_read", "ivy")), 0);
+        let mut catalog = Registry::default().get_registry(&store, &id.as_str().into()).unwrap().unwrap();
+        let IvyJson::Array(mut namespaces) = catalog.remove("namespaces").unwrap() else { unreachable!() };
+        let mut ns = namespaces.remove(0);
+        let IvyJson::Array(mut tools) = ns.remove("tools").unwrap() else { unreachable!() };
+        let base = tools.remove(0);
+        for i in 0..8 {
+            let mut tool = base.clone();
+            tool.insert("name", format!("read{i}").into());
+            tool.insert("discovery", IvyJson::object([("mcp", IvyJson::object([("name", format!("fixture_read{i}").into()), ("surface", "ivy".into())]))]));
+            for key in ["inputSchema", "outputSchema"] {
+                tool.insert(key, IvyJson::object([("type", "object".into()), ("description", "s".repeat(16 * 1024).into())]));
+            }
+            tools.push(tool);
+        }
+        ns.insert("tools", IvyJson::Array(tools));
+        ns.insert("guideMarkdown", format!("Use fixture.read0. {}", "g".repeat(8192)).into());
+        catalog.insert("namespaces", IvyJson::Array(vec![ns]));
+        store.connection().execute("UPDATE registries SET registry_json=? WHERE node_id=?", rusqlite::params![canonical(&catalog, usize::MAX).unwrap(), id]).unwrap();
+    }
+    let mut registry = Registry::default(); let mut owner = discovery();
+    drop(catalog_instruction_guides(&mut owner, &store, &mut registry, &NativeRuntime).unwrap());
+    let before = LIVE.load(AtomicOrdering::Relaxed); PEAK.store(before, AtomicOrdering::Relaxed);
+    let started = std::time::Instant::now();
+    let mut old = catalog_instruction_guides(&mut owner, &store, &mut registry, &NativeRuntime).unwrap();
+    let old_elapsed = started.elapsed(); let old_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    let mut seen = HashSet::new(); old.retain(|guide| seen.insert(guide.clone())); drop(seen);
+    let expected = hash_json(&IvyJson::Array(old.into_iter().map(IvyJson::String).collect())).unwrap();
+    let nodes = registry.catalog_providers(&store).unwrap();
+    let before = LIVE.load(AtomicOrdering::Relaxed); PEAK.store(before, AtomicOrdering::Relaxed);
+    let started = std::time::Instant::now();
+    let mut new = mcp_guides(&store, &mut registry, &nodes, &NativeRuntime).unwrap();
+    let elapsed = started.elapsed(); let peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    let mut seen = HashSet::new(); new.retain(|guide| seen.insert(guide.clone()));
+    assert_eq!(hash_json(&IvyJson::Array(new.into_iter().map(IvyJson::String).collect())).unwrap(), expected);
+    eprintln!("Hive instruction guide Rust allocation peak: full MCP definitions {old_peak} bytes, metadata guides {peak} bytes for 16 providers, 128 tools, 4 MiB raw schemas and 8 KiB guide per provider; elapsed {old_elapsed:?} / {elapsed:?}");
+    assert!(old_peak > peak + 4 * 1024 * 1024, "Guide projection copied schemas: {old_peak} / {peak}");
+    assert!(peak < 1024 * 1024, "Guide projection unexpectedly large: {peak}");
+}
+
 fn original_instructions(
         owner: &mut Discovery,
         store: &Store,
