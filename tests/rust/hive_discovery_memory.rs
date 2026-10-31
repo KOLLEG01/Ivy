@@ -90,7 +90,7 @@ fn search_index_does_not_retain_or_copy_the_registry_source() {
     let identity = digest(source.as_bytes());
     store.connection().execute("INSERT INTO registries VALUES('fixture',?)", [&source]).unwrap();
     drop(source);
-    let node = IvyJson::object([("serviceNodeId", "fixture".into())]);
+    let node: JsString = "fixture".into();
     let mut discovery = discovery();
     NativeRuntime.word_character(b'a' as u32);
     let before = LIVE.load(AtomicOrdering::Relaxed);
@@ -175,7 +175,7 @@ fn registry_identity_follows_savepoint_rollback_and_delete() {
     ).unwrap();
     let source = r#"{"namespaces":[],"discoveryHint":"original"}"#;
     store.connection().execute("INSERT INTO registries VALUES('fixture',?)", [source]).unwrap();
-    let node = IvyJson::object([("serviceNodeId", "fixture".into())]);
+    let node: JsString = "fixture".into();
     let mut discovery = discovery();
     let first = discovery.index(&store, &node, &NativeRuntime).unwrap();
     assert_eq!(first.identity, digest(source.as_bytes()));
@@ -217,7 +217,7 @@ fn registry_identity_is_rebuilt_from_online_backup() {
     }
     {
         let store = Store::open(&backup).unwrap();
-        let node = IvyJson::object([("serviceNodeId", "fixture".into())]);
+        let node: JsString = "fixture".into();
         let mut discovery = discovery();
         let index = discovery.index(&store, &node, &NativeRuntime).unwrap();
         assert_eq!(index.identity, digest(source.as_bytes()));
@@ -478,7 +478,7 @@ fn insert_catalog_provider(store: &Store, id: &str, flags: [IvyJson; 4], mcp: Op
         ("name",name.into()),("surface",surface.into()),
     ]))])); }
     let catalog=IvyJson::object([("namespaces",IvyJson::Array(vec![IvyJson::object([
-        ("namespace","fixture".into()),("guideMarkdown","Fixture guide.".into()),("tools",IvyJson::Array(vec![tool])),
+        ("namespace","fixture".into()),("description","Fixture tools.".into()),("guideMarkdown","Fixture guide.".into()),("tools",IvyJson::Array(vec![tool])),
     ])]))]);
     store.connection().execute("INSERT INTO registries VALUES(?1,?2)",
         rusqlite::params![id,canonical(&catalog,usize::MAX).unwrap()]).unwrap();
@@ -564,3 +564,239 @@ fn mcp_catalog_avoids_full_status_and_diagnostic_working_sets() {
     assert!(old_peak>peak+2*1024*1024,"Provider projection retained status bodies: {old_peak} / {peak}");
     assert!(peak<1024*1024,"Compact catalog unexpectedly large: {peak}");
 }
+
+#[test]
+fn discovery_hint_projection_preserves_optional_types_and_utf16() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store.connection().execute_batch(
+        "INSERT INTO principals VALUES('fixture');
+         INSERT INTO service_nodes VALUES('fixture','fixture','host','service',1,'{}');",
+    ).unwrap();
+    let owner = Registry::default();
+    let id = JsString::from("fixture");
+    assert_eq!(owner.discovery_hint(&store, &id).unwrap(), None);
+    let mut values = vec![IvyJson::Null, empty(), IvyJson::Array(vec![]), false.into(), 17.0.into(), "root".into()];
+    for hint in [
+        IvyJson::Null, false.into(), 17.0.into(), IvyJson::Array(vec!["ignored".into()]),
+        IvyJson::object([("ignored", "x".repeat(64 * 1024).into())]), "".into(),
+        "\u{feff} \u{2028}hint \u{a0}".into(),
+        IvyJson::String(JsString(vec![0xfeff, b'a' as u16, 0, 0xd800, b'b' as u16, 0xdc00, 0x2028])),
+    ] {
+        values.push(IvyJson::object([("discoveryHint", hint)]));
+    }
+    for value in values {
+        store.connection().execute(
+            "INSERT INTO registries VALUES('fixture',?) ON CONFLICT(node_id) DO UPDATE SET registry_json=excluded.registry_json",
+            [canonical(&value, usize::MAX).unwrap()],
+        ).unwrap();
+        let expected = owner.get_registry(&store, &id).map(|value| value.and_then(|value|
+            value.get("discoveryHint").and_then(IvyJson::as_js_string).cloned()
+        )).map_err(|error| error.to_wire());
+        assert_eq!(owner.discovery_hint(&store, &id).map_err(|error| error.to_wire()), expected);
+    }
+    store.connection().execute("DELETE FROM registries", []).unwrap();
+    assert_eq!(owner.discovery_hint(&store, &id).unwrap(), None);
+}
+
+#[test]
+fn instruction_projection_preserves_hints_policies_and_revisions() {
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store.connection().execute("INSERT INTO principals VALUES('fixture')", []).unwrap();
+    for (id, active, mcp, hint) in [
+        ("a", true, Some(("fixture_read", "ivy")), "\u{feff} Duplicate capability.\u{2028}"),
+        ("b", false, Some(("old_read", "ivy_dev")), "Offline capability."),
+        ("c", true, Some(("fixture_read", "ivy")), "Duplicate capability."),
+        ("d", true, None, "Hidden capability."),
+        ("e", true, Some(("fixture_read", "ivy")), "\u{feff} \u{2028}"),
+        ("f", true, Some(("other_read", "ivy_dev")), "Sorted capability."),
+    ] {
+        insert_catalog_provider(&store, id, [active.into(), true.into(), true.into(), true.into()], mcp, 0);
+        store.connection().execute(
+            "UPDATE registries SET registry_json=json_set(registry_json,'$.discoveryHint',json(?)) WHERE node_id=?",
+            rusqlite::params![canonical(&IvyJson::from(hint), usize::MAX).unwrap(), id],
+        ).unwrap();
+    }
+    store.connection().execute("UPDATE service_nodes SET status_json=json_set(status_json,'$.serviceName','another') WHERE id='f'", []).unwrap();
+    let mut registry = Registry::default();
+    let mut owner = discovery();
+    for phase in 0..3 {
+        if phase == 1 {
+            let hint = IvyJson::String(JsString(vec![b'n' as u16, 0, 0xd800, 0xdc00, 0xd801]));
+            store.connection().execute(
+                "UPDATE registries SET registry_json=json_set(registry_json,'$.discoveryHint',json(?)) WHERE node_id='a'",
+                [canonical(&hint, usize::MAX).unwrap()],
+            ).unwrap();
+        }
+        if phase == 2 {
+            store.connection().execute("DELETE FROM registries WHERE node_id='b'", []).unwrap();
+        }
+        let expected = original_instructions(&mut owner, &store, &mut registry, &NativeRuntime, 1_000_000.0).unwrap();
+        store.connection().authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+            match context.action {
+                rusqlite::hooks::AuthAction::Read { table_name: "diagnostics", .. } => rusqlite::hooks::Authorization::Deny,
+                _ => rusqlite::hooks::Authorization::Allow,
+            }
+        })).unwrap();
+        let actual = owner.instructions(&store, &mut registry, &NativeRuntime, 1_000_000.0).unwrap();
+        store.connection().authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>).unwrap();
+        assert_eq!(actual, expected, "phase {phase}");
+        let instructions = text(string(&actual, "instructions").unwrap());
+        assert!(!instructions.contains("Hidden capability."));
+        assert_eq!(instructions.matches("Duplicate capability.").count(), 1);
+        assert_eq!(instructions.contains("Offline capability."), phase < 2);
+    }
+}
+
+#[test]
+fn instructions_avoid_full_status_and_registry_working_sets() {
+    const CHILD: &str = "IVY_INSTRUCTION_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "discovery::memory_tests::instructions_avoid_full_status_and_registry_working_sets", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+        return;
+    }
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store.connection().execute("INSERT INTO principals VALUES('fixture')", []).unwrap();
+    for i in 0..64 {
+        let id = format!("provider{i:02}");
+        insert_catalog_provider(&store, &id, [true.into(), true.into(), true.into(), true.into()], Some(("fixture_read", "ivy")), 32 * 1024);
+        store.connection().execute(
+            "UPDATE registries SET registry_json=json_set(registry_json,'$.discoveryHint','Fixture capability.','$.opaque',?) WHERE node_id=?",
+            rusqlite::params!["r".repeat(32 * 1024), id],
+        ).unwrap();
+    }
+    let diagnostic = serde_json::json!({"source":"unrelated","status":"current","message":"d".repeat(2 * 1024 * 1024)}).to_string();
+    store.connection().execute("INSERT INTO diagnostics VALUES('large',?)", [diagnostic]).unwrap();
+    let mut registry = Registry::default();
+    let mut owner = discovery();
+    drop(original_instructions(&mut owner, &store, &mut registry, &NativeRuntime, 0.0).unwrap());
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    let started = std::time::Instant::now();
+    let old = original_instructions(&mut owner, &store, &mut registry, &NativeRuntime, 0.0).unwrap();
+    let old_elapsed = started.elapsed();
+    let old_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    let expected = hash_json(&old).unwrap();
+    drop(old);
+    store.connection().authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+        match context.action {
+            rusqlite::hooks::AuthAction::Read { table_name: "diagnostics", .. } => rusqlite::hooks::Authorization::Deny,
+            _ => rusqlite::hooks::Authorization::Allow,
+        }
+    })).unwrap();
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    let started = std::time::Instant::now();
+    let new = owner.instructions(&store, &mut registry, &NativeRuntime, 0.0).unwrap();
+    let elapsed = started.elapsed();
+    let peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    store.connection().authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>).unwrap();
+    assert_eq!(hash_json(&new).unwrap(), expected);
+    eprintln!("Hive instructions Rust allocation peak: full nodes/registries {old_peak} bytes, projected hints {peak} bytes for 64 providers, 2 MiB status, 2 MiB registries and 2 MiB diagnostics; elapsed {old_elapsed:?} / {elapsed:?}");
+    assert!(old_peak > peak + 2 * 1024 * 1024, "Instructions retained status bodies: {old_peak} / {peak}");
+    assert!(peak < 2 * 1024 * 1024, "Projected instructions unexpectedly large: {peak}");
+}
+
+fn original_instructions(
+        owner: &mut Discovery,
+        store: &Store,
+        registry: &mut Registry,
+        runtime: &dyn Runtime,
+        now: f64,
+    ) -> IvyResult<IvyJson> {
+        let catalog = owner.mcp_catalog(store, registry, None, runtime, now)?;
+        let mut guides = vec![];
+        for binding in &catalog {
+            if (binding
+                .get("provider")
+                .is_some_and(|v| v.as_object().is_some()))
+                && binding
+                    .get("guideMarkdown")
+                    .and_then(IvyJson::as_js_string)
+                    .is_some_and(|v| !v.0.is_empty())
+            {
+                guides.push(concat(&[
+                    string(binding, "serviceName")?,
+                    &"/".into(),
+                    string(field(binding, "definition")?, "namespace")?,
+                    &": ".into(),
+                    string(binding, "guideMarkdown")?,
+                ]));
+            }
+        }
+        let mut hints: Vec<(JsString, Vec<JsString>)> = vec![];
+        for node in registry.nodes(store, runtime, now)? {
+            if !owner
+                .index(store, string(&node, "serviceNodeId")?, runtime)?
+                .tools
+                .iter()
+                .any(|t| t.mcp.is_some())
+            {
+                continue;
+            }
+            let Some(hint) = registry
+                .get_registry(store, string(&node, "serviceNodeId")?)?
+                .as_ref()
+                .and_then(|v| v.get("discoveryHint"))
+                .and_then(IvyJson::as_js_string)
+                .map(JsString::trim_ecmascript)
+                .filter(|v| !v.0.is_empty())
+            else {
+                continue;
+            };
+            let name = string(&node, "serviceName")?.clone();
+            if let Some((_, values)) = hints.iter_mut().find(|(n, _)| n == &name) {
+                if !values.contains(&hint) {
+                    values.push(hint);
+                }
+            } else {
+                hints.push((name, vec![hint]));
+            }
+        }
+        hints.sort_by(|a, b| runtime.compare_english(&a.0, &b.0));
+        let mut value = JsString::from(include_str!(
+            "../../../../instructions/hive-mcp-instructions.md"
+        ))
+        .trim_ecmascript();
+        if !hints.is_empty() {
+            value = concat(&[
+                &value,
+                &"\n\nServices registered to this Hive provide the following capabilities:\n"
+                    .into(),
+            ]);
+            let mut lines = vec![];
+            for (name, mut values) in hints {
+                values.sort_by(|a, b| runtime.compare_english(a, b));
+                for hint in values {
+                    lines.push(concat(&[&"- ".into(), &name, &": ".into(), &hint]));
+                }
+            }
+            value = concat(&[&value, &joined(&lines, "\n")]);
+        }
+        let mut seen = HashSet::new();
+        guides.retain(|v| seen.insert(v.clone()));
+        guides.sort_by(|a, b| runtime.compare_english(a, b));
+        if !guides.is_empty() {
+            value = concat(&[
+                &value,
+                &"\n\nTool workflows:\n".into(),
+                &joined(
+                    &guides
+                        .iter()
+                        .map(|v| concat(&[&"- ".into(), v]))
+                        .collect::<Vec<_>>(),
+                    "\n",
+                ),
+            ]);
+        }
+        require(
+            text(&value).len() <= 32768,
+            "limit_exceeded",
+            "Composed Hive instructions exceed 32 KiB.",
+        )?;
+        Ok(IvyJson::object([("instructions", IvyJson::String(value))]))
+    }

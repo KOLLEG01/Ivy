@@ -464,6 +464,22 @@ impl Registry {
             .iter()
             .all(|key| node.get(key).and_then(IvyJson::as_bool) == Some(true))
     }
+    pub(crate) fn discovery_hint(&self, store: &Store, id: &JsString) -> IvyResult<Option<JsString>> {
+        let row = sql(store, store.connection().query_row(
+            "SELECT json_type(registry_json),
+                    CASE WHEN json_type(registry_json,'$.discoveryHint')='text'
+                         THEN registry_json -> '$.discoveryHint' END
+             FROM registries WHERE node_id=?", [text(id)],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        ).optional())?;
+        let Some((kind, value)) = row else { return Ok(None) };
+        if kind == "null" { return Ok(None) }
+        if kind != "object" { return Err(IvyError::internal()) }
+        value.map(|value| {
+            parse(&value, usize::MAX).map_err(|_| IvyError::internal())?
+                .into_js_string().ok_or_else(IvyError::internal)
+        }).transpose()
+    }
     pub fn get_registry(&self, store: &Store, id: &JsString) -> IvyResult<Option<IvyJson>> {
         sql(
             store,

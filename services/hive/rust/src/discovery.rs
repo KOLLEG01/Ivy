@@ -505,10 +505,9 @@ impl Discovery {
     fn index(
         &mut self,
         store: &Store,
-        node: &IvyJson,
+        id: &JsString,
         runtime: &dyn Runtime,
     ) -> IvyResult<Arc<Index>> {
-        let id = string(node, "serviceNodeId")?;
         let identity = store.connection()
             .prepare_cached("SELECT identity FROM registry_identities WHERE node_id=?")
             .and_then(|mut statement| statement.query_row([text(id)], |row| row.get::<_, String>(0)).optional())
@@ -708,7 +707,7 @@ impl Discovery {
         for node in registry.nodes(store, runtime, now)? {
             if !mcp_only
                 || self
-                    .index(store, &node, runtime)?
+                    .index(store, string(&node, "serviceNodeId")?, runtime)?
                     .tools
                     .iter()
                     .any(|t| t.mcp.is_some())
@@ -738,7 +737,7 @@ impl Discovery {
             require(
                 !mcp_only
                     || self
-                        .index(store, &node, runtime)?
+                        .index(store, string(&node, "serviceNodeId")?, runtime)?
                         .tools
                         .iter()
                         .any(|t| t.mcp.is_some()),
@@ -806,7 +805,7 @@ impl Discovery {
                 ("available", Registry::eligible(node).into()),
                 (
                     "catalog",
-                    self.index(store, node, runtime)?.identity.clone().into(),
+                    self.index(store, string(node, "serviceNodeId")?, runtime)?.identity.clone().into(),
                 ),
             ]));
         }
@@ -838,10 +837,10 @@ impl Discovery {
                     .iter()
                     .filter(|n| n.get("serviceName").and_then(IvyJson::as_js_string) == Some(&name))
                     .collect();
-                let description = self.index(store, owners[0], runtime)?.description.clone();
+                let description = self.index(store, string(owners[0], "serviceNodeId")?, runtime)?.description.clone();
                 let mut names = HashSet::new();
                 for node in &owners {
-                    for t in &self.index(store, node, runtime)?.tools {
+                    for t in &self.index(store, string(node, "serviceNodeId")?, runtime)?.tools {
                         if !mcp_only || t.mcp.is_some() {
                             names.insert(t.qualified_name.clone());
                         }
@@ -898,7 +897,7 @@ impl Discovery {
                 }
             }
             for node in &selected {
-                for tool in &self.index(store, node, runtime)?.tools {
+                for tool in &self.index(store, string(node, "serviceNodeId")?, runtime)?.tools {
                     if !mcp_only || tool.mcp.is_some() {
                         records.push((
                             string(node, "serviceName")?.clone(),
@@ -1081,7 +1080,7 @@ impl Discovery {
                         };
                         if !is_text(entry.get("serviceName"), "hive") {
                             for node in &selected {
-                                let index = self.index(store, node, runtime)?;
+                                let index = self.index(store, string(node, "serviceNodeId")?, runtime)?;
                                 if let Some((_, d)) = index
                                     .groups
                                     .iter()
@@ -1358,9 +1357,9 @@ impl Discovery {
             }
         }
         let mut hints: Vec<(JsString, Vec<JsString>)> = vec![];
-        for node in registry.nodes(store, runtime, now)? {
+        for node in registry.catalog_providers(store)? {
             if !self
-                .index(store, &node, runtime)?
+                .index(store, &node.service_node_id, runtime)?
                 .tools
                 .iter()
                 .any(|t| t.mcp.is_some())
@@ -1368,16 +1367,14 @@ impl Discovery {
                 continue;
             }
             let Some(hint) = registry
-                .get_registry(store, string(&node, "serviceNodeId")?)?
+                .discovery_hint(store, &node.service_node_id)?
                 .as_ref()
-                .and_then(|v| v.get("discoveryHint"))
-                .and_then(IvyJson::as_js_string)
                 .map(JsString::trim_ecmascript)
                 .filter(|v| !v.0.is_empty())
             else {
                 continue;
             };
-            let name = string(&node, "serviceName")?.clone();
+            let name = node.service_name;
             if let Some((_, values)) = hints.iter_mut().find(|(n, _)| n == &name) {
                 if !values.contains(&hint) {
                     values.push(hint);
