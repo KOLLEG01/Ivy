@@ -564,13 +564,14 @@ pub fn canonical(value: &IvyJson, maximum_bytes: usize) -> IvyResult<String> {
 pub(crate) fn canonical_object<'a>(
     pairs: impl IntoIterator<Item = (&'a JsString, &'a IvyJson)>,
     maximum_bytes: usize,
-) -> IvyResult<String> {
+    out: impl std::fmt::Write,
+) -> IvyResult<()> {
     let mut pairs: Vec<_> = pairs.into_iter().collect();
     pairs.reverse();
     pairs.sort_by(|a, b| a.0.cmp(b.0));
     pairs.dedup_by(|a, b| a.0 == b.0);
     let mut encoder = Encoder {
-        out: String::new(), maximum_bytes, nodes: 1, sorted: true, validate: true, accounted: 0,
+        out, maximum_bytes, nodes: 1, sorted: true, validate: true, accounted: 0,
     };
     encoder.punctuation("{")?;
     for (index, (key, value)) in pairs.iter().enumerate() {
@@ -581,7 +582,7 @@ pub(crate) fn canonical_object<'a>(
     }
     encoder.punctuation("}")?;
     encoder.account(2 + pairs.len().saturating_sub(1))?;
-    Ok(encoder.out)
+    Ok(())
 }
 /// Encode an object's generated array one record at a time with the same
 /// canonical ordering, depth, node and byte budgets as an owned JSON tree.
@@ -590,7 +591,8 @@ pub(crate) fn canonical_object_with_array<'a>(
     array_key: &'a JsString,
     records: impl IntoIterator<Item = IvyJson>,
     maximum_bytes: usize,
-) -> IvyResult<String> {
+    out: impl std::fmt::Write,
+) -> IvyResult<()> {
     let mut pairs: Vec<_> = pairs.into_iter().filter(|(key, _)| *key != array_key)
         .map(|(key, value)| (key, Some(value))).collect();
     pairs.push((array_key, None));
@@ -598,7 +600,7 @@ pub(crate) fn canonical_object_with_array<'a>(
     pairs.sort_by(|a, b| a.0.cmp(b.0));
     pairs.dedup_by(|a, b| a.0 == b.0);
     let mut encoder = Encoder {
-        out: String::new(), maximum_bytes, nodes: 1, sorted: true, validate: true, accounted: 0,
+        out, maximum_bytes, nodes: 1, sorted: true, validate: true, accounted: 0,
     };
     let mut records = records.into_iter();
     encoder.punctuation("{")?;
@@ -623,7 +625,14 @@ pub(crate) fn canonical_object_with_array<'a>(
     }
     encoder.punctuation("}")?;
     encoder.account(2 + pairs.len().saturating_sub(1))?;
-    Ok(encoder.out)
+    Ok(())
+}
+pub(crate) fn canonical_into(
+    value: &IvyJson,
+    maximum_bytes: usize,
+    out: impl std::fmt::Write,
+) -> IvyResult<()> {
+    encode_into(value, maximum_bytes, true, true, out)
 }
 pub fn stringify(value: &IvyJson, maximum_bytes: usize) -> IvyResult<String> {
     encode(value, maximum_bytes, false, false)
@@ -648,8 +657,19 @@ fn encode(
     sorted: bool,
     validate: bool,
 ) -> IvyResult<String> {
+    let mut out = String::new();
+    encode_into(value, maximum_bytes, sorted, validate, &mut out)?;
+    Ok(out)
+}
+fn encode_into(
+    value: &IvyJson,
+    maximum_bytes: usize,
+    sorted: bool,
+    validate: bool,
+    out: impl std::fmt::Write,
+) -> IvyResult<()> {
     let mut encoder = Encoder {
-        out: String::new(),
+        out,
         maximum_bytes,
         nodes: 0,
         sorted,
@@ -657,17 +677,17 @@ fn encode(
         accounted: 0,
     };
     encoder.value(value, 0)?;
-    Ok(encoder.out)
+    Ok(())
 }
-struct Encoder {
-    out: String,
+struct Encoder<W> {
+    out: W,
     maximum_bytes: usize,
     nodes: usize,
     sorted: bool,
     validate: bool,
     accounted: usize,
 }
-impl Encoder {
+impl<W: std::fmt::Write> Encoder<W> {
     fn node(&mut self, depth: usize) -> IvyResult<()> {
         self.nodes += 1;
         if self.validate && (self.nodes > 400_000 || depth > 128) {
@@ -677,8 +697,7 @@ impl Encoder {
     }
     fn emit(&mut self, text: &str) -> IvyResult<()> {
         self.account(text.len())?;
-        self.out.push_str(text);
-        Ok(())
+        self.out.write_str(text).map_err(|_| IvyError::internal())
     }
     fn account(&mut self, bytes: usize) -> IvyResult<()> {
         self.accounted = self.accounted.saturating_add(bytes);
@@ -689,8 +708,7 @@ impl Encoder {
     }
     fn punctuation(&mut self, text: &str) -> IvyResult<()> {
         if self.sorted {
-            self.out.push_str(text);
-            Ok(())
+            self.out.write_str(text).map_err(|_| IvyError::internal())
         } else {
             self.emit(text)
         }

@@ -111,7 +111,7 @@ fn tool_page_identity_does_not_clone_the_full_tool_vector() {
     let before = LIVE.load(Ordering::Relaxed);
     PEAK.store(before, Ordering::Relaxed);
     let identity = owned_tool_identity(&id, &guide, &tools);
-    let expected = hash_json(&identity).unwrap();
+    let expected = ivy_contracts::hash::digest(canonical(&identity, MANAGEMENT_FRAME_BYTES).unwrap());
     let cloned_peak = PEAK.load(Ordering::Relaxed) - before;
     drop(identity);
     let before = LIVE.load(Ordering::Relaxed);
@@ -123,6 +123,8 @@ fn tool_page_identity_does_not_clone_the_full_tool_vector() {
     eprintln!("Hive tool-page identity Rust allocation peak: full materialization {cloned_peak} bytes, streamed identity {moved_peak} bytes for 1 MiB opaque schema text");
     // Compare allocator requests above the already-owned input, excluding RSS.
     assert!(cloned_peak > moved_peak + isize::try_from(copied_schema_bytes * 3 / 4).unwrap());
+    // One tool's UTF-16 payload fits; retaining the encoded catalog does not.
+    assert!(moved_peak < 512 * 1024, "Catalog hashing retained encoded text: {moved_peak}");
 }
 
 #[test]

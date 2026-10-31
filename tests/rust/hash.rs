@@ -1,6 +1,7 @@
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
-    hash::{hash_json, hash_object_with_array, hmac_sha256, tool_definition_hash, verify_hmac_sha256},
+    hash::{digest, hash_json, hash_object_with_array, hmac_sha256, tool_definition_hash, verify_hmac_sha256},
+    json::canonical,
     limits::MANAGEMENT_FRAME_BYTES,
 };
 
@@ -68,8 +69,8 @@ fn copied_tool_hash(definition: &IvyJson) -> IvyResult<String> {
     let IvyJson::Object(pairs) = definition else {
         return Err(IvyError::new("invalid_arguments", "Expected a tool definition."));
     };
-    hash_json(&IvyJson::object(pairs.iter()
-        .filter(|(key, _)| key != &JsString::from("discovery")).cloned()))
+    canonical(&IvyJson::object(pairs.iter()
+        .filter(|(key, _)| key != &JsString::from("discovery")).cloned()), MANAGEMENT_FRAME_BYTES).map(digest)
 }
 
 fn compare_tool_hash(definition: &IvyJson) -> bool {
@@ -146,7 +147,7 @@ fn compare_generated_array(object: &IvyJson, records: Vec<IvyJson>) -> bool {
     expected.insert("tools", IvyJson::Array(records.clone()));
     let actual = hash_object_with_array(pairs.iter().map(|(key, value)| (key, value)),
         &JsString::from("tools"), records).map_err(|e| (e.code, e.message));
-    let expected = hash_json(&expected).map_err(|e| (e.code, e.message));
+    let expected = canonical(&expected, MANAGEMENT_FRAME_BYTES).map(digest).map_err(|e| (e.code, e.message));
     assert_eq!(actual, expected);
     actual.is_ok()
 }
@@ -194,5 +195,21 @@ fn generated_array_hash_keeps_one_node_depth_and_byte_budget() {
         assert_eq!(compare_generated_array(&object, vec![
             "a".repeat(text / 2).into(), "b".repeat(text - text / 2 + extra).into(),
         ]), extra == 0);
+    }
+}
+
+#[test]
+fn canonical_hash_matches_exact_bytes_across_buffer_boundaries() {
+    // Escapes and multibyte Unicode cross the fixed hash buffer repeatedly.
+    for length in [0, 1, 8190, 8191, 8192, 8193, 16_383, 16_384, 65_536] {
+        let mut units = vec![u16::from(b'x'); length];
+        units.extend("\u{1f600}\"\\\n\u{1}\u{e000}".encode_utf16());
+        units.extend([0xd800, u16::from(b'z'), 0xdc00]);
+        let value = IvyJson::object([
+            (JsString(vec![0xe000]), IvyJson::String(JsString(units))),
+            (JsString(vec![0xd800, 0xdc00]), IvyJson::Array(vec![(-0.0).into(), 1e-7.into(), true.into()])),
+        ]);
+        assert_eq!(hash_json(&value).unwrap(), digest(canonical(&value, MANAGEMENT_FRAME_BYTES).unwrap()));
+        assert!(compare_generated_array(&IvyJson::object([("guide", value.clone())]), vec![value]));
     }
 }
