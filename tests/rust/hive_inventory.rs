@@ -590,4 +590,3 @@ fn inventory_utf16_sql_aliases_and_retained_missing_schema_projection_match_orig
     success(&rows, get_old);
     assert_eq!(value(&rows, get_old)["schemaVersion"], "9.0.0");
 }
-
