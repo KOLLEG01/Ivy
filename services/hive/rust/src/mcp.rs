@@ -8,7 +8,7 @@ use ivy_contracts::{
     limits::MANAGEMENT_FRAME_BYTES,
     schema::SchemaValidators,
 };
-use std::{collections::HashMap, sync::OnceLock};
+use std::{borrow::Cow, collections::HashMap, sync::OnceLock};
 
 /// Reuses Discovery's language primitives and adds ECMAScript String.toUpperCase.
 pub trait Runtime: crate::discovery::Runtime {
@@ -211,7 +211,7 @@ fn empty_object(schema: &IvyJson) -> bool {
             })
         })
 }
-pub fn has_structured_output(bindings: &[IvyJson]) -> IvyResult<bool> {
+pub fn has_structured_output<'a>(bindings: impl IntoIterator<Item = &'a IvyJson>) -> IvyResult<bool> {
     for binding in bindings {
         let schema = field(definition(binding)?, "outputSchema")?;
         if matches!(
@@ -246,9 +246,9 @@ fn pointer_key(v: &[u16]) -> JsString {
     }
     JsString(out)
 }
-fn visible_root(schema: &IvyJson) -> IvyJson {
+fn visible_root(schema: &IvyJson) -> Cow<'_, IvyJson> {
     let Some(reference) = schema.get("$ref").and_then(IvyJson::as_js_string) else {
-        return schema.clone();
+        return Cow::Borrowed(schema);
     };
     let prefix: Vec<_> = "#/$defs/".encode_utf16().collect();
     let Some(name) = reference
@@ -256,7 +256,7 @@ fn visible_root(schema: &IvyJson) -> IvyJson {
         .strip_prefix(prefix.as_slice())
         .filter(|v| !v.is_empty() && !v.contains(&47))
     else {
-        return schema.clone();
+        return Cow::Borrowed(schema);
     };
     let Some(target) = schema
         .get("$defs")
@@ -269,7 +269,7 @@ fn visible_root(schema: &IvyJson) -> IvyJson {
                 )
         })
     else {
-        return schema.clone();
+        return Cow::Borrowed(schema);
     };
     let mut result = schema.clone();
     result.remove("$ref");
@@ -288,7 +288,7 @@ fn visible_root(schema: &IvyJson) -> IvyJson {
         IvyJson::String(reference.clone()),
     )]));
     result.insert("allOf", IvyJson::Array(all));
-    result
+    Cow::Owned(result)
 }
 fn service_input(
     bindings: &[&IvyJson],
@@ -391,23 +391,19 @@ fn core_input(binding: &IvyJson, bundle: &mut McpSchemaBundle, path: &str) -> Iv
         "registry_invalid",
         "A selected core MCP variant needs an object input schema.",
     )?;
-    let mut properties = field(&schema, "properties")?.clone();
     let key = string(select, "property")?;
-    properties.insert(
+    schema.get_mut("properties").unwrap().insert(
         key.clone(),
         IvyJson::object([("const", field(select, "value")?.clone())]),
     );
-    schema.insert("properties", properties);
-    let mut required = schema
-        .get("required")
-        .and_then(IvyJson::as_array)
-        .unwrap_or(&[])
-        .to_vec();
     let value = IvyJson::String(key.clone());
-    if !required.contains(&value) {
-        required.push(value);
+    if let Some(IvyJson::Array(required)) = schema.get_mut("required") {
+        if !required.contains(&value) {
+            required.push(value);
+        }
+    } else {
+        schema.insert("required", IvyJson::Array(vec![value]));
     }
-    schema.insert("required", IvyJson::Array(required));
     Ok(schema)
 }
 fn alternatives(branches: Vec<IvyJson>) -> IvyResult<IvyJson> {
@@ -420,22 +416,22 @@ fn alternatives(branches: Vec<IvyJson>) -> IvyResult<IvyJson> {
     }));
     let mut properties = empty();
     for key in keys {
-        let mut choices: Vec<(String, IvyJson)> = vec![];
+        let mut choices: Vec<(String, &IvyJson)> = vec![];
         for branch in &branches {
             if let Some(value) = branch.get("properties").and_then(|v| v.get_key(&key)) {
                 let hash = hash_json(value)?;
                 if let Some((_, v)) = choices.iter_mut().find(|(h, _)| h == &hash) {
-                    *v = value.clone();
+                    *v = value;
                 } else {
-                    choices.push((hash, value.clone()));
+                    choices.push((hash, value));
                 }
             }
         }
-        let choices: Vec<_> = choices.into_iter().map(|(_, v)| v).collect();
+        let mut choices: Vec<_> = choices.into_iter().map(|(_, v)| v.clone()).collect();
         properties.insert(
             key,
             if choices.len() == 1 {
-                choices[0].clone()
+                choices.pop().unwrap()
             } else {
                 IvyJson::object([("anyOf", IvyJson::Array(choices))])
             },
@@ -537,14 +533,14 @@ pub fn direct_descriptors(bindings: &[IvyJson], runtime: &dyn Runtime) -> IvyRes
             "Direct MCP tools need an object input schema.",
         )?;
         let input = input_bundle.finish(input);
-        let mut outputs: Vec<(String, IvyJson)> = vec![];
+        let mut outputs: Vec<(String, &IvyJson)> = vec![];
         for binding in &group {
             let value = field(definition(binding)?, "outputSchema")?;
             let hash = hash_json(value)?;
             if let Some((_, prior)) = outputs.iter_mut().find(|(h, _)| h == &hash) {
-                *prior = value.clone();
+                *prior = value;
             } else {
-                outputs.push((hash, value.clone()));
+                outputs.push((hash, value));
             }
         }
         let mut output_bundle = McpSchemaBundle::new();
@@ -626,7 +622,7 @@ pub fn direct_descriptors(bindings: &[IvyJson], runtime: &dyn Runtime) -> IvyRes
             ("description", IvyJson::String(join(&descriptions, "\n\n"))),
             ("inputSchema", input),
         ]);
-        if has_structured_output(&group.iter().map(|v| (*v).clone()).collect::<Vec<_>>())? {
+        if has_structured_output(group.iter().copied())? {
             descriptor.insert(
                 "outputSchema",
                 output_bundle.finish(IvyJson::object([

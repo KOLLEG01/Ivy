@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "hive",
   "kind": "hive",
-  "version": "0.4.43",
+  "version": "0.4.44",
   "description": "Persistent Hive backend and bundled Console",
   "connectsToHive": false,
   "requirements": {

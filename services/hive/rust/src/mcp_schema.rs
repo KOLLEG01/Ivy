@@ -288,10 +288,14 @@ impl McpSchemaBundle {
         rewrite(&mut root, path, &references)?;
         Ok(root)
     }
-    pub fn finish(&self, mut schema: IvyJson) -> IvyJson {
+    pub fn finish(self, mut schema: IvyJson) -> IvyJson {
         if self.definitions.as_object().is_some_and(|v| !v.is_empty()) {
-            schema.insert("$defs", self.definitions.clone());
+            schema.insert("$defs", self.definitions);
         }
         schema
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/rust/hive_mcp_schema_ownership.rs"]
+mod ownership_tests;
