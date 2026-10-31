@@ -556,7 +556,8 @@ fn observation_pages_keep_live_fields_host_filters_exact_cursors_and_sort_ties()
         }
     }
     let all=registry.host_observations(&store,None,&crate::native_runtime::NativeRuntime,0.0).unwrap();
-    let page=compare_observation_catalog(&store,&registry,&IvyJson::Null,0.0).unwrap();
+    let empty=IvyJson::object(std::iter::empty::<(&str,IvyJson)>());
+    let page=compare_observation_catalog(&store,&registry,&empty,0.0).unwrap();
     for entry in page.get("items").unwrap().as_array().unwrap() {
         assert!(all.contains(entry));
     }
@@ -565,6 +566,7 @@ fn observation_pages_keep_live_fields_host_filters_exact_cursors_and_sort_ties()
 #[test]
 fn observation_pages_keep_operating_and_response_bounds() {
     let store=node_page_store();let registry=Registry::default();
+    let empty=IvyJson::object(std::iter::empty::<(&str,IvyJson)>());
     insert_page_node(&store,"reporter",&IvyJson::object([("serviceNodeId","reporter".into()),("connected",true.into())]));
     for index in 0..1001 {
         let host=format!("host{index:04}");insert_host_report(&store,&host,"reporter",host.clone().into(),0);
@@ -577,10 +579,10 @@ fn observation_pages_keep_operating_and_response_bounds() {
     let filtered=IvyJson::object([("hostId","host1000".into())]);
     assert_eq!(compare_observation_catalog(&store,&registry,&filtered,0.0).unwrap().get("items").unwrap().as_array().unwrap().len(),1);
     store.connection().execute("DELETE FROM host_reports WHERE host_id='host1000'",[]).unwrap();
-    compare_observation_catalog(&store,&registry,&IvyJson::Null,0.0).unwrap();
+    compare_observation_catalog(&store,&registry,&empty,0.0).unwrap();
     store.connection().execute("DELETE FROM host_reports",[]).unwrap();
     for index in 0..3 {let host=format!("host{index}");insert_host_report(&store,&host,"reporter",host.clone().into(),1100*1024);}
-    let mut params=IvyJson::Null;
+    let mut params=empty.clone();
     for _ in 0..3 {
         let page=compare_observation_catalog(&store,&registry,&params,0.0).unwrap();
         assert_eq!(page.get("items").unwrap().as_array().unwrap().len(),1);
@@ -588,7 +590,7 @@ fn observation_pages_keep_operating_and_response_bounds() {
     }
     store.connection().execute("DELETE FROM host_reports",[]).unwrap();
     insert_host_report(&store,"huge","reporter","huge".into(),2*1024*1024);
-    assert_eq!(compare_observation_catalog(&store,&registry,&IvyJson::Null,0.0).unwrap_err().code,"result_too_large");
+    assert_eq!(compare_observation_catalog(&store,&registry,&empty,0.0).unwrap_err().code,"result_too_large");
     assert_eq!(compare_observation_catalog(&store,&registry,&IvyJson::object([("cursor","invalid".into())]),0.0).unwrap_err().code,"invalid_cursor");
 }
 
