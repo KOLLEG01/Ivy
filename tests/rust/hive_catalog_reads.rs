@@ -635,11 +635,11 @@ fn full_protected_builds(store: &Store, current: &JsString) -> IvyResult<std::co
         if let Some(id)=value.and_then(IvyJson::as_js_string).filter(|id|!id.0.is_empty()){builds.insert(id.clone());}
     };
     for snapshot in snapshots {
-        let status=snapshot.required("status")?;
+        let status=snapshot.get("status").ok_or_else(IvyError::internal)?;
         optional(status.get("executor").and_then(|v|v.get("buildId")));
         for (name,fields) in [("instances",&["installedBuild","observedBuild"][..]),
             ("unfinished",&["previousBuild","targetBuild","observedBuild"][..])] {
-            let values=match status.required(name)? {IvyJson::Array(a)=>a.as_slice(),IvyJson::String(_)=>&[],_=>return Err(IvyError::internal())};
+            let values=match status.get(name).ok_or_else(IvyError::internal)? {IvyJson::Array(a)=>a.as_slice(),IvyJson::String(_)=>&[],_=>return Err(IvyError::internal())};
             for value in values {
                 if value.is_null(){return Err(IvyError::internal());}
                 for field in fields {optional(value.get(*field));}
