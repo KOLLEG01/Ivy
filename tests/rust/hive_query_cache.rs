@@ -2,7 +2,11 @@ use super::*;
 
 fn rank(state: &mut State, content: &str) -> IvyJson {
     state
-        .value(ValueRef::Text(content.as_bytes()), ValueRef::Text(b"/rank"))
+        .project(
+            ValueRef::Text(content.as_bytes()),
+            ValueRef::Text(b"/rank"),
+            |value| Ok(value.clone()),
+        )
         .unwrap()
 }
 
@@ -53,4 +57,72 @@ fn query_scope_releases_cache_on_success_and_failure() {
         assert!(state.cache.is_empty());
         assert_eq!(state.cache_bytes, 0);
     }
+}
+
+#[test]
+fn sql_scalar_projections_do_not_copy_selected_containers() {
+    use crate::retention::graph_tests::{LIVE, PEAK};
+    use std::sync::atomic::Ordering;
+    const CHILD: &str = "IVY_SQL_PROJECTION_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "store::query::cache_tests::sql_scalar_projections_do_not_copy_selected_containers",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed;"),
+            "Memory child selected no test"
+        );
+        return;
+    }
+    let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+    let content = serde_json::json!({
+        "object": {"padding":"x".repeat(128 * 1024)},
+        "array": ["x".repeat(128 * 1024)],
+    })
+    .to_string();
+    let mut statement = store.connection().prepare(
+        "SELECT ivy_type(?1,?2),ivy_value(?1,?2),ivy_is_null(?1,?2),ivy_contains(?1,?2,'x'),ivy_recency(?1,?2)"
+    ).unwrap();
+    let mut maximum = 0;
+    for pointer in ["/object", "/array"] {
+        let mut query = || {
+            statement
+                .query_row([content.as_str(), pointer], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, f64>(3)?,
+                        row.get::<_, f64>(4)?,
+                    ))
+                })
+                .unwrap()
+        };
+        assert_eq!(query(), (9, None, 0, 0.0, 0.0));
+        assert_eq!(store.query_state.0.lock().unwrap().cache.len(), 1);
+        let before = LIVE.load(Ordering::Relaxed);
+        PEAK.store(before, Ordering::Relaxed);
+        let result = query();
+        maximum = maximum.max(PEAK.load(Ordering::Relaxed) - before);
+        assert_eq!(result, (9, None, 0, 0.0, 0.0));
+    }
+    eprintln!(
+        "Hive SQL scalar projection Rust allocation peak: {maximum} bytes above cached 256 KiB JSON input"
+    );
+    assert!(
+        maximum < 64 * 1024,
+        "SQL scalar projection copied a JSON container: {maximum}"
+    );
 }

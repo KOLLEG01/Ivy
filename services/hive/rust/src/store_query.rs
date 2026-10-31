@@ -53,17 +53,24 @@ impl State {
             "Database operation exceeded its work budget.",
         )
     }
-    fn value(&mut self, content: ValueRef<'_>, pointer: ValueRef<'_>) -> IvyResult<IvyJson> {
+    // Project while the cached or temporary tree is borrowed, so scalar SQL
+    // functions never need to copy a selected string, object or array first.
+    fn project<T>(
+        &mut self,
+        content: ValueRef<'_>,
+        pointer: ValueRef<'_>,
+        project: impl FnOnce(&IvyJson) -> IvyResult<T>,
+    ) -> IvyResult<T> {
         self.check()?;
         let (ValueRef::Text(content), ValueRef::Text(pointer)) = (content, pointer) else {
-            return Ok(IvyJson::Null);
+            return project(&IvyJson::Null);
         };
         let content = std::str::from_utf8(content).map_err(sql_error)?;
         let pointer = std::str::from_utf8(pointer).map_err(sql_error)?;
         let mut uncached = None;
         if !self.cache.contains_key(content) {
             let Ok(root) = parse(content, usize::MAX) else {
-                return Ok(IvyJson::Null);
+                return project(&IvyJson::Null);
             };
             let bytes = content.len() + std::mem::size_of::<String>() + root.retained_bytes();
             if bytes > JSON_CACHE_ENTRY_BYTES {
@@ -82,7 +89,7 @@ impl State {
             value = match value {
                 IvyJson::Object(_) => match value.get_key(&key) {
                     Some(v) => v,
-                    None => return Ok(IvyJson::Null),
+                    None => return project(&IvyJson::Null),
                 },
                 IvyJson::Array(items) => {
                     let ascii = key.to_utf8().unwrap_or_default();
@@ -98,13 +105,13 @@ impl State {
                         .and_then(|i| items.get(i))
                     {
                         Some(v) => v,
-                        None => return Ok(IvyJson::Null),
+                        None => return project(&IvyJson::Null),
                     }
                 }
-                _ => return Ok(IvyJson::Null),
+                _ => return project(&IvyJson::Null),
             };
         }
-        Ok(value.clone())
+        project(value)
     }
 }
 
@@ -143,28 +150,30 @@ impl Store {
             self.db
                 .create_scalar_function(name, 2, FunctionFlags::SQLITE_UTF8, move |context| {
                     let mut state = state.lock().unwrap();
-                    let value = match state.value(context.get_raw(0), context.get_raw(1)) {
-                        Ok(value) => value,
+                    let result = state.project(context.get_raw(0), context.get_raw(1), |value| {
+                        Ok(match name {
+                            "ivy_type" => Value::Integer(match value {
+                                IvyJson::Bool(_) => 1,
+                                IvyJson::Number(_) => 2,
+                                IvyJson::String(_) => 3,
+                                _ => 9,
+                            }),
+                            "ivy_is_null" => Value::Integer(i64::from(value.is_null())),
+                            _ => match value {
+                                IvyJson::Bool(v) => Value::Integer(i64::from(*v)),
+                                IvyJson::Number(v) => Value::Real(*v),
+                                IvyJson::String(v) => Value::Text(text(v)),
+                                _ => Value::Null,
+                            },
+                        })
+                    });
+                    match result {
+                        Ok(value) => Ok(value),
                         Err(error) => {
                             state.error = Some(error.clone());
-                            return Err(rusqlite::Error::UserFunctionError(Box::new(error)));
+                            Err(rusqlite::Error::UserFunctionError(Box::new(error)))
                         }
-                    };
-                    Ok(match name {
-                        "ivy_type" => Value::Integer(match value {
-                            IvyJson::Bool(_) => 1,
-                            IvyJson::Number(_) => 2,
-                            IvyJson::String(_) => 3,
-                            _ => 9,
-                        }),
-                        "ivy_is_null" => Value::Integer(i64::from(value.is_null())),
-                        _ => match value {
-                            IvyJson::Bool(v) => Value::Integer(i64::from(v)),
-                            IvyJson::Number(v) => Value::Real(v),
-                            IvyJson::String(ref v) => Value::Text(text(v)),
-                            _ => Value::Null,
-                        },
-                    })
+                    }
                 })
                 .map_err(sql_error)?;
         }
@@ -177,48 +186,48 @@ impl Store {
                     FunctionFlags::SQLITE_UTF8,
                     move |context| {
                         let mut state = state.lock().unwrap();
-                        let result = (|| -> IvyResult<f64> {
-                            let value = state.value(context.get_raw(0), context.get_raw(1))?;
-                            if name == "ivy_contains" {
-                                let (IvyJson::String(ref value), ValueRef::Text(needle)) =
-                                    (value, context.get_raw(2))
-                                else {
-                                    return Ok(0.0);
-                                };
-                                let lowered = state
-                                    .runtime
-                                    .as_ref()
-                                    .ok_or_else(IvyError::internal)?
-                                    .locale_lowercase(value)?;
-                                let needle =
-                                    JsString::from(std::str::from_utf8(needle).map_err(sql_error)?);
-                                return Ok(u8::from(
-                                    needle.0.is_empty()
-                                        || lowered
-                                            .0
-                                            .windows(needle.0.len())
-                                            .any(|part| part == needle.0),
-                                ) as f64);
-                            }
-                            Ok(match value {
-                                IvyJson::Number(v)
-                                    if v.is_finite()
-                                        && v.fract() == 0.0
-                                        && v.abs() <= 9_007_199_254_740_991.0 =>
-                                {
-                                    v
-                                }
-                                IvyJson::String(ref value) => {
-                                    let parsed = state
-                                        .runtime
+                        let runtime = state.runtime.clone();
+                        let result =
+                            state.project(context.get_raw(0), context.get_raw(1), |value| {
+                                if name == "ivy_contains" {
+                                    let (IvyJson::String(value), ValueRef::Text(needle)) =
+                                        (value, context.get_raw(2))
+                                    else {
+                                        return Ok(0.0);
+                                    };
+                                    let lowered = runtime
                                         .as_ref()
                                         .ok_or_else(IvyError::internal)?
-                                        .parse_date(value);
-                                    if parsed.is_finite() { parsed } else { 0.0 }
+                                        .locale_lowercase(value)?;
+                                    let needle = JsString::from(
+                                        std::str::from_utf8(needle).map_err(sql_error)?,
+                                    );
+                                    return Ok(u8::from(
+                                        needle.0.is_empty()
+                                            || lowered
+                                                .0
+                                                .windows(needle.0.len())
+                                                .any(|part| part == needle.0),
+                                    ) as f64);
                                 }
-                                _ => 0.0,
-                            })
-                        })();
+                                Ok(match value {
+                                    IvyJson::Number(v)
+                                        if v.is_finite()
+                                            && v.fract() == 0.0
+                                            && v.abs() <= 9_007_199_254_740_991.0 =>
+                                    {
+                                        *v
+                                    }
+                                    IvyJson::String(value) => {
+                                        let parsed = runtime
+                                            .as_ref()
+                                            .ok_or_else(IvyError::internal)?
+                                            .parse_date(value);
+                                        if parsed.is_finite() { parsed } else { 0.0 }
+                                    }
+                                    _ => 0.0,
+                                })
+                            });
                         result.map_err(|error| {
                             state.error = Some(error.clone());
                             rusqlite::Error::UserFunctionError(Box::new(error))
