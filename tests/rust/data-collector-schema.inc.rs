@@ -35,6 +35,35 @@ fn schema_applies_documented_defaults_and_keeps_public_registration() {
 }
 
 #[test]
+fn expanded_definition_schema_uses_a_new_immutable_contract_version() {
+    use ivy_data_collector::schema::DEFINITION_VERSION;
+    let registered = registry();
+    let contract = registered
+        .required("contracts")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|value| value.get("key") == Some(&"data-collector/definition".into()))
+        .unwrap();
+    assert_eq!(contract.get("version"), Some(&DEFINITION_VERSION.into()));
+    assert_ne!(DEFINITION_VERSION, "1.0.0");
+    let required = registered
+        .required("requiredContracts")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|value| value.get("key") == Some(&"data-collector/definition".into()))
+        .unwrap();
+    assert_eq!(
+        required.get("readVersions"),
+        Some(&json(r#"["1.0.0","1.1.0"]"#))
+    );
+    assert_eq!(required.get("writeVersions"), Some(&json(r#"["1.1.0"]"#)));
+}
+
+#[test]
 fn schema_preserves_json_members_and_validates_dictionary_keys() {
     let data =
         json(r#"{"__proto__":1,"constructor":2,"nested":{"__proto__":3,"items":[null,false]}}"#);
@@ -95,13 +124,29 @@ fn schema_rejects_invalid_shapes_and_domain_conflicts_without_exposing_values() 
 
 #[test]
 fn idle_only_option_is_opt_in_and_kept_at_the_runtime_and_definition_boundaries() {
-    for (name,base) in [
-        ("runtimeUpdateSchema",r#"{"action":"disable","operationId":"pause","id":"fixture","expectedRevision":1}"#),
-        ("definitionUpdateSchema",r#"{"action":"activate","operationId":"pause","jobId":"job","definitionRevision":1,"expectedRevision":1,"enabled":false}"#),
-        ("updateSchema",r#"{"action":"activate","operationId":"pause","jobId":"job","definitionRevision":1,"expectedRevision":1,"enabled":false}"#),
+    for (name, base) in [
+        (
+            "runtimeUpdateSchema",
+            r#"{"action":"disable","operationId":"pause","id":"fixture","expectedRevision":1}"#,
+        ),
+        (
+            "definitionUpdateSchema",
+            r#"{"action":"activate","operationId":"pause","jobId":"job","definitionRevision":1,"expectedRevision":1,"enabled":false}"#,
+        ),
+        (
+            "updateSchema",
+            r#"{"action":"activate","operationId":"pause","jobId":"job","definitionRevision":1,"expectedRevision":1,"enabled":false}"#,
+        ),
     ] {
-        let input=json(base);assert_eq!(parse_schema(name,&input).unwrap(),input);
-        for flag in [true,false] {let mut flagged=input.clone();flagged.insert("onlyWhenIdle",flag.into());assert_eq!(parse_schema(name,&flagged).unwrap(),flagged);}
-        let mut bad=input;bad.insert("onlyWhenIdle","true".into());assert!(parse_schema(name,&bad).is_err());
+        let input = json(base);
+        assert_eq!(parse_schema(name, &input).unwrap(), input);
+        for flag in [true, false] {
+            let mut flagged = input.clone();
+            flagged.insert("onlyWhenIdle", flag.into());
+            assert_eq!(parse_schema(name, &flagged).unwrap(), flagged);
+        }
+        let mut bad = input;
+        bad.insert("onlyWhenIdle", "true".into());
+        assert!(parse_schema(name, &bad).is_err());
     }
 }

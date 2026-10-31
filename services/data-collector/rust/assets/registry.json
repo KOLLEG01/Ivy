@@ -1038,7 +1038,7 @@
     },
     {
       "key": "data-collector/definition",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "owner": {
         "kind": "service",
         "serviceName": "data-collector"
@@ -1536,10 +1536,11 @@
     {
       "key": "data-collector/definition",
       "readVersions": [
-        "1.0.0"
+        "1.0.0",
+        "1.1.0"
       ],
       "writeVersions": [
-        "1.0.0"
+        "1.1.0"
       ]
     },
     {

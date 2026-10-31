@@ -1,6 +1,6 @@
 //! Durable control-write requests and exact pinned-successor reconciliation.
 //! The definition owner serializes mutations; network waits never hold SQLite.
-use crate::{model, store_owner::StoreOwner};
+use crate::{model, schema::DEFINITION_VERSION, store_owner::StoreOwner};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     json::{canonical, parse, stringify},
@@ -234,7 +234,15 @@ impl DefinitionJournal {
             };
             let mut request = IvyJson::object([
                 ("mutationId", mutation),
-                ("contractVersion", "1.0.0".into()),
+                (
+                    "contractVersion",
+                    if kind == "definition" {
+                        DEFINITION_VERSION
+                    } else {
+                        "1.0.0"
+                    }
+                    .into(),
+                ),
                 ("references", references),
             ]);
             if let Some(previous) = previous {
