@@ -152,14 +152,12 @@ pub fn sync(
 
 fn item(
     row: &IvyJson,
-    node: &IvyJson,
+    provider_stale: bool,
     revision: IvyJson,
     runtime: &dyn Runtime,
     now: f64,
 ) -> IvyResult<IvyJson> {
-    let stale = node.get("stale").and_then(IvyJson::as_bool) == Some(true)
-        || !Registry::eligible(node)
-        || now - runtime.parse_date(string(row, "observed_at")?) > 60_000.0;
+    let stale = provider_stale || now - runtime.parse_date(string(row, "observed_at")?) > 60_000.0;
     Ok(IvyJson::object([
         (
             "resourceRef",
@@ -176,6 +174,10 @@ fn item(
         ("stale", stale.into()),
         ("snapshotRevision", revision),
     ]))
+}
+
+fn provider_stale(node: &IvyJson) -> bool {
+    node.get("stale").and_then(IvyJson::as_bool) == Some(true) || !Registry::eligible(node)
 }
 
 pub fn get(
@@ -198,7 +200,7 @@ pub fn get(
     let row = found
         .first()
         .ok_or_else(|| IvyError::new("not_found", "Native inventory resource not found."))?;
-    let node = registry.node(store, string(row, "node_id")?, runtime, now)?;
+    let node = registry.inventory_provider(store, string(row, "node_id")?, runtime, now)?;
     let revision = sql(
         store,
         store.connection().query_row(
@@ -211,7 +213,7 @@ pub fn get(
             |r| r.get::<_, f64>(0),
         ),
     )?;
-    item(row, &node, IvyJson::Number(revision), runtime, now)
+    item(row, provider_stale(&node), IvyJson::Number(revision), runtime, now)
 }
 
 pub fn list(
@@ -253,8 +255,9 @@ pub fn list(
     let namespace = select("namespace");
     let kind = select("kind");
     let native_id = resource.and_then(|v| v.get("nativeId"));
+    let mut providers = HashMap::new();
     if let Some(id) = node_id.filter(|v| v.as_js_string().is_some_and(|v| !v.0.is_empty())) {
-        let node = registry.node(
+        let node = registry.inventory_provider(
             store,
             id.as_js_string().ok_or_else(IvyError::internal)?,
             runtime,
@@ -271,6 +274,9 @@ pub fn list(
             "target_conflict",
             "Inventory owner selectors disagree.",
         )?;
+        // The old provider map is keyed by the original JSON identity, which
+        // may differ from the SQL row's lossy UTF-8 key.
+        providers.insert(string(&node, "serviceNodeId")?.clone(), provider_stale(&node));
     }
     let base = [
         node_id,
@@ -431,24 +437,26 @@ pub fn list(
         }
     );
     let found = rows(store, &query, &bindings)?;
-    let nodes = registry
-        .nodes(store, runtime, now)?
-        .into_iter()
-        .map(|node| Ok((string(&node, "serviceNodeId")?.clone(), node)))
-        .collect::<IvyResult<HashMap<_, _>>>()?;
     let mut items = vec![];
     let mut bytes = 128;
     let mut trimmed = false;
     for row in found.iter().take(limit) {
-        let node = nodes.get(string(row, "node_id")?).ok_or_else(|| {
-            IvyError::new(
+        let id = string(row, "node_id")?;
+        let stale = if let Some(stale) = providers.get(id) {
+            *stale
+        } else {
+            let node = registry.inventory_provider(store, id, runtime, now)?;
+            require(string(&node, "serviceNodeId")? == id,
                 "storage_invalid",
                 "Inventory item references an unknown Service Node.",
-            )
-        })?;
+            )?;
+            let stale = provider_stale(&node);
+            providers.insert(id.clone(), stale);
+            stale
+        };
         let next = item(
             row,
-            node,
+            stale,
             field(row, "snapshot_revision")?.clone(),
             runtime,
             now,

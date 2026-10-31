@@ -332,6 +332,100 @@ fn node_page_store() -> Store {
     store.connection().execute("INSERT INTO principals VALUES('fixture')",[]).unwrap();
     store
 }
+
+fn insert_inventory_fixture(store: &Store, id: &str, payload_bytes: usize) {
+    insert_page_node(store,id,&IvyJson::object([
+        ("serviceNodeId",id.into()),("hostId","host".into()),("serviceName","service".into()),
+        ("connected",true.into()),("synced",true.into()),("ready",true.into()),("desiredEnabled",true.into()),
+        ("lastContactAt","1970-01-01T00:00:00.000Z".into()),("opaque","s".repeat(payload_bytes).into()),
+    ]));
+    store.connection().execute("INSERT OR IGNORE INTO inventory_schemas VALUES('fixture','item','1','{}')",[]).unwrap();
+    store.connection().execute("INSERT INTO inventory_sets VALUES(?1,'fixture','item',8,'1','1970-01-01T00:00:00.000Z')",[id]).unwrap();
+    for native in ["a","b"] {
+        store.connection().execute("INSERT INTO inventory VALUES(?1,'fixture','item',?2,'1','{}','1970-01-01T00:00:00.000Z')",params![id,native]).unwrap();
+    }
+    let diagnostic=IvyJson::object([("source",format!("service:{id}").into()),("status","current".into()),
+        ("lastObservedAt","1970-01-01T00:00:00.000Z".into()),("message","m".repeat(payload_bytes).into())]);
+    store.connection().execute("INSERT INTO diagnostics VALUES(?1,?2)",params![id,canonical(&diagnostic,MANAGEMENT_FRAME_BYTES).unwrap()]).unwrap();
+}
+
+#[test]
+fn inventory_provider_projection_preserves_fields_flags_and_original_utf16() {
+    let store=node_page_store();let registry=Registry::default();let runtime=crate::native_runtime::NativeRuntime;
+    insert_inventory_fixture(&store,"node",0);
+    for flag in ["connected","synced","ready","desiredEnabled"] {
+        for value in [IvyJson::Bool(true),IvyJson::Bool(false),IvyJson::Null,1.0.into(),"true".into()] {
+            let mut node=registry.node(&store,&"node".into(),&runtime,0.0).unwrap();
+            node.insert(flag,value);node.insert("hostId",IvyJson::String(JsString(vec![0xd800,0,0xd801])));
+            store.connection().execute("UPDATE service_nodes SET status_json=?1 WHERE id='node'",[canonical(&node,MANAGEMENT_FRAME_BYTES).unwrap()]).unwrap();
+            for now in [0.0,10_000.0,10_001.0] {
+                let full=registry.node(&store,&"node".into(),&runtime,now).unwrap();
+                let compact=registry.inventory_provider(&store,&"node".into(),&runtime,now).unwrap();
+                for field in ["serviceNodeId","hostId","serviceName","connected","synced","ready","desiredEnabled","lastContactAt","stale"] {
+                    assert_eq!(compact.get(field),full.get(field),"{flag} / {field}");
+                }
+                assert_eq!(Registry::eligible(&compact),Registry::eligible(&full));
+                assert!(compact.get("opaque").is_none());assert!(compact.get("diagnostic").unwrap().is_null());
+            }
+        }
+    }
+}
+
+#[test]
+fn inventory_pages_skip_unselected_status_and_diagnostics_keep_guards_and_utf16_aliases() {
+    let store=node_page_store();let registry=Registry::default();let runtime=crate::native_runtime::NativeRuntime;
+    insert_inventory_fixture(&store,"a",0);insert_inventory_fixture(&store,"z",0);
+    store.connection().execute("UPDATE service_nodes SET status_json='invalid' WHERE id='z'",[]).unwrap();
+    store.connection().execute("UPDATE diagnostics SET diagnostic_json='invalid'",[]).unwrap();
+    let params=IvyJson::object([("limit",1.0.into())]);
+    let page=crate::inventory::list(&store,&registry,&params,&runtime,0.0).unwrap();
+    let item=&page.get("items").unwrap().as_array().unwrap()[0];
+    assert_eq!(item.get("stale").and_then(IvyJson::as_bool),Some(false));
+    assert!(page.get("nextCursor").unwrap().as_js_string().is_some());
+    let resource=item.get("resourceRef").unwrap();
+    assert_eq!(crate::inventory::get(&store,&registry,resource,&runtime,0.0).unwrap(),*item);
+    let conflict=IvyJson::object([("serviceNodeId","a".into()),("hostId","other".into()),("cursor","invalid".into())]);
+    assert_eq!(crate::inventory::list(&store,&registry,&conflict,&runtime,0.0).unwrap_err().code,"target_conflict");
+    let missing=IvyJson::object([("serviceNodeId","missing".into()),("cursor","invalid".into())]);
+    assert_eq!(crate::inventory::list(&store,&registry,&missing,&runtime,0.0).unwrap_err().code,"not_found");
+    let empty=IvyJson::object([("namespace","empty".into())]);
+    assert!(crate::inventory::list(&store,&registry,&empty,&runtime,0.0).unwrap().get("items").unwrap().as_array().unwrap().is_empty());
+    // Original JSON node identity remains distinct from its lossy SQL alias.
+    store.connection().execute("UPDATE service_nodes SET status_json=json_set(status_json,'$.serviceNodeId',json('\"\\ud800\"')) WHERE id='a'",[]).unwrap();
+    assert_eq!(crate::inventory::list(&store,&registry,&params,&runtime,0.0).unwrap_err().code,"storage_invalid");
+    assert!(crate::inventory::get(&store,&registry,resource,&runtime,0.0).is_ok());
+}
+
+#[test]
+fn inventory_pages_bound_provider_state_without_status_or_diagnostic_bodies() {
+    const CHILD:&str="IVY_INVENTORY_PAGE_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output=std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","kernel::catalogs::read_tests::inventory_pages_bound_provider_state_without_status_or_diagnostic_bodies","--nocapture"])
+            .env(CHILD,"1").output().unwrap();
+        eprint!("{}",String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));return;
+    }
+    let store=node_page_store();let registry=Registry::default();let runtime=crate::native_runtime::NativeRuntime;
+    for index in 0..64 {insert_inventory_fixture(&store,&format!("node{index:03}"),32*1024);}
+    let before=LIVE.load(Ordering::Relaxed);PEAK.store(before,Ordering::Relaxed);
+    let full=registry.nodes(&store,&runtime,0.0).unwrap().into_iter().map(|node|
+        (string(&node,"serviceNodeId").unwrap().clone(),node)).collect::<std::collections::HashMap<_,_>>();
+    let full_peak=PEAK.load(Ordering::Relaxed)-before;
+    assert_eq!(full.len(),64);drop(full);
+    let before=LIVE.load(Ordering::Relaxed);PEAK.store(before,Ordering::Relaxed);
+    let page=crate::inventory::list(&store,&registry,&IvyJson::object([("limit",1.0.into())]),&runtime,0.0).unwrap();
+    let page_peak=PEAK.load(Ordering::Relaxed)-before;
+    let items=page.get("items").unwrap().as_array().unwrap();assert_eq!(items.len(),1);
+    assert_eq!(items[0].get("resourceRef").unwrap().get("serviceNodeId"),Some(&"node000".into()));
+    assert_eq!(items[0].get("stale"),Some(&false.into()));
+    eprintln!("Hive inventory Rust allocation peak: full provider map {full_peak} bytes, selected page {page_peak} bytes for 64 providers, 2 MiB status text and 2 MiB diagnostics");
+    // The old provider map alone costs this much. The new measurement includes
+    // the complete SQL page, set-revision cursor identity and response sizing.
+    // SQLite's C heap and process RSS are outside this Rust allocation probe.
+    assert!(full_peak>8*1024*1024);assert!(page_peak<512*1024);
+}
 fn insert_page_node(store: &Store, id: &str, node: &IvyJson) {
     store.connection().execute("INSERT INTO service_nodes VALUES(?1,'fixture','host','service',1,?2)",
         params![id,canonical(node,MANAGEMENT_FRAME_BYTES).unwrap()]).unwrap();

@@ -295,6 +295,21 @@ impl Registry {
         .ok_or_else(|| IvyError::new("not_found", "Service Node not found."))?;
         self.current_node(store, &decode(&value)?, None, runtime, now)
     }
+    pub(crate) fn inventory_provider(
+        &self, store: &Store, id: &JsString, runtime: &dyn Runtime, now: f64,
+    ) -> IvyResult<IvyJson> {
+        // Inventory needs owner selectors and liveness, never diagnostics or
+        // the rest of a provider's status. Keep contact/staleness rules shared.
+        let value = sql(store, store.connection().query_row(
+            "SELECT json_object('serviceNodeId',status_json -> '$.serviceNodeId',
+                 'hostId',status_json -> '$.hostId','serviceName',status_json -> '$.serviceName',
+                 'connected',status_json -> '$.connected','synced',status_json -> '$.synced',
+                 'ready',status_json -> '$.ready','desiredEnabled',status_json -> '$.desiredEnabled',
+                 'lastContactAt',status_json -> '$.lastContactAt')
+             FROM service_nodes WHERE id=?1", [text(id)], |row| row.get::<_,String>(0),
+        ).optional())?.ok_or_else(|| IvyError::new("not_found", "Service Node not found."))?;
+        self.current_node(store, &decode(&value)?, Some(&[]), runtime, now)
+    }
     pub fn nodes(&self, store: &Store, runtime: &dyn Runtime, now: f64) -> IvyResult<Vec<IvyJson>> {
         let mut statement=sql(store,store.connection().prepare_cached("SELECT diagnostic_json FROM diagnostics WHERE json_extract(diagnostic_json,'$.status')='current' ORDER BY rowid"))?;
         let diagnostics = sql(store, statement.query_map([], |r| r.get::<_, String>(0)))?
