@@ -1174,7 +1174,7 @@ impl Discovery {
         selectors.remove("limit");
         let entries = IvyJson::Array(entries);
         let entries_hash = hash_json(&entries)?;
-        let IvyJson::Array(entries) = entries else { unreachable!() };
+        let entries = entries.into_array().unwrap();
         let identity = IvyJson::object([
             ("method", "discovery.list".into()),
             ("mcpOnly", mcp_only.into()),
