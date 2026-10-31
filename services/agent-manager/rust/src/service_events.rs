@@ -180,36 +180,38 @@ impl ServiceEvents {
             .policy
             .lock()
             .map_err(|_| IvyError::internal())?
-            .observe(&IvyJson::object([
-                ("method", IvyJson::String(value.method.clone())),
-                ("params", value.params.clone()),
-            ]));
+            .observe(&value.method, &value.params);
+        let activity_thread = ["thread/status/changed", "turn/started", "turn/completed"]
+            .iter()
+            .any(|method| value.method.eq_str(method))
+            .then(|| {
+                value
+                    .params
+                    .get("threadId")
+                    .and_then(IvyJson::as_js_string)
+                    .cloned()
+            })
+            .flatten();
         let event = settings
             .notifications
             .lock()
             .map_err(|_| IvyError::internal())?
-            .observe_js(
-                epoch,
-                &value.method,
-                value.params.clone(),
-                &(self.0.clock)(),
-            )?;
+            .observe_js(epoch, &value.method, value.params, &(self.0.clock)())?;
         let ready = settings.service.ready() && !settings.closing.load(Ordering::Acquire);
         if ready {
             if let Some(notice) =
                 native_browser_notice(&settings.service_node_id, &event, settings.query.as_ref())?
             {
+                let params = event.get("params").unwrap();
                 self.send(
-                    value
-                        .params
+                    params
                         .required("threadId")?
                         .as_js_string()
                         .ok_or_else(IvyError::internal)?
                         .clone(),
                     notice,
                     Some(
-                        value
-                            .params
+                        params
                             .required("turn")?
                             .required("id")?
                             .as_js_string()
@@ -241,28 +243,23 @@ impl ServiceEvents {
                 "turn/completed",
             ]
             .iter()
-            .any(|v| method == &JsString::from(*v));
-            let internal_activity = ["thread/status/changed", "turn/started", "turn/completed"]
-                .iter()
-                .any(|v| method == &JsString::from(*v))
-                && value
-                    .params
-                    .get("threadId")
-                    .and_then(IvyJson::as_js_string)
-                    .map(|thread| {
-                        settings
-                            .policy
-                            .lock()
-                            .map_err(|_| IvyError::internal())?
-                            .is_internal(thread)
-                    })
-                    .transpose()?
-                    .flatten()
-                    == Some(true);
+            .any(|v| method.eq_str(v));
+            let internal_activity = activity_thread
+                .as_ref()
+                .map(|thread| {
+                    settings
+                        .policy
+                        .lock()
+                        .map_err(|_| IvyError::internal())?
+                        .is_internal(thread)
+                })
+                .transpose()?
+                .flatten()
+                == Some(true);
             if refresh && !internal_activity {
                 inventory.request_threads(ready)?;
             }
-            if method == &JsString::from("project/changed") {
+            if method.eq_str("project/changed") {
                 inventory.request_projects(ready)?;
                 inventory.request_threads(ready)?;
             }

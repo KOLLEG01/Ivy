@@ -68,16 +68,15 @@ impl NativeNoticePolicy {
         }
         Ok(())
     }
-    pub fn observe(&mut self, event: &IvyJson) {
-        let params = event.get("params").unwrap_or(&NULL);
+    pub fn observe(&mut self, method: &JsString, params: &IvyJson) {
         let thread = params.get("thread").unwrap_or(&NULL);
         let id = params.get("threadId").and_then(IvyJson::as_js_string);
-        if event.get("method") == Some(&"thread/started".into()) {
+        if method.eq_str("thread/started") {
             if let Some(id) = thread.get("id").and_then(IvyJson::as_js_string) {
                 self.set_thread(id.clone(), thread, None);
             }
         }
-        if event.get("method") == Some(&"thread/project/updated".into()) {
+        if method.eq_str("thread/project/updated") {
             if let (Some(id), Some(project)) = (id, params.get("projectId")) {
                 let mut thread = self
                     .threads
@@ -88,7 +87,7 @@ impl NativeNoticePolicy {
                 self.set_thread(id.clone(), &thread, None);
             }
         }
-        if event.get("method") == Some(&"thread/deleted".into()) {
+        if method.eq_str("thread/deleted") {
             if let Some(id) = id {
                 self.threads.remove(id);
             }

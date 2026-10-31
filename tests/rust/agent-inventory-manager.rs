@@ -89,7 +89,15 @@ fn notice_policy_matches_original_membership_revisions_and_push_events() {
                         array(step, "entries"),
                         field(step, "revision").as_f64().unwrap(),
                     )?,
-                    "observe" => owner.observe(field(step, "event")),
+                    "observe" => {
+                        let event = field(step, "event");
+                        let method = event
+                            .get("method")
+                            .and_then(IvyJson::as_js_string)
+                            .cloned()
+                            .unwrap_or_default();
+                        owner.observe(&method, event.get("params").unwrap_or(&IvyJson::Null));
+                    }
                     "snapshot" => return policy_snapshot(&owner),
                     action => panic!("{action}"),
                 }

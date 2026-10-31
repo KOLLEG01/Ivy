@@ -71,27 +71,39 @@ pub fn journal_events(
                 let epoch = epoch.clone();
                 let callback = callback.clone();
                 Box::pin(async move {
+                    let resolved =
+                        notification
+                            .method
+                            .eq_str("serverRequest/resolved")
+                            .then(|| {
+                                (
+                                    notification.params.is_null(),
+                                    notification
+                                        .params
+                                        .get("requestId")
+                                        .cloned()
+                                        .unwrap_or(IvyJson::Null),
+                                    notification
+                                        .params
+                                        .get("threadId")
+                                        .cloned()
+                                        .unwrap_or(IvyJson::Null),
+                                )
+                            });
                     // The original publishes/cache-observes the event before
                     // resolving a pending answer from serverRequest/resolved.
-                    callback(notification.clone()).await?;
-                    if notification.method == JsString::from("serverRequest/resolved") {
-                        if notification.params == IvyJson::Null {
+                    callback(notification).await?;
+                    if let Some((null, request, thread)) = resolved {
+                        if null {
                             return Err(IvyError::new(
                                 "native_observation_commit_failed",
                                 "Native observation commit failed.",
                             ));
                         }
-                        memory.lock().unwrap().resolve_input_json(
-                            &epoch,
-                            notification
-                                .params
-                                .get("requestId")
-                                .unwrap_or(&IvyJson::Null),
-                            notification
-                                .params
-                                .get("threadId")
-                                .unwrap_or(&IvyJson::Null),
-                        )?;
+                        memory
+                            .lock()
+                            .unwrap()
+                            .resolve_input_json(&epoch, &request, &thread)?;
                     }
                     Ok(())
                 })

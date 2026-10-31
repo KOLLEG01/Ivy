@@ -41,6 +41,19 @@ struct Event {
     charge: usize,
 }
 
+fn transport_charge(encoded: &str) -> usize {
+    encoded.len()
+        + 2
+        + encoded
+            .bytes()
+            .map(|byte| match byte {
+                b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 8 | 12 => 2,
+                0..=31 => 6,
+                _ => 1,
+            })
+            .sum::<usize>()
+}
+
 pub struct NativeNotifications {
     service_node_id: JsString,
     native_version: JsString,
@@ -128,7 +141,7 @@ impl NativeNotifications {
         let encoded = stringify(&value, usize::MAX)?;
         let bytes = encoded.len();
         if bytes.saturating_add(std::mem::size_of::<Event>()) <= self.maximum_bytes {
-            let charge = bytes + stringify(&IvyJson::from(encoded.as_str()), usize::MAX)?.len();
+            let charge = transport_charge(&encoded);
             self.events.push_back(Event {
                 sequence: self.sequence,
                 json: encoded.into_boxed_str(),
