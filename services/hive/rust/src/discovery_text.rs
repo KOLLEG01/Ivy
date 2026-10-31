@@ -255,9 +255,11 @@ pub(super) fn guide(value: &JsString, catalog: &crate::registry_catalog::Catalog
                 } else {
                     result.extend_from_slice(&value.0[i..end]);
                 }
-                i = end;
-                continue;
+            } else {
+                result.extend_from_slice(&value.0[i..end]);
             }
+            i = end;
+            continue;
         }
         result.push(value.0[i]);
         i += 1;

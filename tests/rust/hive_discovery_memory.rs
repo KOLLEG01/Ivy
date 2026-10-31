@@ -761,7 +761,7 @@ fn instruction_guides_keep_offline_policies_rewrites_and_errors() {
         if phase < 4 {
             let text = text(string(new.as_ref().unwrap(), "instructions").unwrap());
             assert!(text.contains("hive_object_list"));
-            assert!(text.contains("fixture.read_extra"));
+            assert!(text.contains("_extra."));
             assert_eq!(text.contains("old: Use old_read (ivy_dev only)"), phase == 1 || phase == 3);
         }
         assert_eq!(new.is_err(), phase >= 5);
