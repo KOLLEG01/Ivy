@@ -23,7 +23,9 @@ fn core_calls_original_definitions_hashes_and_resolution_order() {
         let result = if kind == &"binding".into() {
             owner.binding(input.as_js_string().unwrap())
         } else {
-            owner.resolve(input)
+            owner.resolve(input).map(|call| IvyJson::object([
+                ("method", call.method.into()), ("params", call.params.clone()),
+            ]))
         };
         let actual = match result {
             Ok(value) => IvyJson::object([("value", value)]),

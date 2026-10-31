@@ -30,7 +30,7 @@ fn core_definitions_are_shared_without_internal_schema_copies() {
     assert!(concurrent.iter().all(|binding| std::ptr::eq(*binding, concurrent[0])));
     // Use the largest real bundled definition, including its opaque schemas.
     let largest = core_methods().into_iter().map(|method| {
-        CoreCalls.borrowed_binding(&format!("hive.{method}").as_str().into()).unwrap()
+        &CoreCalls.borrowed_binding(&format!("hive.{method}").as_str().into()).unwrap().binding
     }).max_by_key(|binding| binding.retained_bytes()).unwrap();
     let params = IvyJson::object([
         ("qualifiedName", largest.qualified_name.clone().into()),
@@ -49,10 +49,10 @@ fn core_definitions_are_shared_without_internal_schema_copies() {
     PEAK.store(before, AtomicOrdering::Relaxed);
     for _ in 0..16 {
         for owner in [&first, &second] {
-            assert!(std::ptr::eq(largest, owner.borrowed_binding(&largest.qualified_name).unwrap()));
+            assert!(std::ptr::eq(largest, &owner.borrowed_binding(&largest.qualified_name).unwrap().binding));
             let resolved = owner.resolve(&params).unwrap();
-            assert_eq!(resolved.get("method"), largest.metadata.get("name"));
-            assert_eq!(resolved.get("params"), params.get("arguments"));
+            assert!(largest.metadata.required("name").unwrap().as_js_string().unwrap().eq_str(resolved.method));
+            assert_eq!(resolved.params, params.required("arguments").unwrap());
         }
     }
     let shared_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
@@ -225,4 +225,117 @@ fn registry_identity_is_rebuilt_from_online_backup() {
     }
     std::fs::remove_file(path).unwrap();
     std::fs::remove_file(backup).unwrap();
+}
+
+fn reference_schema_result(tool: &IvyJson) -> IvyResult<IvyJson> {
+    let output = tool.get("outputSchema").cloned().unwrap_or(IvyJson::Null);
+    let input = field(tool, "inputSchema")?.clone();
+    let hash = hash_json(&IvyJson::object([
+        ("inputSchema", input.clone()), ("outputSchema", output.clone()),
+    ]))?;
+    Ok(IvyJson::object([
+        ("name", field(tool, "name")?.clone()),
+        ("description", tool.get("description").cloned().unwrap_or_else(|| "".into())),
+        ("inputSchema", input), ("outputSchema", output),
+        ("schemaHash", hash.into()), ("complete", true.into()),
+    ]))
+}
+fn core_params(arguments: IvyJson) -> IvyJson {
+    let binding = CoreCalls.borrowed_binding(&"hive.objects.read".into()).unwrap();
+    IvyJson::object([
+        ("qualifiedName", binding.binding.qualified_name.clone().into()),
+        ("expectedDefinitionHash", binding.binding.definition_hash.clone().into()),
+        ("serviceName", "hive".into()), ("arguments", arguments),
+    ])
+}
+
+#[test]
+fn resolved_calls_borrow_core_and_service_arguments() {
+    let params = core_params(IvyJson::object([
+        (JsString(vec![0xd800]), IvyJson::String(JsString(vec![0xd801]))),
+    ]));
+    let core = CoreCalls.resolve(&params).unwrap();
+    assert_eq!(core.method, "objects.read");
+    assert!(std::ptr::eq(core.params, params.required("arguments").unwrap()));
+    assert!(std::ptr::eq(core.method.as_ptr(), operation_catalog().keys()
+        .find(|name| name.as_str() == "objects.read").unwrap().as_ptr()));
+    let mut service = params.clone();
+    service.insert("serviceName", "fixture".into());
+    service.insert("serviceNodeId", "node".into());
+    let owner = discovery();
+    let call = owner.resolve_call(&service).unwrap();
+    assert_eq!(call.method, "tools.call");
+    assert!(std::ptr::eq(call.params, &service));
+    assert!(owner.resolve_call(&params).unwrap().params == core.params);
+}
+
+#[test]
+fn tool_schema_projection_matches_original_and_moves_schema_buffers() {
+    let opaque = IvyJson::object([(JsString(vec![0xd800]), IvyJson::String(JsString(vec![0xd801]))) ]);
+    let mut duplicate = vec![("inputSchema".into(), opaque.clone()), ("inputSchema".into(), true.into()),
+        ("name".into(), "opaque".into()), ("description".into(), IvyJson::Null)];
+    duplicate.push(("outputSchema".into(), false.into()));
+    let fixtures = vec![IvyJson::Null, empty(), IvyJson::object([("name", "missing input".into())]),
+        IvyJson::object([("inputSchema", true.into())]),
+        IvyJson::object([("name", "empty output".into()), ("inputSchema", opaque.clone())]),
+        IvyJson::object([("name", "both".into()), ("inputSchema", opaque.clone()), ("outputSchema", opaque)]),
+        IvyJson::Object(duplicate)];
+    let encoded = |result: IvyResult<IvyJson>| stringify(&match result {
+        Ok(value) => IvyJson::object([("value", value)]),
+        Err(error) => IvyJson::object([("error", error.to_wire())]),
+    }, usize::MAX).unwrap();
+    for tool in fixtures {
+        assert_eq!(encoded(tool_schema_result(tool.clone())), encoded(reference_schema_result(&tool)));
+    }
+    let tool = IvyJson::object([("name", "owned".into()), ("inputSchema", "first".into()), ("outputSchema", "second".into())]);
+    let pointers: Vec<_> = ["inputSchema", "outputSchema"].iter().map(|name|
+        tool.required(name).unwrap().as_js_string().unwrap().0.as_ptr()).collect();
+    let result = tool_schema_result(tool).unwrap();
+    for (name, pointer) in ["inputSchema", "outputSchema"].into_iter().zip(pointers) {
+        assert_eq!(result.required(name).unwrap().as_js_string().unwrap().0.as_ptr(), pointer);
+    }
+}
+
+#[test]
+fn call_resolution_and_schema_projection_avoid_large_tree_copies() {
+    const CHILD: &str = "IVY_DISCOVERY_CALL_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "discovery::memory_tests::call_resolution_and_schema_projection_avoid_large_tree_copies", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        return;
+    }
+    let owner = discovery();
+    // Initialize the finite core binding before measuring per-call allocations.
+    drop(core_params(empty()));
+    for kind in ["core", "service", "schema"] {
+        let mut original_peak = 0;
+        for original in [true, false] {
+            let payload = || IvyJson::from("X".repeat(1024 * 1024));
+            let input = if kind == "schema" {
+                IvyJson::object([("name", "large".into()), ("inputSchema", payload()), ("outputSchema", payload())])
+            } else {
+                let mut params = core_params(IvyJson::object([("opaque", payload())]));
+                if kind == "service" { params.insert("serviceName", "fixture".into()); params.insert("serviceNodeId", "node".into()); }
+                params
+            };
+            let before = LIVE.load(AtomicOrdering::Relaxed); PEAK.store(before, AtomicOrdering::Relaxed);
+            let output = if kind == "schema" {
+                std::borrow::Cow::Owned(if original { reference_schema_result(&input) } else { tool_schema_result(input) }.unwrap())
+            } else if original {
+                let call = owner.resolve_call(&input).unwrap();
+                std::borrow::Cow::Owned(IvyJson::object([("method", call.method.into()), ("params", call.params.clone())]))
+            } else {
+                std::borrow::Cow::Borrowed(owner.resolve_call(&input).unwrap().params)
+            };
+            let peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+            eprintln!("Hive discovery Rust allocation peak: {peak} bytes; kind={kind}; original={original}; 1 MiB text per payload/schema");
+            if original { original_peak = peak; }
+            else if kind == "schema" { assert!(peak + 1024 * 1024 < original_peak, "Schema projection copied trees: {peak} / {original_peak}"); }
+            else { assert!(peak < 8 * 1024, "Call resolution copied arguments: {peak}"); }
+            drop(output);
+        }
+    }
 }

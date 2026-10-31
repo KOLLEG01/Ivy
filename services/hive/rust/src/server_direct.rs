@@ -123,14 +123,13 @@ impl Dispatcher {
                     "caller_changed",
                     "Return to the original caller before reconciling or repeating this action.",
                 )?;
-                let mut resolved = self.0.core.resolve(params)?;
+                let resolved = self.0.core.resolve(params)?;
                 if ![
                     "notifications.subscribe",
                     "packages.catalog",
                     "packages.authorizeUpload",
                 ]
-                .iter()
-                .any(|method| resolved.get("method") == Some(&(*method).into()))
+                .contains(&resolved.method)
                 {
                     return Ok(None);
                 }
@@ -138,8 +137,9 @@ impl Dispatcher {
                     ("jsonrpc", "2.0".into()),
                     ("id", request.required("id")?.clone()),
                 ]);
-                next.insert("method", resolved.remove("method").ok_or_else(IvyError::internal)?);
-                next.insert("params", resolved.remove("params").ok_or_else(IvyError::internal)?);
+                next.insert("method", resolved.method.into());
+                let params = request.get_mut("params").unwrap().remove("arguments").unwrap();
+                next.insert("params", params);
                 require_fresh(context, &*self.0.now)?;
                 return self.dispatch(peers, context, &mut next, peer);
             }

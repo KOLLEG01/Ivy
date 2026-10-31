@@ -123,6 +123,24 @@ fn provider(node: &IvyJson) -> IvyResult<IvyJson> {
         ("available", Registry::eligible(node).into()),
     ]))
 }
+fn tool_schema_result(mut tool: IvyJson) -> IvyResult<IvyJson> {
+    let output = tool.remove("outputSchema").unwrap_or(IvyJson::Null);
+    field(&tool, "inputSchema")?;
+    let mut schemas = IvyJson::object([
+        ("inputSchema", tool.remove("inputSchema").unwrap()),
+        ("outputSchema", output),
+    ]);
+    let hash = hash_json(&schemas)?;
+    field(&tool, "name")?;
+    Ok(IvyJson::object([
+        ("name", tool.remove("name").unwrap()),
+        ("description", tool.remove("description").unwrap_or_else(|| "".into())),
+        ("inputSchema", schemas.remove("inputSchema").unwrap()),
+        ("outputSchema", schemas.remove("outputSchema").unwrap()),
+        ("schemaHash", hash.into()),
+        ("complete", true.into()),
+    ]))
+}
 #[derive(Clone)]
 struct IndexedTool {
     qualified_name: JsString,
@@ -246,9 +264,18 @@ impl Index {
 /// The finite bundled core catalog is immutable and shared by both ingress paths.
 #[derive(Default)]
 pub struct CoreCalls;
+struct CoreBinding {
+    method: &'static str,
+    binding: ToolBinding,
+}
+#[derive(Debug)]
+pub struct ResolvedCall<'a> {
+    pub method: &'static str,
+    pub params: &'a IvyJson,
+}
 impl CoreCalls {
-    fn borrowed_binding(&self, qualified: &JsString) -> IvyResult<&'static ToolBinding> {
-        static BINDINGS: OnceLock<HashMap<JsString, OnceLock<IvyResult<ToolBinding>>>> =
+    fn borrowed_binding(&self, qualified: &JsString) -> IvyResult<&'static CoreBinding> {
+        static BINDINGS: OnceLock<HashMap<JsString, OnceLock<IvyResult<CoreBinding>>>> =
             OnceLock::new();
         let bindings = BINDINGS.get_or_init(|| {
             core_methods()
@@ -265,12 +292,14 @@ impl CoreCalls {
             .map_err(Clone::clone)
     }
     pub fn binding(&self, qualified: &JsString) -> IvyResult<IvyJson> {
-        Ok(self.borrowed_binding(qualified)?.to_wire())
+        Ok(self.borrowed_binding(qualified)?.binding.to_wire())
     }
-    fn build(qualified: &JsString) -> IvyResult<ToolBinding> {
+    fn build(qualified: &JsString) -> IvyResult<CoreBinding> {
         let name = text(qualified);
         let method = name.strip_prefix("hive.").unwrap();
-        let op = operation_definition(method).ok_or_else(IvyError::internal)?;
+        let (method, op) = operation_catalog().iter()
+            .find(|(name, _)| name.as_str() == method).ok_or_else(IvyError::internal)?;
+        let method = method.as_str();
         let read_only = op.get("mutation").and_then(|v| v.as_bool()) != Some(true);
         let input = operation_input_schema(method)?;
         let mut discovery = empty();
@@ -328,13 +357,16 @@ impl CoreCalls {
                 ]),
             ),
         ]);
-        Ok(ToolBinding::new(
-            qualified.clone(),
-            tool_definition_hash(&definition)?.into(),
-            definition,
-        ))
+        Ok(CoreBinding {
+            method,
+            binding: ToolBinding::new(
+                qualified.clone(),
+                tool_definition_hash(&definition)?.into(),
+                definition,
+            ),
+        })
     }
-    pub fn resolve(&self, params: &IvyJson) -> IvyResult<IvyJson> {
+    pub fn resolve<'a>(&self, params: &'a IvyJson) -> IvyResult<ResolvedCall<'a>> {
         require(
             params
                 .get("serviceNodeId")
@@ -350,7 +382,7 @@ impl CoreCalls {
         let binding = self.borrowed_binding(string(params, "qualifiedName")?)?;
         require(
             params.get("expectedDefinitionHash").and_then(IvyJson::as_js_string)
-                == Some(&binding.definition_hash),
+                == Some(&binding.binding.definition_hash),
             "tool_definition_changed",
             "The retained Hive definition changed; describe and reassess.",
         )?;
@@ -360,13 +392,7 @@ impl CoreCalls {
             "invalid_arguments",
             "Hive operation arguments must be an object.",
         )?;
-        return Ok(IvyJson::object([
-            (
-                "method",
-                field(&binding.metadata, "name")?.clone(),
-            ),
-            ("params", arguments.clone()),
-        ]));
+        Ok(ResolvedCall { method: binding.method, params: arguments })
     }
 }
 
@@ -446,25 +472,8 @@ impl Discovery {
                     "Public MCP tool is not in the current catalog.",
                 )
             })?;
-        let output = tool.get("outputSchema").cloned().unwrap_or(IvyJson::Null);
-        let input = field(&tool, "inputSchema")?.clone();
-        let hash = hash_json(&IvyJson::object([
-            ("inputSchema", input.clone()),
-            ("outputSchema", output.clone()),
-        ]))?;
-        Ok(IvyJson::object([
-            ("name", field(&tool, "name")?.clone()),
-            (
-                "description",
-                tool.get("description")
-                    .cloned()
-                    .unwrap_or_else(|| "".into()),
-            ),
-            ("inputSchema", input),
-            ("outputSchema", output),
-            ("schemaHash", hash.into()),
-            ("complete", true.into()),
-        ]))
+        drop(bindings);
+        tool_schema_result(tool)
     }
     fn evict(&mut self, id: &JsString) {
         if let Some(i) = self.indexes.iter().position(|(k, _)| k == id) {
@@ -1305,7 +1314,7 @@ impl Discovery {
             ("items", IvyJson::Array(items)),
         ]))
     }
-    pub fn resolve_call(&mut self, params: &IvyJson) -> IvyResult<IvyJson> {
+    pub fn resolve_call<'a>(&self, params: &'a IvyJson) -> IvyResult<ResolvedCall<'a>> {
         if is_text(params.get("serviceName"), "hive") {
             return self.core_bindings.resolve(params);
         }
@@ -1317,10 +1326,7 @@ impl Discovery {
             "invalid_arguments",
             "Service calls require the exact described serviceNodeId.",
         )?;
-        Ok(IvyJson::object([
-            ("method", "tools.call".into()),
-            ("params", params.clone()),
-        ]))
+        Ok(ResolvedCall { method: "tools.call", params })
     }
     pub fn instructions(
         &mut self,

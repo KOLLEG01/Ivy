@@ -123,7 +123,9 @@ impl Trace {
                     runtime,
                     now,
                 ),
-                "resolveCall" => discovery.resolve_call(&parameters),
+                "resolveCall" => discovery.resolve_call(&parameters).map(|call| IvyJson::object([
+                    ("method", call.method.into()), ("params", call.params.clone()),
+                ])),
                 "mcpCatalog" => discovery
                     .mcp_catalog(
                         store,

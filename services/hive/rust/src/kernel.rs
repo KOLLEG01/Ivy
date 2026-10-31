@@ -273,6 +273,9 @@ impl Call<'_> {
         // an admitted string and must reach the unknown-operation check.
         let method = String::from_utf16_lossy(&string(value, "method")?.0);
         let params = field(value, "params")?;
+        self.execute_call(context, &method, params)
+    }
+    fn execute_call(&mut self, context: &IvyJson, method: &str, params: &IvyJson) -> IvyResult<IvyJson> {
         if let Some(reset) = self
             .options
             .reset_bootstrap_credential_digest
@@ -293,7 +296,7 @@ impl Call<'_> {
                         "objects.read",
                         "uis.deploy",
                     ]
-                    .contains(&method.as_str()),
+                    .contains(&method),
                 "maintenance_active",
                 "Hive accepts only the configured ui bootstrap while the runtime reset is held.",
             )?;
@@ -305,7 +308,7 @@ impl Call<'_> {
                 "This Hive supports protocol major 1.",
             ));
         }
-        if let Err(error) = validate_input(&method, params) {
+        if let Err(error) = validate_input(method, params) {
             if method == "registry.sync" && context.get("serviceNodeId").is_some() {
                 let registry = &mut *self.registry;
                 let mut node = registry.node(
@@ -350,7 +353,7 @@ impl Call<'_> {
             }
             return Err(error);
         }
-        if operation_definition(&method).and_then(|v| v["access"].as_str()) == Some("service")
+        if operation_definition(method).and_then(|v| v["access"].as_str()) == Some("service")
             && method != "service.connect"
         {
             service(context)?;
@@ -370,19 +373,11 @@ impl Call<'_> {
                 "Return to the original caller before reconciling or repeating this action.",
             )?;
             let resolved = self.discovery.resolve_call(params)?;
-            // Keep envelope extensions, but do not clone the old arguments only
-            // to overwrite them with the resolved parameter owner.
-            let mut request = IvyJson::object(
-                value.as_object().ok_or_else(IvyError::internal)?.iter()
-                    .filter(|(key, _)| !key.eq_str("params"))
-                    .cloned(),
-            );
-            for (key, value) in resolved.into_object().ok_or_else(IvyError::internal)? {
-                request.insert(key, value);
-            }
-            return self.execute(context, &request);
+            // The outer envelope is admitted once. Resolution supplies a known
+            // method and borrowed object parameters; repeat the operation policy.
+            return self.execute_call(context, resolved.method, resolved.params);
         }
-        let duration = Duration::from_millis(match method.as_str() {
+        let duration = Duration::from_millis(match method {
             "registry.sync" => 25_000,
             "objects.query" | "objects.delete" => 15_000,
             _ => 1000,
@@ -407,7 +402,7 @@ impl Call<'_> {
                 "Tool routing is owned by the live connection table.",
             )?;
             let handler = *handlers
-                .get(&JsString::from(method.as_str()))
+                .get(&JsString::from(method))
                 .ok_or_else(|| IvyError::new("not_found", "Unknown Hive operation."))?;
             let result = handler(
                 &mut Call {
@@ -425,9 +420,9 @@ impl Call<'_> {
                 },
                 context,
                 params,
-                &method,
+                method,
             )?;
-            if options.validate_messages && validate_output(&method, &result).is_err() {
+            if options.validate_messages && validate_output(method, &result).is_err() {
                 return Err(IvyError::new(
                     "internal_error",
                     "The completed operation produced an invalid server result.",
