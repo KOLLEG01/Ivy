@@ -239,100 +239,164 @@ fn topic_page_identity_moves_schema_payloads_without_copying_them() {
     assert!(copied_peak > moved_peak + 1536 * 1024, "Topic identity copied schemas");
 }
 
-fn copied_contract_records(
-    catalog: Option<&IvyJson>, captured: Option<&IvyJson>, params: &IvyJson,
-) -> IvyResult<(String, Vec<IvyJson>)> {
-    let mut records = vec![];
-    for (index, value) in catalog.filter(|value| !value.is_null())
-        .map(|value| value.as_array().ok_or_else(IvyError::internal))
-        .transpose()?.unwrap_or(&[]).iter().enumerate()
-    {
-        if selected(params, "key", value.get("key")) {
-            records.push(IvyJson::object([
-                ("value", value.clone()), ("index", IvyJson::Number(index as f64)),
-            ]));
-        }
+fn full_contract_page(store: &Store, params: &IvyJson, node: &IvyJson) -> IvyResult<IvyJson> {
+    let catalog = Registry::default().required_contracts(store, string(params, "serviceNodeId")?)?;
+    let has_catalog = catalog.is_some();
+    let values = catalog.filter(|value| !value.is_null())
+        .map(|value| value.into_array().ok_or_else(IvyError::internal))
+        .transpose()?.unwrap_or_default();
+    let records = values.into_iter().enumerate().filter_map(|(index, value)| {
+        selected(params, "key", value.get("key")).then(|| IvyJson::object([
+            ("value", value), ("index", IvyJson::Number(index as f64)),
+        ]))
+    }).collect();
+    let mut snapshot = IvyJson::object([("records", IvyJson::Array(records))]);
+    if let Some(captured) = node.get("lastSuccessfulSyncAt") {
+        snapshot.insert("capturedAt", captured.clone());
     }
-    let mut identity = IvyJson::object([("records", IvyJson::Array(records.clone()))]);
-    if let Some(captured) = captured { identity.insert("capturedAt", captured.clone()); }
-    Ok((hash_json(&identity)?, records))
+    let hash = hash_json(&snapshot)?;
+    let records = snapshot.remove("records").and_then(IvyJson::into_array).unwrap();
+    let mut identity = objects::page_identity("serviceNodes.contracts", params)?;
+    identity.insert("snapshot", hash.into());
+    let mut page = crate::paging::catalog_page(store, records, &identity,
+        |record| format!("{:08}", record.get("index").unwrap().as_f64().unwrap() as usize).into(),
+        params.get("limit").and_then(IvyJson::as_f64).map(|value| value as usize),
+        optional_string(params, "cursor"))?;
+    let items = page.remove("items").and_then(IvyJson::into_array).unwrap();
+    page.insert("items", IvyJson::Array(items.into_iter()
+        .map(|mut record| record.remove("value").unwrap()).collect()));
+    page.insert("provider", provider(node));
+    page.insert("hasCatalog", has_catalog.into());
+    if let Some(captured) = node.get("lastSuccessfulSyncAt") {
+        page.insert("capturedAt", captured.clone());
+    }
+    Ok(page)
+}
+
+fn contract_store() -> Store {
+    let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+    store.connection().execute_batch(r#"INSERT INTO principals VALUES('fixture');
+        INSERT INTO service_nodes VALUES('fixture','fixture','host','service',1,'{}');"#).unwrap();
+    store
+}
+fn contract_source(store: &Store, source: Option<&str>) {
+    store.connection().execute("DELETE FROM registries", []).unwrap();
+    if let Some(source) = source {
+        store.connection().execute("INSERT INTO registries VALUES('fixture',?)", [source]).unwrap();
+    }
+}
+fn compare_contract_page(store: &Store, params: &IvyJson, node: &IvyJson) -> IvyResult<IvyJson> {
+    let expected = full_contract_page(store, params, node).map_err(|error| error.to_wire());
+    let actual = service_contracts::list(store, params, node);
+    assert_eq!(actual.as_ref().map_err(IvyError::to_wire), expected.as_ref().map_err(Clone::clone));
+    actual
 }
 
 #[test]
 fn contract_page_identity_keeps_filters_original_indices_hashes_and_errors() {
-    let key = IvyJson::String(JsString(vec![0xd800]));
-    let catalog = IvyJson::Array(vec![
-        IvyJson::Null,
-        IvyJson::object([("key", "other".into())]),
-        IvyJson::object([("key", key.clone()), ("readScope", IvyJson::object([
-            (JsString(vec![0xd801]), IvyJson::String(JsString(vec![0xd802]))),
-            ("opaque".into(), IvyJson::Array(vec![false.into(), 9007199254740992.0.into()])),
-        ]))]),
-        IvyJson::object([("key", key.clone()), ("writeVersions", IvyJson::Array(vec![]))]),
-    ]);
-    for catalog in [None, Some(IvyJson::Null), Some(IvyJson::Bool(false)),
-        Some(IvyJson::object([] as [(&str, IvyJson); 0])), Some(catalog),
-        Some(IvyJson::Array(vec![IvyJson::Number(f64::NAN)]))]
+    let store = contract_store();
+    let values = r#"[null,false,17,"scalar",{},{"key":17},{"key":true},
+        {"key":"other"},{"key":"\ud800","readScope":{"\ud801":"\ud802"}},
+        {"key":"\ud800","writeVersions":[]},{"key":"�"},{"key":"nul\u0000tail"},
+        {"key":"\ud83d\ude00"},{"key":"escaped"},{"key":"\u0065scaped"}]"#;
+    for source in [None, Some("null"), Some("{}"), Some(r#"{"requiredContracts":null}"#),
+        Some(r#"{"requiredContracts":false}"#), Some("[]"), Some("1"),
+        Some(r#"{"requiredContracts":[]} trailing"#),
+        Some(&format!(r#"{{"requiredContracts":{values}}}"#)),
+        Some(r#"{"requiredContracts":[{"key":"unsafe","n":9007199254740992}]}"#)]
     {
-        for captured in [None, Some(IvyJson::Null), Some(key.clone()), Some(IvyJson::Number(f64::NAN))] {
-            for params in [IvyJson::Null, IvyJson::object([("key", "".into())]),
-                IvyJson::object([("key", key.clone())]), IvyJson::object([("key", "absent".into())])]
+        contract_source(&store, source);
+        for captured in [None, Some(IvyJson::Null), Some("2026-01-01T00:00:00Z".into()),
+            Some(IvyJson::String(JsString(vec![0xd800]))), Some(IvyJson::Number(f64::NAN))]
+        {
+            let mut node = IvyJson::object([("serviceNodeId", "fixture".into())]);
+            if let Some(captured) = captured { node.insert("lastSuccessfulSyncAt", captured); }
+            for filter in [None, Some("".into()), Some("other".into()), Some("absent".into()),
+                Some(IvyJson::String(JsString(vec![0xd800]))), Some("�".into()),
+                Some("nul\0tail".into()), Some("😀".into()), Some("escaped".into()), Some("true".into())]
             {
-                let expected = copied_contract_records(catalog.as_ref(), captured.as_ref(), &params)
-                    .map_err(|e| (e.code, e.message));
-                let actual = contract_page_records(catalog.clone(), captured.as_ref(), &params)
-                    .map_err(|e| (e.code, e.message));
-                assert_eq!(actual, expected);
-                if params.get("key") == Some(&key) && let Ok((_, records)) = actual
-                    && records.len() == 2
-                {
-                    assert_eq!(records[0].get("index"), Some(&2.0.into()));
-                    assert_eq!(records[1].get("index"), Some(&3.0.into()));
+                let mut params = IvyJson::object([("serviceNodeId", "fixture".into()), ("limit", 1.0.into())]);
+                if let Some(filter) = filter { params.insert("key", filter); }
+                if let Ok(first) = compare_contract_page(&store, &params, &node) {
+                    let mut page = first;
+                    while !page.get("nextCursor").unwrap().is_null() {
+                        params.insert("cursor", page.get("nextCursor").unwrap().clone());
+                        page = compare_contract_page(&store, &params, &node).unwrap();
+                    }
                 }
+                params.insert("cursor", "invalid".into());
+                let _ = compare_contract_page(&store, &params, &node);
             }
         }
     }
+    // A filtered-out edit leaves the snapshot intact; a selected edit invalidates
+    // its cursor even when it lies beyond this response's first entry.
+    let node = IvyJson::object([("serviceNodeId", "fixture".into()), ("lastSuccessfulSyncAt", IvyJson::Null)]);
+    let mut params = IvyJson::object([("serviceNodeId", "fixture".into()), ("key", "same".into()), ("limit", 1.0.into())]);
+    contract_source(&store, Some(r#"{"requiredContracts":[{"key":"same"},{"key":"other"},{"key":"same"}]}"#));
+    let page = compare_contract_page(&store, &params, &node).unwrap();
+    params.insert("cursor", page.get("nextCursor").unwrap().clone());
+    contract_source(&store, Some(r#"{"requiredContracts":[{"key":"same"},{"key":"changed"},{"key":"same"}]}"#));
+    compare_contract_page(&store, &params, &node).unwrap();
+    contract_source(&store, Some(r#"{"requiredContracts":[{"key":"same"},{"key":"changed"},{"key":"same","extra":1}]}"#));
+    assert_eq!(compare_contract_page(&store, &params, &node).unwrap_err().code, "invalid_cursor");
+    contract_source(&store, Some(r#"{"requiredContracts":[{"key":"same"},{"key":"changed"},{"key":"same","extra":9007199254740992}]}"#));
+    assert_eq!(compare_contract_page(&store, &params, &node).unwrap_err().code, "invalid_arguments");
 }
 
 #[test]
-fn contract_page_identity_moves_requirements_without_deep_copies() {
+fn contract_pages_keep_wrapper_byte_limits_and_cursor_boundaries() {
+    let store = contract_store();
+    let node = IvyJson::object([("serviceNodeId", "fixture".into())]);
+    let mut params = IvyJson::object([("serviceNodeId", "fixture".into()), ("limit", 50.0.into())]);
+    let source = serde_json::json!({"requiredContracts":(0..3).map(|index|
+        serde_json::json!({"key":format!("entry{index}"),"scope":"s".repeat(1100*1024)})
+    ).collect::<Vec<_>>()}).to_string();
+    contract_source(&store, Some(&source));
+    let page = compare_contract_page(&store, &params, &node).unwrap();
+    assert_eq!(page.get("items").unwrap().as_array().unwrap().len(), 1);
+    params.insert("cursor", page.get("nextCursor").unwrap().clone());
+    let page = compare_contract_page(&store, &params, &node).unwrap();
+    assert_eq!(page.get("items").unwrap().as_array().unwrap()[0].get("key"), Some(&"entry1".into()));
+    contract_source(&store, Some(&serde_json::json!({"requiredContracts":[{"scope":"s".repeat(crate::paging::PAGE_BYTES)}]}).to_string()));
+    params.remove("cursor");
+    assert_eq!(compare_contract_page(&store, &params, &node).unwrap_err().code, "result_too_large");
+}
+
+#[test]
+fn contract_pages_stream_snapshot_and_load_only_selected_requirements() {
     const CHILD: &str = "IVY_CONTRACT_PAGE_MEMORY_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "kernel::catalogs::read_tests::contract_page_identity_moves_requirements_without_deep_copies", "--nocapture"])
+            .args(["--exact", "kernel::catalogs::read_tests::contract_pages_stream_snapshot_and_load_only_selected_requirements", "--nocapture"])
             .env(CHILD, "1").output().unwrap();
         eprint!("{}", String::from_utf8_lossy(&output.stderr));
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
         assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
         return;
     }
-    let store = Store::open(std::path::Path::new(":memory:")).unwrap();
-    let catalog = IvyJson::Array((0..16).map(|index| IvyJson::object([
-        ("key", format!("fixture/contract{index}").into()),
-        ("readScope", IvyJson::object([("roots", IvyJson::Array(vec!["r".repeat(64 * 1024).into()]))])),
-    ])).collect());
-    let payload = |value: &IvyJson| value.get("readScope").unwrap()
-        .get("roots").unwrap().as_array().unwrap()[0].as_js_string().unwrap().0.as_ptr() as usize;
-    let pointers: Vec<_> = catalog.as_array().unwrap().iter().map(payload).collect();
-    let captured = IvyJson::from("2026-01-01T00:00:00Z");
-    let before = LIVE.load(Ordering::Relaxed);
-    PEAK.store(before, Ordering::Relaxed);
-    let (expected, copied) = copied_contract_records(Some(&catalog), Some(&captured), &IvyJson::Null).unwrap();
-    let copied_peak = PEAK.load(Ordering::Relaxed) - before;
-    drop(copied);
-    let before = LIVE.load(Ordering::Relaxed);
-    PEAK.store(before, Ordering::Relaxed);
-    let (hash, records) = contract_page_records(Some(catalog), Some(&captured), &IvyJson::Null).unwrap();
-    let moved_peak = PEAK.load(Ordering::Relaxed) - before;
-    assert_eq!(hash, expected);
-    let identity = IvyJson::object([("snapshot", hash.into())]);
-    let page = crate::paging::catalog_page(&store, records, &identity,
-        |record| format!("{:08}", record.get("index").unwrap().as_f64().unwrap() as usize).into(), Some(3), None).unwrap();
-    let items = page.get("items").unwrap().as_array().unwrap();
-    assert_eq!(items.iter().map(|record| payload(record.get("value").unwrap())).collect::<Vec<_>>(), pointers[..3]);
-    let cursor = page.get("nextCursor").unwrap().as_js_string().unwrap();
-    assert_eq!(crate::paging::catalog_boundary(&store, &identity, cursor).unwrap(), JsString::from("00000002"));
-    assert!(crate::paging::catalog_boundary(&store, &IvyJson::Null, cursor).is_err());
-    eprintln!("Hive contract-page identity Rust allocation peak: copied {copied_peak} bytes, moved {moved_peak} bytes for 1 MiB read-scope text");
-    assert!(copied_peak > moved_peak + 3 * 1024 * 1024, "Contract identity copied requirements");
+    let store = contract_store();
+    let node = IvyJson::object([("serviceNodeId", "fixture".into()), ("lastSuccessfulSyncAt", IvyJson::Null)]);
+    let mut params = IvyJson::object([("serviceNodeId", "fixture".into()), ("limit", 1.0.into())]);
+    let source = serde_json::json!({"requiredContracts":(0..32).map(|index|
+        serde_json::json!({"key":format!("entry{index}"),"scope":"s".repeat(32*1024)})
+    ).collect::<Vec<_>>()}).to_string();
+    contract_source(&store, Some(&source));
+    drop(source);
+    for filter in [None, Some("entry31")] {
+        if let Some(filter) = filter { params.insert("key", filter.into()); }
+        let before = LIVE.load(Ordering::Relaxed);
+        PEAK.store(before, Ordering::Relaxed);
+        let expected = full_contract_page(&store, &params, &node).unwrap();
+        let full_peak = PEAK.load(Ordering::Relaxed) - before;
+        let before = LIVE.load(Ordering::Relaxed);
+        PEAK.store(before, Ordering::Relaxed);
+        let page = service_contracts::list(&store, &params, &node).unwrap();
+        let projected_peak = PEAK.load(Ordering::Relaxed) - before;
+        assert_eq!(page, expected);
+        eprintln!("Hive contract page Rust allocation peak: full {full_peak} bytes, streamed {projected_peak} bytes; filter {filter:?}, 1 MiB stored scope text");
+        // Rust requests only; SQLite's C heap and process RSS are excluded.
+        assert!(full_peak > 3 * 1024 * 1024);
+        assert!(projected_peak < 1024 * 1024, "Complete requirement array was retained");
+    }
 }

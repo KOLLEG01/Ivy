@@ -9,6 +9,8 @@ use rusqlite::{OptionalExtension, params};
 use std::collections::HashSet;
 #[path = "deployment_catalog.rs"]
 mod deployments;
+#[path = "service_contract_catalog.rs"]
+mod service_contracts;
 
 pub(super) const METHODS: &[&str] = &[
     "system.diagnostics",
@@ -38,12 +40,6 @@ fn text(value: &JsString) -> String {
 }
 fn optional_string<'a>(value: &'a IvyJson, key: &str) -> Option<&'a JsString> {
     value.get(key).and_then(IvyJson::as_js_string)
-}
-fn array<'a>(value: &'a IvyJson, key: &str) -> IvyResult<&'a [IvyJson]> {
-    match value.get(key).filter(|v| !v.is_null()) {
-        None => Ok(&[]),
-        Some(v) => v.as_array().ok_or_else(IvyError::internal),
-    }
 }
 fn provider(node: &IvyJson) -> IvyJson {
     IvyJson::object([
@@ -129,30 +125,8 @@ fn tool_page_records<'a>(
     let tools_key = JsString::from("tools");
     let node = IvyJson::String(id.clone());
     let hash = hash_object_with_array([(&node_key, &node), (&guide_key, guide)], &tools_key,
-        tools.iter().map(crate::registry_catalog::ToolBinding::to_wire))?;
+        tools.iter().map(|tool| Ok(tool.to_wire())))?;
     Ok((hash, tools.iter().zip(included).filter_map(|(tool, include)| include.then_some(tool)).collect()))
-}
-fn contract_page_records(
-    catalog: Option<IvyJson>,
-    captured: Option<&IvyJson>,
-    params: &IvyJson,
-) -> IvyResult<(String, Vec<IvyJson>)> {
-    let values = catalog.filter(|value| !value.is_null())
-        .map(|value| value.into_array().ok_or_else(IvyError::internal))
-        .transpose()?.unwrap_or_default();
-    let records = values.into_iter().enumerate().filter_map(|(index, value)| {
-        selected(params, "key", value.get("key")).then(|| IvyJson::object([
-            ("value", value), ("index", IvyJson::Number(index as f64)),
-        ]))
-    }).collect();
-    let mut identity = IvyJson::object([("records", IvyJson::Array(records))]);
-    if let Some(captured) = captured {
-        identity.insert("capturedAt", captured.clone());
-    }
-    let hash = hash_json(&identity)?;
-    let records = identity.remove("records").and_then(IvyJson::into_array)
-        .ok_or_else(IvyError::internal)?;
-    Ok((hash, records))
 }
 pub(super) fn handle(
     call: &mut Call<'_>,
@@ -288,35 +262,7 @@ pub(super) fn handle(
             let node = call
                 .registry
                 .node(call.store, id, call.runtime, (call.clock)())?;
-            let catalog = call.registry.required_contracts(call.store, id)?;
-            let has_catalog = catalog.is_some();
-            let (identity, records) = contract_page_records(
-                catalog, node.get("lastSuccessfulSyncAt"), params,
-            )?;
-            let mut paged = page(
-                call,
-                method,
-                params,
-                records,
-                |v| {
-                    format!(
-                        "{:08}",
-                        v.get("index").and_then(IvyJson::as_f64).unwrap() as usize
-                    )
-                    .into()
-                },
-                Some(identity.into()),
-            )?;
-            let items = paged.remove("items").and_then(IvyJson::into_array)
-                .ok_or_else(IvyError::internal)?;
-            paged.insert("items", IvyJson::Array(items.into_iter()
-                .map(|mut record| record.remove("value").unwrap_or(IvyJson::Null)).collect()));
-            paged.insert("provider", provider(&node));
-            paged.insert("hasCatalog", has_catalog.into());
-            if let Some(captured) = node.get("lastSuccessfulSyncAt") {
-                paged.insert("capturedAt", captured.clone());
-            }
-            Ok(paged)
+            service_contracts::list(call.store, params, &node)
         }
         "namespaces.list" => {
             let mut records: Vec<IvyJson> = vec![];

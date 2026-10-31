@@ -146,7 +146,7 @@ fn compare_generated_array(object: &IvyJson, records: Vec<IvyJson>) -> bool {
     let mut expected = IvyJson::object(pairs.iter().cloned());
     expected.insert("tools", IvyJson::Array(records.clone()));
     let actual = hash_object_with_array(pairs.iter().map(|(key, value)| (key, value)),
-        &JsString::from("tools"), records).map_err(|e| (e.code, e.message));
+        &JsString::from("tools"), records.into_iter().map(Ok)).map_err(|e| (e.code, e.message));
     let expected = canonical(&expected, MANAGEMENT_FRAME_BYTES).map(digest).map_err(|e| (e.code, e.message));
     assert_eq!(actual, expected);
     actual.is_ok()
@@ -172,10 +172,14 @@ fn generated_array_hash_preserves_canonical_fields_duplicates_and_error_order() 
     let guide = IvyJson::Number(f64::NAN);
     let error = hash_object_with_array([(&JsString::from("guide"), &guide)],
         &JsString::from("tools"), (0..2).map(|_| {
-            visits.set(visits.get() + 1); IvyJson::Null
+            visits.set(visits.get() + 1); Ok(IvyJson::Null)
         })).unwrap_err();
     assert_eq!(error.code, "invalid_arguments");
     assert_eq!(visits.get(), 0);
+    let error = hash_object_with_array([], &JsString::from("tools"), [
+        Ok(IvyJson::Null), Err(ivy_contracts::IvyError::new("fixture", "Record read failed.")),
+    ]).unwrap_err();
+    assert_eq!(error.code, "fixture");
 }
 
 #[test]

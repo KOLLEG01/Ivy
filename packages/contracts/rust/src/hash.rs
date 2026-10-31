@@ -90,11 +90,11 @@ pub fn hash_json(value: &IvyJson) -> IvyResult<String> {
     canonical_into(value, MANAGEMENT_FRAME_BYTES, &mut writer)?;
     Ok(writer.finish())
 }
-/// Hash a generated catalog array without retaining every materialized record.
+/// Hash a fallible catalog stream without retaining every materialized record.
 pub fn hash_object_with_array<'a>(
     pairs: impl IntoIterator<Item = (&'a JsString, &'a IvyJson)>,
     array_key: &'a JsString,
-    records: impl IntoIterator<Item = IvyJson>,
+    records: impl IntoIterator<Item = IvyResult<IvyJson>>,
 ) -> IvyResult<String> {
     let mut writer = HashWriter::new();
     crate::json::canonical_object_with_array(pairs, array_key, records, MANAGEMENT_FRAME_BYTES, &mut writer)?;

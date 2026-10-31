@@ -589,7 +589,7 @@ pub(crate) fn canonical_object<'a>(
 pub(crate) fn canonical_object_with_array<'a>(
     pairs: impl IntoIterator<Item = (&'a JsString, &'a IvyJson)>,
     array_key: &'a JsString,
-    records: impl IntoIterator<Item = IvyJson>,
+    records: impl IntoIterator<Item = IvyResult<IvyJson>>,
     maximum_bytes: usize,
     out: impl std::fmt::Write,
 ) -> IvyResult<()> {
@@ -614,7 +614,7 @@ pub(crate) fn canonical_object_with_array<'a>(
             let mut count = 0usize;
             for record in records.by_ref() {
                 if count > 0 { encoder.punctuation(",")?; }
-                encoder.value(&record, 2)?;
+                encoder.value(&record?, 2)?;
                 count += 1;
             }
             encoder.punctuation("]")?;
