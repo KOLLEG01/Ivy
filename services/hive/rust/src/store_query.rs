@@ -67,24 +67,30 @@ impl State {
         };
         let content = std::str::from_utf8(content).map_err(sql_error)?;
         let pointer = std::str::from_utf8(pointer).map_err(sql_error)?;
-        let mut uncached = None;
-        if !self.cache.contains_key(content) {
-            let Ok(root) = parse(content, usize::MAX) else {
-                return project(&IvyJson::Null);
-            };
-            let bytes = content.len() + std::mem::size_of::<String>() + root.retained_bytes();
-            if bytes > JSON_CACHE_ENTRY_BYTES {
-                uncached = Some(root);
-            } else {
-                if self.cache.len() >= 8 || self.cache_bytes + bytes > JSON_CACHE_BYTES {
-                    self.cache.clear();
-                    self.cache_bytes = 0;
-                }
-                self.cache.insert(content.to_owned(), root);
-                self.cache_bytes += bytes;
-            }
+        if let Some(root) = self.cache.get(content) {
+            return Self::project_pointer(root, pointer, project);
         }
-        let mut value = uncached.as_ref().unwrap_or_else(|| &self.cache[content]);
+        let Ok(root) = parse(content, usize::MAX) else {
+            return project(&IvyJson::Null);
+        };
+        let bytes = content.len() + std::mem::size_of::<String>() + root.retained_bytes();
+        if bytes > JSON_CACHE_ENTRY_BYTES {
+            return Self::project_pointer(&root, pointer, project);
+        }
+        if self.cache.len() >= 8 || self.cache_bytes + bytes > JSON_CACHE_BYTES {
+            self.cache.clear();
+            self.cache_bytes = 0;
+        }
+        let root = self.cache.entry(content.to_owned()).or_insert(root);
+        self.cache_bytes += bytes;
+        Self::project_pointer(root, pointer, project)
+    }
+
+    fn project_pointer<T>(
+        mut value: &IvyJson,
+        pointer: &str,
+        project: impl FnOnce(&IvyJson) -> IvyResult<T>,
+    ) -> IvyResult<T> {
         for key in pointer_parts(&pointer.into())? {
             value = match value {
                 IvyJson::Object(_) => match value.get_key(&key) {
