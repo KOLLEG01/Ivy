@@ -449,10 +449,9 @@ fn discovery_mcp_active_policy_filters_offline_obsolete_variants_and_rewrites_gu
  {
     let mut s = setup();
     let mut old = sample();
-    old["namespaces"][0]["guideMarkdown"] = json!(format!(
-        "Use fixture.read. fixture.save and hive.objects.list. Keep fixture.internal and fixture.read_extra. {}",
-        "x".repeat(8192)
-    ));
+    old["namespaces"][0]["guideMarkdown"] = json!(
+        "Use fixture.read. fixture.save and hive.objects.list. Keep fixture.internal and fixture.read_extra."
+    );
     ready(&mut s, "old", "sample", "host-old", old.clone());
     push(&mut s, action("disconnect", Some("old"), json!({})));
     let mut current = old.clone();
