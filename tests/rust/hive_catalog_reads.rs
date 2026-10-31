@@ -376,7 +376,7 @@ fn inventory_pages_skip_unselected_status_and_diagnostics_keep_guards_and_utf16_
     let store=node_page_store();let registry=Registry::default();let runtime=crate::native_runtime::NativeRuntime;
     insert_inventory_fixture(&store,"a",0);insert_inventory_fixture(&store,"z",0);
     store.connection().execute("UPDATE service_nodes SET status_json='invalid' WHERE id='z'",[]).unwrap();
-    store.connection().execute("UPDATE diagnostics SET diagnostic_json='invalid'",[]).unwrap();
+    store.connection().execute("UPDATE diagnostics SET diagnostic_json=json_set(diagnostic_json,'$.lastObservedAt',42)",[]).unwrap();
     let params=IvyJson::object([("limit",1.0.into())]);
     let page=crate::inventory::list(&store,&registry,&params,&runtime,0.0).unwrap();
     let item=&page.get("items").unwrap().as_array().unwrap()[0];
