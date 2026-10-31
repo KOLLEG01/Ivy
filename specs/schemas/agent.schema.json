@@ -3426,6 +3426,39 @@
         }
       ]
     },
+    "TaskOutputCleanupInput": {
+      "type": "object",
+      "properties": {
+        "taskKey": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^TASK-[0-9]{4,}$"
+        }
+      },
+      "required": [
+        "taskKey"
+      ],
+      "additionalProperties": false
+    },
+    "TaskOutputCleanup": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 2048,
+          "minLength": 1
+        },
+        "removed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "removed"
+      ],
+      "additionalProperties": false
+    },
     "WorkspaceResolveInput": {
       "type": "object",
       "properties": {

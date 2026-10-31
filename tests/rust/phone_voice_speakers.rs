@@ -27,7 +27,9 @@ struct Schemas {
 // Instrument the REQUIRED installed compiler seam; this is not that compiler.
 impl VoiceSchemas for Schemas {
     fn validate(&self, schema: &IvyJson, input: &IvyJson, max: usize) -> IvyResult<()> {
-        if input.get("version").is_some() {return ivy_contracts::schema::SchemaValidators::new().validate(schema,input,max);}
+        if input.get("version").is_some() {
+            return ivy_contracts::schema::SchemaValidators::new().validate(schema, input, max);
+        }
         self.calls.lock().unwrap().push((schema.clone(), max));
         stringify(input, max)?;
         if max == 64 * 1024 && self.reject_output.load(Ordering::SeqCst) {

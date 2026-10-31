@@ -139,6 +139,7 @@ struct World<'a> {
     client: Arc<Client>,
     tools: Arc<ToolClients>,
     consumed: Cell<bool>,
+    cleanups: RefCell<Vec<Json>>,
 }
 impl World<'_> {
     fn input(&self) -> &Json {
@@ -419,6 +420,19 @@ impl LifecyclePolicies for World<'_> {
     }
 }
 impl LifecycleEngine for World<'_> {
+    async fn cleanup_task_outputs(
+        &self,
+        node: &JsString,
+        task_key: &JsString,
+        operation_id: &JsString,
+    ) -> IvyResult<()> {
+        self.cleanups.borrow_mut().push(Json::object([
+            ("serviceNodeId", Json::String(node.clone())),
+            ("taskKey", Json::String(task_key.clone())),
+            ("operationId", Json::String(operation_id.clone())),
+        ]));
+        self.fail("cleanup")
+    }
     fn client(&self) -> &dyn RpcClient {
         self.client.as_ref()
     }
@@ -434,6 +448,11 @@ impl LifecycleEngine for World<'_> {
         self.fail("owner")
     }
     async fn scoped_operation_id(&self, scope: &Json) -> IvyResult<JsString> {
+        assert_ne!(
+            scope.as_array().and_then(|a| a.first()),
+            Some(&"task-board-output-cleanup".into()),
+            "Output cleanup must survive replacement of the live identity cache"
+        );
         event(&self.trace, ["scope".into(), scope.clone()]);
         Ok(format!("scoped-{}", &hash_json(scope)?[7..]).into())
     }
@@ -569,6 +588,7 @@ async fn native_lifecycle_matches_original_retained_operations_archive_context_a
                 tools: Arc::new(ToolClients::new(client.clone())),
                 client,
                 consumed: Cell::new(false),
+                cleanups: RefCell::new(vec![]),
             };
             let subject = NativeLifecycle {
                 store: &world,
@@ -636,9 +656,114 @@ async fn native_lifecycle_matches_original_retained_operations_archive_context_a
                 canonical(&actual, MANAGEMENT_FRAME_BYTES).unwrap()
             );
             assert!(world.client.replies.lock().unwrap().is_empty());
+            let cleanups = world.cleanups.borrow();
+            if !flag(world.input(), "archived") {
+                assert!(
+                    cleanups.is_empty(),
+                    "Restoration and new contexts must preserve outputs"
+                );
+            }
+            for cleanup in cleanups.iter() {
+                assert_eq!(cleanup.get("taskKey"), task.value.get("taskKey"));
+            }
             rows += 1;
         }
     }
     assert_eq!(rows, expected_rows);
     assert_eq!(frames, expected_frames);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn archive_cleanup_failure_keeps_original_request_pending_until_retry() {
+    let group = data().as_array().unwrap().last().unwrap();
+    let mut row = group
+        .required("rows")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row.get("name") == Some(&"archive original durable thread".into()))
+        .unwrap()
+        .clone();
+    let mut input = row.required("input").unwrap().clone();
+    input.insert(
+        "fault",
+        Json::object([
+            ("where", "cleanup".into()),
+            ("code", "task_output_cleanup_failed".into()),
+        ]),
+    );
+    row.insert("input", input);
+    let trace: Trace = Arc::default();
+    let client = Arc::new(Client {
+        case_name: s(&row, "name").clone(),
+        replies: Mutex::new(
+            row.required("rpcReplies")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .to_vec()
+                .into(),
+        ),
+        trace: trace.clone(),
+    });
+    let world = World {
+        base: group.required("base").unwrap(),
+        row: &row,
+        live: RefCell::new(
+            row.required("initial")
+                .unwrap()
+                .required("liveOperation")
+                .unwrap()
+                .clone(),
+        ),
+        trace,
+        tools: Arc::new(ToolClients::new(client.clone())),
+        client,
+        consumed: Cell::new(false),
+        cleanups: RefCell::new(vec![]),
+    };
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let subject = NativeLifecycle {
+        store: &world,
+        engine: &world,
+        operations: &world,
+        catalogs: &catalogs,
+    };
+    let operation = doc(world.initial("operation"));
+    let mut steps = Steps {
+        world: &world,
+        count: 0,
+    };
+    let empty = Json::object([
+        ("task", Json::Null),
+        ("history", Json::Null),
+        ("archive", Json::Null),
+    ]);
+    let error = subject
+        .publish(&operation, &mut steps, empty.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "task_board_output_cleanup_pending");
+    assert_eq!(error.outcome, ivy_contracts::Outcome::Unknown);
+    assert_eq!(
+        world
+            .client
+            .replies
+            .lock()
+            .unwrap()
+            .front()
+            .unwrap()
+            .get("method"),
+        Some(&"objects.archive".into())
+    );
+    subject
+        .publish(&operation, &mut steps, empty)
+        .await
+        .unwrap();
+    let cleanups = world.cleanups.borrow();
+    assert_eq!(cleanups.len(), 2);
+    assert_eq!(cleanups[0], cleanups[1]);
+    assert!(world.client.replies.lock().unwrap().is_empty());
 }

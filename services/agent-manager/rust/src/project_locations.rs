@@ -99,6 +99,12 @@ impl ProjectLocations {
     pub fn defaults(&self) -> IvyJson {
         self.0.policy.defaults()
     }
+    pub async fn cleanup_task_outputs(&self, task_key: &JsString, operation_id: &JsString) -> IvyResult<IvyJson> {
+        let policy = self.0.policy.clone();
+        let task_key = task_key.clone();
+        let operation_id = operation_id.clone();
+        blocking(move || crate::task_outputs::cleanup(&policy, &task_key, &operation_id)).await
+    }
     pub fn set_native_projects(&self, projects: &[IvyJson]) -> IvyResult<()> {
         *self
             .0

@@ -19,15 +19,19 @@ pub struct ProjectManagement {
 }
 impl ProjectManagement {
     pub fn handlers(self: &Arc<Self>) -> HashMap<JsString, ToolHandler> {
-        ["resolveProject", "resolveWorkspace", "listDirectories"].into_iter().map(|name| {
+        ["resolveProject", "resolveWorkspace", "listDirectories", "cleanupTaskOutputs"].into_iter().map(|name| {
             let owner = self.clone();
             let handler: ToolHandler = Arc::new(move |args, context| {
                 let owner = owner.clone();
                 Box::pin(async move {
-                    let schema = match name {"resolveProject" => "ProjectResolveInput", "resolveWorkspace" => "WorkspaceResolveInput", _ => "DirectoryListInput"};
+                    let schema = match name {"resolveProject" => "ProjectResolveInput", "resolveWorkspace" => "WorkspaceResolveInput", "cleanupTaskOutputs" => "TaskOutputCleanupInput", _ => "DirectoryListInput"};
                     validate_agent(schema, &args)?;
                     (owner.available)()?;
                     match name {
+                        "cleanupTaskOutputs" => {
+                            let operation_id = context.operation_id.as_ref().filter(|value| !value.0.is_empty()).ok_or_else(|| IvyError::new("operation_id_required", "Task output cleanup requires a stable operation identity."))?;
+                            owner.locations.cleanup_task_outputs(args.required("taskKey")?.as_js_string().unwrap(), operation_id).await
+                        }
                         "resolveProject" => {
                             let selection = args.required("selection")?;
                             if selection.get("kind") != Some(&"projectless".into()) {(owner.fresh_projects)().await?;}

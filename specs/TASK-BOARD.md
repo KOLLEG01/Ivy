@@ -81,6 +81,11 @@ Ordinary comments, delivery receipts, unexported files and live Run source pins 
   Run, Result, Review, History, Delivery and comment-read records. It is refused while a claim
   or publication is active, or another Task still depends on it. The deleted task key is not reused.
 - Archiving a ticket also archives its linked Codex tasks, including previous Run and History contexts.
+  The same retained archive operation removes `outputs/<task-key>/` on its execution hosts
+  after native execution is resolved. Host outages and incomplete deletion keep the operation
+  pending for retry. Cleanup only addresses this deterministic output directory; shared projects
+  and worktrees remain intact. Store lasting deliverables in their destination or as ticket
+  attachments before archiving. Restoring a ticket does not restore deleted working outputs.
   Restoration tries the current native task first; confirmed failure creates a new native task
   while retaining the ticket's workflow state. Pending or unknown native outcomes never create
   replacements. Shared archive controls and MCP use the TaskBoard lifecycle action.
@@ -120,7 +125,8 @@ Ordinary comments, delivery receipts, unexported files and live Run source pins 
   only while work is active or unresolved. Optional per-task worktrees retain an exclusive path
   until Done, cancellation, Backlog or archive. Release reservations after committed completion;
   on lookup, reclaim stale reservations from authoritative idle state while preserving unfinished
-  admissions, publications and native outcomes. Retain the workspace files themselves.
+  admissions, publications and native outcomes. Retain workspace files until explicit archival;
+  only the ticket's disposable output directory is removed then.
   Agents discover peers through `task_list relatedTo`, matching the allocated canonical working
   directory and host rather than the project ID. Directed messages and dependencies may cross
   workspaces. Unrelated peer state changes do not inject turns or require board-wide polling.
@@ -149,7 +155,7 @@ Ordinary comments, delivery receipts, unexported files and live Run source pins 
   requires a final Result. Subsequent comments and edits remain valid after manual closure.
 - The agent performs Git lifecycle work from the ticket's explicit workspace/worktree intent.
   TaskBoard and AgentManager do not silently clone, switch branches or alter repositories.
-  Completed workspace directories are retained.
+  Completed project and worktree directories are retained; ticket output retention follows archival.
 
 Sources: [allocation](../services/task-board/rust/src/scheduler.rs),
 [workspace resolution](../services/agent-manager/rust/src),

@@ -55,8 +55,6 @@ mod sip_host;
 mod sip_receiver;
 #[path = "phone_sip_stack.rs"]
 mod sip_stack;
-#[path = "phone_voice_rpc.rs"]
-mod voice_rpc;
 
 const EPOCH: &str = "01234567-89ab-cdef-0123-456789abcdef";
 const OP: &str = "11234567-89ab-cdef-0123-456789abcdef";

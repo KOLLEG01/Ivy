@@ -133,7 +133,7 @@ projectRoot: paths.project,
       initialSequence: 0,
     },
   },
-  taskBoard: {
+  "task-board": {
     principalId,
     rootObjectId: null,
     scheduler: { enabled: true, intervalMs: 2000, pageSize: 50 },
@@ -145,7 +145,6 @@ validateHost("HiveSettings", settings.hive);
 validateHost("ManagerSettings", settings["service-manager"]);
 validateAgent("Settings", settings["agent-manager"]);
 validateAutomation("Settings", settings["automation-example"]);
-validateTaskBoard("Settings", settings.taskBoard);
 const config = {
   schemaVersion: 1,
   hostId,
@@ -175,6 +174,7 @@ const config = {
   })),
 };
 validateHost("HostConfig", config);
+validateTaskBoard("Settings", config.instances.find(instance => instance.componentId === "task-board").settings);
 await atomicJson(configPath, config);
 await atomicJson(join(root, "configuration-receipt.json"), {
   schemaVersion: 1,

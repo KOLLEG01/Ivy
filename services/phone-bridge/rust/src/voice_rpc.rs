@@ -22,7 +22,9 @@ pub use process::NativeVoiceConnector;
 mod preparation;
 pub use preparation::{VoiceJournalFuture, VoicePreparation, VoicePreparationJournal};
 mod owner;
-pub use owner::{PhoneCodexVoice, VoiceAsyncGuard, VoiceGuard, VoiceSelectionCommand, WorkObserver};
+pub use owner::{
+    PhoneCodexVoice, VoiceAsyncGuard, VoiceGuard, VoiceSelectionCommand, WorkObserver,
+};
 
 /// Required compiler boundary for installed native schemas. Implementations must
 /// apply the catalog schema and the supplied serialized-value byte limit.
@@ -155,3 +157,7 @@ impl VoiceRpc {
 #[cfg(test)]
 #[path = "../../../../tests/rust/phone_voice_schemas.rs"]
 mod schema_tests;
+
+#[cfg(test)]
+#[path = "../../../../tests/rust/phone_voice_rpc.rs"]
+mod rpc_tests;

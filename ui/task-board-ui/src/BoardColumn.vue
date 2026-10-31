@@ -16,6 +16,7 @@ import {
   User,
 } from "@lucide/vue";
 import { computed, ref, watch } from "vue";
+import ArchiveOutputsHint from "./ArchiveOutputsHint.vue";
 import {
   Button,
   DropdownMenu,
@@ -260,6 +261,7 @@ defineExpose({ refresh: pages.refresh });
           <DropdownMenuItem :disabled="disabled || archiveDisabled || !count" @select="emit('archiveAll')">
             <Archive aria-hidden="true" />Archive all tasks
           </DropdownMenuItem>
+          <ArchiveOutputsHint />
         </DropdownMenuContent>
       </DropdownMenu>
     </h2>
@@ -470,6 +472,7 @@ defineExpose({ refresh: pages.refresh });
                 <DropdownMenuItem :disabled="taskDisabled(task.id) || archiveDisabled || task.context.claimed || task.context.publishing" @select="emit('archive', task.id)">
                   <Archive aria-hidden="true" />Archive task
                 </DropdownMenuItem>
+                <ArchiveOutputsHint />
               </template></DropdownMenuContent
             ></DropdownMenu
           >

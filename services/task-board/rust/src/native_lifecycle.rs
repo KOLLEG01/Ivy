@@ -22,7 +22,7 @@ use ivy_sdk::{
     native_owner::NativeOwner,
     operation_ids::scoped_operation_id,
     rpc::{RequestOptions, RpcClient},
-    tools::ToolClients,
+    tools::{InterfaceRequirement, ToolCallOptions, ToolClients},
 };
 use std::sync::Arc;
 
@@ -60,6 +60,12 @@ pub trait LifecycleEngine: LifecyclePolicies {
     fn principal_id(&self) -> &JsString;
     async fn verify_owner(&self) -> IvyResult<()>;
     async fn scoped_operation_id(&self, scope: &Json) -> IvyResult<JsString>;
+    async fn cleanup_task_outputs(
+        &self,
+        node: &JsString,
+        task_key: &JsString,
+        operation_id: &JsString,
+    ) -> IvyResult<()>;
 }
 /// Bind the same authenticated connection as the journal and explicit current
 /// engine policies. This adapter supplies no prompt, question or allocation default.
@@ -101,6 +107,31 @@ impl<R: RpcClient + 'static, P: LifecyclePolicies> LifecyclePolicies for Lifecyc
     }
 }
 impl<R: RpcClient + 'static, P: LifecyclePolicies> LifecycleEngine for LifecycleRuntime<R, P> {
+    async fn cleanup_task_outputs(
+        &self,
+        node: &JsString,
+        task_key: &JsString,
+        operation_id: &JsString,
+    ) -> IvyResult<()> {
+        self.verify_owner().await?;
+        let result = self
+            .tools
+            .service_tools(
+                node.clone(),
+                &[InterfaceRequirement {
+                    namespace: "agent".into(),
+                    interface_version: "1.0.0".into(),
+                }],
+            )?
+            .call(
+                &"agent.cleanupTaskOutputs".into(),
+                Json::object([("taskKey", Json::String(task_key.clone()))]),
+                Some(operation_id.clone()),
+                ToolCallOptions::default(),
+            )
+            .await?;
+        validate_agent("TaskOutputCleanup", &result)
+    }
     fn client(&self) -> &dyn RpcClient {
         self.client.as_ref()
     }
@@ -166,6 +197,10 @@ pub struct NativeLifecycle<'a, S, E, O> {
     pub engine: &'a E,
     pub operations: &'a O,
     pub catalogs: &'a CheckedNativeContracts,
+}
+struct TicketContexts {
+    threads: Vec<Json>,
+    output_nodes: Vec<JsString>,
 }
 fn field<'a>(v: &'a Json, k: &str) -> &'a Json {
     static NULL: Json = Json::Null;
@@ -573,8 +608,9 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
             "The archived native context could not be restored; no replacement was created.",
         )
     }
-    async fn contexts(&self, task: &Document, history: bool) -> IvyResult<Vec<Json>> {
+    async fn contexts(&self, task: &Document, history: bool) -> IvyResult<TicketContexts> {
         let mut unique = Vec::<(String, Json)>::new();
+        let mut output_nodes = Vec::<JsString>::new();
         let mut add = |primary: &Json| -> IvyResult<()> {
             if !primary.is_null() {
                 let hash = hash_json(primary)?;
@@ -627,6 +663,14 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                             "task_board_execution_unresolved",
                             "Resolve every native execution attempt before changing the ticket context.",
                         )?;
+                        if let Some(node) = field(&document.value, "target")
+                            .get("serviceNodeId")
+                            .and_then(Json::as_js_string)
+                        {
+                            if !output_nodes.contains(node) {
+                                output_nodes.push(node.clone());
+                            }
+                        }
                         add(field(&document.value, "primaryResourceRef"))?;
                     } else {
                         let previous = field(&document.value, "previousTask");
@@ -662,7 +706,17 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                 }
             }
         }
-        Ok(unique.into_iter().map(|(_, primary)| primary).collect())
+        let threads: Vec<Json> = unique.into_iter().map(|(_, primary)| primary).collect();
+        for primary in &threads {
+            let node = s(primary, "serviceNodeId")?;
+            if !output_nodes.contains(node) {
+                output_nodes.push(node.clone());
+            }
+        }
+        Ok(TicketContexts {
+            threads,
+            output_nodes,
+        })
     }
     async fn plan(
         &self,
@@ -1058,9 +1112,33 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                 let primary = field(&task.value, "primaryResourceRef");
                 let mut replacement = Json::Null;
                 if archived {
-                    for context in contexts {
-                        self.archive_thread(operation, &context, true, false)
-                            .await?;
+                    for context in &contexts.threads {
+                        self.archive_thread(operation, context, true, false).await?;
+                    }
+                    for node in &contexts.output_nodes {
+                        // A live owner's scoped-ID cache does not survive a
+                        // restart. Bind this host effect to the retained archive.
+                        let operation_id: JsString = hash_json(&Json::Array(vec![
+                            "task-board-output-cleanup".into(),
+                            operation.pin.required("objectId")?.clone(),
+                            Json::String(node.clone()),
+                        ]))?
+                        .into();
+                        if let Err(error) = self
+                            .engine
+                            .cleanup_task_outputs(node, s(&task.value, "taskKey")?, &operation_id)
+                            .await
+                        {
+                            return Err(IvyError::new(
+                                "task_board_output_cleanup_pending",
+                                format!(
+                                    "Task output cleanup is pending on {}: {}",
+                                    node.to_utf8()?,
+                                    error.message
+                                ),
+                            )
+                            .with_outcome(ivy_contracts::Outcome::Unknown));
+                        }
                     }
                 } else if !primary.is_null()
                     && !self

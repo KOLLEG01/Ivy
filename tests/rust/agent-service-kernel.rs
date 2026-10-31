@@ -2,6 +2,8 @@
 mod reference_data;
 #[path = "agent-staged-files.rs"]
 mod staged_files;
+#[path = "agent-task-outputs.rs"]
+mod task_outputs;
 use ivy_agent_manager::{
     agent_health::AgentHealth,
     browser_notices::{input_browser_notice, native_browser_notice, service_owns_completion},
@@ -379,7 +381,10 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
             .map(IvyJson::String)
             .collect::<Vec<_>>();
         names.sort_by_key(|v| v.as_js_string().unwrap().clone());
-        same(&IvyJson::Array(names), field(data(), "handlers"));
+        let mut expected_handlers = field(data(), "handlers").as_array().unwrap().to_vec();
+        expected_handlers.push("agent.cleanupTaskOutputs".into());
+        expected_handlers.sort_by_key(|v| v.as_js_string().unwrap().clone());
+        same(&IvyJson::Array(names), &IvyJson::Array(expected_handlers));
         let mut expected_native = field(&catalog, "clientRequests")
             .as_array()
             .unwrap()

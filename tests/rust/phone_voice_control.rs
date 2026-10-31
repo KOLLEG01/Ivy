@@ -14,6 +14,11 @@ use tokio::{
 fn value(text: &str) -> IvyJson {
     parse(text, 4 * 1024 * 1024).unwrap()
 }
+fn local_settings(extra: &str) -> IvyJson {
+    let mut native = value(extra);
+    native.insert("cwd", if cfg!(windows) { "C:\\work" } else { "/work" }.into());
+    native
+}
 fn empty() -> IvyJson {
     IvyJson::object([] as [(&str, IvyJson); 0])
 }
@@ -23,7 +28,9 @@ fn empty() -> IvyJson {
 pub(crate) struct Schemas(Mutex<Vec<usize>>);
 impl VoiceSchemas for Schemas {
     fn validate(&self, schema: &IvyJson, input: &IvyJson, max: usize) -> IvyResult<()> {
-        if input.get("version").is_some() {return ivy_contracts::schema::SchemaValidators::new().validate(schema,input,max);}
+        if input.get("version").is_some() {
+            return ivy_contracts::schema::SchemaValidators::new().validate(schema, input, max);
+        }
         self.0.lock().unwrap().push(max);
         stringify(input, max)?;
         Ok(())
@@ -202,7 +209,7 @@ pub(crate) fn fixture(
 ) {
     let (connector, receive, schemas) = connector_fixture(plans);
     let control = VoiceControl::new(
-        settings(native, Style::Windows, "C:\\owner".into()),
+        settings(native, Style::native(), if cfg!(windows) { "C:\\owner" } else { "/owner" }.into()),
         connector.clone(),
         schemas.clone(),
         hooks,
@@ -385,7 +392,7 @@ async fn abandoned_open_and_catalogs_share_the_configured_connection() {
             gate: Some(gate.clone()),
             ..Plan::default()
         }],
-        value(r#"{"cwd":"C:\\work","voice":"ember"}"#),
+        local_settings(r#"{"voice":"ember"}"#),
         hooks(),
     );
     drop(control.open());
@@ -462,7 +469,7 @@ async fn abandoned_open_and_catalogs_share_the_configured_connection() {
 async fn project_read_publishes_before_validation_and_retains_cleanup_authority() {
     let (control, connector, mut peers, _) = fixture(
         vec![Plan::default()],
-        value(r#"{"cwd":"C:\\work","projectId":"p"}"#),
+        local_settings(r#"{"projectId":"p"}"#),
         hooks(),
     );
     let opening = control.open();
@@ -497,7 +504,7 @@ async fn close_retains_initialization_and_drain_after_observers_are_dropped() {
             gate: Some(gate.clone()),
             ..Plan::default()
         }],
-        value(r#"{"cwd":"C:\\work"}"#),
+        local_settings("{}"),
         hooks(),
     );
     let opening = control.open();
@@ -536,7 +543,7 @@ async fn close_retains_initialization_and_drain_after_observers_are_dropped() {
 async fn cleanup_reconnect_during_drain_is_the_final_connection_closed() {
     let (control, connector, mut peers, _) = fixture(
         vec![Plan::default(), Plan::default()],
-        value(r#"{"cwd":"C:\\work"}"#),
+        local_settings("{}"),
         hooks(),
     );
     let first = timed(control.open().wait()).await.unwrap();
@@ -562,7 +569,7 @@ async fn cleanup_reconnect_during_drain_is_the_final_connection_closed() {
 async fn reconnect_replaces_identity_and_catalog_cache_without_preparing_a_task() {
     let (control, connector, mut peers, _) = fixture(
         vec![Plan::default(), Plan::default()],
-        value(r#"{"cwd":"C:\\work"}"#),
+        local_settings("{}"),
         hooks(),
     );
     let first = timed(control.open().wait()).await.unwrap();
@@ -630,7 +637,7 @@ async fn original_native_callbacks_and_unexpected_loss_are_forwarded_once() {
     });
     let (control, _, mut peers, _) = fixture(
         vec![Plan::default(), Plan::default()],
-        value(r#"{"cwd":"C:\\work"}"#),
+        local_settings("{}"),
         callbacks,
     );
     let first = timed(control.open().wait()).await.unwrap();
@@ -707,7 +714,7 @@ async fn failed_open_can_retry_and_cleanup_error_remains_the_sticky_close_result
                 ..Plan::default()
             },
         ],
-        value(r#"{"cwd":"C:\\work"}"#),
+        local_settings("{}"),
         hooks(),
     );
     assert_eq!(
