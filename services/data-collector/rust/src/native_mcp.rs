@@ -20,7 +20,10 @@ use ivy_sdk::{
     tools::{InterfaceRequirement, ToolCallOptions, ToolClients},
 };
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::Mutex as AsyncMutex;
@@ -36,10 +39,31 @@ fn check(signal: &CancellationToken) -> IvyResult<()> {
         Ok(())
     }
 }
-struct Guard(CancellationToken);
-impl NativeDispatchGuard for Guard {
+struct Dispatch {
+    operation_id: JsString,
+    attempted: AtomicBool,
+}
+impl Dispatch {
+    fn new(call: &NativeOperationCall) -> Self {
+        Self {
+            operation_id: call.operation_id.clone(),
+            attempted: AtomicBool::new(false),
+        }
+    }
+}
+struct Guard<'a> {
+    signal: &'a CancellationToken,
+    dispatch: &'a Dispatch,
+}
+impl NativeDispatchGuard for Guard<'_> {
     fn check(&self) -> GuardFuture<'_> {
-        Box::pin(async { check(&self.0) })
+        Box::pin(async {
+            check(self.signal)?;
+            // The session lock keeps this proof alive if its caller is dropped.
+            // Once permitted, a send remains possible until a definitive rejection.
+            self.dispatch.attempted.store(true, Ordering::Release);
+            Ok(())
+        })
     }
 }
 fn absolute(path: &JsString) -> bool {
@@ -62,6 +86,7 @@ fn absolute(path: &JsString) -> bool {
 struct State {
     context: Option<Context>,
     closed: bool,
+    dispatch: Option<Dispatch>,
 }
 struct Inner {
     client: Arc<dyn RpcClient>,
@@ -169,6 +194,7 @@ impl NativeMcpSession {
             ]))
             .await?;
         let start = prepare(&owner, self.0.client.clone(), "thread/start", params).await?;
+        state.dispatch = Some(Dispatch::new(&start));
         // Retain identity in both the session and SQLite before dispatch can begin.
         state.context = Some(Context {
             revision: 0,
@@ -184,7 +210,13 @@ impl NativeMcpSession {
         });
         let context = state.context.as_mut().unwrap();
         self.0.contexts.insert(context, &self.0.closed).await?;
-        let operation = dispatch(&owner, &context.start, &self.0.signal).await?;
+        let operation = dispatch(
+            &owner,
+            &context.start,
+            &self.0.signal,
+            state.dispatch.as_ref().unwrap(),
+        )
+        .await?;
         context.thread = Some(started(result(context, &operation)?)?);
         self.0.contexts.save(context).await?;
         Ok(())
@@ -224,9 +256,25 @@ async fn dispatch(
     owner: &NativeOwner,
     call: &NativeOperationCall,
     signal: &CancellationToken,
+    admission: &Dispatch,
 ) -> IvyResult<IvyJson> {
     check(signal)?;
-    let mut operation = owner.dispatch(call, &Guard(signal.clone())).await?;
+    let response = owner
+        .dispatch(
+            call,
+            &Guard {
+                signal,
+                dispatch: admission,
+            },
+        )
+        .await;
+    if response
+        .as_ref()
+        .is_err_and(|error| error.outcome == Outcome::NotExecuted)
+    {
+        admission.attempted.store(false, Ordering::Release);
+    }
+    let mut operation = response?;
     if let Some(observation) = &operation {
         owner.check_operation(observation, call)?;
     }
@@ -285,6 +333,41 @@ async fn same_epoch(owner: &NativeOwner, epoch: &JsString) -> IvyResult<()> {
         Err(unresolved())
     }
 }
+/// A live caller can discard its own unsent intent. Missing receipts and records
+/// recovered after a process restart carry no such authority.
+async fn discard_unsent(
+    contexts: &Contexts,
+    context: &mut Context,
+    admission: Option<&Dispatch>,
+) -> IvyResult<bool> {
+    let Some(admission) = admission.filter(|proof| !proof.attempted.load(Ordering::Acquire)) else {
+        return Ok(false);
+    };
+    // Fence a save whose blocking store command outlived its canceled waiter.
+    contexts.mark_closing(context).await?;
+    let Some(mut saved) = contexts.read(context.key()?).await? else {
+        return Ok(true);
+    };
+    if saved.thread.is_none() && saved.start.operation_id == admission.operation_id {
+        contexts.retire(&saved).await?;
+        return Ok(true);
+    }
+    let mut changed = false;
+    for call in [&mut saved.pending, &mut saved.unsubscribe] {
+        if call
+            .as_ref()
+            .is_some_and(|call| call.operation_id == admission.operation_id)
+        {
+            *call = None;
+            changed = true;
+        }
+    }
+    if changed {
+        contexts.save(&mut saved).await?;
+    }
+    *context = saved;
+    Ok(false)
+}
 /// Only this context's original receipts authorize retirement. Unknown outcomes
 /// remain in SQLite; neither starts nor uncertain unsubscriptions are replayed.
 async fn retire_context(
@@ -292,6 +375,7 @@ async fn retire_context(
     context: &mut Context,
     client: Arc<dyn RpcClient>,
     tools: Arc<ToolClients>,
+    admission: &mut Option<Dispatch>,
 ) -> IvyResult<()> {
     let owner = owner(context, tools, &CancellationToken::new());
     if context.thread.is_none() {
@@ -321,13 +405,26 @@ async fn retire_context(
             IvyJson::object([("threadId", IvyJson::String(context.thread.clone().unwrap()))]),
         )
         .await?;
+        *admission = Some(Dispatch::new(&call));
         context.unsubscribe = Some(call);
         contexts.save(context).await?;
         let call = context.unsubscribe.as_ref().unwrap();
         // Recheck after discovery and immediately before every permitted send.
-        let operation = owner
-            .dispatch_local(call, || same_epoch(&owner, &context.epoch))
-            .await?;
+        let proof = admission.as_ref().unwrap();
+        let response = owner
+            .dispatch_local(call, || async {
+                same_epoch(&owner, &context.epoch).await?;
+                proof.attempted.store(true, Ordering::Release);
+                Ok(())
+            })
+            .await;
+        if response
+            .as_ref()
+            .is_err_and(|error| error.outcome == Outcome::NotExecuted)
+        {
+            proof.attempted.store(false, Ordering::Release);
+        }
+        let operation = response?;
         let operation = match operation {
             Some(value) => {
                 owner.check_operation(&value, call)?;
@@ -366,10 +463,14 @@ impl TaskMcp for NativeMcpSession {
                     if context.pending.is_some() { return Err(unresolved()); }
                     let owner=owner(context,this.0.tools.clone(),&this.0.signal);
                     let params=IvyJson::object([("threadId",IvyJson::String(context.thread.clone().unwrap())),("server",this.0.configuration.required("server")?.clone()),("tool",IvyJson::String(tool)),("arguments",args)]);
-                    context.pending=Some(prepare(&owner,this.0.client.clone(),"mcpServer/tool/call",params).await?);
+                    let call=prepare(&owner,this.0.client.clone(),"mcpServer/tool/call",params).await?;
+                    state.dispatch=Some(Dispatch::new(&call));
+                    let State {context,dispatch:admission,..}=&mut *state;
+                    let context=context.as_mut().unwrap();
+                    context.pending=Some(call);
                     this.0.contexts.save(context).await?;
                     let call=context.pending.as_ref().unwrap();
-                    let operation=dispatch(&owner,call,&this.0.signal).await?;
+                    let operation=dispatch(&owner,call,&this.0.signal,admission.as_ref().unwrap()).await?;
                     let value=tool_result(result(context,&operation)?);
                     // A completed native reply remains at its original operation.
                     context.pending=None;
@@ -385,7 +486,10 @@ impl TaskMcp for NativeMcpSession {
             this.0.closed.cancel();
             let mut state = this.0.state.lock().await;
             state.closed = true;
-            let Some(context) = &mut state.context else {
+            let State {
+                context, dispatch, ..
+            } = &mut *state;
+            let Some(context) = context else {
                 return Ok(());
             };
             let _cleanup = this.0.contexts.cleanup.lock().await;
@@ -395,16 +499,21 @@ impl TaskMcp for NativeMcpSession {
             let Some(mut saved) = this.0.contexts.read(context.key()?).await? else {
                 return Ok(());
             };
+            if discard_unsent(&this.0.contexts, &mut saved, dispatch.as_ref()).await? {
+                return Ok(());
+            }
             let _ = tokio::time::timeout(Duration::from_secs(5), async {
                 retire_context(
                     &this.0.contexts,
                     &mut saved,
                     this.0.client.clone(),
                     this.0.tools.clone(),
+                    dispatch,
                 )
                 .await
             })
             .await;
+            discard_unsent(&this.0.contexts, &mut saved, dispatch.as_ref()).await?;
             Ok(())
         })
     }
@@ -440,18 +549,28 @@ impl NativeMcpFactory {
     }
     pub async fn recover(&self) -> IvyResult<()> {
         let (client, tools) = self.selected()?;
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let mut cursor = self.contexts.cleanup.lock().await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut cursor = tokio::time::timeout_at(deadline, self.contexts.cleanup.lock())
+            .await
+            .map_err(|_| unresolved())?;
+        let mut saved = None;
+        let mut admission = None;
+        let outcome = tokio::time::timeout_at(deadline, async {
             if let Some(key) = self.contexts.next(cursor.clone()).await? {
                 *cursor = key.clone();
-                if let Some(mut context) = self.contexts.read(key).await? {
-                    retire_context(&self.contexts, &mut context, client, tools).await?;
+                saved = self.contexts.read(key).await?;
+                if let Some(context) = &mut saved {
+                    retire_context(&self.contexts, context, client, tools, &mut admission).await?;
                 }
             }
             Ok(())
         })
         .await
-        .map_err(|_| unresolved())?
+        .map_err(|_| unresolved());
+        if let Some(context) = &mut saved {
+            discard_unsent(&self.contexts, context, admission.as_ref()).await?;
+        }
+        outcome?
     }
 }
 impl McpBridgeFactory for NativeMcpFactory {

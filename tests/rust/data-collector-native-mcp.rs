@@ -22,6 +22,9 @@ enum Mode {
     HoldTool,
     LostUnsubscribe,
     HoldUnsubscribe,
+    HoldInvokeBinding,
+    RejectTool,
+    UnknownToolAdmission,
 }
 #[derive(Default)]
 struct Client {
@@ -161,6 +164,13 @@ impl RpcClient for Client {
             if method == "tools.list" {
                 let namespace = model::text(&params, "namespace")?;
                 let name = model::text(&params, "namePrefix")?;
+                if namespace == "agent"
+                    && name == "invoke"
+                    && matches!(*self.mode.lock().unwrap(), Mode::HoldInvokeBinding)
+                {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
                 return Ok(IvyJson::object([
                     (
                         "provider",
@@ -253,6 +263,22 @@ impl RpcClient for Client {
                     self.invokes.lock().unwrap().push(args.clone());
                     let native_method = model::text(args, "method")?;
                     let mode = *self.mode.lock().unwrap();
+                    if native_method == "mcpServer/tool/call" {
+                        match mode {
+                            Mode::RejectTool => {
+                                return Err(IvyError::new("cancelled", "Not admitted.")
+                                    .with_outcome(Outcome::NotExecuted));
+                            }
+                            Mode::UnknownToolAdmission => {
+                                return Err(IvyError::new(
+                                    "connection_closed",
+                                    "Admission unknown.",
+                                )
+                                .with_outcome(Outcome::Unknown));
+                            }
+                            _ => (),
+                        }
+                    }
                     let held = matches!(
                         (mode, native_method.as_str()),
                         (Mode::HoldStart, "thread/start")
@@ -363,6 +389,39 @@ async fn entered(client: &Client) {
         .await
         .unwrap();
 }
+async fn cancel_before_admission(
+    session: &NativeMcpSession,
+    client: &Client,
+    task: tokio::task::JoinHandle<IvyResult<IvyJson>>,
+    cancel: &str,
+) {
+    let close = match cancel {
+        "close" => {
+            let session = session.clone();
+            Some(tokio::spawn(async move { session.close().await }))
+        }
+        "signal" => {
+            session.0.signal.cancel();
+            None
+        }
+        _ => {
+            task.abort();
+            None
+        }
+    };
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .is_ok_and(|result| result.is_ok())
+    );
+    client.release.notify_one();
+    if let Some(close) = close {
+        close.await.unwrap().unwrap();
+    } else {
+        session.close().await.unwrap();
+    }
+}
 
 #[tokio::test]
 async fn normal_context_is_durably_owned_before_dispatch_and_retires_once() {
@@ -423,6 +482,191 @@ async fn task_cancellation_keeps_the_start_identity() {
     factory.recover().await.unwrap();
     assert!(retained(&factory, &client).await.is_none());
     assert_eq!(client.count("thread/start"), 1);
+}
+#[tokio::test]
+async fn cancellation_before_start_admission_releases_only_the_local_intent() {
+    for cancel in ["close", "signal", "drop"] {
+        let (_root, client, factory, session) = fixture(Mode::HoldInvokeBinding);
+        let pending = session.clone();
+        let task = tokio::spawn(async move { call(&pending).await });
+        entered(&client).await;
+        cancel_before_admission(&session, &client, task, cancel).await;
+        factory.recover().await.unwrap();
+        assert!(
+            factory
+                .contexts
+                .next(String::new())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(client.invokes.lock().unwrap().is_empty(), "{cancel}");
+    }
+}
+#[tokio::test]
+async fn cancellation_before_tool_admission_allows_the_original_context_to_close() {
+    for cancel in ["close", "signal", "drop"] {
+        let (_root, client, factory, mut session) = fixture(Mode::Normal);
+        call(&session).await.unwrap();
+        // A fresh provider cache makes discovery pause after the next durable
+        // pending write, before the native dispatch guard has permitted a send.
+        Arc::get_mut(&mut session.0).unwrap().tools = Arc::new(ToolClients::new(client.clone()));
+        *client.mode.lock().unwrap() = Mode::HoldInvokeBinding;
+        let pending = session.clone();
+        let task = tokio::spawn(async move { call(&pending).await });
+        entered(&client).await;
+        let context = retained(&factory, &client).await.unwrap();
+        let original = context.pending.unwrap().operation_id;
+        assert!(
+            !client
+                .operations
+                .lock()
+                .unwrap()
+                .contains_key(&original.to_utf8().unwrap())
+        );
+        cancel_before_admission(&session, &client, task, cancel).await;
+        factory.recover().await.unwrap();
+        assert!(retained(&factory, &client).await.is_none(), "{cancel}");
+        assert_eq!(client.count("thread/start"), 1, "{cancel}");
+        assert_eq!(client.count("mcpServer/tool/call"), 1, "{cancel}");
+        assert_eq!(client.count("thread/unsubscribe"), 1, "{cancel}");
+    }
+}
+#[tokio::test]
+async fn definitive_rejection_allows_cleanup_but_a_lost_admission_does_not() {
+    for mode in [Mode::RejectTool, Mode::UnknownToolAdmission] {
+        let (_root, client, factory, session) = fixture(mode);
+        call(&session).await.unwrap_err();
+        let pending = retained(&factory, &client).await.unwrap().pending.unwrap();
+        assert!(
+            !client
+                .operations
+                .lock()
+                .unwrap()
+                .contains_key(&pending.operation_id.to_utf8().unwrap())
+        );
+        session.close().await.unwrap();
+        if matches!(mode, Mode::RejectTool) {
+            factory.recover().await.unwrap();
+            assert!(retained(&factory, &client).await.is_none());
+            assert_eq!(client.count("thread/unsubscribe"), 1);
+        } else {
+            factory.recover().await.unwrap_err();
+            assert_eq!(
+                retained(&factory, &client)
+                    .await
+                    .unwrap()
+                    .pending
+                    .unwrap()
+                    .operation_id,
+                pending.operation_id
+            );
+            assert_eq!(client.count("thread/unsubscribe"), 0);
+        }
+        assert_eq!(client.count("thread/start"), 1);
+        assert_eq!(client.count("mcpServer/tool/call"), 1);
+    }
+}
+#[tokio::test]
+async fn a_process_reopen_cannot_infer_that_an_absent_admission_was_unsent() {
+    let (root, client, factory, mut session) = fixture(Mode::Normal);
+    call(&session).await.unwrap();
+    Arc::get_mut(&mut session.0).unwrap().tools = Arc::new(ToolClients::new(client.clone()));
+    *client.mode.lock().unwrap() = Mode::HoldInvokeBinding;
+    let pending = session.clone();
+    let task = tokio::spawn(async move { call(&pending).await });
+    entered(&client).await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    let context = retained(&factory, &client).await.unwrap();
+    let key = context.key().unwrap();
+    let original = context.pending.unwrap().operation_id;
+    client.release.notify_one();
+    let store = factory.contexts.store.clone();
+    drop(session);
+    drop(factory);
+    store.close().await.unwrap();
+    let reopened = root.store();
+    *client.store.lock().unwrap() = Some(reopened.clone());
+    let current = client.clone();
+    let factory = NativeMcpFactory::new(Arc::new(move || Ok(current.clone())), reopened);
+    factory.recover().await.unwrap_err();
+    assert_eq!(
+        factory
+            .contexts
+            .read(key)
+            .await
+            .unwrap()
+            .unwrap()
+            .pending
+            .unwrap()
+            .operation_id,
+        original
+    );
+    assert_eq!(client.count("thread/start"), 1);
+    assert_eq!(client.count("mcpServer/tool/call"), 1);
+    assert_eq!(client.count("thread/unsubscribe"), 0);
+}
+#[tokio::test]
+async fn unsent_cleanup_is_released_after_close_or_recovery_times_out() {
+    for cleanup in ["close", "drop", "recover"] {
+        let (_root, client, factory, mut session) = fixture(Mode::Normal);
+        call(&session).await.unwrap();
+        Arc::get_mut(&mut session.0).unwrap().tools = Arc::new(ToolClients::new(client.clone()));
+        *client.mode.lock().unwrap() = Mode::HoldInvokeBinding;
+        let task = if cleanup == "recover" {
+            let context = retained(&factory, &client).await.unwrap();
+            factory.contexts.mark_closing(&context).await.unwrap();
+            // Recovery must discover its own uncached management binding too.
+            *factory.cached.lock().unwrap() = None;
+            let factory = factory.clone();
+            tokio::spawn(async move { factory.recover().await })
+        } else {
+            let session = session.clone();
+            tokio::spawn(async move { session.close().await })
+        };
+        entered(&client).await;
+        let original = retained(&factory, &client)
+            .await
+            .unwrap()
+            .unsubscribe
+            .unwrap()
+            .operation_id;
+        if cleanup == "drop" {
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        } else {
+            let result = tokio::time::timeout(Duration::from_secs(6), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.is_ok(), cleanup == "close");
+            assert!(
+                retained(&factory, &client)
+                    .await
+                    .unwrap()
+                    .unsubscribe
+                    .is_none()
+            );
+        }
+        assert_eq!(client.count("thread/unsubscribe"), 0);
+        *client.mode.lock().unwrap() = Mode::Normal;
+        client.release.notify_one();
+        if cleanup == "drop" {
+            session.close().await.unwrap();
+        } else {
+            factory.recover().await.unwrap();
+        }
+        assert!(retained(&factory, &client).await.is_none(), "{cleanup}");
+        assert_eq!(client.count("thread/unsubscribe"), 1);
+        assert!(
+            !client
+                .operations
+                .lock()
+                .unwrap()
+                .contains_key(&original.to_utf8().unwrap())
+        );
+    }
 }
 #[tokio::test]
 async fn lost_start_is_not_replayed_and_survives_a_real_database_reopen() {
