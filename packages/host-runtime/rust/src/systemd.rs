@@ -5,6 +5,7 @@ use crate::{
     linux_host::trimmed,
     linux_resources::{installation_identity, validate_linux_resource_scope},
     linux_service_identity::linux_process_user,
+    runtime_owner::stop::StopPolicy,
 };
 use futures_util::future::BoxFuture;
 use ivy_contracts::{JsString, hash::hash_json};
@@ -164,14 +165,14 @@ impl SystemdAdapter {
         &self,
         config: IvyJson,
         unit: JsString,
-        timeout_ms: f64,
+        policy: StopPolicy,
     ) -> IvyResult<SystemdState> {
         let adapter = self.clone();
         tokio::spawn(async move {
             require(
-                timeout_ms.is_finite()
-                    && timeout_ms.fract() == 0.0
-                    && (0.0..=120_000.0).contains(&timeout_ms),
+                policy
+                    .timeout()
+                    .is_none_or(|timeout| timeout <= std::time::Duration::from_secs(600)),
                 "invalid_arguments",
                 "Systemd stop timeout is invalid.",
             )?;
@@ -180,13 +181,21 @@ impl SystemdAdapter {
             if stopped(&current) {
                 return Ok(current);
             }
+            let deadline = policy
+                .timeout()
+                .map(|timeout| adapter.host.now_ms() + timeout.as_millis() as f64);
             adapter
-                .command(&config, vec!["stop".into(), unit.clone()])
+                .command(
+                    &config,
+                    vec!["stop".into(), "--no-block".into(), unit.clone()],
+                )
                 .await?;
-            let deadline = adapter.host.now_ms() + timeout_ms;
             let mut observed = adapter.state(&config, &unit).await?;
-            while !stopped(&observed) && adapter.host.now_ms() < deadline {
-                adapter.host.sleep(100).await;
+            while !stopped(&observed) && deadline.is_none_or(|end| adapter.host.now_ms() < end) {
+                adapter
+                    .host
+                    .sleep(if deadline.is_none() { 1000 } else { 100 })
+                    .await;
                 observed = adapter.state(&config, &unit).await?;
             }
             if !stopped(&observed) {
@@ -488,8 +497,15 @@ pub fn render_systemd_unit(
     if let Some(resources) = resources {
         plan.insert("linuxResources", resources.clone());
     }
+    let launch = Some(text(target.required("revision")?)?);
+    let policy = StopPolicy::for_manifest(manifest);
+    let content = if policy == StopPolicy::Cooperative {
+        bootstrap::linux_unit_with_stop_policy(&plan, &process, launch, policy)?
+    } else {
+        bootstrap::linux_unit(&plan, &process, launch)?
+    };
     Ok(RenderedSystemdUnit {
         unit: name,
-        content: bootstrap::linux_unit(&plan, &process, Some(text(target.required("revision")?)?))?,
+        content,
     })
 }

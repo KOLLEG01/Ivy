@@ -1,5 +1,5 @@
 use super::*;
-use crate::{linux_service_identity, systemd};
+use crate::{linux_service_identity, runtime_owner::stop::StopPolicy, systemd};
 
 fn inactive(state: &SystemdState) -> bool {
     ["inactive", "failed"]
@@ -60,16 +60,14 @@ impl NativeActivationRuntime {
         if inactive(&current) {
             return Ok(Some(current));
         }
-        let grace = match target {
-            Some(t) => timeout(
-                &c.journal.manifest(&text(t, "candidateId")?).await?,
-                "shutdown",
-                15000.0,
-            ),
-            None => 15000.0,
+        let policy = match target {
+            Some(t) => {
+                StopPolicy::for_manifest(&c.journal.manifest(&text(t, "candidateId")?).await?)
+            }
+            None => StopPolicy::Deadline(Duration::from_secs(15)),
         };
         self.systemd
-            .stop_unit(c.config.clone(), unit.into(), grace)
+            .stop_unit(c.config.clone(), unit.into(), policy)
             .await
             .map(Some)
     }
@@ -193,7 +191,7 @@ impl NativeActivationRuntime {
                         .stop_unit(
                             c.config.clone(),
                             unit.clone().into(),
-                            timeout(&manifest, "shutdown", 15000.0),
+                            StopPolicy::for_manifest(&manifest),
                         )
                         .await?;
                 }
@@ -215,10 +213,17 @@ impl NativeActivationRuntime {
                             "nodeExecutable",
                             if crate::native_plan::is_native_plan(&manifest) {
                                 crate::layout::path_json(&crate::paths::direct_native_file(
-                                    &crate::config::path_value(candidate.required("artifactRoot")?)?,
-                                    &manifest.required("entrypoint")?.required("executable")?.as_str()?,
+                                    &crate::config::path_value(
+                                        candidate.required("artifactRoot")?,
+                                    )?,
+                                    &manifest
+                                        .required("entrypoint")?
+                                        .required("executable")?
+                                        .as_str()?,
                                 )?)
-                            } else { c.config.required("executables")?.required("node")?.clone() },
+                            } else {
+                                c.config.required("executables")?.required("node")?.clone()
+                            },
                         ),
                     ]),
                     config.json().clone(),

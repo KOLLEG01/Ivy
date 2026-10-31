@@ -1,19 +1,30 @@
-// HostExecutor owns the module index; exercise this owned module until exported.
 pub use ivy_host_runtime::process;
 #[cfg(windows)]
 #[path = "service-manager-owner-cases.rs"]
 mod owner_cases;
-#[path = "../../packages/host-runtime/rust/src/runtime_owner/stop.rs"]
-mod stop;
+use ivy_host_runtime::runtime_owner::stop;
 
+use ivy_contracts::JsString;
 use ivy_contracts::{IvyError, IvyJson, json::parse, limits::MANAGEMENT_FRAME_BYTES};
+use ivy_host_runtime::{
+    IvyResult,
+    linux_host::FileMetadata,
+    systemd::{SystemdAdapter, SystemdHost, UnitFile},
+};
+#[allow(dead_code)]
+#[path = "host-service-fixture.rs"]
+mod service_fixture;
 use process::{Command, LaunchContext, OwnedProcess};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicI64, AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
+use stop::StopPolicy;
 
 struct Fixture(PathBuf);
 impl Fixture {
@@ -100,6 +111,12 @@ fn child_fixture() {
         if mode == "cooperate" && root.join("control.json").exists() {
             return;
         }
+        if mode == "drain" && root.join("control.json").exists() {
+            std::fs::write(root.join("draining"), "waiting for model").unwrap();
+            if root.join("release").exists() {
+                return;
+            }
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!("fixture watchdog expired");
@@ -124,20 +141,26 @@ fn control_is_bound_to_instance_launch_and_boot() {
 async fn cooperative_exit_completes_before_any_forced_stop() {
     let fixture = Fixture::new();
     let child = fixture.spawn("cooperate").await;
-    let result = stop::stop_child(&child, Duration::from_secs(61), async {
-        tokio::fs::write(fixture.0.join("control.json"), "shutdown")
-            .await
-            .unwrap();
-        Ok(())
-    })
+    let result = stop::stop_child(
+        &child,
+        StopPolicy::Deadline(Duration::from_secs(61)),
+        async {
+            tokio::fs::write(fixture.0.join("control.json"), "shutdown")
+                .await
+                .unwrap();
+            Ok(())
+        },
+    )
     .await
     .unwrap();
     assert_eq!(result.exit_code, Some(0));
     assert_eq!(result.error_code, None);
     // Repeated stop on an already completed child must not write stale control.
-    stop::stop_child(&child, Duration::from_secs(3), async {
-        panic!("late control write")
-    })
+    stop::stop_child(
+        &child,
+        StopPolicy::Deadline(Duration::from_secs(3)),
+        async { panic!("late control write") },
+    )
     .await
     .unwrap();
 }
@@ -148,7 +171,7 @@ async fn unresponsive_child_is_forced_only_after_the_grace_interval() {
     let child = fixture.spawn("ignore").await;
     let start = Instant::now();
     let grace = Duration::from_millis(250);
-    let result = stop::stop_child(&child, grace, async {
+    let result = stop::stop_child(&child, StopPolicy::Deadline(grace), async {
         Err(IvyError::new(
             "internal_error",
             "Injected control write failure.",
@@ -168,12 +191,526 @@ async fn stalled_control_write_cannot_extend_the_stop_deadline() {
     let child = fixture.spawn("ignore").await;
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        stop::stop_child(&child, Duration::from_millis(250), std::future::pending()),
+        stop::stop_child(
+            &child,
+            StopPolicy::Deadline(Duration::from_millis(250)),
+            std::future::pending(),
+        ),
     )
     .await
     .expect("bounded stop")
     .unwrap();
     assert_ne!(result.error_code.as_deref(), Some("outcome_unknown"));
+}
+
+#[tokio::test]
+async fn cooperative_owner_keeps_a_draining_process_until_its_own_completion() {
+    let fixture = Fixture::new();
+    let child = fixture.spawn("drain").await;
+    let mut stopping = Box::pin(stop::stop_child(&child, StopPolicy::Cooperative, async {
+        tokio::fs::write(fixture.0.join("control.json"), "shutdown")
+            .await
+            .unwrap();
+        Ok(())
+    }));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut stopping)
+            .await
+            .is_err()
+    );
+    assert!(fixture.0.join("draining").exists());
+    assert!(child.completion.current().is_none());
+    tokio::fs::write(fixture.0.join("release"), "model completed")
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), stopping)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.exit_code, Some(0));
+    assert_eq!(result.error_code, None);
+}
+
+type OsFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
+struct StopHost {
+    states: Mutex<VecDeque<&'static str>>,
+    commands: Mutex<Vec<Vec<JsString>>>,
+    elapsed: AtomicI64,
+    advance: i64,
+}
+impl StopHost {
+    fn new(states: &[&'static str], advance: i64) -> Arc<Self> {
+        Arc::new(Self {
+            states: Mutex::new(states.iter().copied().collect()),
+            commands: Mutex::new(vec![]),
+            elapsed: AtomicI64::new(0),
+            advance,
+        })
+    }
+}
+impl SystemdHost for StopHost {
+    fn platform(&self) -> &str {
+        "linux"
+    }
+    fn user_id(&self) -> Option<u32> {
+        Some(0)
+    }
+    fn metadata(&self, _: JsString) -> OsFuture<std::io::Result<FileMetadata>> {
+        panic!("No file operation during stop")
+    }
+    fn read(&self, _: JsString) -> OsFuture<std::io::Result<Vec<u8>>> {
+        panic!("No file operation during stop")
+    }
+    fn open(&self, _: JsString, _: bool) -> OsFuture<std::io::Result<Box<dyn UnitFile>>> {
+        panic!("No file operation during stop")
+    }
+    fn rename(&self, _: JsString, _: JsString) -> OsFuture<std::io::Result<()>> {
+        panic!("No file operation during stop")
+    }
+    fn unlink(&self, _: JsString) -> OsFuture<std::io::Result<()>> {
+        panic!("No file operation during stop")
+    }
+    fn execute(&self, _: JsString, args: Vec<JsString>) -> OsFuture<IvyResult<JsString>> {
+        self.commands.lock().unwrap().push(args.clone());
+        let output = if args[0].eq_str("show") {
+            let mut states = self.states.lock().unwrap();
+            let state = if states.len() > 1 {
+                states.pop_front().unwrap()
+            } else {
+                states[0]
+            };
+            format!(
+                "LoadState=loaded\nActiveState={state}\nSubState={}\nMainPID={}\n",
+                if state == "inactive" {
+                    "dead"
+                } else {
+                    "stop-sigterm"
+                },
+                if state == "inactive" { 0 } else { 123 }
+            )
+            .into()
+        } else {
+            assert!(args[0].eq_str("stop"));
+            assert!(args[1].eq_str("--no-block"));
+            "".into()
+        };
+        Box::pin(async move { Ok(output) })
+    }
+    fn uuid(&self) -> String {
+        panic!("No file operation during stop")
+    }
+    fn now_ms(&self) -> f64 {
+        self.elapsed.load(Ordering::SeqCst) as f64
+    }
+    fn sleep(&self, ms: u64) -> OsFuture<()> {
+        self.elapsed.fetch_add(
+            if self.advance == 0 {
+                ms as i64
+            } else {
+                self.advance
+            },
+            Ordering::SeqCst,
+        );
+        Box::pin(tokio::task::yield_now())
+    }
+}
+fn stop_config() -> IvyJson {
+    IvyJson::object([(
+        "executables",
+        IvyJson::object([("systemctl", "/fixture/systemctl".into())]),
+    )])
+}
+fn stop_unit() -> JsString {
+    "ivy-next-0123456789ab-abcdef012345.service".into()
+}
+
+#[tokio::test]
+async fn systemd_stop_observes_async_completion_and_accepts_manifest_sized_budgets() {
+    for milliseconds in [150_000, 600_000] {
+        let host = StopHost::new(&["active", "deactivating", "inactive"], 100);
+        let state = SystemdAdapter::with_host(host.clone())
+            .stop_unit(
+                stop_config(),
+                stop_unit(),
+                StopPolicy::Deadline(Duration::from_millis(milliseconds)),
+            )
+            .await
+            .unwrap();
+        assert!(state.active_state.eq_str("inactive"));
+        let commands = host.commands.lock().unwrap();
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|args| args[0].eq_str("stop"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            commands[1],
+            vec!["stop".into(), "--no-block".into(), stop_unit()]
+        );
+    }
+    let host = StopHost::new(&["active", "deactivating"], 100);
+    let error = SystemdAdapter::with_host(host)
+        .stop_unit(
+            stop_config(),
+            stop_unit(),
+            StopPolicy::Deadline(Duration::from_millis(150)),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "outcome_unknown");
+    let host = StopHost::new(&["active"], 0);
+    let error = SystemdAdapter::with_host(host.clone())
+        .stop_unit(
+            stop_config(),
+            stop_unit(),
+            StopPolicy::Deadline(Duration::from_secs(601)),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "invalid_arguments");
+    assert!(host.commands.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cooperative_systemd_stop_waits_beyond_a_manifest_deadline_without_another_stop() {
+    let host = StopHost::new(
+        &["active", "deactivating", "deactivating", "inactive"],
+        700_000,
+    );
+    let policy = StopPolicy::for_manifest(&IvyJson::object([
+        ("componentId", "agent-manager".into()),
+        (
+            "shutdown",
+            IvyJson::object([("timeoutMs", 150_000.0.into())]),
+        ),
+    ]));
+    assert_eq!(policy, StopPolicy::Cooperative);
+    let state = SystemdAdapter::with_host(host.clone())
+        .stop_unit(stop_config(), stop_unit(), policy)
+        .await
+        .unwrap();
+    assert!(state.active_state.eq_str("inactive"));
+    assert!(host.elapsed.load(Ordering::SeqCst) > 600_000);
+    assert_eq!(
+        host.commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|args| args[0].eq_str("stop"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn agent_manager_unit_signals_only_its_owner_and_keeps_native_work_outside_a_stop_deadline() {
+    let root = service_fixture::ServiceFixture::new();
+    let hash = || IvyJson::from(format!("sha256:{}", "a".repeat(64)));
+    for component in ["agent-manager", "fixture"] {
+        let mut config = service_fixture::host_configuration(&root);
+        let mut instance = config.required("instances").unwrap().as_array().unwrap()[0].clone();
+        instance.insert("componentId", component.into());
+        config.insert("instances", IvyJson::Array(vec![instance]));
+        let candidate = IvyJson::object([
+            ("candidateId", hash()),
+            ("componentId", component.into()),
+            (
+                "artifactRoot",
+                root.0.join("artifact").to_string_lossy().to_string().into(),
+            ),
+            (
+                "platform",
+                IvyJson::object([("os", "linux".into()), ("arch", "x64".into())]),
+            ),
+        ]);
+        let target = IvyJson::object([
+            ("instanceId", "fixture".into()),
+            ("candidateId", hash()),
+            ("revision", "launch".into()),
+            (
+                "configPath",
+                root.0
+                    .join("instance.json")
+                    .to_string_lossy()
+                    .to_string()
+                    .into(),
+            ),
+        ]);
+        let manifest = IvyJson::object([
+            ("componentId", component.into()),
+            (
+                "entrypoint",
+                IvyJson::object([
+                    ("executable", "dist/native/linux-x64/fixture".into()),
+                    ("args", IvyJson::Array(vec![])),
+                ]),
+            ),
+            (
+                "shutdown",
+                IvyJson::object([("timeoutMs", 150_000.0.into())]),
+            ),
+        ]);
+        let unit = ivy_host_runtime::systemd::render_systemd_unit(
+            &config,
+            &"fixture".into(),
+            &target,
+            &candidate,
+            &manifest,
+            None,
+        )
+        .unwrap()
+        .content
+        .to_utf8()
+        .unwrap();
+        if component == "agent-manager" {
+            assert!(unit.contains("\nKillMode=mixed\nTimeoutStopSec=infinity\n"));
+        } else {
+            assert!(unit.contains("\nKillMode=control-group\nTimeoutStopSec=630\n"));
+        }
+    }
+}
+
+struct DrainClock(AtomicI64);
+impl ivy_sdk::clock::Clock for DrainClock {
+    fn utc_millis(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
+    fn monotonic(&self) -> Instant {
+        Instant::now()
+    }
+}
+struct DrainObservation {
+    clock: Arc<DrainClock>,
+    calls: AtomicUsize,
+    cancel: bool,
+}
+impl ivy_host_runtime::executor::ActivationRuntime for DrainObservation {
+    fn prepare<'a>(
+        &'a self,
+        _: &'a ivy_host_runtime::executor::OperationContext,
+        _: &'a IvyJson,
+        _: &'a str,
+    ) -> ivy_host_runtime::executor::ExecutorFuture<'a, IvyJson> {
+        Box::pin(async { panic!("No build during drain") })
+    }
+    fn compatibility<'a>(
+        &'a self,
+        _: &'a ivy_host_runtime::executor::OperationContext,
+        _: &'a str,
+        _: Option<IvyJson>,
+    ) -> ivy_host_runtime::executor::ExecutorFuture<'a, ()> {
+        Box::pin(async { panic!("No new deployment during drain") })
+    }
+    fn reconcile<'a>(
+        &'a self,
+        context: &'a ivy_host_runtime::executor::OperationContext,
+        target: Option<IvyJson>,
+        allow_start: bool,
+    ) -> ivy_host_runtime::executor::ExecutorFuture<'a, ()> {
+        assert!(!allow_start);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.clock.0.fetch_add(1000, Ordering::SeqCst);
+        let at = ivy_sdk::clock::Clock::utc_millis(self.clock.as_ref());
+        if self.cancel {
+            context.cancel.cancel();
+        }
+        Box::pin(async move {
+            let target = target.unwrap();
+            context
+                .journal
+                .record_observation(
+                    "fixture",
+                    IvyJson::object([
+                        ("schemaVersion", 1.0.into()),
+                        ("instanceId", "fixture".into()),
+                        ("ownerPid", (std::process::id() as f64).into()),
+                        ("ownerBootId", "owner".into()),
+                        (
+                            "observedAt",
+                            chrono::DateTime::from_timestamp_millis(at)
+                                .unwrap()
+                                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                                .into(),
+                        ),
+                        ("targetRevision", target.required("revision")?.clone()),
+                        ("candidateId", target.required("candidateId")?.clone()),
+                        ("buildId", target.required("candidateId")?.clone()),
+                        (
+                            "state",
+                            if call == 0 { "draining" } else { "stopped" }.into(),
+                        ),
+                        ("health", IvyJson::Null),
+                        ("restartCount", 0.0.into()),
+                        ("nextRestartAt", IvyJson::Null),
+                        ("code", IvyJson::Null),
+                        ("message", "".into()),
+                    ]),
+                )
+                .await
+        })
+    }
+    fn dispose(&self) -> ivy_host_runtime::executor::ExecutorFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[tokio::test]
+async fn deployment_drain_keeps_its_original_owner_past_deadline_and_respects_cancellation() {
+    use ivy_host_runtime::{
+        executor::{ExecutorOptions, ObservationGoal, OperationContext, wait_for},
+        journal::HostJournal,
+    };
+    for (component, cancel, cancel_before) in [
+        ("agent-manager", false, false),
+        ("fixture", false, false),
+        ("agent-manager", true, false),
+        ("agent-manager", false, true),
+    ] {
+        let root = service_fixture::ServiceFixture::new();
+        let config = service_fixture::host_configuration(&root);
+        let clock = Arc::new(DrainClock(AtomicI64::new(1760000000000)));
+        let journal = HostJournal::open_with_clock(config.clone(), clock.clone())
+            .await
+            .unwrap();
+        let hash = || IvyJson::from(format!("sha256:{}", "a".repeat(64)));
+        let candidate = IvyJson::object([
+            ("candidateId", hash()),
+            ("buildId", hash()),
+            ("componentId", component.into()),
+            (
+                "artifactRoot",
+                root.0.join("artifact").to_string_lossy().to_string().into(),
+            ),
+            (
+                "manifestPath",
+                root.0
+                    .join("manifest.json")
+                    .to_string_lossy()
+                    .to_string()
+                    .into(),
+            ),
+            ("createdAt", "2026-01-01T00:00:00.000Z".into()),
+            (
+                "platform",
+                IvyJson::object([
+                    ("os", if cfg!(windows) { "win32" } else { "linux" }.into()),
+                    ("arch", "x64".into()),
+                    ("node", "24.18.0".into()),
+                ]),
+            ),
+        ]);
+        let manifest = IvyJson::object([
+            ("schemaVersion", 1.0.into()),
+            ("componentId", component.into()),
+            ("kind", "service".into()),
+            ("version", "1.0.0".into()),
+            ("buildId", hash()),
+            ("connectsToHive", false.into()),
+            (
+                "requirements",
+                IvyJson::object([
+                    ("node", ">=24.18.0 <25.0.0".into()),
+                    ("hiveProtocol", IvyJson::Null),
+                    ("contracts", IvyJson::Array(vec![])),
+                ]),
+            ),
+            (
+                "entrypoint",
+                IvyJson::object([
+                    ("executable", "fixture".into()),
+                    ("args", IvyJson::Array(vec![])),
+                    ("timeoutMs", 30_000.0.into()),
+                ]),
+            ),
+            (
+                "readiness",
+                IvyJson::object([
+                    ("timeoutMs", 30_000.0.into()),
+                    (
+                        "command",
+                        IvyJson::object([
+                            ("executable", "fixture".into()),
+                            ("args", IvyJson::Array(vec![])),
+                            ("timeoutMs", 5000.0.into()),
+                        ]),
+                    ),
+                ]),
+            ),
+            (
+                "shutdown",
+                IvyJson::object([("timeoutMs", 150_000.0.into())]),
+            ),
+            (
+                "restart",
+                IvyJson::object([
+                    ("policy", "always".into()),
+                    ("minimumDelayMs", 1000.0.into()),
+                    ("maximumDelayMs", 60_000.0.into()),
+                ]),
+            ),
+        ]);
+        journal.save_candidate(candidate, manifest).await.unwrap();
+        let context = OperationContext {
+            journal,
+            config,
+            instance_id: "fixture".into(),
+            cancel: Default::default(),
+            clock: clock.clone(),
+            options: ExecutorOptions {
+                own_instance_id: None,
+                account_home: root.0.to_string_lossy().to_string().into(),
+                build_id: None,
+            },
+        };
+        let target = IvyJson::object([
+            ("instanceId", "fixture".into()),
+            ("candidateId", hash()),
+            ("revision", "original-launch".into()),
+            ("desired", "stopped".into()),
+            (
+                "configPath",
+                root.0
+                    .join("instance.json")
+                    .to_string_lossy()
+                    .to_string()
+                    .into(),
+            ),
+            ("requestedAt", "2026-01-01T00:00:00.000Z".into()),
+        ]);
+        let runtime = DrainObservation {
+            clock,
+            calls: AtomicUsize::new(0),
+            cancel,
+        };
+        if cancel_before {
+            context.cancel.cancel();
+        }
+        let result = wait_for(
+            &context,
+            &runtime,
+            Some(target),
+            ObservationGoal::Drained,
+            1.0,
+            false,
+        )
+        .await;
+        if cancel || cancel_before {
+            assert_eq!(result.unwrap_err().code, "cancelled");
+            assert_eq!(
+                runtime.calls.load(Ordering::SeqCst),
+                if cancel_before { 0 } else { 1 }
+            );
+        } else if component == "agent-manager" {
+            assert_eq!(result.unwrap().get("state"), Some(&"stopped".into()));
+            assert_eq!(runtime.calls.load(Ordering::SeqCst), 2);
+        } else {
+            assert_eq!(result.unwrap_err().code, "observation_deadline");
+            assert_eq!(runtime.calls.load(Ordering::SeqCst), 1);
+        }
+        context.journal.close().await.unwrap();
+    }
 }
 
 #[test]

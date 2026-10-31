@@ -421,6 +421,19 @@ pub fn linux_unit(
     instance: &IvyJson,
     launch_id: Option<JsString>,
 ) -> IvyResult<JsString> {
+    linux_unit_with_stop_policy(
+        plan,
+        instance,
+        launch_id,
+        crate::runtime_owner::stop::StopPolicy::Deadline(std::time::Duration::from_secs(630)),
+    )
+}
+pub(crate) fn linux_unit_with_stop_policy(
+    plan: &IvyJson,
+    instance: &IvyJson,
+    launch_id: Option<JsString>,
+    stop: crate::runtime_owner::stop::StopPolicy,
+) -> IvyResult<JsString> {
     let launch = match launch_id {
         Some(id) => id,
         None => {
@@ -525,7 +538,11 @@ pub fn linux_unit(
             "\n".into(),
         ]);
     }
-    parts.extend(["ExecStart=:".into(),JsString(arguments),"\nWorkingDirectory=".into(),directory,"\nRestart=".into(),policy,"\nRestartSec=".into(),delay.to_string().into(),"\nKillMode=control-group\nTimeoutStopSec=630\nUMask=0077\nNoNewPrivileges=true\nEnvironment=NODE_NO_WARNINGS=1\nEnvironment=IVY_LAUNCH_ID=".into(),launch,"\n".into()]);
+    let (kill_mode, stop_seconds) = match stop.timeout() {
+        None => ("mixed", "infinity".to_owned()),
+        Some(timeout) => ("control-group", timeout.as_millis().div_ceil(1000).max(1).to_string()),
+    };
+    parts.extend(["ExecStart=:".into(),JsString(arguments),"\nWorkingDirectory=".into(),directory,"\nRestart=".into(),policy,"\nRestartSec=".into(),delay.to_string().into(),"\nKillMode=".into(),kill_mode.into(),"\nTimeoutStopSec=".into(),stop_seconds.into(),"\nUMask=0077\nNoNewPrivileges=true\nEnvironment=NODE_NO_WARNINGS=1\nEnvironment=IVY_LAUNCH_ID=".into(),launch,"\n".into()]);
     if let Some(config) = instance.get("configPath").filter(|value| value.as_js_string().is_some_and(|text| !text.0.is_empty())) {
         parts.extend([
             "Environment=IVY_INSTANCE_CONFIG=".into(),

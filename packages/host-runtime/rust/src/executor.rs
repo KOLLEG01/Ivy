@@ -208,7 +208,23 @@ pub async fn wait_for(
     timeout_ms: f64,
     allow_start: bool,
 ) -> IvyResult<IvyJson> {
-    let end = context.clock.utc_millis() as f64 + timeout_ms;
+    if context.cancel.is_cancelled() {
+        return Err(IvyError::new("cancelled", "Cancelled"));
+    }
+    let wait_for_work = if matches!(goal, ObservationGoal::Stopped | ObservationGoal::Drained) {
+        if let Some(target) = &target {
+            crate::runtime_owner::stop::StopPolicy::for_manifest(
+                &context.journal.manifest(&text(target, "candidateId")?).await?,
+            )
+            .timeout()
+            .is_none()
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    let end = (!wait_for_work).then(|| context.clock.utc_millis() as f64 + timeout_ms);
     while !context.cancel.is_cancelled() {
         runtime
             .reconcile(context, target.clone(), allow_start)
@@ -254,7 +270,7 @@ pub async fn wait_for(
                 return Err(error);
             }
         }
-        if at >= end {
+        if end.is_some_and(|end| at >= end) {
             return Err(unknown(
                 "observation_deadline",
                 "The current runtime owner did not establish the required state before its deadline.",

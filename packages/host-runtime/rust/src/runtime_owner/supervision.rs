@@ -318,7 +318,7 @@ impl Owner {
             .ok_or_else(IvyError::internal)?
             .clone();
         let instance_id = JsString::from(self.instance_id.clone());
-        let grace = number(selected.manifest.get("shutdown"), "timeoutMs", 15_000);
+        let policy = stop::StopPolicy::for_manifest(&selected.manifest);
         let request = async move {
             let health = config::json_file(data.join("health.json"), CONFIGURATION_BYTES).await?;
             validate_host("Health", &health)?;
@@ -327,12 +327,7 @@ impl Owner {
             }
             Ok(())
         };
-        let result = stop::stop_child(
-            self.child.as_ref().unwrap(),
-            Duration::from_millis(grace),
-            request,
-        )
-        .await;
+        let result = stop::stop_child(self.child.as_ref().unwrap(), policy, request).await;
         self.child = None;
         if let Err(error) = result {
             if error.code == "outcome_unknown" {

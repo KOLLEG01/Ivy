@@ -10,7 +10,7 @@ use ivy_host_runtime::{
     node_path,
     process::{self, Command, LaunchContext, OutputStream},
     runtime_maintenance,
-    runtime_owner::stop::{shutdown_control, stop_child},
+    runtime_owner::stop::{StopPolicy, shutdown_control, stop_child},
 };
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -437,7 +437,7 @@ async fn supervise(
         }
     };
     let stopping = write_status(host, status, "stopping", None).await;
-    let closed = stop_child(&child, Duration::from_secs(30), async {
+    let closed = stop_child(&child, StopPolicy::Deadline(Duration::from_secs(30)), async {
         let value = config::json_file(
             manager.data_root().join("health.json"),
             config::CONFIGURATION_BYTES,

@@ -243,7 +243,9 @@ impl Inner {
                         .stop_unit(
                             config.clone(),
                             systemd_unit_name(&config, &id)?.into(),
-                            30000.0,
+                            crate::runtime_owner::stop::StopPolicy::Deadline(Duration::from_secs(
+                                30,
+                            )),
                         )
                         .await?;
                 }
