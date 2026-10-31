@@ -1,6 +1,6 @@
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
-    hash::{hash_json, hmac_sha256, tool_definition_hash, verify_hmac_sha256},
+    hash::{hash_json, hash_object_with_array, hmac_sha256, tool_definition_hash, verify_hmac_sha256},
     limits::MANAGEMENT_FRAME_BYTES,
 };
 
@@ -137,5 +137,62 @@ fn tool_hash_projection_keeps_shared_node_depth_and_byte_limits() {
             ("b", "b".repeat(text - text / 2 + extra).into()),
         ]);
         assert_eq!(compare_tool_hash(&definition), extra == 0);
+    }
+}
+
+fn compare_generated_array(object: &IvyJson, records: Vec<IvyJson>) -> bool {
+    let pairs = object.as_object().unwrap();
+    let mut expected = IvyJson::object(pairs.iter().cloned());
+    expected.insert("tools", IvyJson::Array(records.clone()));
+    let actual = hash_object_with_array(pairs.iter().map(|(key, value)| (key, value)),
+        &JsString::from("tools"), records).map_err(|e| (e.code, e.message));
+    let expected = hash_json(&expected).map_err(|e| (e.code, e.message));
+    assert_eq!(actual, expected);
+    actual.is_ok()
+}
+
+#[test]
+fn generated_array_hash_preserves_canonical_fields_duplicates_and_error_order() {
+    let object = IvyJson::Object(vec![
+        ("tools".into(), IvyJson::Number(f64::NAN)),
+        ("guide".into(), IvyJson::Number(f64::NAN)),
+        ("guide".into(), IvyJson::String(JsString(vec![0xd800]))),
+        (JsString(vec![0xe000]), "bmp".into()),
+        (JsString(vec![0xd800, 0xdc00]), "astral".into()),
+    ]);
+    assert!(compare_generated_array(&object, vec![]));
+    for value in [IvyJson::Bool(false), IvyJson::Null, (-0.0).into(), 1e-7.into(),
+        IvyJson::object([(JsString(vec![0xd800]), IvyJson::String(JsString(vec![0xdc00])))]),
+        IvyJson::Number(f64::NAN), 9007199254740992.0.into()]
+    {
+        compare_generated_array(&object, vec![value]);
+    }
+    let visits = std::cell::Cell::new(0);
+    let guide = IvyJson::Number(f64::NAN);
+    let error = hash_object_with_array([(&JsString::from("guide"), &guide)],
+        &JsString::from("tools"), (0..2).map(|_| {
+            visits.set(visits.get() + 1); IvyJson::Null
+        })).unwrap_err();
+    assert_eq!(error.code, "invalid_arguments");
+    assert_eq!(visits.get(), 0);
+}
+
+#[test]
+fn generated_array_hash_keeps_one_node_depth_and_byte_budget() {
+    let object = IvyJson::object([] as [(&str, IvyJson); 0]);
+    for depth in [126, 127] {
+        let mut value = IvyJson::Null;
+        for _ in 0..depth { value = IvyJson::Array(vec![value]); }
+        assert_eq!(compare_generated_array(&object, vec![value]), depth == 126);
+    }
+    for count in [399_998, 399_999] {
+        assert_eq!(compare_generated_array(&object, vec![IvyJson::Null; count]), count == 399_998);
+    }
+    // Seventeen punctuation/key bytes and one shared budget across both records.
+    let text = MANAGEMENT_FRAME_BYTES - 17;
+    for extra in [0, 1] {
+        assert_eq!(compare_generated_array(&object, vec![
+            "a".repeat(text / 2).into(), "b".repeat(text - text / 2 + extra).into(),
+        ]), extra == 0);
     }
 }

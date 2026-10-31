@@ -94,6 +94,19 @@ pub fn try_catalog_page(
     limit: Option<usize>,
     cursor: Option<&JsString>,
 ) -> IvyResult<IvyJson> {
+    catalog_page_with(store, records, identity, key, Ok, limit, cursor)
+}
+
+/// Select compact record identities before materializing response bodies.
+pub(crate) fn catalog_page_with<T>(
+    store: &Store,
+    records: Vec<T>,
+    identity: &IvyJson,
+    key: impl Fn(&T) -> IvyResult<JsString>,
+    materialize: impl Fn(T) -> IvyResult<IvyJson>,
+    limit: Option<usize>,
+    cursor: Option<&JsString>,
+) -> IvyResult<IvyJson> {
     let after = match cursor.filter(|c| !c.0.is_empty()) {
         Some(cursor) => catalog_boundary(store, identity, cursor)?,
         None => JsString::default(),
@@ -120,6 +133,7 @@ pub fn try_catalog_page(
             truncated = true;
             break;
         }
+        let record = materialize(record)?;
         let size = canonical(&record, MANAGEMENT_FRAME_BYTES)?.len();
         if used + size > PAGE_BYTES {
             if items.is_empty() {

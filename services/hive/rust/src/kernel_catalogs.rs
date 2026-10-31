@@ -1,7 +1,7 @@
 use super::*;
 use ivy_contracts::{
     core_schema::validate_shared,
-    hash::hash_json,
+    hash::{hash_json, hash_object_with_array},
     json::{canonical, parse},
     limits::MANAGEMENT_FRAME_BYTES,
 };
@@ -114,25 +114,23 @@ fn prefixed(value: &IvyJson, name: &str, prefix: Option<&IvyJson>) -> IvyResult<
         .ok_or_else(IvyError::internal)?;
     Ok(string(value, name)?.0.starts_with(&prefix.0))
 }
-fn tool_page_records(
+fn tool_page_records<'a>(
     id: &JsString,
     guide: &IvyJson,
-    tools: Vec<IvyJson>,
+    tools: &'a [crate::registry_catalog::ToolBinding],
     params: &IvyJson,
-) -> IvyResult<(String, Vec<IvyJson>)> {
-    let mut identity = IvyJson::object([
-        ("nodeId", IvyJson::String(id.clone())),
-        ("tools", IvyJson::Array(tools)),
-        ("guide", guide.clone()),
-    ]);
+) -> IvyResult<(String, Vec<&'a crate::registry_catalog::ToolBinding>)> {
     // Check every prefix before hashing, preserving the original error order.
-    // The identity owns the only materialized tools; move them into the page input.
-    let included = array(&identity, "tools")?.iter().map(|tool| prefixed(
-        tool.get("definition").unwrap_or(&IvyJson::Null), "name", params.get("namePrefix"),
+    let included = tools.iter().map(|tool| prefixed(
+        &tool.metadata, "name", params.get("namePrefix"),
     )).collect::<IvyResult<Vec<_>>>()?;
-    let hash = hash_json(&identity)?;
-    let tools = identity.remove("tools").and_then(IvyJson::into_array).ok_or_else(IvyError::internal)?;
-    Ok((hash, tools.into_iter().zip(included).filter_map(|(tool, include)| include.then_some(tool)).collect()))
+    let node_key = JsString::from("nodeId");
+    let guide_key = JsString::from("guide");
+    let tools_key = JsString::from("tools");
+    let node = IvyJson::String(id.clone());
+    let hash = hash_object_with_array([(&node_key, &node), (&guide_key, guide)], &tools_key,
+        tools.iter().map(crate::registry_catalog::ToolBinding::to_wire))?;
+    Ok((hash, tools.iter().zip(included).filter_map(|(tool, include)| include.then_some(tool)).collect()))
 }
 fn contract_page_records(
     catalog: Option<IvyJson>,
@@ -365,15 +363,21 @@ pub(super) fn handle(
             )?;
             let node = field(field(&snapshot, "provider")?, "node")?;
             let id = string(node, "serviceNodeId")?;
-            let tools = call.registry.bindings(call.store, id, string(params, "namespace")?)?;
+            let catalog = call.registry.live_catalog(call.store, id)?;
+            let namespace = string(params, "namespace")?;
+            let tools = catalog.as_ref().and_then(|catalog| catalog.namespaces.iter()
+                .find(|ns| &ns.name == namespace).map(|ns| catalog.bindings(ns))).unwrap_or(&[]);
             let (identity, filtered) = tool_page_records(id, field(&snapshot, "guideMarkdown")?, tools, params)?;
-            let mut result = page(
-                call,
-                method,
-                params,
+            let mut page_identity = objects::page_identity(method, params)?;
+            page_identity.insert("snapshot", identity.into());
+            let mut result = crate::paging::catalog_page_with(
+                call.store,
                 filtered,
-                |v| key(v, "qualifiedName"),
-                Some(identity.into()),
+                &page_identity,
+                |binding| Ok(binding.qualified_name.clone()),
+                |binding| Ok(binding.to_wire()),
+                params.get("limit").and_then(IvyJson::as_f64).map(|v| v as usize),
+                optional_string(params, "cursor"),
             )?;
             result.insert("provider", field(&snapshot, "provider")?.clone());
             result.insert("guideMarkdown", field(&snapshot, "guideMarkdown")?.clone());

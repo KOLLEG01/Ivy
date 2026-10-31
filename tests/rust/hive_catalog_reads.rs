@@ -51,6 +51,22 @@ fn fixture_tools(schema_bytes: usize) -> Vec<IvyJson> {
     ])).collect()
 }
 
+fn native_bindings(tools: Vec<IvyJson>) -> Vec<crate::registry_catalog::ToolBinding> {
+    tools.into_iter().map(|mut tool| crate::registry_catalog::ToolBinding::new(
+        tool.remove("qualifiedName").unwrap().into_js_string().unwrap(),
+        tool.remove("definitionHash").unwrap().into_js_string().unwrap(),
+        tool.remove("definition").unwrap(),
+    )).collect()
+}
+
+fn owned_tool_identity(id: &JsString, guide: &IvyJson, tools: &[crate::registry_catalog::ToolBinding]) -> IvyJson {
+    IvyJson::object([
+        ("nodeId", id.clone().into()),
+        ("tools", IvyJson::Array(tools.iter().map(crate::registry_catalog::ToolBinding::to_wire).collect())),
+        ("guide", guide.clone()),
+    ])
+}
+
 #[test]
 fn tool_page_identity_keeps_hashes_filters_and_error_order() {
     let id = JsString::from("fixture");
@@ -59,17 +75,20 @@ fn tool_page_identity_keeps_hashes_filters_and_error_order() {
     let expected = hash_json(&IvyJson::object([
         ("nodeId", id.clone().into()), ("tools", IvyJson::Array(tools.clone())), ("guide", guide.clone()),
     ])).unwrap();
+    let bindings = native_bindings(tools.clone());
     let params = IvyJson::object([("namePrefix", "call3".into())]);
-    let (hash, filtered) = tool_page_records(&id, &guide, tools.clone(), &params).unwrap();
+    let (hash, filtered) = tool_page_records(&id, &guide, &bindings, &params).unwrap();
     assert_eq!(hash, expected);
-    assert_eq!(filtered, vec![tools[3].clone()]);
-    let (hash, all) = tool_page_records(&id, &guide, tools.clone(), &IvyJson::Null).unwrap();
+    assert_eq!(hash_json(&IvyJson::Array(filtered.iter().map(|b| b.to_wire()).collect())).unwrap(),
+        hash_json(&IvyJson::Array(vec![tools[3].clone()])).unwrap());
+    let (hash, all) = tool_page_records(&id, &guide, &bindings, &IvyJson::Null).unwrap();
     assert_eq!(hash, expected);
-    assert_eq!(all, tools);
-    let malformed = vec![IvyJson::object([("definition", IvyJson::Null)])];
+    assert_eq!(hash_json(&IvyJson::Array(all.iter().map(|b| b.to_wire()).collect())).unwrap(),
+        hash_json(&IvyJson::Array(tools)).unwrap());
+    let malformed = vec![crate::registry_catalog::ToolBinding::new("bad".into(), "hash".into(), IvyJson::Null)];
     let guide = IvyJson::Number(f64::NAN);
-    assert_eq!(tool_page_records(&id, &guide, malformed.clone(), &params).unwrap_err().code, "internal_error");
-    assert_eq!(tool_page_records(&id, &guide, malformed, &IvyJson::Null).unwrap_err().code, "invalid_arguments");
+    assert_eq!(tool_page_records(&id, &guide, &malformed, &params).unwrap_err().code, "internal_error");
+    assert_eq!(tool_page_records(&id, &guide, &malformed, &IvyJson::Null).unwrap_err().code, "invalid_arguments");
 }
 
 #[test]
@@ -87,26 +106,61 @@ fn tool_page_identity_does_not_clone_the_full_tool_vector() {
     let id = JsString::from("fixture");
     let guide = IvyJson::from("Fixture guide.");
     let schema_bytes = 64 * 1024;
-    let tools = fixture_tools(schema_bytes);
-    // Vec::clone copies initialized UTF-16 units, not the input's spare capacity.
+    let tools = native_bindings(fixture_tools(schema_bytes));
     let copied_schema_bytes = 8 * 2 * schema_bytes * std::mem::size_of::<u16>();
     let before = LIVE.load(Ordering::Relaxed);
     PEAK.store(before, Ordering::Relaxed);
-    let identity = IvyJson::object([
-        ("nodeId", id.clone().into()), ("tools", IvyJson::Array(tools.clone())), ("guide", guide.clone()),
-    ]);
+    let identity = owned_tool_identity(&id, &guide, &tools);
     let expected = hash_json(&identity).unwrap();
     let cloned_peak = PEAK.load(Ordering::Relaxed) - before;
     drop(identity);
     let before = LIVE.load(Ordering::Relaxed);
     PEAK.store(before, Ordering::Relaxed);
-    let (hash, returned) = tool_page_records(&id, &guide, tools, &IvyJson::Null).unwrap();
+    let (hash, returned) = tool_page_records(&id, &guide, &tools, &IvyJson::Null).unwrap();
     let moved_peak = PEAK.load(Ordering::Relaxed) - before;
     assert_eq!(hash, expected);
     assert_eq!(returned.len(), 8);
-    eprintln!("Hive tool-page identity Rust allocation peak: cloned identity {cloned_peak} bytes, moved identity {moved_peak} bytes for 1 MiB opaque schema text");
+    eprintln!("Hive tool-page identity Rust allocation peak: full materialization {cloned_peak} bytes, streamed identity {moved_peak} bytes for 1 MiB opaque schema text");
     // Compare allocator requests above the already-owned input, excluding RSS.
     assert!(cloned_peak > moved_peak + isize::try_from(copied_schema_bytes * 3 / 4).unwrap());
+}
+
+#[test]
+fn tool_pages_keep_cursors_and_materialize_only_selected_definitions() {
+    let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+    let tools = native_bindings(fixture_tools(0));
+    let id = JsString::from("fixture");
+    let guide = IvyJson::from("Fixture guide.");
+    let hash = hash_json(&owned_tool_identity(&id, &guide, &tools)).unwrap();
+    let identity = IvyJson::object([("snapshot", hash.clone().into())]);
+    let mut cursor = None;
+    let mut count = 0;
+    loop {
+        let (actual_hash, filtered) = tool_page_records(&id, &guide, &tools, &IvyJson::Null).unwrap();
+        assert_eq!(actual_hash, hash);
+        let legacy = crate::paging::catalog_page(&store,
+            tools.iter().map(crate::registry_catalog::ToolBinding::to_wire).collect(), &identity,
+            |v| v.get("qualifiedName").unwrap().as_js_string().unwrap().clone(), Some(3), cursor.as_ref()).unwrap();
+        let materialized = std::cell::Cell::new(0);
+        let actual = crate::paging::catalog_page_with(&store, filtered, &identity,
+            |binding| Ok(binding.qualified_name.clone()), |binding| {
+                materialized.set(materialized.get() + 1); Ok(binding.to_wire())
+            }, Some(3), cursor.as_ref()).unwrap();
+        assert_eq!(actual, legacy);
+        let page_count = actual.get("items").unwrap().as_array().unwrap().len();
+        assert_eq!(materialized.get(), page_count);
+        count += page_count;
+        cursor = legacy.get("nextCursor").unwrap().as_js_string().cloned();
+        if cursor.is_none() { break; }
+    }
+    assert_eq!(count, 8);
+    let materialized = std::cell::Cell::new(0);
+    let error = crate::paging::catalog_page_with(&store, tools.iter().collect(), &identity,
+        |binding| Ok(binding.qualified_name.clone()), |binding| {
+            materialized.set(materialized.get() + 1); Ok(binding.to_wire())
+        }, Some(1), Some(&"invalid cursor".into())).unwrap_err();
+    assert_eq!(error.code, "invalid_cursor");
+    assert_eq!(materialized.get(), 0);
 }
 
 fn fixture_topics(schema_bytes: usize) -> Vec<TopicRecord> {

@@ -583,6 +583,48 @@ pub(crate) fn canonical_object<'a>(
     encoder.account(2 + pairs.len().saturating_sub(1))?;
     Ok(encoder.out)
 }
+/// Encode an object's generated array one record at a time with the same
+/// canonical ordering, depth, node and byte budgets as an owned JSON tree.
+pub(crate) fn canonical_object_with_array<'a>(
+    pairs: impl IntoIterator<Item = (&'a JsString, &'a IvyJson)>,
+    array_key: &'a JsString,
+    records: impl IntoIterator<Item = IvyJson>,
+    maximum_bytes: usize,
+) -> IvyResult<String> {
+    let mut pairs: Vec<_> = pairs.into_iter().filter(|(key, _)| *key != array_key)
+        .map(|(key, value)| (key, Some(value))).collect();
+    pairs.push((array_key, None));
+    pairs.reverse();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+    pairs.dedup_by(|a, b| a.0 == b.0);
+    let mut encoder = Encoder {
+        out: String::new(), maximum_bytes, nodes: 1, sorted: true, validate: true, accounted: 0,
+    };
+    let mut records = records.into_iter();
+    encoder.punctuation("{")?;
+    for (index, (key, value)) in pairs.iter().enumerate() {
+        if index > 0 { encoder.punctuation(",")?; }
+        encoder.string(key)?;
+        encoder.emit(":")?;
+        if *key == array_key {
+            encoder.node(1)?;
+            encoder.punctuation("[")?;
+            let mut count = 0usize;
+            for record in records.by_ref() {
+                if count > 0 { encoder.punctuation(",")?; }
+                encoder.value(&record, 2)?;
+                count += 1;
+            }
+            encoder.punctuation("]")?;
+            encoder.account(2 + count.saturating_sub(1))?;
+        } else {
+            encoder.value(value.unwrap(), 1)?;
+        }
+    }
+    encoder.punctuation("}")?;
+    encoder.account(2 + pairs.len().saturating_sub(1))?;
+    Ok(encoder.out)
+}
 pub fn stringify(value: &IvyJson, maximum_bytes: usize) -> IvyResult<String> {
     encode(value, maximum_bytes, false, false)
 }
@@ -626,6 +668,13 @@ struct Encoder {
     accounted: usize,
 }
 impl Encoder {
+    fn node(&mut self, depth: usize) -> IvyResult<()> {
+        self.nodes += 1;
+        if self.validate && (self.nodes > 400_000 || depth > 128) {
+            return Err(complexity());
+        }
+        Ok(())
+    }
     fn emit(&mut self, text: &str) -> IvyResult<()> {
         self.account(text.len())?;
         self.out.push_str(text);
@@ -698,10 +747,7 @@ impl Encoder {
                 }
                 Part::Value(value, depth) => (value, depth),
             };
-            self.nodes += 1;
-            if self.validate && (self.nodes > 400_000 || depth > 128) {
-                return Err(complexity());
-            }
+            self.node(depth)?;
             match value {
                 IvyJson::Null => self.emit("null")?,
                 IvyJson::Bool(value) => self.emit(if *value { "true" } else { "false" })?,

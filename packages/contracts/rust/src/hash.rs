@@ -49,3 +49,11 @@ pub fn hash_object<'a>(
 pub fn hash_json(value: &IvyJson) -> IvyResult<String> {
     Ok(digest(canonical(value, MANAGEMENT_FRAME_BYTES)?))
 }
+/// Hash a generated catalog array without retaining every materialized record.
+pub fn hash_object_with_array<'a>(
+    pairs: impl IntoIterator<Item = (&'a JsString, &'a IvyJson)>,
+    array_key: &'a JsString,
+    records: impl IntoIterator<Item = IvyJson>,
+) -> IvyResult<String> {
+    Ok(digest(crate::json::canonical_object_with_array(pairs, array_key, records, MANAGEMENT_FRAME_BYTES)?))
+}
