@@ -566,6 +566,122 @@ fn mcp_catalog_avoids_full_status_and_diagnostic_working_sets() {
 }
 
 #[test]
+fn discovery_lists_and_ambiguous_selection_skip_full_status_and_diagnostics() {
+    const CHILD: &str = "IVY_DISCOVERY_LIST_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "discovery::memory_tests::discovery_lists_and_ambiguous_selection_skip_full_status_and_diagnostics", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+        return;
+    }
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store.connection().execute("INSERT INTO principals VALUES('fixture')", []).unwrap();
+    for i in 0..64 {
+        insert_catalog_provider(&store, &format!("provider{i:02}"), [true.into(), true.into(), true.into(), true.into()], Some(("fixture_read", "ivy")), 32 * 1024);
+    }
+    store.connection().execute("UPDATE service_nodes SET status_json=json_set(status_json,'$.version','1.0.0','$.nativeVersion',json('null'))", []).unwrap();
+    let diagnostic = serde_json::json!({"source":"unrelated", "status":"current", "message":"d".repeat(2 * 1024 * 1024)}).to_string();
+    store.connection().execute("INSERT INTO diagnostics VALUES('large',?)", [diagnostic]).unwrap();
+    let registry = Registry::default();
+    let service = JsString(vec![b's' as u16, 0, 0xd800]);
+    let selectors = [
+        empty(),
+        IvyJson::object([("serviceName", service.clone().into())]),
+        IvyJson::object([("query", "fixture".into())]),
+        IvyJson::object([("serviceName", service.clone().into()), ("providers", true.into())]),
+    ];
+    let mut owner = discovery();
+    // Warm the compact search indexes; measure only allocations made by a read.
+    drop(owner.list(&store, &registry, &selectors[2], false, &NativeRuntime, 0.0).unwrap());
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    let full = registry.nodes(&store, &NativeRuntime, 0.0).unwrap();
+    assert_eq!(full.len(), 64);
+    let full_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    drop(full);
+    store.connection().authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+        match context.action {
+            rusqlite::hooks::AuthAction::Read { table_name: "diagnostics", .. } => rusqlite::hooks::Authorization::Deny,
+            _ => rusqlite::hooks::Authorization::Allow,
+        }
+    })).unwrap();
+    let mut peak = 0;
+    for params in &selectors {
+        for mcp_only in [false, true] {
+            let before = LIVE.load(AtomicOrdering::Relaxed);
+            PEAK.store(before, AtomicOrdering::Relaxed);
+            let result = owner.list(&store, &registry, params, mcp_only, &NativeRuntime, 0.0).unwrap();
+            peak = peak.max(PEAK.load(AtomicOrdering::Relaxed) - before);
+            let items = result.get("items").unwrap().as_array().unwrap();
+            assert!(!items.is_empty());
+            if params.get("providers").is_some() {
+                assert_eq!(items[0].get("name"), Some(&"provider00".into()));
+                assert_eq!(items[0].get("available"), Some(&true.into()));
+                assert!(result.get("nextCursor").unwrap().as_js_string().is_some());
+            } else {
+                let item = items.iter().find(|v| v.get("serviceName").and_then(IvyJson::as_js_string) == Some(&service)).unwrap();
+                assert_eq!(item.get("providerCount"), Some(&64.0.into()));
+                assert_eq!(item.get("availableCount"), Some(&64.0.into()));
+            }
+        }
+    }
+    let error = registry.select(&store, &"fixture".into(), &empty(), &NativeRuntime, 0.0).unwrap_err();
+    assert_eq!(error.code, "ambiguous_service_node");
+    store.connection().authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>).unwrap();
+    eprintln!("Hive Discovery list Rust allocation peak: old full-node input {full_peak} bytes, compact list {peak} bytes for 64 providers, 2 MiB status and 2 MiB unrelated diagnostics");
+    assert!(full_peak > peak + 4 * 1024 * 1024);
+    assert!(peak < 1024 * 1024, "Discovery retained full status or index copies: {peak}");
+}
+
+#[test]
+fn describe_borrows_the_catalog_and_materializes_only_requested_definitions() {
+    const CHILD: &str = "IVY_DISCOVERY_DESCRIBE_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "discovery::memory_tests::describe_borrows_the_catalog_and_materializes_only_requested_definitions", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+        return;
+    }
+    let store = Store::open(Path::new(":memory:")).unwrap();
+    store.connection().execute("INSERT INTO principals VALUES('fixture')", []).unwrap();
+    insert_catalog_provider(&store, "provider", [true.into(), true.into(), true.into(), true.into()], Some(("fixture_read", "ivy")), 0);
+    let schema = serde_json::json!({"description":"s".repeat(256 * 1024)});
+    let mut tools: Vec<_> = (0..8).map(|i| serde_json::json!({
+        "namespace":"fixture", "name":format!("read{i}"), "description":"Read a fixture.",
+        "inputSchema":schema, "outputSchema":schema,
+    })).collect();
+    tools[0]["inputSchema"] = serde_json::json!({"type":"object"});
+    tools[0]["outputSchema"] = serde_json::Value::Null;
+    let source = serde_json::json!({"namespaces":[{
+        "namespace":"fixture", "description":"Fixture tools.", "guideMarkdown":"Fixture guide.", "tools":tools,
+    }]}).to_string();
+    store.connection().execute("UPDATE registries SET registry_json=?", [source]).unwrap();
+    let mut registry = Registry::default();
+    let catalog = registry.live_catalog(&store, &"provider".into()).unwrap().unwrap();
+    let expected = catalog.tools[0].to_wire();
+    let mut owner = discovery();
+    let params = IvyJson::object([
+        ("serviceName", JsString(vec![b's' as u16, 0, 0xd800]).into()),
+        ("tools", IvyJson::Array(vec!["fixture.read0".into(), "fixture.read0".into()])),
+    ]);
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    let result = owner.describe(&store, &mut registry, &params, false, &NativeRuntime, 0.0).unwrap();
+    let peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    assert_eq!(result.get("items").unwrap().as_array().unwrap(), &[expected.clone(), expected]);
+    assert_eq!(result.get("guides").unwrap().as_array().unwrap().len(), 1);
+    assert!(Arc::ptr_eq(&catalog, &registry.live_catalog(&store, &"provider".into()).unwrap().unwrap()));
+    eprintln!("Hive Discovery describe Rust allocation peak: {peak} bytes with 3.5 MiB unrelated schema text in the shared catalog");
+    assert!(peak < 256 * 1024, "Describe decoded or copied unselected schemas: {peak}");
+}
+
+#[test]
 fn discovery_hint_projection_preserves_optional_types_and_utf16() {
     let store = Store::open(Path::new(":memory:")).unwrap();
     store.connection().execute_batch(

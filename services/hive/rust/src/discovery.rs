@@ -1,5 +1,5 @@
 //! Catalog navigation, provider-bound descriptions and retained definition identities.
-use crate::{registry::{CatalogProvider, Registry}, registry_catalog::ToolBinding, store::Store};
+use crate::{registry::{CatalogProvider, Registry}, registry_catalog::{Catalog, ToolBinding}, store::Store};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     core_bundle::{bundled_schema, operation_input_schema},
@@ -716,7 +716,7 @@ impl Discovery {
         params: &IvyJson,
         mcp_only: bool,
         runtime: &dyn Runtime,
-        now: f64,
+        _now: f64,
     ) -> IvyResult<IvyJson> {
         require(
             (params
@@ -748,11 +748,12 @@ impl Discovery {
             "invalid_arguments",
             "Provider selection cannot be combined with tool filters.",
         )?;
+        let all_nodes = registry.catalog_providers(store)?;
         let mut nodes = vec![];
-        for node in registry.nodes(store, runtime, now)? {
+        for node in &all_nodes {
             if !mcp_only
                 || self
-                    .index(store, string(&node, "serviceNodeId")?, runtime)?
+                    .index(store, &node.service_node_id, runtime)?
                     .tools
                     .iter()
                     .any(|t| t.mcp.is_some())
@@ -764,9 +765,7 @@ impl Discovery {
             .indexes
             .iter()
             .filter(|(id, _)| {
-                !nodes
-                    .iter()
-                    .any(|v| v.get("serviceNodeId").and_then(IvyJson::as_js_string) == Some(id))
+                !nodes.iter().any(|v| &v.service_node_id == id)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -778,11 +777,13 @@ impl Discovery {
             .and_then(IvyJson::as_js_string)
             .is_some_and(|v| !v.0.is_empty())
         {
-            let node = registry.node(store, string(params, "serviceNodeId")?, runtime, now)?;
+            let node = all_nodes.iter()
+                .find(|node| Some(&node.service_node_id) == params.get("serviceNodeId").and_then(IvyJson::as_js_string))
+                .ok_or_else(|| IvyError::new("not_found", "Service Node not found."))?;
             require(
                 !mcp_only
                     || self
-                        .index(store, string(&node, "serviceNodeId")?, runtime)?
+                        .index(store, &node.service_node_id, runtime)?
                         .tools
                         .iter()
                         .any(|t| t.mcp.is_some()),
@@ -794,7 +795,7 @@ impl Discovery {
                     .get("serviceName")
                     .and_then(IvyJson::as_js_string)
                     .is_none_or(|v| v.0.is_empty())
-                    || node.get("serviceName") == params.get("serviceName"),
+                    || Some(&node.service_name) == params.get("serviceName").and_then(IvyJson::as_js_string),
                 "target_conflict",
                 "The selected node belongs to a different service.",
             )?;
@@ -806,12 +807,12 @@ impl Discovery {
                     .get("serviceName")
                     .and_then(IvyJson::as_js_string)
                     .is_none_or(|v| v.0.is_empty())
-                    || n.get("serviceName") == params.get("serviceName"))
+                    || Some(&n.service_name) == params.get("serviceName").and_then(IvyJson::as_js_string))
                     && (params
                         .get("serviceNodeId")
                         .and_then(IvyJson::as_js_string)
                         .is_none_or(|v| v.0.is_empty())
-                        || n.get("serviceNodeId") == params.get("serviceNodeId"))
+                        || Some(&n.service_node_id) == params.get("serviceNodeId").and_then(IvyJson::as_js_string))
             })
             .collect();
         let service = params
@@ -827,9 +828,7 @@ impl Discovery {
                 {
                     selected
                         .first()
-                        .and_then(|v| v.get("serviceName"))
-                        .and_then(IvyJson::as_js_string)
-                        .cloned()
+                        .map(|v| v.service_name.clone())
                 } else {
                     None
                 }
@@ -845,12 +844,12 @@ impl Discovery {
         let mut identity = vec![];
         for node in &selected {
             identity.push(IvyJson::object([
-                ("id", field(node, "serviceNodeId")?.clone()),
-                ("serviceName", field(node, "serviceName")?.clone()),
-                ("available", Registry::eligible(node).into()),
+                ("id", node.service_node_id.clone().into()),
+                ("serviceName", node.service_name.clone().into()),
+                ("available", node.available.into()),
                 (
                     "catalog",
-                    self.index(store, string(node, "serviceNodeId")?, runtime)?.identity.clone().into(),
+                    self.index(store, &node.service_node_id, runtime)?.identity.clone().into(),
                 ),
             ]));
         }
@@ -873,19 +872,19 @@ impl Discovery {
             ]));
             let mut names: Vec<_> = selected
                 .iter()
-                .map(|n| string(n, "serviceName").cloned())
-                .collect::<IvyResult<_>>()?;
+                .map(|n| n.service_name.clone())
+                .collect();
             names.sort_by(|a, b| a.0.cmp(&b.0));
             names.dedup();
             for name in names {
                 let owners: Vec<_> = selected
                     .iter()
-                    .filter(|n| n.get("serviceName").and_then(IvyJson::as_js_string) == Some(&name))
+                    .filter(|n| n.service_name == name)
                     .collect();
-                let description = self.index(store, string(owners[0], "serviceNodeId")?, runtime)?.description.clone();
+                let description = self.index(store, &owners[0].service_node_id, runtime)?.description.clone();
                 let mut names = HashSet::new();
                 for node in &owners {
-                    for t in &self.index(store, string(node, "serviceNodeId")?, runtime)?.tools {
+                    for t in &self.index(store, &node.service_node_id, runtime)?.tools {
                         if !mcp_only || t.mcp.is_some() {
                             names.insert(t.qualified_name.clone());
                         }
@@ -901,57 +900,42 @@ impl Discovery {
                     (
                         "availableCount",
                         IvyJson::Number(
-                            owners.iter().filter(|n| Registry::eligible(n)).count() as f64
+                            owners.iter().filter(|n| n.available).count() as f64
                         ),
                     ),
                 ]));
             }
         } else if params.get("providers").and_then(IvyJson::as_bool) == Some(true) {
             for node in &selected {
+                let (version, native_version) = store.connection().query_row(
+                    "SELECT status_json -> '$.version', status_json -> '$.nativeVersion' FROM service_nodes WHERE id=?",
+                    [text(&node.service_node_id)],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                ).map_err(|e| store.query_error(e))?;
+                let version = parse(&version, usize::MAX)?.into_js_string().ok_or_else(IvyError::internal)?;
+                let native_version = native_version.map(|v| parse(&v, usize::MAX))
+                    .transpose()?.and_then(IvyJson::into_js_string).unwrap_or_else(|| "none".into());
                 let description = concat(&[
-                    string(node, "hostId")?,
+                    &node.host_id,
                     &": ".into(),
-                    string(node, "serviceName")?,
+                    &node.service_name,
                     &" ".into(),
-                    string(node, "version")?,
+                    &version,
                     &"; native ".into(),
-                    node.get("nativeVersion")
-                        .filter(|v| !v.is_null())
-                        .and_then(IvyJson::as_js_string)
-                        .unwrap_or(&"none".into()),
+                    &native_version,
                     &".".into(),
                 ]);
                 entries.push(IvyJson::object([
                     ("kind", "provider".into()),
-                    ("name", field(node, "serviceNodeId")?.clone()),
-                    ("serviceName", field(node, "serviceName")?.clone()),
-                    ("serviceNodeId", field(node, "serviceNodeId")?.clone()),
-                    ("hostId", field(node, "hostId")?.clone()),
-                    ("available", Registry::eligible(node).into()),
+                    ("name", node.service_node_id.clone().into()),
+                    ("serviceName", node.service_name.clone().into()),
+                    ("serviceNodeId", node.service_node_id.clone().into()),
+                    ("hostId", node.host_id.clone().into()),
+                    ("available", node.available.into()),
                     ("description", IvyJson::String(compact(&description))),
                 ]));
             }
         } else {
-            let mut records = vec![];
-            if service
-                .as_ref()
-                .is_none_or(|v| v.0.is_empty() || v == &"hive".into())
-            {
-                for tool in &self.core_index {
-                    records.push((JsString::from("hive"), tool.clone(), true));
-                }
-            }
-            for node in &selected {
-                for tool in &self.index(store, string(node, "serviceNodeId")?, runtime)?.tools {
-                    if !mcp_only || tool.mcp.is_some() {
-                        records.push((
-                            string(node, "serviceName")?.clone(),
-                            tool.clone(),
-                            Registry::eligible(node),
-                        ));
-                    }
-                }
-            }
             let query = if params
                 .get("query")
                 .and_then(IvyJson::as_js_string)
@@ -975,7 +959,7 @@ impl Discovery {
                 "Search needs at least one meaningful term.",
             )?;
             let mut by_name: HashMap<(JsString, JsString), usize> = HashMap::new();
-            for (name, tool, available) in records {
+            let mut add = |name: &JsString, tool: &IndexedTool, available: bool| -> IvyResult<()> {
                 if params
                     .get("group")
                     .and_then(IvyJson::as_js_string)
@@ -984,7 +968,7 @@ impl Discovery {
                     let group = string(params, "group")?;
                     if &tool.group != group && !starts(&tool.group, &concat(&[group, &"/".into()]))
                     {
-                        continue;
+                        return Ok(());
                     }
                 }
                 let service_words = if query.is_empty() {
@@ -998,7 +982,7 @@ impl Discovery {
                         .chain(service_words.iter())
                         .any(|word| includes(word, term))
                 }) {
-                    continue;
+                    return Ok(());
                 }
                 let key = (name.clone(), tool.qualified_name.clone());
                 let names = words(&tool.qualified_name, runtime)?;
@@ -1039,10 +1023,10 @@ impl Discovery {
                     let mut entry = IvyJson::object([
                         ("kind", "tool".into()),
                         ("name", IvyJson::String(tool.qualified_name.clone())),
-                        ("description", IvyJson::String(tool.description)),
+                        ("description", IvyJson::String(tool.description.clone())),
                         ("serviceName", IvyJson::String(name.clone())),
-                        ("namespace", IvyJson::String(tool.namespace)),
-                        ("group", IvyJson::String(tool.group)),
+                        ("namespace", IvyJson::String(tool.namespace.clone())),
+                        ("group", IvyJson::String(tool.group.clone())),
                     ]);
                     let mcp = tool
                         .mcp
@@ -1050,7 +1034,7 @@ impl Discovery {
                         .and_then(|v| v.get("name"))
                         .cloned()
                         .or_else(|| {
-                            if name == "hive".into() {
+                            if name.eq_str("hive") {
                                 meta("coreMcpNames")
                                     .get(&text(&JsString(tool.qualified_name.0[5..].to_vec())))
                                     .cloned()
@@ -1071,6 +1055,20 @@ impl Discovery {
                     );
                     by_name.insert(key, entries.len());
                     entries.push(entry);
+                }
+                Ok(())
+            };
+            if service.as_ref().is_none_or(|v| v.0.is_empty() || v.eq_str("hive")) {
+                for tool in &self.core_index {
+                    add(&"hive".into(), tool, true)?;
+                }
+            }
+            for node in &selected {
+                let index = self.index(store, &node.service_node_id, runtime)?;
+                for tool in &index.tools {
+                    if !mcp_only || tool.mcp.is_some() {
+                        add(&node.service_name, tool, node.available)?;
+                    }
                 }
             }
             if params
@@ -1125,7 +1123,7 @@ impl Discovery {
                         };
                         if !is_text(entry.get("serviceName"), "hive") {
                             for node in &selected {
-                                let index = self.index(store, string(node, "serviceNodeId")?, runtime)?;
+                                let index = self.index(store, &node.service_node_id, runtime)?;
                                 if let Some((_, d)) = index
                                     .groups
                                     .iter()
@@ -1174,6 +1172,9 @@ impl Discovery {
         let mut selectors = params.clone();
         selectors.remove("cursor");
         selectors.remove("limit");
+        let entries = IvyJson::Array(entries);
+        let entries_hash = hash_json(&entries)?;
+        let IvyJson::Array(entries) = entries else { unreachable!() };
         let identity = IvyJson::object([
             ("method", "discovery.list".into()),
             ("mcpOnly", mcp_only.into()),
@@ -1181,7 +1182,7 @@ impl Discovery {
             ("catalogs", IvyJson::Array(identity)),
             (
                 "entries",
-                hash_json(&IvyJson::Array(entries.clone()))?.into(),
+                entries_hash.into(),
             ),
         ]);
         let boundary = if params
@@ -1253,7 +1254,7 @@ impl Discovery {
     pub fn describe(
         &mut self,
         store: &Store,
-        registry: &Registry,
+        registry: &mut Registry,
         params: &IvyJson,
         mcp_only: bool,
         runtime: &dyn Runtime,
@@ -1289,8 +1290,8 @@ impl Discovery {
             .get("serviceNodeId")
             .and_then(IvyJson::as_js_string)
             .cloned();
-        let mut guides: Vec<(JsString, IvyJson)> = vec![];
-        let mut namespaces: HashMap<JsString, IvyJson> = HashMap::new();
+        let mut guides = vec![];
+        let mut namespaces: HashMap<JsString, (Arc<Catalog>, usize)> = HashMap::new();
         let mut items = vec![];
         for qualified in array(params, "tools")? {
             let qualified = qualified.as_js_string().ok_or_else(IvyError::internal)?;
@@ -1303,19 +1304,25 @@ impl Discovery {
                 }
                 let node = registry.select(store, &namespace, &target, runtime, now)?;
                 let id = string(&node, "serviceNodeId")?.clone();
+                let catalog = registry.live_catalog(store, &id)?.ok_or_else(IvyError::internal)?;
+                let position = catalog.namespaces.iter().position(|ns| ns.name == namespace)
+                    .ok_or_else(IvyError::internal)?;
+                let markdown = catalog.namespaces[position].guide_markdown.as_ref()
+                    .ok_or_else(IvyError::internal)?.clone();
+                guides.push(IvyJson::object([
+                    ("namespace", namespace.clone().into()),
+                    ("guideMarkdown", markdown.into()),
+                ]));
                 namespaces.insert(
                     namespace.clone(),
-                    registry.namespace(store, &id, &namespace)?,
+                    (catalog, position),
                 );
                 owner = Some(id);
             }
-            let ns = &namespaces[&namespace];
-            let definition = array(ns, "tools")?
+            let (catalog, position) = &namespaces[&namespace];
+            let binding = catalog.bindings(&catalog.namespaces[*position])
                 .iter()
-                .find(|v| {
-                    string(v, "name")
-                        .is_ok_and(|name| concat(&[&namespace, &".".into(), name]) == *qualified)
-                })
+                .find(|binding| &binding.qualified_name == qualified)
                 .ok_or_else(|| {
                     IvyError::new(
                         "not_found",
@@ -1323,21 +1330,11 @@ impl Discovery {
                     )
                 })?;
             require(
-                !mcp_only || mcp_name(definition).is_some_and(|v| v.as_object().is_some()),
+                !mcp_only || mcp_name(&binding.metadata).is_some_and(|v| v.as_object().is_some()),
                 "not_found",
                 "Tool is not published through MCP.",
             )?;
-            let markdown = field(ns, "guideMarkdown")?.clone();
-            if let Some((_, prior)) = guides.iter_mut().find(|(k, _)| k == &namespace) {
-                *prior = markdown;
-            } else {
-                guides.push((namespace, markdown));
-            }
-            items.push(IvyJson::object([
-                ("qualifiedName", IvyJson::String(qualified.clone())),
-                ("definition", definition.clone()),
-                ("definitionHash", tool_definition_hash(definition)?.into()),
-            ]));
+            items.push(binding.to_wire());
         }
         let node = registry.node(store, &owner.unwrap_or_default(), runtime, now)?;
         details(IvyJson::object([
@@ -1345,17 +1342,7 @@ impl Discovery {
             ("provider", provider(&node)?),
             (
                 "guides",
-                IvyJson::Array(
-                    guides
-                        .into_iter()
-                        .map(|(ns, g)| {
-                            IvyJson::object([
-                                ("namespace", IvyJson::String(ns)),
-                                ("guideMarkdown", g),
-                            ])
-                        })
-                        .collect(),
-                ),
+                IvyJson::Array(guides),
             ),
             ("items", IvyJson::Array(items)),
         ]))

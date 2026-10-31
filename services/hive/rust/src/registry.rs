@@ -698,20 +698,20 @@ impl Registry {
             return Ok(node);
         }
         let mut eligible = vec![];
-        for node in self.nodes(store, runtime, now)? {
-            if ["hostId", "serviceName"].iter().any(|key| {
+        for node in self.catalog_providers(store)? {
+            if [("hostId", &node.host_id), ("serviceName", &node.service_name)].iter().any(|(key, value)| {
                 target
                     .get(key)
                     .and_then(IvyJson::as_js_string)
                     .is_some_and(|v| {
-                        !v.0.is_empty() && Some(v) != node.get(key).and_then(IvyJson::as_js_string)
+                        !v.0.is_empty() && v != *value
                     })
             }) {
                 continue;
             }
-            let contains = self.read_namespace(store, string(&node, "serviceNodeId")?, namespace,
+            let contains = self.read_namespace(store, &node.service_node_id, namespace,
                 |selected| Ok(selected.is_some()))?;
-            if contains && Self::eligible(&node) {
+            if contains && node.available {
                 eligible.push(node);
             }
         }
@@ -723,9 +723,9 @@ impl Registry {
                             .iter()
                             .map(|n| {
                                 IvyJson::object([
-                                    ("serviceNodeId", n.get("serviceNodeId").unwrap().clone()),
-                                    ("hostId", n.get("hostId").unwrap().clone()),
-                                    ("serviceName", n.get("serviceName").unwrap().clone()),
+                                    ("serviceNodeId", n.service_node_id.clone().into()),
+                                    ("hostId", n.host_id.clone().into()),
+                                    ("serviceName", n.service_name.clone().into()),
                                 ])
                             })
                             .collect(),
@@ -737,7 +737,8 @@ impl Registry {
             "service_unavailable",
             "No eligible provider matches the target.",
         )?;
-        Ok(eligible.remove(0))
+        // Only the selected response needs the full current status and diagnostic.
+        self.node(store, &eligible[0].service_node_id, runtime, now)
     }
     pub fn snapshot(
         &self,
