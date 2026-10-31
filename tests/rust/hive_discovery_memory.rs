@@ -759,7 +759,7 @@ fn original_instructions(
         }
         hints.sort_by(|a, b| runtime.compare_english(&a.0, &b.0));
         let mut value = JsString::from(include_str!(
-            "../../../../instructions/hive-mcp-instructions.md"
+            "../../instructions/hive-mcp-instructions.md"
         ))
         .trim_ecmascript();
         if !hints.is_empty() {
