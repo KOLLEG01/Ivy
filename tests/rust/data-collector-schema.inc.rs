@@ -92,3 +92,16 @@ fn schema_rejects_invalid_shapes_and_domain_conflicts_without_exposing_values() 
         assert!(parse_schema("outputSchema", &input).is_err());
     }
 }
+
+#[test]
+fn idle_only_option_is_opt_in_and_kept_at_the_runtime_and_definition_boundaries() {
+    for (name,base) in [
+        ("runtimeUpdateSchema",r#"{"action":"disable","operationId":"pause","id":"fixture","expectedRevision":1}"#),
+        ("definitionUpdateSchema",r#"{"action":"activate","operationId":"pause","jobId":"job","definitionRevision":1,"expectedRevision":1,"enabled":false}"#),
+        ("updateSchema",r#"{"action":"activate","operationId":"pause","jobId":"job","definitionRevision":1,"expectedRevision":1,"enabled":false}"#),
+    ] {
+        let input=json(base);assert_eq!(parse_schema(name,&input).unwrap(),input);
+        for flag in [true,false] {let mut flagged=input.clone();flagged.insert("onlyWhenIdle",flag.into());assert_eq!(parse_schema(name,&flagged).unwrap(),flagged);}
+        let mut bad=input;bad.insert("onlyWhenIdle","true".into());assert!(parse_schema(name,&bad).is_err());
+    }
+}

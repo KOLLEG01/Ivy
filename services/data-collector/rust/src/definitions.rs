@@ -685,6 +685,7 @@ impl Definitions {
         definition_revision: f64,
         expected: f64,
         enabled: bool,
+        only_when_idle: bool,
         operation: &JsString,
         target: Option<IvyJson>,
     ) -> IvyResult<IvyJson> {
@@ -743,6 +744,19 @@ impl Definitions {
                     .cloned()
             })
             .unwrap_or(self.0.service_node_id.clone().into());
+        if only_when_idle {
+            require(
+                !enabled
+                    && node == self.0.service_node_id.clone().into()
+                    && before.as_ref().is_some_and(|b| {
+                        b.get("serviceNodeId") == Some(&node)
+                            && b.get("definitionRevision").and_then(IvyJson::as_f64)
+                                == Some(definition_revision)
+                    }),
+                "invalid_arguments",
+                "Idle-only activation can only pause the unchanged local assignment.",
+            )?;
+        }
         if let Some(before) = &before {
             if before.get("serviceNodeId") != Some(&node) {
                 let source = model::field(before, "serviceNodeId")?;
@@ -786,6 +800,22 @@ impl Definitions {
             }
         }
         let local = self.row(&model::text(&task, "id")?, true).await?;
+        if only_when_idle {
+            let row = local.as_ref().ok_or_else(IvyError::internal)?;
+            require(row.get("definition").is_some_and(|d| {
+                d.get("jobId") == Some(&job)
+                    && d.get("revision").and_then(IvyJson::as_f64) == Some(definition_revision)
+            }), "revision_conflict", "Wait for the current definition to be adopted before pausing.")?;
+            // Check quiescence and stop automatic admission in one store command,
+            // before publishing the disabled assignment. Never signal a worker.
+            self.0.engine.update(IvyJson::object([
+                ("action", "disable".into()),
+                ("id", model::field(&task, "id")?.clone()),
+                ("expectedRevision", model::field(row, "revision")?.clone()),
+                ("operationId", journal.mutation(operation, "idle").await?),
+                ("onlyWhenIdle", true.into()),
+            ]), None).await?;
+        }
         let prior_value = |key| before.as_ref().and_then(|v| nullish(v.get(key)));
         let local_value = |key| local.as_ref().and_then(|v| nullish(v.get(key)));
         let desired = IvyJson::object([
@@ -1462,6 +1492,7 @@ impl Definitions {
                     model::number(&input, "definitionRevision")?,
                     model::number(&input, "expectedRevision")?,
                     model::truth(&input, "enabled"),
+                    model::truth(&input, "onlyWhenIdle"),
                     &operation,
                     input.get("serviceNodeId").cloned(),
                 )
@@ -1499,6 +1530,7 @@ impl Definitions {
                             model::number(&saved, "revision")?,
                             0.0,
                             model::truth(task, "enabled"),
+                            false,
                             &append(&operation, &format!(":{task_id}:activate")),
                             None,
                         )
@@ -1604,6 +1636,7 @@ impl Definitions {
                             .and_then(IvyJson::as_f64)
                             .unwrap_or(0.0),
                         action == "enable",
+                        false,
                         &operation,
                         None,
                     )

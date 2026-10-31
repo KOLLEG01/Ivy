@@ -733,6 +733,9 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 256
+            },
+            "onlyWhenIdle": {
+              "type": "boolean"
             }
           },
           "required": [
@@ -1504,6 +1507,10 @@
             "serviceNodeId": {
               "type": "string",
               "minLength": 1
+            },
+            "onlyWhenIdle": {
+              "type": "boolean",
+              "description": "When true, pause only an unchanged assignment on this instance after atomically verifying no queued run, worker or pending publication. Busy work returns task_busy and continues."
             }
           },
           "required": [
@@ -2120,6 +2127,10 @@
                 "serviceNodeId": {
                   "type": "string",
                   "minLength": 1
+                },
+                "onlyWhenIdle": {
+                  "type": "boolean",
+                  "description": "When true, pause only an unchanged assignment on this instance after atomically verifying no queued run, worker or pending publication. Busy work returns task_busy and continues."
                 }
               },
               "required": [

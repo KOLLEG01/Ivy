@@ -196,6 +196,11 @@ impl Runtime<'_> {
                 return Ok(IvyJson::object([("runId", operation.clone()), ("status", "queued".into())]));
             }
             require(model::number(&row, "revision")? == model::number(&input, "expectedRevision")?, "revision_conflict", "Task changed; reload before updating.")?;
+            let idle_only = action == "disable" && model::truth(&input, "onlyWhenIdle");
+            if idle_only {
+                cache.require_stopped(&row)?;
+                require(!self.store.busy(&id)? && !active(&id), "task_busy", "Wait for queued work, workers and publications before pausing.")?;
+            }
             let mut task = model::field(&row, "task")?.clone();
             if action == "delete" {
                 require(!self.store.busy(&id)?, "task_busy", "Disable and wait for the task before deleting.")?;
@@ -224,7 +229,7 @@ impl Runtime<'_> {
             self.store.save(&row)?;
             if action == "delete" { return Ok(IvyJson::object([("deleted", true.into()), ("resultObjectId", nullable(row.get("resultObjectId")))])); }
             if action == "disable" {
-                disabled = Some(id.clone());
+                if !idle_only { disabled = Some(id.clone()); }
                 for mut run in self.store.runs("queued")? { if model::text(&run, "taskId")? == id {
                     run.insert("status", "cancelled".into()); run.insert("finishedAt", now_iso.into());
                     run.insert("error", "Task disabled before execution.".into()); self.store.save_run(&run)?;

@@ -5,7 +5,7 @@
     {
       "namespace": "data-collector",
       "description": "Script tasks and versioned collection results",
-      "guideMarkdown": "Hive owns versioned scripts and execution definitions. save creates a draft (expectedRevision is the definition revision, 0 for creation); activate selects an exact definitionRevision, target serviceNodeId and enabled state with the current assignment revision. Read definitions, definition, definitionHistory or script for central state. tasks/task expose draft and desired/adopted revisions for this instance. enable activates the latest draft; disable stops the assigned instance; run uses the adopted cache. import explicitly adopts existing local definitions without altering their schedules/state/results. recover requires verified stopped old workers after cache loss. Instantiation on another host requires the old disabled assignment's quiescence acknowledgement. Retain operationId and read operation after lost replies. Existing accepted jobs continue from durable local caches while Hive is unavailable; outputs/events queue locally in order. Secrets remain assigned by name, never include values in scripts/config/history. Dependencies use exact versions. Results and their retention are separate. After outcome_unknown verify workers and disable with confirmedStoppedRunId; never blindly replay external writes.",
+      "guideMarkdown": "Hive owns versioned scripts and execution definitions. save creates a draft (expectedRevision is the definition revision, 0 for creation); activate selects an exact definitionRevision, target serviceNodeId and enabled state with the current assignment revision. For maintenance, use enabled=false with onlyWhenIdle=true on the unchanged local assignment; queued work, workers and pending publications return task_busy without stopping them. Read the original operation before retrying after an uncertain reply. Read definitions, definition, definitionHistory or script for central state. tasks/task expose draft and desired/adopted revisions for this instance. enable activates the latest draft; disable stops the assigned instance; run uses the adopted cache. import explicitly adopts existing local definitions without altering their schedules/state/results. recover requires verified stopped old workers after cache loss. Instantiation on another host requires the old disabled assignment's quiescence acknowledgement. Retain operationId and read operation after lost replies. Existing accepted jobs continue from durable local caches while Hive is unavailable; outputs/events queue locally in order. Secrets remain assigned by name, never include values in scripts/config/history. Dependencies use exact versions. Results and their retention are separate. After outcome_unknown verify workers and disable with confirmedStoppedRunId; never blindly replay external writes.",
       "tools": [
         {
           "namespace": "data-collector",
@@ -522,6 +522,10 @@
                       "serviceNodeId": {
                         "type": "string",
                         "minLength": 1
+                      },
+                      "onlyWhenIdle": {
+                        "type": "boolean",
+                        "description": "When true, pause only an unchanged assignment on this instance after atomically verifying no queued run, worker or pending publication. Busy work returns task_busy and continues."
                       }
                     },
                     "required": [
