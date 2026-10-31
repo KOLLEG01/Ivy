@@ -428,9 +428,10 @@ fn inventory_pages_bound_provider_state_without_status_or_diagnostic_bodies() {
 }
 
 fn inventory_payload_fixture(count: usize, payload_bytes: usize) -> Store {
-    let store=node_page_store();insert_inventory_fixture(&store,"node",0);
+    let store=node_page_store();
+    store.connection().execute("INSERT INTO inventory_schemas VALUES('fixture','item','1','{\"recencyPointer\":\"/recency\"}')",[]).unwrap();
+    insert_inventory_fixture(&store,"node",0);
     store.connection().execute("DELETE FROM inventory",[]).unwrap();
-    store.connection().execute("UPDATE inventory_schemas SET definition='{\"recencyPointer\":\"/recency\"}'",[]).unwrap();
     for index in 0..count {
         let summary=canonical(&IvyJson::object([("payload","x".repeat(payload_bytes).into()),("recency",((index/2) as f64).into())]),MANAGEMENT_FRAME_BYTES).unwrap();
         store.connection().execute("INSERT INTO inventory VALUES('node','fixture','item',?1,'1',?2,'1970-01-01T00:00:00.000Z')",params![format!("id{index:02}"),summary]).unwrap();
