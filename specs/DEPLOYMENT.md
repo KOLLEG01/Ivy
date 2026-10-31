@@ -256,6 +256,12 @@ substitute a development build for an installed artifact.
 
 ## Local host operations
 
+Shared native servers can use the optional [Codex server component](../services/codex-server/README.md)
+as independent HostExecutor instances. Its Windows startup inspection and migration
+procedure cover external Scheduler starts as well as the managed process tree.
+Bootstrap Scheduler actions must enter through `ivy-host-job.exe`, not a console
+interpreter; the interpreter's hidden-window flag alone is insufficient.
+
 Run the installed `ivy` CLI on the owning host. The native HostExecutor package includes
 `dist/native/<os>-<arch>/ivy` (`ivy.exe` on Windows); add that directory to `PATH` or
 invoke the executable directly. Build it with `npm run build:deployment -- --component

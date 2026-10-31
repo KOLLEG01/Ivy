@@ -49,6 +49,7 @@ pub(crate) struct Context {
     pub pending: Option<NativeOperationCall>,
     pub unsubscribe: Option<NativeOperationCall>,
     pub closing: bool,
+    pub task_id: Option<String>,
 }
 impl Context {
     pub fn key(&self) -> IvyResult<String> {
@@ -113,6 +114,13 @@ impl Context {
                         .unwrap_or(IvyJson::Null),
                 ),
                 ("closing", self.closing.into()),
+                (
+                    "taskId",
+                    self.task_id
+                        .clone()
+                        .map(IvyJson::from)
+                        .unwrap_or(IvyJson::Null),
+                ),
             ]),
             usize::MAX,
         )
@@ -156,6 +164,7 @@ impl Context {
                 .required("closing")?
                 .as_bool()
                 .ok_or_else(IvyError::internal)?,
+            task_id: model::optional_text(&value, "taskId"),
         })
     }
 }
@@ -167,6 +176,14 @@ pub(crate) struct Contexts {
     pub cleanup: Arc<Mutex<String>>,
 }
 impl Contexts {
+    pub async fn task_pending(&self, task_id: String) -> IvyResult<bool> {
+        self.store.call(move |store| {
+            let count: i64 = store.connection().query_row(
+                "SELECT COUNT(*) FROM metadata WHERE key GLOB 'native-mcp:*' AND (json_extract(value,'$.taskId')=? OR json_extract(value,'$.taskId') IS NULL)",
+                [task_id], |r| r.get(0)).map_err(|_| IvyError::internal())?;
+            Ok(count > 0)
+        }).await
+    }
     pub fn new(store: StoreOwner) -> Self {
         Self {
             store,

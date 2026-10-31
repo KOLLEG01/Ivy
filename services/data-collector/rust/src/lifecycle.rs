@@ -420,6 +420,7 @@ pub async fn start(path: PathBuf, options: StartOptions) -> IvyResult<Collector>
         if let Some(cleanup) = cleanup {
             let _ = cleanup.await;
         }
+        mcp.close().await;
     });
     let runtime = collector.clone();
     let control = tokio::spawn(async move {

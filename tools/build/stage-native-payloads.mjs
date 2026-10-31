@@ -41,7 +41,7 @@ function runtimeAssets(component, root, os) {
     }
     return assets;
   }
-  if (!['agent-manager', 'service-manager', 'chat-bridge', 'task-board', 'phone-bridge', 'secretary'].includes(component)) return [];
+  if (!['codex-server', 'agent-manager', 'service-manager', 'chat-bridge', 'task-board', 'phone-bridge', 'secretary'].includes(component)) return [];
   const assets = [];
   const visit = directory => {
     if (realpathSync(directory) !== directory) throw Error('Native catalog inputs must not use links.');

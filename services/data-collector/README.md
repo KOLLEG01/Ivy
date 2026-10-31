@@ -7,7 +7,7 @@ camera images. English and German UI copy follows the browser language.
 
 ## Tasks and results
 
-The [schema](src/schema.ts) defines settings, tasks and the two MCP tools:
+The [schemas](rust/assets/schemas.json) define settings, tasks and the two MCP tools:
 `data_collector_read` and `data_collector_update`. Read tasks for service limits,
 save a complete task as a draft with its `expectedRevision` (zero on creation),
 then `activate` its exact `jobId` and `definitionRevision`, with the current
@@ -25,15 +25,58 @@ returns `{ data, state?, events?: [{ name, payload }] }`. `data` is any JSON val
 `state` is private durable task state; it advances atomically with the local
 successful execution record before publication, so subsequent offline runs
 receive the latest cursor. Failed or interrupted executions do not advance it.
-An optional task `mcp` binding selects an AgentManager node, absolute project `cwd`,
-MCP `server` and explicit `tools` list. The worker receives `mcp.call(tool, args)`;
-DataCollector forwards granted calls through the existing native owner in an
-ephemeral context without starting a model turn. Hive and plugin credentials stay
-in their owning processes. The bridge exists only for that run and closes with it.
+An optional task `mcp` binding grants `mcp.call(tool, args)`. Account MCP bindings
+select an AgentManager node, absolute project `cwd`, MCP `server` and explicit
+`tools` list. Their context starts lazily without a model turn. Each accepted task
+generation has an exclusive context; tasks never share one. Periodic tasks with
+intervals below 30 minutes retain it until the next run plus a minute (at most
+30 minutes). Manual and infrequent tasks release their subscription after a run.
+Disablement, deletion, definition changes and connection replacement retire the
+old context. The run's HTTP endpoint, token and cancellation are always separate.
+Collector contexts disable `node_repl` and `cua_repl`; ordinary agents keep them.
+
+For Ivy calls use an explicit direct binding instead:
+
+```json
+{
+  "transport": "ivy",
+  "callerPrincipalId": "collector-principal",
+  "bindings": [
+    { "kind": "core", "tool": "hive_status" },
+    {
+      "kind": "service",
+      "tool": "data_collector_read",
+      "serviceNodeId": "host.collector",
+      "qualifiedName": "data-collector.read",
+      "interfaceVersion": "1.0.0"
+    }
+  ]
+}
+```
+
+Service calls retain the MCP arguments `{serviceNodeId, input, operationId?}` and
+`{result: value}` response. Each selected service, namespace version and exact
+method is discovered and checked through SDK ToolClients. `hive_status` accepts
+only `{}` and returns the authenticated Hive `system.status`, including its
+runtime epoch. There is no automatic transport fallback. Assign the collector
+principal the required routing and data permissions before switching a binding;
+the former AgentManager's permissions are not inherited. Migrate through pinned
+definition save/activation, preserving the script, state, result and assignment.
+Retain the prior definition revision for rollback. Unknown writes require checking
+the original service operation, never a new operation ID or an automatic replay.
+
+Hive and plugin credentials stay in their owning processes. The script bridge
+exists only for its run and closes with it.
 Native context ownership and outstanding operation identities are saved in the
 local database before dispatch. Cleanup reconciles the originals after cancellation
 or restart; unknown outcomes authorize neither replay nor unloading. At most 64
 unretired contexts are admitted per instance, including unresolved cleanup.
+An unresolved context fences its task across runs and restarts until its original
+receipts permit retirement. A new owner epoch alone does not prove that work on an
+independent shared server ended. Native unsubscribe starts Codex's own inactivity
+grace period; it does not immediately kill tool processes.
+Legacy context records without a task identity fence new transport contexts until
+their original cleanup completes, since they cannot be safely assigned to a task.
 The [Microsoft 365 example](../../docs/examples/data-collector/m365/README.md)
 shows account identity checks, status results and stable activity for object watchers.
 Use assigned secret names, never literal credentials in task configuration or output.

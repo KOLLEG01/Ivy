@@ -333,41 +333,127 @@
                             }
                           },
                           "mcp": {
-                            "type": "object",
-                            "properties": {
-                              "serviceNodeId": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 256
+                            "oneOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "serviceNodeId": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 256
+                                  },
+                                  "cwd": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 4096
+                                  },
+                                  "server": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 256
+                                  },
+                                  "tools": {
+                                    "minItems": 1,
+                                    "maxItems": 100,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 256
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "serviceNodeId",
+                                  "cwd",
+                                  "server",
+                                  "tools"
+                                ],
+                                "additionalProperties": false
                               },
-                              "cwd": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 4096
-                              },
-                              "server": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 256
-                              },
-                              "tools": {
-                                "minItems": 1,
-                                "maxItems": 100,
-                                "type": "array",
-                                "items": {
-                                  "type": "string",
-                                  "minLength": 1,
-                                  "maxLength": 256
-                                }
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "transport": {
+                                    "const": "ivy"
+                                  },
+                                  "callerPrincipalId": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 256
+                                  },
+                                  "bindings": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": 100,
+                                    "items": {
+                                      "oneOf": [
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "kind": {
+                                              "const": "service"
+                                            },
+                                            "tool": {
+                                              "type": "string",
+                                              "minLength": 1,
+                                              "maxLength": 256
+                                            },
+                                            "serviceNodeId": {
+                                              "type": "string",
+                                              "minLength": 1,
+                                              "maxLength": 256
+                                            },
+                                            "qualifiedName": {
+                                              "type": "string",
+                                              "minLength": 1,
+                                              "maxLength": 256,
+                                              "pattern": "^[a-z][a-z0-9-]*\\.[a-zA-Z][a-zA-Z0-9._-]*$"
+                                            },
+                                            "interfaceVersion": {
+                                              "type": "string",
+                                              "minLength": 1,
+                                              "maxLength": 64,
+                                              "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+                                            }
+                                          },
+                                          "required": [
+                                            "kind",
+                                            "tool",
+                                            "serviceNodeId",
+                                            "qualifiedName",
+                                            "interfaceVersion"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "kind": {
+                                              "const": "core"
+                                            },
+                                            "tool": {
+                                              "const": "hive_status"
+                                            }
+                                          },
+                                          "required": [
+                                            "kind",
+                                            "tool"
+                                          ],
+                                          "additionalProperties": false
+                                        }
+                                      ]
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "transport",
+                                  "callerPrincipalId",
+                                  "bindings"
+                                ],
+                                "additionalProperties": false
                               }
-                            },
-                            "required": [
-                              "serviceNodeId",
-                              "cwd",
-                              "server",
-                              "tools"
-                            ],
-                            "additionalProperties": false
+                            ]
                           },
                           "inputSecretName": {
                             "anyOf": [
@@ -1027,41 +1113,127 @@
                 }
               },
               "mcp": {
-                "type": "object",
-                "properties": {
-                  "serviceNodeId": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 256
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "serviceNodeId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      },
+                      "cwd": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096
+                      },
+                      "server": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      },
+                      "tools": {
+                        "minItems": 1,
+                        "maxItems": 100,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256
+                        }
+                      }
+                    },
+                    "required": [
+                      "serviceNodeId",
+                      "cwd",
+                      "server",
+                      "tools"
+                    ],
+                    "additionalProperties": false
                   },
-                  "cwd": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 4096
-                  },
-                  "server": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 256
-                  },
-                  "tools": {
-                    "minItems": 1,
-                    "maxItems": 100,
-                    "type": "array",
-                    "items": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 256
-                    }
+                  {
+                    "type": "object",
+                    "properties": {
+                      "transport": {
+                        "const": "ivy"
+                      },
+                      "callerPrincipalId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      },
+                      "bindings": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 100,
+                        "items": {
+                          "oneOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "const": "service"
+                                },
+                                "tool": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 256
+                                },
+                                "serviceNodeId": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 256
+                                },
+                                "qualifiedName": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 256,
+                                  "pattern": "^[a-z][a-z0-9-]*\\.[a-zA-Z][a-zA-Z0-9._-]*$"
+                                },
+                                "interfaceVersion": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 64,
+                                  "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "tool",
+                                "serviceNodeId",
+                                "qualifiedName",
+                                "interfaceVersion"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "const": "core"
+                                },
+                                "tool": {
+                                  "const": "hive_status"
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "tool"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    "required": [
+                      "transport",
+                      "callerPrincipalId",
+                      "bindings"
+                    ],
+                    "additionalProperties": false
                   }
-                },
-                "required": [
-                  "serviceNodeId",
-                  "cwd",
-                  "server",
-                  "tools"
-                ],
-                "additionalProperties": false
+                ]
               },
               "inputSecretName": {
                 "anyOf": [

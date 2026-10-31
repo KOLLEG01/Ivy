@@ -2200,6 +2200,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ivy-codex-server"
+version = "0.2.40"
+dependencies = [
+ "chrono",
+ "ivy-contracts",
+ "ivy-host-runtime",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ivy-contracts"
 version = "0.2.40"
 dependencies = [

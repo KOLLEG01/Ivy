@@ -6,6 +6,18 @@ import type { Operation, Wire } from "../../../packages/sdk/src/client.js";
 import { client } from "./runtime";
 
 /** Collector task format from services/data-collector/rust/assets/schemas.json. */
+export type IvyBinding =
+  | { kind: "core"; tool: "hive_status" }
+  | {
+      kind: "service";
+      tool: string;
+      serviceNodeId: string;
+      qualifiedName: string;
+      interfaceVersion: string;
+    };
+export type McpConfiguration =
+  | { serviceNodeId: string; cwd: string; server: string; tools: string[] }
+  | { transport: "ivy"; callerPrincipalId: string; bindings: IvyBinding[] };
 export interface Task {
   id: string;
   name: string;
@@ -17,10 +29,14 @@ export interface Task {
   dependencies: Record<string, string>;
   config: Record<string, Wire.Json>;
   secretNames: string[];
-  mcp?: { serviceNodeId: string; cwd: string; server: string; tools: string[] };
+  mcp?: McpConfiguration;
   inputSecretName?: string | null;
   allowUnauthenticatedInput?: boolean;
-  retention: { maximumCount: number; maximumAgeDays: number; maximumBytes: number };
+  retention: {
+    maximumCount: number;
+    maximumAgeDays: number;
+    maximumBytes: number;
+  };
 }
 export const tr = (de: string, en: string) =>
   navigator.language.toLowerCase().startsWith("de") ? de : en;

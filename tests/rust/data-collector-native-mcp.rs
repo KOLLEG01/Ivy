@@ -23,6 +23,7 @@ enum Mode {
     LostUnsubscribe,
     HoldUnsubscribe,
     HoldInvokeBinding,
+    HoldDirectBinding,
     RejectTool,
     UnknownToolAdmission,
 }
@@ -31,6 +32,7 @@ struct Client {
     store: Mutex<Option<StoreOwner>>,
     operations: Mutex<HashMap<String, IvyJson>>,
     invokes: Mutex<Vec<IvyJson>>,
+    direct: Mutex<Vec<IvyJson>>,
     mode: Mutex<Mode>,
     epoch: Mutex<Option<String>>,
     entered: Notify,
@@ -164,6 +166,12 @@ impl RpcClient for Client {
             if method == "tools.list" {
                 let namespace = model::text(&params, "namespace")?;
                 let name = model::text(&params, "namePrefix")?;
+                if namespace == "fixture"
+                    && matches!(*self.mode.lock().unwrap(), Mode::HoldDirectBinding)
+                {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
                 if namespace == "agent"
                     && name == "invoke"
                     && matches!(*self.mode.lock().unwrap(), Mode::HoldInvokeBinding)
@@ -184,6 +192,13 @@ impl RpcClient for Client {
                                 "definition",
                                 IvyJson::object([
                                     ("namespace", namespace.clone().into()),
+                                    (
+                                        "annotations",
+                                        IvyJson::object([(
+                                            "readOnlyHint",
+                                            (name == "read").into(),
+                                        )]),
+                                    ),
                                     ("name", name.into()),
                                     (
                                         "interfaceVersion",
@@ -211,6 +226,15 @@ impl RpcClient for Client {
             assert_eq!(method, "tools.call");
             let args = params.required("arguments")?;
             match model::text(&params, "qualifiedName")?.as_str() {
+                "fixture.read" => {
+                    self.direct.lock().unwrap().push(params.clone());
+                    Ok(json(r#"{"cursor":"next","items":[1,2]}"#))
+                }
+                "fixture.write" => {
+                    self.direct.lock().unwrap().push(params.clone());
+                    Err(IvyError::new("connection_closed", "Lost reply")
+                        .with_outcome(Outcome::Unknown))
+                }
                 "agent.status" => Ok(self.status()),
                 "agent.operation" => {
                     let id = model::text(args, "operationId")?;
@@ -383,6 +407,418 @@ async fn retained(factory: &NativeMcpFactory, client: &Client) -> Option<Context
 }
 async fn call(session: &NativeMcpSession) -> IvyResult<IvyJson> {
     session.call("echo".into(), object()).await
+}
+#[tokio::test]
+async fn explicit_ivy_bindings_preserve_core_and_service_envelopes_and_never_start_native() {
+    let (_root, client, factory, _) = fixture(Mode::Normal);
+    let configuration = json(
+        r#"{"transport":"ivy","callerPrincipalId":"collector","bindings":[{"kind":"core","tool":"hive_status"},{"kind":"service","tool":"read","serviceNodeId":"native-agent","qualifiedName":"fixture.read","interfaceVersion":"0.159.2"},{"kind":"service","tool":"write","serviceNodeId":"native-agent","qualifiedName":"fixture.write","interfaceVersion":"0.159.2"}]}"#,
+    );
+    crate::schema::parse_schema("mcpSchema", &configuration).unwrap();
+    let (rpc, tools) = factory.selected().unwrap();
+    let session =
+        crate::ivy_mcp::IvyMcp::new(rpc, tools, configuration.clone(), CancellationToken::new());
+    let core = session.call("hive_status".into(), object()).await.unwrap();
+    assert_eq!(
+        core,
+        json(r#"{"result":{"callerPrincipalId":"collector","runtimeEpoch":"hive-epoch"}}"#)
+    );
+    assert_eq!(
+        core.get("result").unwrap().get("runtimeEpoch"),
+        Some(&"hive-epoch".into())
+    );
+    let args =
+        json(r#"{"serviceNodeId":"native-agent","input":{"view":"history","cursor":"original"}}"#);
+    assert_eq!(
+        session.call("read".into(), args.clone()).await.unwrap(),
+        json(r#"{"result":{"cursor":"next","items":[1,2]}}"#)
+    );
+    let sent = client.direct.lock().unwrap()[0].clone();
+    assert_eq!(sent.get("arguments"), args.get("input"));
+    assert_eq!(
+        sent.get("expectedCallerPrincipalId"),
+        Some(&"collector".into())
+    );
+    for (tool, args) in [
+        ("ungranted", object()),
+        ("hive_status", json(r#"{"method":"system.reset"}"#)),
+        (
+            "read",
+            json(r#"{"serviceNodeId":"other-account","input":{}}"#),
+        ),
+        (
+            "write",
+            json(r#"{"serviceNodeId":"native-agent","input":{}}"#),
+        ),
+        (
+            "write",
+            json(
+                r#"{"serviceNodeId":"native-agent","operationId":"original","input":{"operationId":"other"}}"#,
+            ),
+        ),
+    ] {
+        assert!(session.call(tool.into(), args).await.is_err());
+    }
+    let args = json(
+        r#"{"serviceNodeId":"native-agent","operationId":"original","input":{"operationId":"original"}}"#,
+    );
+    assert_eq!(
+        session
+            .call("write".into(), args)
+            .await
+            .unwrap_err()
+            .outcome,
+        Outcome::Unknown
+    );
+    assert_eq!(
+        client.direct.lock().unwrap().len(),
+        2,
+        "A lost write reply is never replayed"
+    );
+    assert_eq!(
+        client.direct.lock().unwrap()[1].get("operationId"),
+        Some(&"original".into())
+    );
+    let mut other = configuration.clone();
+    other.insert("callerPrincipalId", "other-account".into());
+    let (rpc, tools) = factory.selected().unwrap();
+    let wrong = crate::ivy_mcp::IvyMcp::new(rpc, tools, other, CancellationToken::new());
+    assert_eq!(
+        wrong
+            .call("hive_status".into(), object())
+            .await
+            .unwrap_err()
+            .code,
+        "target_conflict"
+    );
+    let stop = CancellationToken::new();
+    stop.cancel();
+    let (rpc, tools) = factory.selected().unwrap();
+    let stopped = crate::ivy_mcp::IvyMcp::new(rpc, tools, configuration, stop);
+    assert!(stopped.call("hive_status".into(), object()).await.is_err());
+    assert!(client.invokes.lock().unwrap().is_empty());
+}
+#[tokio::test]
+async fn ivy_discovery_can_be_cancelled_without_dispatching_a_service_call() {
+    let (_root, client, factory, _) = fixture(Mode::HoldDirectBinding);
+    let (rpc, tools) = factory.selected().unwrap();
+    let signal = CancellationToken::new();
+    let session = crate::ivy_mcp::IvyMcp::new(
+        rpc,
+        tools,
+        json(
+            r#"{"transport":"ivy","callerPrincipalId":"collector","bindings":[{"kind":"service","tool":"read","serviceNodeId":"native-agent","qualifiedName":"fixture.read","interfaceVersion":"0.159.2"}]}"#,
+        ),
+        signal.clone(),
+    );
+    let pending = tokio::spawn(async move {
+        session
+            .call(
+                "read".into(),
+                json(r#"{"serviceNodeId":"native-agent","input":{}}"#),
+            )
+            .await
+    });
+    entered(&client).await;
+    signal.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(1), pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.code, "cancelled");
+    assert_eq!(error.outcome, Outcome::NotExecuted);
+    assert!(client.direct.lock().unwrap().is_empty());
+    client.release.notify_one();
+}
+
+async fn saved_task(factory: &NativeMcpFactory, id: &str, interval: u64) -> IvyJson {
+    let configuration = json(&format!(
+        r#"{{"serviceNodeId":"native-agent","cwd":"{}","server":"fixture","tools":["echo"]}}"#,
+        if cfg!(windows) {
+            "C:/fixture"
+        } else {
+            "/fixture"
+        }
+    ));
+    let task = IvyJson::object([
+        ("id", id.into()),
+        ("enabled", true.into()),
+        ("intervalSeconds", (interval as f64).into()),
+        ("mcp", configuration),
+    ]);
+    let saved = task.clone();
+    factory
+        .contexts
+        .store
+        .call(move |store| {
+            store.save(&IvyJson::object([
+                ("task", saved),
+                ("revision", 1.0.into()),
+                ("deleted", false.into()),
+            ]))
+        })
+        .await
+        .unwrap();
+    task
+}
+async fn bridge_call(bridge: &dyn McpBridge) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let context = bridge.context();
+    let url = model::text(&context, "url").unwrap();
+    let address = url
+        .strip_prefix("http://")
+        .unwrap()
+        .strip_suffix("/call")
+        .unwrap();
+    let token = model::text(&context, "token").unwrap();
+    let body = r#"{"tool":"echo","arguments":{}}"#;
+    let request = format!(
+        "POST /call HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    response
+}
+#[tokio::test]
+async fn periodic_runs_reuse_exclusively_with_new_bridges_and_release_on_disable() {
+    let (_root, client, factory, _) = fixture(Mode::Normal);
+    let task = saved_task(&factory, "periodic", 60).await;
+    let first = factory
+        .open(task.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(client.count("thread/start"), 0, "Context starts lazily");
+    assert!(
+        factory
+            .open(task.clone(), CancellationToken::new())
+            .await
+            .is_err()
+    );
+    assert!(bridge_call(first.as_ref()).await.contains("200 OK"));
+    let original_context = first.context();
+    // Long runs retain from their completion, not from their opening time.
+    factory
+        .slots
+        .lock()
+        .unwrap()
+        .get("periodic")
+        .unwrap()
+        .retained
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .until = tokio::time::Instant::now() - Duration::from_secs(1);
+    first.close().await.unwrap();
+    assert_eq!(client.count("thread/unsubscribe"), 0);
+    let second = factory
+        .open(task.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_ne!(original_context, second.context());
+    drop(first); // An old bridge must not release the next run's exclusive lease.
+    assert!(
+        factory
+            .open(task.clone(), CancellationToken::new())
+            .await
+            .is_err()
+    );
+    assert!(bridge_call(second.as_ref()).await.contains("200 OK"));
+    assert_eq!(client.count("thread/start"), 1);
+    assert_eq!(client.count("mcpServer/tool/call"), 2);
+    let params = client.invokes.lock().unwrap()[0]
+        .get("params")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        params
+            .get("config")
+            .unwrap()
+            .get("mcp_servers.node_repl.enabled"),
+        Some(&false.into())
+    );
+    assert_eq!(
+        params
+            .get("config")
+            .unwrap()
+            .get("mcp_servers.cua_repl.enabled"),
+        Some(&false.into())
+    );
+    second.close().await.unwrap();
+    factory
+        .contexts
+        .store
+        .call(|s| {
+            let mut row = s.get("periodic", false)?.unwrap();
+            let mut task = row.required("task")?.clone();
+            task.insert("enabled", false.into());
+            row.insert("task", task);
+            s.save(&row)
+        })
+        .await
+        .unwrap();
+    factory.recover().await.unwrap();
+    assert_eq!(client.count("thread/unsubscribe"), 1);
+    assert!(
+        !factory
+            .contexts
+            .task_pending("periodic".into())
+            .await
+            .unwrap()
+    );
+}
+#[tokio::test]
+async fn transport_tasks_do_not_share_contexts_and_manual_runs_unsubscribe() {
+    let (_root, client, factory, _) = fixture(Mode::Normal);
+    let periodic = saved_task(&factory, "periodic", 60).await;
+    let manual = saved_task(&factory, "manual", 0).await;
+    // Existing manual admission also allows disabled tasks. Such a run must
+    // retain that capability and must unsubscribe at completion.
+    let mut manual = manual;
+    manual.insert("enabled", false.into());
+    let saved = manual.clone();
+    factory
+        .contexts
+        .store
+        .call(move |store| {
+            let mut row = store.get("manual", false)?.unwrap();
+            row.insert("task", saved);
+            store.save(&row)
+        })
+        .await
+        .unwrap();
+    let first = factory
+        .open(periodic, CancellationToken::new())
+        .await
+        .unwrap();
+    let second = factory
+        .open(manual, CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(bridge_call(first.as_ref()).await.contains("200 OK"));
+    assert!(bridge_call(second.as_ref()).await.contains("200 OK"));
+    first.close().await.unwrap();
+    second.close().await.unwrap();
+    assert_eq!(client.count("thread/start"), 2);
+    assert_eq!(client.count("thread/unsubscribe"), 1);
+    assert!(
+        !factory
+            .contexts
+            .task_pending("manual".into())
+            .await
+            .unwrap()
+    );
+    factory.close().await;
+    assert_eq!(client.count("thread/unsubscribe"), 2);
+}
+#[tokio::test]
+async fn unknown_transport_call_fences_its_task_until_the_original_settles() {
+    let (_root, client, factory, _) = fixture(Mode::HoldTool);
+    let task = saved_task(&factory, "fenced", 60).await;
+    let signal = CancellationToken::new();
+    let bridge = factory.open(task.clone(), signal.clone()).await.unwrap();
+    let work = {
+        let bridge = bridge.clone();
+        tokio::spawn(async move { bridge_call(bridge.as_ref()).await })
+    };
+    entered(&client).await;
+    signal.cancel();
+    let _ = work.await;
+    bridge.close().await.unwrap();
+    for _ in 0..3 {
+        assert!(
+            factory
+                .open(task.clone(), CancellationToken::new())
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(client.count("thread/start"), 1);
+    assert_eq!(client.count("mcpServer/tool/call"), 1);
+    client.finish("mcpServer/tool/call");
+    *client.mode.lock().unwrap() = Mode::Normal;
+    factory.recover().await.unwrap();
+    let next = factory.open(task, CancellationToken::new()).await.unwrap();
+    assert!(bridge_call(next.as_ref()).await.contains("200 OK"));
+    assert_eq!(client.count("thread/start"), 2);
+    next.close().await.unwrap();
+    factory.close().await;
+}
+#[tokio::test]
+async fn configuration_and_connection_replacement_retire_the_previous_task_context() {
+    let root = Root::new();
+    let store = root.store();
+    let first_client = Arc::new(Client::default());
+    *first_client.store.lock().unwrap() = Some(store.clone());
+    let selected: Arc<Mutex<Arc<dyn RpcClient>>> = Arc::new(Mutex::new(first_client.clone()));
+    let current = selected.clone();
+    let factory = NativeMcpFactory::new(
+        Arc::new(move || Ok(current.lock().unwrap().clone())),
+        store.clone(),
+    );
+    let mut task = saved_task(&factory, "changing", 60).await;
+    let first = factory
+        .open(task.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(bridge_call(first.as_ref()).await.contains("200 OK"));
+    first.close().await.unwrap();
+    let mut mcp = task.required("mcp").unwrap().clone();
+    mcp.insert("server", "another-account".into());
+    task.insert("mcp", mcp);
+    let saved = task.clone();
+    store
+        .call(move |s| {
+            let mut row = s.get("changing", false)?.unwrap();
+            row.insert("task", saved);
+            row.insert("revision", 2.0.into());
+            s.save(&row)
+        })
+        .await
+        .unwrap();
+    let second = factory
+        .open(task.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(bridge_call(second.as_ref()).await.contains("200 OK"));
+    second.close().await.unwrap();
+    assert_eq!(first_client.count("thread/start"), 2);
+    assert_eq!(first_client.count("thread/unsubscribe"), 1);
+    assert_eq!(
+        first_client
+            .invokes
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .get("params")
+            .unwrap()
+            .get("server"),
+        Some(&"another-account".into())
+    );
+    let replacement = Arc::new(Client::default());
+    *replacement.store.lock().unwrap() = Some(store);
+    *selected.lock().unwrap() = replacement.clone();
+    let third = factory.open(task, CancellationToken::new()).await.unwrap();
+    assert!(bridge_call(third.as_ref()).await.contains("200 OK"));
+    third.close().await.unwrap();
+    assert_eq!(first_client.count("thread/unsubscribe"), 2);
+    assert_eq!(replacement.count("thread/start"), 1);
+    factory.close().await;
+    assert_eq!(replacement.count("thread/unsubscribe"), 1);
+}
+#[tokio::test]
+async fn legacy_unassigned_contexts_are_reconciled_before_admitting_reuse() {
+    let (_root, client, factory, session) = fixture(Mode::UnknownStart);
+    call(&session).await.unwrap_err();
+    session.close().await.unwrap();
+    let task = saved_task(&factory, "upgraded", 60).await;
+    assert!(factory.open(task, CancellationToken::new()).await.is_err());
+    assert_eq!(client.count("thread/start"), 1);
 }
 async fn entered(client: &Client) {
     tokio::time::timeout(Duration::from_secs(5), client.entered.notified())
@@ -892,6 +1328,7 @@ async fn pending_context_limit_prevents_dispatch_and_recovery_rotates_past_unkno
             pending: None,
             unsubscribe: None,
             closing: true,
+            task_id: None,
         };
         context.start.operation_id = format!("another-{index:02}").into();
         factory

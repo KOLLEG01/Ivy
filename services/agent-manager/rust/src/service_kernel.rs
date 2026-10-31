@@ -791,6 +791,17 @@ async fn start(config: InstanceConfig, bindings: AgentRuntimeBindings) -> IvyRes
             NativeInteractions::new(native.epoch.clone(), InteractionLimits::default()),
         )?;
         let registry = native_management.registry().clone();
+        if let Some(tools) = settings.get("bundledTools") {
+            let tools = crate::bundled_tools::BundledTools::new(
+                native.native_home.clone(),
+                config.artifact_root().to_owned(),
+                tools.clone(),
+            )?;
+            native_management.set_thread_preparation(Arc::new(move || {
+                let tools = tools.clone();
+                Box::pin(async move { tools.refresh().await })
+            }));
+        }
         let reconciliation = AgentReconciliation::new(
             ReconciliationSettings {
                 service_node_id: service_node.clone(),

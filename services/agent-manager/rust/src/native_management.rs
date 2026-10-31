@@ -184,6 +184,9 @@ impl NativeManagement {
     pub fn registry(&self) -> &IvyJson {
         &self.0.registry
     }
+    pub fn set_thread_preparation(&self, preparation: crate::native_dispatch::ThreadPreparation) {
+        self.0.dispatch.set_thread_preparation(preparation);
+    }
 
     /// Only implemented native handlers are returned. The shared connection
     /// refuses registry publication until every other declared handler is added.

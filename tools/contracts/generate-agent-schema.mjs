@@ -234,6 +234,16 @@ const definitions = {
       skillsRoot: { ...text(2048), minLength: 1 },
       mcpCredentials: { type: "object", maxProperties: 32, propertyNames: { pattern: "^[a-z][a-z0-9_-]{0,63}$" }, additionalProperties: ref("McpCredential") },
       patcherEnabled: bool,
+      bundledTools: object({
+        nodeExecutable: { ...text(2048), minLength: 1 },
+        nodeEnvironment: { type: "object", additionalProperties: text(16384), maxProperties: 64 },
+        cuaEnvironment: { type: "object", additionalProperties: text(16384), maxProperties: 64 },
+        inheritedEnvironment: array(id, 64),
+        nodeArgs: array(text(4096), 64),
+        cuaArgs: array(text(4096), 64),
+        startupTimeoutSeconds: integer(1, 300),
+        toolTimeoutSeconds: integer(1, 3600),
+      }, ["nodeExecutable", "nodeEnvironment", "cuaEnvironment", "inheritedEnvironment", "nodeArgs", "cuaArgs", "startupTimeoutSeconds", "toolTimeoutSeconds"]),
       projectRoot: { ...text(2048), minLength: 1 },
       internalProjectRoot: { ...text(2048), minLength: 1 },
       appServer: {

@@ -633,6 +633,50 @@ impl AsyncNative {
 }
 
 #[tokio::test]
+async fn thread_runtime_preparation_fails_before_dispatch_and_keeps_the_original_receipt() {
+    let mut fixture = AsyncNative::new();
+    let dispatch = NativeDispatch::new(
+        fixture.rpc.clone(),
+        "epoch".into(),
+        fixture.operations.clone(),
+        fixture.closing.clone(),
+    );
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let count = attempts.clone();
+    dispatch.set_thread_preparation(Arc::new(move || {
+        count.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Err(IvyError::new("target_conflict", "Runtime is not verified.")) })
+    }));
+    let identity = Identity {
+        caller_principal_id: "caller".into(),
+        operation_id: format!(
+            "epoch:{}:preparation",
+            chrono::Utc::now().timestamp_millis()
+        )
+        .into(),
+    };
+    for _ in 0..2 {
+        let outcome = dispatch
+            .invoke(
+                identity.clone(),
+                "thread/start".into(),
+                IvyJson::object([] as [(&str, IvyJson); 0]),
+            )
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        assert_eq!(outcome.get("phase"), Some(&"failed".into()));
+    }
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), fixture.sent.next_line())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn acknowledged_turn_keeps_native_owner_and_answers_until_model_and_reply_finish() {
     let mut fixture = AsyncNative::new();
     let dispatch = NativeDispatch::new(
