@@ -1,4 +1,4 @@
-use crate::{IvyJson, IvyResult, json::{canonical, canonical_object}, limits::MANAGEMENT_FRAME_BYTES};
+use crate::{IvyJson, IvyResult, JsString, json::{canonical, canonical_object}, limits::MANAGEMENT_FRAME_BYTES};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
@@ -35,11 +35,16 @@ pub fn tool_definition_hash(definition: &IvyJson) -> IvyResult<String> {
             "Expected a tool definition.",
         ));
     };
-    Ok(digest(canonical_object(
+    hash_object(
         pairs.iter().filter(|(key, _)| !key.eq_str("discovery"))
             .map(|(key, value)| (key, value)),
-        MANAGEMENT_FRAME_BYTES,
-    )?))
+    )
+}
+/// Hash a borrowed object projection with IvyJson::object's last-value rule.
+pub fn hash_object<'a>(
+    pairs: impl IntoIterator<Item = (&'a JsString, &'a IvyJson)>,
+) -> IvyResult<String> {
+    Ok(digest(canonical_object(pairs, MANAGEMENT_FRAME_BYTES)?))
 }
 pub fn hash_json(value: &IvyJson) -> IvyResult<String> {
     Ok(digest(canonical(value, MANAGEMENT_FRAME_BYTES)?))

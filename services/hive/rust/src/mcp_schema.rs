@@ -1,5 +1,5 @@
 //! Per-tool MCP schema composition with provider-local reference identities.
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_object};
 use std::collections::HashMap;
 
 fn empty() -> IvyJson {
@@ -245,9 +245,9 @@ impl McpSchemaBundle {
         Self::default()
     }
     pub fn embed(&mut self, value: &IvyJson, path: &JsString) -> IvyResult<IvyJson> {
-        if value.as_object().is_none() {
+        let Some(fields) = value.as_object() else {
             return Ok(value.clone());
-        }
+        };
         let source = value;
         let mut references = HashMap::new();
         let mut added = vec![];
@@ -256,12 +256,15 @@ impl McpSchemaBundle {
                 let mut deps = empty();
                 let mut outside = false;
                 dependencies(definition, source, &mut deps, &mut outside)?;
-                let mut identity =
-                    IvyJson::object([("definition", definition.clone()), ("dependencies", deps)]);
-                if outside {
-                    identity.insert("path", IvyJson::String(path.clone()));
-                }
-                let identity = hash_json(&identity)?;
+                let definition_key = JsString::from("definition");
+                let dependencies_key = JsString::from("dependencies");
+                let path_key = JsString::from("path");
+                let path_value = IvyJson::String(path.clone());
+                let identity = hash_object(
+                    [(&definition_key, definition), (&dependencies_key, &deps)]
+                        .into_iter()
+                        .chain(outside.then_some((&path_key, &path_value))),
+                )?;
                 let name = if let Some(name) = self.names.get(&identity) {
                     name.clone()
                 } else {
@@ -283,8 +286,10 @@ impl McpSchemaBundle {
             rewrite(&mut definition, path, &references)?;
             self.definitions.insert(name, definition);
         }
-        let mut root = source.clone();
-        root.remove("$defs");
+        let mut root = IvyJson::Object(match fields.iter().position(|(key, _)| key.eq_str("$defs")) {
+            Some(index) => fields[..index].iter().chain(&fields[index + 1..]).cloned().collect(),
+            None => fields.to_vec(),
+        });
         rewrite(&mut root, path, &references)?;
         Ok(root)
     }
