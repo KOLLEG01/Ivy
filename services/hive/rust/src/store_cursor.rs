@@ -8,8 +8,11 @@ fn invalid(message: &str) -> IvyError {
 
 impl Store {
     pub fn cursor(&self, identity: &IvyJson, boundary: &IvyJson) -> IvyResult<String> {
+        self.cursor_with_hash(&hash_json(identity)?, boundary)
+    }
+    pub(crate) fn cursor_with_hash(&self, hash: &str, boundary: &IvyJson) -> IvyResult<String> {
         let data = IvyJson::object([
-            ("query", hash_json(identity)?.into()),
+            ("query", hash.into()),
             ("boundary", boundary.clone()),
         ]);
         let body = URL_SAFE_NO_PAD.encode(canonical(&data, MANAGEMENT_FRAME_BYTES)?);
@@ -20,6 +23,11 @@ impl Store {
     /// Authenticate a cursor and its query identity. Each operation validates
     /// the expected shape of its decoded boundary.
     pub fn read_cursor(&self, identity: &IvyJson, cursor: &JsString) -> IvyResult<Option<IvyJson>> {
+        self.read_cursor_with_hash(cursor, || hash_json(identity))
+    }
+    pub(crate) fn read_cursor_with_hash(
+        &self, cursor: &JsString, hash: impl FnOnce() -> IvyResult<String>,
+    ) -> IvyResult<Option<IvyJson>> {
         let cursor = cursor.to_utf8().map_err(|_| invalid("Invalid cursor."))?;
         let (body, signature) = cursor
             .split_once('.')
@@ -43,7 +51,7 @@ impl Store {
         let text = std::str::from_utf8(&decoded).map_err(|_| invalid("Invalid cursor."))?;
         let data = parse(text, usize::MAX).map_err(|_| invalid("Invalid cursor."))?;
         require(!data.is_null(), "invalid_cursor", "Invalid cursor.")?;
-        let hash = hash_json(identity)?;
+        let hash = hash()?;
         require(
             data.get("query") == Some(&IvyJson::from(hash)),
             "invalid_cursor",

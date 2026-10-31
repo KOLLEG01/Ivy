@@ -439,6 +439,81 @@ fn inventory_payload_fixture(count: usize, payload_bytes: usize) -> Store {
     store
 }
 
+fn full_inventory_identity(store: &Store, parameters: &IvyJson) -> IvyResult<IvyJson> {
+    let mut statement=store.connection().prepare("SELECT s.node_id,s.namespace,s.kind,s.revision,s.schema_version FROM inventory_sets s JOIN service_nodes n ON s.node_id=n.id ORDER BY s.node_id,s.namespace,s.kind").unwrap();
+    let sets=statement.query_map([],|row|Ok(IvyJson::object([
+        ("node_id",IvyJson::from(row.get::<_,String>(0)?)),("namespace",row.get::<_,String>(1)?.into()),
+        ("kind",row.get::<_,String>(2)?.into()),("revision",IvyJson::Number(row.get::<_,f64>(3)?)),
+        ("schema_version",row.get::<_,String>(4)?.into()),
+    ]))).unwrap().map(|r|r.unwrap()).collect::<Vec<_>>();
+    let mut selectors=parameters.clone();selectors.remove("cursor");selectors.remove("limit");
+    Ok(IvyJson::object([("method","inventory.list".into()),("selectors",selectors),
+        ("sets",canonical(&IvyJson::Array(sets),MANAGEMENT_FRAME_BYTES)?.into())]))
+}
+
+#[test]
+fn inventory_snapshot_stream_keeps_legacy_cursors_all_sets_and_validation_order() {
+    let store=node_page_store();insert_inventory_fixture(&store,"node",0);
+    let registry=Registry::default();let runtime=crate::native_runtime::NativeRuntime;
+    for kind in ["empty\0kind","quotes\"\\\n😀","�"] {
+        store.connection().execute("INSERT INTO inventory_sets VALUES('node','fixture',?1,2,'1','1970-01-01T00:00:00.000Z')",[kind]).unwrap();
+    }
+    let params=IvyJson::object([("limit",1.0.into())]);
+    let boundary=IvyJson::Array(["item","a","fixture","node"].map(IvyJson::from).to_vec());
+    let legacy=store.cursor(&full_inventory_identity(&store,&params).unwrap(),&boundary).unwrap();
+    let first=crate::inventory::list(&store,&registry,&params,&runtime,0.0).unwrap();
+    assert_eq!(first.get("nextCursor"),Some(&legacy.clone().into()));
+    let mut next=params.clone();next.insert("cursor",legacy.into());
+    let second=crate::inventory::list(&store,&registry,&next,&runtime,0.0).unwrap();
+    assert_eq!(second.get("items").unwrap().as_array().unwrap()[0].get("resourceRef").unwrap().get("nativeId"),Some(&"b".into()));
+    store.connection().execute("UPDATE inventory_sets SET revision=3 WHERE kind!='item'",[]).unwrap();
+    assert_eq!(crate::inventory::list(&store,&registry,&next,&runtime,0.0).unwrap_err().code,"invalid_cursor");
+    next.insert("cursor","invalid".into());
+    store.connection().execute("UPDATE inventory_sets SET revision=9007199254740992 WHERE kind!='item'",[]).unwrap();
+    assert_eq!(crate::inventory::list(&store,&registry,&next,&runtime,0.0).unwrap_err().code,"invalid_arguments");
+    store.connection().execute("UPDATE inventory_sets SET revision=3 WHERE kind!='item'",[]).unwrap();
+    // Outer validation remains lazy and follows cursor authentication.
+    next.insert("unused",IvyJson::Number(f64::NAN));
+    assert_eq!(crate::inventory::list(&store,&registry,&next,&runtime,0.0).unwrap_err().code,"invalid_cursor");
+    next.remove("cursor");next.insert("limit",50.0.into());
+    assert!(crate::inventory::list(&store,&registry,&next,&runtime,0.0).is_ok());
+    next.insert("limit",1.0.into());
+    assert_eq!(crate::inventory::list(&store,&registry,&next,&runtime,0.0).unwrap_err().code,"invalid_arguments");
+    let calls=std::cell::Cell::new(0);
+    assert_eq!(store.read_cursor_with_hash(&"invalid".into(),||{calls.set(calls.get()+1);Err(IvyError::internal())}).unwrap_err().code,"invalid_cursor");
+    assert_eq!(calls.get(),0);
+}
+
+#[test]
+fn inventory_snapshot_stream_bounds_memory_without_set_vectors_or_encoded_text() {
+    const CHILD:&str="IVY_INVENTORY_SNAPSHOT_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output=std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","kernel::catalogs::read_tests::inventory_snapshot_stream_bounds_memory_without_set_vectors_or_encoded_text","--nocapture"])
+            .env(CHILD,"1").output().unwrap();
+        eprint!("{}",String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));return;
+    }
+    let store=node_page_store();insert_inventory_fixture(&store,"node",0);
+    for index in 0..10_000 {
+        store.connection().execute("INSERT INTO inventory_sets VALUES('node',?1,?2,2,'1','1970-01-01T00:00:00.000Z')",
+            params!["n".repeat(60),format!("k{index:05}{}","x".repeat(50))]).unwrap();
+    }
+    let params=IvyJson::object([("limit",1.0.into())]);
+    let boundary=IvyJson::Array(["item","a","fixture","node"].map(IvyJson::from).to_vec());
+    let before=LIVE.load(Ordering::Relaxed);PEAK.store(before,Ordering::Relaxed);let start=std::time::Instant::now();
+    let expected=store.cursor(&full_inventory_identity(&store,&params).unwrap(),&boundary).unwrap();
+    let full_elapsed=start.elapsed();let full_peak=PEAK.load(Ordering::Relaxed)-before;
+    let before=LIVE.load(Ordering::Relaxed);PEAK.store(before,Ordering::Relaxed);let start=std::time::Instant::now();
+    let page=crate::inventory::list(&store,&Registry::default(),&params,&crate::native_runtime::NativeRuntime,0.0).unwrap();
+    let streamed_elapsed=start.elapsed();let streamed_peak=PEAK.load(Ordering::Relaxed)-before;
+    assert_eq!(page.get("nextCursor"),Some(&expected.into()));
+    eprintln!("Hive inventory snapshot Rust allocation peak: legacy identity {full_peak} bytes, complete streamed page {streamed_peak} bytes for 10001 sets; elapsed {full_elapsed:?} / {streamed_elapsed:?}");
+    // SQLite's C heap and process RSS are excluded from this Rust-only probe.
+    assert!(full_peak>8*1024*1024);assert!(streamed_peak<256*1024);
+}
+
 #[test]
 fn inventory_payload_pages_keep_byte_trimmed_native_and_recency_cursor_boundaries() {
     let store=inventory_payload_fixture(8,300_000);let registry=Registry::default();let runtime=crate::native_runtime::NativeRuntime;

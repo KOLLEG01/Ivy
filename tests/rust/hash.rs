@@ -1,7 +1,7 @@
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
-    hash::{digest, hash_array, hash_json, hash_object_with_array, hmac_sha256, tool_definition_hash, verify_hmac_sha256},
-    json::canonical,
+    hash::{digest, hash_array, hash_json, hash_object_with_array, hash_object_with_array_string, hmac_sha256, tool_definition_hash, verify_hmac_sha256},
+    json::{canonical, validate_canonical_array},
     limits::MANAGEMENT_FRAME_BYTES,
 };
 
@@ -180,6 +180,49 @@ fn generated_array_hash_preserves_canonical_fields_duplicates_and_error_order() 
         Ok(IvyJson::Null), Err(ivy_contracts::IvyError::new("fixture", "Record read failed.")),
     ]).unwrap_err();
     assert_eq!(error.code, "fixture");
+}
+
+fn compare_array_string_hash(object: &IvyJson, records: Vec<IvyJson>) -> bool {
+    let encoded=canonical(&IvyJson::Array(records.clone()),MANAGEMENT_FRAME_BYTES);
+    let validation=validate_canonical_array(records.iter().cloned().map(Ok),MANAGEMENT_FRAME_BYTES);
+    assert_eq!(validation.as_ref().map(|_|()).map_err(|e|(&e.code,&e.message)),
+        encoded.as_ref().map(|_|()).map_err(|e|(&e.code,&e.message)));
+    let mut expected=object.clone();
+    let expected=encoded.and_then(|text|{expected.insert("sets",text.into());hash_json(&expected)}).map_err(|e|(e.code,e.message));
+    let actual=hash_object_with_array_string(object.as_object().unwrap().iter().map(|(k,v)|(k,v)),
+        &"sets".into(),records.into_iter().map(Ok)).map_err(|e|(e.code,e.message));
+    assert_eq!(actual,expected);actual.is_ok()
+}
+
+#[test]
+fn generated_array_string_hash_preserves_escaping_utf16_and_independent_depth_and_node_budgets() {
+    let object=IvyJson::object([("sets",IvyJson::Number(f64::NAN)),("selectors",IvyJson::object([("name","x".into())]))]);
+    assert!(compare_array_string_hash(&object,vec![]));
+    for size in [0,8190,8191,8192,8193,65_536] {
+        let mut units=vec![u16::from(b'x');size];units.extend("\"\\\n\0\t\r\u{8}\u{c}😀".encode_utf16());units.extend([0xd800,0xdc00,0xd801]);
+        assert!(compare_array_string_hash(&object,vec![IvyJson::object([
+            (JsString(vec![0xd800,0]),IvyJson::String(JsString(units))),
+            ("numbers".into(),IvyJson::Array(vec![(-0.0).into(),1e-7.into(),true.into()])),
+        ])]));
+    }
+    for depth in [127,128] {
+        let mut value=IvyJson::Null;for _ in 0..depth {value=IvyJson::Array(vec![value]);}
+        assert_eq!(compare_array_string_hash(&object,vec![value]),depth==127);
+    }
+    for count in [399_999,400_000] {assert_eq!(compare_array_string_hash(&object,vec![IvyJson::Null;count]),count==399_999);}
+    assert!(!compare_array_string_hash(&object,vec![IvyJson::Number(f64::NAN)]));
+    assert_eq!(hash_object_with_array_string([], &"sets".into(),[Err(IvyError::new("fixture","Read failed."))]).unwrap_err().code,"fixture");
+}
+
+#[test]
+fn generated_array_string_hash_counts_escaped_bytes_in_the_outer_budget() {
+    let object=IvyJson::object([] as [(&str,IvyJson);0]);
+    // 17 fixed bytes; a quote in the original record becomes four bytes in
+    // the object's string field after the inner and outer JSON escaping.
+    for extra in [0,1] {
+        let count=(MANAGEMENT_FRAME_BYTES-17)/4+extra;
+        assert_eq!(compare_array_string_hash(&object,vec!["\"".repeat(count).into()]),extra==0);
+    }
 }
 
 #[test]

@@ -103,6 +103,17 @@ pub fn hash_object_with_array<'a>(
     records: impl IntoIterator<Item = IvyResult<IvyJson>>,
 ) -> IvyResult<String> {
     let mut writer = HashWriter::new();
-    crate::json::canonical_object_with_array(pairs, array_key, records, MANAGEMENT_FRAME_BYTES, &mut writer)?;
+    crate::json::canonical_object_with_array(pairs, array_key, records, false, MANAGEMENT_FRAME_BYTES, &mut writer)?;
+    Ok(writer.finish())
+}
+/// Hash an object whose generated array is stored as canonical JSON text in a
+/// string field. Inner-array and outer-object budgets remain independent.
+pub fn hash_object_with_array_string<'a>(
+    pairs: impl IntoIterator<Item = (&'a JsString, &'a IvyJson)>,
+    string_key: &'a JsString,
+    records: impl IntoIterator<Item = IvyResult<IvyJson>>,
+) -> IvyResult<String> {
+    let mut writer = HashWriter::new();
+    crate::json::canonical_object_with_array(pairs, string_key, records, true, MANAGEMENT_FRAME_BYTES, &mut writer)?;
     Ok(writer.finish())
 }

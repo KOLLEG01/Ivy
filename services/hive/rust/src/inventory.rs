@@ -7,14 +7,15 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
-    json::{canonical, parse},
+    hash::hash_object_with_array_string,
+    json::{canonical, parse, validate_canonical_array},
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use rusqlite::{
     OptionalExtension, params, params_from_iter,
     types::{Value, ValueRef},
 };
-use std::collections::{HashMap, HashSet};
+use std::{cell::OnceCell, collections::{HashMap, HashSet}};
 
 fn sql<T>(store: &Store, result: rusqlite::Result<T>) -> IvyResult<T> {
     result.map_err(|e| store.query_error(e))
@@ -216,6 +217,23 @@ pub fn get(
     item(row, provider_stale(&node), IvyJson::Number(revision), runtime, now)
 }
 
+fn with_set_records<T>(
+    store: &Store, bindings: &[Value],
+    consume: impl FnOnce(&mut dyn Iterator<Item = IvyResult<IvyJson>>) -> IvyResult<T>,
+) -> IvyResult<T> {
+    let mut statement = sql(store, store.connection().prepare_cached(
+        "SELECT s.node_id,s.namespace,s.kind,s.revision,s.schema_version FROM inventory_sets s JOIN service_nodes n ON s.node_id=n.id WHERE (? IS NULL OR n.id=?) AND (? IS NULL OR n.host_id=?) AND (? IS NULL OR n.service_name=?) AND (? IS NULL OR s.namespace=?) AND (? IS NULL OR s.kind=?) ORDER BY s.node_id,s.namespace,s.kind",
+    ))?;
+    let mut records = sql(store, statement.query_map(params_from_iter(bindings.iter()), |row| {
+        Ok(IvyJson::object([
+            ("node_id", row_value(row,0)?), ("namespace", row_value(row,1)?),
+            ("kind", row_value(row,2)?), ("revision", row_value(row,3)?),
+            ("schema_version", row_value(row,4)?),
+        ]))
+    }))?.map(|row| sql(store,row));
+    consume(&mut records)
+}
+
 pub fn list(
     store: &Store,
     registry: &Registry,
@@ -327,26 +345,29 @@ pub fn list(
             )?;
         }
     }
-    let sets = rows(
-        store,
-        "SELECT s.node_id,s.namespace,s.kind,s.revision,s.schema_version FROM inventory_sets s JOIN service_nodes n ON s.node_id=n.id WHERE (? IS NULL OR n.id=?) AND (? IS NULL OR n.host_id=?) AND (? IS NULL OR n.service_name=?) AND (? IS NULL OR s.namespace=?) AND (? IS NULL OR s.kind=?) ORDER BY s.node_id,s.namespace,s.kind",
-        &selectors[..10],
-    )?;
+    let set_bindings = selectors[..10].to_vec();
+    // Preserve standalone-array validation before cursor authentication, but
+    // never hold the full set list or its encoded text. Re-read compact fields
+    // only when a cursor actually needs the outer identity hash.
+    with_set_records(store, &set_bindings, |records|
+        validate_canonical_array(records, MANAGEMENT_FRAME_BYTES))?;
     let mut identity_parameters = parameters.clone();
     identity_parameters.remove("cursor");
     identity_parameters.remove("limit");
-    let identity = IvyJson::object([
-        ("method", "inventory.list".into()),
-        ("selectors", identity_parameters),
-        ("sets", encoded(&IvyJson::Array(sets))?.into()),
-    ]);
+    let fields: [(JsString,IvyJson);2] = [
+        ("method".into(), "inventory.list".into()), ("selectors".into(), identity_parameters),
+    ];
+    let set_key = JsString::from("sets");
+    let query_hash = OnceCell::new();
+    let hash = || query_hash.get_or_init(|| with_set_records(store, &set_bindings, |records|
+        hash_object_with_array_string(fields.iter().map(|(key,value)| (key,value)), &set_key, records))).clone();
     let boundary = if let Some(cursor) = parameters
         .get("cursor")
         .filter(|v| v.as_js_string().is_some_and(|v| !v.0.is_empty()))
     {
-        store.read_cursor(
-            &identity,
+        store.read_cursor_with_hash(
             cursor.as_js_string().ok_or_else(IvyError::internal)?,
+            || hash(),
         )?
     } else {
         Some(IvyJson::Null)
@@ -498,7 +519,7 @@ pub fn list(
         for key in ["kind", "nativeId", "namespace", "serviceNodeId"] {
             parts.push(field(last, key)?.clone());
         }
-        Some(store.cursor(&identity, &IvyJson::Array(parts))?)
+        Some(store.cursor_with_hash(&hash()?, &IvyJson::Array(parts))?)
     } else {
         None
     };

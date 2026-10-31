@@ -584,12 +584,13 @@ pub(crate) fn canonical_object<'a>(
     encoder.account(2 + pairs.len().saturating_sub(1))?;
     Ok(())
 }
-/// Encode an object's generated array one record at a time with the same
-/// canonical ordering, depth, node and byte budgets as an owned JSON tree.
+/// Encode an object's generated array inline or as canonical JSON text in a
+/// string field. The latter retains separate inner and outer budgets.
 pub(crate) fn canonical_object_with_array<'a>(
     pairs: impl IntoIterator<Item = (&'a JsString, &'a IvyJson)>,
     array_key: &'a JsString,
     records: impl IntoIterator<Item = IvyResult<IvyJson>>,
+    array_string: bool,
     maximum_bytes: usize,
     out: impl std::fmt::Write,
 ) -> IvyResult<()> {
@@ -609,7 +610,8 @@ pub(crate) fn canonical_object_with_array<'a>(
         encoder.string(key)?;
         encoder.emit(":")?;
         if *key == array_key {
-            encoder.records(records.by_ref(), 1)?;
+            if array_string { encoder.string_records(records.by_ref(), 1)?; }
+            else { encoder.records(records.by_ref(), 1)?; }
         } else {
             encoder.value(value.unwrap(), 1)?;
         }
@@ -625,6 +627,17 @@ pub(crate) fn canonical_array(
 ) -> IvyResult<()> {
     Encoder { out, maximum_bytes, nodes: 0, sorted: true, validate: true, accounted: 0 }
         .records(records, 0)
+}
+/// Validate a generated standalone canonical array without retaining its text.
+pub fn validate_canonical_array(
+    records: impl IntoIterator<Item = IvyResult<IvyJson>>,
+    maximum_bytes: usize,
+) -> IvyResult<()> {
+    struct Discard;
+    impl std::fmt::Write for Discard {
+        fn write_str(&mut self, _: &str) -> std::fmt::Result { Ok(()) }
+    }
+    canonical_array(records, maximum_bytes, Discard)
 }
 pub(crate) fn canonical_into(
     value: &IvyJson,
@@ -686,7 +699,33 @@ struct Encoder<W> {
     validate: bool,
     accounted: usize,
 }
+struct QuotedString<'a, W> {
+    encoder: &'a mut Encoder<W>,
+    error: Option<IvyError>,
+}
+impl<W: std::fmt::Write> std::fmt::Write for QuotedString<'_, W> {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        if self.error.is_none() {
+            for c in text.chars() {
+                if let Err(error) = self.encoder.scalar(c) { self.error = Some(error); break; }
+            }
+        }
+        // Finish validating the inner array even if its escaped text exceeded
+        // the outer budget. Its own validation errors take precedence.
+        Ok(())
+    }
+}
 impl<W: std::fmt::Write> Encoder<W> {
+    fn string_records(&mut self, records: impl IntoIterator<Item = IvyResult<IvyJson>>, depth: usize) -> IvyResult<()> {
+        self.node(depth)?;
+        self.emit("\"")?;
+        let maximum_bytes = self.maximum_bytes;
+        let mut quoted = QuotedString { encoder: self, error: None };
+        Encoder { out: &mut quoted, maximum_bytes, nodes: 0, sorted: true, validate: true, accounted: 0 }
+            .records(records, 0)?;
+        if let Some(error) = quoted.error { return Err(error); }
+        quoted.encoder.emit("\"")
+    }
     fn records(&mut self, records: impl IntoIterator<Item = IvyResult<IvyJson>>, depth: usize) -> IvyResult<()> {
         self.node(depth)?;
         self.punctuation("[")?;
@@ -729,23 +768,26 @@ impl<W: std::fmt::Write> Encoder<W> {
         for unit in char::decode_utf16(s.0.iter().copied()) {
             match unit {
                 Err(e) => self.emit(&format!("\\u{:04x}", e.unpaired_surrogate()))?,
-                Ok(c) => match c {
-                    '"' => self.emit("\\\"")?,
-                    '\\' => self.emit("\\\\")?,
-                    '\n' => self.emit("\\n")?,
-                    '\r' => self.emit("\\r")?,
-                    '\t' => self.emit("\\t")?,
-                    '\u{8}' => self.emit("\\b")?,
-                    '\u{c}' => self.emit("\\f")?,
-                    c if (c as u32) < 32 => self.emit(&format!("\\u{:04x}", c as u32))?,
-                    c => {
-                        let mut b = [0; 4];
-                        self.emit(c.encode_utf8(&mut b))?;
-                    }
-                },
+                Ok(c) => self.scalar(c)?,
             }
         }
         self.emit("\"")
+    }
+    fn scalar(&mut self, c: char) -> IvyResult<()> {
+        match c {
+            '"' => self.emit("\\\""),
+            '\\' => self.emit("\\\\"),
+            '\n' => self.emit("\\n"),
+            '\r' => self.emit("\\r"),
+            '\t' => self.emit("\\t"),
+            '\u{8}' => self.emit("\\b"),
+            '\u{c}' => self.emit("\\f"),
+            c if (c as u32) < 32 => self.emit(&format!("\\u{:04x}", c as u32)),
+            c => {
+                let mut b = [0; 4];
+                self.emit(c.encode_utf8(&mut b))
+            }
+        }
     }
     fn value(&mut self, value: &IvyJson, depth: usize) -> IvyResult<()> {
         enum Part<'a> {
