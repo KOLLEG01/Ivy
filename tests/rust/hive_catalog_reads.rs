@@ -426,6 +426,70 @@ fn inventory_pages_bound_provider_state_without_status_or_diagnostic_bodies() {
     // SQLite's C heap and process RSS are outside this Rust allocation probe.
     assert!(full_peak>8*1024*1024);assert!(page_peak<512*1024);
 }
+
+fn inventory_payload_fixture(count: usize, payload_bytes: usize) -> Store {
+    let store=node_page_store();insert_inventory_fixture(&store,"node",0);
+    store.connection().execute("DELETE FROM inventory",[]).unwrap();
+    store.connection().execute("UPDATE inventory_schemas SET definition='{\"recencyPointer\":\"/recency\"}'",[]).unwrap();
+    for index in 0..count {
+        let summary=canonical(&IvyJson::object([("payload","x".repeat(payload_bytes).into()),("recency",((index/2) as f64).into())]),MANAGEMENT_FRAME_BYTES).unwrap();
+        store.connection().execute("INSERT INTO inventory VALUES('node','fixture','item',?1,'1',?2,'1970-01-01T00:00:00.000Z')",params![format!("id{index:02}"),summary]).unwrap();
+    }
+    store
+}
+
+#[test]
+fn inventory_payload_pages_keep_byte_trimmed_native_and_recency_cursor_boundaries() {
+    let store=inventory_payload_fixture(8,300_000);let registry=Registry::default();let runtime=crate::native_runtime::NativeRuntime;
+    let sets=IvyJson::Array(vec![IvyJson::object([("node_id","node".into()),("namespace","fixture".into()),
+        ("kind","item".into()),("revision",8.0.into()),("schema_version","1".into())])]);
+    for recency in [false,true] {
+        let mut params=IvyJson::object([("limit",200.0.into())]);
+        if recency {params.insert("sort","recency-desc".into());}
+        let first=crate::inventory::list(&store,&registry,&params,&runtime,0.0).unwrap();
+        let ids=|page:&IvyJson| page.get("items").unwrap().as_array().unwrap().iter().map(|item|
+            item.get("resourceRef").unwrap().get("nativeId").unwrap().as_str().unwrap()).collect::<Vec<_>>();
+        assert_eq!(ids(&first),if recency {vec!["id06","id07","id04","id05","id02","id03"]}
+            else {vec!["id00","id01","id02","id03","id04","id05"]});
+        let mut selectors=params.clone();selectors.remove("limit");
+        let identity=IvyJson::object([("method","inventory.list".into()),("selectors",selectors),
+            ("sets",canonical(&sets,MANAGEMENT_FRAME_BYTES).unwrap().into())]);
+        let mut boundary=vec![];if recency {boundary.push(1.0.into());}
+        boundary.extend(["item".into(),if recency {"id03".into()} else {"id05".into()},"fixture".into(),"node".into()]);
+        let expected=store.cursor(&identity,&IvyJson::Array(boundary)).unwrap();
+        assert_eq!(first.get("nextCursor"),Some(&IvyJson::from(expected.clone())));
+        params.insert("cursor",expected.into());
+        let second=crate::inventory::list(&store,&registry,&params,&runtime,0.0).unwrap();
+        assert_eq!(ids(&second),if recency {vec!["id00","id01"]} else {vec!["id06","id07"]});
+        assert!(second.get("nextCursor").unwrap().is_null());
+    }
+}
+
+#[test]
+fn inventory_payload_pages_load_only_records_needed_for_the_response_byte_limit() {
+    const CHILD:&str="IVY_INVENTORY_PAYLOAD_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output=std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","kernel::catalogs::read_tests::inventory_payload_pages_load_only_records_needed_for_the_response_byte_limit","--nocapture"])
+            .env(CHILD,"1").output().unwrap();
+        eprint!("{}",String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));return;
+    }
+    let store=inventory_payload_fixture(64,256*1024);let registry=Registry::default();
+    // Measure just the old summary prefetch, excluding other selected columns.
+    let before=LIVE.load(Ordering::Relaxed);PEAK.store(before,Ordering::Relaxed);
+    let mut statement=store.connection().prepare("SELECT summary FROM inventory ORDER BY kind,native_id,namespace,node_id LIMIT 201").unwrap();
+    let summaries=statement.query_map([],|row| Ok(IvyJson::from(row.get::<_,String>(0)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    let prefetch_peak=PEAK.load(Ordering::Relaxed)-before;assert_eq!(summaries.len(),64);drop(summaries);drop(statement);
+    let before=LIVE.load(Ordering::Relaxed);PEAK.store(before,Ordering::Relaxed);
+    let page=crate::inventory::list(&store,&registry,&IvyJson::object([("limit",200.0.into())]),&crate::native_runtime::NativeRuntime,0.0).unwrap();
+    let page_peak=PEAK.load(Ordering::Relaxed)-before;
+    assert_eq!(page.get("items").unwrap().as_array().unwrap().len(),7);assert!(page.get("nextCursor").unwrap().as_js_string().is_some());
+    eprintln!("Hive inventory payload Rust allocation peak: old summaries alone {prefetch_peak} bytes, complete bounded page {page_peak} bytes for 64 records and 16 MiB summary text");
+    // Rust allocator requests only; SQLite's C heap and process RSS are excluded.
+    assert!(prefetch_peak>32*1024*1024);assert!(page_peak<8*1024*1024);
+}
 fn insert_page_node(store: &Store, id: &str, node: &IvyJson) {
     store.connection().execute("INSERT INTO service_nodes VALUES(?1,'fixture','host','service',1,?2)",
         params![id,canonical(node,MANAGEMENT_FRAME_BYTES).unwrap()]).unwrap();

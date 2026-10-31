@@ -428,7 +428,7 @@ pub fn list(
         .unwrap_or(50.0) as usize;
     bindings.push(Value::Integer((limit + 1) as i64));
     let query = format!(
-        "SELECT i.*,s.revision AS snapshot_revision,{} AS sort_value {JOINS} WHERE {SELECTED} AND (? IS NULL OR (ivy_type(i.summary,json_extract(k.definition,'$.archivedPointer'))=1 AND ivy_value(i.summary,json_extract(k.definition,'$.archivedPointer'))=?)) AND (? IS NULL OR EXISTS (SELECT 1 FROM json_each(k.definition,'$.searchPointers') p WHERE ivy_contains(i.summary,p.value,?)=1)) AND {after} AND ivy_budget() ORDER BY {} i.kind COLLATE BINARY,i.native_id COLLATE BINARY,i.namespace COLLATE BINARY,i.node_id COLLATE BINARY LIMIT ?",
+        "SELECT i.rowid,{} AS sort_value {JOINS} WHERE {SELECTED} AND (? IS NULL OR (ivy_type(i.summary,json_extract(k.definition,'$.archivedPointer'))=1 AND ivy_value(i.summary,json_extract(k.definition,'$.archivedPointer'))=?)) AND (? IS NULL OR EXISTS (SELECT 1 FROM json_each(k.definition,'$.searchPointers') p WHERE ivy_contains(i.summary,p.value,?)=1)) AND {after} AND ivy_budget() ORDER BY {} i.kind COLLATE BINARY,i.native_id COLLATE BINARY,i.namespace COLLATE BINARY,i.node_id COLLATE BINARY LIMIT ?",
         if recency_sort { RECENCY } else { "0" },
         if recency_sort {
             format!("{RECENCY} DESC,")
@@ -436,12 +436,25 @@ pub fn list(
             String::new()
         }
     );
-    let found = rows(store, &query, &bindings)?;
+    // Keep summaries out of the SQL sort and the limit+1 lookahead. Only
+    // materialize records while building the byte-bounded response.
+    let found = {
+        let mut statement = sql(store, store.connection().prepare_cached(&query))?;
+        sql(store, statement.query_map(params_from_iter(bindings.iter()), |row|
+            Ok((row.get::<_,i64>(0)?, row.get::<_,f64>(1)?))))?
+            .map(|row| sql(store, row)).collect::<IvyResult<Vec<_>>>()?
+    };
     let mut items = vec![];
     let mut bytes = 128;
     let mut trimmed = false;
-    for row in found.iter().take(limit) {
-        let id = string(row, "node_id")?;
+    let mut last_recency = 0.0;
+    for (row_id, recency) in found.iter().take(limit) {
+        let row = rows(store,
+            "SELECT i.*,s.revision AS snapshot_revision FROM inventory i
+             JOIN inventory_sets s ON s.node_id=i.node_id AND s.namespace=i.namespace AND s.kind=i.kind
+             WHERE i.rowid=?1", &[Value::Integer(*row_id)])?
+            .pop().ok_or_else(IvyError::internal)?;
+        let id = string(&row, "node_id")?;
         let stale = if let Some(stale) = providers.get(id) {
             *stale
         } else {
@@ -455,9 +468,9 @@ pub fn list(
             stale
         };
         let next = item(
-            row,
+            &row,
             stale,
-            field(row, "snapshot_revision")?.clone(),
+            field(&row, "snapshot_revision")?.clone(),
             runtime,
             now,
         )?;
@@ -473,15 +486,16 @@ pub fn list(
         }
         bytes += size;
         items.push(next);
+        last_recency = *recency;
     }
     let more = trimmed || found.len() > items.len();
     let cursor = if more && !items.is_empty() {
-        let last = &found[items.len() - 1];
+        let last = field(items.last().ok_or_else(IvyError::internal)?, "resourceRef")?;
         let mut parts = vec![];
         if recency_sort {
-            parts.push(field(last, "sort_value")?.clone());
+            parts.push(last_recency.into());
         }
-        for key in ["kind", "native_id", "namespace", "node_id"] {
+        for key in ["kind", "nativeId", "namespace", "serviceNodeId"] {
             parts.push(field(last, key)?.clone());
         }
         Some(store.cursor(&identity, &IvyJson::Array(parts))?)
