@@ -214,6 +214,43 @@ impl NativeInventory {
             result => result,
         }
     }
+    /// Shutdown needs current activity, not persisted conversations or turns.
+    pub async fn has_active_threads(&self) -> IvyResult<bool> {
+        let reader = self.reader(None, 120_000);
+        for id in reader.loaded().await? {
+            let result = reader
+                .read(
+                    "thread/read",
+                    IvyJson::object([
+                        ("threadId", IvyJson::String(id)),
+                        ("includeTurns", false.into()),
+                    ]),
+                )
+                .await?;
+            let status = result
+                .required("thread")?
+                .required("status")?
+                .required("type")?
+                .as_js_string()
+                .ok_or_else(|| {
+                    IvyError::new(
+                        "native_inventory_invalid",
+                        "Native activity must have a known thread status.",
+                    )
+                })?;
+            if status.eq_str("active") {
+                return Ok(true);
+            }
+            require(
+                ["idle", "notLoaded", "systemError"]
+                    .iter()
+                    .any(|value| status.eq_str(value)),
+                "native_inventory_invalid",
+                "Native activity must have a known thread status.",
+            )?;
+        }
+        Ok(false)
+    }
     async fn thread_snapshot(&self, reader: &Reader<'_>) -> IvyResult<IvyJson> {
         let before = reader.loaded().await?;
         let owned: HashSet<_> = before.iter().cloned().collect();
@@ -390,7 +427,12 @@ impl Reader<'_> {
     }
     async fn read(&self, method: &str, params: IvyJson) -> IvyResult<IvyJson> {
         self.check()?;
-        let timeout_ms = self.budget.min(crate::native_management::native_read_timeout_ms(&method.into(), &params));
+        let timeout_ms = self
+            .budget
+            .min(crate::native_management::native_read_timeout_ms(
+                &method.into(),
+                &params,
+            ));
         let reply = (self.owner.read)(
             method.into(),
             params,

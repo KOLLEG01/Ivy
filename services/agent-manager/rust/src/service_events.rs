@@ -16,6 +16,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+use tokio::sync::watch;
 
 #[derive(Default)]
 struct State {
@@ -37,6 +38,7 @@ struct Inner {
     settings: ServiceEventSettings,
     state: Mutex<State>,
     clock: Arc<JournalClock>,
+    activity: watch::Sender<()>,
 }
 #[derive(Clone)]
 pub struct ServiceEvents(Arc<Inner>);
@@ -56,6 +58,7 @@ impl ServiceEvents {
             settings,
             state: Mutex::new(State::default()),
             clock,
+            activity: watch::channel(()).0,
         }))
     }
     pub fn begin_epoch(&self, epoch: JsString) -> IvyResult<Events> {
@@ -113,6 +116,39 @@ impl ServiceEvents {
         state.inventory = Some(inventory);
         state.notices = Some(notices);
         Ok(())
+    }
+    /// Called after invocation admission has closed and accepted RPCs settled.
+    /// Events invalidate the metadata scan, including activity on child threads.
+    pub async fn wait_idle(&self) -> IvyResult<()> {
+        let mut activity = self.0.activity.subscribe();
+        let (rpc, inventory) = {
+            let state = self.0.state.lock().map_err(|_| IvyError::internal())?;
+            (state.rpc.clone(), state.inventory.clone())
+        };
+        let (Some(rpc), Some(inventory)) = (rpc, inventory) else {
+            // Startup can stop before handlers and inventory are installed.
+            return Ok(());
+        };
+        loop {
+            activity.borrow_and_update();
+            let result = tokio::select! {
+                _ = rpc.closed() => return Ok(()),
+                result = inventory.has_active_threads() => result,
+            };
+            if activity.has_changed().map_err(|_| IvyError::internal())? {
+                continue;
+            }
+            if matches!(result, Ok(false)) {
+                return Ok(());
+            }
+            // A failed read proves no idle boundary. Retry only the read; never
+            // resend a turn or a tool action. Normal active work waits on events.
+            tokio::select! {
+                _ = rpc.closed() => return Ok(()),
+                _ = activity.changed() => {},
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if result.is_err() => {},
+            }
+        }
     }
     fn journal(&self) -> Arc<Mutex<NativeJournal>> {
         self.0.settings.operations.journal()
@@ -176,6 +212,19 @@ impl ServiceEvents {
     }
     fn notification(&self, epoch: &JsString, value: NativeNotification) -> IvyResult<()> {
         let settings = &self.0.settings;
+        if self.0.activity.receiver_count() != 0
+            && [
+                "thread/started",
+                "thread/closed",
+                "thread/status/changed",
+                "turn/started",
+                "turn/completed",
+            ]
+            .iter()
+            .any(|method| value.method.eq_str(method))
+        {
+            self.0.activity.send_replace(());
+        }
         settings
             .policy
             .lock()

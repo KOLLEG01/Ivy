@@ -13,6 +13,7 @@ use crate::{
     inventory_manager::{InventoryConnection, InventoryManager},
     local_state::{Limits as StateLimits, LocalAgentState},
     native_connection::AgentNativeConnection,
+    native_handshake::NativeMode,
     native_journal::{Limits as JournalLimits, NativeJournal, Owner},
     native_launch::{
         NativeHomeInputs, NativeProcessOptions, managed_environment_before_launch,
@@ -270,6 +271,7 @@ fn put<T>(slot: &Slot<T>, value: T) -> IvyResult<()> {
 }
 struct Resources {
     native: Slot<Arc<AgentNativeConnection>>,
+    events: Slot<ServiceEvents>,
     service: Slot<Arc<ServiceClient>>,
     environment: Slot<ManagedEnvironment>,
     inventory: Slot<InventoryManager>,
@@ -316,7 +318,20 @@ impl Resources {
                 stop_timer: Arc::new(move || {
                     resources.stop_timer.send_replace(true);
                 }),
-                admissions: Arc::new(move || admissions.work.close()),
+                admissions: Arc::new(move || {
+                    let native = get(&admissions.native);
+                    let events = get(&admissions.events);
+                    admissions.work.close_after(Box::pin(async move {
+                        if let Some(native) = native? {
+                            if native.mode != NativeMode::ExternalProxy {
+                                if let Some(events) = events? {
+                                    events.wait_idle().await?;
+                                }
+                            }
+                        }
+                        Ok(())
+                    }))
+                }),
                 native: Arc::new(move || {
                     // Signal the native owner at phase admission, before its waiter.
                     let run = get(&native.native).map(|owner| owner.map(|owner| owner.close()));
@@ -514,6 +529,7 @@ async fn start(config: InstanceConfig, bindings: AgentRuntimeBindings) -> IvyRes
     let (stop_timer, _) = watch::channel(false);
     let resources = Arc::new(Resources {
         native: slot(),
+        events: slot(),
         service: slot(),
         environment: slot(),
         inventory: slot(),
@@ -559,6 +575,7 @@ async fn start(config: InstanceConfig, bindings: AgentRuntimeBindings) -> IvyRes
             policy: policy.clone(),
             query: bindings.form_query,
         });
+        put(&resources.events, events.clone())?;
         let paths = bindings.home.paths.clone();
         let account_home = bindings.home.account_home.clone();
         let begin = events.clone();

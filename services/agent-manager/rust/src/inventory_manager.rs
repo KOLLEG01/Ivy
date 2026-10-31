@@ -156,6 +156,9 @@ impl InventoryManager {
             .project_snapshot
             .clone())
     }
+    pub async fn has_active_threads(&self) -> IvyResult<bool> {
+        self.0.inventory.has_active_threads().await
+    }
     pub fn refresh_threads(&self, connection: InventoryConnection) -> IvyResult<InventoryRun> {
         self.refresh(connection, false, true)
     }

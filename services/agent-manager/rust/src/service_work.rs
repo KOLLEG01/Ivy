@@ -132,6 +132,11 @@ impl AgentWork {
     /// Retire admission and capture accepted work under the same lock. The
     /// native owner must remain available until this work has settled.
     pub fn close(&self) -> ServiceFuture<()> {
+        self.close_after(Box::pin(async { Ok(()) }))
+    }
+    /// Asynchronous native work can outlive its accepting RPC. Keep replies
+    /// admissible until that work, too, has reached its retirement boundary.
+    pub fn close_after(&self, native_work: ServiceFuture<()>) -> ServiceFuture<()> {
         let snapshot = self
             .0
             .lock()
@@ -148,6 +153,7 @@ impl AgentWork {
         let owner = self.clone();
         Box::pin(async move {
             Self::wait_snapshot(snapshot).await?;
+            native_work.await?;
             // A pending native request may need an answer before it can finish.
             // Retire answers only once the ordinary invocations have settled.
             let replies = owner
