@@ -560,3 +560,130 @@ fn node_and_host_pages_load_only_selected_status_and_skip_unreturned_diagnostics
         assert!(projected_peak<512*1024,"Unreturned diagnostics or full node catalogs were retained");
     }
 }
+
+
+fn full_namespace_catalog(store: &Store, registry: &Registry, params: &IvyJson, now: f64) -> IvyResult<IvyJson> {
+    let mut records: Vec<IvyJson> = Vec::new();
+    for node in registry.nodes(store,&crate::native_runtime::NativeRuntime,now)? {
+        for name in registry.namespace_names(store,string(&node,"serviceNodeId")?)? {
+            if let Some(record)=records.iter_mut().find(|record| record.get("namespace")==Some(&name)) {
+                let mut providers=record.remove("providers").and_then(IvyJson::into_array).unwrap();
+                providers.push(provider(&node));record.insert("providers",IvyJson::Array(providers));
+            } else {
+                records.push(IvyJson::object([("namespace",name),("providers",IvyJson::Array(vec![provider(&node)]))]));
+            }
+        }
+    }
+    let identity=objects::page_identity("namespaces.list",params)?;
+    crate::paging::catalog_page(store,records,&identity,|record|key(record,"namespace"),
+        params.get("limit").and_then(IvyJson::as_f64).map(|value|value as usize),optional_string(params,"cursor"))
+}
+fn compare_namespace_catalog(store: &Store, registry: &Registry, params: &IvyJson, now: f64) -> IvyResult<IvyJson> {
+    let expected=full_namespace_catalog(store,registry,params,now).map_err(|error|error.to_wire());
+    let actual=registry.namespace_page(store,params,&crate::native_runtime::NativeRuntime,now);
+    assert!(actual.as_ref().map_err(IvyError::to_wire)==expected.as_ref().map_err(Clone::clone),
+        "Namespace page differs; actual error {:?}",actual.as_ref().err().map(|e|&e.code));
+    actual
+}
+fn insert_namespace_provider(store: &Store, id: &str, online: bool, names: Vec<IvyJson>, message_bytes: usize, schema_bytes: usize) {
+    insert_page_node(store,id,&IvyJson::object([("serviceNodeId",id.into()),("hostId","host".into()),
+        ("serviceName","service".into()),("connected",online.into()),("ready",online.into()),
+        ("synced",true.into()),("desiredEnabled",true.into()),("lastContactAt","1970-01-01T00:00:00.000Z".into())]));
+    let catalog=IvyJson::object([("namespaces",IvyJson::Array(names.into_iter().map(|namespace|
+        IvyJson::object([("namespace",namespace),("tools",IvyJson::Array(vec![IvyJson::object([
+            ("inputSchema",IvyJson::object([("description","s".repeat(schema_bytes).into())]))
+        ])]))])
+    ).collect()))]);
+    store.connection().execute("INSERT INTO registries VALUES(?1,?2)",params![id,canonical(&catalog,MANAGEMENT_FRAME_BYTES).unwrap()]).unwrap();
+    let diagnostic=IvyJson::object([("source",format!("service:{id}").into()),("status","current".into()),
+        ("lastObservedAt","1970-01-01T00:00:00.000Z".into()),("code","fixture".into()),
+        ("message","m".repeat(message_bytes).into())]);
+    store.connection().execute("INSERT INTO diagnostics VALUES(?1,?2)",params![id,canonical(&diagnostic,MANAGEMENT_FRAME_BYTES).unwrap()]).unwrap();
+}
+
+#[test]
+fn namespace_pages_keep_names_provider_duplicates_live_status_and_exact_cursors() {
+    let store=node_page_store();let registry=Registry::default();
+    let a=IvyJson::String(JsString(vec![0xd800]));
+    let b=IvyJson::String(JsString(vec![0xd801]));
+    insert_namespace_provider(&store,"a\"",true,vec![a.clone(),b.clone(),"same".into(),"same".into(),
+        "nul\0tail".into(),"�".into(),"alpha".into(),IvyJson::Null,17.0.into(),
+        IvyJson::object([("ignored","value".into())]),"".into(),"😀".into()],10,0);
+    insert_namespace_provider(&store,"a\\",false,vec![b.clone(),"alpha".into(),"same".into(),a.clone()],10,0);
+    insert_namespace_provider(&store,"nul\0node",true,vec!["same".into(),"second".into()],10,0);
+    insert_namespace_provider(&store,"z",true,vec!["same".into(),"last".into()],10,0);
+    insert_page_node(&store,"absent",&IvyJson::object([("serviceNodeId","absent".into()),("hostId","host".into())]));
+    for (id,source) in [("null","null"),("empty","{}"),("null-names",r#"{"namespaces":null}"#)] {
+        insert_page_node(&store,id,&IvyJson::object([("serviceNodeId",id.into()),("hostId","host".into())]));
+        store.connection().execute("INSERT INTO registries VALUES(?1,?2)",params![id,source]).unwrap();
+    }
+    store.connection().execute("UPDATE registries SET registry_json=replace(registry_json,'\"alpha\"','\"\\u0061lpha\"') WHERE node_id=?1",["a\\"]).unwrap();
+    for now in [0.0,10_001.0] {
+        for limit in [1,2,50] {
+            let mut params=IvyJson::object([("limit",(limit as f64).into())]);
+            let mut page=compare_namespace_catalog(&store,&registry,&params,now).unwrap();
+            let mut count=1;
+            while !page.get("nextCursor").unwrap().is_null() {
+                params.insert("cursor",page.get("nextCursor").unwrap().clone());
+                page=compare_namespace_catalog(&store,&registry,&params,now).unwrap();
+                count+=1;assert!(count<20);
+            }
+            params.insert("cursor","invalid".into());
+            assert_eq!(compare_namespace_catalog(&store,&registry,&params,now).unwrap_err().code,"invalid_cursor");
+        }
+    }
+    let all=compare_namespace_catalog(&store,&registry,&IvyJson::object([("limit",50.0.into())]),0.0).unwrap();
+    let same=all.get("items").unwrap().as_array().unwrap().iter().find(|record|record.get("namespace")==Some(&"same".into())).unwrap();
+    let providers=same.get("providers").unwrap().as_array().unwrap();
+    assert_eq!(providers.len(),5);
+    assert_eq!(providers[0].get("node").unwrap().get("serviceNodeId"),Some(&"a\"".into()));
+    assert_eq!(providers[1],providers[0]);
+    assert_eq!(providers[2].get("eligible"),Some(&false.into()));
+}
+
+#[test]
+fn namespace_pages_keep_provider_response_byte_limits() {
+    let store=node_page_store();let registry=Registry::default();
+    for index in 0..3 {
+        insert_namespace_provider(&store,&format!("node{index}"),true,vec![format!("namespace{index}").into()],1100*1024,0);
+    }
+    let mut params=IvyJson::object([("limit",50.0.into())]);
+    let first=compare_namespace_catalog(&store,&registry,&params,0.0).unwrap();
+    assert_eq!(first.get("items").unwrap().as_array().unwrap().len(),1);
+    params.insert("cursor",first.get("nextCursor").unwrap().clone());
+    let second=compare_namespace_catalog(&store,&registry,&params,0.0).unwrap();
+    assert_eq!(second.get("items").unwrap().as_array().unwrap()[0].get("namespace"),Some(&"namespace1".into()));
+    store.connection().execute("UPDATE registries SET registry_json=replace(registry_json,'namespace1','namespace0') WHERE node_id='node1'",[]).unwrap();
+    params.remove("cursor");
+    assert_eq!(compare_namespace_catalog(&store,&registry,&params,0.0).unwrap_err().code,"result_too_large");
+}
+
+#[test]
+fn namespace_pages_materialize_only_selected_providers_and_skip_schema_payloads() {
+    const CHILD: &str="IVY_NAMESPACE_PAGE_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output=std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","kernel::catalogs::read_tests::namespace_pages_materialize_only_selected_providers_and_skip_schema_payloads","--nocapture"])
+            .env(CHILD,"1").output().unwrap();
+        eprint!("{}",String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));return;
+    }
+    let store=node_page_store();let registry=Registry::default();
+    for index in 0..64 {
+        insert_namespace_provider(&store,&format!("node{index:03}"),true,
+            (0..4).map(|which|format!("ns{index:03}-{which}").into()).collect(),32*1024,16*1024);
+    }
+    let params=IvyJson::object([("limit",1.0.into())]);
+    let before=LIVE.load(Ordering::Relaxed);PEAK.store(before,Ordering::Relaxed);
+    let expected=full_namespace_catalog(&store,&registry,&params,0.0).unwrap();
+    let full_peak=PEAK.load(Ordering::Relaxed)-before;
+    let before=LIVE.load(Ordering::Relaxed);PEAK.store(before,Ordering::Relaxed);
+    let page=registry.namespace_page(&store,&params,&crate::native_runtime::NativeRuntime,0.0).unwrap();
+    let paged_peak=PEAK.load(Ordering::Relaxed)-before;
+    assert!(page==expected,"Namespace memory-case response differs");
+    eprintln!("Hive namespace page Rust allocation peak: full {full_peak} bytes, paged {paged_peak} bytes for 64 providers, 256 names, 2 MiB diagnostic messages and 4 MiB schema text");
+    // Rust requests only; SQLite's C heap and process RSS are excluded.
+    assert!(full_peak>16*1024*1024);
+    assert!(paged_peak<512*1024,"Unselected status/providers/schema payloads were retained");
+}

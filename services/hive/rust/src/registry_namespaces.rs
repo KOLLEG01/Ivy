@@ -20,6 +20,7 @@ struct Names<'a> {
     #[serde(borrow)]
     namespaces: Option<Vec<&'a RawValue>>,
 }
+#[cfg(test)]
 #[derive(Deserialize)]
 struct Named<'a> {
     #[serde(borrow)]
@@ -160,6 +161,7 @@ pub(super) fn live_catalog(source: &str) -> IvyResult<Option<LiveCatalog>> {
     Ok(Some(result))
 }
 
+#[cfg(test)]
 pub(super) fn names(source: &str) -> IvyResult<Vec<IvyJson>> {
     let source = source.trim_matches([' ', '\t', '\r', '\n']);
     if source == "null" {

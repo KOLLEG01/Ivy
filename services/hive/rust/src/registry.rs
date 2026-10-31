@@ -485,6 +485,7 @@ impl Registry {
         let source = sql(store, row.get_ref(0))?.as_str().map_err(|_| IvyError::internal())?;
         namespaces::topics(source, namespace)
     }
+    #[cfg(test)]
     pub fn namespace_names(&self, store: &Store, id: &JsString) -> IvyResult<Vec<IvyJson>> {
         let mut statement = sql(store, store.connection().prepare_cached(
             "SELECT registry_json FROM registries WHERE node_id=?",

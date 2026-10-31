@@ -208,34 +208,9 @@ pub(super) fn handle(
                 .node(call.store, id, call.runtime, (call.clock)())?;
             service_contracts::list(call.store, params, &node)
         }
-        "namespaces.list" => {
-            let mut records: Vec<IvyJson> = vec![];
-            for node in call
-                .registry
-                .nodes(call.store, call.runtime, (call.clock)())?
-            {
-                let names = call
-                    .registry
-                    .namespace_names(call.store, string(&node, "serviceNodeId")?)?;
-                for name in names {
-                    if let Some(record) = records
-                        .iter_mut()
-                        .find(|v| v.get("namespace") == Some(&name))
-                    {
-                        let mut providers = record.remove("providers")
-                            .and_then(IvyJson::into_array).ok_or_else(IvyError::internal)?;
-                        providers.push(provider(&node));
-                        record.insert("providers", IvyJson::Array(providers));
-                    } else {
-                        records.push(IvyJson::object([
-                            ("namespace", name),
-                            ("providers", IvyJson::Array(vec![provider(&node)])),
-                        ]));
-                    }
-                }
-            }
-            page(call, method, params, records, |v| key(v, "namespace"), None)
-        }
+        "namespaces.list" => call.registry.namespace_page(
+            call.store, params, call.runtime, (call.clock)(),
+        ),
         "namespaces.get" => call.registry.snapshot(
             call.store,
             string(params, "namespace")?,
