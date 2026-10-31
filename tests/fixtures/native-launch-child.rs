@@ -35,7 +35,7 @@ fn main() {
         arguments.clone()
     };
     let log = format!(
-        "{{\"args\":[{}],\"executable\":{},\"cwd\":{},\"home\":{},\"credential\":{},\"shellPath\":{}}}\n",
+        "{{\"args\":[{}],\"executable\":{},\"cwd\":{},\"home\":{},\"credential\":{},\"shellPath\":{},\"rjemMallocConf\":{},\"mallocConf\":{}}}\n",
         logged_arguments
             .iter()
             .map(|s| quote(s))
@@ -46,7 +46,9 @@ fn main() {
         quote(&env::var("CODEX_HOME").unwrap_or_default()),
         env::var("IVY_HIVE_TOKEN").as_deref() == Ok("fixture-credential"),
         env::var("PATH").unwrap_or_default().split(';').next()
-            == executable.parent().unwrap().to_str()
+            == executable.parent().unwrap().to_str(),
+        env::var("_RJEM_MALLOC_CONF").map_or_else(|_| "null".to_owned(), |v| quote(&v)),
+        env::var("MALLOC_CONF").map_or_else(|_| "null".to_owned(), |v| quote(&v))
     );
     OpenOptions::new()
         .create(true)
@@ -57,6 +59,11 @@ fn main() {
         .unwrap();
     if arguments == ["--version"] {
         println!("codex-cli {}", fields[6]);
+    } else if fields[2] == "launch-environment" && arguments.get(1).is_some_and(|s| s == "proxy") {
+        // Admit the proxy probe, then exit without connecting to an external server.
+        if arguments.last().is_some_and(|s| s == "--help") {
+            println!("--sock");
+        }
     } else if arguments.iter().any(|s| s == "-Command") {
         println!(
             "{{\"packageStatus\":15700,\"version\":\"7.6.0\",\"executable\":{}}}",

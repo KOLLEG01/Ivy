@@ -153,6 +153,10 @@ On glibc-based Linux hosts, health initialization starts one small process-wide
 allocator worker. It returns free pages to the OS at most once every 30 seconds,
 independently of the service event loop and readiness-file I/O. Live data,
 transport limits and the host's aggregate memory budget are unchanged.
+For owned Linux Codex processes, AgentManager enables jemalloc background page
+release unless the executing account supplies `_RJEM_MALLOC_CONF` or `MALLOC_CONF`.
+Explicit values, including empty values, take precedence. Proxies and adapters
+keep their existing launch environment.
 
 Account-, device- and network-specific values remain mandatory installation inputs.
 Configure non-loopback listeners and trusted proxies explicitly when required by the

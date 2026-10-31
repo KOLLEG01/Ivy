@@ -544,7 +544,7 @@ async fn claude_event(
     .await
     .unwrap_or_else(|_| panic!("Missing native event: {method}; observed {observed:?}"))
 }
-fn claude_launch_options(
+fn launch_options(
     root: &Root,
     settings: &IvyJson,
     events: tokio::sync::mpsc::UnboundedSender<IvyJson>,
@@ -590,6 +590,170 @@ fn claude_launch_options(
         }),
     }
 }
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn owned_linux_launch_frees_idle_pages_and_preserves_explicit_allocator_choices() {
+    use ivy_contracts::hash::digest;
+    let root = Root::new();
+    let executable = root.0.join("native");
+    let compiled = Command::new("rustc")
+        .args(["--edition=2024", "-C", "debuginfo=0"])
+        .arg(repo().join("tests/fixtures/native-launch-child.rs"))
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let node = Command::new("node")
+        .args(["-p", "process.execPath"])
+        .output()
+        .unwrap();
+    assert!(node.status.success());
+    let node = String::from_utf8(node.stdout).unwrap();
+    let hash = digest(fs::read(&executable).unwrap());
+    let catalog_path = root
+        .0
+        .join("artifact/dist/specs/native/codex-0.154.0/catalog.json");
+    fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+    let mut catalog = parse(
+        &fs::read_to_string(repo().join("specs/native/codex-0.154.0/catalog.json")).unwrap(),
+        usize::MAX,
+    )
+    .unwrap();
+    catalog.insert("nativeExecutableHash", hash.clone().into());
+    fs::write(catalog_path, stringify(&catalog, usize::MAX).unwrap()).unwrap();
+    let parent = [
+        std::env::var_os("_RJEM_MALLOC_CONF"),
+        std::env::var_os("MALLOC_CONF"),
+    ];
+    for (index, external, rjem, malloc) in [
+        (0, false, None, None),
+        (1, false, Some("background_thread:false"), None),
+        (2, false, None, Some("dirty_decay_ms:5000")),
+        (3, false, Some(""), None),
+        (4, false, None, Some("")),
+        (
+            5,
+            false,
+            Some("background_thread:false"),
+            Some("dirty_decay_ms:5000"),
+        ),
+        (6, true, None, None),
+        (
+            7,
+            true,
+            Some("background_thread:true"),
+            Some("dirty_decay_ms:5000"),
+        ),
+    ] {
+        let home = root.0.join("data/native");
+        let marker = root.0.join(format!("case-{index}"));
+        fs::write(
+            root.0.join("launch-fixture.txt"),
+            format!(
+                "{}\n{}\nlaunch-environment\n{}\n{}\n{{}}\n0.154.0\n",
+                node.trim(),
+                repo()
+                    .join("tests/fixtures/native-connection-child.mjs")
+                    .display(),
+                home.display(),
+                marker.display(),
+            ),
+        )
+        .unwrap();
+        let mut server = IvyJson::object([("mode", "owned-stdio".into())]);
+        if external {
+            server = IvyJson::object([
+                ("mode", "external-proxy".into()),
+                ("socketPath", path(&root.0.join("unused.sock"))),
+                ("expectedCodexHome", path(&home)),
+            ]);
+        }
+        let settings = IvyJson::object([
+            ("nativeExecutable", path(&executable)),
+            ("nativeVersion", "0.154.0".into()),
+            ("nativeExecutableHash", hash.clone().into()),
+            ("codexHome", path(&home)),
+            ("appServer", server),
+            (
+                "limits",
+                IvyJson::object([
+                    ("maxOperations", 100.0.into()),
+                    ("maxJournalBytes", 1048576.0.into()),
+                    ("maxPendingInputs", 8.0.into()),
+                    ("maxNotificationBytes", 1048576.0.into()),
+                ]),
+            ),
+        ]);
+        let (send, _events) = tokio::sync::mpsc::unbounded_channel();
+        let mut options = launch_options(&root, &settings, send);
+        for (key, value) in [("_RJEM_MALLOC_CONF", rjem), ("MALLOC_CONF", malloc)] {
+            options.home_inputs.environment.remove(&JsString::from(key));
+            if let Some(value) = value {
+                options
+                    .home_inputs
+                    .environment
+                    .insert(key.into(), value.into());
+            }
+        }
+        let result = tokio::time::timeout(Duration::from_secs(15), start_native_process(options))
+            .await
+            .unwrap();
+        if external {
+            // The inert proxy records its environment and exits without a server.
+            assert!(result.is_err());
+        } else {
+            let connection = result.unwrap();
+            assert_eq!(connection.mode, NativeMode::OwnedStdio);
+            connection.close().await.unwrap();
+        }
+        let launches = fs::read_to_string(format!("{}.launches", marker.display())).unwrap();
+        let launches: Vec<_> = launches
+            .lines()
+            .map(|s| parse(s, usize::MAX).unwrap())
+            .collect();
+        assert_eq!(launches.len(), if external { 3 } else { 2 });
+        let expected_rjem = if external {
+            None
+        } else {
+            rjem.or_else(|| malloc.is_none().then_some("background_thread:true"))
+        };
+        let expected_malloc = if external { None } else { malloc };
+        for (position, launch) in launches.iter().enumerate() {
+            let child = position == launches.len() - 1;
+            assert_eq!(
+                launch.get("rjemMallocConf"),
+                Some(&if child {
+                    expected_rjem.map(IvyJson::from).unwrap_or(IvyJson::Null)
+                } else {
+                    IvyJson::Null
+                }),
+                "case {index}, launch {position}"
+            );
+            assert_eq!(
+                launch.get("mallocConf"),
+                Some(&if child {
+                    expected_malloc.map(IvyJson::from).unwrap_or(IvyJson::Null)
+                } else {
+                    IvyJson::Null
+                }),
+                "case {index}, launch {position}"
+            );
+        }
+    }
+    assert_eq!(
+        [
+            std::env::var_os("_RJEM_MALLOC_CONF"),
+            std::env::var_os("MALLOC_CONF")
+        ],
+        parent
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_claude_launch_retries_only_zero_work_preserves_inputs_and_reopens_data() {
     use ivy_contracts::hash::digest;
@@ -730,7 +894,7 @@ async fn production_claude_launch_retries_only_zero_work_preserves_inputs_and_re
     let (send, mut events) = tokio::sync::mpsc::unbounded_channel();
     let connection = tokio::time::timeout(
         Duration::from_secs(45),
-        start_native_process(claude_launch_options(&root, &settings, send)),
+        start_native_process(launch_options(&root, &settings, send)),
     )
     .await
     .unwrap()
@@ -923,7 +1087,7 @@ async fn production_claude_launch_retries_only_zero_work_preserves_inputs_and_re
         .unwrap();
     // Keep the event receiver alive during the second handshake.
     let (send2, mut events2) = tokio::sync::mpsc::unbounded_channel();
-    let reopened = start_native_process(claude_launch_options(&root, &settings, send2))
+    let reopened = start_native_process(launch_options(&root, &settings, send2))
         .await
         .unwrap();
     let saved = claude_call(

@@ -570,6 +570,21 @@ async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection
     } else {
         vec!["app-server".into()]
     };
+    #[cfg(target_os = "linux")]
+    if mode == NativeMode::OwnedStdio {
+        // The process launcher filters inherited variables. Preserve explicit
+        // allocator choices, including empty values, before selecting a default.
+        let mut configured = false;
+        for key in ["_RJEM_MALLOC_CONF", "MALLOC_CONF"] {
+            if let Some(value) = context.environment.get(&JsString::from(key)) {
+                environment.insert(key.into(), node_path::to_native(value).into_os_string());
+                configured = true;
+            }
+        }
+        if !configured {
+            environment.insert("_RJEM_MALLOC_CONF".into(), "background_thread:true".into());
+        }
+    }
     let child = process::spawn(
         &process::Command {
             executable: "codex".into(),
