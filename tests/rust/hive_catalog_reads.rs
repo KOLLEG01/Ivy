@@ -555,12 +555,6 @@ fn observation_pages_keep_live_fields_host_filters_exact_cursors_and_sort_ties()
             }
         }
     }
-    let all=registry.host_observations(&store,None,&crate::native_runtime::NativeRuntime,0.0).unwrap();
-    let empty=IvyJson::object(std::iter::empty::<(&str,IvyJson)>());
-    let page=compare_observation_catalog(&store,&registry,&empty,0.0).unwrap();
-    for entry in page.get("items").unwrap().as_array().unwrap() {
-        assert!(all.contains(entry));
-    }
 }
 
 #[test]
@@ -621,6 +615,139 @@ fn observation_pages_load_selected_snapshots_without_reporter_diagnostics() {
     eprintln!("Hive host observation Rust allocation peak: full {full_peak} bytes, paged {projected_peak} bytes for 64 reports, 2 MiB snapshots and 2 MiB diagnostics");
     // Rust requests only; SQLite's C heap and process RSS are excluded.
     assert!(full_peak>4*1024*1024);assert!(projected_peak<512*1024,"Unreturned snapshots or reporter diagnostics retained");
+}
+
+fn full_protected_builds(store: &Store, current: &JsString) -> IvyResult<std::collections::HashSet<JsString>> {
+    let registry=Registry::default();let runtime=&crate::native_runtime::NativeRuntime;
+    let mut builds=std::collections::HashSet::from([current.clone()]);
+    for node in registry.nodes(store,runtime,0.0)? {
+        if let Some(id)=node.get("buildId").and_then(IvyJson::as_js_string) {builds.insert(id.clone());}
+    }
+    let mut statement=sql(store,store.connection().prepare_cached(
+        "SELECT node_id,snapshot_json FROM host_reports ORDER BY host_id LIMIT 1001"))?;
+    let snapshots=sql(store,statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))))?
+        .map(|row| {
+            let (id,value)=sql(store,row)?;let snapshot=decode(&value)?;
+            if snapshot.as_object().is_none(){return Err(IvyError::internal());}
+            registry.node(store,&id.into(),runtime,0.0)?;Ok(snapshot)
+        }).collect::<IvyResult<Vec<_>>>()?;
+    let mut optional=|value:Option<&IvyJson>| {
+        if let Some(id)=value.and_then(IvyJson::as_js_string).filter(|id|!id.0.is_empty()){builds.insert(id.clone());}
+    };
+    for snapshot in snapshots {
+        let status=snapshot.required("status")?;
+        optional(status.get("executor").and_then(|v|v.get("buildId")));
+        for (name,fields) in [("instances",&["installedBuild","observedBuild"][..]),
+            ("unfinished",&["previousBuild","targetBuild","observedBuild"][..])] {
+            let values=match status.required(name)? {IvyJson::Array(a)=>a.as_slice(),IvyJson::String(_)=>&[],_=>return Err(IvyError::internal())};
+            for value in values {
+                if value.is_null(){return Err(IvyError::internal());}
+                for field in fields {optional(value.get(*field));}
+            }
+        }
+    }
+    Ok(builds)
+}
+fn compare_protected_builds(store: &Store) -> IvyResult<std::collections::HashSet<JsString>> {
+    let expected=full_protected_builds(store,&"kernel".into()).map_err(|e|e.to_wire());
+    let actual=crate::package_kernel::protected_builds(store,&"kernel".into());
+    assert_eq!(actual.as_ref().map_err(IvyError::to_wire),expected.as_ref().map_err(Clone::clone));actual
+}
+fn set_host_snapshot(store: &Store, host: &str, node: &str, value: &IvyJson) {
+    store.connection().execute("INSERT OR REPLACE INTO host_reports VALUES(?1,?2,1,'1970-01-01T00:00:00.000Z',?3)",
+        params![host,node,canonical(value,MANAGEMENT_FRAME_BYTES).unwrap()]).unwrap();
+}
+
+#[test]
+fn package_protection_keeps_exact_build_ids_optional_shapes_and_corrupt_record_errors() {
+    let store=node_page_store();
+    let ids=["".into(),"same".into(),"nul\0tail".into(),IvyJson::String(JsString(vec![0xd800])),
+        IvyJson::String(JsString(vec![0xd801])),"�".into(),"😀".into()];
+    for (index,id) in ids.iter().enumerate() {
+        let node=format!("node{index}");insert_page_node(&store,&node,&IvyJson::object([
+            ("serviceNodeId",node.clone().into()),("buildId",id.clone()),("connected",false.into())]));
+        let status=IvyJson::object([("executor",IvyJson::object([("buildId",id.clone())])),
+            ("instances",IvyJson::Array(vec![IvyJson::object([("installedBuild",id.clone()),("observedBuild","shared".into())])])),
+            ("unfinished",IvyJson::Array(vec![IvyJson::object([("previousBuild",id.clone()),("targetBuild","target".into()),("observedBuild","observed".into())])]))]);
+        set_host_snapshot(&store,&node,&node,&IvyJson::object([("status",status)]));
+    }
+    let builds=compare_protected_builds(&store).unwrap();
+    for id in &ids {assert!(builds.contains(id.as_js_string().unwrap()));}
+    for id in ["kernel","shared","target","observed"] {assert!(builds.contains(&id.into()));}
+    for value in [IvyJson::Null,false.into(),17.0.into(),"".into(),IvyJson::Array(vec![]),IvyJson::object([("opaque",true.into())])] {
+        let status=IvyJson::object([("executor",IvyJson::object([("buildId",value.clone())])),
+            ("instances",IvyJson::Array(vec![false.into(),17.0.into(),"scalar".into(),IvyJson::Array(vec![]),
+                IvyJson::object([("installedBuild",value.clone()),("observedBuild",value.clone())])])),
+            ("unfinished",IvyJson::Array(vec![IvyJson::object([("previousBuild",value.clone()),("targetBuild",value.clone()),("observedBuild",value)])]))]);
+        set_host_snapshot(&store,"node0","node0",&IvyJson::object([("status",status)]));compare_protected_builds(&store).unwrap();
+    }
+    for source in ["null","false","[]","{}",r#"{"status":null}"#,
+        r#"{"status":{"instances":null,"unfinished":[]}}"#,
+        r#"{"status":{"instances":[null],"unfinished":[]}}"#,
+        r#"{"status":{"instances":[],"unfinished":[null]}}"#] {
+        set_host_snapshot(&store,"node0","node0",&parse(source,usize::MAX).unwrap());
+        assert_eq!(compare_protected_builds(&store).unwrap_err().code,"internal_error");
+    }
+    set_host_snapshot(&store,"node0","node0",&parse(r#"{"status":{"instances":"characters","unfinished":"later"}}"#,usize::MAX).unwrap());
+    compare_protected_builds(&store).unwrap();
+    store.connection().execute("UPDATE service_nodes SET status_json='null' WHERE id='node0'",[]).unwrap();
+    assert_eq!(compare_protected_builds(&store).unwrap_err().code,"internal_error");
+}
+
+#[test]
+fn package_protection_keeps_missing_reporter_priority_before_reference_validation() {
+    let store=node_page_store();insert_page_node(&store,"reporter",&IvyJson::object([("serviceNodeId","reporter".into())]));
+    set_host_snapshot(&store,"a","reporter",&IvyJson::object([("status",IvyJson::Null)]));
+    store.connection().execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+    set_host_snapshot(&store,"z","gone",&IvyJson::object([("status",IvyJson::object([
+        ("instances",IvyJson::Array(vec![])),("unfinished",IvyJson::Array(vec![]))]))]));
+    store.connection().execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+    assert_eq!(compare_protected_builds(&store).unwrap_err().code,"not_found");
+    store.connection().execute("DELETE FROM host_reports WHERE host_id='z'",[]).unwrap();
+    assert_eq!(compare_protected_builds(&store).unwrap_err().code,"internal_error");
+}
+
+#[test]
+fn package_protection_includes_hosts_beyond_the_old_observation_listing_bound() {
+    let store=node_page_store();insert_page_node(&store,"reporter",&IvyJson::object([("serviceNodeId","reporter".into())]));
+    for index in 0..1020 {
+        let host=format!("host{index:04}");
+        let status=IvyJson::object([("executor",IvyJson::object([("buildId",host.clone().into())])),
+            ("instances",IvyJson::Array(vec![])),("unfinished",IvyJson::Array(vec![]))]);
+        set_host_snapshot(&store,&host,"reporter",&IvyJson::object([("status",status)]));
+    }
+    let old=full_protected_builds(&store,&"kernel".into()).unwrap();
+    let actual=crate::package_kernel::protected_builds(&store,&"kernel".into()).unwrap();
+    assert_eq!(old.len(),1002);assert_eq!(actual.len(),1021);assert!(old.is_subset(&actual));
+    for index in 0..1020 {assert!(actual.contains(&format!("host{index:04}").into()));}
+}
+
+#[test]
+fn package_protection_streams_ids_without_status_snapshot_or_diagnostic_bodies() {
+    const CHILD:&str="IVY_PACKAGE_PROTECTION_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output=std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","kernel::catalogs::read_tests::package_protection_streams_ids_without_status_snapshot_or_diagnostic_bodies","--nocapture"])
+            .env(CHILD,"1").output().unwrap();
+        eprint!("{}",String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));return;
+    }
+    let store=node_page_store();
+    for index in 0..64 {
+        let id=format!("node{index:03}");insert_namespace_provider(&store,&id,false,vec!["fixture".into()],32*1024,0);
+        let status=IvyJson::object([("executor",IvyJson::object([("buildId",id.clone().into())])),
+            ("instances",IvyJson::Array(vec![])),("unfinished",IvyJson::Array(vec![])),("opaque","s".repeat(32*1024).into())]);
+        set_host_snapshot(&store,&id,&id,&IvyJson::object([("status",status)]));
+    }
+    let before=LIVE.load(Ordering::Relaxed);PEAK.store(before,Ordering::Relaxed);
+    let expected=full_protected_builds(&store,&"kernel".into()).unwrap();let full_peak=PEAK.load(Ordering::Relaxed)-before;
+    let before=LIVE.load(Ordering::Relaxed);PEAK.store(before,Ordering::Relaxed);
+    let actual=crate::package_kernel::protected_builds(&store,&"kernel".into()).unwrap();let projected_peak=PEAK.load(Ordering::Relaxed)-before;
+    assert_eq!(actual,expected);assert_eq!(actual.len(),65);
+    eprintln!("Hive protected build IDs Rust allocation peak: full {full_peak} bytes, projected {projected_peak} bytes for 64 hosts, 2 MiB snapshots and 2 MiB diagnostics");
+    // Rust requests only; SQLite's C heap and process RSS are excluded.
+    assert!(full_peak>4*1024*1024);assert!(projected_peak<512*1024,"Unneeded report or diagnostic bodies retained");
 }
 
 fn full_namespace_catalog(store: &Store, registry: &Registry, params: &IvyJson, now: f64) -> IvyResult<IvyJson> {

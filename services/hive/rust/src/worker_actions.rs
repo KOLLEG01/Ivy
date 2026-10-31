@@ -72,10 +72,7 @@ impl WorkerActions {
             Some(catalog) => catalog,
             None => package_kernel::catalog(
                 &mut kernel.parts.store,
-                kernel.parts.registry.clone(),
                 kernel.options.build_id.clone(),
-                kernel.runtime.clone(),
-                kernel.clock.clone(),
             )?,
         };
         Ok(Self {

@@ -798,31 +798,6 @@ impl Registry {
             store.invalidate("system/hosts".into());Ok(IvyJson::object([("sequence",IvyJson::Number(sequence)),("reportedAt",IvyJson::String(at))]))
         })
     }
-    pub fn host_observations(
-        &self,
-        store: &Store,
-        host: Option<&JsString>,
-        runtime: &dyn Runtime,
-        now: f64,
-    ) -> IvyResult<Vec<IvyJson>> {
-        let mut statement=sql(store,store.connection().prepare_cached("SELECT node_id,reported_at,snapshot_json FROM host_reports WHERE (? IS NULL OR host_id=?) ORDER BY host_id LIMIT 1001"))?;
-        sql(
-            store,
-            statement.query_map(params![host.map(text), host.map(text)], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            }),
-        )?
-        .map(|row| {
-            let (id, at, snapshot) = sql(store, row)?;
-            self.host_observation(store, &id, at, snapshot, runtime, now)
-        })
-        .collect()
-    }
-
     fn host_observation(
         &self, store: &Store, id: &str, at: String, snapshot: String,
         runtime: &dyn Runtime, now: f64,

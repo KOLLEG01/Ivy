@@ -395,9 +395,8 @@ impl Trace {
                 .live_catalog(store, &id()?)
                 .map(|v| v.map_or(IvyJson::Null, |v| catalog_fixture::catalog_to_wire(&v))),
             "reportHost" => registry.report_host(store, &id()?, &parameters, runtime, now),
-            "hostObservations" => registry
-                .host_observations(
-                    store,
+            "hostObservations" => host_observations(
+                    store,registry,
                     parameters.get("hostId").and_then(IvyJson::as_js_string),
                     runtime,
                     now,
@@ -417,6 +416,29 @@ impl Trace {
             _ => Err(IvyError::internal()),
         }
     }
+}
+
+// Reference-only list retained for SDK fixture parity. Production callers select
+// an observation page or project package build IDs directly from the Store.
+fn host_observations(
+    store: &Store, registry: &Registry, host: Option<&JsString>,
+    runtime: &dyn ivy_hive::retention::Runtime, now: f64,
+) -> IvyResult<Vec<IvyJson>> {
+    let host=host.map(|s|String::from_utf16_lossy(&s.0));
+    let mut statement=store.connection().prepare_cached(
+        "SELECT node_id,reported_at,snapshot_json FROM host_reports WHERE (?1 IS NULL OR host_id=?1) ORDER BY host_id LIMIT 1001"
+    ).map_err(|e|store.query_error(e))?;
+    statement.query_map([host],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))
+        .map_err(|e|store.query_error(e))?.map(|row| {
+            let (id,at,snapshot)=row.map_err(|e|store.query_error(e))?;
+            let snapshot=ivy_contracts::json::parse(&snapshot,usize::MAX).map_err(|_|IvyError::internal())?;
+            if snapshot.as_object().is_none(){return Err(IvyError::internal());}
+            let reporter=registry.node(store,&id.into(),runtime,now)?;
+            Ok(IvyJson::object([("snapshot",snapshot),("serviceNodeId",reporter.required("serviceNodeId")?.clone()),
+                ("reportedAt",at.into()),("stale",(reporter.get("connected").and_then(IvyJson::as_bool)!=Some(true)
+                    ||reporter.get("ready").and_then(IvyJson::as_bool)!=Some(true)
+                    ||reporter.get("stale").and_then(IvyJson::as_bool)==Some(true)).into())]))
+        }).collect()
 }
 
 fn sql(text: impl Into<String>) -> Value {

@@ -116,10 +116,7 @@ impl Kernel {
             hive_settings::initialize(&mut store)?;
             let catalog = package_kernel::catalog(
                 &mut store,
-                registry.clone(),
                 options.kernel.build_id.clone(),
-                ports.runtime.clone(),
-                ports.clock.clone(),
             )?;
             let mut kernel = Self::compose(
                 Parts {

@@ -1,28 +1,18 @@
 use super::*;
 use ivy_contracts::IvyResult;
-use ivy_hive::{
-    package_kernel::{self, CatalogRequest, KernelCatalog},
-    registry::Registry,
-    retention::Runtime,
-};
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
+use ivy_hive::{package_kernel::{self, CatalogRequest, KernelCatalog},registry::Registry,retention::Runtime};
+use std::{cell::RefCell,rc::Rc};
 
 #[derive(Default)]
 pub(super) struct Trace {
     catalog: Option<KernelCatalog>,
     registry: Option<Rc<RefCell<Registry>>>,
-    runtime: Option<Rc<dyn Runtime>>,
-    clock: Rc<Cell<f64>>,
     build: JsString,
 }
 impl Trace {
     pub(super) fn reset(&mut self) {
         self.catalog = None;
         self.registry = None;
-        self.runtime = None;
     }
     pub(super) fn execute(
         &mut self,
@@ -30,7 +20,7 @@ impl Trace {
         step: &Value,
         profile: &Value,
     ) -> IvyResult<IvyJson> {
-        self.clock.set(step["now"].as_f64().unwrap());
+        let now=step["now"].as_f64().unwrap();
         if self.catalog.is_none() || step["method"] == "constructor" {
             let dates = profile["dates"]
                 .as_array()
@@ -49,34 +39,21 @@ impl Trace {
             let registry = Rc::new(RefCell::new(Registry::new(
                 store,
                 runtime.as_ref(),
-                self.clock.get(),
+                now,
             )?));
             self.build = step["buildId"].as_str().unwrap_or("kernel-build").into();
-            let clock = self.clock.clone();
-            let catalog = package_kernel::catalog(
-                store,
-                registry.clone(),
-                self.build.clone(),
-                runtime.clone(),
-                Rc::new(move || clock.get()),
-            )?;
+            let catalog = package_kernel::catalog(store,self.build.clone())?;
             self.catalog = Some(catalog);
             self.registry = Some(registry);
-            self.runtime = Some(runtime);
         }
         let catalog = self.catalog.as_ref().unwrap();
         let registry = self.registry.as_ref().unwrap();
-        let runtime = self.runtime.as_ref().unwrap();
         let params = IvyJson::from_serde(&step["params"]).unwrap();
         match step["method"].as_str().unwrap() {
             "constructor" => Ok(IvyJson::Null),
             "protected" => {
                 let mut builds = package_kernel::protected_builds(
-                    store,
-                    &registry.borrow(),
-                    &self.build,
-                    runtime.as_ref(),
-                    &|| self.clock.get(),
+                    store,&self.build,
                 )?
                 .into_iter()
                 .collect::<Vec<_>>();
@@ -133,7 +110,7 @@ impl Trace {
                     store,
                     request,
                     &principals,
-                    self.clock.get() as u64,
+                    now as u64,
                     &step["nowText"].as_str().unwrap().into(),
                 )
             }
