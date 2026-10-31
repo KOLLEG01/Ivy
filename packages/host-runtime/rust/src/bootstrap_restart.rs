@@ -34,6 +34,12 @@ pub trait BootstrapRestartOs: Send + Sync {
         plans: Vec<IvyJson>,
         distribution: PathBuf,
     ) -> BoxFuture<'static, IvyResult<Vec<IvyJson>>>;
+    fn shutdown(
+        &self,
+        owner: IvyJson,
+        plans: Vec<IvyJson>,
+        distribution: PathBuf,
+    ) -> BoxFuture<'static, IvyResult<()>>;
     fn command(
         &self,
         action: &'static str,
@@ -113,7 +119,10 @@ impl NativeBootstrapRestartOs {
             let invalid = || unknown("Scheduler returned an invalid result.");
             let result = json::parse(&result.stdout.to_utf8().map_err(|_| invalid())?, usize::MAX)
                 .map_err(|_| invalid())?;
-            let succeeded = result.get("ok").and_then(IvyJson::as_bool).ok_or_else(invalid)?;
+            let succeeded = result
+                .get("ok")
+                .and_then(IvyJson::as_bool)
+                .ok_or_else(invalid)?;
             if !succeeded {
                 return Err(IvyError::new_js(
                     result
@@ -152,6 +161,49 @@ impl BootstrapRestartOs for NativeBootstrapRestartOs {
                 .ok_or_else(IvyError::internal)
         })
     }
+    fn shutdown(
+        &self,
+        owner: IvyJson,
+        plans: Vec<IvyJson>,
+        distribution: PathBuf,
+    ) -> BoxFuture<'static, IvyResult<()>> {
+        let call = self.call(
+            "select",
+            IvyJson::object([("owner", owner.clone()), ("plans", IvyJson::Array(plans))]),
+            distribution,
+        );
+        let work = tokio::spawn(async move {
+            let selection = call.await?;
+            let selected = selection.required("owner")?;
+            require(
+                [
+                    "instanceId",
+                    "componentId",
+                    "name",
+                    "candidateId",
+                    "definitionHash",
+                    "enabled",
+                    "running",
+                ]
+                .iter()
+                .all(|key| selected.get(key) == owner.get(key)),
+                "target_conflict",
+                "Bootstrap ownership changed before shutdown.",
+            )?;
+            #[cfg(windows)]
+            {
+                crate::bootstrap_os::windows::stop(&selection).await
+            }
+            #[cfg(not(windows))]
+            {
+                Err(IvyError::new(
+                    "unsupported_runtime",
+                    "Windows bootstrap shutdown requires Windows.",
+                ))
+            }
+        });
+        Box::pin(async move { work.await.map_err(|_| IvyError::internal())? })
+    }
     fn command(
         &self,
         action: &'static str,
@@ -160,6 +212,11 @@ impl BootstrapRestartOs for NativeBootstrapRestartOs {
     ) -> BoxFuture<'static, IvyResult<()>> {
         let helper = self.job_launcher.clone();
         Box::pin(async move {
+            require(
+                action == "/Run",
+                "invalid_arguments",
+                "Bootstrap scheduler commands may only start an owned task.",
+            )?;
             let command = exec_file::FileCommand {
                 executable: system().join("System32/schtasks.exe").into_os_string(),
                 args: vec![
@@ -228,7 +285,7 @@ impl BootstrapConfigurationRestarts {
     }
 }
 
-/// Exact Windows End/observe/Run ordering, with retained immutable ownership
+/// Exact Windows shutdown/observe/Run ordering, with retained immutable ownership
 /// inspection before every state observation. No command retry is introduced.
 pub async fn restart_windows_owner(
     plans: Vec<IvyJson>,
@@ -246,10 +303,14 @@ pub async fn restart_windows_owner(
         "target_conflict",
         "The selected Windows bootstrap task is not enabled.",
     )?;
-    let running = |owner: &IvyJson| owner.get("running").and_then(IvyJson::as_bool)
-        .ok_or_else(|| unknown("Scheduler returned an invalid owner state."));
+    let running = |owner: &IvyJson| {
+        owner
+            .get("running")
+            .and_then(IvyJson::as_bool)
+            .ok_or_else(|| unknown("Scheduler returned an invalid owner state."))
+    };
     if running(owner.ok_or_else(IvyError::internal)?)? {
-        os.command("/End", name.clone(), distribution.clone())
+        os.shutdown(owner.unwrap().clone(), plans.clone(), distribution.clone())
             .await?;
     }
     let deadline = clock.utc_millis() + 30000;
@@ -258,7 +319,11 @@ pub async fn restart_windows_owner(
         let owner = owners
             .iter()
             .find(|owner| owner.get("name") == Some(&IvyJson::String(name.clone())));
-        if owner.map(running).transpose()?.is_none_or(|running| !running) {
+        if owner
+            .map(running)
+            .transpose()?
+            .is_none_or(|running| !running)
+        {
             break;
         }
         require(
@@ -462,5 +527,8 @@ fn field<'a>(value: &'a IvyJson, key: &str) -> &'a IvyJson {
     value.get(key).unwrap_or(&NULL)
 }
 fn date(value: &IvyJson, key: &str) -> IvyResult<f64> {
-    Ok(value.get(key).and_then(IvyJson::as_js_string).map_or(f64::NAN, parse_date))
+    Ok(value
+        .get(key)
+        .and_then(IvyJson::as_js_string)
+        .map_or(f64::NAN, parse_date))
 }

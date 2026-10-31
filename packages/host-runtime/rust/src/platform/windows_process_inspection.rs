@@ -31,6 +31,17 @@ pub fn open_process_query_limited(pid: u32) -> io::Result<OwnedHandle> {
     owned(unsafe { OpenProcess(QUERY, 0, pid) })
 }
 
+/// Retain the original kernel object across cooperative shutdown, including PID reuse.
+pub(crate) struct ProcessExit(OwnedHandle);
+impl ProcessExit {
+    pub(crate) fn open(pid: u32) -> io::Result<Self> {
+        owned(unsafe { OpenProcess(QUERY | SYNCHRONIZE, 0, pid) }).map(Self)
+    }
+    pub(crate) fn has_exited(&self) -> io::Result<bool> {
+        exited(self.0.as_handle(), &mut false)
+    }
+}
+
 /// The caller retains the process handle and controls the token's lifetime.
 pub fn open_process_token_query(process: BorrowedHandle<'_>) -> io::Result<OwnedHandle> {
     let mut raw = null_mut();

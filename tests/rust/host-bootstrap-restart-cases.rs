@@ -132,6 +132,23 @@ impl BootstrapRestartOs for Os {
             Ok(state.required("owners")?.as_array().unwrap().to_vec())
         })
     }
+    fn shutdown(
+        &self,
+        owner: J,
+        _: Vec<J>,
+        distribution: PathBuf,
+    ) -> BoxFuture<'static, IvyResult<()>> {
+        self.command(
+            "shutdown",
+            owner
+                .required("name")
+                .unwrap()
+                .as_js_string()
+                .unwrap()
+                .clone(),
+            distribution,
+        )
+    }
     fn command(
         &self,
         action: &'static str,
@@ -481,7 +498,7 @@ async fn bootstrap_restarts_match_identity_health_markers_and_current_files() {
         "manager-running",
         "disabled-manager",
         "inspect-failure",
-        "end-failure",
+        "shutdown-failure",
         "run-failure",
         "changed-settings",
         "remove-credential",
@@ -604,7 +621,7 @@ async fn bootstrap_restarts_match_identity_health_markers_and_current_files() {
                 .unwrap()
                 .insert("observedAt", stamp(AT + 30000)),
             "manager-once" => input.insert("times", J::Number(2.0)),
-            "manager-running" | "end-failure" => {
+            "manager-running" | "shutdown-failure" => {
                 let name = f.plan.required("processes").unwrap().as_array().unwrap()[1]
                     .required("name")
                     .unwrap();
@@ -615,8 +632,8 @@ async fn bootstrap_restarts_match_identity_health_markers_and_current_files() {
                         owner_state(name, true, false),
                     ]),
                 );
-                if mode == "end-failure" {
-                    input.insert("failAction", "/End".into());
+                if mode == "shutdown-failure" {
+                    input.insert("failAction", "shutdown".into());
                 }
             }
             "disabled-manager" => {
@@ -714,7 +731,7 @@ async fn bootstrap_restarts_match_identity_health_markers_and_current_files() {
         let code = match mode {
             "immutable-mismatch" | "health-mismatch" | "missing-owner" | "missing-release"
             | "disabled-manager" | "inspect-failure" => Some("target_conflict"),
-            "end-failure" | "run-failure" => Some("bootstrap_os_unavailable"),
+            "shutdown-failure" | "run-failure" => Some("bootstrap_os_unavailable"),
             "false-health" | "zero-health" | "empty-health" => Some("invalid_arguments"),
             _ => None,
         };
@@ -761,7 +778,7 @@ async fn bootstrap_restarts_match_identity_health_markers_and_current_files() {
             "manager-running" => 2,
             "future-manager"
             | "manager-once"
-            | "end-failure"
+            | "shutdown-failure"
             | "run-failure"
             | "marker-expired"
             | "marker-new-boot"
@@ -965,7 +982,7 @@ async fn bootstrap_windows_restart_orders_stop_observe_start_and_preserves_unkno
         "deadline",
         "missing",
         "disabled",
-        "end-failure",
+        "shutdown-failure",
         "run-failure",
         "inspect-failure",
         "invalid-enabled",
@@ -1024,8 +1041,8 @@ async fn bootstrap_windows_restart_orders_stop_observe_start_and_preserves_unkno
             ("states", J::Array(states)),
             ("distribution", file_value(&f.root.0)),
         ]);
-        if mode == "end-failure" {
-            input.insert("failAction", "/End".into());
+        if mode == "shutdown-failure" {
+            input.insert("failAction", "shutdown".into());
         }
         if mode == "run-failure" {
             input.insert("failAction", "/Run".into());
@@ -1048,7 +1065,7 @@ async fn bootstrap_windows_restart_orders_stop_observe_start_and_preserves_unkno
             "missing" | "disabled" | "inspect-failure" | "invalid-enabled" => {
                 Some("target_conflict")
             }
-            "invalid-running" | "invalid-stopped" | "end-failure" | "run-failure" => {
+            "invalid-running" | "invalid-stopped" | "shutdown-failure" | "run-failure" => {
                 Some("bootstrap_os_unavailable")
             }
             _ => None,
@@ -1074,8 +1091,8 @@ async fn bootstrap_windows_restart_orders_stop_observe_start_and_preserves_unkno
             .collect::<Vec<_>>();
         let expected: &[&str] = match mode {
             "stopped" => &["/Run"],
-            "running" | "wait-once" | "run-failure" => &["/End", "/Run"],
-            "deadline" | "end-failure" | "invalid-stopped" => &["/End"],
+            "running" | "wait-once" | "run-failure" => &["shutdown", "/Run"],
+            "deadline" | "shutdown-failure" | "invalid-stopped" => &["shutdown"],
             _ => &[],
         };
         assert_eq!(
@@ -1094,8 +1111,8 @@ async fn bootstrap_windows_restart_orders_stop_observe_start_and_preserves_unkno
             inspections,
             match mode {
                 "wait-once" => 3,
-                "missing" | "disabled" | "inspect-failure" | "end-failure" | "invalid-enabled"
-                | "invalid-running" => 1,
+                "missing" | "disabled" | "inspect-failure" | "shutdown-failure"
+                | "invalid-enabled" | "invalid-running" => 1,
                 _ => 2,
             },
             "{mode}"

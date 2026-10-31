@@ -1,6 +1,351 @@
 use super::*;
 use ivy_host_runtime::bootstrap_auto_worker::AutomaticBootstrapWorker;
 
+#[cfg(windows)]
+#[tokio::test]
+async fn bootstrap_windows_pause_retains_original_jobs_past_the_scheduler_deadline_and_a_dropped_observer()
+ {
+    use ivy_host_runtime::bootstrap_os::WindowsBootstrapOs;
+    use std::os::windows::process::CommandExt;
+    let t = Test::new().await;
+    t.seed().await;
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../assets/bootstrap-maintenance-windows.ps1");
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../tests/fixtures/host-bootstrap-drain.ps1");
+    let powershell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let distribution = t.f.root.0.join("pause adapter");
+    let assets = distribution.join("dist/packages/host-runtime/assets");
+    fs::create_dir_all(&assets).unwrap();
+    for name in ["bootstrap-maintenance-windows.ps1", "windows-principal.ps1"] {
+        fs::copy(source.parent().unwrap().join(name), assets.join(name)).unwrap();
+    }
+    let mut plan = t.old.clone();
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let installation = format!("ivy-next-{}", &nonce[..12]);
+    plan.insert("installationId", installation.clone().into());
+    plan.insert("hostId", "cooperative-bootstrap-fixture".into());
+    let artifact = node_path::to_native(
+        plan.required("artifactRoot")
+            .unwrap()
+            .as_js_string()
+            .unwrap(),
+    );
+    fs::create_dir_all(artifact.join("dist/native")).unwrap();
+    fs::copy(job(), artifact.join("dist/native/ivy-host-job.exe")).unwrap();
+    let mut processes = array(plan.required("processes").unwrap()).to_vec();
+    let mut roots = Vec::new();
+    for (index, process) in processes.iter_mut().enumerate() {
+        process.insert("name", format!("{installation}-{index:012x}").into());
+        let config_path = node_path::to_native(
+            process
+                .required("configPath")
+                .unwrap()
+                .as_js_string()
+                .unwrap(),
+        );
+        let configuration = config::json_file(&config_path, config::CONFIGURATION_BYTES)
+            .await
+            .unwrap();
+        let root = node_path::to_native(
+            configuration
+                .required("dataRoot")
+                .unwrap()
+                .as_js_string()
+                .unwrap(),
+        );
+        fs::create_dir_all(&root).unwrap();
+        roots.push((id(process, "componentId"), root));
+        process.insert(
+            "entrypoint",
+            J::object([
+                ("executable", p(&powershell)),
+                (
+                    "args",
+                    J::Array(vec![
+                        "-NoProfile".into(),
+                        "-NonInteractive".into(),
+                        "-ExecutionPolicy".into(),
+                        "Bypass".into(),
+                        "-File".into(),
+                        p(&script),
+                        "-Mode".into(),
+                        "child".into(),
+                        "-FixtureConfiguration".into(),
+                        p(&config_path),
+                    ]),
+                ),
+                ("timeoutMs", J::Number(30000.0)),
+            ]),
+        );
+    }
+    plan.insert("processes", J::Array(processes));
+    let input = J::object([("plan", plan.clone()), ("source", p(&source))]);
+    struct Tasks {
+        powershell: PathBuf,
+        script: PathBuf,
+        input: J,
+    }
+    impl Tasks {
+        fn run(&self, mode: &str) {
+            let mut child = Command::new(&self.powershell)
+                .creation_flags(0x08000000)
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ])
+                .arg(&self.script)
+                .args(["-Mode", mode])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(canonical(&self.input).as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    impl Drop for Tasks {
+        fn drop(&mut self) {
+            self.run("cleanup");
+        }
+    }
+    let tasks = Tasks {
+        powershell,
+        script,
+        input,
+    };
+    tasks.run("prepare");
+    async fn marker(path: &Path) {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !path.exists() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("Missing fixture marker: {}", path.display()));
+    }
+    for (_, root) in &roots {
+        marker(&root.join("health.json")).await;
+    }
+    let os = WindowsBootstrapOs::new(distribution, job());
+    let owners = os.inspect(vec![plan.clone()]).await.unwrap();
+    assert!(
+        owners
+            .iter()
+            .all(|owner| owner.get("enabled") == Some(&true.into())
+                && owner.get("running") == Some(&true.into()))
+    );
+    let snapshot = J::object([
+        ("hostId", plan.required("hostId").unwrap().clone()),
+        ("installationId", installation.into()),
+        ("owners", J::Array(owners.clone())),
+    ]);
+    let mut changed = snapshot.clone();
+    let mut changed_owners = owners.clone();
+    changed_owners[0].insert("definitionHash", "sha256:changed".into());
+    changed.insert("owners", J::Array(changed_owners));
+    assert_eq!(
+        os.pause(changed, vec![plan.clone()])
+            .unwrap()
+            .await
+            .unwrap_err()
+            .code,
+        "target_conflict"
+    );
+    assert_json_eq(
+        &J::Array(os.inspect(vec![plan.clone()]).await.unwrap()),
+        &J::Array(owners),
+    );
+    let observer = tokio::spawn({
+        let os = os.clone();
+        let plan = plan.clone();
+        let snapshot = snapshot.clone();
+        async move { os.pause(snapshot, vec![plan]).unwrap().await }
+    });
+    let manager = &roots
+        .iter()
+        .find(|(component, _)| component == "service-manager")
+        .unwrap()
+        .1;
+    let executor = &roots
+        .iter()
+        .find(|(component, _)| component == "host-executor")
+        .unwrap()
+        .1;
+    marker(&manager.join("draining")).await;
+    let original_health =
+        config::json_file(manager.join("health.json"), config::CONFIGURATION_BYTES)
+            .await
+            .unwrap();
+    observer.abort();
+    assert!(observer.await.unwrap_err().is_cancelled());
+    // Cross the former outer 60-second deadline with real retained work.
+    tokio::time::sleep(Duration::from_secs(61)).await;
+    let during = os.inspect(vec![plan.clone()]).await.unwrap();
+    assert!(
+        during
+            .iter()
+            .all(|owner| owner.get("enabled") == Some(&false.into())
+                && owner.get("running") == Some(&true.into()))
+    );
+    assert!(!manager.join("completed").exists());
+    assert_json_eq(
+        &config::json_file(manager.join("health.json"), config::CONFIGURATION_BYTES)
+            .await
+            .unwrap(),
+        &original_health,
+    );
+    assert!(
+        !executor.join("control.json").exists(),
+        "HostExecutor remains available while services drain"
+    );
+    fs::write(manager.join("release"), b"work finished").unwrap();
+    marker(&manager.join("completed")).await;
+    marker(&executor.join("draining")).await;
+    fs::write(executor.join("release"), b"work finished").unwrap();
+    marker(&executor.join("completed")).await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if os
+                .inspect(vec![plan.clone()])
+                .await
+                .unwrap()
+                .iter()
+                .all(|owner| owner.get("running") == Some(&false.into()))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // A configuration-only restart uses the same cooperative process wait.
+    for (_, root) in &roots {
+        for name in [
+            "health.json",
+            "control.json",
+            "draining",
+            "release",
+            "completed",
+        ] {
+            let path = root.join(name);
+            if path.exists() {
+                fs::remove_file(path).unwrap();
+            }
+        }
+    }
+    os.resume(snapshot, vec![plan.clone()])
+        .unwrap()
+        .await
+        .unwrap();
+    for (_, root) in &roots {
+        marker(&root.join("health.json")).await;
+    }
+    use ivy_host_runtime::bootstrap_restart::{
+        BootstrapRestartOs, NativeBootstrapRestartOs, restart_windows_owner,
+    };
+    let native = NativeBootstrapRestartOs::new(job());
+    let manager_owner = os
+        .inspect(vec![plan.clone()])
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|owner| owner.get("componentId") == Some(&"service-manager".into()))
+        .unwrap();
+    let name = manager_owner
+        .required("name")
+        .unwrap()
+        .as_js_string()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        native
+            .command("/End", name.clone(), t.f.root.0.join("pause adapter"))
+            .await
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+    let mut changed = manager_owner;
+    changed.insert("definitionHash", "sha256:changed".into());
+    assert_eq!(
+        native
+            .shutdown(
+                changed,
+                vec![plan.clone()],
+                t.f.root.0.join("pause adapter")
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "target_conflict"
+    );
+    assert!(!manager.join("control.json").exists());
+    let original = config::json_file(manager.join("health.json"), config::CONFIGURATION_BYTES)
+        .await
+        .unwrap();
+    let restart = tokio::spawn({
+        let plan = plan.clone();
+        let distribution = t.f.root.0.join("pause adapter");
+        async move {
+            restart_windows_owner(
+                vec![plan],
+                name,
+                distribution,
+                &ivy_sdk::clock::SystemClock,
+                &native,
+            )
+            .await
+        }
+    });
+    marker(&manager.join("draining")).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!restart.is_finished());
+    assert!(!manager.join("completed").exists());
+    fs::write(manager.join("release"), b"work finished").unwrap();
+    tokio::time::timeout(Duration::from_secs(20), restart)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let current =
+                config::json_file(manager.join("health.json"), config::CONFIGURATION_BYTES)
+                    .await
+                    .unwrap();
+            if current.get("bootId") != original.get("bootId") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(tasks);
+    assert!(
+        os.inspect(vec![plan]).await.is_err(),
+        "Own scheduled tasks were removed"
+    );
+    t.f.journal.close().await.unwrap();
+}
+
 struct Ready {
     events: Mutex<Vec<J>>,
     next: J,

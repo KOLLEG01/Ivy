@@ -5,6 +5,8 @@ use futures_util::future::BoxFuture;
 use std::path::PathBuf;
 mod automatic;
 mod systemd;
+#[cfg(windows)]
+pub(crate) mod windows;
 pub use systemd::SystemdBootstrapOs;
 
 pub fn bootstrap_os(
@@ -137,11 +139,24 @@ impl BootstrapOs for WindowsBootstrapOs {
         snapshot: IvyJson,
         plans: Vec<IvyJson>,
     ) -> Option<BoxFuture<'_, IvyResult<()>>> {
-        let call = self.call(
-            "pause",
-            IvyJson::object([("snapshot", snapshot), ("plans", IvyJson::Array(plans))]),
-        );
-        Some(Box::pin(async move { call.await.map(|_| ()) }))
+        #[cfg(windows)]
+        {
+            let this = self.clone();
+            let owner = tokio::spawn(async move { windows::pause(this, snapshot, plans).await });
+            Some(Box::pin(async move {
+                owner.await.map_err(|_| crate::IvyError::internal())?
+            }))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (snapshot, plans);
+            Some(Box::pin(async {
+                Err(crate::IvyError::new(
+                    "unsupported_runtime",
+                    "Windows bootstrap pause requires Windows.",
+                ))
+            }))
+        }
     }
     fn resume(
         &self,

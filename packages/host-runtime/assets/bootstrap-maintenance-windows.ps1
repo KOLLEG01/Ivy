@@ -62,7 +62,7 @@ function Get-IvyHash([string]$Content) {
 function Assert-IvyDefinition($Definition) {
   if ((Get-IvyHash $Definition.content) -cne $Definition.hash) { throw 'Retained definition changed.' }
 }
-function Get-IvyOwner($Instance, $Plans) {
+function Get-IvyOwner($Instance, $Plans, [switch]$WithConfiguration) {
   if ($Plans.Count -lt 1 -or $Instance.name -cnotmatch ('^' + [regex]::Escape($Plans[0].installationId) + '-[0-9a-f]{12}$') -or $Plans[0].installationId -cnotmatch '^ivy-next-[0-9a-f]{12}$') { throw 'Invalid owned task name.' }
   $ivyTask = $ivyFolder.GetTask($Instance.name)
   $ivyDefinition = $ivyTask.Definition
@@ -95,8 +95,13 @@ function Get-IvyOwner($Instance, $Plans) {
   $ivyHash = Get-IvyHash $ivyContent
   $ivyProcess = @($ivyMatches[0].processes | Where-Object { $_.instanceId -ceq $Instance.instanceId })[0]
   $ivyCandidate = $ivyCandidates[0]
-  @{instanceId=$Instance.instanceId; componentId=$ivyProcess.componentId; name=$Instance.name; candidateId=$ivyCandidate; definitionHash=$ivyHash;
+  $ivyOwner = @{instanceId=$Instance.instanceId; componentId=$ivyProcess.componentId; name=$Instance.name; candidateId=$ivyCandidate; definitionHash=$ivyHash;
     enabled=[bool]$ivyTask.Enabled; running=($ivyTask.State -notin @(1,3)); definition=@{content=$ivyContent;hash=$ivyHash}}
+  if ($WithConfiguration) {
+    if (-not $ivyProcess.configPath) { throw 'Cooperative maintenance requires an instance configuration.' }
+    return @{owner=$ivyOwner;configPath=[string]$ivyProcess.configPath}
+  }
+  $ivyOwner
 }
 try {
   $ivyStage = 'read-request'
@@ -144,30 +149,27 @@ try {
     $ivySid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     if ($ivyInput.action -eq 'inspect') {
       $ivyResult = @($ivyData.plans[0].processes | ForEach-Object { Get-IvyOwner $_ $ivyData.plans })
+    } elseif ($ivyInput.action -eq 'select') {
+      $ivyResult = Get-IvyOwner $ivyData.owner $ivyData.plans -WithConfiguration
     } elseif ($ivyInput.action -eq 'pause') {
       $ivyPlans = @($ivyData.plans); $ivySnapshot = $ivyData.snapshot; $ivyOwners = @($ivySnapshot.owners)
       if ($ivyPlans.Count -lt 1 -or $ivySnapshot.hostId -cne $ivyPlans[0].hostId -or
           $ivySnapshot.installationId -cne $ivyPlans[0].installationId -or $ivyOwners.Count -ne @($ivyPlans[0].processes).Count) {
         throw 'Bootstrap snapshot belongs to another installation.'
       }
-      foreach ($ivyOwner in $ivyOwners) {
-        $ivyCurrent = Get-IvyOwner $ivyOwner $ivyPlans
+      $ivySelected = @(foreach ($ivyOwner in $ivyOwners) {
+        $ivySelection = Get-IvyOwner $ivyOwner $ivyPlans -WithConfiguration
+        $ivyCurrent = $ivySelection.owner
         if ($ivyCurrent.candidateId -cne $ivyOwner.candidateId -or $ivyCurrent.definitionHash -cne $ivyOwner.definitionHash -or
             $ivyCurrent.enabled -ne [bool]$ivyOwner.enabled -or $ivyCurrent.running -ne [bool]$ivyOwner.running) {
           throw 'Bootstrap owner changed after its exact snapshot.'
         }
-      }
+        $ivySelection
+      })
       foreach ($ivyOwner in $ivyOwners) { ($ivyFolder.GetTask([string]$ivyOwner.name)).Enabled = $false }
-      foreach ($ivyOwner in @($ivyOwners | Sort-Object { if ($_.componentId -ceq 'host-executor') { 1 } else { 0 } })) {
-        $ivyTask = $ivyFolder.GetTask([string]$ivyOwner.name); if ($ivyTask.State -in @(2,4)) { $null = $ivyTask.Stop(0) }
-      }
-      $ivyDeadline = [DateTime]::UtcNow.AddSeconds(60)
-      do {
-        $ivyActive = @($ivyOwners | Where-Object { ($ivyFolder.GetTask([string]$_.name)).State -notin @(1,3) })
-        if ($ivyActive.Count -eq 0) { break }; Start-Sleep -Milliseconds 200
-      } while ([DateTime]::UtcNow -lt $ivyDeadline)
-      if ($ivyActive.Count -ne 0) { throw 'Bootstrap owners did not stop for maintenance.' }
-      $ivyResult = $true
+      # Native Rust owns the fenced shutdown and process wait. Task.Stop kills
+      # the job and would bypass service and native-turn completion.
+      $ivyResult = @($ivySelected)
     } elseif ($ivyInput.action -eq 'resume') {
       $ivyPlans = @($ivyData.plans); $ivySnapshot = $ivyData.snapshot; $ivyOwners = @($ivySnapshot.owners)
       if ($ivyPlans.Count -lt 1 -or $ivySnapshot.hostId -cne $ivyPlans[0].hostId -or
@@ -209,7 +211,7 @@ try {
         $ivyDefinition.Principal.UserId = $ivySid; $ivyDefinition.Principal.LogonType = 3; $ivyDefinition.Principal.RunLevel = 0
         $ivyDefinition.Settings.Enabled = $true; $ivyDefinition.Settings.Hidden = $true; $ivyDefinition.Settings.AllowDemandStart = $true
         $ivyDefinition.Settings.DisallowStartIfOnBatteries = $false; $ivyDefinition.Settings.StopIfGoingOnBatteries = $false
-        $ivyDefinition.Settings.MultipleInstances = 2; $ivyDefinition.Settings.ExecutionTimeLimit = 'PT15M'
+        $ivyDefinition.Settings.MultipleInstances = 2; $ivyDefinition.Settings.ExecutionTimeLimit = 'PT0S'
         $ivyDefinition.Settings.RestartCount = 3; $ivyDefinition.Settings.RestartInterval = 'PT1M'
         # The task is started explicitly below. A boot trigger requires elevation
         # and prevents a standard-user bootstrap owner from registering it.
