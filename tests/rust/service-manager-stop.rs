@@ -416,10 +416,7 @@ fn agent_manager_unit_signals_only_its_owner_and_keeps_native_work_outside_a_sto
         let candidate = IvyJson::object([
             ("candidateId", hash()),
             ("componentId", component.into()),
-            (
-                "artifactRoot",
-                root.0.join("artifact").to_string_lossy().to_string().into(),
-            ),
+            ("artifactRoot", "/fixture/artifact".into()),
             (
                 "platform",
                 IvyJson::object([("os", "linux".into()), ("arch", "x64".into())]),
@@ -429,14 +426,7 @@ fn agent_manager_unit_signals_only_its_owner_and_keeps_native_work_outside_a_sto
             ("instanceId", "fixture".into()),
             ("candidateId", hash()),
             ("revision", "launch".into()),
-            (
-                "configPath",
-                root.0
-                    .join("instance.json")
-                    .to_string_lossy()
-                    .to_string()
-                    .into(),
-            ),
+            ("configPath", "/fixture/instance.json".into()),
         ]);
         let manifest = IvyJson::object([
             ("componentId", component.into()),

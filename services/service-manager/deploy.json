@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "service-manager",
   "kind": "service-manager",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "Host-local deployment facade and sequenced runtime observations",
   "connectsToHive": true,
   "requirements": {
