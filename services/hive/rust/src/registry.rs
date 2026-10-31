@@ -471,6 +471,7 @@ impl Registry {
         let source = sql(store, row.get_ref(0))?.as_str().map_err(|_| IvyError::internal())?;
         namespaces::mcp_names(source)
     }
+    #[cfg(test)]
     pub(crate) fn topic_namespaces(
         &self,
         store: &Store,
@@ -506,6 +507,10 @@ impl Registry {
         self.read_namespace(store, id, namespace, |selected| {
             namespaces::value(selected.ok_or_else(namespaces::not_found)?)
         })
+    }
+    pub(crate) fn check_namespace(&self, store: &Store, id: &JsString, namespace: &JsString) -> IvyResult<()> {
+        self.read_namespace(store, id, namespace, |selected|
+            selected.map(|_| ()).ok_or_else(namespaces::not_found))
     }
     fn read_namespace<T>(
         &self,

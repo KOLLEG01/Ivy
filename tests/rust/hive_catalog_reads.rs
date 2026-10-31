@@ -165,80 +165,6 @@ fn tool_pages_keep_cursors_and_materialize_only_selected_definitions() {
     assert_eq!(materialized.get(), 0);
 }
 
-fn fixture_topics(schema_bytes: usize) -> Vec<TopicRecord> {
-    (0..8).map(|index| TopicRecord {
-        provider: if index == 7 { IvyJson::Null } else {
-            IvyJson::object([("node", IvyJson::object([("serviceNodeId", format!("fixture-{index}").into())]))])
-        },
-        namespace: "fixture".into(),
-        definition: IvyJson::object([
-            ("topic", format!("changed{index}").into()),
-            ("version", "1.0.0".into()),
-            ("payloadSchema", IvyJson::object([("description", "s".repeat(schema_bytes).into())])),
-        ]),
-    }).collect()
-}
-
-fn copied_topic_identity(records: &[TopicRecord]) -> IvyJson {
-    IvyJson::Array(records.iter().map(|record| IvyJson::object([
-        ("serviceNodeId", record.provider.get("node").and_then(|node| node.get("serviceNodeId"))
-            .cloned().unwrap_or_else(|| "hive".into())),
-        ("namespace", record.namespace.clone()),
-        ("definition", record.definition.clone()),
-    ])).collect())
-}
-
-#[test]
-fn topic_page_identity_preserves_payloads_hashes_and_native_ownership() {
-    for schema in [IvyJson::Bool(true), IvyJson::Bool(false), IvyJson::object([
-        (JsString(vec![0xd800]), IvyJson::String(JsString(vec![0xd801]))),
-        ("unknown".into(), IvyJson::Array(vec![IvyJson::Null, 17.0.into()])),
-    ]), 9007199254740992.0.into()] {
-        let mut records = fixture_topics(0);
-        records[0].definition.insert("payloadSchema", schema);
-        let expected_hash = hash_json(&copied_topic_identity(&records)).map_err(|e| e.code);
-        let expected: Vec<_> = records.iter().map(|record| IvyJson::object([
-            ("provider", record.provider.clone()), ("namespace", record.namespace.clone()),
-            ("definition", record.definition.clone()),
-        ])).collect();
-        let actual = topic_page_records(records).map_err(|e| e.code);
-        assert_eq!(actual.as_ref().map(|(hash, _)| hash).map_err(|code| code.clone()), expected_hash.as_ref().map_err(|code| code.clone()));
-        if let Ok((_, returned)) = actual { assert_eq!(returned, expected); }
-    }
-}
-
-#[test]
-fn topic_page_identity_moves_schema_payloads_without_copying_them() {
-    const CHILD: &str = "IVY_TOPIC_PAGE_MEMORY_CHILD";
-    if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "kernel::catalogs::read_tests::topic_page_identity_moves_schema_payloads_without_copying_them", "--nocapture"])
-            .env(CHILD, "1").output().unwrap();
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
-        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
-        return;
-    }
-    let records = fixture_topics(128 * 1024);
-    let payload = |value: &IvyJson| value.get("payloadSchema").unwrap()
-        .get("description").unwrap().as_js_string().unwrap().0.as_ptr() as usize;
-    let pointers: Vec<_> = records.iter().map(|record| payload(&record.definition)).collect();
-    let before = LIVE.load(Ordering::Relaxed);
-    PEAK.store(before, Ordering::Relaxed);
-    let identity = copied_topic_identity(&records);
-    let expected = hash_json(&identity).unwrap();
-    let copied_peak = PEAK.load(Ordering::Relaxed) - before;
-    drop(identity);
-    let before = LIVE.load(Ordering::Relaxed);
-    PEAK.store(before, Ordering::Relaxed);
-    let (hash, returned) = topic_page_records(records).unwrap();
-    let moved_peak = PEAK.load(Ordering::Relaxed) - before;
-    assert_eq!(hash, expected);
-    assert_eq!(returned.iter().map(|record| payload(record.get("definition").unwrap())).collect::<Vec<_>>(), pointers);
-    eprintln!("Hive topic-page identity Rust allocation peak: copied {copied_peak} bytes, moved {moved_peak} bytes for 1 MiB schema text");
-    assert!(copied_peak > moved_peak + 1536 * 1024, "Topic identity copied schemas");
-}
-
 fn full_contract_page(store: &Store, params: &IvyJson, node: &IvyJson) -> IvyResult<IvyJson> {
     let catalog = Registry::default().required_contracts(store, string(params, "serviceNodeId")?)?;
     let has_catalog = catalog.is_some();
@@ -686,4 +612,320 @@ fn namespace_pages_materialize_only_selected_providers_and_skip_schema_payloads(
     // Rust requests only; SQLite's C heap and process RSS are excluded.
     assert!(full_peak>16*1024*1024);
     assert!(paged_peak<512*1024,"Unselected status/providers/schema payloads were retained");
+}
+
+struct TopicRecord {
+    provider: IvyJson,
+    namespace: IvyJson,
+    definition: IvyJson,
+}
+fn topic_page_records(records: Vec<TopicRecord>) -> IvyResult<(String, Vec<IvyJson>)> {
+    let mut providers = Vec::with_capacity(records.len());
+    let identity = IvyJson::Array(records.into_iter().map(|record| {
+        let id = record.provider.get("node").and_then(|node| node.get("serviceNodeId"))
+            .cloned().unwrap_or_else(|| "hive".into());
+        providers.push(record.provider);
+        IvyJson::object([
+            ("serviceNodeId", id), ("namespace", record.namespace), ("definition", record.definition),
+        ])
+    }).collect());
+    let hash = hash_json(&identity)?;
+    let records = identity.into_array().ok_or_else(IvyError::internal)?
+        .into_iter().zip(providers).map(|(mut record, provider)| IvyJson::object([
+            ("provider", provider),
+            ("namespace", record.remove("namespace").unwrap_or(IvyJson::Null)),
+            ("definition", record.remove("definition").unwrap_or(IvyJson::Null)),
+        ])).collect();
+    Ok((hash, records))
+}
+fn full_topics(store: &Store, registry: &Registry, params: &IvyJson, now: f64) -> IvyResult<IvyJson> {
+    let resource = params.get("resourceRef");
+    let id = params
+        .get("serviceNodeId")
+        .filter(|v| !v.is_null())
+        .or_else(|| resource.and_then(|v| v.get("serviceNodeId")));
+    let namespace = params
+        .get("namespace")
+        .filter(|v| !v.is_null())
+        .or_else(|| resource.and_then(|v| v.get("namespace")));
+    require(
+        !params
+            .get("serviceNodeId")
+            .and_then(IvyJson::as_js_string)
+            .is_some_and(|v| !v.0.is_empty())
+            || !resource.is_some_and(|v| v.as_object().is_some())
+            || params.get("serviceNodeId") == resource.and_then(|v| v.get("serviceNodeId")),
+        "target_conflict",
+        "Resource and node selectors disagree.",
+    )?;
+    require(
+        !params
+            .get("namespace")
+            .and_then(IvyJson::as_js_string)
+            .is_some_and(|v| !v.0.is_empty())
+            || !resource.is_some_and(|v| v.as_object().is_some())
+            || params.get("namespace") == resource.and_then(|v| v.get("namespace")),
+        "target_conflict",
+        "Resource and namespace selectors disagree.",
+    )?;
+    let nodes = if id
+        .and_then(IvyJson::as_js_string)
+        .is_some_and(|v| !v.0.is_empty())
+    {
+        vec![
+            registry.node(
+                store,
+                id.and_then(IvyJson::as_js_string)
+                    .ok_or_else(IvyError::internal)?,
+                &crate::native_runtime::NativeRuntime,
+                now,
+            )?,
+        ]
+    } else {
+        registry
+            .nodes(store, &crate::native_runtime::NativeRuntime, now)?
+    };
+    if id
+        .and_then(IvyJson::as_js_string)
+        .is_some_and(|v| !v.0.is_empty())
+    {
+        let node = &nodes[0];
+        require(
+            selected(params, "hostId", node.get("hostId"))
+                && selected(params, "serviceName", node.get("serviceName")),
+            "target_conflict",
+            "The selected resource has a different owner.",
+        )?;
+        if namespace
+            .and_then(IvyJson::as_js_string)
+            .is_some_and(|v| !v.0.is_empty())
+        {
+            registry.namespace(
+                store,
+                string(node, "serviceNodeId")?,
+                namespace
+                    .and_then(IvyJson::as_js_string)
+                    .ok_or_else(IvyError::internal)?,
+            )?;
+        }
+    }
+    let mut records = vec![];
+    for node in nodes.into_iter().filter(|n| {
+        selected(params, "hostId", n.get("hostId"))
+            && selected(params, "serviceName", n.get("serviceName"))
+    }) {
+        let selected = namespace.and_then(IvyJson::as_js_string).filter(|name| !name.0.is_empty());
+        for ns in registry.topic_namespaces(store, string(&node, "serviceNodeId")?, selected)? {
+            for topic in ns.topics {
+                if prefixed(&topic, "topic", params.get("topicPrefix"))? {
+                    records.push(TopicRecord {
+                        provider: provider(&node),
+                        namespace: ns.namespace.as_ref().ok_or_else(IvyError::internal)?.clone(),
+                        definition: topic,
+                    });
+                }
+            }
+        }
+    }
+    if !id
+        .and_then(IvyJson::as_js_string)
+        .is_some_and(|v| !v.0.is_empty())
+        && !params
+            .get("hostId")
+            .and_then(IvyJson::as_js_string)
+            .is_some_and(|v| !v.0.is_empty())
+        && (!namespace
+            .and_then(IvyJson::as_js_string)
+            .is_some_and(|v| !v.0.is_empty())
+            || is_text(namespace, "hive"))
+        && (!params
+            .get("serviceName")
+            .and_then(IvyJson::as_js_string)
+            .is_some_and(|v| !v.0.is_empty())
+            || is_text(params.get("serviceName"), "hive"))
+    {
+        let mut statement = sql(
+            store,
+            store
+                .connection()
+                .prepare_cached("SELECT definition FROM topics WHERE owner='hive'"),
+        )?;
+        for row in sql(
+            store,
+            statement.query_map([], |r| r.get::<_, String>(0)),
+        )? {
+            let mut topic = decode(&sql(store, row)?)?;
+            if !prefixed(&topic, "topic", params.get("topicPrefix"))? {
+                continue;
+            }
+            topic.insert("title", "Object changes".into());
+            topic.insert("description","A Hive object is written, moved, archived or deleted according to the selected topic version.".into());
+            topic.insert("eventKinds", IvyJson::Array(vec![]));
+            records.push(TopicRecord {
+                provider: IvyJson::Null,
+                namespace: "hive".into(),
+                definition: topic,
+            });
+        }
+    }
+    let (snapshot, records) = topic_page_records(records)?;
+    let mut identity=objects::page_identity("topics.list",params)?;identity.insert("snapshot",snapshot.into());
+    crate::paging::catalog_page(
+        store,
+        records,
+        &identity,
+        |v| {
+            let mut out = v
+                .get("provider")
+                .and_then(|v| v.get("node"))
+                .map(|v| key(v, "serviceNodeId"))
+                .unwrap_or_else(|| "hive".into());
+            for part in [
+                key(v, "namespace"),
+                key(v.get("definition").unwrap_or(&IvyJson::Null), "topic"),
+                key(v.get("definition").unwrap_or(&IvyJson::Null), "version"),
+            ] {
+                out.0.push(31);
+                out.0.extend(part.0);
+            }
+            out
+        },
+        params.get("limit").and_then(IvyJson::as_f64).map(|v|v as usize),
+        optional_string(params,"cursor"),
+    )
+}
+
+fn topic_definition(name: IvyJson, version: IvyJson, schema_bytes: usize) -> IvyJson {
+    IvyJson::object([("topic",name),("version",version),("title","Changed".into()),
+        ("description","Fixture changes".into()),("eventKinds",IvyJson::Array(vec![])),
+        ("payloadSchema",IvyJson::object([("description","s".repeat(schema_bytes).into())]))])
+}
+fn insert_topic_provider(store: &Store, id: &str, namespaces: Vec<IvyJson>, message_bytes: usize) {
+    insert_page_node(store,id,&IvyJson::object([("serviceNodeId",id.into()),("hostId","host".into()),
+        ("serviceName","service".into()),("connected",true.into()),("ready",true.into()),
+        ("synced",true.into()),("desiredEnabled",true.into()),("lastContactAt","1970-01-01T00:00:00.000Z".into())]));
+    let catalog=IvyJson::object([("namespaces",IvyJson::Array(namespaces))]);
+    store.connection().execute("INSERT INTO registries VALUES(?1,?2)",params![id,canonical(&catalog,MANAGEMENT_FRAME_BYTES).unwrap()]).unwrap();
+    if message_bytes>0 {
+        let diagnostic=IvyJson::object([("source",format!("service:{id}").into()),("status","current".into()),
+            ("lastObservedAt","1970-01-01T00:00:00.000Z".into()),("message","m".repeat(message_bytes).into())]);
+        store.connection().execute("INSERT INTO diagnostics VALUES(?1,?2)",params![id,canonical(&diagnostic,MANAGEMENT_FRAME_BYTES).unwrap()]).unwrap();
+    }
+}
+fn topic_namespace(name: IvyJson, topics: Vec<IvyJson>) -> IvyJson {
+    IvyJson::object([("namespace",name),("topics",IvyJson::Array(topics))])
+}
+fn actual_topics(store: &Store, registry: &Registry, params: &IvyJson, now: f64) -> IvyResult<IvyJson> {
+    topic_catalog::list(store,registry,params,&crate::native_runtime::NativeRuntime,now)
+}
+fn compare_topics(store: &Store, registry: &Registry, params: &IvyJson, now: f64) -> IvyResult<IvyJson> {
+    let expected=full_topics(store,registry,params,now).map_err(|e|e.to_wire());
+    let actual=actual_topics(store,registry,params,now);
+    assert!(actual.as_ref().map_err(IvyError::to_wire)==expected.as_ref().map_err(Clone::clone),
+        "Topic page differs; actual error {:?}, expected error {:?}",actual.as_ref().err().map(|e|&e.code),
+        expected.as_ref().err().and_then(|e|e.get("code")));
+    actual
+}
+#[test]
+fn topic_pages_keep_filters_snapshot_hashes_exact_cursors_and_stable_utf16_keys() {
+    let store=node_page_store();let registry=Registry::default();
+    let lone=IvyJson::String(JsString(vec![0xd800]));
+    let names=vec!["alpha".into(),lone.clone(),IvyJson::String(JsString(vec![0xd801])),"�".into(),
+        "nul\0tail".into(),"😀".into(),IvyJson::String(JsString(vec![0xd83d]))];
+    for id in ["alpha","beta","hive"] {
+        insert_topic_provider(&store,id,vec![
+            topic_namespace("fixture".into(),names.iter().map(|name|topic_definition(name.clone(),"1.0.0".into(),0)).collect()),
+            topic_namespace(lone.clone(),vec![topic_definition("same".into(),"1.0.0".into(),0)]),
+            topic_namespace("fixture".into(),vec![topic_definition("alpha".into(),"1.0.0".into(),0)]),
+            topic_namespace("nul\0tail".into(),vec![topic_definition("last".into(),"1.0.0".into(),0)]),
+        ],1024);
+    }
+    let builtin=topic_definition("changed".into(),"1.0.0".into(),0);
+    store.connection().execute("INSERT INTO topics VALUES('changed','1.0.0','hive',?)",
+        [canonical(&builtin,MANAGEMENT_FRAME_BYTES).unwrap()]).unwrap();
+    store.connection().execute("UPDATE service_nodes SET status_json=json_set(status_json,'$.hostId','other','$.serviceName','other') WHERE id='beta'",[]).unwrap();
+    store.connection().execute("UPDATE registries SET registry_json=replace(registry_json,'fixture','\\u0066ixture') WHERE node_id='hive'",[]).unwrap();
+    let filters=vec![
+        IvyJson::object([] as [(&str,IvyJson);0]),IvyJson::object([("namespace","fixture".into())]),
+        IvyJson::object([("namespace",lone)]),IvyJson::object([("namespace","nul\0tail".into())]),
+        IvyJson::object([("namespace","absent".into())]),IvyJson::object([("namespace","hive".into())]),
+        IvyJson::object([("hostId","host".into())]),IvyJson::object([("serviceName","other".into())]),
+        IvyJson::object([("serviceName","hive".into())]),IvyJson::object([("topicPrefix","al".into())]),
+        IvyJson::object([("topicPrefix",IvyJson::String(JsString(vec![0xd83d])))]),
+        IvyJson::object([("serviceNodeId","alpha".into()),("namespace","fixture".into())]),
+        IvyJson::object([("resourceRef",IvyJson::object([("serviceNodeId","beta".into()),("namespace","fixture".into())]))]),
+        IvyJson::object([("serviceNodeId","".into()),("namespace","".into()),("hostId","".into()),("topicPrefix","".into())]),
+    ];
+    for now in [0.0,10_001.0] {for filter in &filters {for limit in [1,3,50] {
+        let mut params=filter.clone();params.insert("limit",(limit as f64).into());
+        let mut pages=0;
+        loop {
+            let page=compare_topics(&store,&registry,&params,now).unwrap();
+            pages+=1;assert!(pages<50);
+            let cursor=page.get("nextCursor").unwrap();if cursor.is_null(){break;}
+            params.insert("cursor",cursor.clone());
+        }
+        params.insert("cursor","invalid".into());
+        assert_eq!(compare_topics(&store,&registry,&params,now).unwrap_err().code,"invalid_cursor");
+    }}}
+    for params in [
+        IvyJson::object([("serviceNodeId","absent".into())]),
+        IvyJson::object([("serviceNodeId","alpha".into()),("hostId","other".into())]),
+        IvyJson::object([("serviceNodeId","alpha".into()),("namespace","absent".into())]),
+        IvyJson::object([("namespace","other".into()),("resourceRef",IvyJson::object([("namespace","fixture".into())]))]),
+        IvyJson::object([("serviceNodeId","alpha".into()),("resourceRef",IvyJson::object([("serviceNodeId","beta".into())]))]),
+    ] {compare_topics(&store,&registry,&params,0.0).unwrap_err();}
+    let mut params=IvyJson::object([("limit",1.0.into())]);
+    let first=compare_topics(&store,&registry,&params,0.0).unwrap();
+    params.insert("cursor",first.get("nextCursor").unwrap().clone());
+    store.connection().execute("UPDATE registries SET registry_json=replace(registry_json,'Fixture changes','Changed description') WHERE node_id='beta'",[]).unwrap();
+    assert_eq!(compare_topics(&store,&registry,&params,0.0).unwrap_err().code,"invalid_cursor");
+}
+#[test]
+fn topic_pages_keep_response_bounds_and_catalog_error_priority() {
+    for (topic_bytes,message_bytes) in [(600*1024,600*1024),(1100*1024,1100*1024)] {
+        let store=node_page_store();let registry=Registry::default();
+        insert_topic_provider(&store,"node",vec![topic_namespace("fixture".into(),(0..3)
+            .map(|i|topic_definition(format!("changed{i}").into(),"1.0.0".into(),topic_bytes)).collect())],message_bytes);
+        let result=compare_topics(&store,&registry,&IvyJson::object([("limit",3.0.into()),("serviceNodeId","node".into())]),0.0);
+        if topic_bytes==600*1024 {assert_eq!(result.unwrap().get("items").unwrap().as_array().unwrap().len(),1);}
+        else {assert_eq!(result.unwrap_err().code,"result_too_large");}
+    }
+    for source in ["null","{}","{\"namespaces\":null}","{\"namespaces\":[]}","[","{\"namespaces\":true}",
+        "{\"namespaces\":[null,false,1,\"skip\",{\"namespace\":\"fixture\",\"topics\":null}]}",
+        "{\"namespaces\":[{\"namespace\":\"fixture\",\"topics\":{}}]}",
+        "{\"namespaces\":[{\"topics\":[{\"topic\":\"changed\",\"version\":\"1.0.0\"}]}]}",
+        "{\"namespaces\":[{\"namespace\":null,\"topics\":[true]}]}"] {
+        let store=node_page_store();let registry=Registry::default();
+        insert_topic_provider(&store,"node",vec![],0);
+        store.connection().execute("UPDATE registries SET registry_json=? WHERE node_id='node'",[source]).unwrap();
+        for prefix in [None,Some("changed")] {
+            let mut params=IvyJson::object([("cursor","invalid".into())]);
+            if let Some(prefix)=prefix {params.insert("topicPrefix",prefix.into());}
+            compare_topics(&store,&registry,&params,0.0).unwrap_err();
+        }
+    }
+}
+#[test]
+fn topic_pages_materialize_selected_providers_and_stream_snapshot_definitions() {
+    const CHILD:&str="IVY_TOPIC_CATALOG_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none(){
+        let result=std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","kernel::catalogs::read_tests::topic_pages_materialize_selected_providers_and_stream_snapshot_definitions","--nocapture"])
+            .env(CHILD,"1").output().unwrap();
+        eprint!("{}",String::from_utf8_lossy(&result.stderr));assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stdout));
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed;"));return;
+    }
+    let store=node_page_store();let registry=Registry::default();
+    for i in 0..64 {insert_topic_provider(&store,&format!("node{i:03}"),vec![topic_namespace("fixture".into(),
+        (0..4).map(|j|topic_definition(format!("changed{j}").into(),"1.0.0".into(),8192)).collect())],32*1024);}
+    let params=IvyJson::object([("limit",1.0.into()),("namespace","fixture".into())]);
+    let before=LIVE.load(Ordering::Relaxed);PEAK.store(before,Ordering::Relaxed);
+    let full=full_topics(&store,&registry,&params,0.0).unwrap();let full_peak=PEAK.load(Ordering::Relaxed)-before;
+    drop(full);
+    let before=LIVE.load(Ordering::Relaxed);PEAK.store(before,Ordering::Relaxed);
+    let paged=actual_topics(&store,&registry,&params,0.0).unwrap();let peak=PEAK.load(Ordering::Relaxed)-before;
+    assert_eq!(paged.get("items").unwrap().as_array().unwrap().len(),1);
+    eprintln!("Hive topic catalog Rust allocation peak: full {full_peak} bytes, paged {peak} bytes for 64 providers, 256 topics, 2 MiB diagnostics and 2 MiB schema text");
+    assert!(full_peak>16*1024*1024);assert!(peak<1024*1024,"All topic/provider bodies retained");
 }

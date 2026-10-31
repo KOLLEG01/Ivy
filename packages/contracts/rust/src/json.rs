@@ -609,16 +609,7 @@ pub(crate) fn canonical_object_with_array<'a>(
         encoder.string(key)?;
         encoder.emit(":")?;
         if *key == array_key {
-            encoder.node(1)?;
-            encoder.punctuation("[")?;
-            let mut count = 0usize;
-            for record in records.by_ref() {
-                if count > 0 { encoder.punctuation(",")?; }
-                encoder.value(&record?, 2)?;
-                count += 1;
-            }
-            encoder.punctuation("]")?;
-            encoder.account(2 + count.saturating_sub(1))?;
+            encoder.records(records.by_ref(), 1)?;
         } else {
             encoder.value(value.unwrap(), 1)?;
         }
@@ -626,6 +617,14 @@ pub(crate) fn canonical_object_with_array<'a>(
     encoder.punctuation("}")?;
     encoder.account(2 + pairs.len().saturating_sub(1))?;
     Ok(())
+}
+pub(crate) fn canonical_array(
+    records: impl IntoIterator<Item = IvyResult<IvyJson>>,
+    maximum_bytes: usize,
+    out: impl std::fmt::Write,
+) -> IvyResult<()> {
+    Encoder { out, maximum_bytes, nodes: 0, sorted: true, validate: true, accounted: 0 }
+        .records(records, 0)
 }
 pub(crate) fn canonical_into(
     value: &IvyJson,
@@ -688,6 +687,18 @@ struct Encoder<W> {
     accounted: usize,
 }
 impl<W: std::fmt::Write> Encoder<W> {
+    fn records(&mut self, records: impl IntoIterator<Item = IvyResult<IvyJson>>, depth: usize) -> IvyResult<()> {
+        self.node(depth)?;
+        self.punctuation("[")?;
+        let mut count = 0usize;
+        for record in records {
+            if count > 0 { self.punctuation(",")?; }
+            self.value(&record?, depth + 1)?;
+            count += 1;
+        }
+        self.punctuation("]")?;
+        self.account(2 + count.saturating_sub(1))
+    }
     fn node(&mut self, depth: usize) -> IvyResult<()> {
         self.nodes += 1;
         if self.validate && (self.nodes > 400_000 || depth > 128) {

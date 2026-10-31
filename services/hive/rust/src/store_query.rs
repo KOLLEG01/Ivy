@@ -183,7 +183,7 @@ impl Store {
                 })
                 .map_err(sql_error)?;
         }
-        for (name, arguments) in [("ivy_contains", 3), ("ivy_recency", 2)] {
+        for (name, arguments) in [("ivy_contains", 3), ("ivy_starts_with", 3), ("ivy_recency", 2)] {
             let state = self.query_state.0.clone();
             self.db
                 .create_scalar_function(
@@ -193,8 +193,17 @@ impl Store {
                     move |context| {
                         let mut state = state.lock().unwrap();
                         let runtime = state.runtime.clone();
+                        let prefix = if name == "ivy_starts_with" {
+                            Some(parse(context.get::<String>(2)?.as_str(), usize::MAX)
+                                .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?
+                                .into_js_string().ok_or_else(|| rusqlite::Error::UserFunctionError(Box::new(IvyError::internal())))?)
+                        } else { None };
                         let result =
                             state.project(context.get_raw(0), context.get_raw(1), |value| {
+                                if let Some(prefix) = &prefix {
+                                    return Ok(u8::from(value.as_js_string()
+                                        .is_some_and(|value| value.0.starts_with(&prefix.0))) as f64);
+                                }
                                 if name == "ivy_contains" {
                                     let (IvyJson::String(value), ValueRef::Text(needle)) =
                                         (value, context.get_raw(2))

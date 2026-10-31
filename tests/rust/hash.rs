@@ -1,6 +1,6 @@
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
-    hash::{digest, hash_json, hash_object_with_array, hmac_sha256, tool_definition_hash, verify_hmac_sha256},
+    hash::{digest, hash_array, hash_json, hash_object_with_array, hmac_sha256, tool_definition_hash, verify_hmac_sha256},
     json::canonical,
     limits::MANAGEMENT_FRAME_BYTES,
 };
@@ -216,4 +216,33 @@ fn canonical_hash_matches_exact_bytes_across_buffer_boundaries() {
         assert_eq!(hash_json(&value).unwrap(), digest(canonical(&value, MANAGEMENT_FRAME_BYTES).unwrap()));
         assert!(compare_generated_array(&IvyJson::object([("guide", value.clone())]), vec![value]));
     }
+}
+
+fn compare_array_hash(records: Vec<IvyJson>) -> bool {
+    let expected=hash_json(&IvyJson::Array(records.clone())).map_err(|error|(error.code,error.message));
+    let actual=hash_array(records.into_iter().map(Ok)).map_err(|error|(error.code,error.message));
+    assert_eq!(actual,expected);actual.is_ok()
+}
+#[test]
+fn streamed_array_hash_preserves_values_budgets_and_read_error_priority() {
+    assert!(compare_array_hash(vec![]));
+    for value in [IvyJson::Null,(-0.0).into(),1e-7.into(),IvyJson::Bool(false),
+        IvyJson::String(JsString(vec![0xd800,0,0xd801])),IvyJson::Number(f64::NAN)] {
+        compare_array_hash(vec![value]);
+    }
+    for depth in [127,128] {
+        let mut value=IvyJson::Null;for _ in 0..depth {value=IvyJson::Array(vec![value]);}
+        assert_eq!(compare_array_hash(vec![value]),depth==127);
+    }
+    for count in [399_999,400_000] {assert_eq!(compare_array_hash(vec![IvyJson::Null;count]),count==399_999);}
+    // Seven array/comma/string punctuation bytes, one budget across records.
+    for extra in [0,1] {
+        let bytes=MANAGEMENT_FRAME_BYTES-7;
+        assert_eq!(compare_array_hash(vec!["a".repeat(bytes/2).into(),"b".repeat(bytes-bytes/2+extra).into()]),extra==0);
+    }
+    let visits=std::cell::Cell::new(0);
+    let error=hash_array((0..2).map(|index|{visits.set(visits.get()+1);
+        if index==0 {Ok(IvyJson::Number(f64::NAN))}else{Err(IvyError::new("fixture","Read failed."))}})).unwrap_err();
+    assert_eq!(error.code,"invalid_arguments");assert_eq!(visits.get(),1);
+    assert_eq!(hash_array([Ok(IvyJson::Null),Err(IvyError::new("fixture","Read failed."))]).unwrap_err().code,"fixture");
 }

@@ -90,6 +90,12 @@ pub fn hash_json(value: &IvyJson) -> IvyResult<String> {
     canonical_into(value, MANAGEMENT_FRAME_BYTES, &mut writer)?;
     Ok(writer.finish())
 }
+/// Hash a generated array with one canonical budget and no retained record tree.
+pub fn hash_array(records: impl IntoIterator<Item = IvyResult<IvyJson>>) -> IvyResult<String> {
+    let mut writer = HashWriter::new();
+    crate::json::canonical_array(records, MANAGEMENT_FRAME_BYTES, &mut writer)?;
+    Ok(writer.finish())
+}
 /// Hash a fallible catalog stream without retaining every materialized record.
 pub fn hash_object_with_array<'a>(
     pairs: impl IntoIterator<Item = (&'a JsString, &'a IvyJson)>,

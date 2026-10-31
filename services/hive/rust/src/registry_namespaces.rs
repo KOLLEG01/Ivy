@@ -15,6 +15,7 @@ struct Name<'a> {
     #[serde(borrow)]
     namespace: Option<&'a RawValue>,
 }
+#[cfg(test)]
 #[derive(Deserialize)]
 struct Names<'a> {
     #[serde(borrow)]
@@ -58,6 +59,7 @@ struct McpName<'a> {
     #[serde(borrow)]
     name: Option<&'a RawValue>,
 }
+#[cfg(test)]
 #[derive(Deserialize)]
 struct TopicFields<'a> {
     #[serde(default, borrow, deserialize_with = "present_raw")]
@@ -65,10 +67,12 @@ struct TopicFields<'a> {
     #[serde(borrow)]
     topics: Option<&'a RawValue>,
 }
+#[cfg(test)]
 fn present_raw<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<&'de RawValue>, D::Error> {
     <&RawValue>::deserialize(de).map(Some)
 }
 
+#[cfg(test)]
 pub(crate) struct TopicNamespace {
     pub namespace: Option<IvyJson>,
     pub topics: Vec<IvyJson>,
@@ -238,6 +242,7 @@ pub(super) fn find<'a>(source: &'a str, namespace: &JsString) -> IvyResult<Optio
     Ok(None)
 }
 
+#[cfg(test)]
 pub(super) fn topics(source: &str, namespace: Option<&JsString>) -> IvyResult<Vec<TopicNamespace>> {
     let source = source.trim_matches([' ', '\t', '\r', '\n']);
     if source == "null" {

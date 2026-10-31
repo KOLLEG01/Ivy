@@ -10,6 +10,8 @@ use rusqlite::{OptionalExtension, params};
 mod deployments;
 #[path = "service_contract_catalog.rs"]
 mod service_contracts;
+#[path = "topic_catalog.rs"]
+mod topic_catalog;
 
 pub(super) const METHODS: &[&str] = &[
     "system.diagnostics",
@@ -248,191 +250,12 @@ pub(super) fn handle(
             result.insert("guideMarkdown", field(&snapshot, "guideMarkdown")?.clone());
             Ok(result)
         }
-        "topics.list" => topics(call, params),
+        "topics.list" => topic_catalog::list(call.store, call.registry, params, call.runtime, (call.clock)()),
         "deployments.report" => report(call, context, params),
         "deployments.list" => deployments::list(call, params),
         "deployments.get" => deployments::get(call, params),
         _ => Err(IvyError::internal()),
     }
-}
-struct TopicRecord {
-    provider: IvyJson,
-    namespace: IvyJson,
-    definition: IvyJson,
-}
-fn topic_page_records(records: Vec<TopicRecord>) -> IvyResult<(String, Vec<IvyJson>)> {
-    let mut providers = Vec::with_capacity(records.len());
-    let identity = IvyJson::Array(records.into_iter().map(|record| {
-        let id = record.provider.get("node").and_then(|node| node.get("serviceNodeId"))
-            .cloned().unwrap_or_else(|| "hive".into());
-        providers.push(record.provider);
-        IvyJson::object([
-            ("serviceNodeId", id), ("namespace", record.namespace), ("definition", record.definition),
-        ])
-    }).collect());
-    let hash = hash_json(&identity)?;
-    let records = identity.into_array().ok_or_else(IvyError::internal)?
-        .into_iter().zip(providers).map(|(mut record, provider)| IvyJson::object([
-            ("provider", provider),
-            ("namespace", record.remove("namespace").unwrap_or(IvyJson::Null)),
-            ("definition", record.remove("definition").unwrap_or(IvyJson::Null)),
-        ])).collect();
-    Ok((hash, records))
-}
-fn topics(call: &Call<'_>, params: &IvyJson) -> IvyResult<IvyJson> {
-    let resource = params.get("resourceRef");
-    let id = params
-        .get("serviceNodeId")
-        .filter(|v| !v.is_null())
-        .or_else(|| resource.and_then(|v| v.get("serviceNodeId")));
-    let namespace = params
-        .get("namespace")
-        .filter(|v| !v.is_null())
-        .or_else(|| resource.and_then(|v| v.get("namespace")));
-    require(
-        !params
-            .get("serviceNodeId")
-            .and_then(IvyJson::as_js_string)
-            .is_some_and(|v| !v.0.is_empty())
-            || !resource.is_some_and(|v| v.as_object().is_some())
-            || params.get("serviceNodeId") == resource.and_then(|v| v.get("serviceNodeId")),
-        "target_conflict",
-        "Resource and node selectors disagree.",
-    )?;
-    require(
-        !params
-            .get("namespace")
-            .and_then(IvyJson::as_js_string)
-            .is_some_and(|v| !v.0.is_empty())
-            || !resource.is_some_and(|v| v.as_object().is_some())
-            || params.get("namespace") == resource.and_then(|v| v.get("namespace")),
-        "target_conflict",
-        "Resource and namespace selectors disagree.",
-    )?;
-    let nodes = if id
-        .and_then(IvyJson::as_js_string)
-        .is_some_and(|v| !v.0.is_empty())
-    {
-        vec![
-            call.registry.node(
-                call.store,
-                id.and_then(IvyJson::as_js_string)
-                    .ok_or_else(IvyError::internal)?,
-                call.runtime,
-                (call.clock)(),
-            )?,
-        ]
-    } else {
-        call.registry
-            .nodes(call.store, call.runtime, (call.clock)())?
-    };
-    if id
-        .and_then(IvyJson::as_js_string)
-        .is_some_and(|v| !v.0.is_empty())
-    {
-        let node = &nodes[0];
-        require(
-            selected(params, "hostId", node.get("hostId"))
-                && selected(params, "serviceName", node.get("serviceName")),
-            "target_conflict",
-            "The selected resource has a different owner.",
-        )?;
-        if namespace
-            .and_then(IvyJson::as_js_string)
-            .is_some_and(|v| !v.0.is_empty())
-        {
-            call.registry.namespace(
-                call.store,
-                string(node, "serviceNodeId")?,
-                namespace
-                    .and_then(IvyJson::as_js_string)
-                    .ok_or_else(IvyError::internal)?,
-            )?;
-        }
-    }
-    let mut records = vec![];
-    for node in nodes.into_iter().filter(|n| {
-        selected(params, "hostId", n.get("hostId"))
-            && selected(params, "serviceName", n.get("serviceName"))
-    }) {
-        let selected = namespace.and_then(IvyJson::as_js_string).filter(|name| !name.0.is_empty());
-        for ns in call.registry.topic_namespaces(call.store, string(&node, "serviceNodeId")?, selected)? {
-            for topic in ns.topics {
-                if prefixed(&topic, "topic", params.get("topicPrefix"))? {
-                    records.push(TopicRecord {
-                        provider: provider(&node),
-                        namespace: ns.namespace.as_ref().ok_or_else(IvyError::internal)?.clone(),
-                        definition: topic,
-                    });
-                }
-            }
-        }
-    }
-    if !id
-        .and_then(IvyJson::as_js_string)
-        .is_some_and(|v| !v.0.is_empty())
-        && !params
-            .get("hostId")
-            .and_then(IvyJson::as_js_string)
-            .is_some_and(|v| !v.0.is_empty())
-        && (!namespace
-            .and_then(IvyJson::as_js_string)
-            .is_some_and(|v| !v.0.is_empty())
-            || is_text(namespace, "hive"))
-        && (!params
-            .get("serviceName")
-            .and_then(IvyJson::as_js_string)
-            .is_some_and(|v| !v.0.is_empty())
-            || is_text(params.get("serviceName"), "hive"))
-    {
-        let mut statement = sql(
-            call.store,
-            call.store
-                .connection()
-                .prepare_cached("SELECT definition FROM topics WHERE owner='hive'"),
-        )?;
-        for row in sql(
-            call.store,
-            statement.query_map([], |r| r.get::<_, String>(0)),
-        )? {
-            let mut topic = decode(&sql(call.store, row)?)?;
-            if !prefixed(&topic, "topic", params.get("topicPrefix"))? {
-                continue;
-            }
-            topic.insert("title", "Object changes".into());
-            topic.insert("description","A Hive object is written, moved, archived or deleted according to the selected topic version.".into());
-            topic.insert("eventKinds", IvyJson::Array(vec![]));
-            records.push(TopicRecord {
-                provider: IvyJson::Null,
-                namespace: "hive".into(),
-                definition: topic,
-            });
-        }
-    }
-    let (identity, records) = topic_page_records(records)?;
-    page(
-        call,
-        "topics.list",
-        params,
-        records,
-        |v| {
-            let mut out = v
-                .get("provider")
-                .and_then(|v| v.get("node"))
-                .map(|v| key(v, "serviceNodeId"))
-                .unwrap_or_else(|| "hive".into());
-            for part in [
-                key(v, "namespace"),
-                key(v.get("definition").unwrap_or(&IvyJson::Null), "topic"),
-                key(v.get("definition").unwrap_or(&IvyJson::Null), "version"),
-            ] {
-                out.0.push(31);
-                out.0.extend(part.0);
-            }
-            out
-        },
-        Some(identity.into()),
-    )
 }
 fn report(call: &mut Call<'_>, context: &IvyJson, params: &IvyJson) -> IvyResult<IvyJson> {
     service(context)?;
