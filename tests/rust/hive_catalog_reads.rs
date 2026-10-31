@@ -400,3 +400,163 @@ fn contract_pages_stream_snapshot_and_load_only_selected_requirements() {
         assert!(projected_peak < 1024 * 1024, "Complete requirement array was retained");
     }
 }
+
+fn node_page_store() -> Store {
+    let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+    store.connection().execute("INSERT INTO principals VALUES('fixture')",[]).unwrap();
+    store
+}
+fn insert_page_node(store: &Store, id: &str, node: &IvyJson) {
+    store.connection().execute("INSERT INTO service_nodes VALUES(?1,'fixture','host','service',1,?2)",
+        params![id,canonical(node,MANAGEMENT_FRAME_BYTES).unwrap()]).unwrap();
+}
+fn full_node_catalog(store: &Store, registry: &Registry, method: &str, params: &IvyJson, now: f64) -> IvyResult<IvyJson> {
+    let nodes = registry.nodes(store,&crate::native_runtime::NativeRuntime,now)?;
+    let records = if method == "serviceNodes.list" {
+        nodes.into_iter().filter(|node| selected(params,"hostId",node.get("hostId"))
+            && selected(params,"serviceName",node.get("serviceName"))).collect()
+    } else {
+        let mut seen = std::collections::HashSet::new();
+        let mut hosts = Vec::new();
+        for node in &nodes {
+            let host = string(node,"hostId")?;
+            if seen.insert(host.clone()) {
+                let owned = nodes.iter().filter(|node| node.get("hostId")==Some(&IvyJson::String(host.clone()))).collect::<Vec<_>>();
+                hosts.push(IvyJson::object([("hostId",host.clone().into()),
+                    ("serviceNodeIds",IvyJson::Array(owned.iter().map(|node| node.get("serviceNodeId").cloned().unwrap_or(IvyJson::Null)).collect())),
+                    ("connected",owned.iter().any(|node| node.get("connected").and_then(IvyJson::as_bool)==Some(true)).into())]));
+            }
+        }
+        hosts
+    };
+    let identity = objects::page_identity(method,params)?;
+    crate::paging::catalog_page(store,records,&identity,
+        |record| key(record,if method=="hosts.list" {"hostId"} else {"serviceNodeId"}),
+        params.get("limit").and_then(IvyJson::as_f64).map(|value| value as usize),optional_string(params,"cursor"))
+}
+fn compare_node_catalog(store: &Store, registry: &Registry, method: &str, params: &IvyJson, now: f64) -> IvyResult<IvyJson> {
+    let expected = full_node_catalog(store,registry,method,params,now).map_err(|e|e.to_wire());
+    let actual = if method=="hosts.list" {registry.host_page(store,params)}
+        else {registry.node_page(store,params,&crate::native_runtime::NativeRuntime,now)};
+    assert!(actual.as_ref().map_err(IvyError::to_wire)==expected.as_ref().map_err(Clone::clone),
+        "{method} page differs; actual error {:?}",actual.as_ref().err().map(|e| &e.code));
+    actual
+}
+
+#[test]
+fn node_and_host_pages_keep_filters_live_fields_exact_cursors_and_lossy_sort_ties() {
+    let store = node_page_store();
+    let registry = Registry::default();
+    let text = |units: &[u16]| IvyJson::String(JsString(units.to_vec()));
+    let node_ids = ["alpha".into(),"nul\0tail".into(),text(&[0xd800]),text(&[0xd801]),
+        "�".into(),"😀".into(),"é".into(),"z".into(),"beta".into(),"last".into()];
+    let hosts = ["host".into(),"nul\0tail".into(),text(&[0xd800]),text(&[0xd801]),"�".into(),
+        "😀".into(),"host".into(),"host".into(),"other".into(),"other".into()];
+    for (index,(id,host)) in node_ids.iter().zip(&hosts).enumerate() {
+        let node = IvyJson::object([("serviceNodeId",id.clone()),("hostId",host.clone()),
+            ("serviceName",if index%2==0 {"even"} else {"odd"}.into()),
+            ("connected",(index%3==0).into()),("synced",true.into()),("ready",(index%2==0).into()),
+            ("desiredEnabled",true.into()),("lastContactAt","1970-01-01T00:00:00.000Z".into())]);
+        insert_page_node(&store,&format!("row{index:03}"),&node);
+        let source = {
+            let mut units: Vec<_> = "service:".encode_utf16().collect();
+            units.extend(id.as_js_string().unwrap().0.iter().copied());
+            IvyJson::String(JsString(units))
+        };
+        for (which,date) in [("first","1970-01-01T00:00:00.000Z"),("latest","1970-01-01T00:00:01.000Z"),("tie","1970-01-01T00:00:01.000Z")] {
+            let diagnostic = IvyJson::object([("source",source.clone()),("status","current".into()),
+                ("lastObservedAt",date.into()),("code",which.into()),("severity","info".into()),
+                ("message",text(&[0xd802,0,0xd803]))]);
+            store.connection().execute("INSERT INTO diagnostics VALUES(?1,?2)",
+                params![format!("{index}-{which}"),canonical(&diagnostic,MANAGEMENT_FRAME_BYTES).unwrap()]).unwrap();
+        }
+    }
+    store.connection().execute("UPDATE service_nodes SET status_json=replace(status_json,'\"other\"','\"\\u006fther\"') WHERE id='row009'",[]).unwrap();
+    for now in [0.0,10_000.0,10_001.0] {
+        for method in ["serviceNodes.list","hosts.list"] {
+            for limit in [1,2,50] {
+                let filters = if method=="hosts.list" {vec![(None,None)]} else {
+                    vec![(None,None),(Some("".into()),Some("".into())),(Some("host".into()),None),
+                        (Some(hosts[2].clone()),None),(Some(hosts[1].clone()),None),
+                        (None,Some("odd".into())),(Some("absent".into()),None)]
+                };
+                for (host,service) in filters {
+                    let mut params = IvyJson::object([("limit",(limit as f64).into())]);
+                    if let Some(host)=host {params.insert("hostId",host);}
+                    if let Some(service)=service {params.insert("serviceName",service);}
+                    let mut page = compare_node_catalog(&store,&registry,method,&params,now).unwrap();
+                    let mut pages = 1;
+                    while !page.get("nextCursor").unwrap().is_null() {
+                        params.insert("cursor",page.get("nextCursor").unwrap().clone());
+                        page = compare_node_catalog(&store,&registry,method,&params,now).unwrap();
+                        pages += 1;assert!(pages<=node_ids.len()+1);
+                    }
+                    params.insert("cursor","invalid".into());
+                    assert_eq!(compare_node_catalog(&store,&registry,method,&params,now).unwrap_err().code,"invalid_cursor");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn node_pages_keep_diagnostic_response_byte_limits() {
+    let store = node_page_store();
+    let registry = Registry::default();
+    for index in 0..3 {
+        let id = format!("node{index}");
+        insert_page_node(&store,&id,&IvyJson::object([("serviceNodeId",id.clone().into()),("hostId","host".into()),
+            ("serviceName","service".into()),("connected",true.into())]));
+        let diagnostic = IvyJson::object([("source",format!("service:{id}").into()),("status","current".into()),
+            ("lastObservedAt","1970-01-01T00:00:00.000Z".into()),("message","m".repeat(1100*1024).into())]);
+        store.connection().execute("INSERT INTO diagnostics VALUES(?1,?2)",params![id,canonical(&diagnostic,MANAGEMENT_FRAME_BYTES).unwrap()]).unwrap();
+    }
+    let mut params = IvyJson::object([("limit",50.0.into())]);
+    let first = compare_node_catalog(&store,&registry,"serviceNodes.list",&params,0.0).unwrap();
+    assert_eq!(first.get("items").unwrap().as_array().unwrap().len(),1);
+    params.insert("cursor",first.get("nextCursor").unwrap().clone());
+    let second = compare_node_catalog(&store,&registry,"serviceNodes.list",&params,0.0).unwrap();
+    assert_eq!(second.get("items").unwrap().as_array().unwrap()[0].get("serviceNodeId"),Some(&"node1".into()));
+    params.remove("cursor");
+    let hosts = compare_node_catalog(&store,&registry,"hosts.list",&params,0.0).unwrap();
+    assert_eq!(hosts.get("items").unwrap().as_array().unwrap()[0].get("serviceNodeIds").unwrap().as_array().unwrap().len(),3);
+}
+
+#[test]
+fn node_and_host_pages_load_only_selected_status_and_skip_unreturned_diagnostics() {
+    const CHILD: &str = "IVY_NODE_PAGE_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","kernel::catalogs::read_tests::node_and_host_pages_load_only_selected_status_and_skip_unreturned_diagnostics","--nocapture"])
+            .env(CHILD,"1").output().unwrap();
+        eprint!("{}",String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+        return;
+    }
+    let store = node_page_store();
+    let registry = Registry::default();
+    for index in 0..64 {
+        let id = format!("node{index:03}");
+        insert_page_node(&store,&id,&IvyJson::object([("serviceNodeId",id.clone().into()),("hostId",format!("host{}",index%4).into()),
+            ("serviceName","service".into()),("connected",true.into())]));
+        let diagnostic = IvyJson::object([("source",format!("service:{id}").into()),("status","current".into()),
+            ("lastObservedAt","1970-01-01T00:00:00.000Z".into()),("message","m".repeat(32*1024).into())]);
+        store.connection().execute("INSERT INTO diagnostics VALUES(?1,?2)",params![id,canonical(&diagnostic,MANAGEMENT_FRAME_BYTES).unwrap()]).unwrap();
+    }
+    let params = IvyJson::object([("limit",1.0.into())]);
+    for method in ["serviceNodes.list","hosts.list"] {
+        let before = LIVE.load(Ordering::Relaxed);PEAK.store(before,Ordering::Relaxed);
+        let expected = full_node_catalog(&store,&registry,method,&params,0.0).unwrap();
+        let full_peak = PEAK.load(Ordering::Relaxed)-before;
+        let before = LIVE.load(Ordering::Relaxed);PEAK.store(before,Ordering::Relaxed);
+        let actual = if method=="hosts.list" {registry.host_page(&store,&params)}
+            else {registry.node_page(&store,&params,&crate::native_runtime::NativeRuntime,0.0)}.unwrap();
+        let projected_peak = PEAK.load(Ordering::Relaxed)-before;
+        assert_eq!(actual,expected);
+        eprintln!("Hive {method} Rust allocation peak: full {full_peak} bytes, paged {projected_peak} bytes for 64 nodes and 2 MiB diagnostic messages");
+        assert!(full_peak>8*1024*1024);
+        // Rust requests only; SQLite's C heap and process RSS are excluded.
+        assert!(projected_peak<512*1024,"Unreturned diagnostics or full node catalogs were retained");
+    }
+}

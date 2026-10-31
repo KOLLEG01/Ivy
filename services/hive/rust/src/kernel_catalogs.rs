@@ -6,7 +6,6 @@ use ivy_contracts::{
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use rusqlite::{OptionalExtension, params};
-use std::collections::HashSet;
 #[path = "deployment_catalog.rs"]
 mod deployments;
 #[path = "service_contract_catalog.rs"]
@@ -192,65 +191,10 @@ pub(super) fn handle(
                 None,
             )
         }
-        "hosts.list" => {
-            let nodes = call
-                .registry
-                .nodes(call.store, call.runtime, (call.clock)())?;
-            let mut seen = HashSet::new();
-            let mut records = vec![];
-            for node in &nodes {
-                let host = field(node, "hostId")?;
-                if seen.insert(string(node, "hostId")?.clone()) {
-                    let owned = nodes
-                        .iter()
-                        .filter(|v| v.get("hostId") == Some(host))
-                        .collect::<Vec<_>>();
-                    records.push(IvyJson::object([
-                        ("hostId", host.clone()),
-                        (
-                            "serviceNodeIds",
-                            IvyJson::Array(
-                                owned
-                                    .iter()
-                                    .map(|v| {
-                                        v.get("serviceNodeId").cloned().unwrap_or(IvyJson::Null)
-                                    })
-                                    .collect(),
-                            ),
-                        ),
-                        (
-                            "connected",
-                            owned
-                                .iter()
-                                .any(|v| {
-                                    v.get("connected").and_then(IvyJson::as_bool) == Some(true)
-                                })
-                                .into(),
-                        ),
-                    ]));
-                }
-            }
-            page(call, method, params, records, |v| key(v, "hostId"), None)
-        }
-        "serviceNodes.list" => {
-            let records = call
-                .registry
-                .nodes(call.store, call.runtime, (call.clock)())?
-                .into_iter()
-                .filter(|v| {
-                    selected(params, "hostId", v.get("hostId"))
-                        && selected(params, "serviceName", v.get("serviceName"))
-                })
-                .collect();
-            page(
-                call,
-                method,
-                params,
-                records,
-                |v| key(v, "serviceNodeId"),
-                None,
-            )
-        }
+        "hosts.list" => call.registry.host_page(call.store, params),
+        "serviceNodes.list" => call.registry.node_page(
+            call.store, params, call.runtime, (call.clock)(),
+        ),
         "serviceNodes.get" => call.registry.node(
             call.store,
             string(params, "serviceNodeId")?,

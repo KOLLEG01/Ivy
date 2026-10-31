@@ -20,6 +20,8 @@ mod diagnostics;
 mod syncing;
 #[path = "registry_namespaces.rs"]
 mod namespaces;
+#[path = "registry_pages.rs"]
+mod pages;
 #[cfg(test)]
 #[path = "../../../../tests/rust/hive_registry_catalog_memory.rs"]
 mod catalog_memory_tests;
@@ -206,22 +208,18 @@ impl Registry {
             diagnostics
         } else {
             let id = id.ok_or_else(IvyError::internal)?;
-            let source = join(["service:".into(), id.clone()])
-                .to_utf8()
-                .ok()
-                .filter(|v| !v.contains('\0'));
-            let query = if source.is_some() {
-                "SELECT diagnostic_json FROM diagnostics WHERE json_extract(diagnostic_json,'$.source')=?
-                 AND json_extract(diagnostic_json,'$.status')='current' ORDER BY rowid"
-            } else {
-                // Compare lossless non-UTF-8/NUL sources below; skip resolved history in SQL.
-                "SELECT diagnostic_json FROM diagnostics WHERE json_extract(diagnostic_json,'$.status')='current' ORDER BY rowid"
-            };
-            let mut statement = sql(store, store.connection().prepare_cached(query))?;
+            // Compare decoded JSON inside SQLite: lone UTF-16 units and NUL
+            // retain exact identity without a scan/parse fallback in Rust.
+            let source = encoded(&IvyJson::String(join(["service:".into(), id.clone()])))?;
+            let mut statement = sql(store, store.connection().prepare_cached(
+                "SELECT diagnostic_json FROM diagnostics
+                 WHERE json_extract(diagnostic_json,'$.source')=json_extract(?1,'$')
+                   AND json_extract(diagnostic_json,'$.status')='current' ORDER BY rowid",
+            ))?;
             stored = sql(
                 store,
                 statement.query_map(
-                    rusqlite::params_from_iter(source.iter()),
+                    [source],
                     |r| r.get::<_, String>(0),
                 ),
             )?
