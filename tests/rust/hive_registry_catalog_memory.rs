@@ -247,6 +247,46 @@ fn registry_sync_does_not_materialize_foreign_status_and_diagnostics() {
     assert!(peak < 1024*1024, "Registration decoded foreign full nodes: {peak}");
 }
 
+#[test]
+fn tool_page_snapshots_are_node_scoped_and_replaced_by_schema_only_sync() {
+    fn identity(catalog: &Catalog, id: &JsString) -> String {
+        let ns = &catalog.namespaces[0];
+        crate::registry_catalog::tool_page_identity(id,
+            &ns.guide_markdown.clone().unwrap().into(), catalog.bindings(ns), Some(ns)).unwrap()
+    }
+    let mut store = namespace_store("null");
+    store.connection().execute_batch(
+        "INSERT INTO service_nodes SELECT 'second',principal_id,host_id,service_name,generation,
+         json_set(status_json,'$.serviceNodeId','second') FROM service_nodes WHERE id='fixture';",
+    ).unwrap();
+    let mut registry = serde_json::json!({
+        "namespaces":[{"namespace":"fixture","description":"Fixture.","guideMarkdown":"Fixture guide.",
+            "tools":[{"namespace":"fixture","name":"read","interfaceVersion":"1.0.0","description":"Read.",
+                "inputSchema":{"type":"object"},"outputSchema":{"type":"null"}}],"topics":[],"inventoryKinds":[]}],
+        "contracts":[],"requiredContracts":[]
+    });
+    let mut owner = Registry::default();
+    let id = JsString::from("fixture");
+    let second = JsString::from("second");
+    let parameters = IvyJson::from_serde(&registry).unwrap();
+    for node in [&id, &second] {
+        owner.sync(&mut store, node, None, &parameters, &NativeRuntime, 0.0).unwrap();
+    }
+    let original = owner.live_catalog(&store, &id).unwrap().unwrap();
+    let other = owner.live_catalog(&store, &second).unwrap().unwrap();
+    let before = identity(&original, &id);
+    let other_hash = identity(&other, &second);
+    assert_eq!(identity(&original, &id), before);
+    assert_ne!(before, other_hash);
+    registry["namespaces"][0]["tools"][0]["inputSchema"]["description"] = "Changed schema.".into();
+    owner.sync(&mut store, &id, None, &IvyJson::from_serde(&registry).unwrap(), &NativeRuntime, 0.0).unwrap();
+    let changed = owner.live_catalog(&store, &id).unwrap().unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&original, &changed));
+    assert_ne!(identity(&changed, &id), before);
+    assert_eq!(identity(&original, &id), before);
+    assert_eq!(identity(&owner.live_catalog(&store, &second).unwrap().unwrap(), &second), other_hash);
+}
+
 fn full_registry_live_catalog(owner: &Registry, store: &Store, id: &JsString) -> IvyResult<Option<Catalog>> {
     let Some(registry) = owner.get_registry(store, id)? else { return Ok(None) };
     let mut bindings = HashMap::new();
