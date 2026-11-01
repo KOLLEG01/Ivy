@@ -1,5 +1,5 @@
 //! Catalog navigation, provider-bound descriptions and retained definition identities.
-use crate::{registry::{CatalogProvider, Registry}, registry_catalog::{Catalog, ToolBinding}, store::Store};
+use crate::{registry::{CatalogProvider, Registry}, registry_catalog::ToolBinding, store::Store};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     core_bundle::{bundled_schema, operation_input_schema},
@@ -1291,7 +1291,7 @@ impl Discovery {
             .and_then(IvyJson::as_js_string)
             .cloned();
         let mut guides = vec![];
-        let mut namespaces: HashMap<JsString, (Arc<Catalog>, usize)> = HashMap::new();
+        let mut namespaces: HashMap<JsString, Vec<IvyJson>> = HashMap::new();
         let mut items = vec![];
         for qualified in array(params, "tools")? {
             let qualified = qualified.as_js_string().ok_or_else(IvyError::internal)?;
@@ -1304,25 +1304,28 @@ impl Discovery {
                 }
                 let node = registry.select(store, &namespace, &target, runtime, now)?;
                 let id = string(&node, "serviceNodeId")?.clone();
-                let catalog = registry.live_catalog(store, &id)?.ok_or_else(IvyError::internal)?;
-                let position = catalog.namespaces.iter().position(|ns| ns.name == namespace)
-                    .ok_or_else(IvyError::internal)?;
-                let markdown = catalog.namespaces[position].guide_markdown.as_ref()
-                    .ok_or_else(IvyError::internal)?.clone();
+                let names = array(params, "tools")?.iter().map(|name| {
+                    name.as_js_string().ok_or_else(IvyError::internal)
+                }).collect::<IvyResult<Vec<_>>>()?.into_iter()
+                    .filter(|name| segment(name, 46) == namespace)
+                    .map(|name| JsString(name.0[namespace.0.len() + 1..].to_vec()))
+                    .collect::<Vec<_>>();
+                let (markdown, definitions) = registry.namespace_description(store, &id, &namespace, &names)?;
                 guides.push(IvyJson::object([
                     ("namespace", namespace.clone().into()),
-                    ("guideMarkdown", markdown.into()),
+                    ("guideMarkdown", markdown),
                 ]));
                 namespaces.insert(
                     namespace.clone(),
-                    (catalog, position),
+                    definitions,
                 );
                 owner = Some(id);
             }
-            let (catalog, position) = &namespaces[&namespace];
-            let binding = catalog.bindings(&catalog.namespaces[*position])
+            let definitions = &namespaces[&namespace];
+            let definition = definitions
                 .iter()
-                .find(|binding| &binding.qualified_name == qualified)
+                .find(|definition| string(definition, "name")
+                    .is_ok_and(|name| concat(&[&namespace, &".".into(), name]) == *qualified))
                 .ok_or_else(|| {
                     IvyError::new(
                         "not_found",
@@ -1330,11 +1333,15 @@ impl Discovery {
                     )
                 })?;
             require(
-                !mcp_only || mcp_name(&binding.metadata).is_some_and(|v| v.as_object().is_some()),
+                !mcp_only || mcp_name(definition).is_some_and(|v| v.as_object().is_some()),
                 "not_found",
                 "Tool is not published through MCP.",
             )?;
-            items.push(binding.to_wire());
+            items.push(IvyJson::object([
+                ("qualifiedName", qualified.clone().into()),
+                ("definition", definition.clone()),
+                ("definitionHash", tool_definition_hash(definition)?.into()),
+            ]));
         }
         let node = registry.node(store, &owner.unwrap_or_default(), runtime, now)?;
         details(IvyJson::object([

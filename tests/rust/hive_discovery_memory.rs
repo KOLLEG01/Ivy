@@ -637,11 +637,11 @@ fn discovery_lists_and_ambiguous_selection_skip_full_status_and_diagnostics() {
 }
 
 #[test]
-fn describe_borrows_the_catalog_and_materializes_only_requested_definitions() {
+fn describe_materializes_only_requested_definitions_with_cold_or_warm_catalog() {
     const CHILD: &str = "IVY_DISCOVERY_DESCRIBE_MEMORY_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "discovery::memory_tests::describe_borrows_the_catalog_and_materializes_only_requested_definitions", "--nocapture"])
+            .args(["--exact", "discovery::memory_tests::describe_materializes_only_requested_definitions_with_cold_or_warm_catalog", "--nocapture"])
             .env(CHILD, "1").output().unwrap();
         eprint!("{}", String::from_utf8_lossy(&output.stderr));
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
@@ -670,15 +670,17 @@ fn describe_borrows_the_catalog_and_materializes_only_requested_definitions() {
         ("serviceName", JsString(vec![b's' as u16, 0, 0xd800]).into()),
         ("tools", IvyJson::Array(vec!["fixture.read0".into(), "fixture.read0".into()])),
     ]);
-    let before = LIVE.load(AtomicOrdering::Relaxed);
-    PEAK.store(before, AtomicOrdering::Relaxed);
-    let result = owner.describe(&store, &mut registry, &params, false, &NativeRuntime, 0.0).unwrap();
-    let peak = PEAK.load(AtomicOrdering::Relaxed) - before;
-    assert_eq!(result.get("items").unwrap().as_array().unwrap(), &[expected.clone(), expected]);
-    assert_eq!(result.get("guides").unwrap().as_array().unwrap().len(), 1);
+    for (warm, registry) in [(false, &mut Registry::default()), (true, &mut registry)] {
+        let before = LIVE.load(AtomicOrdering::Relaxed);
+        PEAK.store(before, AtomicOrdering::Relaxed);
+        let result = owner.describe(&store, registry, &params, false, &NativeRuntime, 0.0).unwrap();
+        let peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+        assert_eq!(result.get("items").unwrap().as_array().unwrap(), &[expected.clone(), expected.clone()]);
+        assert_eq!(result.get("guides").unwrap().as_array().unwrap().len(), 1);
+        eprintln!("Hive Discovery describe Rust allocation peak: {peak} bytes with 3.5 MiB unrelated schema text; catalog warm={warm}");
+        assert!(peak < 256 * 1024, "Describe decoded or copied unselected schemas: {peak}");
+    }
     assert!(Arc::ptr_eq(&catalog, &registry.live_catalog(&store, &"provider".into()).unwrap().unwrap()));
-    eprintln!("Hive Discovery describe Rust allocation peak: {peak} bytes with 3.5 MiB unrelated schema text in the shared catalog");
-    assert!(peak < 256 * 1024, "Describe decoded or copied unselected schemas: {peak}");
 }
 
 #[test]

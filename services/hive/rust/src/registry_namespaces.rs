@@ -33,6 +33,11 @@ struct Tools<'a> {
     tools: Vec<&'a RawValue>,
 }
 #[derive(Deserialize)]
+struct ToolName<'a> {
+    #[serde(borrow)]
+    name: &'a RawValue,
+}
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LiveNamespace<'a> {
     #[serde(borrow)]
@@ -163,6 +168,19 @@ pub(super) fn live_catalog(source: &str) -> IvyResult<Option<LiveCatalog>> {
         });
     }
     Ok(Some(result))
+}
+
+pub(super) fn description(raw: &RawValue, names: &[JsString]) -> IvyResult<(IvyJson, Vec<IvyJson>)> {
+    let namespace: LiveNamespace<'_> = serde_json::from_str(raw.get()).map_err(|_| IvyError::internal())?;
+    let mut tools = vec![];
+    for raw in namespace.tools {
+        let tool: ToolName<'_> = serde_json::from_str(raw.get()).map_err(|_| IvyError::internal())?;
+        if value(tool.name)?.as_js_string().is_some_and(|name| names.contains(name)) {
+            tools.push(value(raw)?);
+        }
+    }
+    let guide = namespace.guide_markdown.map(value).transpose()?.ok_or_else(IvyError::internal)?;
+    Ok((guide, tools))
 }
 
 #[cfg(test)]

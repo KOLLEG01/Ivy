@@ -577,6 +577,14 @@ impl Registry {
         self.read_namespace(store, id, namespace, |selected|
             selected.map(|_| ()).ok_or_else(namespaces::not_found))
     }
+    pub(crate) fn namespace_description(
+        &self, store: &Store, id: &JsString, namespace: &JsString, names: &[JsString],
+    ) -> IvyResult<(IvyJson, Vec<IvyJson>)> {
+        // A catalog larger than its cache budget must not be rebuilt to describe
+        // one tool. Borrow its row and decode only the requested definitions.
+        self.read_namespace(store, id, namespace, |selected|
+            namespaces::description(selected.ok_or_else(namespaces::not_found)?, names))
+    }
     fn read_namespace<T>(
         &self,
         store: &Store,
