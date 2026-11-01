@@ -1,6 +1,6 @@
 //! Local runtime control. Database transitions are synchronous; remote reads and
 //! cancellation happen after the store command completes.
-use crate::{cache::ExecutionCache, model, schema, store::CollectorStore};
+use crate::{cache::ExecutionCache, model, policy, schema, store::CollectorStore};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::canonical};
 
 pub enum Read {
@@ -177,7 +177,7 @@ impl Runtime<'_> {
                     ("task", task.clone()),
                     ("revision", IvyJson::Number(saved.as_ref().map(|r| model::number(r, "revision")).transpose()?.unwrap_or(0.0) + 1.0)),
                     ("resultObjectId", nullable(saved.as_ref().and_then(|r| r.get("resultObjectId")))),
-                    ("nextAt", IvyJson::Number(now_ms as f64 + model::number(task, "intervalSeconds")? * 1000.0)),
+                    ("nextAt", IvyJson::Number(policy::next_at(previous, task, now_ms as f64)?)),
                     ("state", nullable(previous.and_then(|r| r.get("state")))),
                     ("deleted", false.into()),
                     ("lastRunId", nullable(previous.and_then(|r| r.get("lastRunId")))),
@@ -222,7 +222,6 @@ impl Runtime<'_> {
                     }
                 }
                 task.insert("enabled", (action == "enable").into());
-                row.insert("nextAt", IvyJson::Number(now_ms as f64 + model::number(&task, "intervalSeconds")? * 1000.0));
             }
             row.insert("task", task);
             row.insert("revision", IvyJson::Number(model::number(&row, "revision")? + 1.0));

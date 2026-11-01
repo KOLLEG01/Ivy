@@ -8,6 +8,17 @@ pub const INPUT_BYTES: usize = 262_144;
 pub const MCP_BYTES: usize = 1_048_576;
 pub const EVENT_BYTES: usize = 4096;
 
+/// Resume the existing schedule unless its interval changed or the task is new.
+pub fn next_at(previous: Option<&RecordTask>, task: &IvyJson, now_ms: f64) -> IvyResult<f64> {
+    let interval = model::number(task, "intervalSeconds")?;
+    if let Some(row) = previous.filter(|row| !model::truth(row, "deleted"))
+        && model::number(model::field(row, "task")?, "intervalSeconds")? == interval
+    {
+        return model::number(row, "nextAt");
+    }
+    Ok(now_ms + interval * 1000.0)
+}
+
 pub fn effective_retention(task: &IvyJson, maximum: &IvyJson) -> IvyResult<IvyJson> {
     Ok(IvyJson::object(
         ["maximumCount", "maximumAgeDays", "maximumBytes"]

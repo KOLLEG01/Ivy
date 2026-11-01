@@ -1,6 +1,6 @@
 //! Local adoption commit after the control plane has fetched and validated exact
 //! definition/script/assignment pins and reconciled disabled worker ownership.
-use crate::{cache::ExecutionCache, model, store::CollectorStore};
+use crate::{cache::ExecutionCache, model, policy, store::CollectorStore};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult,
     json::{canonical, parse},
@@ -142,10 +142,8 @@ pub fn adopt(store: &CollectorStore, input: Adoption<'_>) -> IvyResult<bool> {
         };
         let next_at = if let Some(transfer) = transfer {
             model::field(transfer, "nextAt")?.clone()
-        } else if !changed && current.is_some() {
-            previous("nextAt").unwrap_or(IvyJson::Null)
         } else {
-            IvyJson::Number(input.now_ms + model::number(&task, "intervalSeconds")? * 1000.0)
+            IvyJson::Number(policy::next_at(current.as_ref(), &task, input.now_ms)?)
         };
         if deleted {
             task.insert("enabled", false.into());

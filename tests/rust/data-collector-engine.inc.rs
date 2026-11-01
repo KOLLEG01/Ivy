@@ -507,20 +507,24 @@ async fn idle_activation_preserves_queued_running_and_publishing_work_and_origin
     // Model the publisher's acknowledgement after the real worker completed.
     engine.store().call(|s|{let mut r=s.run("first")?.unwrap();r.insert("status","succeeded".into());s.save_run(&r)}).await.unwrap();
     let completed=engine.store().call(|s|s.run("first")).await.unwrap();
+    let due_at=engine.store().call(|s|model::number(&s.get("task",false)?.unwrap(),"nextAt")).await.unwrap();
     let paused=control.update(input.clone(),None).await.unwrap();
     assert!(paused.required("adoptionError").unwrap().is_null());
     assert_eq!(peer.writes.load(Ordering::Relaxed),1);
     assert_eq!(engine.store().call(|s|s.run("first")).await.unwrap(),completed);
+    assert_eq!(engine.store().call(|s|model::number(&s.get("task",false)?.unwrap(),"nextAt")).await.unwrap(),due_at);
     clock.0.store(2_000_000,Ordering::Release);engine.tick(false).await.unwrap();
     assert_eq!(runner.calls.lock().unwrap().len(),1);
     let mut resume=input.clone();resume.insert("operationId","resume".into());resume.insert("expectedRevision",2.0.into());resume.insert("enabled",true.into());resume.remove("onlyWhenIdle");
     control.update(resume,None).await.unwrap();
-    engine.update(json(r#"{"action":"run","operationId":"later","id":"task"}"#),None).await.unwrap();
+    assert_eq!(engine.store().call(|s|model::number(&s.get("task",false)?.unwrap(),"nextAt")).await.unwrap(),due_at);
+    // Work that became due during maintenance runs on the next scheduler tick.
     engine.tick(false).await.unwrap();wait(||runner.calls.lock().unwrap().len()==2).await;
+    let later_id=engine.store().call(|s|model::text(&s.get("task",false)?.unwrap(),"lastRunId")).await.unwrap();
     assert_eq!(control.update(input,None).await.unwrap(),paused);
     assert_eq!(peer.writes.load(Ordering::Relaxed),2);assert!(engine.active("task"));
     runner.finish.add_permits(1);wait(||!engine.active("task")).await;
-    let later=engine.store().call(|s|s.run("later")).await.unwrap().unwrap();
+    let later=engine.store().call(move |s|s.run(&later_id)).await.unwrap().unwrap();
     assert_eq!(later.get("status"),Some(&"publishing".into()));assert!(later.required("error").unwrap().is_null());
     engine.close().await;
 }

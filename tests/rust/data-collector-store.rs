@@ -501,3 +501,105 @@ fn dc01_deleted_id_adoption_cannot_bypass_capacity_and_transfer_is_consumed_once
     assert_eq!(model::number(&final_row, "state").unwrap(), 42.0);
     assert_eq!(model::number(&final_row, "nextAt").unwrap(), 9999.0);
 }
+
+fn scheduled_task() -> IvyJson {
+    json(r#"{"id":"scheduled","name":"Scheduled","enabled":true,"intervalSeconds":86400,"timeoutSeconds":5,"memoryMb":64,"script":"export default()=>({data:null})","dependencies":{},"config":{},"secretNames":[],"retention":{"maximumCount":1000,"maximumAgeDays":7,"maximumBytes":104857600}}"#)
+}
+
+#[test]
+fn adoption_keeps_due_times_across_maintenance_and_non_interval_edits() {
+    use ivy_data_collector::adoption::{Adoption, adopt};
+    let settings = ivy_data_collector::schema::parse_schema(
+        "settingsSchema", &json(r#"{"ingress":{"port":8080}}"#),
+    ).unwrap();
+    for due_at in [2000.0, 90_000_000.0] {
+        let db = Database::new();
+        let s = db.open(Limits::default());
+        let mut task = scheduled_task();
+        let mut desired = json(r#"{"serviceNodeId":"fixture.collector","jobId":"job","enabled":true,"deleted":false,"definitionRevision":1,"rootObjectId":"root","resultObjectId":"result"}"#);
+        let adopt_at = |task: &IvyJson, desired: &IvyJson, revision, now_ms| {
+            adopt(&s, Adoption {
+                task, desired, assignment_id: "assignment", assignment_revision: revision,
+                service_node_id: "fixture.collector", settings: &settings,
+                confirmed_stopped: false, ever_accepted: true, active: false, now_ms,
+            }).unwrap()
+        };
+        // First acceptance has no cache, so no earlier worker can exist.
+        assert!(adopt(&s, Adoption {
+            task: &task, desired: &desired, assignment_id: "assignment", assignment_revision: 1.0,
+            service_node_id: "fixture.collector", settings: &settings,
+            confirmed_stopped: false, ever_accepted: false, active: false, now_ms: 1000.0,
+        }).unwrap());
+        let mut row = s.get("scheduled", false).unwrap().unwrap();
+        assert_eq!(model::number(&row, "nextAt").unwrap(), 86_401_000.0);
+        row.insert("nextAt", due_at.into());
+        row.insert("state", false.into());
+        s.save(&row).unwrap();
+        for (revision, enabled) in [(2.0, false), (3.0, true)] {
+            desired.insert("enabled", enabled.into());
+            assert!(adopt_at(&task, &desired, revision, revision * 2000.0));
+            let row = s.get("scheduled", false).unwrap().unwrap();
+            assert_eq!(model::number(&row, "nextAt").unwrap(), due_at);
+            assert_eq!(row.get("state"), Some(&IvyJson::Bool(false)));
+            assert_eq!(row.get("resultObjectId"), Some(&"result".into()));
+        }
+        task.insert("name", "Renamed".into());
+        desired.insert("definitionRevision", 2.0.into());
+        assert!(adopt_at(&task, &desired, 4.0, 7000.0));
+        assert_eq!(model::number(&s.get("scheduled", false).unwrap().unwrap(), "nextAt").unwrap(), due_at);
+        task.insert("intervalSeconds", 60.0.into());
+        desired.insert("definitionRevision", 3.0.into());
+        assert!(adopt_at(&task, &desired, 5.0, 8000.0));
+        assert_eq!(model::number(&s.get("scheduled", false).unwrap().unwrap(), "nextAt").unwrap(), 68_000.0);
+        assert!(s.runs("queued").unwrap().is_empty(), "Adoption must not replay work");
+    }
+}
+
+#[test]
+fn local_updates_keep_due_times_and_deleted_task_reuse_starts_a_new_schedule() {
+    use ivy_data_collector::runtime::Runtime;
+    let settings = ivy_data_collector::schema::parse_schema(
+        "settingsSchema", &json(r#"{"ingress":{"port":8080}}"#),
+    ).unwrap();
+    for due_at in [2000.0, 90_000_000.0] {
+        let db = Database::new();
+        let s = db.open(Limits::default());
+        let runtime = Runtime { store: &s, settings: &settings, root_id: "root" };
+        let update = |args: IvyJson, now_ms| runtime.update(
+            &args, None, now_ms, "2026-01-01T00:00:00.000Z", |_| false, |_| Ok(()),
+        ).unwrap();
+        let mut task = scheduled_task();
+        let save = |task: &IvyJson, revision, operation: &str| IvyJson::object([
+            ("action", "save".into()), ("operationId", operation.into()),
+            ("expectedRevision", IvyJson::Number(revision)), ("task", task.clone()),
+        ]);
+        update(save(&task, 0.0, "new"), 1000);
+        let mut row = s.get("scheduled", false).unwrap().unwrap();
+        row.insert("nextAt", due_at.into());
+        row.insert("state", false.into());
+        row.insert("resultObjectId", "result".into());
+        s.save(&row).unwrap();
+        for (action, revision) in [("disable", 1.0), ("enable", 2.0)] {
+            update(IvyJson::object([
+                ("action", action.into()), ("operationId", action.into()),
+                ("id", "scheduled".into()), ("expectedRevision", revision.into()),
+            ]), 4000);
+            let row = s.get("scheduled", false).unwrap().unwrap();
+            assert_eq!(model::number(&row, "nextAt").unwrap(), due_at);
+            assert_eq!(row.get("state"), Some(&IvyJson::Bool(false)));
+            assert_eq!(row.get("resultObjectId"), Some(&"result".into()));
+        }
+        task.insert("name", "Renamed".into());
+        update(save(&task, 3.0, "rename"), 5000);
+        assert_eq!(model::number(&s.get("scheduled", false).unwrap().unwrap(), "nextAt").unwrap(), due_at);
+        task.insert("intervalSeconds", 60.0.into());
+        update(save(&task, 4.0, "interval"), 6000);
+        assert_eq!(model::number(&s.get("scheduled", false).unwrap().unwrap(), "nextAt").unwrap(), 66_000.0);
+        update(json(r#"{"action":"delete","operationId":"delete","id":"scheduled","expectedRevision":5}"#), 7000);
+        update(save(&task, 6.0, "recreate"), 8000);
+        let row = s.get("scheduled", false).unwrap().unwrap();
+        assert_eq!(model::number(&row, "nextAt").unwrap(), 68_000.0);
+        assert_eq!(row.get("state"), Some(&IvyJson::Null));
+        assert!(s.runs("queued").unwrap().is_empty(), "Updates must not replay work");
+    }
+}
