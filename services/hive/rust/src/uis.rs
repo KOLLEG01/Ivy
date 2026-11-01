@@ -368,54 +368,20 @@ impl<'a> Uis<'a> {
         &self,
         store: &Store,
         required: &IvyJson,
-        runtime: &dyn Runtime,
-        clock: &dyn Fn() -> f64,
     ) -> IvyResult<Vec<ServiceState>> {
         let mut result = vec![];
-        for node in self.registry.nodes(store, runtime, clock())? {
-            if required.is_null() {
-                return Err(IvyError::internal());
-            }
-            if node.get("serviceName") != required.get("serviceName") {
+        for node in self.registry.catalog_providers(store)? {
+            if &node.service_name != string(required, "serviceName")? {
                 continue;
             }
-            let catalog = self
-                .registry
-                .get_registry(store, string(&node, "serviceNodeId")?)?;
-            let mut namespace = None;
-            if let Some(catalog) = catalog.as_ref().filter(|v| !v.is_null()) {
-                for value in array(catalog, "namespaces")? {
-                    if value.is_null() {
-                        return Err(IvyError::internal());
-                    }
-                    if value.get("namespace") == required.get("namespace") {
-                        namespace = Some(value);
-                        break;
-                    }
-                }
-            }
-            let compatible = if let Some(namespace) = namespace {
-                let tools = array(namespace, "tools")?;
-                let mut compatible = !tools.is_empty();
-                if compatible {
-                    for tool in tools {
-                        if tool.is_null() {
-                            return Err(IvyError::internal());
-                        }
-                        if tool.get("interfaceVersion") != required.get("interfaceVersion") {
-                            compatible = false;
-                            break;
-                        }
-                    }
-                }
-                compatible
-            } else {
-                false
-            };
+            let compatible = self.registry.namespace_compatibility(
+                store, &node.service_node_id, string(required, "namespace")?,
+                string(required, "interfaceVersion")?,
+            )?;
             result.push(ServiceState {
-                has_catalog: namespace.is_some(),
-                compatible,
-                eligible: Registry::eligible(&node),
+                has_catalog: compatible.is_some(),
+                compatible: compatible.unwrap_or(false),
+                eligible: node.available,
             });
         }
         Ok(result)
@@ -568,7 +534,7 @@ impl<'a> Uis<'a> {
             }
         }
         for required in array(requirements, "services")? {
-            let states = self.service_states(store, required, runtime, clock)?;
+            let states = self.service_states(store, required)?;
             let resource = IvyJson::object([
                 ("serviceName", field(required, "serviceName")?.clone()),
                 ("namespace", field(required, "namespace")?.clone()),

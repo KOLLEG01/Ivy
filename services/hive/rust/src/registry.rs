@@ -585,6 +585,12 @@ impl Registry {
         self.read_namespace(store, id, namespace, |selected|
             namespaces::description(selected.ok_or_else(namespaces::not_found)?, names))
     }
+    pub(crate) fn namespace_compatibility(
+        &self, store: &Store, id: &JsString, namespace: &JsString, version: &JsString,
+    ) -> IvyResult<Option<bool>> {
+        self.read_namespace(store, id, namespace, |selected|
+            selected.map(|raw| namespaces::compatible(raw, version)).transpose())
+    }
     fn read_namespace<T>(
         &self,
         store: &Store,

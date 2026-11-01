@@ -38,6 +38,11 @@ struct ToolName<'a> {
     name: &'a RawValue,
 }
 #[derive(Deserialize)]
+struct ToolVersion<'a> {
+    #[serde(rename = "interfaceVersion", borrow)]
+    version: Option<&'a RawValue>,
+}
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LiveNamespace<'a> {
     #[serde(borrow)]
@@ -181,6 +186,20 @@ pub(super) fn description(raw: &RawValue, names: &[JsString]) -> IvyResult<(IvyJ
     }
     let guide = namespace.guide_markdown.map(value).transpose()?.ok_or_else(IvyError::internal)?;
     Ok((guide, tools))
+}
+
+pub(super) fn compatible(raw: &RawValue, version: &JsString) -> IvyResult<bool> {
+    let namespace: Tools<'_> = serde_json::from_str(raw.get()).map_err(|_| IvyError::internal())?;
+    if namespace.tools.is_empty() { return Ok(false); }
+    for raw in namespace.tools {
+        if raw.get() == "null" { return Err(IvyError::internal()); }
+        if !raw.get().starts_with('{') { return Ok(false); }
+        let tool: ToolVersion<'_> = serde_json::from_str(raw.get()).map_err(|_| IvyError::internal())?;
+        if tool.version.map(value).transpose()?.as_ref().and_then(IvyJson::as_js_string) != Some(version) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

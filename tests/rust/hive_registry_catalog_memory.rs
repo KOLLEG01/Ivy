@@ -14,6 +14,128 @@ fn namespace_store(source: &str) -> Store {
     store
 }
 
+#[test]
+fn ui_namespace_compatibility_preserves_absence_versions_and_short_circuit_errors() {
+    let store = namespace_store("null");
+    let owner = Registry::default();
+    let id = JsString::from("fixture");
+    let namespace = JsString::from("fixture");
+    let version = JsString(vec![b'1' as u16, 0, 0xd800]);
+    for (tools, expected) in [
+        (r#"[]"#, Ok(false)),
+        (r#"[{"interfaceVersion":"1\u0000\ud800"}]"#, Ok(true)),
+        (r#"[{"interfaceVersion":"1\u0000\ud800"},{"interfaceVersion":"2"}]"#, Ok(false)),
+        (r#"[{}]"#, Ok(false)),
+        (r#"[{"interfaceVersion":null}]"#, Ok(false)),
+        (r#"[{"interfaceVersion":17}]"#, Ok(false)),
+        (r#"[[]]"#, Ok(false)),
+        (r#"[null]"#, Err("internal_error")),
+        (r#"[{"interfaceVersion":"different"},null]"#, Ok(false)),
+        (r#"null"#, Err("internal_error")),
+    ] {
+        let source = format!(r#"{{"namespaces":[{{"namespace":"other","tools":null}},{{"namespace":"fixture","tools":{tools}}}]}}"#);
+        store.connection().execute("UPDATE registries SET registry_json=?", [&source]).unwrap();
+        assert_eq!(owner.namespace_compatibility(&store, &id, &namespace, &version)
+            .map_err(|e| e.code), expected.map(Some).map_err(str::to_owned), "{tools}");
+    }
+    for source in ["null", r#"{"namespaces":[]}"#] {
+        store.connection().execute("UPDATE registries SET registry_json=?", [source]).unwrap();
+        assert_eq!(owner.namespace_compatibility(&store, &id, &namespace, &version).unwrap(), None);
+    }
+    store.connection().execute("DELETE FROM registries", []).unwrap();
+    assert_eq!(owner.namespace_compatibility(&store, &id, &namespace, &version).unwrap(), None);
+}
+
+#[test]
+fn ui_namespace_compatibility_does_not_decode_opaque_schema_bodies() {
+    const CHILD: &str = "IVY_UI_COMPATIBILITY_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "registry::catalog_memory_tests::ui_namespace_compatibility_does_not_decode_opaque_schema_bodies", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+        return;
+    }
+    let source = serde_json::json!({"namespaces":[{"namespace":"fixture","tools":[{
+        "interfaceVersion":"1.0.0", "inputSchema":{"description":"s".repeat(2*1024*1024)},
+        "outputSchema":false
+    }]}], "contracts":[{"description":"s".repeat(1024*1024)}]}).to_string();
+    let store = namespace_store(&source);
+    drop(source);
+    let owner = Registry::default();
+    let id = JsString::from("fixture");
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    let full = owner.get_registry(&store, &id).unwrap().unwrap();
+    let full_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    drop(full);
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    assert_eq!(owner.namespace_compatibility(&store, &id, &"fixture".into(), &"1.0.0".into()).unwrap(), Some(true));
+    let peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    eprintln!("Hive UI compatibility Rust allocation peak: full registry {full_peak} bytes, projected versions {peak} bytes for 3 MiB opaque schema text");
+    assert!(full_peak > 6*1024*1024);
+    assert!(peak < 64*1024, "UI inspection decoded unrelated schemas: {peak}");
+}
+
+#[test]
+fn registry_sync_does_not_materialize_foreign_status_and_diagnostics() {
+    const CHILD: &str = "IVY_REGISTRY_SYNC_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "registry::catalog_memory_tests::registry_sync_does_not_materialize_foreign_status_and_diagnostics", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+        return;
+    }
+    let mut store = namespace_store(r#"{"namespaces":[]}"#);
+    let parameters = IvyJson::from_serde(serde_json::json!({
+        "namespaces":[{"namespace":"fixture","description":"Fixture.","guideMarkdown":"Fixture guide.",
+            "tools":[{"namespace":"fixture","name":"read","interfaceVersion":"1.0.0","description":"Read.",
+                "inputSchema":{"type":"object"},"outputSchema":{"type":"null"},
+                "discovery":{"mcp":{"name":"fixture_read"}}}],"topics":[],"inventoryKinds":[]}],
+        "mcpPrefix":"fixture", "contracts":[], "requiredContracts":[]
+    })).unwrap();
+    let mut owner = Registry::default();
+    let id = JsString::from("fixture");
+    // Warm the real schema validator before measuring the steady sync path.
+    drop(owner.sync(&mut store, &id, None, &parameters, &NativeRuntime, 0.0).unwrap());
+    for i in 0..64 {
+        let id = format!("other{i:02}");
+        let status = serde_json::json!({"serviceNodeId":id,"serviceName":"other","hostId":"host",
+            "connected":false,"synced":true,"ready":false,"desiredEnabled":false,
+            "lastContactAt":"1970-01-01T00:00:00.000Z","padding":"p".repeat(32*1024)}).to_string();
+        store.connection().execute("INSERT INTO service_nodes VALUES(?1,'fixture','host','service',1,?2)",
+            params![id,status]).unwrap();
+        store.connection().execute("INSERT INTO registries VALUES(?1,?2)",
+            params![id,r#"{"namespaces":[{"tools":[{"discovery":{"mcp":{"name":"fixture_reserved"}}}]}]}"#]).unwrap();
+    }
+    let diagnostic = serde_json::json!({"source":"service:unrelated","status":"current",
+        "lastObservedAt":"1970-01-01T00:00:00.000Z","message":"d".repeat(2*1024*1024)}).to_string();
+    store.connection().execute("INSERT INTO diagnostics VALUES('unrelated',?)", [diagnostic]).unwrap();
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    let full = owner.nodes(&store, &NativeRuntime, 0.0).unwrap();
+    let full_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    drop(full);
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    drop(owner.sync(&mut store, &id, None, &parameters, &NativeRuntime, 0.0).unwrap());
+    let peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    eprintln!("Hive registry sync Rust allocation peak: old full-node input {full_peak} bytes, complete sync {peak} bytes for 64 foreign providers, 2 MiB status and 2 MiB diagnostics");
+    // Offline/disabled foreign catalogs still reserve their MCP names.
+    let collision = parse(&encoded(&parameters).unwrap().replace("fixture_read", "fixture_reserved"), usize::MAX).unwrap();
+    assert_eq!(owner.sync(&mut store, &id, None, &collision, &NativeRuntime, 0.0).unwrap_err().code, "registry_invalid");
+    assert_eq!(owner.get_registry(&store, &id).unwrap().unwrap(), parameters);
+    // Rust allocator requests only; SQLite's C heap and process RSS are excluded.
+    assert!(full_peak > 8*1024*1024);
+    assert!(peak < 1024*1024, "Registration decoded foreign full nodes: {peak}");
+}
+
 fn full_registry_live_catalog(owner: &Registry, store: &Store, id: &JsString) -> IvyResult<Option<Catalog>> {
     let Some(registry) = owner.get_registry(store, id)? else { return Ok(None) };
     let mut bindings = HashMap::new();

@@ -56,9 +56,9 @@ impl Registry {
             let prefix=parameters.get("mcpPrefix").filter(|v|!v.is_null()).and_then(IvyJson::as_js_string).cloned().unwrap_or_else(||JsString(service.0.iter().map(|u|if *u==45{95}else{*u}).collect()));
             require(prefix!=JsString::from("hive")&&prefix!=JsString::from("wiki"),"registry_invalid","Hive and Wiki MCP prefixes are reserved.")?;
             let mut other_names=HashSet::new();
-            for owner in self.nodes(store,runtime,now)?{
-                if owner.get("serviceName").and_then(IvyJson::as_js_string)==Some(&service){continue;}
-                other_names.extend(self.mcp_names(store,string(&owner,"serviceNodeId")?)?);
+            for owner in self.catalog_providers(store)?{
+                if owner.service_name==service{continue;}
+                other_names.extend(self.mcp_names(store,&owner.service_node_id)?);
             }
             for ns in namespaces{
                 let namespace=string(ns,"namespace")?;
