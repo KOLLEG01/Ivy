@@ -1254,7 +1254,7 @@ impl Discovery {
     pub fn describe(
         &mut self,
         store: &Store,
-        registry: &mut Registry,
+        registry: &Registry,
         params: &IvyJson,
         mcp_only: bool,
         runtime: &dyn Runtime,
