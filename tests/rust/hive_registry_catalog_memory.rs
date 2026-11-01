@@ -93,7 +93,7 @@ fn registry_sync_does_not_materialize_foreign_status_and_diagnostics() {
         return;
     }
     let mut store = namespace_store(r#"{"namespaces":[]}"#);
-    let parameters = IvyJson::from_serde(serde_json::json!({
+    let parameters = IvyJson::from_serde(&serde_json::json!({
         "namespaces":[{"namespace":"fixture","description":"Fixture.","guideMarkdown":"Fixture guide.",
             "tools":[{"namespace":"fixture","name":"read","interfaceVersion":"1.0.0","description":"Read.",
                 "inputSchema":{"type":"object"},"outputSchema":{"type":"null"},
