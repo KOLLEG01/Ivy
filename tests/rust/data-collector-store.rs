@@ -596,8 +596,9 @@ fn local_updates_keep_due_times_and_deleted_task_reuse_starts_a_new_schedule() {
         update(save(&task, 4.0, "interval"), 6000);
         assert_eq!(model::number(&s.get("scheduled", false).unwrap().unwrap(), "nextAt").unwrap(), 66_000.0);
         update(json(r#"{"action":"delete","operationId":"delete","id":"scheduled","expectedRevision":5}"#), 7000);
-        update(save(&task, 6.0, "recreate"), 8000);
+        update(save(&task, 0.0, "recreate"), 8000);
         let row = s.get("scheduled", false).unwrap().unwrap();
+        assert_eq!(model::number(&row, "revision").unwrap(), 7.0);
         assert_eq!(model::number(&row, "nextAt").unwrap(), 68_000.0);
         assert_eq!(row.get("state"), Some(&IvyJson::Null));
         assert!(s.runs("queued").unwrap().is_empty(), "Updates must not replay work");
