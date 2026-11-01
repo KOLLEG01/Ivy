@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, cp, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, cp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -72,6 +72,25 @@ test("bundled tools bind the current app fingerprint and launch directly with th
   );
   assert.equal(cua.env.NODE_REPL_TRUSTED_SERVICES, "browser");
   assert.equal(cua.env.KEEP, "retained");
+  if (process.platform === "win32") {
+    for (const mode of ["node_repl", "cua_repl"]) {
+      const launch = buildLaunch(runtime, mode, [], {
+        ...environment,
+        CODEX_HOME: path.toNamespacedPath(root),
+      });
+      assert.equal(launch.env.CODEX_HOME, root);
+      assert.equal((await stat(launch.env.CODEX_HOME)).ino, (await stat(root)).ino);
+      assert.equal(
+        launch.env.NODE_REPL_TRUSTED_CODE_PATHS,
+        [root, runtime.modules].join(";"),
+      );
+      const unc = buildLaunch(runtime, mode, [], {
+        ...environment,
+        CODEX_HOME: "\\\\?\\UNC\\server\\share\\name with % and #",
+      });
+      assert.equal(unc.env.CODEX_HOME, "\\\\server\\share\\name with % and #");
+    }
+  }
   await writeFile(
     path.join(selected, "bin/node_modules/@oai/browser-desktop/service.js"),
     "wrong",

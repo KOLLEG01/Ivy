@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const anchors = ["manifest.json", "bin/node.exe", "bin/node_repl.exe"];
 const hashFile = (file) =>
@@ -185,11 +186,18 @@ export function buildLaunch(runtime, mode, args, environment = process.env) {
     throw new Error("Expected node_repl, cua_repl, notify or --describe");
   if (mode !== "notify" && !path.isAbsolute(environment.CODEX_HOME ?? ""))
     throw new Error("An explicit absolute CODEX_HOME is required");
+  // Native ownership uses canonical paths. The tool's TOML reader requires the
+  // ordinary Windows spelling so its directory checks do not inspect a volume.
+  const home =
+    process.platform === "win32" && path.isAbsolute(environment.CODEX_HOME ?? "")
+      ? fileURLToPath(pathToFileURL(environment.CODEX_HOME))
+      : environment.CODEX_HOME;
   const env = {
     ...environment,
+    ...(home === undefined ? {} : { CODEX_HOME: home }),
     NODE_REPL_NODE_MODULE_DIRS: runtime.modules,
     NODE_REPL_NODE_PATH: runtime.node,
-    NODE_REPL_TRUSTED_CODE_PATHS: [environment.CODEX_HOME, runtime.modules]
+    NODE_REPL_TRUSTED_CODE_PATHS: [home, runtime.modules]
       .filter(Boolean)
       .join(";"),
     CUA_REPL_NODE_REPL_PATH: runtime.repl,
