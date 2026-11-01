@@ -32,11 +32,9 @@ fn read(call: &Call<'_>, host: &str, deployment: &str) -> IvyResult<Option<IvyJs
         return Ok(None);
     };
     let record = decode(&record)?;
-    let node = call.registry.node(
+    let node = call.registry.routing_node(
         call.store,
         &node_id.as_str().into(),
-        call.runtime,
-        (call.clock)(),
     )?;
     Ok(Some(IvyJson::object([
         ("record", record),
@@ -44,7 +42,7 @@ fn read(call: &Call<'_>, host: &str, deployment: &str) -> IvyResult<Option<IvyJs
         ("reportedAt", at.into()),
         (
             "stale",
-            (node.get("connected").and_then(IvyJson::as_bool) != Some(true)).into(),
+            (!node.connected).into(),
         ),
     ])))
 }
