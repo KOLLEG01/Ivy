@@ -1,5 +1,6 @@
 //! Stream the existing snapshot identity, then load only the selected page.
 use super::*;
+use ivy_contracts::hash::hash_object_with_array;
 
 const RECORDS: &str = "FROM registries AS r,json_each(r.registry_json,'$.requiredContracts') AS e
     WHERE r.node_id=?1 AND e.key IS NOT NULL AND (?2 IS NULL OR CASE WHEN e.type='object' THEN

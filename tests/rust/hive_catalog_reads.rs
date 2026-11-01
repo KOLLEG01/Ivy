@@ -76,19 +76,20 @@ fn tool_page_identity_keeps_hashes_filters_and_error_order() {
         ("nodeId", id.clone().into()), ("tools", IvyJson::Array(tools.clone())), ("guide", guide.clone()),
     ])).unwrap();
     let bindings = native_bindings(tools.clone());
+    let namespace = Namespace::new("fixture".into(), None, 0..bindings.len());
     let params = IvyJson::object([("namePrefix", "call3".into())]);
-    let (hash, filtered) = tool_page_records(&id, &guide, &bindings, &params).unwrap();
+    let (hash, filtered) = tool_page_records(&id, &guide, &bindings, Some(&namespace), &params).unwrap();
     assert_eq!(hash, expected);
     assert_eq!(hash_json(&IvyJson::Array(filtered.iter().map(|b| b.to_wire()).collect())).unwrap(),
         hash_json(&IvyJson::Array(vec![tools[3].clone()])).unwrap());
-    let (hash, all) = tool_page_records(&id, &guide, &bindings, &IvyJson::Null).unwrap();
+    let (hash, all) = tool_page_records(&id, &guide, &bindings, Some(&namespace), &IvyJson::Null).unwrap();
     assert_eq!(hash, expected);
     assert_eq!(hash_json(&IvyJson::Array(all.iter().map(|b| b.to_wire()).collect())).unwrap(),
         hash_json(&IvyJson::Array(tools)).unwrap());
     let malformed = vec![crate::registry_catalog::ToolBinding::new("bad".into(), "hash".into(), IvyJson::Null)];
     let guide = IvyJson::Number(f64::NAN);
-    assert_eq!(tool_page_records(&id, &guide, &malformed, &params).unwrap_err().code, "internal_error");
-    assert_eq!(tool_page_records(&id, &guide, &malformed, &IvyJson::Null).unwrap_err().code, "invalid_arguments");
+    assert_eq!(tool_page_records(&id, &guide, &malformed, None, &params).unwrap_err().code, "internal_error");
+    assert_eq!(tool_page_records(&id, &guide, &malformed, None, &IvyJson::Null).unwrap_err().code, "invalid_arguments");
 }
 
 #[test]
@@ -116,7 +117,7 @@ fn tool_page_identity_does_not_clone_the_full_tool_vector() {
     drop(identity);
     let before = LIVE.load(Ordering::Relaxed);
     PEAK.store(before, Ordering::Relaxed);
-    let (hash, returned) = tool_page_records(&id, &guide, &tools, &IvyJson::Null).unwrap();
+    let (hash, returned) = tool_page_records(&id, &guide, &tools, None, &IvyJson::Null).unwrap();
     let moved_peak = PEAK.load(Ordering::Relaxed) - before;
     assert_eq!(hash, expected);
     assert_eq!(returned.len(), 8);
@@ -137,8 +138,9 @@ fn tool_pages_keep_cursors_and_materialize_only_selected_definitions() {
     let identity = IvyJson::object([("snapshot", hash.clone().into())]);
     let mut cursor = None;
     let mut count = 0;
+    let namespace = Namespace::new("fixture".into(), None, 0..tools.len());
     loop {
-        let (actual_hash, filtered) = tool_page_records(&id, &guide, &tools, &IvyJson::Null).unwrap();
+        let (actual_hash, filtered) = tool_page_records(&id, &guide, &tools, Some(&namespace), &IvyJson::Null).unwrap();
         assert_eq!(actual_hash, hash);
         let legacy = crate::paging::catalog_page(&store,
             tools.iter().map(crate::registry_catalog::ToolBinding::to_wire).collect(), &identity,
