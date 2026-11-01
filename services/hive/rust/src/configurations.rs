@@ -288,7 +288,7 @@ impl Configurations {
         )?;
         Ok(rows.first().cloned().map(JsString::from))
     }
-    fn configuration(&self, value: &IvyJson, host: &JsString) -> IvyResult<IvyJson> {
+    fn configuration<'a>(&self, value: &'a IvyJson, host: &JsString) -> IvyResult<&'a IvyJson> {
         validate_host("HostConfig", value)?;
         require(
             value.get("hostId").and_then(IvyJson::as_js_string) == Some(host),
@@ -348,30 +348,33 @@ impl Configurations {
                 "Additional secret paths must be unique setting paths; protect arrays as a whole instead of addressing their elements.",
             )?;
         }
-        Ok(value.clone())
+        Ok(value)
     }
     pub fn get(&self, store: &Store, host: &JsString, revision: Option<u64>) -> IvyResult<IvyJson> {
         let id = self
             .object_id(store, host)?
             .ok_or_else(|| IvyError::new("not_found", "Host configuration not found."))?;
-        let read = objects::read(store, Location::Id(&id), revision)?;
+        let mut read = objects::read(store, Location::Id(&id), revision)?;
         let content = field(&read, "content")?;
         require(
             content.get("encoding") == Some(&"json".into()),
             "storage_invalid",
             "Host configuration content is not JSON.",
         )?;
-        let configuration = self.configuration(field(content, "value")?, host)?;
+        self.configuration(field(content, "value")?, host)?;
         let revision = field(&read, "revision")?;
-        Ok(IvyJson::object([
+        let mut result = IvyJson::object([
             ("hostId", IvyJson::String(host.clone())),
             ("objectId", IvyJson::String(id)),
             ("revision", field(revision, "revision")?.clone()),
             ("contentHash", field(revision, "contentHash")?.clone()),
             ("updatedAt", field(revision, "createdAt")?.clone()),
             ("byteLength", field(revision, "byteLength")?.clone()),
-            ("configuration", configuration),
-        ]))
+        ]);
+        // The response owns this decoded body; validation only borrows it.
+        let configuration = read.remove("content").unwrap().remove("value").unwrap();
+        result.insert("configuration", configuration);
+        Ok(result)
     }
     pub fn list(&self, store: &Store, runtime: &dyn Runtime) -> IvyResult<Vec<IvyJson>> {
         let ids = store
@@ -397,8 +400,11 @@ impl Configurations {
             if value.is_null() {
                 return Err(IvyError::internal());
             }
-            let host = string(value, "hostId")?;
-            result.push(self.get(store, &host, None)?);
+            let host = string(value, "hostId")?.clone();
+            drop(read);
+            let mut summary = self.get(store, &host, None)?;
+            summary.remove("configuration");
+            result.push(summary);
         }
         result.sort_by(|a, b| {
             runtime.compare_contract_keys(
@@ -406,9 +412,6 @@ impl Configurations {
                 b.get("hostId").unwrap().as_js_string().unwrap(),
             )
         });
-        for value in &mut result {
-            value.remove("configuration");
-        }
         Ok(result)
     }
     fn prepare_write(&self, store: &Store, params: &IvyJson) -> IvyResult<IvyJson> {
@@ -436,7 +439,7 @@ impl Configurations {
                 "content",
                 IvyJson::object([
                     ("encoding", "json".into()),
-                    ("value", clone_json(&configuration)?),
+                    ("value", clone_json(configuration)?),
                 ]),
             ),
         ]);
@@ -509,7 +512,7 @@ impl Configurations {
             return Err(IvyError::internal());
         }
         let host = string(value, "hostId")?;
-        let projected = redact(&self.configuration(value, &host)?)?;
+        let projected = redact(self.configuration(value, host)?)?;
         let mut result = read.clone();
         result.insert(
             "content",

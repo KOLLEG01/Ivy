@@ -39,6 +39,52 @@ fn catalog_page_moves_selected_records_without_copying_schema_payloads() {
     assert!(peak < 1024 * 1024, "Catalog page copied schema payloads: {peak}");
 }
 
+#[test]
+fn host_configuration_summaries_release_bodies_before_loading_the_next_host() {
+    const CHILD: &str = "IVY_CONFIGURATION_LIST_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "kernel::catalogs::read_tests::host_configuration_summaries_release_bodies_before_loading_the_next_host", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+        return;
+    }
+    let mut store = Store::open(std::path::Path::new(":memory:")).unwrap();
+    let owner = Configurations::new(&mut store).unwrap();
+    let hosts: Vec<JsString> = (0..64).map(|i| format!("host{i:02}").into()).collect();
+    store.connection().execute_batch("BEGIN").unwrap();
+    for host in &hosts {
+        let name = host.to_utf8().unwrap();
+        let configuration = serde_json::json!({"schemaVersion":1,"hostId":name,
+            "runtimeRoot":"/fixture/runtime","artifactRoot":"/fixture/artifacts","stagingRoot":"/fixture/staging",
+            "publicBaseUrl":"https://fixture.invalid","executables":{"node":"node"},
+            "instances":[{"instanceId":"worker","serviceNodeId":"worker","componentId":"fixture-worker",
+                "enabled":true,"engine":"process","credential":"synthetic-secret",
+                "settings":{"value":"x".repeat(128*1024)}}]}).to_string();
+        store.connection().execute("INSERT INTO objects VALUES(NULL,?1,NULL,NULL,?1,?2,0,NULL,1,'ivy/host-configuration',1,NULL,0,'time','time')",
+            rusqlite::params![name,format!("/{name}")]).unwrap();
+        store.connection().execute("INSERT INTO revisions VALUES(?1,1,'ivy/host-configuration','1.0.0','json',?2,?3,?4,'time','{}')",
+            rusqlite::params![name,configuration,format!("sha256:{}","0".repeat(64)),configuration.len() as i64]).unwrap();
+    }
+    store.connection().execute_batch("COMMIT").unwrap();
+    // Warm the shared validator before comparing body ownership.
+    drop(owner.get(&store, &hosts[0], None).unwrap());
+    let before = LIVE.load(Ordering::Relaxed);PEAK.store(before, Ordering::Relaxed);
+    let mut retained: Vec<_> = hosts.iter().map(|host| owner.get(&store, host, None).unwrap()).collect();
+    let retained_peak = PEAK.load(Ordering::Relaxed) - before;
+    for value in &mut retained { value.remove("configuration"); }
+    let before = LIVE.load(Ordering::Relaxed);PEAK.store(before, Ordering::Relaxed);
+    let actual = owner.list(&store, &crate::native_runtime::NativeRuntime).unwrap();
+    let peak = PEAK.load(Ordering::Relaxed) - before;
+    assert_eq!(actual, retained);
+    eprintln!("Hive host configuration list Rust allocation peak: retained bodies {retained_peak} bytes, summaries {peak} bytes for 64 hosts with 8 MiB settings text");
+    // SQLite's C heap and process RSS are outside these allocator measurements.
+    assert!(retained_peak > 16*1024*1024);
+    assert!(peak < 2*1024*1024, "Configuration bodies accumulated across hosts: {peak}");
+}
+
 fn fixture_tools(schema_bytes: usize) -> Vec<IvyJson> {
     (0..8).map(|index| IvyJson::object([
         ("qualifiedName", format!("fixture.call{index}").into()),
