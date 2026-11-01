@@ -1206,43 +1206,37 @@ impl Discovery {
             })
             .ok_or_else(|| IvyError::new("invalid_cursor", "Invalid discovery boundary."))?
             as usize;
+        let total = entries.len();
         let mut items = vec![];
+        // Size entries once, including the envelope, separators and current cursor.
+        let mut used = r#"{"items":[],"nextCursor":}"#.len();
         let mut next = IvyJson::Null;
         let limit = params
             .get("limit")
             .filter(|v| !v.is_null())
             .and_then(IvyJson::as_f64)
             .unwrap_or(20.0);
-        for (i, entry) in entries.iter().enumerate().skip(offset) {
+        for (i, entry) in entries.into_iter().enumerate().skip(offset) {
             if items.len() as f64 >= limit {
                 break;
             }
-            let candidate = if i + 1 < entries.len() {
+            let candidate = if i + 1 < total {
                 store
                     .cursor(&identity, &IvyJson::Number((i + 1) as f64))?
                     .into()
             } else {
                 IvyJson::Null
             };
-            let mut page = items.clone();
-            page.push(entry.clone());
-            if stringify(
-                &IvyJson::object([
-                    ("items", IvyJson::Array(page)),
-                    ("nextCursor", candidate.clone()),
-                ]),
-                usize::MAX,
-            )?
-            .len()
-                > 8192
-            {
+            let size = stringify(&entry, usize::MAX)?.len() + usize::from(!items.is_empty());
+            if used + size + stringify(&candidate, usize::MAX)?.len() > 8192 {
                 break;
             }
-            items.push(entry.clone());
+            used += size;
+            items.push(entry);
             next = candidate;
         }
         require(
-            !items.is_empty() || offset == entries.len(),
+            !items.is_empty() || offset == total,
             "result_too_large",
             "A discovery entry exceeds the page limit.",
         )?;
