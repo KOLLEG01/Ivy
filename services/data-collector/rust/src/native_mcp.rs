@@ -205,19 +205,41 @@ impl NativeMcpSession {
             target.clone(),
             Self::options(&self.0.signal),
         );
+        let cwd = self.0.configuration.required("cwd")?.clone();
+        let config = {
+            let effective = self
+                .0
+                .tools
+                .native_service_tools(target.service_node_id.clone())?
+                .read(
+                    &"codex.config/read".into(),
+                    IvyJson::object([
+                        ("cwd", cwd.clone()),
+                        ("includeLayers", false.into()),
+                    ]),
+                    ToolCallOptions {
+                        request: Self::options(&self.0.signal),
+                        expected_caller_principal_id: Some(owner.caller().clone()),
+                    },
+                )
+                .await?;
+            let servers = effective.required("config")?.get("mcp_servers");
+            let mut overrides = object();
+            for name in ["node_repl", "cua_repl"] {
+                // An override for an absent server creates an incomplete transport.
+                if servers.and_then(|servers| servers.get(name)).is_some() {
+                    overrides.insert(format!("mcp_servers.{name}.enabled"), false.into());
+                }
+            }
+            overrides
+        };
         let params = owner
             .thread_start_params(&IvyJson::object([
-                ("cwd", self.0.configuration.required("cwd")?.clone()),
+                ("cwd", cwd),
                 ("ephemeral", true.into()),
                 ("permissions", ":read-only".into()),
                 ("approvalPolicy", "never".into()),
-                (
-                    "config",
-                    IvyJson::object([
-                        ("mcp_servers.node_repl.enabled", false.into()),
-                        ("mcp_servers.cua_repl.enabled", false.into()),
-                    ]),
-                ),
+                ("config", config),
             ]))
             .await?;
         let start = prepare(&owner, self.0.client.clone(), "thread/start", params).await?;

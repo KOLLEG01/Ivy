@@ -33,6 +33,8 @@ struct Client {
     operations: Mutex<HashMap<String, IvyJson>>,
     invokes: Mutex<Vec<IvyJson>>,
     direct: Mutex<Vec<IvyJson>>,
+    native_configuration: Mutex<Option<IvyJson>>,
+    configuration_reads: Mutex<Vec<IvyJson>>,
     mode: Mutex<Mode>,
     epoch: Mutex<Option<String>>,
     entered: Notify,
@@ -196,7 +198,9 @@ impl RpcClient for Client {
                                         "annotations",
                                         IvyJson::object([(
                                             "readOnlyHint",
-                                            (name == "read").into(),
+                                            (name == "read"
+                                                || namespace == "codex" && name == "config/read")
+                                                .into(),
                                         )]),
                                     ),
                                     ("name", name.into()),
@@ -226,6 +230,12 @@ impl RpcClient for Client {
             assert_eq!(method, "tools.call");
             let args = params.required("arguments")?;
             match model::text(&params, "qualifiedName")?.as_str() {
+                "codex.config/read" => {
+                    self.configuration_reads.lock().unwrap().push(args.clone());
+                    Ok(self.native_configuration.lock().unwrap().clone().unwrap_or_else(|| {
+                        json(r#"{"config":{"mcp_servers":{"node_repl":{"command":"node"},"cua_repl":{"command":"node"}}}}"#)
+                    }))
+                }
                 "fixture.read" => {
                     self.direct.lock().unwrap().push(params.clone());
                     Ok(json(r#"{"cursor":"next","items":[1,2]}"#))
@@ -407,6 +417,35 @@ async fn retained(factory: &NativeMcpFactory, client: &Client) -> Option<Context
 }
 async fn call(session: &NativeMcpSession) -> IvyResult<IvyJson> {
     session.call("echo".into(), object()).await
+}
+#[tokio::test]
+async fn headless_overrides_only_disable_existing_local_servers() {
+    for configured in [
+        r#"{"other":{"url":"https://fixture.invalid/mcp"}}"#,
+        r#"{"node_repl":{"command":"node"},"other":{"command":"fixture"}}"#,
+    ] {
+        let (_root, client, _factory, session) = fixture(Mode::Normal);
+        let configuration = json(&format!(r#"{{"config":{{"mcp_servers":{configured}}}}}"#));
+        *client.native_configuration.lock().unwrap() = Some(configuration.clone());
+        call(&session).await.unwrap();
+        call(&session).await.unwrap();
+        let reads = client.configuration_reads.lock().unwrap().clone();
+        assert_eq!(reads.len(), 1, "Read effective configuration only on context creation");
+        assert_eq!(reads[0].get("includeLayers"), Some(&false.into()));
+        assert_eq!(reads[0].get("cwd"), session.0.configuration.get("cwd"));
+        let start = client.invokes.lock().unwrap()[0].clone();
+        let overrides = start.required("params").unwrap().required("config").unwrap();
+        let servers = configuration.required("config").unwrap().required("mcp_servers").unwrap();
+        let disabled = IvyJson::Bool(false);
+        assert_eq!(
+            overrides.get("mcp_servers.node_repl.enabled"),
+            servers.get("node_repl").map(|_| &disabled)
+        );
+        assert_eq!(overrides.get("mcp_servers.cua_repl.enabled"), None);
+        assert_eq!(overrides.as_object().unwrap().len(), usize::from(servers.get("node_repl").is_some()));
+        assert_eq!(*client.native_configuration.lock().unwrap(), Some(configuration));
+        session.close().await.unwrap();
+    }
 }
 #[tokio::test]
 async fn explicit_ivy_bindings_preserve_core_and_service_envelopes_and_never_start_native() {
