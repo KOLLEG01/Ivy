@@ -40,11 +40,11 @@ fn catalog_page_moves_selected_records_without_copying_schema_payloads() {
 }
 
 #[test]
-fn host_configuration_summaries_release_bodies_before_loading_the_next_host() {
+fn host_configuration_reads_do_not_retain_or_copy_unneeded_bodies() {
     const CHILD: &str = "IVY_CONFIGURATION_LIST_MEMORY_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "kernel::catalogs::read_tests::host_configuration_summaries_release_bodies_before_loading_the_next_host", "--nocapture"])
+            .args(["--exact", "kernel::catalogs::read_tests::host_configuration_reads_do_not_retain_or_copy_unneeded_bodies", "--nocapture"])
             .env(CHILD, "1").output().unwrap();
         eprint!("{}", String::from_utf8_lossy(&output.stderr));
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
@@ -83,6 +83,33 @@ fn host_configuration_summaries_release_bodies_before_loading_the_next_host() {
     // SQLite's C heap and process RSS are outside these allocator measurements.
     assert!(retained_peak > 16*1024*1024);
     assert!(peak < 2*1024*1024, "Configuration bodies accumulated across hosts: {peak}");
+
+    let configuration = IvyJson::from_serde(&serde_json::json!({"schemaVersion":1,"hostId":"fixture",
+        "runtimeRoot":"/fixture/runtime","artifactRoot":"/fixture/artifacts","stagingRoot":"/fixture/staging",
+        "publicBaseUrl":"https://fixture.invalid","executables":{"node":"node"},
+        "instances":[{"instanceId":"worker","serviceNodeId":"worker","componentId":"fixture-worker",
+            "enabled":true,"engine":"process","credential":"synthetic-secret","secretPaths":["/settings/token"],
+            "settings":{"value":"p".repeat(512*1024),"token":"s".repeat(512*1024)}}]})).unwrap();
+    let read = IvyJson::object([
+        ("object", IvyJson::object([("contractKey", "ivy/host-configuration".into())])),
+        ("revision", IvyJson::object([("revision", 1.0.into())])),
+        ("content", IvyJson::object([("encoding", "json".into()), ("value", configuration)])),
+        ("extension", "retained".into()),
+    ]);
+    let before = LIVE.load(Ordering::Relaxed);PEAK.store(before, Ordering::Relaxed);
+    let expected = owner.project_read(read.clone()).unwrap();
+    let copied_peak = PEAK.load(Ordering::Relaxed) - before;
+    let before = LIVE.load(Ordering::Relaxed);PEAK.store(before, Ordering::Relaxed);
+    let actual = owner.project_read(read).unwrap();
+    let owned_peak = PEAK.load(Ordering::Relaxed) - before;
+    assert_eq!(actual, expected);
+    assert_eq!(actual.get("extension"), Some(&"retained".into()));
+    let instance = &actual.get("content").unwrap().get("value").unwrap().get("instances").unwrap().as_array().unwrap()[0];
+    assert!(instance.get("credential").unwrap().get("$ivySecret").is_some());
+    assert!(instance.get("settings").unwrap().get("token").unwrap().get("$ivySecret").is_some());
+    eprintln!("Hive host configuration projection Rust allocation peak: copied input {copied_peak} bytes, owned input {owned_peak} bytes for 1 MiB settings text");
+    assert!(copied_peak > owned_peak + 1024*1024);
+    assert!(owned_peak < 2*1024*1024, "Redaction retained or copied its owned source: {owned_peak}");
 }
 
 fn fixture_tools(schema_bytes: usize) -> Vec<IvyJson> {

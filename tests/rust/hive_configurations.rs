@@ -60,16 +60,14 @@ pub(super) fn execute(
             ),
             "history" => owner.history(store, params),
             "projectRead" => {
-                let owned;
                 let read = if let Some(v) = params.get("read") {
-                    v
+                    v.clone()
                 } else {
-                    owned = objects::read(
+                    objects::read(
                         store,
                         objects::Location::Id(text(params, "objectId")?),
                         revision,
-                    )?;
-                    &owned
+                    )?
                 };
                 owner.project_read(read)
             }

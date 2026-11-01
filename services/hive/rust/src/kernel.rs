@@ -512,7 +512,7 @@ fn domain(
                 .and_then(IvyJson::as_js_string)
                 .is_some_and(|v| !v.0.is_empty())
             {
-                call.configurations.project_read(&read)
+                call.configurations.project_read(read)
             } else {
                 Ok(read)
             }

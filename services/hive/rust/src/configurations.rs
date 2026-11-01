@@ -154,8 +154,12 @@ fn markers(value: &IvyJson, path: JsString, result: &mut Vec<Marker>) -> IvyResu
     }
     Ok(())
 }
-fn redact(configuration: &IvyJson) -> IvyResult<IvyJson> {
-    let mut projected = clone_json(configuration)?;
+fn redact(configuration: IvyJson) -> IvyResult<IvyJson> {
+    let mut projected = {
+        let encoded = canonical(&configuration, MANAGEMENT_FRAME_BYTES)?;
+        drop(configuration);
+        parse(&encoded, MANAGEMENT_FRAME_BYTES)?
+    };
     let instances = instances_mut(&mut projected)?;
     for instance in instances {
         for path in paths(instance)? {
@@ -414,9 +418,10 @@ impl Configurations {
         });
         Ok(result)
     }
-    fn prepare_write(&self, store: &Store, params: &IvyJson) -> IvyResult<IvyJson> {
-        let host = string(params, "hostId")?;
-        let configuration = self.configuration(field(params, "configuration")?, host)?;
+    fn prepare_write(
+        &self, store: &Store, params: &IvyJson, host: &JsString, configuration: &IvyJson,
+    ) -> IvyResult<IvyJson> {
+        let configuration = self.configuration(configuration, host)?;
         let object = self.object_id(store, host)?;
         require(
             if object.is_some() {
@@ -480,7 +485,10 @@ impl Configurations {
             params,
             now_ms,
             now,
-            |store| self.prepare_write(store, params),
+            |store| {
+                let host = string(params, "hostId")?;
+                self.prepare_write(store, params, host, field(params, "configuration")?)
+            },
         )?;
         self.get(
             store,
@@ -497,28 +505,28 @@ impl Configurations {
         revision: Option<u64>,
     ) -> IvyResult<IvyJson> {
         let mut value = self.get(store, host, revision)?;
-        let projected = redact(field(&value, "configuration")?)?;
+        let projected = redact(value.remove("configuration").unwrap())?;
         value.insert("configuration", projected);
         Ok(value)
     }
-    pub fn project_read(&self, read: &IvyJson) -> IvyResult<IvyJson> {
+    pub fn project_read(&self, mut read: IvyJson) -> IvyResult<IvyJson> {
         if field(&read, "object")?.get("contractKey") != Some(&CONTRACT_KEY.into())
-            || field(read, "content")?.get("encoding") != Some(&"json".into())
+            || field(&read, "content")?.get("encoding") != Some(&"json".into())
         {
-            return Ok(read.clone());
+            return Ok(read);
         }
-        let value = field(field(read, "content")?, "value")?;
+        let value = field(field(&read, "content")?, "value")?;
         if value.is_null() {
             return Err(IvyError::internal());
         }
         let host = string(value, "hostId")?;
-        let projected = redact(self.configuration(value, host)?)?;
-        let mut result = read.clone();
-        result.insert(
+        self.configuration(value, host)?;
+        let projected = redact(read.remove("content").unwrap().remove("value").unwrap())?;
+        read.insert(
             "content",
             IvyJson::object([("encoding", "json".into()), ("value", projected)]),
         );
-        Ok(result)
+        Ok(read)
     }
     pub fn save(
         &self,
@@ -538,14 +546,13 @@ impl Configurations {
             |store| {
                 let host = string(params, "hostId")?;
                 let current = if self.object_id(store, host)?.is_some() {
-                    Some(field(&self.get(store, host, None)?, "configuration")?.clone())
+                    Some(self.get(store, host, None)?.remove("configuration").unwrap())
                 } else {
                     None
                 };
                 let value = restore(field(params, "configuration")?, current.as_ref())?;
-                let mut prepared = params.clone();
-                prepared.insert("configuration", value);
-                self.prepare_write(store, &prepared)
+                drop(current);
+                self.prepare_write(store, params, host, &value)
             },
         )?;
         self.edit(
