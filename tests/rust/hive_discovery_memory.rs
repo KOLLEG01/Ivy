@@ -680,6 +680,9 @@ fn describe_materializes_only_requested_definitions_with_cold_or_warm_catalog() 
         eprintln!("Hive Discovery describe Rust allocation peak: {peak} bytes with 3.5 MiB unrelated schema text; catalog warm={warm}");
         assert!(peak < 256 * 1024, "Describe decoded or copied unselected schemas: {peak}");
     }
+    let mut unqualified = params;
+    unqualified.insert("tools", IvyJson::Array(vec!["fixture".into()]));
+    assert_eq!(owner.describe(&store, &mut registry, &unqualified, false, &NativeRuntime, 0.0).unwrap_err().code, "not_found");
     assert!(Arc::ptr_eq(&catalog, &registry.live_catalog(&store, &"provider".into()).unwrap().unwrap()));
 }
 
