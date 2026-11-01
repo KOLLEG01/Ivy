@@ -130,7 +130,7 @@ fn registry_sync_does_not_materialize_foreign_status_and_diagnostics() {
     // Offline/disabled foreign catalogs still reserve their MCP names.
     let collision = parse(&encoded(&parameters).unwrap().replace("fixture_read", "fixture_reserved"), usize::MAX).unwrap();
     assert_eq!(owner.sync(&mut store, &id, None, &collision, &NativeRuntime, 0.0).unwrap_err().code, "registry_invalid");
-    assert_eq!(owner.get_registry(&store, &id).unwrap().unwrap(), parameters);
+    assert_eq!(encoded(&owner.get_registry(&store, &id).unwrap().unwrap()).unwrap(), encoded(&parameters).unwrap());
     // Rust allocator requests only; SQLite's C heap and process RSS are excluded.
     assert!(full_peak > 8*1024*1024);
     assert!(peak < 1024*1024, "Registration decoded foreign full nodes: {peak}");
