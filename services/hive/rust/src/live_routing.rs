@@ -67,22 +67,23 @@ struct Tool {
     schemas: Option<Schemas>,
 }
 /// Routing needs identities and availability, not the full registered status.
-struct Node {
-    id: JsString,
-    host: Option<JsString>,
-    service: Option<JsString>,
-    principal: Option<JsString>,
-    connected: bool,
-    synced: bool,
-    ready: bool,
-    enabled: bool,
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoutingNode {
+    pub id: JsString,
+    pub host: Option<JsString>,
+    pub service: Option<JsString>,
+    pub principal: Option<JsString>,
+    pub connected: bool,
+    pub synced: bool,
+    pub ready: bool,
+    pub enabled: bool,
 }
-impl Node {
-    fn from_status(value: &IvyJson, id: JsString) -> Self {
+impl RoutingNode {
+    pub fn from_status(value: &IvyJson) -> IvyResult<Self> {
         let text = |key| value.get(key).and_then(IvyJson::as_js_string).cloned();
         let flag = |key| value.get(key).and_then(IvyJson::as_bool) == Some(true);
-        Self {
-            id,
+        Ok(Self {
+            id: string(value, "serviceNodeId")?,
             host: text("hostId"),
             service: text("serviceName"),
             principal: text("principalId"),
@@ -90,7 +91,7 @@ impl Node {
             synced: flag("synced"),
             ready: flag("ready"),
             enabled: flag("desiredEnabled"),
-        }
+        })
     }
     fn eligible(&self) -> bool {
         self.connected && self.synced && self.ready && self.enabled
@@ -109,7 +110,7 @@ impl Node {
     }
 }
 struct Route {
-    node: Node,
+    node: RoutingNode,
     generation: f64,
     namespaces: HashSet<JsString>,
     tools: HashMap<JsString, Tool>,
@@ -214,13 +215,19 @@ impl LiveRouting {
         generation: Option<f64>,
         catalog: Option<&Catalog>,
     ) -> IvyResult<()> {
-        let id = string(node, "serviceNodeId")?;
-        let prior = self.routes.iter().position(|route| route.node.id == id);
+        self.update_node(RoutingNode::from_status(node)?, generation, catalog)
+    }
+    pub(crate) fn update_node(
+        &mut self,
+        node: RoutingNode,
+        generation: Option<f64>,
+        catalog: Option<&Catalog>,
+    ) -> IvyResult<()> {
+        let prior = self.routes.iter().position(|route| route.node.id == node.id);
         if prior.is_none() && generation.is_none() {
             return Ok(());
         }
         let generation = generation.unwrap_or_else(|| self.routes[prior.unwrap()].generation);
-        let node = Node::from_status(node, id);
         if let Some(index) = prior.filter(|i| self.routes[*i].generation == generation) {
             self.routes[index].node = node;
             return self.routes[index]

@@ -15,6 +15,117 @@ fn namespace_store(source: &str) -> Store {
 }
 
 #[test]
+fn node_identity_preserves_utf16_without_reading_status_diagnostics() {
+    let store = namespace_store("null");
+    let owner = Registry::default();
+    let values = [JsString(vec![0xd800,0,b'n' as u16]), JsString(vec![b's' as u16,0xd801]), JsString(vec![0,0xd802])];
+    let node = IvyJson::object([
+        ("serviceNodeId", values[0].clone().into()), ("serviceName", values[1].clone().into()),
+        ("hostId", values[2].clone().into()), ("desiredEnabled", true.into()),
+    ]);
+    store.connection().execute("UPDATE service_nodes SET status_json=? WHERE id='fixture'", [encoded(&node).unwrap()]).unwrap();
+    store.connection().authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+        use rusqlite::hooks::{AuthAction, Authorization};
+        match context.action {
+            AuthAction::Read { table_name: "diagnostics", .. } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }
+    })).unwrap();
+    let identity = owner.node_identity(&store, &"fixture".into()).unwrap();
+    assert_eq!(identity.service_node_id, values[0]);
+    assert_eq!(identity.service_name, values[1]);
+    assert_eq!(identity.host_id, values[2]);
+    assert_eq!(owner.node_identity(&store, &"absent".into()).err().unwrap().code, "not_found");
+}
+
+#[test]
+fn routing_projection_preserves_optional_identities_and_exact_boolean_flags() {
+    let store = namespace_store("null");
+    let owner = Registry::default();
+    let mut node = IvyJson::object([
+        ("serviceNodeId", JsString(vec![0xd800,0]).into()),
+        ("hostId", JsString(vec![0xd801]).into()), ("serviceName", "service".into()),
+        ("principalId", JsString(vec![0,0xd802]).into()),
+    ]);
+    for value in [IvyJson::Bool(true), false.into(), IvyJson::Null, "true".into(), 1.0.into(), IvyJson::Array(vec![])] {
+        for name in ["connected", "synced", "ready", "desiredEnabled", "hostId", "serviceName", "principalId"] {
+            let mut candidate = node.clone();candidate.insert(name, value.clone());
+            store.connection().execute("UPDATE service_nodes SET status_json=? WHERE id='fixture'", [encoded(&candidate).unwrap()]).unwrap();
+            assert_eq!(owner.routing_node(&store, &"fixture".into()).unwrap(), crate::live_routing::RoutingNode::from_status(&candidate).unwrap(), "{name} {value:?}");
+        }
+    }
+    for name in ["hostId", "serviceName", "principalId"] { node.remove(name); }
+    store.connection().execute("UPDATE service_nodes SET status_json=? WHERE id='fixture'", [encoded(&node).unwrap()]).unwrap();
+    assert_eq!(owner.routing_node(&store, &"fixture".into()).unwrap(), crate::live_routing::RoutingNode::from_status(&node).unwrap());
+    assert_eq!(owner.routing_node(&store, &"absent".into()).err().unwrap().code, "not_found");
+}
+
+#[test]
+fn host_reports_skip_unchanged_status_bodies_and_keep_change_notifications() {
+    const CHILD: &str = "IVY_HOST_REPORT_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "registry::catalog_memory_tests::host_reports_skip_unchanged_status_bodies_and_keep_change_notifications", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+        return;
+    }
+    let mut store = namespace_store("null");
+    store.connection().execute("UPDATE service_nodes SET status_json=json_set(status_json,'$.serviceName','service-manager','$.padding',?) WHERE id='fixture'", ["p".repeat(2*1024*1024)]).unwrap();
+    let alert = serde_json::json!({"source":"service:fixture","status":"current","code":"fixture",
+        "severity":"warning","lastObservedAt":"1970-01-01T00:00:00.000Z","message":"d".repeat(2*1024*1024)}).to_string();
+    store.connection().execute("INSERT INTO diagnostics VALUES('fixture',?)", [alert]).unwrap();
+    let mut instances = vec![];
+    for i in 0..64 {
+        let id = format!("node{i:02}");
+        let status = serde_json::json!({"serviceNodeId":id,"serviceName":"service","hostId":"host",
+            "desiredEnabled":true,"padding":"p".repeat(32*1024),"unknown":{"kept":[true,17]}}).to_string();
+        store.connection().execute("INSERT INTO service_nodes VALUES(?1,'fixture','host','service',1,?2)", params![id,status]).unwrap();
+        instances.push(serde_json::json!({"instanceId":id,"serviceNodeId":id,"desiredEnabled":true}));
+    }
+    let retained = store.connection().query_row("SELECT status_json FROM service_nodes WHERE id='node00'", [], |r| r.get::<_,String>(0)).unwrap();
+    let mut document = serde_json::json!({"sequence":1,"status":{"hostId":"host","observedAt":"1970-01-01T00:00:00.000Z","instances":instances}});
+    let snapshot = IvyJson::from_serde(&document).unwrap();
+    let mut owner = Registry::default();
+    let id = JsString::from("fixture");
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    let full = owner.node(&store, &id, &NativeRuntime, 0.0).unwrap();
+    let full_peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    drop(full);
+    store.connection().execute_batch("CREATE TRIGGER reject_unchanged_node_flag BEFORE UPDATE ON service_nodes WHEN json_type(OLD.status_json,'$.desiredEnabled')=json_type(NEW.status_json,'$.desiredEnabled') BEGIN SELECT RAISE(ABORT,'Unchanged node status was rewritten'); END;").unwrap();
+    store.connection().authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+        use rusqlite::hooks::{AuthAction, Authorization};
+        match context.action {
+            AuthAction::Read { table_name: "diagnostics", .. } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }
+    })).unwrap();
+    let before = LIVE.load(AtomicOrdering::Relaxed);
+    PEAK.store(before, AtomicOrdering::Relaxed);
+    owner.report_host(&mut store, &id, &snapshot, &NativeRuntime, 0.0).unwrap();
+    let routes = owner.changed_nodes().iter().map(|id| owner.routing_node(&store, id).unwrap()).collect::<Vec<_>>();
+    assert_eq!(routes.len(), 64);
+    assert!(routes.iter().all(|node| node.enabled && node.host.as_ref().is_some_and(|host| host.eq_str("host"))));
+    let peak = PEAK.load(AtomicOrdering::Relaxed) - before;
+    assert_eq!(owner.take_changed_nodes(), (0..64).map(|i| JsString::from(format!("node{i:02}"))).collect::<Vec<_>>());
+    assert_eq!(store.connection().query_row("SELECT status_json FROM service_nodes WHERE id='node00'", [], |r| r.get::<_,String>(0)).unwrap(), retained);
+    document["sequence"] = 2.into();
+    document["status"]["instances"][0]["desiredEnabled"] = false.into();
+    owner.report_host(&mut store, &id, &IvyJson::from_serde(&document).unwrap(), &NativeRuntime, 0.0).unwrap();
+    let changed = store.connection().query_row("SELECT status_json FROM service_nodes WHERE id='node00'", [], |r| r.get::<_,String>(0)).unwrap();
+    let mut expected = decode(&retained).unwrap();expected.insert("desiredEnabled", false.into());
+    assert_eq!(encoded(&decode(&changed).unwrap()).unwrap(), encoded(&expected).unwrap());
+    assert_eq!(owner.take_changed_nodes().len(), 64);
+    eprintln!("Hive host report Rust allocation peak: old full reporter input {full_peak} bytes, complete report and 64 native routing handoffs {peak} bytes for 2 MiB reporter status, 2 MiB child status and 2 MiB diagnostics");
+    // Rust allocator requests only; SQLite's C heap and process RSS are excluded.
+    assert!(full_peak > 8*1024*1024);
+    assert!(peak < 256*1024, "Host report decoded unchanged status bodies: {peak}");
+}
+
+#[test]
 fn ui_namespace_compatibility_preserves_absence_versions_and_short_circuit_errors() {
     let store = namespace_store("null");
     let owner = Registry::default();

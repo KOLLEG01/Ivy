@@ -417,16 +417,11 @@ impl WorkerActions {
             for id in registry.changed_nodes().to_vec() {
                 let route = (|| -> IvyResult<crate::storage::RoutingUpdate> {
                     // Hints may outlive a rolled-back node or failed catalog read.
-                    let node = registry.node(
-                        &kernel.parts.store,
-                        &id,
-                        kernel.runtime.as_ref(),
-                        (kernel.clock)(),
-                    )?;
+                    let node = registry.routing_node(&kernel.parts.store, &id)?;
                     let catalog = if execution.is_some_and(|(context, request)|
                         request.get("method") == Some(&IvyJson::from("registry.sync"))
                         && context.get("serviceNodeId").and_then(IvyJson::as_js_string) == Some(&id))
-                        && node.get("synced") == Some(&IvyJson::Bool(true))
+                        && node.synced
                     {
                         registry.live_catalog(&kernel.parts.store, &id)?
                     } else {

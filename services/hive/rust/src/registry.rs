@@ -41,6 +41,11 @@ pub(crate) struct CatalogProvider {
     pub host_id: JsString,
     pub available: bool,
 }
+pub(crate) struct NodeIdentity {
+    pub service_node_id: JsString,
+    pub service_name: JsString,
+    pub host_id: JsString,
+}
 #[derive(Default)]
 struct Contact {
     at: JsString,
@@ -62,6 +67,10 @@ fn decode(value: &str) -> IvyResult<IvyJson> {
     let value = parse(value, usize::MAX).map_err(|_| IvyError::internal())?;
     require_object(&value)?;
     Ok(value)
+}
+fn stored_string(value: &str) -> IvyResult<JsString> {
+    parse(value, usize::MAX).map_err(|_| IvyError::internal())?
+        .into_js_string().ok_or_else(IvyError::internal)
 }
 fn encoded(value: &IvyJson) -> IvyResult<String> {
     canonical(value, MANAGEMENT_FRAME_BYTES)
@@ -333,16 +342,52 @@ impl Registry {
             row.get::<_, String>(0)?, row.get::<_, String>(1)?,
             row.get::<_, String>(2)?, row.get::<_, bool>(3)?,
         ))))?;
-        let string = |value: &str| parse(value, usize::MAX)
-            .map_err(|_| IvyError::internal())?
-            .into_js_string().ok_or_else(IvyError::internal);
         rows.map(|row| {
             let (id, service, host, available) = sql(store, row)?;
             Ok(CatalogProvider {
-                service_node_id: string(&id)?, service_name: string(&service)?,
-                host_id: string(&host)?, available,
+                service_node_id: stored_string(&id)?, service_name: stored_string(&service)?,
+                host_id: stored_string(&host)?, available,
             })
         }).collect()
+    }
+    fn node_metadata(&self, store: &Store, id: &JsString) -> IvyResult<Option<(NodeIdentity, Option<bool>)>> {
+        let row = sql(store, store.connection().query_row(
+            "SELECT status_json -> '$.serviceNodeId',status_json -> '$.serviceName',
+                    status_json -> '$.hostId',json_type(status_json,'$.desiredEnabled')
+             FROM service_nodes WHERE id=?", [text(id)],
+            |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?,
+                row.get::<_,String>(2)?, row.get::<_,Option<String>>(3)?)),
+        ).optional())?;
+        row.map(|(id, service, host, enabled)| Ok((NodeIdentity {
+            service_node_id: stored_string(&id)?, service_name: stored_string(&service)?,
+            host_id: stored_string(&host)?,
+        }, match enabled.as_deref() { Some("true") => Some(true), Some("false") => Some(false), _ => None }))).transpose()
+    }
+    pub(crate) fn node_identity(&self, store: &Store, id: &JsString) -> IvyResult<NodeIdentity> {
+        self.node_metadata(store, id)?.map(|(identity, _)| identity)
+            .ok_or_else(|| IvyError::new("not_found", "Service Node not found."))
+    }
+    pub(crate) fn routing_node(&self, store: &Store, id: &JsString) -> IvyResult<crate::live_routing::RoutingNode> {
+        let (id, host, service, principal, connected, synced, ready, enabled) = sql(store, store.connection().query_row(
+            "SELECT status_json -> '$.serviceNodeId',
+                    CASE WHEN json_type(status_json,'$.hostId')='text' THEN status_json -> '$.hostId' END,
+                    CASE WHEN json_type(status_json,'$.serviceName')='text' THEN status_json -> '$.serviceName' END,
+                    CASE WHEN json_type(status_json,'$.principalId')='text' THEN status_json -> '$.principalId' END,
+                    coalesce(json_type(status_json,'$.connected')='true',0),
+                    coalesce(json_type(status_json,'$.synced')='true',0),
+                    coalesce(json_type(status_json,'$.ready')='true',0),
+                    coalesce(json_type(status_json,'$.desiredEnabled')='true',0)
+             FROM service_nodes WHERE id=?", [text(id)], |row| Ok((
+                row.get::<_,String>(0)?, row.get::<_,Option<String>>(1)?,
+                row.get::<_,Option<String>>(2)?, row.get::<_,Option<String>>(3)?,
+                row.get::<_,bool>(4)?, row.get::<_,bool>(5)?, row.get::<_,bool>(6)?, row.get::<_,bool>(7)?,
+            )),
+        ).optional())?.ok_or_else(|| IvyError::new("not_found", "Service Node not found."))?;
+        let optional = |value: Option<String>| value.map(|value| stored_string(&value)).transpose();
+        Ok(crate::live_routing::RoutingNode {
+            id: stored_string(&id)?, host: optional(host)?, service: optional(service)?,
+            principal: optional(principal)?, connected, synced, ready, enabled,
+        })
     }
     pub fn nodes(&self, store: &Store, runtime: &dyn Runtime, now: f64) -> IvyResult<Vec<IvyJson>> {
         let mut statement=sql(store,store.connection().prepare_cached("SELECT diagnostic_json FROM diagnostics WHERE json_extract(diagnostic_json,'$.status')='current' ORDER BY rowid"))?;
@@ -815,11 +860,11 @@ impl Registry {
         runtime: &dyn Runtime,
         now: f64,
     ) -> IvyResult<IvyJson> {
-        let reporter = self.node(store, id, runtime, now)?;
+        let reporter = self.node_identity(store, id)?;
         let host = field(snapshot, "status")?;
         require(
-            is_text(reporter.get("serviceName"), "service-manager")
-                && reporter.get("hostId") == host.get("hostId"),
+            reporter.service_name.eq_str("service-manager")
+                && host.get("hostId").and_then(IvyJson::as_js_string) == Some(&reporter.host_id),
             "target_conflict",
             "Host observation requires its current local ServiceManager.",
         )?;
@@ -866,15 +911,22 @@ impl Registry {
             }
             for instance in instances{
                 let node_id=string(instance,"serviceNodeId")?;
-                let known=sql(store,store.connection().query_row("SELECT status_json FROM service_nodes WHERE id=?",[text(node_id)],|r|r.get::<_,String>(0)).optional())?.map(|v|decode(&v)).transpose()?;
+                let known=self.node_metadata(store,node_id)?;
                 let managed=sql(store,store.connection().query_row("SELECT host_id FROM managed_nodes WHERE node_id=?",[text(node_id)],|r|r.get::<_,String>(0)).optional())?;
-                require((known.as_ref().is_none_or(|v|v.get("hostId").and_then(IvyJson::as_js_string)==Some(host_id)))&&managed.is_none_or(|v|JsString::from(v)==*host_id),"target_conflict","Reported Service Node belongs to another host.")?;
+                require(known.as_ref().is_none_or(|(node,_)|&node.host_id==host_id)&&managed.is_none_or(|v|JsString::from(v)==*host_id),"target_conflict","Reported Service Node belongs to another host.")?;
                 let enabled=field(instance,"desiredEnabled")?;
                 sql(store,store.connection().execute("INSERT INTO managed_nodes VALUES (?,?,?) ON CONFLICT(node_id) DO UPDATE SET desired_enabled=excluded.desired_enabled",params![text(node_id),text(host_id),i64::from(enabled.as_bool().ok_or_else(IvyError::internal)?)]))?;
-                if let Some(mut node)=known{let notify=node.get("desiredEnabled")!=Some(enabled);node.insert("desiredEnabled",enabled.clone());self.save(store,&node,notify)?;}
+                if let Some((identity,old_enabled))=known{
+                    if old_enabled==enabled.as_bool(){self.mark_node(identity.service_node_id);}
+                    else{
+                        // Preserve the full admitted document only when its flag changes.
+                        let source=sql(store,store.connection().query_row("SELECT status_json FROM service_nodes WHERE id=?",[text(node_id)],|r|r.get::<_,String>(0)))?;
+                        let mut node=decode(&source)?;node.insert("desiredEnabled",enabled.clone());self.save(store,&node,true)?;
+                    }
+                }
             }
             let at=iso(runtime,now)?;
-            sql(store,store.connection().execute("INSERT INTO host_reports VALUES (?,?,?,?,?) ON CONFLICT(host_id) DO UPDATE SET node_id=excluded.node_id,sequence=excluded.sequence,reported_at=excluded.reported_at,snapshot_json=excluded.snapshot_json",params![text(host_id),text(string(&reporter,"serviceNodeId")?),sequence,text(&at),encoded]))?;
+            sql(store,store.connection().execute("INSERT INTO host_reports VALUES (?,?,?,?,?) ON CONFLICT(host_id) DO UPDATE SET node_id=excluded.node_id,sequence=excluded.sequence,reported_at=excluded.reported_at,snapshot_json=excluded.snapshot_json",params![text(host_id),text(&reporter.service_node_id),sequence,text(&at),encoded]))?;
             store.invalidate("system/hosts".into());Ok(IvyJson::object([("sequence",IvyJson::Number(sequence)),("reportedAt",IvyJson::String(at))]))
         })
     }

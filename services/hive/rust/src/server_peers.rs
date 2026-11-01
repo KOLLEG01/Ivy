@@ -993,8 +993,8 @@ impl Peers {
     }
     /// The storage client already owns private notification admission.
     pub fn routing_update(&self, value: &crate::storage::RoutingUpdate) -> IvyResult<()> {
-        self.0.owners.routing.lock().unwrap().update(
-            &value.node,
+        self.0.owners.routing.lock().unwrap().update_node(
+            value.node.clone(),
             value.generation,
             value.catalog.as_deref(),
         )

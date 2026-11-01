@@ -217,11 +217,9 @@ pub(super) fn handle(
 }
 fn report(call: &mut Call<'_>, context: &IvyJson, params: &IvyJson) -> IvyResult<IvyJson> {
     service(context)?;
-    let node = call.registry.node(
+    let node = call.registry.node_identity(
         call.store,
         string(context, "serviceNodeId")?,
-        call.runtime,
-        (call.clock)(),
     )?;
     let now = call.runtime.iso_date((call.clock)())?;
     let runtime = call.runtime;
@@ -230,8 +228,8 @@ fn report(call: &mut Call<'_>, context: &IvyJson, params: &IvyJson) -> IvyResult
             validate_shared("DeploymentRecord",record)?;
             crate::paging::utc(&IvyJson::String(string(record, "createdAt")?.clone()),runtime)?;
             crate::paging::utc(&IvyJson::String(string(record, "updatedAt")?.clone()),runtime)?;
-            require(record.get("hostId")==node.get("hostId"),"target_conflict","Deployment snapshot belongs to another host.")?;
-            let host=text(string(&node,"hostId")?);
+            require(record.get("hostId").and_then(IvyJson::as_js_string)==Some(&node.host_id),"target_conflict","Deployment snapshot belongs to another host.")?;
+            let host=text(&node.host_id);
             let id=text(&string(record, "deploymentId")?.clone());
             let prior=sql(store,store.connection().query_row("SELECT record_json FROM deployment_reports WHERE host_id=? AND deployment_id=?",params![host,id],|r|r.get::<_,String>(0)).optional())?;
             if let Some(prior)=prior{
@@ -242,7 +240,7 @@ fn report(call: &mut Call<'_>, context: &IvyJson, params: &IvyJson) -> IvyResult
                 let valid=string(&previous, "updatedAt")?.clone()<=string(record, "updatedAt")?.clone()&&match before{None=>canonical(&previous,MANAGEMENT_FRAME_BYTES)?==canonical(record,MANAGEMENT_FRAME_BYTES)?,Some(before)=>after.is_none_or(|after|after>=before)};
                 require(valid,"revision_conflict","Deployment observation cannot regress a phase or replace a terminal result.")?;
             }
-            sql(store,store.connection().execute("INSERT INTO deployment_reports VALUES (?,?,?,?,?) ON CONFLICT(host_id,deployment_id) DO UPDATE SET node_id=excluded.node_id,reported_at=excluded.reported_at,record_json=excluded.record_json",params![host,id,text(string(&node,"serviceNodeId")?),text(&now),canonical(record,MANAGEMENT_FRAME_BYTES)?]))?;
+            sql(store,store.connection().execute("INSERT INTO deployment_reports VALUES (?,?,?,?,?) ON CONFLICT(host_id,deployment_id) DO UPDATE SET node_id=excluded.node_id,reported_at=excluded.reported_at,record_json=excluded.record_json",params![host,id,text(&node.service_node_id),text(&now),canonical(record,MANAGEMENT_FRAME_BYTES)?]))?;
         }Ok(())
     })?;
     Ok(IvyJson::object([("reportedAt", IvyJson::String(now))]))

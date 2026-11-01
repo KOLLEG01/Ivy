@@ -551,6 +551,11 @@ fn compare_with_error_codes(steps: &[Value], changed: &[(usize, &str)]) -> Value
     for (index, (a, b)) in actual_rows.iter().zip(original_rows).enumerate() {
         let mut native = normalized(a, &aliases, &requests, false);
         let mut original = normalized(b, &no_aliases, &requests, true);
+        for row in [&mut native, &mut original] {
+            if let Some(notifications) = row.get_mut("notifications").and_then(Value::as_array_mut) {
+                for notification in notifications { catalog_fixture::project_routing_notification(notification); }
+            }
+        }
         if let Some((_, code)) = changed.iter().find(|(step, _)| *step == index) {
             assert_eq!(a["error"]["data"]["code"], *code);
             native["error"] = Value::Null;

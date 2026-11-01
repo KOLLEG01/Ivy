@@ -1,7 +1,7 @@
 //! Project historical JSON traces onto the native internal catalog in tests only.
 #![allow(dead_code)]
 use ivy_contracts::{IvyError, IvyJson, IvyResult};
-use ivy_hive::{registry_catalog::{Catalog, Namespace, NotificationDefinition, ToolBinding}, storage::RoutingUpdate};
+use ivy_hive::{registry_catalog::{Catalog, Namespace, NotificationDefinition, ToolBinding}, storage::RoutingUpdate, live_routing::RoutingNode};
 use std::sync::Arc;
 
 pub fn catalog_from_wire(value: &IvyJson) -> IvyResult<Catalog> {
@@ -51,15 +51,33 @@ pub fn catalog_to_wire(value: &Catalog) -> IvyJson {
 }
 pub fn routing_from_wire(value: &IvyJson) -> IvyResult<RoutingUpdate> {
     Ok(RoutingUpdate {
-        node: value.required("node")?.clone(),
+        node: RoutingNode::from_status(value.required("node")?)?,
         generation: value.get("generation").and_then(IvyJson::as_f64),
         catalog: value.get("catalog").filter(|v| !v.is_null())
             .map(catalog_from_wire).transpose()?.map(Arc::new),
     })
 }
 pub fn routing_to_wire(value: &RoutingUpdate) -> IvyJson {
-    let mut wire = IvyJson::object([("node", value.node.clone())]);
+    let mut wire = IvyJson::object([("node", node_to_wire(&value.node))]);
     if let Some(generation) = value.generation { wire.insert("generation", generation.into()); }
     if let Some(catalog) = &value.catalog { wire.insert("catalog", catalog_to_wire(catalog)); }
     wire
+}
+fn node_to_wire(value: &RoutingNode) -> IvyJson {
+    IvyJson::object([
+        ("serviceNodeId", value.id.clone().into()),
+        ("hostId", value.host.clone().map_or(IvyJson::Null, Into::into)),
+        ("serviceName", value.service.clone().map_or(IvyJson::Null, Into::into)),
+        ("principalId", value.principal.clone().map_or(IvyJson::Null, Into::into)),
+        ("connected", value.connected.into()), ("synced", value.synced.into()),
+        ("ready", value.ready.into()), ("desiredEnabled", value.enabled.into()),
+    ])
+}
+pub fn project_routing_notification(value: &mut serde_json::Value) {
+    // Historical internal notifications carried full status. Compare precisely
+    // the identity/flags consumed by routing, leaving all public results intact.
+    if let Some(node) = value.pointer_mut("/routing/node") {
+        let routing = RoutingNode::from_status(&IvyJson::from_serde(node).unwrap()).unwrap();
+        *node = serde_json::from_str(&ivy_contracts::json::stringify(&node_to_wire(&routing), usize::MAX).unwrap()).unwrap();
+    }
 }

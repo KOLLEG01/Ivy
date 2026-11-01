@@ -141,7 +141,7 @@ impl Default for RequestOptions {
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoutingUpdate {
-    pub node: IvyJson,
+    pub node: crate::live_routing::RoutingNode,
     pub generation: Option<f64>,
     pub catalog: Option<Arc<crate::registry_catalog::Catalog>>,
 }
