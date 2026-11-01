@@ -109,7 +109,9 @@ fn host_configuration_reads_do_not_retain_or_copy_unneeded_bodies() {
     assert!(instance.get("settings").unwrap().get("token").unwrap().get("$ivySecret").is_some());
     eprintln!("Hive host configuration projection Rust allocation peak: copied input {copied_peak} bytes, owned input {owned_peak} bytes for 1 MiB settings text");
     assert!(copied_peak > owned_peak + 1024*1024);
-    assert!(owned_peak < 2*1024*1024, "Redaction retained or copied its owned source: {owned_peak}");
+    // The 2 MiB UTF-16 source also carries object keys and metadata. Allow that
+    // fixed overhead while rejecting another full copy of the settings text.
+    assert!(owned_peak < 2*1024*1024 + 64*1024, "Redaction retained or copied its owned source: {owned_peak}");
 }
 
 fn fixture_tools(schema_bytes: usize) -> Vec<IvyJson> {
