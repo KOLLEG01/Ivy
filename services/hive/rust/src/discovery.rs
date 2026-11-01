@@ -1307,7 +1307,7 @@ impl Discovery {
                 let names = array(params, "tools")?.iter().map(|name| {
                     name.as_js_string().ok_or_else(IvyError::internal)
                 }).collect::<IvyResult<Vec<_>>>()?.into_iter()
-                    .filter(|name| segment(name, 46) == namespace)
+                    .filter(|name| name.0.len() > namespace.0.len() && segment(name, 46) == namespace)
                     .map(|name| JsString(name.0[namespace.0.len() + 1..].to_vec()))
                     .collect::<Vec<_>>();
                 let (markdown, definitions) = registry.namespace_description(store, &id, &namespace, &names)?;

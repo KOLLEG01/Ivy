@@ -373,6 +373,13 @@ fn discovery_descriptions_pin_provider_exact_tools_definitions_and_call_guards_m
             json!({"serviceName":"sample","serviceNodeId":"a","tools":["fixture.absent"]}),
         ),
     );
+    let unqualified = push(
+        &mut s,
+        operation(
+            "describe",
+            json!({"serviceName":"sample","serviceNodeId":"a","tools":["fixture"]}),
+        ),
+    );
     let core = push(
         &mut s,
         public(operation(
@@ -432,7 +439,7 @@ fn discovery_descriptions_pin_provider_exact_tools_definitions_and_call_guards_m
     assert_eq!(code(&r, ambiguous), "ambiguous_service_node");
     assert_eq!(value(&r, exact)["items"].as_array().unwrap().len(), 3);
     assert_eq!(value(&r, exact)["guides"].as_array().unwrap().len(), 1);
-    for i in [hidden, missing, invalid_core] {
+    for i in [hidden, missing, unqualified, invalid_core] {
         assert_eq!(code(&r, i), "not_found");
     }
     assert_eq!(code(&r, core_node), "target_conflict");
