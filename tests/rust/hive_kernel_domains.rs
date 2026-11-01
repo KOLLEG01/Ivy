@@ -225,7 +225,7 @@ fn kernel_namespace_tool_and_topic_catalogs_bind_providers_and_snapshot_cursors(
     );
     let mut changed = catalog();
     changed["namespaces"][0]["guideMarkdown"] = "Changed guide.".into();
-    ok(&mut s, service_request("registry.sync", "node", changed));
+    ok(&mut s, service_request("registry.sync", "node", changed.clone()));
     let stale = push(
         &mut s,
         follow(
@@ -234,6 +234,32 @@ fn kernel_namespace_tool_and_topic_catalogs_bind_providers_and_snapshot_cursors(
                 json!({"namespace":"fixture","serviceNodeId":"node","limit":1}),
             ),
             tools,
+        ),
+    );
+    let before_schema_change = ok(
+        &mut s,
+        request(
+            "tools.list",
+            json!({"namespace":"fixture","serviceNodeId":"node","limit":1}),
+        ),
+    );
+    changed["namespaces"][0]["tools"][0]["inputSchema"]["description"] = "Changed schema.".into();
+    ok(&mut s, service_request("registry.sync", "node", changed));
+    let stale_schema = push(
+        &mut s,
+        follow(
+            request(
+                "tools.list",
+                json!({"namespace":"fixture","serviceNodeId":"node","limit":1}),
+            ),
+            before_schema_change,
+        ),
+    );
+    let after_schema_change = ok(
+        &mut s,
+        request(
+            "tools.list",
+            json!({"namespace":"fixture","serviceNodeId":"node","limit":1}),
         ),
     );
     let resource =
@@ -260,6 +286,13 @@ fn kernel_namespace_tool_and_topic_catalogs_bind_providers_and_snapshot_cursors(
         ),
     );
     ready(&mut s, "second", "host2", "fixture");
+    let second_tools = ok(
+        &mut s,
+        request(
+            "tools.list",
+            json!({"namespace":"fixture","serviceNodeId":"second","limit":1}),
+        ),
+    );
     ok(
         &mut s,
         service_request(
@@ -299,6 +332,12 @@ fn kernel_namespace_tool_and_topic_catalogs_bind_providers_and_snapshot_cursors(
     );
     assert_eq!(value(&result, scoped)["items"].as_array().unwrap().len(), 1);
     error(&result, stale, "invalid_cursor");
+    error(&result, stale_schema, "invalid_cursor");
+    assert_eq!(
+        value(&result, after_schema_change)["items"][0]["definition"]["inputSchema"]["description"],
+        "Changed schema."
+    );
+    assert!(value(&result, second_tools)["items"][0]["definition"]["inputSchema"]["description"].is_null());
     for index in [conflict, namespace_conflict, owner_conflict] {
         error(&result, index, "target_conflict");
     }

@@ -1,6 +1,9 @@
 //! One immutable catalog shared by registry readers and routing handoffs.
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
-use std::{collections::HashMap, mem::size_of, ops::Range, sync::Arc};
+use std::{
+    collections::HashMap, mem::size_of, ops::Range,
+    sync::{Arc, OnceLock},
+};
 
 const CACHE_BYTES: usize = 32 * 1024 * 1024;
 const ENTRY_BYTES: usize = 8 * 1024 * 1024;
@@ -65,11 +68,47 @@ impl ToolBinding {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub struct Namespace {
     pub name: JsString,
     pub guide_markdown: Option<JsString>,
     pub tools: Range<usize>,
+    // Catalogs belong to one node and are replaced on registry changes. Keep the
+    // successful SHA-256 text inline so lazy initialization cannot grow the budget.
+    tool_page_identity: OnceLock<[u8; 71]>,
+}
+impl Namespace {
+    pub fn new(name: JsString, guide_markdown: Option<JsString>, tools: Range<usize>) -> Self {
+        Self { name, guide_markdown, tools, tool_page_identity: OnceLock::new() }
+    }
+}
+impl PartialEq for Namespace {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.guide_markdown == other.guide_markdown
+            && self.tools == other.tools
+    }
+}
+pub(crate) fn tool_page_identity(
+    id: &JsString,
+    guide: &IvyJson,
+    tools: &[ToolBinding],
+    namespace: Option<&Namespace>,
+) -> IvyResult<String> {
+    if let Some(hash) = namespace.and_then(|ns| ns.tool_page_identity.get()) {
+        return Ok(String::from_utf8(hash.to_vec()).unwrap());
+    }
+    let node_key = JsString::from("nodeId");
+    let guide_key = JsString::from("guide");
+    let tools_key = JsString::from("tools");
+    let node = IvyJson::String(id.clone());
+    let hash = ivy_contracts::hash::hash_object_with_array(
+        [(&node_key, &node), (&guide_key, guide)], &tools_key,
+        tools.iter().map(|tool| Ok(tool.to_wire())),
+    )?;
+    if let Some(namespace) = namespace {
+        let _ = namespace.tool_page_identity.set(hash.as_bytes().try_into().unwrap());
+    }
+    Ok(hash)
 }
 #[derive(Debug, PartialEq)]
 pub struct NotificationDefinition {
@@ -124,11 +163,11 @@ impl Catalog {
             }
             let start = tools.len();
             tools.extend(bindings.remove(&name).unwrap_or_default());
-            namespaces.push(Namespace {
-                tools: start..tools.len(),
+            namespaces.push(Namespace::new(
                 name,
-                guide_markdown: ns.get("guideMarkdown").and_then(IvyJson::as_js_string).cloned(),
-            });
+                ns.get("guideMarkdown").and_then(IvyJson::as_js_string).cloned(),
+                start..tools.len(),
+            ));
         }
         Ok(Self { namespaces, tools, notifications })
     }

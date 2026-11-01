@@ -6,11 +6,9 @@ use std::sync::Arc;
 
 pub fn catalog_from_wire(value: &IvyJson) -> IvyResult<Catalog> {
     let namespaces = value.get("namespaces").and_then(IvyJson::as_array)
-        .into_iter().flatten().map(|name| Ok(Namespace {
-            name: name.as_js_string().ok_or_else(IvyError::internal)?.clone(),
-            guide_markdown: None,
-            tools: 0..0,
-        })).collect::<IvyResult<_>>()?;
+        .into_iter().flatten().map(|name| Ok(Namespace::new(
+            name.as_js_string().ok_or_else(IvyError::internal)?.clone(), None, 0..0,
+        ))).collect::<IvyResult<_>>()?;
     let tools = value.get("tools").and_then(IvyJson::as_array)
         .into_iter().flatten().map(|binding| Ok(ToolBinding::new(
             binding.required("qualifiedName")?.as_js_string()

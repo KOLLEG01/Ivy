@@ -165,12 +165,12 @@ pub(super) fn live_catalog(source: &str) -> IvyResult<Option<LiveCatalog>> {
         }
         let start = result.tools.len();
         result.tools.extend(bindings.remove(&name).unwrap_or_default());
-        result.namespaces.push(Namespace {
+        result.namespaces.push(Namespace::new(
             name,
-            tools: start..result.tools.len(),
-            guide_markdown: guide.filter(|raw| raw.get().starts_with('"'))
+            guide.filter(|raw| raw.get().starts_with('"'))
                 .map(|raw| live_value(raw)?.into_js_string().ok_or_else(IvyError::internal)).transpose()?,
-        });
+            start..result.tools.len(),
+        ));
     }
     Ok(Some(result))
 }

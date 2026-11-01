@@ -271,10 +271,10 @@ fn full_registry_live_catalog(owner: &Registry, store: &Store, id: &JsString) ->
         }
         let start = result.tools.len();
         result.tools.extend(bindings.remove(&name).unwrap_or_default());
-        result.namespaces.push(crate::registry_catalog::Namespace {
-            name, tools: start..result.tools.len(),
-            guide_markdown: ns.get("guideMarkdown").and_then(IvyJson::as_js_string).cloned(),
-        });
+        result.namespaces.push(crate::registry_catalog::Namespace::new(
+            name, ns.get("guideMarkdown").and_then(IvyJson::as_js_string).cloned(),
+            start..result.tools.len(),
+        ));
     }
     Ok(Some(result))
 }

@@ -17,7 +17,60 @@ fn binding_wire_keeps_field_order_and_opaque_schema_values() {
         assert_eq!(binding.to_wire().get("definitionHash"), Some(&"definition-hash".into()));
         assert_eq!(ivy_contracts::hash::hash_json(&binding.definition()).unwrap(),
             ivy_contracts::hash::hash_json(&definition).unwrap());
+        let namespace = Namespace::new("fixture".into(), None, 0..1);
+        let id = JsString::from("node");
+        let guide = IvyJson::String(JsString(vec![0xd800]));
+        let expected = ivy_contracts::hash::hash_json(&IvyJson::object([
+            ("nodeId", id.clone().into()), ("guide", guide.clone()),
+            ("tools", IvyJson::Array(vec![binding.to_wire()])),
+        ])).unwrap();
+        for _ in 0..2 {
+            assert_eq!(tool_page_identity(&id, &guide, std::slice::from_ref(&binding), Some(&namespace)).unwrap(), expected);
+        }
     }
+}
+
+#[test]
+fn warm_tool_pages_skip_schema_materialization_with_fixed_catalog_capacity() {
+    use crate::retention::graph_tests::{LIVE, PEAK};
+    use std::sync::atomic::Ordering;
+    const CHILD: &str = "IVY_TOOL_PAGE_HASH_MEMORY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "registry_catalog::tests::warm_tool_pages_skip_schema_materialization_with_fixed_catalog_capacity", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+    let catalog = Catalog {
+        namespaces: vec![Namespace::new("fixture".into(), None, 0..4)],
+        tools: (0..4).map(|index| ToolBinding::new(
+            format!("fixture.call{index}").into(), "hash".into(), IvyJson::object([
+                ("inputSchema", IvyJson::object([("description", "x".repeat(128 * 1024).into())])),
+                ("outputSchema", IvyJson::object([("description", "y".repeat(128 * 1024).into())])),
+            ]),
+        )).collect(), notifications: vec![],
+    };
+    let id = JsString::from("node");
+    let before = LIVE.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    let expected = tool_page_identity(&id, &IvyJson::Null, &catalog.tools, None).unwrap();
+    let uncached_peak = PEAK.load(Ordering::Relaxed) - before;
+    let capacity = catalog.retained_bytes();
+    let namespace = &catalog.namespaces[0];
+    assert_eq!(tool_page_identity(&id, &IvyJson::Null, &catalog.tools, Some(namespace)).unwrap(), expected);
+    let before = LIVE.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    for _ in 0..16 {
+        assert_eq!(tool_page_identity(&id, &IvyJson::Null, &catalog.tools, Some(namespace)).unwrap(), expected);
+    }
+    let warm_peak = PEAK.load(Ordering::Relaxed) - before;
+    assert_eq!(catalog.retained_bytes(), capacity);
+    eprintln!("Tool page identity Rust allocation peak: uncached {uncached_peak} bytes; 16 warm pages {warm_peak} bytes");
+    assert!(uncached_peak > 512 * 1024);
+    assert!(warm_peak < 16 * 1024, "Warm pages copied schemas: {warm_peak} bytes");
 }
 
 #[test]

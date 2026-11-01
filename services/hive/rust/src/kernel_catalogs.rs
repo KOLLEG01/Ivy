@@ -1,7 +1,8 @@
 use super::*;
+use crate::registry_catalog::{Namespace, ToolBinding, tool_page_identity};
 use ivy_contracts::{
     core_schema::validate_shared,
-    hash::{hash_json, hash_object_with_array},
+    hash::hash_json,
     json::{canonical, parse},
     limits::MANAGEMENT_FRAME_BYTES,
 };
@@ -97,19 +98,15 @@ fn prefixed(value: &IvyJson, name: &str, prefix: Option<&IvyJson>) -> IvyResult<
 fn tool_page_records<'a>(
     id: &JsString,
     guide: &IvyJson,
-    tools: &'a [crate::registry_catalog::ToolBinding],
+    tools: &'a [ToolBinding],
+    namespace: Option<&Namespace>,
     params: &IvyJson,
-) -> IvyResult<(String, Vec<&'a crate::registry_catalog::ToolBinding>)> {
+) -> IvyResult<(String, Vec<&'a ToolBinding>)> {
     // Check every prefix before hashing, preserving the original error order.
     let included = tools.iter().map(|tool| prefixed(
         &tool.metadata, "name", params.get("namePrefix"),
     )).collect::<IvyResult<Vec<_>>>()?;
-    let node_key = JsString::from("nodeId");
-    let guide_key = JsString::from("guide");
-    let tools_key = JsString::from("tools");
-    let node = IvyJson::String(id.clone());
-    let hash = hash_object_with_array([(&node_key, &node), (&guide_key, guide)], &tools_key,
-        tools.iter().map(|tool| Ok(tool.to_wire())))?;
+    let hash = tool_page_identity(id, guide, tools, namespace)?;
     Ok((hash, tools.iter().zip(included).filter_map(|(tool, include)| include.then_some(tool)).collect()))
 }
 pub(super) fn handle(
@@ -190,9 +187,11 @@ pub(super) fn handle(
             let id = string(node, "serviceNodeId")?;
             let catalog = call.registry.live_catalog(call.store, id)?;
             let namespace = string(params, "namespace")?;
-            let tools = catalog.as_ref().and_then(|catalog| catalog.namespaces.iter()
-                .find(|ns| &ns.name == namespace).map(|ns| catalog.bindings(ns))).unwrap_or(&[]);
-            let (identity, filtered) = tool_page_records(id, field(&snapshot, "guideMarkdown")?, tools, params)?;
+            let selected = catalog.as_ref().and_then(|catalog| catalog.namespaces.iter()
+                .find(|ns| &ns.name == namespace).map(|ns| (ns, catalog.bindings(ns))));
+            let tools = selected.map(|(_, tools)| tools).unwrap_or(&[]);
+            let (identity, filtered) = tool_page_records(id, field(&snapshot, "guideMarkdown")?, tools,
+                selected.map(|(ns, _)| ns), params)?;
             let mut page_identity = objects::page_identity(method, params)?;
             page_identity.insert("snapshot", identity.into());
             let mut result = crate::paging::catalog_page_with(
