@@ -4,7 +4,7 @@ use crate::{
     admission::ChatAdmission,
     evidence_bytes::{read_chat_evidence, save_chat_evidence},
     main_context::{main_input_origin, main_turn_context, object_options},
-    native_plan::chat_turn_options,
+    native_plan::{chat_turn_options, selected},
     operations::ChatOperations,
     store::{ChatStore, Pin, Reference},
 };
@@ -15,6 +15,7 @@ use ivy_contracts::{
     hash::hash_json,
     json::canonical,
     limits::{MANAGEMENT_FRAME_BYTES, NATIVE_FRAME_BYTES, NATIVE_REQUEST_FRAME_BYTES},
+    native_backend::BackendIdentity,
     native_contract::NativeContract,
 };
 use ivy_sdk::{
@@ -87,6 +88,7 @@ fn catalog(
     catalogs: &CheckedNativeContracts,
     version: &Json,
     source_hash: Option<&Json>,
+    backend: Option<&Json>,
 ) -> IvyResult<Arc<NativeContract>> {
     let version = version.as_js_string().ok_or_else(|| {
         IvyError::new(
@@ -97,11 +99,15 @@ fn catalog(
     let identity = source_hash
         .filter(|v| !(v).is_null())
         .map(|hash| Json::object([("sourceHash", hash.clone())]));
-    catalogs.checked_native_contract(version, identity.as_ref())
+    let contract = catalogs.checked_native_contract(version, identity.as_ref())?;
+    match BackendIdentity::optional(backend)? {
+        Some(backend) => Ok(Arc::new(contract.with_backend(Some(backend)))),
+        None => Ok(contract),
+    }
 }
 fn owner(expected: &Json, contract: &NativeContract) -> IvyResult<NativeOwnerIdentity> {
     Ok(NativeOwnerIdentity {
-        backend: None,
+        backend: contract.backend().cloned(),
         service_node_id: string(expected, "serviceNodeId")?.clone(),
         host_id: None,
         native_version: string(expected, "nativeVersion")?.clone(),
@@ -135,15 +141,14 @@ pub async fn verify_chat_native_request(
     let plan = validation
         .resolve_plan(store, field(definition, "nativePlan")?)
         .await?;
-    let source = catalog(
-        catalogs,
-        field(request, "nativeVersion")?,
-        Some(field(request, "catalogSourceHash")?),
-    )?;
+    let source = selected(catalogs, request)?;
     let method = string(request, "method")?;
     let definition_hash = source.definition_hash(method)?.to_owned();
     require(
-        request.get("nativeVersion") == plan.get("nativeVersion")
+        BackendIdentity::matches(
+            request,
+            BackendIdentity::optional(plan.get("backend"))?.as_ref(),
+        ) && request.get("nativeVersion") == plan.get("nativeVersion")
             && request.get("catalogSourceHash") == plan.get("catalogSourceHash")
             && request.get("catalogSourceHash") == source.catalog().get("sourceHash")
             && call.get("nativeVersion") == request.get("nativeVersion")
@@ -313,11 +318,7 @@ pub async fn verify_chat_native_operation<'v>(
         instructions,
     )
     .await?;
-    let source = catalog(
-        catalogs,
-        field(request, "nativeVersion")?,
-        Some(field(request, "catalogSourceHash")?),
-    )?;
+    let source = selected(catalogs, request)?;
     validate_native_operation(
         value,
         &NativeOperationIdentity {
@@ -348,6 +349,7 @@ pub fn verify_chat_native_read(
         catalogs,
         field(expected, "nativeVersion")?,
         catalog_source_hash,
+        expected.get("backend"),
     )?;
     validate_native_read(
         value,
@@ -525,7 +527,11 @@ impl<'a> ChatNativeEvidence<'a> {
     }
     fn read_owner(&self, expected: &Json) -> IvyResult<()> {
         require(
-            expected.get("serviceNodeId")
+            BackendIdentity::matches(
+                expected,
+                BackendIdentity::optional(field(&self.definition, "nativePlan")?.get("backend"))?
+                    .as_ref(),
+            ) && expected.get("serviceNodeId")
                 == field(&self.definition, "project")?.get("serviceNodeId")
                 && expected.get("callerPrincipalId") == self.definition.get("principalId")
                 && expected.get("nativeVersion")
@@ -535,6 +541,7 @@ impl<'a> ChatNativeEvidence<'a> {
         )
     }
     pub fn verify_read(&self, value: &Json, expected: &Json) -> IvyResult<()> {
+        self.read_owner(expected)?;
         verify_chat_native_read(
             value,
             expected,

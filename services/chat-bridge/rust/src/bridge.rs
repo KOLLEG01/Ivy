@@ -98,7 +98,7 @@ impl<'a> ChatBridge<'a> {
                     )?
                     && primary.get("serviceNodeId")
                         == definition.required("project")?.get("serviceNodeId")
-                    && primary.get("namespace") == Some(&Json::from("codex"))
+                    && primary.get("namespace") == definition.required("project")?.get("namespace")
                     && primary.get("kind") == Some(&Json::from("thread")),
                 "chat_binding_mismatch",
                 "The selected Main must preserve its configured native project and owner.",

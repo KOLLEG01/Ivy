@@ -224,7 +224,8 @@ impl<'a> ChatQueue<'a> {
                 )?
                 && binding.required("primary")?.get("serviceNodeId")
                     == definition.required("project")?.get("serviceNodeId")
-                && binding.required("primary")?.get("namespace") == Some(&Json::from("codex"))
+                && binding.required("primary")?.get("namespace")
+                    == definition.required("project")?.get("namespace")
                 && binding.required("primary")?.get("kind") == Some(&Json::from("thread")),
             "chat_binding_mismatch",
             "Main must retain the exact configured native project, plan and owning thread.",

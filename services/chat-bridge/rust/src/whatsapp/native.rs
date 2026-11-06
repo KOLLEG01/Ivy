@@ -444,9 +444,9 @@ impl WhatsAppNative {
             )?;
             f(reply, "result")
         };
-        let contract = self.0.main.catalogs().checked_native_contract(
-            &text(f(f(binding, "value"), "nativePlan"), "nativeVersion")?,
-            None,
+        let contract = crate::native_plan::selected(
+            self.0.main.catalogs(),
+            f(f(binding, "value"), "nativePlan"),
         )?;
         let observed = NativeObservations::new(&contract).native_thread_state(result)?;
         let mut state = self.0.state.lock().unwrap();

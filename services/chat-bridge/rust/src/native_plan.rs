@@ -8,14 +8,15 @@ use crate::{
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, chat_schema::validate_chat,
     checked_native_contract::CheckedNativeContracts, hash::hash_json,
-    limits::NATIVE_REQUEST_FRAME_BYTES, native_contract::NativeContract,
+    limits::NATIVE_REQUEST_FRAME_BYTES, native_backend::BackendIdentity,
+    native_contract::NativeContract,
 };
 use ivy_sdk::{
     native_evidence::{NativePayloadLimits, validate_native_payload},
     native_plan::{NativePlanKind, read_native_plan, validate_native_invocation},
 };
 
-fn selected(
+pub(crate) fn selected(
     catalogs: &CheckedNativeContracts,
     value: &Json,
 ) -> IvyResult<std::sync::Arc<NativeContract>> {
@@ -23,7 +24,7 @@ fn selected(
         return Err(IvyError::internal());
     }
     let missing = JsString::from("");
-    catalogs.checked_native_contract(
+    let contract = catalogs.checked_native_contract(
         value
             .get("nativeVersion")
             .and_then(Json::as_js_string)
@@ -35,8 +36,20 @@ fn selected(
                 .cloned()
                 .unwrap_or(Json::Null),
         )])),
+    )?;
+    match BackendIdentity::optional(value.get("backend"))? {
+        Some(backend) => Ok(std::sync::Arc::new(contract.with_backend(Some(backend)))),
+        None => Ok(contract),
+    }
+}
+
+pub(crate) fn with_backend(plan: &Json, value: Json) -> IvyResult<Json> {
+    BackendIdentity::select_arguments(
+        BackendIdentity::optional(plan.get("backend"))?.as_ref(),
+        value,
     )
 }
+
 pub fn validate_chat_native_draft(
     catalogs: &CheckedNativeContracts,
     value: &Json,

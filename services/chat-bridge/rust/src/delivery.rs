@@ -6,7 +6,7 @@ use crate::{
     input_media::admitted_native_input,
     main_context::{main_input_origin, main_turn_context},
     native_driver::{ChatNativeDriver, NativeOrigin, native_path},
-    native_plan::{chat_turn_options, resolve_chat_plan},
+    native_plan::{chat_turn_options, resolve_chat_plan, selected, with_backend},
     notice_input::admitted_notice_input,
     operations::contention,
     publisher::PublicationFuture,
@@ -14,7 +14,8 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, agent_schema::validate_agent, hash::hash_json,
-    json::canonical, limits::MANAGEMENT_FRAME_BYTES, operation::derive_operation_id_js,
+    json::canonical, limits::MANAGEMENT_FRAME_BYTES, native_backend::BackendIdentity,
+    operation::derive_operation_id_js,
 };
 use ivy_sdk::{
     native_observations::NativeObservations,
@@ -197,7 +198,7 @@ impl<'a> ChatDelivery<'a> {
                 )?
                 && primary.get("serviceNodeId")
                     == definition.required("project")?.get("serviceNodeId")
-                && primary.get("namespace") == Some(&"codex".into())
+                && primary.get("namespace") == definition.required("project")?.get("namespace")
                 && primary.get("kind") == Some(&"thread".into()),
             "chat_binding_mismatch",
             "The original input must keep its configured native project, plan and owning primary.",
@@ -225,27 +226,30 @@ impl<'a> ChatDelivery<'a> {
     ) -> IvyResult<bool> {
         let primary = binding.required("primary")?;
         let plan = binding.required("nativePlan")?;
-        let expected = Json::object([
-            ("serviceNodeId", primary.required("serviceNodeId")?.clone()),
-            (
-                "callerPrincipalId",
-                self.main
-                    .admission()
-                    .definition()
-                    .required("principalId")?
-                    .clone(),
-            ),
-            ("nativeVersion", plan.required("nativeVersion")?.clone()),
-            ("epoch", status.required("epoch")?.clone()),
-            ("method", "thread/read".into()),
-            (
-                "params",
-                Json::object([
-                    ("threadId", primary.required("nativeId")?.clone()),
-                    ("includeTurns", false.into()),
-                ]),
-            ),
-        ]);
+        let expected = with_backend(
+            plan,
+            Json::object([
+                ("serviceNodeId", primary.required("serviceNodeId")?.clone()),
+                (
+                    "callerPrincipalId",
+                    self.main
+                        .admission()
+                        .definition()
+                        .required("principalId")?
+                        .clone(),
+                ),
+                ("nativeVersion", plan.required("nativeVersion")?.clone()),
+                ("epoch", status.required("epoch")?.clone()),
+                ("method", "thread/read".into()),
+                (
+                    "params",
+                    Json::object([
+                        ("threadId", primary.required("nativeId")?.clone()),
+                        ("includeTurns", false.into()),
+                    ]),
+                ),
+            ]),
+        )?;
         let observed = self
             .native()
             .management(
@@ -278,13 +282,7 @@ impl<'a> ChatDelivery<'a> {
             "chat_native_unavailable",
             "Native input needs an original successful primary observation.",
         )?;
-        let source = self.native().catalogs().checked_native_contract(
-            text(&expected, "nativeVersion")?,
-            Some(&Json::object([(
-                "sourceHash",
-                plan.required("catalogSourceHash")?.clone(),
-            )])),
-        )?;
+        let source = selected(self.native().catalogs(), plan)?;
         let observed =
             NativeObservations::new(&source).native_thread_state(reply.required("result")?)?;
         require(
@@ -504,15 +502,18 @@ impl<'a> ChatDelivery<'a> {
             "threadId",
             binding.required("primary")?.required("nativeId")?.clone(),
         );
-        let request = Json::object([
-            ("nativeVersion", plan.required("nativeVersion")?.clone()),
-            (
-                "catalogSourceHash",
-                plan.required("catalogSourceHash")?.clone(),
-            ),
-            ("method", "thread/resume".into()),
-            ("params", params),
-        ]);
+        let request = with_backend(
+            &plan,
+            Json::object([
+                ("nativeVersion", plan.required("nativeVersion")?.clone()),
+                (
+                    "catalogSourceHash",
+                    plan.required("catalogSourceHash")?.clone(),
+                ),
+                ("method", "thread/resume".into()),
+                ("params", params),
+            ]),
+        )?;
         let operation_id = derive_operation_id_js(
             text(&input.value, "operationId")?,
             &format!("chat:native:resume:{}", hash_json(&origin_value)?).into(),
@@ -658,7 +659,10 @@ impl<'a> ChatDelivery<'a> {
                 .await?;
             validate_agent("FrameLimits", &capacity)?;
             require(
-                [
+                BackendIdentity::matches(
+                    &capacity,
+                    self.native().native_owner()?.target().backend.as_ref(),
+                ) && [
                     "serviceNodeId",
                     "epoch",
                     "nativeVersion",
@@ -708,15 +712,18 @@ impl<'a> ChatDelivery<'a> {
                 "clientUserMessageId",
                 mutation(&input.pin.object_id, "native-user-message")?.into(),
             );
-            let request = Json::object([
-                ("nativeVersion", plan.required("nativeVersion")?.clone()),
-                (
-                    "catalogSourceHash",
-                    plan.required("catalogSourceHash")?.clone(),
-                ),
-                ("method", "turn/start".into()),
-                ("params", params),
-            ]);
+            let request = with_backend(
+                &plan,
+                Json::object([
+                    ("nativeVersion", plan.required("nativeVersion")?.clone()),
+                    (
+                        "catalogSourceHash",
+                        plan.required("catalogSourceHash")?.clone(),
+                    ),
+                    ("method", "turn/start".into()),
+                    ("params", params),
+                ]),
+            )?;
             let operation_id = derive_operation_id_js(
                 text(&input.value, "operationId")?,
                 &"chat:native:turn/start".into(),

@@ -34,6 +34,10 @@ wacore-libsignal = { version = "=0.7.0", default-features = false, features = ["
 flate2.workspace = true
 
 [[test]]
+name = "chat-backends"
+path = "../../../tests/rust/chat-backends.rs"
+
+[[test]]
 name = "chat-native-driver"
 path = "../../../tests/rust/chat-native-driver.rs"
 

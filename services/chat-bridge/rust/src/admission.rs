@@ -1,7 +1,7 @@
 //! Pure transport admission, before storage, scheduling or content logging.
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, chat_schema::validate_chat, hash::hash_json,
-    json::canonical, limits::MANAGEMENT_FRAME_BYTES,
+    json::canonical, limits::MANAGEMENT_FRAME_BYTES, native_backend::BackendIdentity,
 };
 use std::collections::HashSet;
 
@@ -41,7 +41,9 @@ impl ChatAdmission {
             ));
         }
         let project = definition.required("project")?;
-        if project.get("namespace") != Some(&Json::from("codex"))
+        let backend = BackendIdentity::optional(definition.required("nativePlan")?.get("backend"))?;
+        let namespace = backend.as_ref().map_or("codex", BackendIdentity::id);
+        if project.get("namespace") != Some(&Json::from(namespace))
             || project.get("kind") != Some(&Json::from("project"))
         {
             return Err(IvyError::new(

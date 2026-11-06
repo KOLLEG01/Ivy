@@ -3,7 +3,7 @@
 use crate::{
     admission::ChatAdmission,
     native_evidence::{ChatNativeEvidence, verify_chat_native_request},
-    native_plan::{ChatNativeValidation, resolve_chat_plan, validate_chat_native_draft},
+    native_plan::{ChatNativeValidation, resolve_chat_plan, selected, validate_chat_native_draft},
     operations::contention,
     store::{ChatStore, Destination, Document, Pin, Reference, mutation},
 };
@@ -171,15 +171,9 @@ impl<'a> ChatNativeDriver<'a> {
     pub fn native_owner(&self) -> IvyResult<NativeOwner> {
         let definition = self.admission.definition();
         let plan = definition.required("nativePlan")?;
-        let source = self.catalogs.checked_native_contract(
-            text(plan, "nativeVersion")?,
-            Some(&Json::object([(
-                "sourceHash",
-                plan.required("catalogSourceHash")?.clone(),
-            )])),
-        )?;
+        let source = selected(self.catalogs, plan)?;
         let target = NativeOwnerIdentity {
-            backend: None,
+            backend: source.backend().cloned(),
             service_node_id: text(definition.required("project")?, "serviceNodeId")?.clone(),
             host_id: None,
             native_version: text(source.catalog(), "version")?.clone(),
@@ -220,13 +214,7 @@ impl<'a> ChatNativeDriver<'a> {
             definition.required("nativePlan")?,
             self.instructions,
         )?;
-        let source = self.catalogs.checked_native_contract(
-            text(&plan, "nativeVersion")?,
-            Some(&Json::object([(
-                "sourceHash",
-                plan.required("catalogSourceHash")?.clone(),
-            )])),
-        )?;
+        let source = selected(self.catalogs, &plan)?;
         require(
             source.catalog().get("sourceHash") == plan.get("catalogSourceHash"),
             "chat_native_mismatch",

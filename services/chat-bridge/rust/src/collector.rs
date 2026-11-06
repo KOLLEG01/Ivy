@@ -289,7 +289,7 @@ impl<'a> ChatCollector<'a> {
         for (key, value) in state.next()?.as_object().ok_or_else(IvyError::internal)? {
             expected.insert(key.clone(), value.clone());
         }
-        Ok(expected)
+        crate::native_plan::with_backend(field(definition, "nativePlan")?, expected)
     }
     async fn replay(
         &self,
@@ -782,11 +782,14 @@ impl<'a> ChatCollector<'a> {
             let expected = self.expected(&selected.value, &state)?;
             let observation = self
                 .runtime
-                .read(Json::object([
-                    ("nativeVersion", field(&expected, "nativeVersion")?.clone()),
-                    ("method", field(&expected, "method")?.clone()),
-                    ("params", field(&expected, "params")?.clone()),
-                ]))
+                .read(crate::native_plan::with_backend(
+                    &expected,
+                    Json::object([
+                        ("nativeVersion", field(&expected, "nativeVersion")?.clone()),
+                        ("method", field(&expected, "method")?.clone()),
+                        ("params", field(&expected, "params")?.clone()),
+                    ]),
+                )?)
                 .await?;
             self.evidence.verify_read(&observation, &expected)?;
             let bytes = canonical(&observation, MAXIMUM_EVIDENCE_BYTES)?.len();

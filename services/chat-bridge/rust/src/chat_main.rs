@@ -14,7 +14,7 @@ use crate::{
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, Outcome, chat_schema::validate_chat,
     hash::hash_json, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
-    operation::derive_operation_id_js,
+    native_backend::BackendIdentity, operation::derive_operation_id_js,
 };
 use ivy_sdk::native_owner::{GuardFuture, NativeDispatchGuard};
 
@@ -222,6 +222,15 @@ impl<'a> ChatMain<'a> {
         )?;
         let original = source.value.required("definition")?;
         require(
+            BackendIdentity::matches(
+                original.required("nativePlan")?,
+                BackendIdentity::optional(definition.required("nativePlan")?.get("backend"))?
+                    .as_ref(),
+            ),
+            "chat_binding_mismatch",
+            "Main resumption cannot change the original native backend or account.",
+        )?;
+        require(
             source.value.get("definitionHash")
                 != Some(&Json::from(self.admission().definition_hash()))
                 && source.value.get("definitionHash") == Some(&hash_json(original)?.into())
@@ -262,7 +271,7 @@ impl<'a> ChatMain<'a> {
                 )?
                 && primary.get("serviceNodeId")
                     == definition.required("project")?.get("serviceNodeId")
-                && primary.get("namespace") == Some(&"codex".into())
+                && primary.get("namespace") == original.required("project")?.get("namespace")
                 && primary.get("kind") == Some(&"thread".into()),
             "chat_binding_mismatch",
             "Main resumption must retain its original definition-owned native thread.",
@@ -934,15 +943,18 @@ impl<'a> ChatMain<'a> {
         } else {
             plan.required("threadStart")?.clone()
         };
-        let request = Json::object([
-            ("nativeVersion", plan.required("nativeVersion")?.clone()),
-            (
-                "catalogSourceHash",
-                plan.required("catalogSourceHash")?.clone(),
-            ),
-            ("method", method.into()),
-            ("params", params),
-        ]);
+        let request = crate::native_plan::with_backend(
+            &plan,
+            Json::object([
+                ("nativeVersion", plan.required("nativeVersion")?.clone()),
+                (
+                    "catalogSourceHash",
+                    plan.required("catalogSourceHash")?.clone(),
+                ),
+                ("method", method.into()),
+                ("params", params),
+            ]),
+        )?;
         let mut call = self
             .native
             .prepare(
@@ -1032,7 +1044,13 @@ impl<'a> ChatMain<'a> {
                             .required("serviceNodeId")?
                             .clone(),
                     ),
-                    ("namespace", "codex".into()),
+                    (
+                        "namespace",
+                        definition
+                            .required("project")?
+                            .required("namespace")?
+                            .clone(),
+                    ),
                     ("kind", "thread".into()),
                     ("nativeId", thread.required("id")?.clone()),
                 ]),

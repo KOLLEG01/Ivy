@@ -335,15 +335,18 @@ impl<'a> ChatCancelWorker<'a> {
             ]);
             if !reference.is_some_and(|value| !value.is_null()) {
                 let plan = field(&head.binding.value, "nativePlan")?;
-                let request = Json::object([
-                    ("nativeVersion", field(plan, "nativeVersion")?.clone()),
-                    (
-                        "catalogSourceHash",
-                        field(plan, "catalogSourceHash")?.clone(),
-                    ),
-                    ("method", "turn/interrupt".into()),
-                    ("params", params),
-                ]);
+                let request = crate::native_plan::with_backend(
+                    plan,
+                    Json::object([
+                        ("nativeVersion", field(plan, "nativeVersion")?.clone()),
+                        (
+                            "catalogSourceHash",
+                            field(plan, "catalogSourceHash")?.clone(),
+                        ),
+                        ("method", "turn/interrupt".into()),
+                        ("params", params),
+                    ]),
+                )?;
                 let call = self
                     .native
                     .prepare(&input.pin.object_id, &operation_id, request)

@@ -3162,6 +3162,10 @@ export const rustTests = {
     "package": "ivy-chat-bridge",
     "test": "chat-evidence-bytes"
   },
+  "tests/rust/chat-backends.rs": {
+    "package": "ivy-chat-bridge",
+    "test": "chat-backends"
+  },
   "tests/rust/chat-native-driver.rs": {
     "package": "ivy-chat-bridge",
     "test": "chat-native-driver"

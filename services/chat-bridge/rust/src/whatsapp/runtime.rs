@@ -11,7 +11,9 @@ use super::{
     sender::phone,
 };
 use crate::{generation::ChatGeneration, main_context::object_options};
-use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, json::parse};
+use ivy_contracts::{
+    IvyError, IvyJson as Json, IvyResult, JsString, json::parse, native_backend::BackendIdentity,
+};
 use ivy_sdk::{
     clock::{Clock, SystemClock, date_to_iso},
     rpc::RequestFuture,
@@ -297,7 +299,10 @@ impl WhatsAppRuntime {
                 Box::pin(async move {
                     match selected {
                         Some(attached) => attached.file_workspace(&caller).await,
-                        None => Err(IvyError::new("service_not_ready", "The Main file transport is not attached.")),
+                        None => Err(IvyError::new(
+                            "service_not_ready",
+                            "The Main file transport is not attached.",
+                        )),
                     }
                 })
             }),
@@ -817,7 +822,12 @@ impl WhatsAppRuntime {
         self.0.socket.presence().await
     }
     pub async fn retention(&self) -> IvyResult<()> {
-        crate::files::ChatFiles::with_clock(self.0.journal.clone(), self.0.config.clone(), self.0.clock.clone()).prune()?;
+        crate::files::ChatFiles::with_clock(
+            self.0.journal.clone(),
+            self.0.config.clone(),
+            self.0.clock.clone(),
+        )
+        .prune()?;
         self.0
             .journal
             .access(|j| j.prune(HistoryLimits::default()))?;
@@ -904,6 +914,10 @@ impl WhatsAppRuntime {
         };
         if params.get("serviceNodeId") != f(a.definition(), "project").get("serviceNodeId")
             || !object(event)
+            || !BackendIdentity::matches(
+                event,
+                BackendIdentity::optional(f(a.definition(), "nativePlan").get("backend"))?.as_ref(),
+            )
             || event.get("serviceNodeId") != params.get("serviceNodeId")
             || event.get("nativeVersion") != f(a.definition(), "nativePlan").get("nativeVersion")
         {
@@ -1000,7 +1014,11 @@ impl WhatsAppRuntime {
 }
 impl crate::runtime::ChatTransport for WhatsAppRuntime {
     fn files(&self) -> Option<crate::files::ChatFiles> {
-        Some(crate::files::ChatFiles::with_clock(self.0.journal.clone(), self.0.config.clone(), self.0.clock.clone()))
+        Some(crate::files::ChatFiles::with_clock(
+            self.0.journal.clone(),
+            self.0.config.clone(),
+            self.0.clock.clone(),
+        ))
     }
     fn start(&self) {
         WhatsAppRuntime::start(self)
