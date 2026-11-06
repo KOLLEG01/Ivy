@@ -42,6 +42,27 @@ async function fixture(t, width) {
 const claude = { backendId: 'secondary', provider: 'claude', accountId: 'personal' };
 const backendLabel = 'Claude · personal (secondary)';
 
+for (const width of [1440, 390]) test(`Migrated inventory has one project and task without deleting original references on ${width}px`, { timeout: 180000 }, async t => {
+  const f = await fixture(t, width), page = f.page;
+  await f.open('agents-origins');
+  if (width < 768) await page.getByRole('button', { name: 'Toggle navigation', exact: true }).click();
+  const navigation = page.getByRole('navigation', { name: 'Recent tasks', exact: true });
+  await expect(navigation.getByRole('link', { name: 'claude personal task', exact: true })).toHaveCount(1);
+  await expect(navigation.getByRole('button', { name: 'Personal project ' + backendLabel, exact: true })).toBeVisible();
+  await expect(navigation.getByRole('button', { name: 'Personal project', exact: true })).toHaveCount(0);
+  await expect(navigation.getByRole('link', { name: 'codex work task', exact: true })).toHaveCount(1);
+  await expect(navigation.getByRole('link', { name: 'codex personal task', exact: true })).toHaveCount(1);
+  const address = await navigation.getByRole('link', { name: 'claude personal task', exact: true }).getAttribute('href');
+  assert.equal(new URLSearchParams(address.split('?')[1]).get('node'), 'fixture-host.agent-manager');
+  assert.equal(new URLSearchParams(address.split('?')[1]).get('backend'), 'secondary');
+  const calls = await page.evaluate(() => window.executionFixture.calls);
+  assert(calls.some(call => call.params.qualifiedName === 'agent.storageIdentity' && call.params.arguments.backend.provider === 'claude'));
+  assert(!calls.some(call => call.method === 'tools.call' && call.params.serviceNodeId.endsWith('.offline-manager')));
+  assert.equal(await page.evaluate(() => window.executionFixture.actions.length), 0);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  assert.deepEqual(f.errors, []);
+});
+
 for (const width of [1440, 390]) test(`Agent UI stops claiming stale inventory is working on ${width}px`, { timeout: 180000 }, async t => {
   const f = await fixture(t, width), page = f.page;
   await page.clock.install({ time: new Date('2026-09-25T12:00:00.000Z') });

@@ -10,6 +10,7 @@ import { backendRead, nativeBackendKey, nativeBackendModels, nativeBackendScopes
 import { executionBackendChoices, executionModels, executionSpeedAvailable, modelAvailability, nativeModelSpeedAvailable, nativeSpeedAvailable } from '../packages/ui-client/src/execution-models.js';
 import type { ExecutionModels } from '../packages/ui-client/src/execution-models.js';
 import { nativeRead, optionalTool } from '../packages/ui-client/src/native.js';
+import { currentNativeInventory, nativeInventoryOrigins } from '../packages/ui-client/src/native-inventory.js';
 
 const a: Agent.BackendIdentity = { backendId: 'primary', provider: 'codex', accountId: 'work' };
 const b: Agent.BackendIdentity = { backendId: 'secondary', provider: 'claude', accountId: 'personal' };
@@ -37,7 +38,7 @@ function agent(backend: Agent.BackendIdentity, host = hostId, efforts = ['low', 
 function transport() {
   const calls: Record<string, unknown>[] = [], definitions: string[] = [];
   let statuses: Agent.BackendsResult['backends'] = [status(a), status(b), status(c)];
-  const behavior = { outage: '', changedEpoch: false, wrongBinding: false, wrongCatalog: false };
+  const behavior = { outage: '', changedEpoch: false, wrongBinding: false, wrongCatalog: false, origin: '', wrongOriginOwner: false };
   const binding = (name: string) => {
     definitions.push(name);
     const value = tool(name);
@@ -60,6 +61,8 @@ function transport() {
       assert(selected, 'Management observations require the full account selector.');
       return { ...selected, ...(behavior.changedEpoch ? { epoch: 'reconnected' } : {}) };
     }
+    if (name === 'agent.storageIdentity') return { serviceNodeId, backend: behavior.wrongOriginOwner ? a : args['backend'],
+      provider: (args['backend'] as Agent.BackendIdentity).provider, originalServiceNodeId: behavior.origin || serviceNodeId };
     if (name.endsWith('model/list')) return { data: [{ id: 'same-id', model: 'same-model', displayName: 'Same model',
       supportedReasoningEfforts: [{ reasoningEffort: namespace === b.backendId ? 'max' : 'low' }], defaultReasoningEffort: 'low' }], nextCursor: null };
     return {};
@@ -117,6 +120,57 @@ test('model discovery addresses each backend namespace and leaves provider JSON 
     assert.equal(typeof call['operationId'], 'string', 'Native methods outside the codex namespace still carry an operation identity.');
     assert(f.calls.some(call => call['qualifiedName'] === 'agent.status' && nativeBackendKey((call['arguments'] as { backend: Agent.BackendIdentity }).backend) === nativeBackendKey(backend)));
   }
+});
+
+const inventoryNodes = () => [{ serviceNodeId, hostId, connected: true, nativeVersion: null },
+  { serviceNodeId: 'old-manager', hostId, connected: false, nativeVersion: '0.163.0' }];
+
+test('retired inventory duplicates require authenticated storage origin and a current matching resource', async () => {
+  const f = transport(), scopes = await nativeBackendScopes(f.client, { serviceNodeId, hostId });
+  f.behavior.origin = 'old-manager';
+  const origins = await nativeInventoryOrigins(f.client, inventoryNodes(), [scopes[1]!]);
+  assert.equal(origins.length, 1);
+  const old: Wire.ResourceRef = { serviceNodeId: 'old-manager', namespace: 'codex', kind: 'thread', nativeId: 'same' };
+  const moved = { ...old, serviceNodeId, namespace: b.backendId };
+  const unrelated = { ...moved, namespace: a.backendId };
+  const unmatched = { ...old, nativeId: 'unique' };
+  const otherNamespace = { ...old, namespace: 'another' };
+  const items = [old, moved, unrelated, unmatched, otherNamespace];
+  assert.deepEqual(currentNativeInventory(items, value => value, origins, scopes, inventoryNodes()), [moved, unrelated, unmatched, otherNamespace]);
+  const projects = [old, moved].map(ref => ({ ...ref, kind: 'project' }));
+  assert.deepEqual(currentNativeInventory(projects, value => value, origins, scopes, inventoryNodes()), [projects[1]]);
+  assert.deepEqual(items[0], old, 'Display filtering never mutates an original reference.');
+  assert.equal(f.calls.filter(call => call['qualifiedName'] === 'agent.storageIdentity').length, 1);
+  assert(f.calls.every(call => ['agent.backends', 'agent.status', 'agent.storageIdentity'].includes(call['qualifiedName'] as string)));
+});
+
+test('inventory filtering keeps originals across ambiguous origins, account replacement, reconnect or a live source', async () => {
+  const f = transport(), scopes = await nativeBackendScopes(f.client, { serviceNodeId, hostId });
+  f.behavior.origin = 'old-manager';
+  const origins = await nativeInventoryOrigins(f.client, inventoryNodes(), [scopes[1]!]);
+  const old: Wire.ResourceRef = { serviceNodeId: 'old-manager', namespace: 'codex', kind: 'thread', nativeId: 'same' };
+  const moved = { ...old, serviceNodeId, namespace: b.backendId }, items = [old, moved];
+  for (const current of [[], [{ ...scopes[1]!, backend: { ...b, accountId: 'replacement' } }],
+    [{ ...scopes[1]!, status: { ...status(b), epoch: 'reconnected' } }],
+    [{ ...scopes[1]!, status: { ...status(b), state: 'failed' as const } }]])
+    assert.deepEqual(currentNativeInventory(items, value => value, origins, current, inventoryNodes()), items);
+  assert.deepEqual(currentNativeInventory(items, value => value, [...origins, ...origins], scopes, inventoryNodes()), items);
+  assert.deepEqual(currentNativeInventory(items, value => value, origins, scopes, inventoryNodes().map(node => ({ ...node, connected: true }))), items);
+  assert.deepEqual(currentNativeInventory([old], value => value, origins, scopes, inventoryNodes()), [old]);
+  assert.deepEqual(currentNativeInventory([old, { ...moved, namespace: a.backendId }], value => value, origins, scopes, inventoryNodes()), [old, { ...moved, namespace: a.backendId }]);
+});
+
+test('optional inventory provenance refuses foreign owners and reconnects without hiding other accounts', async () => {
+  for (const failure of ['wrongOriginOwner', 'changedEpoch'] as const) {
+    const f = transport(), scopes = await nativeBackendScopes(f.client, { serviceNodeId, hostId });
+    f.behavior.origin = 'old-manager'; f.behavior[failure] = true;
+    assert.deepEqual(await nativeInventoryOrigins(f.client, inventoryNodes(), [scopes[1]!]), []);
+  }
+  const f = transport(), scopes = await nativeBackendScopes(f.client, { serviceNodeId, hostId });
+  assert.deepEqual(await nativeInventoryOrigins(f.client, [], scopes), []);
+  assert(!f.calls.some(call => call['qualifiedName'] === 'agent.storageIdentity'), 'Ordinary hosts need no provenance reads.');
+  const abort = new AbortController(); abort.abort();
+  await assert.rejects(nativeInventoryOrigins(f.client, inventoryNodes(), scopes, abort.signal), { name: 'AbortError' });
 });
 
 test('discovery rejects duplicate owners, foreign hosts, reconnects and foreign native definitions', async () => {

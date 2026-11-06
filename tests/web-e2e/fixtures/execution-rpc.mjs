@@ -8,6 +8,7 @@ export const backends = [
 export const hostId = 'fixture-host', serviceNodeId = hostId + '.agent-manager', taskNode = 'fixture-task-board';
 const hash = 'sha256:' + '1'.repeat(64), time = '2026-01-01T00:00:00.000Z';
 const staleActivity = new URLSearchParams(location.search).get('mode') === 'agents-freshness';
+const retiredInventory = new URLSearchParams(location.search).get('mode') === 'agents-origins';
 export const workspace = { serviceNodeId: taskNode, generation: 1, principalId: 'fixture-user', callerPrincipalId: 'fixture-user',
   rootObjectId: null, role: 'user', recovered: true, observedAt: time, scheduler: { enabled: false, intervalMs: 1000, pageSize: 10 }, phoneTarget: null };
 const nativeOptions = { backend: backends[0], model: 'codex-only', reasoningEffort: 'high', serviceTier: 'fast' };
@@ -59,7 +60,7 @@ function objectRead(key, value, version) {
 export const fixtureClient = { async request(method, params, options = {}) {
   options.signal?.throwIfAborted(); params = JSON.parse(JSON.stringify(params)); state.calls.push({ method, params });
   if (method === 'serviceNodes.list') return { items: [{ serviceNodeId, hostId, serviceName: 'agent-manager', connected: true, synced: true, ready: true, desiredEnabled: true },
-    ...(agentMode() ? [{ serviceNodeId: hostId + '.offline-manager', hostId, serviceName: 'agent-manager', connected: false, synced: false, ready: false, desiredEnabled: true }] : [])], nextCursor: null };
+    ...(agentMode() ? [{ serviceNodeId: hostId + '.offline-manager', hostId, serviceName: 'agent-manager', nativeVersion: retiredInventory ? '0.163.0' : null, connected: false, synced: false, ready: false, desiredEnabled: true }] : [])], nextCursor: null };
   if (method === 'serviceNodes.get') return { serviceName: params.serviceNodeId === taskNode ? 'task-board' : 'agent-manager', connected: true, synced: true, ready: true, desiredEnabled: true };
   if (method === 'system.status') return { ready: true, callerPrincipalId: 'fixture-user', runtimeEpoch: '11111111-1111-4111-8111-111111111111' };
   if (method === 'uis.catalog') return { items: [], nextCursor: null };
@@ -89,9 +90,12 @@ export const fixtureClient = { async request(method, params, options = {}) {
     primaryResourceRef: { serviceNodeId, namespace: backends[1].backendId, kind: 'thread', nativeId: new URLSearchParams(location.search).get('mode') === 'linked-wrong' ? 'foreign' : 'retained' },
     plan: { turnStart: { model: 'same-model', effort: 'max', serviceTier: 'flex' } } }, '3.1.0') : objectRead('task', task, '3.3.0');
   if (method === 'inventory.get') return { summary: thread(backends.find(backend => backend.backendId === params.resourceRef.namespace)) };
-  if (method === 'inventory.list') return { items: backends.map(backend => ({ resourceRef: { serviceNodeId, namespace: backend.backendId, kind: params.kind ?? 'project', nativeId: params.kind === 'thread' ? params.cursor ? 'older-thread' : 'same-thread' : 'same-project' },
+  if (method === 'inventory.list') return { items: [...backends.map(backend => ({ resourceRef: { serviceNodeId, namespace: backend.backendId, kind: params.kind ?? 'project', nativeId: params.kind === 'thread' ? params.cursor ? 'older-thread' : 'same-thread' : 'same-project' },
     summary: params.kind === 'thread' ? { ...thread(backend), ...(params.cursor ? { name: 'Older ' + backend.provider + ' task' } : {}) } : project(backend),
-    schemaVersion: '1.0.0', observedAt: time, stale: params.kind === 'thread' && staleActivity, snapshotRevision: 1 })), nextCursor: agentMode() && params.kind === 'thread' && !params.cursor ? 'next-tasks' : null };
+    schemaVersion: '1.0.0', observedAt: time, stale: params.kind === 'thread' && staleActivity, snapshotRevision: 1 })),
+    ...(retiredInventory ? [{ resourceRef: { serviceNodeId: hostId + '.offline-manager', namespace: 'codex', kind: params.kind ?? 'project', nativeId: params.kind === 'thread' ? 'same-thread' : 'same-project' },
+      summary: params.kind === 'thread' ? thread(backends[1]) : project(backends[1]), schemaVersion: '1.0.0', observedAt: time, stale: true, snapshotRevision: 1 }] : [])],
+    nextCursor: agentMode() && params.kind === 'thread' && !params.cursor ? 'next-tasks' : null };
   if (method !== 'tools.call') throw Error('Unexpected fixture RPC: ' + method);
   const name = params.qualifiedName, args = params.arguments;
   if (name === 'task-board.workspace') return workspace;
@@ -109,6 +113,8 @@ export const fixtureClient = { async request(method, params, options = {}) {
   const backend = name.startsWith('agent.') ? backends.find(value => value.backendId === args.backend?.backendId && value.provider === args.backend?.provider && value.accountId === args.backend?.accountId) : backends.find(value => name.startsWith(value.backendId + '.'));
   if (!backend) throw Error('Missing or wrong account selector: ' + name);
   if (name === 'agent.status') return backendStatus(backend);
+  if (name === 'agent.storageIdentity') return { serviceNodeId, backend, provider: backend.provider,
+    originalServiceNodeId: backend.provider === 'claude' ? hostId + '.offline-manager' : serviceNodeId };
   if (name === 'agent.inputDefinition') return { backend, identity: pendingInput.identity, method: pendingInput.method, nativeVersion: '0.163.0', catalogHash: hash,
     responseSchema: { type: 'object', properties: { decision: { enum: ['accept', 'decline'] } }, required: ['decision'] } };
   if (name === 'agent.inputs') return { backend, epoch: backend.backendId + '-epoch', truncated: false, items: agentMode() ? [] : [new URLSearchParams(location.search).get('mode') === 'input-history' ?

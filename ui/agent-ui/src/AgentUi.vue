@@ -82,6 +82,7 @@ import { nativeHosts, nativeServiceNodes } from '../../../packages/ui-client/src
 import { nativeBackendScopes, nativeBackendLabel } from '../../../packages/ui-client/src/native-backends';
 import { nativeOwnerKey, nativeRouteOwner, nativeRouteQuery } from '../../../packages/ui-client/src/native-route';
 import type { NativeRouteOwner } from '../../../packages/ui-client/src/native-route';
+import { currentNativeInventory, nativeInventoryOrigins } from '../../../packages/ui-client/src/native-inventory';
 
 const hash = useHashRoute();
 const mobile = useMediaQuery('(max-width: 767px)');
@@ -155,6 +156,8 @@ const accounts = useRemote(async signal => (await Promise.all((nodes.value.value
   catch { signal.throwIfAborted(); return []; }
 }))).flat(), 30000, ['services/agent-manager']);
 watch(() => nodes.value.value, () => void accounts.refresh());
+const inventoryOrigins = useRemote(signal => nativeInventoryOrigins(client, nodes.value.value?.items ?? [], accounts.value.value ?? [], signal), 0);
+watch([() => nodes.value.value, () => accounts.value.value], () => void inventoryOrigins.refresh());
 const ownerFor = (ref: Operation.InventoryItem['resourceRef']): NativeRouteOwner => {
   const scope = accounts.value.value?.find(value => value.serviceNodeId === ref.serviceNodeId && (value.backend?.backendId ?? 'codex') === ref.namespace);
   return { serviceNodeId: ref.serviceNodeId, namespace: ref.namespace, ...(scope?.backend ? { backend: scope.backend } : {}) };
@@ -266,12 +269,14 @@ const hostReady = (serviceNodeId: string) => {
   return !!item?.ready && !!item.connected;
 };
 const scopedProjects = computed(() =>
-  (allProjects.value.value ?? []).filter(value => !hostFilter.value || hostName(value.serviceNodeId) === hostFilter.value).map(value => ({ ...value,
+  currentNativeInventory(allProjects.value.value ?? [], value => ({ serviceNodeId: value.serviceNodeId, namespace: value.namespace ?? 'codex', kind: 'project', nativeId: value.project.nativeId }),
+    inventoryOrigins.value.value ?? [], accounts.value.value ?? [], nodes.value.value?.items ?? []).filter(value => !hostFilter.value || hostName(value.serviceNodeId) === hostFilter.value).map(value => ({ ...value,
     backend: ownerFor({ serviceNodeId: value.serviceNodeId, namespace: value.namespace ?? 'codex', kind: 'project', nativeId: value.project.nativeId }).backend })));
 const projectOf = (owner: NativeRouteOwner, id: string) =>
   scopedProjects.value.find(value => nativeOwnerKey({ serviceNodeId: value.serviceNodeId, namespace: value.namespace ?? 'codex', backend: value.backend }) === nativeOwnerKey(owner) && value.project.nativeId === id)?.project;
 // Tasks wait for the project catalog so internal work never flashes into a user project.
-const tasks = computed(() => allProjects.value.value === null ? [] : recent.value.value?.items ?? []);
+const tasks = computed(() => allProjects.value.value === null ? [] : currentNativeInventory(recent.value.value?.items ?? [], value => value.resourceRef,
+  inventoryOrigins.value.value ?? [], accounts.value.value ?? [], nodes.value.value?.items ?? []));
 const taskLists = computed(() => partitionInternalTasks(scopedProjects.value, tasks.value));
 const visibleRecent = computed(() => taskLists.value.recent);
 const sections = computed(() =>
