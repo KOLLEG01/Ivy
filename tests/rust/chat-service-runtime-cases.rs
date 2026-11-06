@@ -1,7 +1,7 @@
-#[path = "../fixtures/reference-data.rs"]
-mod reference_data;
 #[path = "../fixtures/chat-backend-schema.rs"]
 mod backend_schema;
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_chat_bridge::{
     admission::ChatAdmission,
@@ -33,6 +33,8 @@ use tokio::{
 mod active;
 #[path = "chat-startup-cases.rs"]
 mod startup;
+#[path = "chat-resume-startup.rs"]
+mod resume_startup;
 #[path = "chat-wa-integration-cases.rs"]
 mod whatsapp;
 fn field<'a>(v: &'a Json, key: &str) -> &'a Json {
@@ -54,7 +56,10 @@ fn equal(a: &Json, b: &Json, label: &str) {
 fn checked_registry_frames(value: &Json) -> Json {
     let mut frames = value.as_array().unwrap().to_vec();
     for frame in &mut frames {
-        if frame.get("method").is_some_and(|v| v.is_str("registry.sync")) {
+        if frame
+            .get("method")
+            .is_some_and(|v| v.is_str("registry.sync"))
+        {
             let registry = backend_schema::registry_without_checked_backends(
                 frame.required("params").unwrap(),
             );
@@ -105,7 +110,11 @@ fn read_oracle(mode: &str) -> Json {
         "whatsapp-oracle" => include_bytes!("fixtures/chat-service-whatsapp-oracle-cases.json.gz"),
         _ => panic!("Unknown compatibility corpus: {mode}"),
     };
-    parse(std::str::from_utf8(&reference_data::read(bytes)).unwrap(), usize::MAX).unwrap()
+    parse(
+        std::str::from_utf8(&reference_data::read(bytes)).unwrap(),
+        usize::MAX,
+    )
+    .unwrap()
 }
 struct Peer {
     child: Child,
@@ -448,7 +457,8 @@ async fn service_start_reconnect_health_control_and_close_match_original_main() 
             service_node_id: "chat-provider".into(),
             data_root: Some(dir.clone()),
             language: "en".into(),
-        diagnostic_notifications: true,
+            diagnostic_notifications: true,
+            resume_main: None,
         });
         let mut settings = Json::object([
             ("pollMs", Json::Number(60000.0)),

@@ -3166,6 +3166,15 @@ export const rustTests = {
     "package": "ivy-chat-bridge",
     "test": "chat-backends"
   },
+  "tests/rust/chat-resume.rs": {
+    "package": "ivy-chat-bridge",
+    "test": "chat-resume"
+  },
+  "tests/rust/chat-resume-startup.rs": {
+    "package": "ivy-chat-bridge",
+    "test": "chat-native-driver",
+    "filter": "runtime::resume_startup::"
+  },
   "tests/rust/chat-native-driver.rs": {
     "package": "ivy-chat-bridge",
     "test": "chat-native-driver"

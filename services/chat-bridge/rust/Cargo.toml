@@ -34,6 +34,10 @@ wacore-libsignal = { version = "=0.7.0", default-features = false, features = ["
 flate2.workspace = true
 
 [[test]]
+name = "chat-resume"
+path = "../../../tests/rust/chat-resume.rs"
+
+[[test]]
 name = "chat-backends"
 path = "../../../tests/rust/chat-backends.rs"
 

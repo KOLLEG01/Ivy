@@ -12,9 +12,14 @@ use crate::{
     store::{ChatStore, Destination, Document, Pin, Reference, mutation},
 };
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, Outcome, chat_schema::validate_chat,
-    hash::hash_json, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
-    native_backend::BackendIdentity, operation::derive_operation_id_js,
+    IvyError, IvyJson as Json, IvyResult, JsString, Outcome,
+    agent_schema::validate_agent,
+    chat_schema::validate_chat,
+    hash::hash_json,
+    json::canonical,
+    limits::MANAGEMENT_FRAME_BYTES,
+    native_backend::BackendIdentity,
+    operation::{derive_operation_id_js, parse_operation_id_js},
 };
 use ivy_sdk::native_owner::{GuardFuture, NativeDispatchGuard};
 
@@ -67,6 +72,51 @@ fn binding_view(value: Document) -> Json {
 }
 fn binding_name(id: &str) -> String {
     format!("Chat binding {id}")
+}
+
+/// An operator-selected configuration transition, separate from the immutable
+/// destination definition. Its original pins and operation identity survive retries.
+pub struct ConfiguredMainResume {
+    operation_id: JsString,
+    main: Pin,
+    binding: Pin,
+}
+impl ConfiguredMainResume {
+    pub fn from_json(value: &Json) -> IvyResult<Self> {
+        validate_chat("ConfiguredMainResume", value)?;
+        let operation_id = string(value, "operationId")?.clone();
+        parse_operation_id_js(&operation_id)?;
+        Ok(Self {
+            operation_id,
+            main: pin(value.required("main")?)?,
+            binding: pin(value.required("binding")?)?,
+        })
+    }
+    fn request(&self, admission: &ChatAdmission, caller: &JsString) -> IvyResult<Json> {
+        Ok(Json::object([
+            ("action", "createMain".into()),
+            (
+                "operationId",
+                derive_operation_id_js(
+                    &self.operation_id,
+                    &Json::object([
+                        ("action", "chat:configured-main-resume".into()),
+                        ("main", self.main.json()),
+                        ("binding", self.binding.json()),
+                        ("definitionHash", admission.definition_hash().into()),
+                    ]),
+                )?
+                .into(),
+            ),
+            ("expectedBridge", admission.expected(caller)),
+            ("expectedMainRevision", Json::Null),
+            (
+                "reason",
+                "Resume the selected Main after a configuration change.".into(),
+            ),
+            ("resumeMain", self.main.json()),
+        ]))
+    }
 }
 
 pub struct ChatMain<'a> {
@@ -143,6 +193,101 @@ impl<'a> ChatMain<'a> {
             .map_err(|e| e.into_ivy())?
             .map(|main| self.queue().check_main(main))
             .transpose()
+    }
+    /// Complete the existing durable create/resume action before admitting work
+    /// to a new configuration. Never replace an independently created Main.
+    pub async fn resume_configured(&self, selected: &ConfiguredMainResume) -> IvyResult<()> {
+        let caller = string(self.admission().definition(), "principalId")?;
+        let request = selected.request(self.admission(), caller)?;
+        let operation_id = string(&request, "operationId")?;
+        if let Some(main) = self.find().await? {
+            if present(&main.value, "binding") {
+                let binding = self
+                    .store()
+                    .read(
+                        "chat-bridge/binding",
+                        Reference::Pinned(&pin(main.value.required("binding")?)?),
+                    )
+                    .await
+                    .map_err(|e| e.into_ivy())?;
+                let definition = self.admission().definition();
+                let predecessor = self
+                    .store()
+                    .read("chat-bridge/binding", Reference::Pinned(&selected.binding))
+                    .await
+                    .map_err(|e| e.into_ivy())?;
+                require(
+                    binding.value.get("operationId") == Some(&operation_id.clone().into())
+                        && binding.value.get("predecessor") == Some(&selected.binding.json())
+                        && binding.value.get("definitionHash")
+                            == Some(&self.admission().definition_hash().into())
+                        && binding.value.get("workspaceId") == definition.get("workspaceId")
+                        && same(
+                            binding.value.required("project")?,
+                            definition.required("project")?,
+                        )?
+                        && same(
+                            binding.value.required("nativePlan")?,
+                            definition.required("nativePlan")?,
+                        )?
+                        && same(
+                            binding.value.required("primary")?,
+                            predecessor.value.required("primary")?,
+                        )?,
+                    "chat_binding_mismatch",
+                    "The current Main must be the exact previously configured resumption.",
+                )?;
+                // The immutable binding remains proof after technical receipts
+                // are collected. Ordinary pending work must not resume it again.
+                let pending = if present(&main.value, "pendingAction") {
+                    Some(
+                        self.store()
+                            .read(
+                                "chat-bridge/operation",
+                                Reference::Pinned(&pin(main.value.required("pendingAction")?)?),
+                            )
+                            .await
+                            .map_err(|e| e.into_ivy())?,
+                    )
+                } else {
+                    None
+                };
+                if pending.as_ref().is_none_or(|pending| {
+                    pending.value.get("operationId") != Some(&operation_id.clone().into())
+                }) {
+                    return Ok(());
+                }
+            }
+        }
+        let source = self
+            .store()
+            .read(
+                "chat-bridge/main",
+                Reference::Current(&selected.main.object_id),
+            )
+            .await
+            .map_err(|e| e.into_ivy())?;
+        require(
+            source.pin == selected.main
+                && source.value.get("binding") == Some(&selected.binding.json()),
+            "chat_binding_mismatch",
+            "Configured resumption must retain the exact selected source Main and binding.",
+        )?;
+        let operation = self.create(caller, &request).await?;
+        self.check_automatic_failure(&operation)?;
+        if !state(&operation, "phase", &["succeeded"])
+            || !self
+                .find()
+                .await?
+                .is_some_and(|main| !present(&main.value, "pendingAction"))
+        {
+            return Err(IvyError::new(
+                "chat_operation_unresolved",
+                "The original configured Main resumption must settle before accepting work.",
+            )
+            .with_outcome(Outcome::Unknown));
+        }
+        Ok(())
     }
     async fn write_main(
         &self,
@@ -221,12 +366,12 @@ impl<'a> ChatMain<'a> {
             "Main resumption requires an unoccupied source Main.",
         )?;
         let original = source.value.required("definition")?;
+        let old_backend =
+            BackendIdentity::optional(original.required("nativePlan")?.get("backend"))?;
+        let backend = BackendIdentity::optional(definition.required("nativePlan")?.get("backend"))?;
+        let selects_legacy_storage = old_backend.is_none() && backend.is_some();
         require(
-            BackendIdentity::matches(
-                original.required("nativePlan")?,
-                BackendIdentity::optional(definition.required("nativePlan")?.get("backend"))?
-                    .as_ref(),
-            ),
+            old_backend == backend || selects_legacy_storage,
             "chat_binding_mismatch",
             "Main resumption cannot change the original native backend or account.",
         )?;
@@ -276,6 +421,67 @@ impl<'a> ChatMain<'a> {
             "chat_binding_mismatch",
             "Main resumption must retain its original definition-owned native thread.",
         )?;
+        if selects_legacy_storage {
+            let old_plan = original.required("nativePlan")?;
+            let plan = definition.required("nativePlan")?;
+            let old_catalog = crate::native_plan::selected(self.native.catalogs(), old_plan)?;
+            let catalog = crate::native_plan::selected(self.native.catalogs(), plan)?;
+            require(
+                old_catalog.catalog_hash() == catalog.catalog_hash(),
+                "chat_binding_mismatch",
+                "Selecting legacy Main storage must retain its exact native engine and catalog.",
+            )?;
+            for key in ["threadStart", "threadResume", "turnStart", "turnInterrupt"] {
+                require(
+                    same(null(old_plan, key), null(plan, key))?,
+                    "chat_binding_mismatch",
+                    "Select legacy Main storage without changing its original plan parameters.",
+                )?;
+            }
+            let backend = backend.as_ref().ok_or_else(IvyError::internal)?;
+            let owner = self.native.native_owner()?;
+            let origin = owner
+                .management("storageIdentity", Json::object::<&str>([]), None)
+                .await?;
+            validate_agent("StorageIdentity", &origin)?;
+            require(
+                origin.get("serviceNodeId") == primary.get("serviceNodeId")
+                    && origin.get("originalServiceNodeId") == primary.get("serviceNodeId")
+                    && origin.get("provider") == Some(&backend.provider().as_str().into())
+                    && BackendIdentity::matches(&origin, Some(backend)),
+                "chat_binding_mismatch",
+                "The selected storage must prove the original Main service, provider and exact account.",
+            )?;
+            let read = owner
+                .read(
+                    &"thread/read".into(),
+                    Json::object([
+                        ("threadId", primary.required("nativeId")?.clone()),
+                        ("includeTurns", false.into()),
+                    ]),
+                    None,
+                    false,
+                )
+                .await?;
+            let result = read.required("reply")?.required("result")?;
+            catalog.validate_result(&"thread/read".into(), result, MANAGEMENT_FRAME_BYTES)?;
+            let thread = result.required("thread")?;
+            let resolved = self.native.resolve_plan()?;
+            let project_id = definition.required("project")?.get("nativeId");
+            require(
+                thread.get("id") == primary.get("nativeId")
+                    && thread.get("ephemeral") == Some(&false.into())
+                    && thread.required("status")?.get("type") != Some(&"active".into())
+                    && native_path(string(thread, "cwd")?)?
+                        == native_path(string(resolved.required("threadStart")?, "cwd")?)?
+                    && thread
+                        .get("projectId")
+                        .filter(|v| !v.is_null())
+                        .is_none_or(|project| Some(project) == project_id),
+                "chat_binding_mismatch",
+                "The selected storage must return the same persistent, idle Main thread and workspace.",
+            )?;
+        }
         Ok(Some(binding))
     }
     async fn conversation(&self, created_at: &Json) -> IvyResult<Pin> {

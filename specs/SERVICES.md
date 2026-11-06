@@ -71,6 +71,16 @@ the original transport result or stays unknown. Transport retention and recovery
 `de` for ChatBridge-authored WhatsApp copy; omission uses English. It is a presentation setting,
 not part of the workspace `Definition` or the separate transcription-language setting.
 
+For an explicit configuration change, `Chat.Settings.resumeMain` can select
+`{operationId, main: {objectId, revision}, binding: {objectId, revision}}` from
+the original idle Main. Startup completes that durable resumption before admitting
+incoming work; reconnects retain the same operation and thread. Clear the setting
+after confirming the transition. An unrelated destination Main is never replaced.
+Selecting an account for previously unscoped storage additionally requires its
+persisted service/provider/account identity, the exact original engine and plan,
+and a fresh read of the same persistent, idle thread and workspace. Existing
+explicit account or provider identities cannot change through resumption.
+
 Explicit file delivery uses `chat_bridge_send_file` and the existing WhatsApp connection.
 Read `chat_bridge_read` with `{fileTarget:true}`, then submit its exact bridge/binding,
 one selected file's canonical base64 bytes, filename, MIME, byte length and SHA-256,

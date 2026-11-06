@@ -311,6 +311,7 @@ async fn actual_provider_generation_reconcile_and_retirement_match_original_main
             data_root: Some(dir.clone()),
             language: "en".into(),
             diagnostic_notifications: true,
+            resume_main: None,
         });
         let fixed = || {
             Arc::new(Fixed(

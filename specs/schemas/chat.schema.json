@@ -137,11 +137,41 @@
         "diagnosticNotifications": {
           "type": "boolean",
           "default": false
+        },
+        "resumeMain": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConfiguredMainResume"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "definition",
         "pollMs"
+      ],
+      "additionalProperties": false
+    },
+    "ConfiguredMainResume": {
+      "type": "object",
+      "properties": {
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "main": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "binding": {
+          "$ref": "#/$defs/ObjectPin"
+        }
+      },
+      "required": [
+        "operationId",
+        "main",
+        "binding"
       ],
       "additionalProperties": false
     },

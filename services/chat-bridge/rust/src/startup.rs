@@ -1,6 +1,7 @@
 //! Host configuration and distribution assets for the existing service lifecycle.
 use crate::{
     admission::ChatAdmission,
+    chat_main::ConfiguredMainResume,
     generation::ChatGenerationConfig,
     main_context::load_main_instructions,
     notice_input::NoticeInstructions,
@@ -48,6 +49,11 @@ impl ChatStartup {
                     .cloned()
                     .ok_or_else(IvyError::internal)?,
                 data_root: Some(owner.data_root().to_path_buf()),
+                resume_main: settings
+                    .get("resumeMain")
+                    .filter(|value| !value.is_null())
+                    .map(ConfiguredMainResume::from_json)
+                    .transpose()?,
                 diagnostic_notifications: settings
                     .get("diagnosticNotifications")
                     .and_then(Json::as_bool)

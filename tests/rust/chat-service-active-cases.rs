@@ -69,6 +69,7 @@ fn generation(row: &Json, corpus: &Json, root: PathBuf) -> Arc<ChatGenerationCon
         data_root: Some(root),
         language: "en".into(),
         diagnostic_notifications: true,
+        resume_main: None,
     })
 }
 async fn invoke(peer: &mut Peer, name: &str, args: &Json) -> Json {

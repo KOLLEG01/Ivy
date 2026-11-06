@@ -676,6 +676,7 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
         data_root: Some(root.clone()),
         language: "en".into(),
         diagnostic_notifications: true,
+        resume_main: None,
     });
     let clock = Arc::new(Fixed(
         field(corpus, "now").as_f64().unwrap() as i64,
@@ -1089,6 +1090,7 @@ async fn remote_image_sdk_publication_reuses_immutable_mutation_after_reply_loss
         data_root: Some(root.clone()),
         language: "en".into(),
         diagnostic_notifications: true,
+        resume_main: None,
     });
     let c = ServiceConnection::connect(
         &peer.url,

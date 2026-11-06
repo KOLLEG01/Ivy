@@ -1,10 +1,17 @@
 //! A provider generation owns its connection, caches and SQLite handle. Accepted
 //! callers retain read leases; retirement takes the handle only after they settle.
 use crate::{
-    admission::ChatAdmission, bridge::ChatBridge, chat_main::ChatMain, collector::ChatCollector,
-    delivery::ChatDelivery, diagnostic_notifications::DiagnosticNotifications,
-    native_driver::ChatNativeDriver, native_plan::resolve_chat_plan,
-    notice_input::NoticeInstructions, operations::ChatOperations, store::ChatStore,
+    admission::ChatAdmission,
+    bridge::ChatBridge,
+    chat_main::{ChatMain, ConfiguredMainResume},
+    collector::ChatCollector,
+    delivery::ChatDelivery,
+    diagnostic_notifications::DiagnosticNotifications,
+    native_driver::ChatNativeDriver,
+    native_plan::resolve_chat_plan,
+    notice_input::NoticeInstructions,
+    operations::ChatOperations,
+    store::ChatStore,
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, checked_native_contract::CheckedNativeContracts,
@@ -35,6 +42,7 @@ pub struct ChatGenerationConfig {
     pub data_root: Option<PathBuf>,
     pub language: JsString,
     pub diagnostic_notifications: bool,
+    pub resume_main: Option<ConfiguredMainResume>,
 }
 
 pub struct ChatGeneration {
@@ -130,9 +138,11 @@ impl ChatGeneration {
                 &config.instructions,
             )?;
             let operations = ChatOperations::new(&store, &config.admission)?;
-            ChatMain::new(&operations, &native, &config.notice_instructions)?
-                .find()
-                .await?;
+            let main = ChatMain::new(&operations, &native, &config.notice_instructions)?;
+            if let Some(resume) = &config.resume_main {
+                main.resume_configured(resume).await?;
+            }
+            main.find().await?;
             connection.throw_if_aborted()
         }
         .await;
