@@ -1,6 +1,8 @@
 //! Existing Claude MCP file ownership, independent of the provider adapter.
+pub use crate::file_work::FileRun as ClaudeMcpRun;
 use crate::{
     environment::{EnvironmentKind, read_environment_document, select_environment_document},
+    file_work::FileWork,
     mcp_manager::McpStatus,
     mcp_render::hive_mcp_urls,
 };
@@ -11,12 +13,7 @@ use ivy_contracts::{
 };
 use ivy_host_runtime::node_path::{self, Style};
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
-use std::{
-    fs,
-    path::Path,
-    sync::{Arc, Mutex},
-};
-use tokio::sync::watch;
+use std::{fs, path::Path, sync::Arc};
 
 pub struct ClaudeMcpSettings {
     pub target: JsString,
@@ -26,29 +23,17 @@ pub struct ClaudeMcpSettings {
     pub defaults: IvyJson,
     pub credentials: crate::mcp_credentials::McpCredentials,
 }
+#[derive(Clone)]
 struct State {
     status: McpStatus,
     last_hash: Option<String>,
-    running: Option<watch::Receiver<bool>>,
 }
 struct Inner {
     settings: ClaudeMcpSettings,
-    state: Mutex<State>,
+    work: FileWork<State>,
 }
 #[derive(Clone)]
 pub struct ClaudeMcpManager(Arc<Inner>);
-pub struct ClaudeMcpRun(Option<watch::Receiver<bool>>);
-impl ClaudeMcpRun {
-    pub async fn wait(mut self) {
-        if let Some(receiver) = self.0.as_mut() {
-            while !*receiver.borrow_and_update() {
-                if receiver.changed().await.is_err() {
-                    break;
-                }
-            }
-        }
-    }
-}
 fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
@@ -191,7 +176,7 @@ fn apply_files(owner: &Inner, prepared: Prepared) -> IvyResult<(Prepared, usize)
         "target_conflict",
         "Claude MCP configuration changed outside this AgentManager.",
     )?;
-    let last_hash = owner.state.lock().unwrap().last_hash.clone();
+    let last_hash = owner.work.read(|state| state.last_hash.clone());
     require(
         last_hash
             .as_ref()
@@ -209,7 +194,9 @@ fn apply_files(owner: &Inner, prepared: Prepared) -> IvyResult<(Prepared, usize)
     let hash = digest(&saved);
     // Preserve the existing output-before-state crash window and the in-memory
     // hash update even when the following state publication fails (AM02).
-    owner.state.lock().unwrap().last_hash = Some(hash.clone());
+    owner
+        .work
+        .progress(|state| state.last_hash = Some(hash.clone()));
     internal(ivy_store::atomic::atomic_json(
         &state_path,
         &IvyJson::object([
@@ -220,49 +207,31 @@ fn apply_files(owner: &Inner, prepared: Prepared) -> IvyResult<(Prepared, usize)
     ))?;
     Ok((prepared, saved.len()))
 }
-struct Completion {
-    owner: Arc<Inner>,
-    sender: Option<watch::Sender<bool>>,
-}
-impl Completion {
-    fn finish(&mut self, result: IvyResult<(Prepared, usize)>) {
-        let mut state = self.owner.state.lock().unwrap();
-        match result {
-            Ok((prepared, bytes)) => {
-                state.status.state = if prepared.enabled {
-                    "applied"
-                } else {
-                    "disabled"
-                };
-                state.status.desired_version = Some(prepared.version.clone());
-                state.status.applied_version = Some(prepared.version);
-                state.status.code = None;
-                state.status.bytes = bytes;
-            }
-            Err(error) => {
-                state.status.state = if ["target_conflict", "invalid_arguments", "access_denied"]
-                    .contains(&error.code.as_str())
-                {
-                    "conflict"
-                } else {
-                    "pending"
-                };
-                state.status.code = Some(error.code);
-            }
+fn update(state: &mut State, result: IvyResult<(Prepared, usize)>) {
+    match result {
+        Ok((prepared, bytes)) => {
+            state.status.state = if prepared.enabled {
+                "applied"
+            } else {
+                "disabled"
+            };
+            state.status.desired_version = Some(prepared.version.clone());
+            state.status.applied_version = Some(prepared.version);
+            state.status.code = None;
+            state.status.bytes = bytes;
         }
-        state.status.observed_at = now();
-        state.running = None;
-        if let Some(sender) = self.sender.take() {
-            sender.send_replace(true);
+        Err(error) => {
+            state.status.state = if ["target_conflict", "invalid_arguments", "access_denied"]
+                .contains(&error.code.as_str())
+            {
+                "conflict"
+            } else {
+                "pending"
+            };
+            state.status.code = Some(error.code);
         }
     }
-}
-impl Drop for Completion {
-    fn drop(&mut self) {
-        if self.sender.is_some() {
-            self.finish(Err(IvyError::internal()));
-        }
-    }
+    state.status.observed_at = now();
 }
 impl ClaudeMcpManager {
     pub fn new(settings: ClaudeMcpSettings) -> IvyResult<Self> {
@@ -282,44 +251,30 @@ impl ClaudeMcpManager {
         };
         Ok(Self(Arc::new(Inner {
             settings,
-            state: Mutex::new(State {
+            work: FileWork::new(State {
                 status,
                 last_hash: None,
-                running: None,
             }),
         })))
     }
     pub fn status(&self) -> McpStatus {
-        self.0.state.lock().unwrap().status.clone()
+        self.0.work.read(|state| state.status.clone())
     }
     pub fn synchronize(&self, connection: Arc<dyn RpcClient>) -> ClaudeMcpRun {
-        let mut state = self.0.state.lock().unwrap();
-        if let Some(running) = &state.running {
-            return ClaudeMcpRun(Some(running.clone()));
-        }
-        let (sender, receiver) = watch::channel(false);
-        state.running = Some(receiver.clone());
-        let owner = self.0.clone();
-        tokio::spawn(async move {
-            let mut completion = Completion {
-                owner: owner.clone(),
-                sender: Some(sender),
-            };
-            let result = async {
+        self.0.work.start(update, || {
+            let owner = self.0.clone();
+            async move {
                 let prepared = prepare(&owner.settings, connection.as_ref()).await?;
                 internal(tokio::task::spawn_blocking(move || apply_files(&owner, prepared)).await)?
             }
-            .await;
-            completion.finish(result);
-        });
-        ClaudeMcpRun(Some(receiver))
+        })
     }
     /// AM03 remains unchanged: bootstrap can replace an existing owned policy.
     pub fn bootstrap(&self) -> ClaudeMcpRun {
         self.synchronize(Arc::new(Bootstrap))
     }
     pub fn close(&self) -> ClaudeMcpRun {
-        ClaudeMcpRun(self.0.state.lock().unwrap().running.clone())
+        self.0.work.close()
     }
 }
 struct Bootstrap;

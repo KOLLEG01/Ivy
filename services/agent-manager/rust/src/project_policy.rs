@@ -1,4 +1,5 @@
 //! Project allocation policy. Filesystem identity and Git effects are separate.
+use crate::project_model::NativeProject;
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json};
 use ivy_host_runtime::node_path::{self, Context, Style};
 
@@ -14,15 +15,6 @@ fn require(value: bool, code: &str, message: &str) -> IvyResult<()> {
     } else {
         Err(IvyError::new(code, message))
     }
-}
-fn paths(project: &IvyJson) -> IvyResult<Vec<&JsString>> {
-    project
-        .required("paths")?
-        .as_array()
-        .ok_or_else(IvyError::internal)?
-        .iter()
-        .map(|value| value.as_js_string().ok_or_else(IvyError::internal))
-        .collect()
 }
 fn truthy_id(value: Option<&JsString>) -> Option<&JsString> {
     value.filter(|value| !value.0.is_empty())
@@ -167,18 +159,17 @@ impl ProjectPolicy {
     }
     pub fn internal_project(
         &self,
-        projects: &[IvyJson],
+        projects: &[NativeProject],
         expected: Option<&JsString>,
     ) -> IvyResult<IvyJson> {
         for project in projects {
-            if paths(project)?
-                .into_iter()
+            if project
+                .paths
+                .iter()
                 .any(|path| self.same_path(path, &self.internal_project_root))
             {
-                if truthy_id(expected).is_none_or(|expected| {
-                    project.get("nativeId").and_then(IvyJson::as_js_string) == Some(expected)
-                }) {
-                    return Ok(project.clone());
+                if truthy_id(expected).is_none_or(|expected| &project.native_id == expected) {
+                    return Ok(project.to_json());
                 }
                 break;
             }
@@ -190,19 +181,16 @@ impl ProjectPolicy {
     }
     pub fn existing_project(
         &self,
-        projects: &[IvyJson],
+        projects: &[NativeProject],
         cwd: &JsString,
         expected: Option<&JsString>,
     ) -> IvyResult<Option<IvyJson>> {
         let expected = truthy_id(expected);
         for project in projects {
-            if expected.is_none_or(|expected| {
-                project.get("nativeId").and_then(IvyJson::as_js_string) == Some(expected)
-            }) && paths(project)?
-                .into_iter()
-                .any(|path| self.same_path(path, cwd))
+            if expected.is_none_or(|expected| &project.native_id == expected)
+                && project.paths.iter().any(|path| self.same_path(path, cwd))
             {
-                return Ok(Some(project.clone()));
+                return Ok(Some(project.to_json()));
             }
         }
         require(
@@ -216,7 +204,7 @@ impl ProjectPolicy {
     /// This is intentionally different from thread membership normalization.
     pub fn workspace_project_id(
         &self,
-        projects: &[IvyJson],
+        projects: &[NativeProject],
         cwd: &JsString,
         explicit: Option<&JsString>,
     ) -> IvyResult<Option<JsString>> {
@@ -226,16 +214,10 @@ impl ProjectPolicy {
         let mut selected = None;
         let mut length = 0;
         for project in projects {
-            for path in paths(project)? {
+            for path in &project.paths {
                 let path = self.paths.resolve(std::slice::from_ref(path));
                 if self.paths.inside(&path, cwd) && (selected.is_none() || path.0.len() > length) {
-                    selected = Some(
-                        project
-                            .required("nativeId")?
-                            .as_js_string()
-                            .ok_or_else(IvyError::internal)?
-                            .clone(),
-                    );
+                    selected = Some(project.native_id.clone());
                     length = path.0.len();
                 }
             }

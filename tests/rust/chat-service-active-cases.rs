@@ -1,4 +1,4 @@
-use super::{Peer, Probe, equal, field, flag, text};
+use super::{Peer, Probe, checked_registry_frames, equal, field, flag, text};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_chat_bridge::{
     admission::ChatAdmission,
@@ -351,7 +351,7 @@ async fn real_service_resumes_original_queue_lanes_and_wakes_only_the_current_tu
             &format!("{label}: original durable claims and exact ordered mutation frames"),
         );
         equal(
-            field(field(&actual, "report"), "handshakes"),
+            &checked_registry_frames(field(field(&actual, "report"), "handshakes")),
             field(field(expected, "report"), "handshakes"),
             "exact registry/identity/filter",
         );

@@ -4,6 +4,8 @@ import { RefreshCw } from "@lucide/vue";
 import {
   Button,
   LoadingIndicator,
+  Label,
+  OptionSelect,
   Popover,
   PopoverContent,
   PopoverTrigger,
@@ -11,20 +13,29 @@ import {
   UsagePill,
   useRemote,
 } from "@ivy/ui";
-import type { HiveClient } from "../../sdk/src/client.js";
-import { nativeRead, record, text } from "./native";
+import type { Agent, HiveClient } from "../../sdk/src/client.js";
+import { optionalTool, record, text } from "./native";
+import { backendRead, nativeBackendLabel, nativeBackendKey, nativeMethod, sameBackend } from './native-backends';
+import type { NativeBackendScope } from './native-backends';
 
 // Account usage and limits of one host, read from its native owner whenever the popover opens.
-const props = defineProps<{ client: HiveClient; node: string; label: string; ready: boolean; compact?: boolean; passive?: boolean }>();
+const props = defineProps<{ client: HiveClient; node: string; backend?: Agent.BackendIdentity | undefined; accounts?: NativeBackendScope[] | undefined; label: string; ready: boolean; compact?: boolean; passive?: boolean }>();
 const open = ref(false);
+const selected = ref('');
+const ownerKey = (owner: { serviceNodeId: string; backend?: Agent.BackendIdentity | undefined }) => JSON.stringify([owner.serviceNodeId, nativeBackendKey(owner.backend)]);
+const owner = computed(() => props.accounts ? props.accounts.find(value => props.backend ? value.serviceNodeId === props.node && sameBackend(value.backend, props.backend) : ownerKey(value) === selected.value) ??
+  (props.backend ? null : props.accounts.find(value => value.status.state === 'ready') ?? props.accounts[0]) :
+  { serviceNodeId: props.node, backend: props.backend, status: { state: props.ready ? 'ready' : 'offline' } });
 const usage = useRemote(async signal => {
-  if (!props.ready) return null;
+  if (!props.ready || !owner.value || owner.value.status.state !== 'ready') return null;
   if (props.passive && !open.value) return null;
-  return record(await nativeRead(props.client, props.node, "codex.account/rateLimits/read", null, signal));
+  const selected = owner.value;
+  if (!await optionalTool(props.client, selected.serviceNodeId, nativeMethod(selected.backend, 'account/rateLimits/read'))) return null;
+  return record(await backendRead(props.client, selected, 'account/rateLimits/read', null, signal));
 }, 60000);
 const { value: result, loading, error, refresh: load } = usage;
 watch(open, value => { if (value) void load(); });
-watch(() => [props.node, props.ready], () => void load());
+watch(() => JSON.stringify([props.node, props.ready, owner.value && ownerKey(owner.value)]), () => { result.value = null; void load(); });
 
 interface Window { label: string; used: number; resets: string }
 interface Bucket { id: string; name: string; plan: string; windows: Window[]; notes: string[] }
@@ -94,6 +105,13 @@ const remaining = computed(() => {
           ><RefreshCw :class="{ 'animate-spin': loading }" aria-hidden="true"
         /></Button>
       </div>
+      <div v-if="accounts?.length && !backend" class="space-y-1.5">
+        <Label :for="'usage-account-' + node">Provider and account</Label>
+        <OptionSelect :id="'usage-account-' + node" :model-value="owner ? ownerKey(owner) : ''" class="w-full" @update:model-value="selected = $event">
+          <option v-for="account in accounts" :key="ownerKey(account)" :value="ownerKey(account)">{{ account.backend ? nativeBackendLabel(account.backend) : account.serviceNodeId }}</option>
+        </OptionSelect>
+      </div>
+      <p v-else-if="backend" class="text-xs text-muted-foreground">{{ nativeBackendLabel(backend) }}</p>
       <LoadingIndicator v-if="loading && !result" label="Loading usage…" />
       <p v-else-if="error" role="alert" class="text-sm text-destructive">{{ error }}</p>
       <template v-else-if="result">

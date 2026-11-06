@@ -1,6 +1,10 @@
 import type { Agent, Operation } from '../../../packages/sdk/src/client.js';
 import { record } from '../../../packages/ui-client/src/native.js';
 import { nativeProjectForThread, isInternalProject } from '../../../packages/sdk/src/native-project-membership.js';
+import { canonical } from '../../../packages/sdk/src/client.js';
+import type { NativeHost } from '../../../packages/ui-client/src/native-hosts.js';
+import { nativeOwnerKey } from '../../../packages/ui-client/src/native-route.js';
+import type { NativeRouteOwner } from '../../../packages/ui-client/src/native-route.js';
 export { normalizedProjectPath as normalizedPath, isInternalProject } from '../../../packages/sdk/src/native-project-membership.js';
 
 /** Native approval reviews and ephemeral service contexts (no saved history) are not user tasks. */
@@ -17,13 +21,15 @@ export function projectChoices(projects: Agent.ProjectSummary[]): ProjectChoice[
     projectId: project.nativeId, path, label: project.name + ' · ' + path,
   })));
 }
-export type ScopedProject = { serviceNodeId: string; project: Agent.ProjectSummary };
+export type ScopedProject = { serviceNodeId: string; namespace?: string; backend?: Agent.BackendIdentity | undefined; project: Agent.ProjectSummary };
+const projectScope = (project: ScopedProject) => canonical([project.serviceNodeId, project.namespace ?? 'codex']);
+const taskScope = (task: Operation.InventoryItem) => canonical([task.resourceRef.serviceNodeId, task.resourceRef.namespace]);
 export function partitionInternalTasks(projects: ScopedProject[], tasks: Operation.InventoryItem[]) {
   const byHost = new Map<string, Agent.ProjectSummary[]>();
-  for (const { serviceNodeId, project } of projects) byHost.set(serviceNodeId, [...(byHost.get(serviceNodeId) ?? []), project]);
+  for (const scoped of projects) { const key = projectScope(scoped); const own = byHost.get(key) ?? []; own.push(scoped.project); byHost.set(key, own); }
   const recent: Operation.InventoryItem[] = [], internal: Operation.InventoryItem[] = [];
   for (const task of tasks) {
-    const project = nativeProjectForThread(byHost.get(task.resourceRef.serviceNodeId) ?? [], record(task.summary));
+    const project = nativeProjectForThread(byHost.get(taskScope(task)) ?? [], record(task.summary));
     (project && isInternalProject(project) ? internal : recent).push(task);
   }
   return { recent, internal };
@@ -41,15 +47,22 @@ export function groupTasks(projects: Agent.ProjectSummary[], tasks: Operation.In
   if (remaining.length) groups.push({ id: 'other', name: 'No project', path: '', paths: [], tasks: remaining });
   return groups;
 }
-export type HostSection = { serviceNodeId: string; groups: TaskGroup[]; internal: Operation.InventoryItem[]; hasInternal: boolean };
+export type ScopedTaskGroup = TaskGroup & { projectId: string; owner: NativeRouteOwner };
+export type HostSection = { hostId: string; serviceNodeId: string; groups: ScopedTaskGroup[]; internal: Operation.InventoryItem[]; hasInternal: boolean };
 /** Every host keeps its own project tree: listed hosts first, then any other host that still has projects or tasks. */
-export function hostSections(hosts: string[], projects: ScopedProject[], tasks: Operation.InventoryItem[]): HostSection[] {
+export function hostSections(hosts: NativeHost[], projects: ScopedProject[], tasks: Operation.InventoryItem[]): HostSection[] {
   const { recent, internal } = partitionInternalTasks(projects, tasks);
-  const ids = [...new Set([...hosts, ...projects.map(value => value.serviceNodeId), ...tasks.map(task => task.resourceRef.serviceNodeId)])];
-  return ids.map(serviceNodeId => {
-    const own = projects.filter(value => value.serviceNodeId === serviceNodeId).map(value => value.project);
-    const mine = (task: Operation.InventoryItem) => task.resourceRef.serviceNodeId === serviceNodeId;
-    return { serviceNodeId, groups: groupTasks(own.filter(project => !isInternalProject(project)), recent.filter(mine)),
-      internal: internal.filter(mine), hasInternal: own.some(isInternalProject) };
+  const known = new Set(hosts.flatMap(host => host.nodes.map(node => node.serviceNodeId)));
+  const extra = [...new Set([...projects.map(value => value.serviceNodeId), ...tasks.map(task => task.resourceRef.serviceNodeId)])].filter(node => !known.has(node));
+  return [...hosts, ...extra.map(serviceNodeId => ({ hostId: serviceNodeId, serviceNodeId, nodes: [{ serviceNodeId }] }))].map(host => {
+    const nodes = new Set(host.nodes.map(node => node.serviceNodeId));
+    const own = projects.filter(value => nodes.has(value.serviceNodeId));
+    const mine = (task: Operation.InventoryItem) => nodes.has(task.resourceRef.serviceNodeId);
+    const scopes = new Map<string, NativeRouteOwner>();
+    for (const value of own) scopes.set(projectScope(value), { serviceNodeId: value.serviceNodeId, namespace: value.namespace ?? 'codex', ...(value.backend ? { backend: value.backend } : {}) });
+    for (const task of recent.filter(mine)) if (!scopes.has(taskScope(task))) scopes.set(taskScope(task), { serviceNodeId: task.resourceRef.serviceNodeId, namespace: task.resourceRef.namespace });
+    const groups = [...scopes].flatMap(([key, owner]) => groupTasks(own.filter(value => projectScope(value) === key && !isInternalProject(value.project)).map(value => value.project), recent.filter(task => taskScope(task) === key))
+      .map(group => ({ ...group, projectId: group.id, id: canonical([nativeOwnerKey(owner), group.id]), owner })));
+    return { hostId: host.hostId, serviceNodeId: host.serviceNodeId, groups, internal: internal.filter(mine), hasInternal: own.some(value => isInternalProject(value.project)) };
   });
 }

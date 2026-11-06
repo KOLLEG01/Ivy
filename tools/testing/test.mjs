@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, relative, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { selectTests, dependencies, implicitSelectionTooLarge, typescriptDeclarations } from './test-selection.mjs';
+import { selectTests, dependencies, implicitSelectionTooLarge, typescriptDeclarations, typescriptEntries } from './test-selection.mjs';
 import * as config from './test-config.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -119,7 +119,8 @@ else if (selected.length === 0) {
       // test project emits imported ui modules that Node-based tests load directly.
       if (selected.some(t => t.kind === 'web')) await run(['tools/build/build-web.mjs',
         ...(selected.every(t => t.scope === 'data-collector') ? ['--ui', 'console,data-collector-ui'] : [])]);
-      const files = [...inputs].filter(path => path.endsWith('.ts')).sort();
+      const files = [...new Set([...typescriptEntries(root, javascriptTests.map(test => test.file), inputs),
+        ...[...inputs].filter(path => path.endsWith('.d.ts'))])].sort();
       rmSync(resolve(root, 'dist/tests'), { recursive: true, force: true });
       if (files.length) {
         const project = resolve(root, 'dist/.test.tsconfig.json');

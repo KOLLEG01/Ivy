@@ -5,6 +5,7 @@ import type { AnySchema } from 'ajv';
 import { canonical } from './canonical.js';
 import { requireThat } from './errors.js';
 import { managementFrameBytes } from './limits.js';
+import { definitionValidator } from './schema-definition.js';
 
 export const secretarySchema = secretary as Record<string, unknown>;
 const ajv = new Ajv2020({ strict: false, allErrors: false, validateFormats: false, ownProperties: true });
@@ -12,6 +13,6 @@ for (const schema of [secretary, wire]) ajv.addSchema(schema as AnySchema);
 
 export function validateSecretary(name: string, value: unknown): void {
   canonical(value, managementFrameBytes);
-  const validator = ajv.getSchema(`${String(secretarySchema['$id'])}#/$defs/${name}`);
+  const validator = definitionValidator(ajv, secretarySchema, name);
   requireThat(validator && validator(value), 'invalid_arguments', 'Value does not match its Secretary contract.');
 }

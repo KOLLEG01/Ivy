@@ -44,6 +44,7 @@ impl Lane {
 }
 #[allow(async_fn_in_trait)]
 pub trait ReconcileStore: SchedulerStore {
+    async fn protect_sources(&self) -> IvyResult<usize>;
     fn pending_coordination_page(
         &self,
         after: Option<&JsString>,
@@ -301,6 +302,7 @@ struct State {
     task_changes: u64,
     busy: bool,
     last_cleanup: f64,
+    sources_checked_at: Option<f64>,
     gate_cursor: Option<JsString>,
     stopped: bool,
     active: Vec<(JsString, Rc<RefCell<Completion>>)>,
@@ -317,6 +319,7 @@ impl Default for State {
             task_changes: 0,
             busy: false,
             last_cleanup: 0.0,
+            sources_checked_at: None,
             gate_cursor: None,
             stopped: false,
             active: vec![],
@@ -361,6 +364,19 @@ pub struct Reconciler<'a, 'x, S, E, X> {
     executor: &'x X,
 }
 impl<S: ReconcileStore, E: ReconcileEngine> Shared<'_, S, E> {
+    async fn protect_sources(&self) -> IvyResult<()> {
+        let result = self.store.protect_sources().await;
+        self.record(&"source-revisions".into(), match &result {
+            Ok(0) => None,
+            Ok(count) => Some(IvyError::new("task_board_source_revision_missing", format!(
+                "{count} unfinished Run source revisions are unavailable; original operations remain unchanged."
+            ))),
+            Err(error) => Some(error.clone()),
+        });
+        result?;
+        self.state.borrow_mut().sources_checked_at = Some(self.engine.now_millis());
+        Ok(())
+    }
     async fn process_native_run(&self, id: &JsString) -> IvyResult<bool> {
         let error = self.engine.sync_native_comments(id).await.err();
         self.record(&prefix("inputs:", id), error);
@@ -541,7 +557,11 @@ impl<'a, 'x, S: ReconcileStore + 'a, E: ReconcileEngine + 'a, X: ReconcileExecut
         self.shared.state.borrow().recovering.is_none()
     }
     pub async fn verify_owner(&self) -> IvyResult<()> {
-        self.shared.engine.verify_owner().await
+        self.shared.engine.verify_owner().await?;
+        if self.shared.state.borrow().sources_checked_at.is_none() {
+            self.shared.protect_sources().await?;
+        }
+        Ok(())
     }
     pub fn task_changed(&self) {
         let mut st = self.shared.state.borrow_mut();
@@ -760,8 +780,21 @@ impl<'a, 'x, S: ReconcileStore + 'a, E: ReconcileEngine + 'a, X: ReconcileExecut
         let sh = &self.shared;
         let result: IvyResult<()> = async {
             sh.engine.verify_owner().await?;
+            if sh.state.borrow().sources_checked_at.is_none() {
+                sh.protect_sources().await?;
+            }
             if sh.engine.now_millis() - sh.state.borrow().last_cleanup >= 60000.0 {
                 sh.state.borrow_mut().last_cleanup = sh.engine.now_millis();
+                if sh
+                    .state
+                    .borrow()
+                    .sources_checked_at
+                    .is_some_and(|at| sh.engine.now_millis() - at >= 60000.0)
+                {
+                    // Use the existing cleanup cadence. A failed refresh retains
+                    // every prior ledger and is surfaced through its diagnostic.
+                    let _ = sh.protect_sources().await;
+                }
                 let cleanup = match &sh.cleanup {
                     Some(collect) => collect().await,
                     None => sh.store.collect_local().await,

@@ -23,6 +23,8 @@ mod comment_reads;
 mod condition_policy;
 #[path = "../fixtures/task-board-configuration.rs"]
 mod configuration;
+#[path = "../fixtures/task-board-execution-backends.rs"]
+mod execution_backends;
 #[path = "../fixtures/task-board-conversation.rs"]
 mod conversation_policy;
 #[path = "../fixtures/task-board-current-history.rs"]

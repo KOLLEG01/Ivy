@@ -106,7 +106,7 @@ async fn source_files(source: PathBuf, paths: Vec<JsString>, required: BTreeSet<
 /// Capture runs to completion even if a caller drops its waiter. No accepted
 /// journal record refers to mutable checkout inputs or to an incoming directory.
 pub async fn capture_source(original: JsString, config: IvyJson, bootstrap_root: PathBuf) -> IvyResult<IvyJson> {
-    internal(tokio::spawn(capture(original, config, bootstrap_root, None)).await)?
+    internal(tokio::spawn(capture_leased(original, config, bootstrap_root, None)).await)?
 }
 /// Preparation selects one component without changing the general snapshot API.
 pub async fn capture_component_source(
@@ -116,7 +116,16 @@ pub async fn capture_component_source(
     component: JsString,
 ) -> IvyResult<IvyJson> {
     crate::preparation_inputs::validate_component_id(&component)?;
-    internal(tokio::spawn(capture(original, config, bootstrap_root, Some(component))).await)?
+    internal(tokio::spawn(capture_leased(original, config, bootstrap_root, Some(component))).await)?
+}
+pub(crate) async fn storage_lease(staging: PathBuf) -> IvyResult<crate::executor_lock::ExecutorLock> {
+    crate::executor_lock::ExecutorLock::acquire(staging.join("source-storage-lock"), true).await
+}
+async fn capture_leased(original: JsString, config: IvyJson, bootstrap: PathBuf, component: Option<JsString>) -> IvyResult<IvyJson> {
+    let lease = storage_lease(path_value(config.required("stagingRoot")?)?).await?;
+    let result = capture(original, config, bootstrap, component).await;
+    lease.close().await?;
+    result
 }
 pub(crate) async fn component_source_inputs(
     root: PathBuf,

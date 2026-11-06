@@ -72,6 +72,7 @@ impl Fixture {
         edit: impl FnOnce(&mut IvyJson),
     ) -> Self {
         let target = NativeOwnerIdentity {
+            backend: None,
             service_node_id: "native-agent".into(),
             host_id: Some("fixture".into()),
             native_version: "version".into(),

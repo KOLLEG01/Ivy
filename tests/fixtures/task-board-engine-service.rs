@@ -91,24 +91,59 @@ fn context(row: &Json, step: &Json) -> InvocationContext {
 #[tokio::test(flavor = "current_thread")]
 async fn public_service_dispatch_matches_original_through_send_bridge() {
     let p = reference_data::read(include_bytes!("task-board-engine-service-cases.json.gz"));
-    let data = parse(
-        std::str::from_utf8(&p).unwrap(),
-        MANAGEMENT_FRAME_BYTES,
-    )
-    .unwrap();
+    let data = parse(std::str::from_utf8(&p).unwrap(), MANAGEMENT_FRAME_BYTES).unwrap();
     let catalogs =
         CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
     let mut boundaries = 0;
+    let mut current_contract_rows = 0;
     for row in data.as_array().unwrap() {
-        let replay = Arc::new(Replay {
-            steps: Mutex::new(
-                f(row, "boundaries")
-                    .as_array()
-                    .unwrap()
+        assert_eq!(
+            hash_json(f(row, "expected")).unwrap(),
+            s(row, "expectedHash").to_utf8().unwrap()
+        );
+        let original = f(row, "boundaries").as_array().unwrap();
+        let strict_id = s(row, "name") == &JsString::from("operation String coercion");
+        let (steps, expected) = if strict_id {
+            // The public contract requires a string identity. The old JS oracle
+            // coerced 17 and read ownership/storage for an unadmitted request.
+            assert_eq!(
+                f(row, "steps"),
+                &Json::Array(vec![Json::object([
+                    ("tool", "operation".into()),
+                    (
+                        "request",
+                        Json::object([("operationId", Json::Number(17.0))])
+                    ),
+                ])])
+            );
+            assert_eq!(original.len(), 5);
+            assert_eq!(
+                f(&original[0], "args"),
+                &Json::Array(vec!["Settings".into(), f(row, "settings").clone()])
+            );
+            assert_eq!(
+                original
                     .iter()
-                    .cloned()
-                    .collect(),
-            ),
+                    .map(|step| s(step, "kind").to_utf8().unwrap())
+                    .collect::<Vec<_>>(),
+                ["validate", "rpc", "validate", "named", "retired"]
+            );
+            current_contract_rows += 1;
+            (
+                &original[..1],
+                Json::object([(
+                    "outcomes",
+                    Json::Array(vec![outcome(Err(IvyError::new(
+                        "invalid_arguments",
+                        "operationId must be a string.",
+                    )))]),
+                )]),
+            )
+        } else {
+            (original, f(row, "expected").clone())
+        };
+        let replay = Arc::new(Replay {
+            steps: Mutex::new(steps.iter().cloned().collect()),
             name: s(row, "name").clone(),
         });
         boundaries += replay.steps.lock().unwrap().len();
@@ -172,10 +207,10 @@ async fn public_service_dispatch_matches_original_through_send_bridge() {
         let actual = Json::object([("outcomes", Json::Array(outcomes))]);
         assert_eq!(
             hash_json(&actual).unwrap(),
-            s(row, "expectedHash").to_utf8().unwrap(),
+            hash_json(&expected).unwrap(),
             "{:?}: actual {actual:?}, expected {:?}",
             replay.name,
-            f(row, "expected")
+            expected
         );
         assert!(
             replay.steps.lock().unwrap().is_empty(),
@@ -184,6 +219,7 @@ async fn public_service_dispatch_matches_original_through_send_bridge() {
         );
     }
     assert_eq!(data.as_array().unwrap().len(), 36);
+    assert_eq!(current_contract_rows, 1);
     assert!(boundaries > 100);
 }
 

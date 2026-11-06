@@ -6,6 +6,7 @@ use crate::{
         persistent_reads::{
             comment_port::CommentPort,
             json_values::{self as v, Value},
+            task_comments::comment_node_version,
         },
     },
     reconciler::ReconcileExecutor,
@@ -275,8 +276,12 @@ where
         } else {
             selected_version.clone()
         };
-        let current_format = version == text("3.0.0") || version == text("3.1.0");
-        if !current_format && version != text("2.2.0") && version != text("2.3.0") {
+        let Some(node_version) = version
+            .as_str()
+            .ok()
+            .as_deref()
+            .and_then(comment_node_version)
+        else {
             return write_retained_graph(
                 self.source,
                 self.identity,
@@ -286,8 +291,8 @@ where
                 &version,
             )
             .await;
-        }
-        let node_version = text(if current_format { "2.0.0" } else { "1.0.0" });
+        };
+        let node_version = text(node_version);
         let owner = v::string(task_id)?;
         let current = self
             .source

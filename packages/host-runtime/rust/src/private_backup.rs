@@ -67,6 +67,19 @@ pub async fn offline_owners(
                 paths.required("data")?,
             )?)
             .await?;
+            if instance.get("componentId") == Some(&"agent-manager".into()) {
+                for backend in crate::agent_backends::configured_backends(
+                    instance.required("settings")?,
+                    paths.get("data"),
+                )? {
+                    if backend.data_root != paths.get("data") {
+                        process_fence::require_clear_process_stop_fence(config::path_value(
+                            backend.data_root.ok_or_else(IvyError::internal)?,
+                        )?)
+                        .await?;
+                    }
+                }
+            }
             if instance.get("engine") == Some(&"docker".into()) {
                 if let Some(container) = docker.inspect_container(config.clone(), id).await? {
                     if !["created", "exited", "dead"]

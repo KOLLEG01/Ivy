@@ -1,21 +1,23 @@
 //! Immutable native request parameters and the identity used for saved evidence.
 //! These helpers neither dispatch native work nor authorize a replacement run.
 use crate::{
-    native_plan::catalog,
+    native_plan::{catalog, matches_primary, owner, routed_owner, routed_selection},
     operations::{Store, mutation},
     read_evidence::ReadEvidenceStore,
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
-    checked_native_contract::CheckedNativeContracts, hash::hash_json,
+    checked_native_contract::CheckedNativeContracts, native_backend::BackendIdentity,
 };
 use ivy_sdk::{
+    native_evidence::NativeOwnerIdentity,
     native_parameters::{NATIVE_PARAMETERS_BYTES, read_native_parameters, save_native_parameters},
     native_plan::validate_native_invocation,
 };
 
 #[derive(Clone, Debug)]
 pub struct EvidenceIdentity {
+    pub backend: Option<BackendIdentity>,
     pub operation_id: JsString,
     pub caller_principal_id: JsString,
     pub service_node_id: JsString,
@@ -25,7 +27,7 @@ pub struct EvidenceIdentity {
 }
 impl EvidenceIdentity {
     pub fn to_json(&self) -> Json {
-        Json::object([
+        let mut value = Json::object([
             ("operationId", Json::String(self.operation_id.clone())),
             (
                 "callerPrincipalId",
@@ -35,7 +37,11 @@ impl EvidenceIdentity {
             ("nativeVersion", Json::String(self.native_version.clone())),
             ("method", Json::String(self.method.clone())),
             ("params", self.params.clone()),
-        ])
+        ]);
+        if let Some(backend) = &self.backend {
+            value.insert("backend", backend.json());
+        }
+        value
     }
 }
 
@@ -139,6 +145,18 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
         origin: Option<&Json>,
         prompts: &P,
     ) -> IvyResult<Json> {
+        self.intended_call_for_task(run, slot, origin, prompts, None)
+            .await
+    }
+    /// Reuse the caller's fenced Task snapshot instead of materializing it again.
+    pub(crate) async fn intended_call_for_task<P: TaskPrompts>(
+        &self,
+        run: &Json,
+        slot: NativeSlot,
+        origin: Option<&Json>,
+        prompts: &P,
+        current_task: Option<&Json>,
+    ) -> IvyResult<Json> {
         let initial = Json::object([("kind", "initial".into())]);
         let origin = origin.unwrap_or(&initial);
         self.store.validate("NativeCallOrigin", origin)?;
@@ -172,10 +190,7 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
             )
         } else if field(origin, "kind").is_str("reattach") {
             require(
-                slot == NativeSlot::Thread
-                    && field(primary, "namespace").is_str("codex")
-                    && field(primary, "kind").is_str("thread")
-                    && primary.get("serviceNodeId") == field(run, "target").get("serviceNodeId"),
+                slot == NativeSlot::Thread && matches_primary(run.required("target")?, primary)?,
                 "task_board_primary_mismatch",
                 "Reattachment requires the saved primary thread on the selected native owner.",
             )?;
@@ -188,11 +203,7 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
             let task = self.initial_task(run).await?;
             let primary = field(&task.value, "primaryResourceRef");
             require(
-                primary.is_null()
-                    || (field(primary, "namespace").is_str("codex")
-                        && field(primary, "kind").is_str("thread")
-                        && primary.get("serviceNodeId")
-                            == field(run, "target").get("serviceNodeId")),
+                primary.is_null() || matches_primary(run.required("target")?, primary)?,
                 "task_board_primary_mismatch",
                 "The original primary must belong to the selected native owner.",
             )?;
@@ -248,26 +259,44 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
                 ]),
             )
         };
-        let request = Json::object([
-            ("nativeVersion", field(plan, "nativeVersion").clone()),
+        let selection = match current_task {
+            Some(task) => routed_selection(task, run)?,
+            None => plan,
+        };
+        let mut request = Json::object([
+            ("nativeVersion", field(selection, "nativeVersion").clone()),
             (
                 "catalogSourceHash",
-                field(plan, "catalogSourceHash").clone(),
+                field(selection, "catalogSourceHash").clone(),
             ),
             ("method", method.into()),
             ("params", params),
         ]);
-        let contract = catalog(self.catalogs, plan)?;
+        let contract = catalog(self.catalogs, selection)?;
+        let selected = match current_task {
+            Some(task) => routed_owner(self.catalogs, task, run)?,
+            None => owner(self.catalogs, run.required("target")?, plan)?,
+        };
+        let contract = contract.with_backend(selected.backend.clone());
+        if let Some(backend) = contract.backend() {
+            request.insert("backend", backend.json());
+        }
         validate_native_invocation(&contract, &request, NATIVE_PARAMETERS_BYTES)?;
-        let expected = if slot == NativeSlot::Steer {
-            hash_json(contract.definition(&method.into())?)?.into()
+        let expected = if slot == NativeSlot::Steer
+            || selection.get("nativeVersion") != plan.get("nativeVersion")
+            || selection.get("catalogSourceHash") != plan.get("catalogSourceHash")
+            || selected.backend
+                != ivy_contracts::native_backend::BackendIdentity::optional(plan.get("backend"))?
+        {
+            contract.definition_hash(&method.into())?.into()
         } else {
             field(plan, "definitions").required(definition)?.clone()
         };
-        Ok(Json::object([
-            ("request", request),
-            ("expectedDefinitionHash", expected),
-        ]))
+        let mut value = Json::object([("request", request), ("expectedDefinitionHash", expected)]);
+        if selected.backend.is_some() {
+            value.insert("owner", selected.to_json());
+        }
+        Ok(value)
     }
 
     async fn initial_task(&self, run: &Json) -> IvyResult<crate::operations::Document> {
@@ -327,6 +356,12 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
         Ok(resolved)
     }
 
+    /// Calls created before explicit backend selection retain the immutable
+    /// original request target. New scoped calls carry their own owner snapshot.
+    pub fn call_owner(&self, run: &Json, call: &Json) -> IvyResult<NativeOwnerIdentity> {
+        crate::native_plan::call_owner(self.catalogs, run, call)
+    }
+
     pub fn evidence_identity(
         &self,
         run: &Json,
@@ -335,14 +370,22 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
     ) -> IvyResult<EvidenceIdentity> {
         let request = call.required("request")?;
         let operation_id = string(call, "operationId")?.clone();
-        let service_node_id = string(run.required("target")?, "serviceNodeId")?.clone();
+        if call.get("owner").is_none() {
+            let target = run
+                .get("originalRequest")
+                .and_then(|value| value.get("target"))
+                .unwrap_or(run.required("target")?);
+            string(target, "serviceNodeId")?;
+        }
         let native_version = string(request, "nativeVersion")?.clone();
         let method = string(request, "method")?.clone();
         let resolved = self.resolve_native_request(request)?;
+        let owner = self.call_owner(run, call)?;
         Ok(EvidenceIdentity {
+            backend: owner.backend,
             operation_id,
             caller_principal_id: principal_id.clone(),
-            service_node_id,
+            service_node_id: owner.service_node_id,
             native_version,
             method,
             params: resolved.required("params")?.clone(),

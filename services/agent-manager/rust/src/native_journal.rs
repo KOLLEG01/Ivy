@@ -2,7 +2,7 @@
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     agent_schema::{NativeFrameKind, validate_agent, validate_agent_frame},
-    hash::hash_json,
+    hash::{hash_json, hash_object},
     json::{canonical, parse, stringify},
     limits::{
         MANAGEMENT_FRAME_BYTES, NATIVE_ANSWER_FRAME_BYTES, NATIVE_FRAME_BYTES,
@@ -267,6 +267,7 @@ fn merge_object(mut base: IvyJson, value: &IvyJson) -> IvyResult<IvyJson> {
 }
 pub struct NativeJournal {
     owner: Owner,
+    backend: Option<ivy_contracts::native_backend::BackendIdentity>,
     limits: Limits,
     operations: Rows<Row<OperationState>>,
     inputs: Rows<Row<InputState>>,
@@ -277,6 +278,15 @@ pub struct NativeJournal {
     on_terminal: Option<TerminalCallback>,
 }
 impl NativeJournal {
+    pub fn new_scoped(
+        owner: Owner,
+        limits: Limits,
+        backend: Option<ivy_contracts::native_backend::BackendIdentity>,
+    ) -> IvyResult<Self> {
+        let mut journal = Self::new(owner, limits)?;
+        journal.backend = backend;
+        Ok(journal)
+    }
     pub fn new(owner: Owner, limits: Limits) -> IvyResult<Self> {
         Self::with_clock(
             owner,
@@ -299,6 +309,7 @@ impl NativeJournal {
         )?;
         Ok(Self {
             owner,
+            backend: None,
             limits,
             operations: Rows::new(),
             inputs: Rows::new(),
@@ -325,6 +336,11 @@ impl NativeJournal {
     }
     pub fn owner(&self) -> &Owner {
         &self.owner
+    }
+    pub(crate) fn inventory_namespace(&self) -> &str {
+        self.backend
+            .as_ref()
+            .map_or("codex", |backend| backend.id())
     }
     pub fn inventory_revision(&mut self, kind: &str, minimum: f64) -> f64 {
         let previous = *self.revisions.get(kind).unwrap_or(&0.0);
@@ -506,10 +522,10 @@ impl NativeJournal {
                 NATIVE_REQUEST_FRAME_BYTES,
             )?;
         }
-        let request_hash = hash_json(&IvyJson::object([
-            ("method", IvyJson::String(method.clone())),
-            ("params", params.clone()),
-        ]))?;
+        let request_hash = hash_object([
+            (&"method".into(), &IvyJson::String(method.clone())),
+            (&"params".into(), params),
+        ])?;
         if let Some(prior) = self.get(identity)? {
             require(
                 prior.get("requestHash") == Some(&IvyJson::from(request_hash.as_str())),
@@ -520,7 +536,7 @@ impl NativeJournal {
         }
         self.compact();
         let now = IvyJson::String((self.clock)());
-        let value = IvyJson::object([
+        let mut value = IvyJson::object([
             ("schemaVersion", IvyJson::Number(1.0)),
             (
                 "callerPrincipalId",
@@ -567,6 +583,9 @@ impl NativeJournal {
                 },
             ),
         ]);
+        if let Some(backend) = &self.backend {
+            value.insert("backend", backend.json());
+        }
         let json = stringify(&value, usize::MAX)?.into_boxed_str();
         let charge = json.len() + if prevent { 0 } else { OUTCOME_RESERVATION };
         let cleanup = prevent
@@ -609,14 +628,7 @@ impl NativeJournal {
     pub fn begin_epoch(&mut self, epoch: &JsString) -> IvyResult<()> {
         validate_agent(
             "InputIdentity",
-            &IvyJson::object([
-                (
-                    "serviceNodeId",
-                    IvyJson::String(self.owner.service_node_id.clone()),
-                ),
-                ("epoch", IvyJson::String(epoch.clone())),
-                ("requestId", IvyJson::Number(0.0)),
-            ]),
+            &self.input_identity(epoch, &IvyJson::Number(0.0)),
         )?;
         require(
             self.epoch.as_ref() != Some(epoch),
@@ -627,6 +639,20 @@ impl NativeJournal {
         self.retire_inputs(&"native_epoch_lost".into())?;
         self.epoch = Some(epoch.clone());
         Ok(())
+    }
+    pub fn input_identity(&self, epoch: &JsString, request_id: &IvyJson) -> IvyJson {
+        let mut value = IvyJson::object([
+            (
+                "serviceNodeId",
+                IvyJson::String(self.owner.service_node_id.clone()),
+            ),
+            ("epoch", IvyJson::String(epoch.clone())),
+            ("requestId", request_id.clone()),
+        ]);
+        if let Some(backend) = &self.backend {
+            value.insert("backend", backend.json());
+        }
+        value
     }
     fn lose_unfinished(&mut self, code: &JsString) -> IvyResult<()> {
         let keys = self
@@ -754,7 +780,11 @@ impl NativeJournal {
         validate_agent("InputIdentity", identity)?;
         require(
             identity.get("serviceNodeId")
-                == Some(&IvyJson::String(self.owner.service_node_id.clone())),
+                == Some(&IvyJson::String(self.owner.service_node_id.clone()))
+                && ivy_contracts::native_backend::BackendIdentity::matches(
+                    identity,
+                    self.backend.as_ref(),
+                ),
             "target_conflict",
             "Native input belongs to another Service Node.",
         )?;
@@ -971,14 +1001,7 @@ impl NativeJournal {
             "native_state_conflict",
             "Input resolution must come from the current native connection.",
         )?;
-        let identity = IvyJson::object([
-            (
-                "serviceNodeId",
-                IvyJson::String(self.owner.service_node_id.clone()),
-            ),
-            ("epoch", IvyJson::String(epoch.clone())),
-            ("requestId", request_id.clone()),
-        ]);
+        let identity = self.input_identity(epoch, request_id);
         let Some(mut value) = self.input(&identity)? else {
             return Ok(None);
         };

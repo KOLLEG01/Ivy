@@ -772,7 +772,8 @@ async fn production_claude_launch_retries_only_zero_work_preserves_inputs_and_re
     } else {
         "ivy-agent-manager"
     };
-    fs::copy(&executable, native.join(binary)).unwrap();
+    // The production path must not require another Rust adapter executable.
+    assert!(!native.join(binary).exists());
     if cfg!(windows) {
         fs::copy(target.join("ivy-job.exe"), native.join("ivy-job.exe")).unwrap();
         for entry in fs::read_dir(target).unwrap().flatten() {
@@ -900,7 +901,8 @@ async fn production_claude_launch_retries_only_zero_work_preserves_inputs_and_re
     .unwrap()
     .unwrap();
     assert_eq!(connection.mode, NativeMode::ClaudeAdapter);
-    assert_eq!(connection.executable, native.join(binary));
+    assert_eq!(connection.executable, paths::realpath(&node).unwrap());
+    assert_ne!(connection.launcher_pid, std::process::id());
     let models = claude_call(
         &connection.rpc,
         "model/list",
@@ -1085,6 +1087,15 @@ async fn production_claude_launch_retries_only_zero_work_preserves_inputs_and_re
         .await
         .unwrap()
         .unwrap();
+    let stops = ivy_agent_manager::process_evidence::OwnedProcessEvidence::new(data.clone())
+        .stops()
+        .await
+        .unwrap();
+    assert!(
+        stops
+            .iter()
+            .any(|row| row.get("epoch") == Some(&IvyJson::String(connection.epoch.clone())))
+    );
     // Keep the event receiver alive during the second handshake.
     let (send2, mut events2) = tokio::sync::mpsc::unbounded_channel();
     let reopened = start_native_process(launch_options(&root, &settings, send2))

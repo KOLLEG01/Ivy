@@ -10,6 +10,18 @@ const task = (status: string, updatedAtMs: number): Operation.InventoryItem => (
 });
 const key = taskKey('node', 'task');
 
+test('stale active inventory never resurrects working after live evidence expires', () => {
+  const stale = { ...task('active', now - 120_000), stale: true };
+  const seen = { since: now - 60_000, tasks: {} };
+  assert.equal(taskActivity(stale, new Map(), seen, '', now), null);
+  assert.equal(taskActivity(stale, new Map([[key, { working: true, at: now - liveStateMs }]]), seen, '', now), null);
+  assert.equal(taskActivity(stale, new Map([[key, { working: true, at: now - 1000 }]]), seen, '', now), 'working');
+  assert.equal(taskActivity(stale, new Map([[key, { working: false, at: now - 1000 }]]), seen, '', now), 'unread');
+  assert.equal(taskActivity(stale, new Map(), { since: now - 180_000, tasks: {} }, '', now), 'unread');
+  assert.equal(taskActivity(stale, new Map(), { since: now - 180_000, tasks: {} }, key, now), null);
+  assert.equal(taskActivity({ ...stale, stale: false }, new Map(), seen, '', now), 'working');
+});
+
 test('live lifecycle events outrank a stale inventory until it can have caught up', () => {
   const seen = { since: now - 60_000, tasks: {} };
   assert.equal(taskActivity(task('idle', now - 120_000), new Map([[key, { working: true, at: now - 1000 }]]), seen, '', now), 'working');

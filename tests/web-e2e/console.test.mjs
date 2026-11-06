@@ -11,6 +11,22 @@ import { digest } from "../../dist/packages/contracts/src/canonical.js";
 const navigation = (page) =>
   page.getByRole("navigation", { name: "Page navigation" });
 
+test('Console starts under its strict CSP on desktop and mobile', { timeout: 60000 }, async t => {
+  const f = await fixture(t);
+  await f.login();
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+    await f.page.setViewportSize(viewport);
+    const response = await f.page.goto(f.base + '/');
+    const policy = response.headers()['content-security-policy'];
+    assert.match(policy, /(?:^|;\s*)script-src 'self'(?:;|$)/);
+    assert.ok(!policy.includes("'unsafe-eval'"));
+    await expect(f.page.getByRole('heading', { name: 'UIs', exact: true })).toBeVisible();
+    assert.ok(await f.page.evaluate(() => document.body.innerText.length > 50));
+    assert.ok(await f.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+    assert.deepEqual(f.pageErrors, []);
+  }
+});
+
 test('Hive quiet hours save at desktop and mobile widths and protect concurrent settings changes', { timeout: 60000 }, async t => {
   const f = await fixture(t);
   await f.login(); await f.page.goto(f.base + '/#/system/settings');

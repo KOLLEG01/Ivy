@@ -1,12 +1,12 @@
 //! MCP bootstrap, coalescing and status lifetime around filesystem application.
-use crate::mcp_files::{AppliedMcp, apply_mcp, regular_bytes};
+pub use crate::file_work::FileRun as McpRun;
+use crate::{
+    file_work::FileWork,
+    mcp_files::{AppliedMcp, apply_mcp, regular_bytes},
+};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
-use tokio::sync::watch;
+use std::{path::PathBuf, sync::Arc};
 
 pub struct McpSettings {
     pub home: PathBuf,
@@ -61,31 +61,13 @@ impl McpStatus {
         ])
     }
 }
-struct State {
-    status: McpStatus,
-    running: Option<watch::Receiver<bool>>,
-}
 struct Inner {
     settings: McpSettings,
-    state: Mutex<State>,
+    work: FileWork<McpStatus>,
 }
 #[derive(Clone)]
 pub struct McpManager {
     inner: Arc<Inner>,
-}
-pub struct McpRun {
-    complete: Option<watch::Receiver<bool>>,
-}
-impl McpRun {
-    pub async fn wait(mut self) {
-        if let Some(receiver) = self.complete.as_mut() {
-            while !*receiver.borrow_and_update() {
-                if receiver.changed().await.is_err() {
-                    break;
-                }
-            }
-        }
-    }
 }
 fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -123,29 +105,6 @@ fn update(status: &mut McpStatus, result: IvyResult<AppliedMcp>) {
     }
     status.observed_at = now();
 }
-// Dropping a caller's wait handle never cancels the manager-owned operation.
-// If the operation task unwinds, clear its running slot and publish an error.
-struct Completion {
-    inner: Arc<Inner>,
-    sender: Option<watch::Sender<bool>>,
-}
-impl Completion {
-    fn finish(&mut self, result: IvyResult<AppliedMcp>) {
-        let mut state = self.inner.state.lock().unwrap();
-        update(&mut state.status, result);
-        state.running = None;
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.send(true);
-        }
-    }
-}
-impl Drop for Completion {
-    fn drop(&mut self) {
-        if self.sender.is_some() {
-            self.finish(Err(IvyError::internal()));
-        }
-    }
-}
 impl McpManager {
     pub fn new(settings: McpSettings) -> Self {
         let status = McpStatus {
@@ -160,56 +119,37 @@ impl McpManager {
         Self {
             inner: Arc::new(Inner {
                 settings,
-                state: Mutex::new(State {
-                    status,
-                    running: None,
-                }),
+                work: FileWork::new(status),
             }),
         }
     }
     pub fn status(&self) -> McpStatus {
-        self.inner.state.lock().unwrap().status.clone()
+        self.inner.work.status()
     }
     /// Start immediately or join the running application. The first connection
     /// owns the coalesced work; later callers do not enqueue another application.
     pub fn synchronize(&self, connection: Arc<dyn RpcClient>) -> McpRun {
-        let mut state = self.inner.state.lock().unwrap();
-        if let Some(receiver) = &state.running {
-            return McpRun {
-                complete: Some(receiver.clone()),
-            };
-        }
-        let (sender, receiver) = watch::channel(false);
-        state.running = Some(receiver.clone());
-        let inner = self.inner.clone();
-        tokio::spawn(async move {
-            let mut completion = Completion {
-                inner: inner.clone(),
-                sender: Some(sender),
-            };
-            let settings = &inner.settings;
-            let result = apply_mcp(
-                settings.home.clone(),
-                connection.as_ref(),
-                &settings.defaults,
-                &settings.host_id,
-                &settings.hive_url,
-                &settings.credential,
-                &settings.credentials,
-            )
-            .await;
-            completion.finish(result);
-        });
-        McpRun {
-            complete: Some(receiver),
-        }
+        self.inner.work.start(update, || {
+            let inner = self.inner.clone();
+            async move {
+                let settings = &inner.settings;
+                apply_mcp(
+                    settings.home.clone(),
+                    connection.as_ref(),
+                    &settings.defaults,
+                    &settings.host_id,
+                    &settings.hive_url,
+                    &settings.credential,
+                    &settings.credentials,
+                )
+                .await
+            }
+        })
     }
     /// Wait for the current application; close does not permanently disable the
     /// manager or enqueue another synchronization.
     pub fn close(&self) -> McpRun {
-        McpRun {
-            complete: self.inner.state.lock().unwrap().running.clone(),
-        }
+        self.inner.work.close()
     }
     pub async fn bootstrap(&self) -> IvyResult<()> {
         let path = self.inner.settings.home.join(".ivy-agent-mcp/state.json");

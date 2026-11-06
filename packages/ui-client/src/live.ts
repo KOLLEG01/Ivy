@@ -1,7 +1,8 @@
 import type { App } from "vue";
 import { remoteUpdatesKey } from "@ivy/ui";
 import type { RemoteUpdates } from "@ivy/ui";
-import type { BrowserNotifications } from "../../sdk/src/client.js";
+import type { Agent, BrowserNotifications } from "../../sdk/src/client.js";
+import { sameNativeBackend } from '../../contracts/src/native-backend.js';
 
 /** The SDK combines explicit loader subscriptions on one socket per app/tab. */
 export function liveUpdates(notifications: BrowserNotifications) {
@@ -36,6 +37,7 @@ export function nativeInputUpdates(
   notifications: BrowserNotifications,
   serviceNodeId: string,
   threadId: string,
+  backend?: Agent.BackendIdentity | (() => Agent.BackendIdentity | undefined),
 ): RemoteUpdates {
   return {
     subscribe(changed, status) {
@@ -49,7 +51,9 @@ export function nativeInputUpdates(
               threadId?: string;
               method?: string;
               params?: { threadId?: string };
+              backend?: Agent.BackendIdentity;
             };
+            if (!sameNativeBackend(payload.backend, typeof backend === 'function' ? backend() : backend)) return;
             if (
               filter.name === "capabilities" ||
               (filter.name === "inputs" && payload.threadId === threadId) ||

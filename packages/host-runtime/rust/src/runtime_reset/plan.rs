@@ -6,6 +6,7 @@ use crate::{
     native_path, node_path, source,
 };
 use ivy_contracts::hash::{digest, hash_json};
+use ivy_contracts::native_backend::BackendIdentity;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -30,6 +31,35 @@ fn field(value: &J, key: &str) -> IvyResult<JsString> {
 }
 fn array(value: &J) -> IvyResult<&[J]> {
     value.as_array().ok_or_else(IvyError::internal)
+}
+fn data_roots(
+    config: &J,
+    instance: &J,
+    include_common: bool,
+) -> IvyResult<Vec<(Option<BackendIdentity>, JsString)>> {
+    let paths = layout::service_paths(config, instance)?;
+    let data = paths.required("data")?;
+    if instance.get("componentId") != Some(&"agent-manager".into()) {
+        return Ok(vec![(None, text(data)?)]);
+    }
+    let mut roots =
+        crate::agent_backends::configured_backends(instance.required("settings")?, Some(data))?
+            .into_iter()
+            .map(|backend| {
+                Ok((
+                    backend.identity,
+                    text(backend.data_root.ok_or_else(IvyError::internal)?)?,
+                ))
+            })
+            .collect::<IvyResult<Vec<_>>>()?;
+    if include_common
+        && !roots
+            .iter()
+            .any(|(_, root)| data.as_js_string() == Some(root))
+    {
+        roots.insert(0, (None, text(data)?));
+    }
+    Ok(roots)
 }
 fn deployment<'a>(config: &'a J, storage: &StorageContext) -> IvyResult<&'a J> {
     let selected = config.get("deployment").filter(|v| !v.is_null());
@@ -226,53 +256,63 @@ pub async fn local_runtime_reset_plan(
                 for entry in array(layout.required(kind)?)? {
                     let area = field(entry, "area")?;
                     let member = field(entry, "path")?;
-                    let root = resolve(
-                        &cwd,
-                        &native_path::to_native(&if area == JsString::from("host") {
-                            field(&config, "runtimeRoot")?
-                        } else {
-                            field(&layout::service_paths(&config, instance)?, &area.to_utf8()?)?
-                        }),
-                    );
-                    let target = resolve(&root, &native_path::to_native(&member));
-                    require(
-                        if target == root {
-                            member == JsString::from(".")
-                                && ["work", "logs"].iter().any(|v| area == JsString::from(*v))
-                        } else {
-                            native_path::within(&root, &target)
-                        },
-                        "target_conflict",
-                        "Runtime reset target leaves its declared component area.",
-                    )?;
-                    let actual_root = future(root.clone()).await?;
-                    let actual = future(target.clone()).await?;
-                    require(
-                        if actual == actual_root {
-                            target == root
-                        } else {
-                            native_path::within(&actual_root, &actual)
-                        },
-                        "target_conflict",
-                        "Runtime reset target traverses a filesystem link.",
-                    )?;
-                    let mut value = J::object([
-                        ("instanceId", instance.required("instanceId")?.clone()),
-                        ("componentId", instance.required("componentId")?.clone()),
-                        ("area", J::String(area)),
-                        ("path", J::String(member)),
-                        ("absolutePath", J::String(native_path::from_native(&target))),
-                    ]);
-                    if kind == "delete" {
-                        delete_paths.push(target);
-                        deleting.push(value);
+                    let roots = if area == JsString::from("data") {
+                        data_roots(&config, instance, true)?
                     } else {
-                        value.insert(
-                            "checksum",
-                            native_tree_hash(target.clone(), storage.clone()).await?,
-                        );
-                        preserve_paths.push(target);
-                        preserving.push(value);
+                        vec![(
+                            None,
+                            if area == JsString::from("host") {
+                                field(&config, "runtimeRoot")?
+                            } else {
+                                field(&layout::service_paths(&config, instance)?, &area.to_utf8()?)?
+                            },
+                        )]
+                    };
+                    for (backend, root) in roots {
+                        let root = resolve(&cwd, &native_path::to_native(&root));
+                        let target = resolve(&root, &native_path::to_native(&member));
+                        require(
+                            if target == root {
+                                member == JsString::from(".")
+                                    && ["work", "logs"].iter().any(|v| area == JsString::from(*v))
+                            } else {
+                                native_path::within(&root, &target)
+                            },
+                            "target_conflict",
+                            "Runtime reset target leaves its declared component area.",
+                        )?;
+                        let actual_root = future(root.clone()).await?;
+                        let actual = future(target.clone()).await?;
+                        require(
+                            if actual == actual_root {
+                                target == root
+                            } else {
+                                native_path::within(&actual_root, &actual)
+                            },
+                            "target_conflict",
+                            "Runtime reset target traverses a filesystem link.",
+                        )?;
+                        let mut value = J::object([
+                            ("instanceId", instance.required("instanceId")?.clone()),
+                            ("componentId", instance.required("componentId")?.clone()),
+                            ("area", J::String(area.clone())),
+                            ("path", J::String(member.clone())),
+                            ("absolutePath", J::String(native_path::from_native(&target))),
+                        ]);
+                        if let Some(backend) = backend {
+                            value.insert("backend", backend.json());
+                        }
+                        if kind == "delete" {
+                            delete_paths.push(target);
+                            deleting.push(value);
+                        } else {
+                            value.insert(
+                                "checksum",
+                                native_tree_hash(target.clone(), storage.clone()).await?,
+                            );
+                            preserve_paths.push(target);
+                            preserving.push(value);
+                        }
                     }
                 }
             }
@@ -280,31 +320,31 @@ pub async fn local_runtime_reset_plan(
                 .get("completionMarker")
                 .filter(|v| v.as_js_string().is_some_and(|text| !text.0.is_empty()))
             {
-                let root = resolve(
-                    &cwd,
-                    &native_path::to_native(&field(
-                        &layout::service_paths(&config, instance)?,
-                        "data",
-                    )?),
-                );
-                let target = resolve(&root, &native_path::to_native(&text(marker)?));
-                require(
-                    target != root && native_path::within(&root, &target),
-                    "target_conflict",
-                    "Runtime reset completion marker leaves its instance data.",
-                )?;
-                require(
-                    native_path::within(&future(root).await?, &future(target.clone()).await?),
-                    "target_conflict",
-                    "Runtime reset completion marker traverses a filesystem link.",
-                )?;
-                markers.push(J::object([
-                    ("instanceId", instance.required("instanceId")?.clone()),
-                    ("componentId", instance.required("componentId")?.clone()),
-                    ("path", marker.clone()),
-                    ("absolutePath", J::String(native_path::from_native(&target))),
-                ]));
-                marker_paths.push(target);
+                for (backend, root) in data_roots(&config, instance, false)? {
+                    let root = resolve(&cwd, &native_path::to_native(&root));
+                    let target = resolve(&root, &native_path::to_native(&text(marker)?));
+                    require(
+                        target != root && native_path::within(&root, &target),
+                        "target_conflict",
+                        "Runtime reset completion marker leaves its instance data.",
+                    )?;
+                    require(
+                        native_path::within(&future(root).await?, &future(target.clone()).await?),
+                        "target_conflict",
+                        "Runtime reset completion marker traverses a filesystem link.",
+                    )?;
+                    let mut value = J::object([
+                        ("instanceId", instance.required("instanceId")?.clone()),
+                        ("componentId", instance.required("componentId")?.clone()),
+                        ("path", marker.clone()),
+                        ("absolutePath", J::String(native_path::from_native(&target))),
+                    ]);
+                    if let Some(backend) = backend {
+                        value.insert("backend", backend.json());
+                    }
+                    markers.push(value);
+                    marker_paths.push(target);
+                }
             }
         }
         let config_file = resolve(&cwd, &native_path::to_native(&config_path));
@@ -323,13 +363,13 @@ pub async fn local_runtime_reset_plan(
             .iter()
             .filter(|v| v.get("componentId") == Some(&"agent-manager".into()))
         {
-            for key in ["projectRoot", "internalProjectRoot"] {
-                if let Some(path) = instance
-                    .required("settings")?
-                    .get(key)
-                    .and_then(J::as_js_string)
-                {
-                    protected.push(resolve(&cwd, &native_path::to_native(path)));
+            for backend in
+                crate::agent_backends::configured_backends(instance.required("settings")?, None)?
+            {
+                for key in ["projectRoot", "internalProjectRoot"] {
+                    if let Some(path) = backend.settings.get(key).and_then(J::as_js_string) {
+                        protected.push(resolve(&cwd, &native_path::to_native(path)));
+                    }
                 }
             }
         }

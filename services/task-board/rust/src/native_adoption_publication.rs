@@ -34,9 +34,10 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
             .await?;
         let value = &task.document.value;
         let primary = f(value, "primaryResourceRef");
+        let target = crate::native_adoption::current_target(value, &previous.value)?;
         require(
             !primary.is_null()
-                && same(primary, f(&previous.value, "primaryResourceRef"))?
+                && target.is_some()
                 && f(&previous.value, "taskId") == f(request, "taskId")
                 && finished_run(&previous.value),
             "task_board_primary_mismatch",
@@ -85,8 +86,15 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                 "feedback",
                 "Track the turn started directly in the saved native thread.".into(),
             ),
-            ("target", f(&previous.value, "target").clone()),
-            ("workspace", f(&previous.value, "workspace").clone()),
+            ("target", target.ok_or_else(IvyError::internal)?),
+            (
+                "workspace",
+                crate::native_plan::routed_workspace(
+                    value,
+                    previous.value.required("target")?,
+                    previous.value.required("workspace")?,
+                )?,
+            ),
             (
                 "intent",
                 f(f(&previous.value, "originalRequest"), "intent").clone(),

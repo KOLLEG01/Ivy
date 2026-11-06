@@ -9,7 +9,7 @@ const summary=v=>({hash:hashJson(v),bytes:Buffer.byteLength(JSON.stringify(v)),o
 const capture=action=>{try{return {ok:true,value:action()};}catch(e){return {ok:false,error:IvyError.from(e).toWire()};}};
 const rows=[];
 function collect(catalog,source){
- const constructed=capture(()=>new NativeContract(catalog));
+ const constructed=capture(()=>new NativeContract(catalog,source.backend));
  if(!constructed.ok){rows.push({...source,constructed});return;}
  const contract=constructed.value,methods=[];
  for(const method of catalog.clientRequests){const name=method.method,definition=contract.definition(name);
@@ -37,5 +37,9 @@ const schemas=[true,false,{}, {type:'object',properties:{title:{type:'string',de
  ];
 for(let i=0;i<schemas.length;i++){const c={...base,clientRequests:[{...method,inputSchema:schemas[i]}]};collect(c,{label:'schema-'+i,source:JSON.stringify(c)});}
 for(const name of ['constructor','__proto__','TURN/START','thread/start','fs/readFile','thread/items/list','\ud800','😀']){const c={...base,clientRequests:[{...method,method:name}]};collect(c,{label:'method-name',source:JSON.stringify(c)});}
+for(const backend of [{backendId:'worker',provider:'codex',accountId:'work'},{backendId:'claude',provider:'claude',accountId:'personal'}]){
+ const c={...base,clientRequests:[{...method,method:'read/\ud800😀',inputSchema:{type:'object',properties:{extension:{}}},outputSchema:{$defs:{value:{const:'\udfff'}},$ref:'#/$defs/value'}}]};
+ collect(c,{label:'backend-utf16',backend,source:JSON.stringify(c)});
+}
 for(const c of [null,{}, {...base,clientRequests:[method,method]},{...base,version:''},{...base,clientRequests:[{...method,inputSchema:null}]}])collect(c,{label:'invalid-catalog',source:JSON.stringify(c)});
 process.stdout.write(JSON.stringify(rows));

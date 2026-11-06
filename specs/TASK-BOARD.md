@@ -16,6 +16,13 @@ Ordinary comments, delivery receipts, unexported files and live Run source pins 
 
 ## Work and allocation
 
+- Execution choices retain the complete backend, provider and account identity. Equal
+  model names do not merge models or options across accounts. Model, reasoning and
+  speed defaults apply only within the same account; changing account clears those
+  overrides and existing project selection. A retained conversation keeps its account.
+  Project IDs and directory reads use that same owner. A scoped project name requires
+  a current account observation; retained inventory alone cannot prove account ownership.
+
 - Model, reasoning and speed remain editable during execution. Save the desired settings
   and request that the current turn yield at a safe stopping point through the existing
   steering channel. After confirmed completion, continue the same conversation with the
@@ -272,6 +279,32 @@ Sources: [allocation](../services/task-board/rust/src/scheduler.rs),
 
 ## Recovery and contact
 
+- `migrateNativeRoute` moves one native owner's current addresses on an idle ticket
+  to a selected backend on the same physical host. An exact terminal Run and retained
+  storage provenance identify that owner and durable thread. The selected
+  storage must return the same inactive thread, workspace paths and project ID.
+  Plan parameters stay unchanged; an explicit provider/account may use a newer
+  checked catalog. When the original call survives, moving an unscoped owner across
+  native engine identities also requires its exact successful storage receipt. If
+  pinned domain evidence exists, both receipts must agree. Missing or uncertain
+  receipts cannot establish this storage's provider/account provenance.
+  After normal collection of the exact local call, `originalThreadOperationId`
+  can identify a retained receipt in the selected storage. The receipt must match
+  the original caller, native owner, checked catalog, Run epoch and durable
+  thread. A supplied ID must agree with any surviving local call. Read failures
+  other than confirmed absence remain errors; no local record is reconstructed.
+  When the terminal Run's call graph has been collected and no receipt ID is
+  supplied, the selected manager's persisted storage identity must name the Run's
+  original service and the selected provider/account. This read does not seed
+  provenance. The same fresh durable-thread and workspace checks still apply.
+  Claims, pending publications and unresolved original outcomes
+  prevent transfer. Archived tickets keep their archive state, fenced in every
+  retained Task write; no native context is restored for the move.
+  The bounded `nativeRoutes` mapping points each original owner directly to its
+  current destination. Historical owners may move independently; moving the current
+  primary requires its exact latest Run. History records the transfer. Complete
+  original Runs, requests, hashes, native owners, calls, epochs, results and evidence
+  remain unchanged. An original receipt never authorizes dispatch through another owner.
 - User and directed task comments wake the same agent turn. Waiting questions do not gate them.
   A reconnect can rebind a still-active exact thread/turn after fresh owner evidence, unless the
   previous owned process is confirmed stopped. A rejected steer is retried with a successor

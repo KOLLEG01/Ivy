@@ -170,6 +170,7 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                 "principalId",
             )?,
             NativeOwnerIdentity {
+                backend: None,
                 service_node_id: text(target, "serviceNodeId")?,
                 host_id: target
                     .get("hostId")

@@ -336,7 +336,7 @@ impl<
         self.clock.now_millis()
     }
     async fn sync_native_comments(&self, id: &JsString) -> IvyResult<()> {
-        sync_native_comments(self.comments, id).await
+        sync_native_comments(self.comments, self.checks.core.catalogs, id).await
     }
     async fn delivery(&self, id: &JsString) -> IvyResult<()> {
         self.deliveries.step(id).await
@@ -360,7 +360,7 @@ impl<P: CurrentPolicies, S, M: NativeCommentStore, D, C, K> OrchestrationPolicie
         Ok(true)
     }
     async fn sync_native_comments(&self, id: &JsString) -> IvyResult<()> {
-        sync_native_comments(self.comments, id).await
+        sync_native_comments(self.comments, self.checks.core.catalogs, id).await
     }
 }
 struct LifecycleBindings<'a, P, S, A> {

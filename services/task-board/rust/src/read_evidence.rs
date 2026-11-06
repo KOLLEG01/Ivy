@@ -8,6 +8,7 @@ use ivy_contracts::{
     checked_native_contract::CheckedNativeContracts,
     hash::{digest, hash_json},
     json::canonical,
+    native_backend::BackendIdentity,
 };
 use ivy_sdk::native_evidence::{NativeOwnerIdentity, NativeReadIdentity, validate_native_read};
 
@@ -25,6 +26,7 @@ const HEADERS: [&str; 9] = [
 ];
 
 pub struct ReadIdentity {
+    pub backend: Option<ivy_contracts::native_backend::BackendIdentity>,
     pub observation_id: JsString,
     pub caller_principal_id: JsString,
     pub service_node_id: JsString,
@@ -40,6 +42,14 @@ pub struct ReadIdentity {
 pub trait ReadEvidenceStore: BlobStore<Pin = Json, Error = IvyError> {
     fn validate(&self, definition: &str, value: &Json) -> IvyResult<()>;
     async fn read_document(&self, key: &str, address: &Json, upgrade: bool) -> IvyResult<Document>;
+    /// Routing is read-only metadata, including for cleanup and evidence of an
+    /// archived Task. It needs no hydrated conversation or workflow admission.
+    async fn read_task_routing(&self, address: &Json) -> IvyResult<Json> {
+        Ok(self
+            .read_document("task-board/task", address, true)
+            .await?
+            .value)
+    }
     async fn write_document(
         &self,
         key: &str,
@@ -100,6 +110,17 @@ pub(crate) fn manifest(value: &Json) -> IvyResult<Manifest<Json>> {
     })
 }
 
+fn compatible_backend(run: &Json, selected: Option<&BackendIdentity>) -> IvyResult<bool> {
+    let original = BackendIdentity::optional(run.required("target")?.get("backend"))?;
+    Ok(original == BackendIdentity::optional(run.required("plan")?.get("backend"))?
+        && original.as_ref().is_none_or(|original| {
+            selected.is_some_and(|selected| {
+                selected.provider() == original.provider()
+                    && selected.account_id() == original.account_id()
+            })
+        }))
+}
+
 impl<S: ReadEvidenceStore> ReadEvidence<'_, S> {
     pub fn verify(
         &self,
@@ -118,6 +139,7 @@ impl<S: ReadEvidenceStore> ReadEvidence<'_, S> {
             value,
             &NativeReadIdentity {
                 owner: NativeOwnerIdentity {
+                    backend: expected.backend.clone(),
                     service_node_id: expected.service_node_id.clone(),
                     host_id: None,
                     native_version: expected.native_version.clone(),
@@ -138,18 +160,68 @@ impl<S: ReadEvidenceStore> ReadEvidence<'_, S> {
             "The read must retain its exact original observation ID.",
         )
     }
-    async fn scope(&self, parent: &Json, expected: &ReadIdentity) -> IvyResult<JsString> {
+    pub(crate) async fn owner_matches(
+        &self,
+        run: &Json,
+        service: &JsString,
+        backend: Option<&BackendIdentity>,
+        retained: bool,
+    ) -> IvyResult<bool> {
+        let target = run.required("target")?;
+        let original = BackendIdentity::optional(target.get("backend"))?;
+        if !compatible_backend(run, backend)? {
+            return Ok(false);
+        }
+        let original_matches = target.get("serviceNodeId").and_then(Json::as_js_string)
+            == Some(service)
+            && original.as_ref() == backend;
+        if retained && original_matches {
+            return Ok(true);
+        }
+        let Some(task_id) = run.get("taskId") else {
+            return Ok(original_matches);
+        };
+        let task = self.store.read_task_routing(task_id).await?;
+        crate::native_plan::read_target_matches(&task, target, service, backend, retained)
+    }
+    async fn scope(
+        &self,
+        parent: &Json,
+        expected: &ReadIdentity,
+        retained: bool,
+    ) -> IvyResult<Option<JsString>> {
         let run = self
             .store
             .read_document("task-board/run", parent, true)
             .await?;
+        let target = run.value.required("target")?;
         let plan = run.value.required("plan")?;
+        let original = target.get("serviceNodeId").and_then(Json::as_js_string)
+            == Some(&expected.service_node_id)
+            && BackendIdentity::matches(target, expected.backend.as_ref());
+        if retained {
+            require(
+                (!original || string(plan, "nativeVersion")? == &expected.native_version)
+                    && self.owner_matches(&run.value, &expected.service_node_id,
+                        expected.backend.as_ref(), true).await?,
+                "Read evidence must belong to its primary Run and original selected native owner/version.",
+            )?;
+            return Ok(original.then(|| string(plan, "catalogSourceHash").cloned()).transpose()?);
+        }
+        require(compatible_backend(&run.value, expected.backend.as_ref())?,
+            "Read evidence must belong to its primary Run and original selected native owner/version.")?;
+        let task = match run.value.get("taskId") {
+            Some(task) => self.store.read_task_routing(task).await?,
+            None => Json::Object(vec![]),
+        };
+        let selection = crate::native_plan::routed_selection(&task, &run.value)?;
         require(
-            string(run.value.required("target")?, "serviceNodeId")? == &expected.service_node_id
-                && string(plan, "nativeVersion")? == &expected.native_version,
+            string(selection, "nativeVersion")? == &expected.native_version
+                && crate::native_plan::read_target_matches(&task, target,
+                    &expected.service_node_id, expected.backend.as_ref(), false)?,
             "Read evidence must belong to its primary Run and original selected native owner/version.",
         )?;
-        Ok(string(plan, "catalogSourceHash")?.clone())
+        Ok(Some(string(selection, "catalogSourceHash")?.clone()))
     }
     pub async fn save(
         &self,
@@ -159,7 +231,8 @@ impl<S: ReadEvidenceStore> ReadEvidence<'_, S> {
     ) -> IvyResult<Json> {
         // Preserve the original failure order: canonical admission precedes scope I/O.
         let body = canonical(observation, MAXIMUM_BYTES)?;
-        let source_hash = self.scope(parent, expected).await?;
+        let source_hash = self.scope(parent, expected, false).await?
+            .ok_or_else(IvyError::internal)?;
         self.verify(observation, expected, Some(&source_hash))?;
         let parent = parent_id(parent)?;
         let content_hash = digest(body.as_bytes());
@@ -175,6 +248,9 @@ impl<S: ReadEvidenceStore> ReadEvidence<'_, S> {
         ]);
         for key in HEADERS {
             value.insert(key, observation.required(key)?.clone());
+        }
+        if let Some(backend) = observation.get("backend") {
+            value.insert("backend", backend.clone());
         }
         value.insert("contentHash", content_hash.clone().into());
         value.insert("byteLength", Json::Number(body.len() as f64));
@@ -225,7 +301,7 @@ impl<S: ReadEvidenceStore> ReadEvidence<'_, S> {
         expected: &ReadIdentity,
     ) -> IvyResult<Json> {
         self.store.validate("Artifact", artifact)?;
-        let source_hash = self.scope(parent, expected).await?;
+        let source_hash = self.scope(parent, expected, true).await?;
         let parent = parent_id(parent)?;
         let document = self
             .store
@@ -239,6 +315,23 @@ impl<S: ReadEvidenceStore> ReadEvidence<'_, S> {
                     == Some(&document.content_hash.clone().into()),
             "Read evidence must have its exact manifest scope, hash and media type.",
         )?;
+        let source_hash = match source_hash {
+            Some(hash) => hash,
+            None => {
+                // A pinned manifest records the catalog admitted when this
+                // historical owner was current. Later routes cannot relabel it.
+                require(document.value.get("nativeVersion").and_then(Json::as_js_string)
+                    == Some(&expected.native_version),
+                    "Retained read version must match its immutable manifest.")?;
+                let identity = Json::object([
+                    ("catalogHash", document.value.required("catalogHash")?.clone()),
+                    ("nativeExecutableHash", document.value.required("nativeExecutableHash")?.clone()),
+                ]);
+                let catalog = self.catalogs.checked_native_contract(
+                    &expected.native_version, Some(&identity))?;
+                string(catalog.catalog(), "sourceHash")?.clone()
+            }
+        };
         let observation = evidence_bytes::read_evidence(
             self.store,
             parent,
@@ -246,6 +339,13 @@ impl<S: ReadEvidenceStore> ReadEvidence<'_, S> {
             ChunkKey::NativeReadEvidence,
         )?;
         self.verify(&observation, expected, Some(&source_hash))?;
+        require(
+            ivy_contracts::native_backend::BackendIdentity::matches(
+                &document.value,
+                expected.backend.as_ref(),
+            ),
+            "Read evidence header must retain its original backend and account.",
+        )?;
         for key in HEADERS {
             require(
                 document.value.get(key) == observation.get(key),

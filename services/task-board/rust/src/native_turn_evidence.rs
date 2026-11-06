@@ -5,7 +5,8 @@ use crate::{
     operations::{Document, mutation},
     read_evidence::{ReadEvidence, ReadEvidenceStore, ReadIdentity},
     turn_output::{
-        bounded_output_summary, final_output_text, missing_output_summary, output_params, page_cursor, turns_params,
+        bounded_output_summary, final_output_text, missing_output_summary, output_params,
+        page_cursor, turns_params,
     },
 };
 use ivy_contracts::{
@@ -144,9 +145,7 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
             .await?;
         let primary = field(&run.value, "primaryResourceRef");
         require(
-            primary.get("namespace") == Some(&Json::from("codex"))
-                && primary.get("kind") == Some(&Json::from("thread"))
-                && primary.get("serviceNodeId") == field(&run.value, "target").get("serviceNodeId")
+            crate::native_plan::matches_primary(run.value.required("target")?, primary)?
                 && field(&run.value, "turnId")
                     .as_js_string()
                     .is_some_and(|turn| !turn.0.is_empty())
@@ -165,21 +164,62 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
     }
     fn expected(
         &self,
-        run: &Json,
+        owner: &Json,
         version: &JsString,
         reference: &Json,
         method: &str,
         params: Json,
     ) -> IvyResult<ReadIdentity> {
         Ok(ReadIdentity {
+            backend: ivy_contracts::native_backend::BackendIdentity::optional(
+                owner.get("backend"),
+            )?,
             observation_id: s(reference, "observationId")?.clone(),
             caller_principal_id: self.principal_id.clone(),
-            service_node_id: s(run.required("target")?, "serviceNodeId")?.clone(),
+            service_node_id: s(owner, "serviceNodeId")?.clone(),
             native_version: version.clone(),
             epoch: s(reference, "epoch")?.clone(),
             method: method.into(),
             params,
         })
+    }
+    async fn observation_owner(&self, run: &Json, observation: &Json) -> IvyResult<Json> {
+        let mut original = Json::object([(
+            "serviceNodeId",
+            run.required("target")?.required("serviceNodeId")?.clone(),
+        )]);
+        if let Some(backend) = run.required("plan")?.get("backend") {
+            original.insert("backend", backend.clone());
+        }
+        if observation.get("serviceNodeId") == original.get("serviceNodeId")
+            && ivy_contracts::native_backend::BackendIdentity::matches(
+                observation,
+                ivy_contracts::native_backend::BackendIdentity::optional(original.get("backend"))?
+                    .as_ref(),
+            )
+        {
+            // The write boundary still checks the current Task route once.
+            return Ok(original);
+        }
+        let Some(service) = observation
+            .get("serviceNodeId")
+            .and_then(Json::as_js_string)
+        else {
+            return Ok(original);
+        };
+        let backend =
+            ivy_contracts::native_backend::BackendIdentity::optional(observation.get("backend"))?;
+        if self
+            .reads()
+            .owner_matches(run, service, backend.as_ref(), false)
+            .await?
+        {
+            original.insert("serviceNodeId", Json::String(service.clone()));
+            if let Some(backend) = backend {
+                original.insert("backend", backend.json());
+            }
+        }
+        Ok(original)
     }
     fn select_turn(&self, reply: &Json, turn: &JsString) -> IvyResult<Json> {
         require(
@@ -215,9 +255,11 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
         )?;
         let selected = self.select_turn(turns.required("reply")?, &source.turn_id)?;
         let status = string(field(&selected, "status"));
+        let owner = self.observation_owner(&source.run.value, metadata).await?;
+        let native_version = s(metadata, "nativeVersion")?;
         let metadata_expected = self.expected(
-            &source.run.value,
-            &source.native_version,
+            &owner,
+            native_version,
             metadata,
             "thread/read",
             Json::object([
@@ -226,8 +268,8 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
             ]),
         )?;
         let turns_expected = self.expected(
-            &source.run.value,
-            &source.native_version,
+            &owner,
+            native_version,
             turns,
             "thread/turns/list",
             turns_params(&source.thread_id, cursor.as_ref()),
@@ -237,19 +279,11 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
             .save(run_pin, metadata, &metadata_expected)
             .await?;
         let turn_artifact = self.reads().save(run_pin, turns, &turns_expected).await?;
-        let value = Json::object([
+        let mut value = Json::object([
             ("schemaVersion", Json::Number(1.0)),
             ("run", run_pin.clone()),
-            ("nativeVersion", Json::String(source.native_version)),
-            (
-                "serviceNodeId",
-                source
-                    .run
-                    .value
-                    .required("target")?
-                    .required("serviceNodeId")?
-                    .clone(),
-            ),
+            ("nativeVersion", Json::String(native_version.clone())),
+            ("serviceNodeId", owner.required("serviceNodeId")?.clone()),
             ("epoch", metadata.required("epoch")?.clone()),
             ("threadId", Json::String(source.thread_id)),
             ("turnId", Json::String(source.turn_id)),
@@ -259,6 +293,9 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
             ("status", Json::String(status)),
             ("createdAt", turns.required("observedAt")?.clone()),
         ]);
+        if let Some(backend) = owner.get("backend") {
+            value.insert("backend", backend.clone());
+        }
         self.store.validate("NativeTurnSnapshot", &value)?;
         let hash = hash_json(&value)?;
         let pin = self
@@ -294,7 +331,7 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
     }
     pub async fn snapshot(&self, run_pin: &Json, artifact: &Json) -> IvyResult<Snapshot> {
         self.store.validate("Artifact", artifact)?;
-        let source = self.run(run_pin).await?;
+        let mut source = self.run(run_pin).await?;
         let document = self
             .store
             .read_document(
@@ -304,16 +341,42 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
             )
             .await?;
         let v = &document.value;
+        let same_backend = ivy_contracts::native_backend::BackendIdentity::matches(
+            v,
+            ivy_contracts::native_backend::BackendIdentity::optional(
+                source.run.value.required("plan")?.get("backend"),
+            )?
+            .as_ref(),
+        );
+        let same_service =
+            v.get("serviceNodeId") == source.run.value.required("target")?.get("serviceNodeId");
+        let routed = if same_backend && same_service {
+            false
+        } else {
+            self.reads()
+                .owner_matches(
+                    &source.run.value,
+                    s(v, "serviceNodeId")?,
+                    ivy_contracts::native_backend::BackendIdentity::optional(v.get("backend"))?
+                        .as_ref(),
+                    true,
+                )
+                .await?
+        };
+        require(
+            same_backend || routed,
+            "task_board_evidence_mismatch",
+            "A snapshot must retain its selected backend and account.",
+        )?;
         require(
             document.parent_id.as_ref() == Some(s(run_pin, "objectId")?)
                 && artifact.get("contentHash") == Some(&Json::from(document.content_hash.clone()))
                 && artifact.get("mediaType") == Some(&Json::from("application/json"))
                 && field(v, "run").get("objectId") == run_pin.get("objectId")
                 && number(field(v, "run"), "revision") <= number(run_pin, "revision")
-                && v.get("nativeVersion").and_then(Json::as_js_string)
-                    == Some(&source.native_version)
-                && v.get("serviceNodeId")
-                    == source.run.value.required("target")?.get("serviceNodeId")
+                && (v.get("nativeVersion").and_then(Json::as_js_string)
+                    == Some(&source.native_version) || routed)
+                && (same_service || routed)
                 && v.get("threadId").and_then(Json::as_js_string) == Some(&source.thread_id)
                 && v.get("turnId").and_then(Json::as_js_string) == Some(&source.turn_id)
                 && field(v, "metadata").get("epoch") == v.get("epoch")
@@ -337,8 +400,8 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
                 v.required("run")?,
                 v.required("metadata")?.required("artifact")?,
                 &self.expected(
-                    &source.run.value,
-                    &source.native_version,
+                    v,
+                    s(v, "nativeVersion")?,
                     v.required("metadata")?,
                     "thread/read",
                     Json::object([
@@ -354,8 +417,8 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
                 v.required("run")?,
                 v.required("turn")?.required("artifact")?,
                 &self.expected(
-                    &source.run.value,
-                    &source.native_version,
+                    v,
+                    s(v, "nativeVersion")?,
                     v.required("turn")?,
                     "thread/turns/list",
                     turns_params(
@@ -383,6 +446,7 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
             "task_board_evidence_mismatch",
             "Snapshot metadata and status must agree with the original native bodies.",
         )?;
+        source.native_version = s(v, "nativeVersion")?.clone();
         Ok(Snapshot {
             document,
             source,
@@ -399,14 +463,17 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
     ) -> IvyResult<Json> {
         let source = self.run(run_pin).await?;
         let params = output_params(&source.thread_id, &source.turn_id, cursor);
+        let owner = self
+            .observation_owner(&source.run.value, observation)
+            .await?;
         let artifact = self
             .reads()
             .save(
                 run_pin,
                 observation,
                 &self.expected(
-                    &source.run.value,
-                    &source.native_version,
+                    &owner,
+                    s(observation, "nativeVersion")?,
                     observation,
                     "thread/items/list",
                     params,
@@ -451,7 +518,7 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
                     run_pin,
                     evidence.required("artifact")?,
                     &self.expected(
-                        &source.run.value,
+                        v,
                         &source.native_version,
                         evidence,
                         "thread/items/list",
@@ -516,7 +583,7 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
             "task_board_native_epoch_changed",
             "All result pages must come from the collection epoch.",
         )?;
-        let source = self.run(run_pin).await?;
+        self.run(run_pin).await?;
         let params = page_params(snapshot, cursor)?;
         let artifact = self
             .reads()
@@ -524,8 +591,8 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
                 run_pin,
                 observation,
                 &self.expected(
-                    &source.run.value,
-                    &source.native_version,
+                    snapshot,
+                    s(snapshot, "nativeVersion")?,
                     observation,
                     "thread/items/list",
                     params,
@@ -597,7 +664,7 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
             "task_board_evidence_mismatch",
             "Native result page must belong to its exact Run and collection.",
         )?;
-        let run = self
+        self
             .store
             .read_document("task-board/run", run_pin, true)
             .await?;
@@ -608,7 +675,7 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
                 run_pin,
                 evidence.required("artifact")?,
                 &self.expected(
-                    &run.value,
+                    snapshot,
                     s(snapshot, "nativeVersion")?,
                     evidence,
                     "thread/items/list",
@@ -803,7 +870,7 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
                 value.required("run")?,
                 verification.required("artifact")?,
                 &self.expected(
-                    &snapshot.source.run.value,
+                    initial,
                     s(initial, "nativeVersion")?,
                     verification,
                     "thread/turns/list",

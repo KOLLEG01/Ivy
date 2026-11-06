@@ -2,7 +2,7 @@ use super::{Root, field, text};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ivy_agent_manager::{
     runtime::canonical_base64,
-    staged_files::{MAXIMUM_BYTES, RETENTION, StagedFiles},
+    staged_files::{DECODE_CHARS, MAXIMUM_BYTES, RETENTION, RETENTION_ENTRIES, StagedFiles},
 };
 use ivy_contracts::{IvyError, IvyJson, JsString, agent_schema::validate_agent, hash::digest};
 use ivy_host_runtime::{filesystem, node_path};
@@ -22,17 +22,21 @@ async fn staged_file_storage_preserves_bytes_expiry_limits_and_native_names() {
     let directory = root.0.join("staged");
     let now = UNIX_EPOCH + Duration::from_millis(1_792_281_600_000);
     let calls = Arc::new(AtomicUsize::new(0));
-    let owner = Arc::new(StagedFiles {
-        root: node_path::from_native(&directory),
-        decode: Arc::new({
+    let largest_slice = Arc::new(AtomicUsize::new(0));
+    let mut owner = StagedFiles::new(
+        node_path::from_native(&directory),
+        Arc::new({
             let calls = calls.clone();
+            let largest_slice = largest_slice.clone();
             move |value| {
                 calls.fetch_add(1, Ordering::SeqCst);
+                largest_slice.fetch_max(value.0.len(), Ordering::SeqCst);
                 canonical_base64(value)
             }
         }),
-        now: Arc::new(move || now),
-    });
+    );
+    owner.now = Arc::new(move || now);
+    let owner = Arc::new(owner);
     for (name, bytes, expected_name) in [
         ("../hello.txt", b"x".as_slice(), "hello.txt"),
         ("empty", b"".as_slice(), "empty"),
@@ -122,14 +126,26 @@ async fn staged_file_storage_preserves_bytes_expiry_limits_and_native_names() {
         "invalid_arguments"
     );
     let maximum = vec![120; MAXIMUM_BYTES];
-    let result = owner
-        .stage(&"maximum".into(), &STANDARD.encode(&maximum).into())
-        .await
-        .unwrap();
+    let encoded: JsString = STANDARD.encode(&maximum).into();
+    let maximum_name: JsString = "maximum".into();
+    let before_validation = calls.load(Ordering::SeqCst);
+    let (result, during_validation) = tokio::join!(biased;
+        owner.stage(&maximum_name, &encoded),
+        async { calls.load(Ordering::SeqCst) },
+    );
+    let result = result.unwrap();
+    assert!(
+        during_validation > before_validation
+            && during_validation - before_validation < encoded.0.len().div_ceil(DECODE_CHARS),
+        "Other work must run before the complete hash/validation pass finishes."
+    );
     assert_eq!(
         fs::read(node_path::to_native(&text(&result, "path"))).unwrap(),
         maximum
     );
+    assert_eq!(text(&result, "contentHash"), digest(&maximum).into());
+    assert_eq!(largest_slice.load(Ordering::SeqCst), DECODE_CHARS);
+    let before_oversize = calls.load(Ordering::SeqCst);
     assert_eq!(
         owner
             .stage(
@@ -140,6 +156,27 @@ async fn staged_file_storage_preserves_bytes_expiry_limits_and_native_names() {
             .unwrap_err()
             .code,
         "invalid_arguments"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        before_oversize,
+        "Reject decoded size from length/padding before invoking the codec."
+    );
+    assert_eq!(
+        owner
+            .stage(
+                &"embedded-padding".into(),
+                &"eA==".repeat(DECODE_CHARS / 4 + 1).into()
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        before_oversize,
+        "Padding cannot restart at a chunk boundary."
     );
     let previous = calls.load(Ordering::SeqCst);
     let context = InvocationContext::detached(
@@ -200,6 +237,161 @@ async fn staged_file_storage_preserves_bytes_expiry_limits_and_native_names() {
     native_stage_paths(now).await;
 }
 
+#[tokio::test]
+async fn staged_retention_progresses_in_bounded_slices_without_recursive_cleanup() {
+    let root = Root::new();
+    let now = UNIX_EPOCH + Duration::from_millis(1_792_281_600_000);
+    let path = root.0.join("staged");
+    let old = path.join("expired");
+    fs::create_dir_all(&old).unwrap();
+    for n in 0..100 {
+        fs::write(old.join(format!("part-{n}")), b"old owned bytes").unwrap();
+    }
+    let nested = path.join("unrelated");
+    fs::create_dir_all(nested.join("nested")).unwrap();
+    fs::write(nested.join("nested/keep"), b"preserve nested tree").unwrap();
+    let ms = chrono::DateTime::<chrono::Utc>::from(now - RETENTION - Duration::from_secs(1))
+        .timestamp_millis();
+    filesystem::set_times_ms(&old, ms, ms).unwrap();
+    filesystem::set_times_ms(&nested, ms, ms).unwrap();
+    let mut owner = StagedFiles::new(node_path::from_native(&path), Arc::new(canonical_base64));
+    owner.now = Arc::new(move || now);
+    let mut remaining = 100;
+    for index in 0..8 {
+        owner.stage(&"live".into(), &"eA==".into()).await.unwrap();
+        let next = fs::read_dir(&old)
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert!(
+            remaining - next <= RETENTION_ENTRIES,
+            "One upload must not traverse the complete expired directory."
+        );
+        remaining = next;
+        if index == 1 {
+            // Reopening the owner loses its in-memory cursor, but must not renew expired files.
+            owner = StagedFiles::new(node_path::from_native(&path), Arc::new(canonical_base64));
+            owner.now = Arc::new(move || now);
+        }
+    }
+    assert!(
+        !old.exists(),
+        "The next slice must continue despite mtime changes caused by its own removals."
+    );
+    assert_eq!(
+        fs::read(nested.join("nested/keep")).unwrap(),
+        b"preserve nested tree"
+    );
+}
+
+#[tokio::test]
+async fn staged_retention_abandons_a_slice_when_an_upload_renews_its_directory() {
+    let root = Root::new();
+    let path = root.0.join("staged");
+    let now = UNIX_EPOCH + Duration::from_millis(1_792_281_600_000);
+    let renewed = path.join(&digest(b"x")[7..]);
+    fs::create_dir_all(&renewed).unwrap();
+    for n in 0..100 {
+        fs::write(
+            renewed.join(format!("old-{n}")),
+            b"older same-content attachment",
+        )
+        .unwrap();
+    }
+    let ms = chrono::DateTime::<chrono::Utc>::from(now - RETENTION - Duration::from_secs(1))
+        .timestamp_millis();
+    filesystem::set_times_ms(&renewed, ms, ms).unwrap();
+    let mut owner = StagedFiles::new(node_path::from_native(&path), Arc::new(canonical_base64));
+    owner.now = Arc::new(move || now);
+    owner.stage(&"other".into(), &"eQ==".into()).await.unwrap();
+    let remaining = fs::read_dir(&renewed).unwrap().count();
+    assert!(remaining > 0 && remaining < 100);
+    owner.stage(&"fresh".into(), &"eA==".into()).await.unwrap();
+    for _ in 0..4 {
+        owner.stage(&"other".into(), &"eQ==".into()).await.unwrap();
+    }
+    assert_eq!(fs::read_dir(&renewed).unwrap().count(), remaining + 1);
+    assert_eq!(fs::read(renewed.join("fresh")).unwrap(), b"x");
+}
+
+#[tokio::test]
+async fn staged_content_directories_cannot_link_outside_and_file_publication_does_not_follow_a_link()
+ {
+    let root = Root::new();
+    let path = root.0.join("staged");
+    let outside = root.0.join("outside");
+    fs::create_dir_all(&path).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("keep"), b"outside bytes").unwrap();
+    let directory = path.join(&digest(b"x")[7..]);
+    filesystem::directory_link(&outside, &directory).unwrap();
+    let owner = StagedFiles::new(node_path::from_native(&path), Arc::new(canonical_base64));
+    assert_eq!(
+        owner
+            .stage(&"keep".into(), &"eA==".into())
+            .await
+            .unwrap_err()
+            .code,
+        "forbidden"
+    );
+    assert_eq!(fs::read(outside.join("keep")).unwrap(), b"outside bytes");
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+    let inside = path.join(&digest(b"z")[7..]);
+    fs::create_dir(&inside).unwrap();
+    fs::hard_link(outside.join("keep"), inside.join("keep")).unwrap();
+    owner.stage(&"keep".into(), &"eg==".into()).await.unwrap();
+    assert_eq!(
+        fs::read(outside.join("keep")).unwrap(),
+        b"outside bytes",
+        "Atomic publication replaces the link, not the outside inode."
+    );
+    assert_eq!(fs::read(inside.join("keep")).unwrap(), b"z");
+    assert_eq!(
+        fs::read_dir(&inside).unwrap().count(),
+        1,
+        "No partial upload remains."
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staged_uploads_share_one_decode_lane_across_accounts() {
+    let root = Root::new();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let (release, wait) = std::sync::mpsc::channel();
+    let wait = Arc::new(std::sync::Mutex::new(Some(wait)));
+    let first = Arc::new(StagedFiles::new(
+        node_path::from_native(&root.0.join("first-account")),
+        Arc::new({
+            let entered = entered.clone();
+            let wait = wait.clone();
+            move |value| {
+                if let Some(wait) = wait.lock().unwrap().take() {
+                    entered.notify_one();
+                    wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+                canonical_base64(value)
+            }
+        }),
+    ));
+    let task = tokio::spawn(async move { first.stage(&"first".into(), &"eA==".into()).await });
+    entered.notified().await;
+    let second = StagedFiles::new(
+        node_path::from_native(&root.0.join("second-account")),
+        Arc::new(canonical_base64),
+    );
+    let outcome = second.stage(&"second".into(), &"eA==".into()).await;
+    release.send(()).unwrap();
+    assert_eq!(outcome.unwrap_err().code, "resource_exhausted");
+    assert!(
+        !root.0.join("second-account").exists(),
+        "Rejected work must not reach storage."
+    );
+    task.await.unwrap().unwrap();
+    second
+        .stage(&"second".into(), &"eA==".into())
+        .await
+        .unwrap();
+}
+
 async fn native_stage_paths(now: std::time::SystemTime) {
     use std::{ffi::OsString, path::PathBuf, sync::Mutex};
 
@@ -222,7 +414,10 @@ async fn native_stage_paths(now: std::time::SystemTime) {
             now
         }
     });
-    for (encoded, code) in [("!", "invalid_arguments"), ("eA==", "internal_error")] {
+    for (encoded, code, expected) in [
+        ("!", "invalid_arguments", vec!["clock"]),
+        ("eA==", "internal_error", vec!["clock", "decode"]),
+    ] {
         assert_eq!(
             owner
                 .stage(&"input".into(), &encoded.into())
@@ -231,10 +426,7 @@ async fn native_stage_paths(now: std::time::SystemTime) {
                 .code,
             code
         );
-        assert_eq!(
-            std::mem::take(&mut *order.lock().unwrap()),
-            ["clock", "decode"]
-        );
+        assert_eq!(std::mem::take(&mut *order.lock().unwrap()), expected);
     }
     let blocked = root.0.join("blocked");
     fs::write(&blocked, b"retain blocker").unwrap();
@@ -285,19 +477,13 @@ async fn native_stage_paths(now: std::time::SystemTime) {
     }
     #[cfg(windows)]
     {
-        variants.push((
-            "parent-missing",
-            root.0.join("uncreated/../parent-missing"),
-        ));
+        variants.push(("parent-missing", root.0.join("uncreated/../parent-missing")));
         variants.push(("parent-link", root.0.join("linked/../parent-link")));
         variants.push((
             "opaque-high",
             root.0.join(native_entry("root-high-", 0xd800)),
         ));
-        variants.push((
-            "opaque-low",
-            root.0.join(native_entry("root-low-", 0xdfff)),
-        ));
+        variants.push(("opaque-low", root.0.join(native_entry("root-low-", 0xdfff))));
     }
     let mut stored = vec![];
     for (label, input) in variants {
@@ -340,7 +526,7 @@ async fn native_stage_paths(now: std::time::SystemTime) {
         );
         assert_eq!(
             std::mem::take(&mut *order.lock().unwrap()),
-            ["clock", "decode"]
+            ["clock", "decode", "decode"]
         );
         stored.push((expected, bytes));
         if let Some(marker) = alias_marker {
@@ -381,7 +567,7 @@ async fn native_stage_paths(now: std::time::SystemTime) {
     owner.stage(&"expiry".into(), &"eA==".into()).await.unwrap();
     assert_eq!(
         std::mem::take(&mut *order.lock().unwrap()),
-        ["clock", "decode"]
+        ["clock", "decode", "decode"]
     );
     for path in expired {
         assert!(

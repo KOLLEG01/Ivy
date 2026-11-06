@@ -15,7 +15,10 @@ use rusqlite::{
     OptionalExtension, params, params_from_iter,
     types::{Value, ValueRef},
 };
-use std::{cell::OnceCell, collections::{HashMap, HashSet}};
+use std::{
+    cell::OnceCell,
+    collections::{HashMap, HashSet},
+};
 
 fn sql<T>(store: &Store, result: rusqlite::Result<T>) -> IvyResult<T> {
     result.map_err(|e| store.query_error(e))
@@ -119,6 +122,7 @@ pub fn sync(
         let entries=array(parameters,"entries")?;let mut ids=HashSet::new();
         for entry in entries{if !ids.insert(string(entry,"nativeId")?.clone()){return Err(IvyError::new("registry_invalid","Inventory contains duplicate native IDs."));}}
         for entry in entries{utc(field(entry,"observedAt")?,runtime)?;store.validators().validate(schema,field(entry,"summary")?,1024*1024)?;}
+        let source_observed=parameters.get("observedAt").map(|value|{utc(value,runtime)?;value.as_js_string().cloned().ok_or_else(IvyError::internal)}).transpose()?;
         let delta=is_text(parameters.get("mode"),"delta");
         let removed=if delta{array(parameters,"removedNativeIds")?}else{&[]};
         if delta{
@@ -132,14 +136,17 @@ pub fn sync(
         if let Some((_,prior_version,prior_at))=previous.as_ref().filter(|(r,_,_)|is_text(parameters.get("mode"),"snapshot")&&*r==revision){
             let current=rows(store,"SELECT native_id,summary,observed_at FROM inventory WHERE node_id=? AND namespace=? AND kind=? ORDER BY native_id",&[Value::Text(text(node_id)),Value::Text(text(namespace)),Value::Text(text(kind))])?.iter().map(|row|Ok(IvyJson::object([("nativeId",field(row,"native_id")?.clone()),("summary",decoded(&text(string(row,"summary")?))?),("observedAt",field(row,"observed_at")?.clone())]))).collect::<IvyResult<Vec<_>>>()?;
             let mut sorted=entries.to_vec();sorted.sort_by_key(|entry|text(string(entry,"nativeId").unwrap()).into_bytes());
-            if JsString::from(prior_version.as_str())!=*version||encoded(&IvyJson::Array(current))?!=encoded(&IvyJson::Array(sorted))?{return Err(conflict("Snapshot revision already identifies different inventory."));}
+            if JsString::from(prior_version.as_str())!=*version||source_observed.as_ref().is_some_and(|observed|JsString::from(prior_at.as_str())!=*observed)||encoded(&IvyJson::Array(current))?!=encoded(&IvyJson::Array(sorted))?{return Err(conflict("Snapshot revision already identifies different inventory."));}
             return Ok(IvyJson::object([("snapshotRevision",IvyJson::Number(revision)),("observedAt",prior_at.clone().into())]));
         }
         if previous.as_ref().is_some_and(|v|revision<=v.0){return Err(conflict("Inventory revision must advance."));}
         if delta&&(previous.as_ref().is_none_or(|(r,v,_)|Some(*r)!=parameters.get("expectedRevision").and_then(IvyJson::as_f64)||JsString::from(v.as_str())!=*version)){return Err(conflict("Inventory delta has a gap; send a fresh complete snapshot."));}
-        let observed=if let Some(first)=entries.first(){
-            let mut latest=string(first,"observedAt")?.clone();for entry in entries{let observed=string(entry,"observedAt")?;if observed>&latest{latest=observed.clone();}}latest
-        }else{runtime.iso_date(now)?};
+        // Existing installed publishers lack a batch timestamp. Preserve their
+        // original entry-time/empty-batch semantics during the current rollout;
+        // an explicitly supplied source timestamp always remains authoritative.
+        let observed=match source_observed{Some(value)=>value,None=>if let Some(first)=entries.first(){
+            let mut latest=string(first,"observedAt")?;for entry in entries{let at=string(entry,"observedAt")?;if at>latest{latest=at;}}latest.clone()
+        }else{runtime.iso_date(now)?}};
         sql(store,store.connection().execute("INSERT INTO inventory_sets VALUES (?,?,?,?,?,?) ON CONFLICT(node_id,namespace,kind) DO UPDATE SET revision=excluded.revision,schema_version=excluded.schema_version,observed_at=excluded.observed_at",params![text(node_id),text(namespace),text(kind),revision,text(version),text(&observed)]))?;
         if is_text(parameters.get("mode"),"snapshot"){
             sql(store,store.connection().execute("DELETE FROM inventory WHERE node_id=? AND namespace=? AND kind=?",params![text(node_id),text(namespace),text(kind)]))?;
@@ -147,7 +154,7 @@ pub fn sync(
         for entry in entries{sql(store,store.connection().execute("INSERT INTO inventory VALUES (?,?,?,?,?,?,?) ON CONFLICT(node_id,namespace,kind,native_id) DO UPDATE SET schema_version=excluded.schema_version,summary=excluded.summary,observed_at=excluded.observed_at",params![text(node_id),text(namespace),text(kind),text(string(entry,"nativeId")?),text(version),encoded(field(entry,"summary")?)?,text(string(entry,"observedAt")?)]))?;}
         let mut updated=node.clone();updated.insert("lastObservationAt",IvyJson::String(observed.clone()));registry.save(store,&updated,false)?;
         let scope=JsString(["inventory/".encode_utf16().collect::<Vec<_>>(),namespace.0.clone(),vec![47],kind.0.clone(),vec![47],node_id.0.clone()].concat());store.invalidate(scope);
-        Ok(IvyJson::object([("snapshotRevision",IvyJson::Number(revision)),("observedAt",IvyJson::String(observed))]))
+        Ok(IvyJson::object([("snapshotRevision",IvyJson::Number(revision)),("observedAt",IvyJson::String(observed.clone()))]))
     })
 }
 
@@ -214,23 +221,36 @@ pub fn get(
             |r| r.get::<_, f64>(0),
         ),
     )?;
-    item(row, provider_stale(&node), IvyJson::Number(revision), runtime, now)
+    item(
+        row,
+        provider_stale(&node),
+        IvyJson::Number(revision),
+        runtime,
+        now,
+    )
 }
 
 fn with_set_records<T>(
-    store: &Store, bindings: &[Value],
+    store: &Store,
+    bindings: &[Value],
     consume: impl FnOnce(&mut dyn Iterator<Item = IvyResult<IvyJson>>) -> IvyResult<T>,
 ) -> IvyResult<T> {
     let mut statement = sql(store, store.connection().prepare_cached(
         "SELECT s.node_id,s.namespace,s.kind,s.revision,s.schema_version FROM inventory_sets s JOIN service_nodes n ON s.node_id=n.id WHERE (? IS NULL OR n.id=?) AND (? IS NULL OR n.host_id=?) AND (? IS NULL OR n.service_name=?) AND (? IS NULL OR s.namespace=?) AND (? IS NULL OR s.kind=?) ORDER BY s.node_id,s.namespace,s.kind",
     ))?;
-    let mut records = sql(store, statement.query_map(params_from_iter(bindings.iter()), |row| {
-        Ok(IvyJson::object([
-            ("node_id", row_value(row,0)?), ("namespace", row_value(row,1)?),
-            ("kind", row_value(row,2)?), ("revision", row_value(row,3)?),
-            ("schema_version", row_value(row,4)?),
-        ]))
-    }))?.map(|row| sql(store,row));
+    let mut records = sql(
+        store,
+        statement.query_map(params_from_iter(bindings.iter()), |row| {
+            Ok(IvyJson::object([
+                ("node_id", row_value(row, 0)?),
+                ("namespace", row_value(row, 1)?),
+                ("kind", row_value(row, 2)?),
+                ("revision", row_value(row, 3)?),
+                ("schema_version", row_value(row, 4)?),
+            ]))
+        }),
+    )?
+    .map(|row| sql(store, row));
     consume(&mut records)
 }
 
@@ -294,7 +314,10 @@ pub fn list(
         )?;
         // The old provider map is keyed by the original JSON identity, which
         // may differ from the SQL row's lossy UTF-8 key.
-        providers.insert(string(&node, "serviceNodeId")?.clone(), provider_stale(&node));
+        providers.insert(
+            string(&node, "serviceNodeId")?.clone(),
+            provider_stale(&node),
+        );
     }
     let base = [
         node_id,
@@ -349,18 +372,31 @@ pub fn list(
     // Preserve standalone-array validation before cursor authentication, but
     // never hold the full set list or its encoded text. Re-read compact fields
     // only when a cursor actually needs the outer identity hash.
-    with_set_records(store, &set_bindings, |records|
-        validate_canonical_array(records, MANAGEMENT_FRAME_BYTES))?;
+    with_set_records(store, &set_bindings, |records| {
+        validate_canonical_array(records, MANAGEMENT_FRAME_BYTES)
+    })?;
     let mut identity_parameters = parameters.clone();
     identity_parameters.remove("cursor");
     identity_parameters.remove("limit");
-    let fields: [(JsString,IvyJson);2] = [
-        ("method".into(), "inventory.list".into()), ("selectors".into(), identity_parameters),
+    let fields: [(JsString, IvyJson); 2] = [
+        ("method".into(), "inventory.list".into()),
+        ("selectors".into(), identity_parameters),
     ];
     let set_key = JsString::from("sets");
     let query_hash = OnceCell::new();
-    let hash = || query_hash.get_or_init(|| with_set_records(store, &set_bindings, |records|
-        hash_object_with_array_string(fields.iter().map(|(key,value)| (key,value)), &set_key, records))).clone();
+    let hash = || {
+        query_hash
+            .get_or_init(|| {
+                with_set_records(store, &set_bindings, |records| {
+                    hash_object_with_array_string(
+                        fields.iter().map(|(key, value)| (key, value)),
+                        &set_key,
+                        records,
+                    )
+                })
+            })
+            .clone()
+    };
     let boundary = if let Some(cursor) = parameters
         .get("cursor")
         .filter(|v| v.as_js_string().is_some_and(|v| !v.0.is_empty()))
@@ -461,9 +497,14 @@ pub fn list(
     // materialize records while building the byte-bounded response.
     let found = {
         let mut statement = sql(store, store.connection().prepare_cached(&query))?;
-        sql(store, statement.query_map(params_from_iter(bindings.iter()), |row|
-            Ok((row.get::<_,i64>(0)?, row.get::<_,f64>(1)?))))?
-            .map(|row| sql(store, row)).collect::<IvyResult<Vec<_>>>()?
+        sql(
+            store,
+            statement.query_map(params_from_iter(bindings.iter()), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
+            }),
+        )?
+        .map(|row| sql(store, row))
+        .collect::<IvyResult<Vec<_>>>()?
     };
     let mut items = vec![];
     let mut bytes = 128;
@@ -480,7 +521,8 @@ pub fn list(
             *stale
         } else {
             let node = registry.inventory_provider(store, id, runtime, now)?;
-            require(string(&node, "serviceNodeId")? == id,
+            require(
+                string(&node, "serviceNodeId")? == id,
                 "storage_invalid",
                 "Inventory item references an unknown Service Node.",
             )?;

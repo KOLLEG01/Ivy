@@ -242,6 +242,9 @@ impl HostActions {
                 if let Some(status) = journal.storage_retention_status().await? {
                     data.insert("storageRetention", status);
                 }
+                let mut space = crate::storage_space::host_storage_space(config.clone()).await?;
+                space.insert("observedAt", chrono::DateTime::from_timestamp_millis(this.clock.utc_millis()).ok_or_else(IvyError::internal)?.to_rfc3339_opts(chrono::SecondsFormat::Millis, true).into());
+                data.insert("storageSpace", space);
                 Ok(data)
             }
             .await;

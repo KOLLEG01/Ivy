@@ -17,6 +17,14 @@ use crate::journal_store::{
 use ivy_contracts::{IvyError, IvyJson as Json, JsString, limits::MANAGEMENT_FRAME_BYTES};
 use std::future::Future;
 
+#[cfg(test)]
+#[path = "../../../../tests/fixtures/task-board-archive-writes.rs"]
+mod archive_tests;
+
+#[cfg(test)]
+#[path = "../../../../tests/fixtures/task-board-run-source-writes.rs"]
+mod run_source_tests;
+
 pub(crate) struct DocumentWrites<'a, S, H, W, I, N, G> {
     pub(crate) source: &'a S,
     pub(crate) hydrate: &'a H,
@@ -482,21 +490,21 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
                 );
             }
         } else if key == "task-board/run" {
-            let phase = f(&value, "phase")?;
-            if !["completed", "failed", "cancelled"]
-                .iter()
-                .any(|item| phase.eq(&text(*item)))
+            if let Some(pin) = crate::journal_store::reference_writes::run_source_for_write(
+                &root(reads),
+                &value,
+                destination,
+                |params| self.source.request_owned("objects.read", Some(params)),
+                |error| {
+                    typed_write_cause(error).is_some_and(|error| {
+                        error.code == "revision_pruned"
+                            && error.outcome_json() == text("not_executed")
+                    })
+                },
+            )
+            .await?
             {
-                references.push((
-                    "source-task".into(),
-                    obj([
-                        ("objectId", f(&value, "taskId")?),
-                        (
-                            "revision",
-                            f(&f(&value, "originalRequest")?, "expectedRevision")?,
-                        ),
-                    ]),
-                ));
+                references.push(("source-task".into(), pin));
             }
         } else if key == "task-board/delivery" {
             let request = f(&value, "chatRequest")?;
@@ -562,7 +570,13 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
                 ),
             ]);
             if key == "task-board/task" {
-                params.push(("expectedArchived".into(), Value::Bool(false)));
+                params.push((
+                    "expectedArchived".into(),
+                    destination
+                        .get("expectedArchived")
+                        .cloned()
+                        .unwrap_or(Value::Bool(false)),
+                ));
             }
         }
         // Only this await is inside the original typed create-conflict catch.

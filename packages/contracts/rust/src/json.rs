@@ -559,6 +559,11 @@ impl Parser<'_> {
 pub fn canonical(value: &IvyJson, maximum_bytes: usize) -> IvyResult<String> {
     encode(value, maximum_bytes, true, true)
 }
+/// Apply canonical validation and count its exact UTF-8 bytes without retaining text.
+/// Traversal, escaping, complexity limits and error order match `canonical`.
+pub fn canonical_size(value: &IvyJson, maximum_bytes: usize) -> IvyResult<usize> {
+    encode_into(value, maximum_bytes, true, true, Discard)
+}
 /// Canonicalize a borrowed object projection with IvyJson::object's last-value rule.
 /// Field values retain their original depth, shared node budget and error order.
 pub(crate) fn canonical_object<'a>(
@@ -633,26 +638,38 @@ pub fn validate_canonical_array(
     records: impl IntoIterator<Item = IvyResult<IvyJson>>,
     maximum_bytes: usize,
 ) -> IvyResult<()> {
-    struct Discard;
-    impl std::fmt::Write for Discard {
-        fn write_str(&mut self, _: &str) -> std::fmt::Result { Ok(()) }
-    }
     canonical_array(records, maximum_bytes, Discard)
+}
+struct Discard;
+impl std::fmt::Write for Discard {
+    fn write_str(&mut self, _: &str) -> std::fmt::Result { Ok(()) }
 }
 pub(crate) fn canonical_into(
     value: &IvyJson,
     maximum_bytes: usize,
     out: impl std::fmt::Write,
 ) -> IvyResult<()> {
-    encode_into(value, maximum_bytes, true, true, out)
+    encode_into(value, maximum_bytes, true, true, out).map(|_| ())
 }
 pub fn stringify(value: &IvyJson, maximum_bytes: usize) -> IvyResult<String> {
     encode(value, maximum_bytes, false, false)
 }
+/// Count the existing JSON.stringify representation without retaining its text.
+pub fn stringify_size(value: &IvyJson, maximum_bytes: usize) -> IvyResult<usize> {
+    encode_into(value, maximum_bytes, false, false, Discard)
+}
+/// Write that same representation into an already reserved output buffer.
+pub fn stringify_into(
+    value: &IvyJson,
+    maximum_bytes: usize,
+    out: impl std::fmt::Write,
+) -> IvyResult<()> {
+    encode_into(value, maximum_bytes, false, false, out).map(|_| ())
+}
 pub fn validate_json(value: &IvyJson, maximum_bytes: usize) -> IvyResult<()> {
     // The JS validator checks the entire domain before checking wire size.
-    let encoded = encode(value, usize::MAX, false, true)?;
-    if encoded.len() > maximum_bytes {
+    let bytes = encode_into(value, usize::MAX, false, true, Discard)?;
+    if bytes > maximum_bytes {
         return Err(too_large());
     }
     Ok(())
@@ -679,7 +696,7 @@ fn encode_into(
     sorted: bool,
     validate: bool,
     out: impl std::fmt::Write,
-) -> IvyResult<()> {
+) -> IvyResult<usize> {
     let mut encoder = Encoder {
         out,
         maximum_bytes,
@@ -689,7 +706,7 @@ fn encode_into(
         accounted: 0,
     };
     encoder.value(value, 0)?;
-    Ok(())
+    Ok(encoder.accounted)
 }
 struct Encoder<W> {
     out: W,

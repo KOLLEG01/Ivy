@@ -108,7 +108,7 @@ pub fn format_answers(input: &J, questions: &[J], answers: &J) -> Result<JsStrin
     }
     Ok(encode(&payload)?.into())
 }
-pub fn permission_result(input: &J, decision: &J, auto_allow: bool) -> J {
+pub fn permission_result(input: J, decision: &J, auto_allow: bool) -> J {
     if auto_allow {
         return J::object([("behavior", "allow".into())]);
     }
@@ -119,7 +119,11 @@ pub fn permission_result(input: &J, decision: &J, auto_allow: bool) -> J {
             ("behavior", "allow".into()),
             (
                 "updatedInput",
-                coalesce(field(decision, "updatedInput"), input),
+                if field(decision, "updatedInput").is_null() {
+                    input
+                } else {
+                    field(decision, "updatedInput").clone()
+                },
             ),
         ])
     } else {
@@ -144,7 +148,7 @@ pub enum Callback {
 pub fn callback(
     context: &J,
     tool_name: &J,
-    input: &J,
+    input: J,
     tool_id: &J,
     auto_allow: bool,
     ids: &IdSource,
@@ -161,7 +165,7 @@ pub fn callback(
         &":".into(),
     ]);
     if is(tool_name, "AskUserQuestion") {
-        let questions = match questions(input) {
+        let questions = match questions(&input) {
             Ok(q) => q,
             Err(e) => {
                 return Callback::Immediate(J::object([
@@ -188,7 +192,7 @@ pub fn callback(
         ]);
         return Callback::UserInput {
             event,
-            input: input.clone(),
+            input,
             questions,
         };
     }
@@ -203,10 +207,7 @@ pub fn callback(
         ("toolName", tool_name.clone()),
         ("input", input.clone()),
     ]);
-    Callback::Permission {
-        event,
-        input: input.clone(),
-    }
+    Callback::Permission { event, input }
 }
 pub fn user_input_result(input: &J, questions: &[J], answers: &J) -> Result<J> {
     Ok(J::object([

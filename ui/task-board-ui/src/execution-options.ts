@@ -1,207 +1,68 @@
-import { discover, serviceTools } from "../../../packages/sdk/src/client.js";
-import type { Agent } from "../../../packages/sdk/src/client.js";
-import {
-  modelsFrom,
-  nativeModels,
-  type NativeModel,
-  record,
-  schemaNode,
-} from "../../../packages/ui-client/src/native";
-import { client } from "./runtime";
+import { IvyError } from '../../../packages/sdk/src/client.js';
+import type { Agent } from '../../../packages/sdk/src/client.js';
+import { validateAgent } from '../../../packages/contracts/src/agent-validation.js';
+import { backendRead, nativeBackendModels, nativeBackendScopes, sameBackend } from '../../../packages/ui-client/src/native-backends';
+import type { NativeBackendScope } from '../../../packages/ui-client/src/native-backends';
+import { nativeHosts, nativeServiceNodes } from '../../../packages/ui-client/src/native-hosts';
+import { client } from './runtime';
+export { executionBackendChoices, executionModels, modelAvailability, executionSpeedAvailable } from '../../../packages/ui-client/src/execution-models';
 
 async function executionNodes(signal: AbortSignal, hostId?: string) {
-  const nodes = [];
-  let cursor: string | undefined;
-  do {
-    const page = await client.request(
-      "serviceNodes.list",
-      {
-        serviceName: "agent-manager",
-        ...(hostId ? { hostId } : {}),
-        limit: 200,
-        ...(cursor ? { cursor } : {}),
-      },
-      { signal },
-    );
-    nodes.push(...page.items);
-    cursor = page.nextCursor ?? undefined;
-  } while (cursor);
-  return nodes;
+  return nativeServiceNodes(client, signal, hostId);
 }
-
-async function agentModelOptions(node: Awaited<ReturnType<typeof executionNodes>>[number], signal: AbortSignal) {
-  const [models, bindings] = await Promise.all([
-    nativeModels(client, node.serviceNodeId, signal).then(modelsFrom),
-    Promise.all(["thread/start", "turn/start"].map((method) =>
-      discover(client, "codex." + method, { serviceNodeId: node.serviceNodeId }))),
-  ]);
-  return { node, models, bindings };
+type Node = Awaited<ReturnType<typeof executionNodes>>[number];
+const available = (node: Node) => node.connected && node.synced && node.ready && node.desiredEnabled;
+const scoped = (node: Node, scope: NativeBackendScope) => ({ node, ...(scope.backend ? { backend: scope.backend } : {}), status: scope.status });
+async function scopesFor(node: Node, signal: AbortSignal) {
+  return (await nativeBackendScopes(client, node, signal)).map(scope => ({ scope, ...scoped(node, scope) }));
 }
-
-/** Execution choices need only the selected host, not projects or other hosts. */
 export async function executionHostOptions(signal: AbortSignal, hostId: string, serviceNodeId?: string) {
-  if (!hostId) return [];
-  const nodes = await executionNodes(signal, hostId);
-  return Promise.all(nodes.filter(node => node.connected && node.synced && node.ready &&
-    (!serviceNodeId || node.serviceNodeId === serviceNodeId)).map(node => agentModelOptions(node, signal)));
+  if (!hostId) return { agents: [], backends: [] };
+  const nodes = (await executionNodes(signal, hostId)).filter(node => available(node) && (!serviceNodeId || node.serviceNodeId === serviceNodeId));
+  const backends = (await Promise.all(nodes.map(async node => {
+    try { return await scopesFor(node, signal); } catch { signal.throwIfAborted(); return []; }
+  }))).flat();
+  const agents = (await Promise.all(backends.map(async owner => {
+    if (owner.status.state !== 'ready') return null;
+    try { return { ...scoped(owner.node, owner.scope), ...await nativeBackendModels(client, owner.scope, signal) }; }
+    catch { signal.throwIfAborted(); return null; }
+  }))).filter(agent => agent !== null);
+  return { agents, backends };
 }
 
 export async function executionEnvironments(signal: AbortSignal, includeNativeOptions = true) {
   const nodes = await executionNodes(signal);
-  const observations = await Promise.all(
-    nodes
-      .filter((node) => node.connected && node.synced && node.ready)
-      .map(async (node) => {
-        try {
-          const tools = serviceTools(client, node.serviceNodeId, [
-            { namespace: "agent", interfaceVersion: "1.0.0" },
-          ]);
-          const [profile, projects, options] = await Promise.all([
-            tools.call("agent.capabilities", {}) as Promise<Agent.CapabilityProfile>,
-            tools.call("agent.projects", {}) as Promise<Agent.ProjectsResult>,
-            includeNativeOptions ? agentModelOptions(node, signal) : { node, models: [], bindings: [] },
-          ]);
-          return { ...options, profile, projects };
-        } catch {
-          return null;
-        }
-      }),
-  );
+  const scopes = (await Promise.all(nodes.filter(available).map(async node => {
+    try { return await scopesFor(node, signal); } catch { signal.throwIfAborted(); return []; }
+  }))).flat();
+  const agents = (await Promise.all(scopes.map(async owner => {
+    if (owner.status.state !== 'ready') return null;
+    try {
+      const [profile, projects, options] = await Promise.all([
+        backendRead(client, owner.scope, 'agent.capabilities', {}, signal),
+        backendRead(client, owner.scope, 'agent.projects', {}, signal),
+        includeNativeOptions ? nativeBackendModels(client, owner.scope, signal) : { models: [], bindings: [] },
+      ]);
+      validateAgent('CapabilityProfile', profile); validateAgent('ProjectsResult', projects);
+      const capabilities = profile as Agent.CapabilityProfile;
+      if (capabilities.serviceNodeId !== owner.node.serviceNodeId || capabilities.hostId !== owner.node.hostId ||
+        !sameBackend(capabilities.backend, owner.backend) || !sameBackend((projects as Agent.ProjectsResult).backend, owner.backend))
+        throw new IvyError('native_owner_mismatch', 'Projects and capabilities must retain the selected account.');
+      return { ...scoped(owner.node, owner.scope), ...options, profile: profile as Agent.CapabilityProfile, projects: projects as Agent.ProjectsResult };
+    } catch { signal.throwIfAborted(); return null; }
+  }))).filter(agent => agent !== null);
   const capabilities = new Map<string, string>();
-  const projects = new Map<
-    string,
-    { id: string; name: string; path: string; hosts: Set<string> }
-  >();
-  for (const observation of observations)
-    if (observation) {
-      for (const value of observation.profile.capabilities)
-        capabilities.set(value.key, value.label);
-      for (const project of observation.projects.projects)
-        for (const path of project.paths) {
-          const key = JSON.stringify([project.nativeId, path]);
-          const saved = projects.get(key) ?? {
-            id: project.nativeId,
-            name: project.name,
-            path,
-            hosts: new Set<string>(),
-          };
-          saved.hosts.add(observation.node.hostId);
-          projects.set(key, saved);
-        }
-    }
-  return {
-    nodes,
-    hosts: [...new Set(nodes.map((node) => node.hostId))].sort(),
-    capabilities: [...capabilities]
-      .map(([key, label]) => ({ key, label }))
-      .sort((a, b) => a.key.localeCompare(b.key)),
-    projects: [...projects]
-      .map(([key, value]) => ({
-        key,
-        id: value.id,
-        name: value.name,
-        path: value.path,
-        hosts: [...value.hosts].sort(),
-      }))
-      .sort(
-        (a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path),
-      ),
-    agents: observations.filter((value) => value !== null),
-  };
-}
-export type ExecutionAgent = Awaited<
-  ReturnType<typeof executionEnvironments>
->["agents"][number];
-type ModelAgent = Awaited<ReturnType<typeof executionHostOptions>>[number];
-export function executionModels(agents: ModelAgent[]) {
-  // A host can run several providers. Any of its agents may serve a model;
-  // defaults for multiple hosts still require support on each eligible host.
-  const hosts = new Map<string, Map<string, NativeModel>>();
-  for (const agent of agents) {
-    const models =
-      hosts.get(agent.node.hostId) ?? new Map<string, NativeModel>();
-    hosts.set(agent.node.hostId, models);
-    for (const model of agent.models) {
-      const previous = models.get(model.model);
-      models.set(
-        model.model,
-        previous
-          ? {
-              ...previous,
-              hidden: previous.hidden && model.hidden,
-              efforts: [...new Set([...previous.efforts, ...model.efforts])],
-            }
-          : model,
-      );
+  const projects = new Map<string, { id: string; name: string; path: string; hosts: Set<string> }>();
+  for (const observation of agents) {
+    for (const value of observation.profile.capabilities) capabilities.set(value.key, value.label);
+    for (const project of observation.projects.projects) for (const path of project.paths) {
+      const key = JSON.stringify([observation.backend ?? observation.node.serviceNodeId, project.nativeId, path]);
+      const saved = projects.get(key) ?? { id: project.nativeId, name: project.name, path, hosts: new Set<string>() };
+      saved.hosts.add(observation.node.hostId); projects.set(key, saved);
     }
   }
-  const catalogs = [...hosts.values()];
-  return [...(catalogs[0]?.values() ?? [])]
-    .filter((model) => catalogs.every((catalog) => catalog.has(model.model)))
-    .map((model) => ({
-      ...model,
-      efforts: model.efforts.filter((effort) =>
-        catalogs.every((catalog) =>
-          catalog.get(model.model)!.efforts.includes(effort),
-        ),
-      ),
-    }));
+  return { nodes, hosts: nativeHosts(nodes).map(host => host.hostId).sort(), backends: scopes,
+    capabilities: [...capabilities].map(([key, label]) => ({ key, label })).sort((a, b) => a.key.localeCompare(b.key)),
+    projects: [...projects].map(([key, value]) => ({ key, id: value.id, name: value.name, path: value.path, hosts: [...value.hosts].sort() })).sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path)), agents };
 }
-/** Every model any agent offers, with the hosts that lack it, so partial support is visible. */
-export function modelAvailability(agents: ExecutionAgent[]) {
-  const models = new Map<
-    string,
-    { model: string; name: string; hidden: boolean; hosts: Set<string> }
-  >();
-  for (const agent of agents)
-    for (const model of agent.models) {
-      const entry = models.get(model.model) ?? {
-        model: model.model,
-        name: model.name,
-        hidden: model.hidden,
-        hosts: new Set<string>(),
-      };
-      entry.hosts.add(agent.node.hostId);
-      models.set(model.model, entry);
-    }
-  const hosts = [...new Set(agents.map((agent) => agent.node.hostId))];
-  return [...models.values()].map((entry) => ({
-    model: entry.model,
-    name: entry.name,
-    hidden: entry.hidden,
-    missing: hosts.filter((host) => !entry.hosts.has(host)).sort(),
-  }));
-}
-export const executionSpeedAvailable = (
-  agents: ModelAgent[],
-  model?: string,
-  effort?: string,
-) => {
-  const supportedHosts = new Set(
-    agents
-      .filter(
-        (agent) =>
-          (!model ||
-            agent.models.some(
-              (value) =>
-                value.model === model &&
-                (!effort || value.efforts.includes(effort)),
-            )) &&
-          agent.bindings.every(
-            (binding) =>
-              "serviceTier" in
-              record(
-                schemaNode(
-                  binding.definition.inputSchema,
-                  binding.definition.inputSchema,
-                ).properties,
-              ),
-          ),
-      )
-      .map((agent) => agent.node.hostId),
-  );
-  return (
-    agents.length > 0 &&
-    agents.every((agent) => supportedHosts.has(agent.node.hostId))
-  );
-};
+export type ExecutionAgent = Awaited<ReturnType<typeof executionEnvironments>>['agents'][number];

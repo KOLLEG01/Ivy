@@ -1,7 +1,9 @@
 //! Offline backup admission and Host-owned recovery stages. Native relocation
 //! and final restore publication are assembled separately by the Host owner.
 use crate::{
-    IvyError, IvyJson as J, IvyResult, backup_files, codex_home, config,
+    IvyError, IvyJson as J, IvyResult,
+    agent_backends::{AgentBackend, configured_backends},
+    backup_files, codex_home, config,
     layout::{self, StorageArea, StorageContext},
     node_path::{self, Style},
     private_backup::NativeBackupPaths,
@@ -12,9 +14,10 @@ use ivy_contracts::{
     core_schema::{validate_host, validate_shared},
     hash::hash_json,
     json,
+    native_backend::BackendIdentity,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     path::PathBuf,
     sync::Arc,
 };
@@ -97,10 +100,22 @@ fn home_context(b: &RestoreBindings) -> codex_home::HomeContext<'_> {
         account_home: &b.storage.account_home,
     }
 }
-fn owned_home(config: &J, instance: &J, b: &RestoreBindings) -> IvyResult<bool> {
-    Ok(codex_home::instance_owned_codex_home_json(
-        instance.required("settings")?,
-        &field(&layout::service_paths(config, instance)?, "data")?,
+fn owned_home(
+    config: &J,
+    instance: &J,
+    backend: &AgentBackend<'_>,
+    b: &RestoreBindings,
+) -> IvyResult<bool> {
+    let paths = if backend.data_root.is_none() {
+        Some(layout::service_paths(config, instance)?)
+    } else {
+        None
+    };
+    Ok(codex_home::instance_owned_codex_home_data_json(
+        backend.settings,
+        backend
+            .data_root
+            .or_else(|| paths.as_ref().and_then(|paths| paths.get("data"))),
         &home_context(b),
     )?
     .is_some())
@@ -199,20 +214,27 @@ pub async fn verify_backup(
         .unwrap_or(&[]);
     let mut shared_instances = Vec::new();
     for instance in array(configuration.required("instances")?)? {
-        if instance.get("componentId") == Some(&"agent-manager".into())
-            && (codex_home::uses_external_app_server_json(instance.required("settings")?)?
-                || !owned_home(&configuration, instance, b)?)
-        {
-            shared_instances.push(instance);
+        if instance.get("componentId") == Some(&"agent-manager".into()) {
+            for backend in configured_backends(instance.required("settings")?, None)? {
+                if codex_home::uses_external_app_server_json(backend.settings)?
+                    || !owned_home(&configuration, instance, &backend, b)?
+                {
+                    shared_instances.push((instance, backend));
+                }
+            }
         }
     }
     let mut valid = shared.len() == shared_instances.len();
-    let mut seen = BTreeSet::new();
+    let mut seen = HashSet::new();
     for home in shared {
-        valid &= seen.insert(field(home, "instanceId")?);
-        let instance = shared_instances
-            .iter()
-            .find(|v| v.get("instanceId") == home.get("instanceId"));
+        valid &= seen.insert((
+            field(home, "instanceId")?,
+            BackendIdentity::optional(home.get("backend"))?,
+        ));
+        let instance = shared_instances.iter().find(|(instance, backend)| {
+            instance.get("instanceId") == home.get("instanceId")
+                && BackendIdentity::matches(home, backend.identity.as_ref())
+        });
         let path = field(home, "path")?;
         if instance.is_none()
             || !node_path::is_absolute(b.storage.paths.style, &path)
@@ -223,7 +245,7 @@ pub async fn verify_backup(
             valid = false;
             continue;
         }
-        let settings = instance.unwrap().required("settings")?;
+        let settings = instance.unwrap().1.settings;
         let connection = settings.get("appServer");
         let explicit = connection
             .filter(|v| v.get("mode") == Some(&"external-proxy".into()))

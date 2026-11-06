@@ -160,9 +160,22 @@ for (const component of ['fixture', 'host-executor', 'task-board', 'secretary', 
     for (const path of [
       ...['hive-mcp-instructions.md','hive-mcp-agent-summary.md','hive-mcp-examples.md','ivy-dev-mcp-instructions.md'].map(name=>'instructions/'+name),
       ...claudeAssets.map(name=>'services/agent-manager/claude/'+name),
+      'specs/native/codex-0.142.3/catalog.json',
     ]) {
       const target=join(root,path);mkdirSync(dirname(target),{recursive:true});writeFileSync(target,readFileSync(path));
     }
+    const session = join(root, 'services/agent-manager/claude/bridge/session.mjs');
+    const savedSession = readFileSync(session);
+    writeFileSync(session, Buffer.concat([savedSession, Buffer.from('\n// changed transport\n')]));
+    assert.throws(() => buildNativeDeployment({ component, root, target: 'x86_64-pc-windows-msvc', identity, cargo }), /Pinned SDK bridge differs/);
+    assert.equal(calls.length, 0, 'Transport drift must fail before Cargo or staging');
+    writeFileSync(session, savedSession);
+    const catalog = join(root, 'specs/native/codex-0.142.3/catalog.json');
+    const savedCatalog = readFileSync(catalog);
+    writeFileSync(catalog, JSON.stringify({ ...JSON.parse(savedCatalog), nativeExecutableHash: 'sha256:' + '0'.repeat(64) }));
+    assert.throws(() => buildNativeDeployment({ component, root, target: 'x86_64-pc-windows-msvc', identity, cargo }), /catalog pin differs/);
+    assert.equal(calls.length, 0, 'A stale catalog pin must fail before Cargo or staging');
+    writeFileSync(catalog, savedCatalog);
   }
   let uiBuilds = 0;
   const buildUi = selected => { assert.equal(selected, root); uiBuilds++; return []; };

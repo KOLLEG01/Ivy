@@ -50,7 +50,21 @@ async fn actions(world: &World<'_>, catalogs: &CheckedNativeContracts) -> Vec<Js
         let result: IvyResult<Json> = match action[0].as_str().unwrap().as_str() {
             "step" => subject.step(&run).await.map(|_| Json::Null),
             "drain" => subject.drain(&run).await.map(Json::Bool),
-            "notification" => Ok(subject.notification(&action[1]).into()),
+            "notification" => {
+                // Historical hints omitted mandatory native event identity.
+                // Supply the original observed owner without changing outcomes.
+                let mut notice = action[1].clone();
+                let mut params = f(&notice, "params").clone();
+                let mut payload = f(&params, "payload").clone();
+                payload.insert("serviceNodeId", f(&params, "serviceNodeId").clone());
+                payload.insert("epoch", f(f(world.row, "context"), "epoch").clone());
+                let mut body = f(&payload, "params").clone();
+                body.insert("turnId", f(f(world.row, "context"), "turnId").clone());
+                payload.insert("params", body);
+                params.insert("payload", payload);
+                notice.insert("params", params);
+                Ok(subject.notification(&notice).into())
+            }
             "clock" => {
                 world.now.set(action[1].as_f64().unwrap());
                 Ok(Json::Null)
@@ -182,6 +196,345 @@ fn snapshot(world: &World<'_>) {
             ]),
         ]),
     );
+}
+
+#[tokio::test]
+async fn routed_notifications_follow_observed_owner_epoch_account_and_exact_turn() {
+    use ivy_contracts::native_backend::{BackendIdentity, NativeProvider};
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let source = data()
+        .required("rows")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| f(row, "name").is_str("unchanged active poll writes no evidence"))
+        .unwrap();
+    for (provider, version) in [
+        (NativeProvider::Codex, "0.163.0"),
+        (NativeProvider::Claude, "0.142.3"),
+    ] {
+        for scoped in [false, true] {
+            let backend = BackendIdentity::new("primary".into(), provider, "one".into()).unwrap();
+            let foreign = BackendIdentity::new("primary".into(), provider, "two".into()).unwrap();
+            let contract = catalogs
+                .checked_native_contract(&version.into(), None)
+                .unwrap();
+            let mut row = attached(source);
+            let mut run = f(&row, "run").clone();
+            let mut value = f(&run, "value").clone();
+            let mut original = f(&value, "target").clone();
+            let mut plan = f(&value, "plan").clone();
+            plan.insert("nativeVersion", version.into());
+            plan.insert(
+                "catalogSourceHash",
+                contract.catalog().required("sourceHash").unwrap().clone(),
+            );
+            if scoped {
+                original = backend.arguments(original).unwrap();
+                plan = backend.arguments(plan).unwrap();
+                let mut primary = f(&value, "primaryResourceRef").clone();
+                primary.insert("namespace", backend.id().into());
+                value.insert("primaryResourceRef", primary);
+            }
+            value.insert("target", original.clone());
+            value.insert("plan", plan);
+            run.insert("value", value.clone());
+            row.insert("run", run);
+            let target = |node: &str| {
+                backend
+                    .arguments(Json::object([
+                        ("hostId", f(&original, "hostId").clone()),
+                        ("serviceNodeId", node.into()),
+                    ]))
+                    .unwrap()
+            };
+            let next = target("next");
+            let route_task = |mut task: Json, selected: &Json| {
+                task.insert(
+                    "nativeRoutes",
+                    Json::Array(vec![Json::object([
+                        ("source", original.clone()),
+                        ("target", selected.clone()),
+                    ])]),
+                );
+                task
+            };
+            let mut task = f(&row, "task").clone();
+            task.insert("value", route_task(f(&task, "value").clone(), &next));
+            row.insert("task", task);
+            let observations = |node: &str, epoch: &str| {
+                let update = |mut observation: Json| {
+                    observation.insert("serviceNodeId", node.into());
+                    observation.insert("epoch", epoch.into());
+                    observation.insert("nativeVersion", version.into());
+                    observation.insert(
+                        "nativeExecutableHash",
+                        contract
+                            .catalog()
+                            .required("nativeExecutableHash")
+                            .unwrap()
+                            .clone(),
+                    );
+                    observation.insert("catalogHash", contract.catalog_hash().into());
+                    backend.arguments(observation).unwrap()
+                };
+                (
+                    update(f(&row, "metadata").clone()),
+                    update(f(&row, "turns").clone()),
+                )
+            };
+            let world = World::new(&row);
+            *world.find_observations.borrow_mut() = Some(observations("next", "epoch"));
+            let subject =
+                NativeOrchestrator::new(&world, &world, &world, &catalogs, progress_tracker());
+            let notice = |node: &str,
+                          selected: Option<&BackendIdentity>,
+                          epoch: &str,
+                          thread: &str,
+                          turn: Option<&str>,
+                          method: &str| {
+                let mut body = Json::object([("threadId", thread.into())]);
+                if let Some(turn) = turn {
+                    body.insert("turnId", turn.into());
+                }
+                let event = BackendIdentity::select_arguments(
+                    selected,
+                    Json::object([
+                        ("sequence", Json::Number(1.0)),
+                        ("serviceNodeId", node.into()),
+                        ("nativeVersion", version.into()),
+                        ("epoch", epoch.into()),
+                        ("method", method.into()),
+                        ("params", body),
+                        ("observedAt", "2026-01-02T03:04:05.006Z".into()),
+                    ]),
+                )
+                .unwrap();
+                Json::object([(
+                    "params",
+                    Json::object([("serviceNodeId", node.into()), ("payload", event)]),
+                )])
+            };
+            assert!(subject.drain(&id(200)).await.unwrap());
+            let correct = notice(
+                "next",
+                Some(&backend),
+                "epoch",
+                "thread",
+                Some("turn"),
+                "turn/completed",
+            );
+            assert!(subject.notification(&correct));
+            *world.find_observations.borrow_mut() =
+                Some(observations("changed-during-read", "epoch"));
+            subject.step(&id(200)).await.unwrap();
+            assert!(!subject.notification(&correct));
+            *world.find_observations.borrow_mut() = Some(observations("next", "epoch"));
+            subject.step(&id(200)).await.unwrap();
+            assert!(subject.notification(&correct));
+            world.now.set(300_001.0);
+            assert_eq!(subject.diagnostics().unwrap().len(), 1);
+            for wrong in [
+                notice(
+                    "native-agent",
+                    None,
+                    "epoch",
+                    "thread",
+                    Some("turn"),
+                    "turn/completed",
+                ),
+                notice(
+                    "next",
+                    None,
+                    "epoch",
+                    "thread",
+                    Some("turn"),
+                    "turn/completed",
+                ),
+                notice(
+                    "next",
+                    Some(&foreign),
+                    "epoch",
+                    "thread",
+                    Some("turn"),
+                    "turn/completed",
+                ),
+                notice(
+                    "next",
+                    Some(&backend),
+                    "old",
+                    "thread",
+                    Some("turn"),
+                    "turn/completed",
+                ),
+                notice(
+                    "next",
+                    Some(&backend),
+                    "epoch",
+                    "other",
+                    Some("turn"),
+                    "turn/completed",
+                ),
+                notice(
+                    "next",
+                    Some(&backend),
+                    "epoch",
+                    "thread",
+                    Some("other"),
+                    "turn/completed",
+                ),
+                notice(
+                    "next",
+                    Some(&backend),
+                    "epoch",
+                    "thread",
+                    Some("turn"),
+                    "ignored",
+                ),
+            ] {
+                assert!(!subject.notification(&wrong));
+                assert_eq!(subject.diagnostics().unwrap().len(), 1);
+            }
+            for key in ["epoch", "serviceNodeId", "backend"] {
+                let mut malformed = correct.clone();
+                let mut params = f(&malformed, "params").clone();
+                let mut event = f(&params, "payload").clone();
+                event.insert(key, Json::Null);
+                params.insert("payload", event);
+                malformed.insert("params", params);
+                assert!(!subject.notification(&malformed), "{key}");
+            }
+            let mut foreign_source = correct.clone();
+            let mut params = f(&foreign_source, "params").clone();
+            params.insert("serviceNodeId", "foreign".into());
+            foreign_source.insert("params", params);
+            assert!(!subject.notification(&foreign_source));
+            let mut nested_turn = correct.clone();
+            let mut params = f(&nested_turn, "params").clone();
+            let mut event = f(&params, "payload").clone();
+            let mut body = f(&event, "params").clone();
+            body.insert("turn", Json::object([("id", "other".into())]));
+            event.insert("params", body);
+            params.insert("payload", event);
+            nested_turn.insert("params", params);
+            assert!(!subject.notification(&nested_turn));
+            assert!(!subject.notification(&notice(
+                "next",
+                Some(&backend),
+                "epoch",
+                "thread",
+                Some("turn"),
+                "item/agentMessage/delta"
+            )));
+            assert!(subject.diagnostics().unwrap().is_empty());
+            assert!(subject.notification(&notice(
+                "next",
+                Some(&backend),
+                "epoch",
+                "thread",
+                None,
+                "thread/status/changed"
+            )));
+
+            // Only a matching completion hint releases a delayed retry.
+            *world.fault.borrow_mut() = Json::object([
+                ("where", "owner".into()),
+                ("code", "invalid_arguments".into()),
+                ("message", "Fixture unavailable.".into()),
+            ]);
+            assert!(subject.drain(&id(200)).await.is_err());
+            assert!(!subject.notification(&notice(
+                "next",
+                Some(&foreign),
+                "epoch",
+                "thread",
+                Some("turn"),
+                "turn/completed"
+            )));
+            assert!(!subject.drain(&id(200)).await.unwrap());
+            assert!(subject.notification(&correct));
+            assert!(subject.drain(&id(200)).await.is_err());
+            *world.fault.borrow_mut() = Json::Null;
+
+            let original_run = world.run(&id(200));
+            let last = target("last");
+            let mut current = world.task(&id(100));
+            current.value = route_task(current.value, &last);
+            world.tasks.borrow_mut().insert(id(100), current);
+            *world.find_observations.borrow_mut() = Some(observations("last", "replacement"));
+            subject.step(&id(200)).await.unwrap();
+            assert!(!subject.notification(&correct));
+            let last_notice = notice(
+                "last",
+                Some(&backend),
+                "replacement",
+                "thread",
+                Some("turn"),
+                "turn/completed",
+            );
+            assert!(subject.notification(&last_notice));
+            *world.find_observations.borrow_mut() = Some(observations("last", "again"));
+            subject.step(&id(200)).await.unwrap();
+            assert!(!subject.notification(&last_notice));
+            let current_notice = notice(
+                "last",
+                Some(&backend),
+                "again",
+                "thread",
+                Some("turn"),
+                "turn/completed",
+            );
+            assert!(subject.notification(&current_notice));
+            assert_eq!(world.run(&id(200)).value, original_run.value);
+            // A failed inspection after a new published route retires the old
+            // hint; it cannot reset retries for a different current owner.
+            let mut current = world.task(&id(100));
+            current.value = route_task(current.value, &target("unavailable"));
+            world.tasks.borrow_mut().insert(id(100), current);
+            *world.fault.borrow_mut() = Json::object([
+                ("where", "find".into()),
+                ("code", "native_unavailable".into()),
+                ("message", "Fixture unavailable.".into()),
+            ]);
+            subject.step(&id(200)).await.unwrap();
+            assert!(!subject.notification(&current_notice));
+
+            let mut stopped_row = row.clone();
+            let mut input = f(&stopped_row, "input").clone();
+            input.insert("stopped", true.into());
+            stopped_row.insert("input", input);
+            let stopped = World::new(&stopped_row);
+            *stopped.find_observations.borrow_mut() = Some(observations("next", "epoch"));
+            let subject = NativeOrchestrator::new(
+                &stopped,
+                &stopped,
+                &stopped,
+                &catalogs,
+                progress_tracker(),
+            );
+            subject.step(&id(200)).await.unwrap();
+            assert!(subject.notification(&correct));
+            *stopped.find_observations.borrow_mut() = Some(observations("next", "replacement"));
+            subject.step(&id(200)).await.unwrap();
+            assert!(!subject.notification(&correct));
+            assert!(!subject.notification(&notice(
+                "next",
+                Some(&backend),
+                "replacement",
+                "thread",
+                Some("turn"),
+                "turn/completed"
+            )));
+            assert!(stopped.log.borrow().iter().any(|row| {
+                row.as_array().is_some_and(|row| {
+                    row[0].is_str("update")
+                        && f(f(&row[1], "change"), "code").is_str("native_process_lost")
+                })
+            }));
+        }
+    }
 }
 
 fn live_case(name: &str) -> bool {
@@ -439,6 +792,30 @@ async fn bounded_orchestration_preserves_historical_fences_and_current_native_po
                 vec![("task-board/run", Json::String(id(200))); attempted.len()],
             );
             current += 1;
+        } else if name == "bounded maps preserve insertion and refresh eviction" {
+            // Unstarted turns have no observed native owner to receive hints.
+            // The existing bounded retry map still expires its oldest entry.
+            same(
+                &Json::Array(results),
+                &Json::Array(vec![
+                    outcome(Ok(Json::Null)),
+                    outcome(Ok(false.into())),
+                    outcome(Ok(false.into())),
+                    outcome(Ok(false.into())),
+                    outcome(Ok(true.into())),
+                    outcome(Ok(true.into())),
+                ]),
+            );
+            let log = world.log.borrow();
+            let count = |name: &str| {
+                log.iter()
+                    .filter(|row| row.as_array().unwrap()[0].is_str(name))
+                    .count()
+            };
+            assert_eq!(count("cache-enter"), 1026);
+            assert_eq!(count("prepare"), 1026);
+            assert_eq!(count("find"), 0);
+            current += 1;
         } else if name == "notifications are scoped advisory retry hints" {
             let failure = || {
                 outcome(Err(IvyError::new(
@@ -528,5 +905,70 @@ async fn bounded_orchestration_preserves_historical_fences_and_current_native_po
         "Historical trace changes require explicit current assertions:\n{}",
         mismatches.join("\n")
     );
-    assert_eq!((rows.len(), golden, current), (87, 70, 17));
+    assert_eq!((rows.len(), golden, current), (87, 69, 18));
+}
+
+#[tokio::test]
+async fn observed_notification_index_updates_at_capacity_without_evicting_other_runs() {
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let source = data()
+        .required("rows")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| f(row, "name").is_str("unchanged active poll writes no evidence"))
+        .unwrap();
+    let row = attached(source);
+    let world = World::new(&row);
+    let subject = NativeOrchestrator::new(&world, &world, &world, &catalogs, progress_tracker());
+    let notice = |number| {
+        let run = world.run(&id(number));
+        Json::object([(
+            "params",
+            Json::object([
+                ("serviceNodeId", "native-agent".into()),
+                (
+                    "payload",
+                    Json::object([
+                        ("serviceNodeId", "native-agent".into()),
+                        ("epoch", "epoch".into()),
+                        ("method", "turn/completed".into()),
+                        (
+                            "params",
+                            Json::object([
+                                (
+                                    "threadId",
+                                    f(f(&run.value, "primaryResourceRef"), "nativeId").clone(),
+                                ),
+                                ("turnId", f(&run.value, "turnId").clone()),
+                            ]),
+                        ),
+                    ]),
+                ),
+            ]),
+        )])
+    };
+    for number in 201..1225 {
+        subject.step(&id(number)).await.unwrap();
+    }
+    assert!(subject.notification(&notice(201)));
+    subject.step(&id(1224)).await.unwrap();
+    assert!(
+        subject.notification(&notice(201)),
+        "Refreshing an existing entry must retain the oldest other entry."
+    );
+    subject.step(&id(1225)).await.unwrap();
+    assert!(!subject.notification(&notice(201)));
+    assert!(subject.notification(&notice(202)));
+    let mut finished = world.run(&id(202));
+    finished.value.insert("phase", "completed".into());
+    finished.value.insert(
+        "externalOutcome",
+        Json::object([("state", "succeeded".into())]),
+    );
+    world.runs.borrow_mut().insert(id(202), finished);
+    subject.step(&id(202)).await.unwrap();
+    assert!(!subject.notification(&notice(202)));
 }

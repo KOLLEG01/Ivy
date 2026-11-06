@@ -80,6 +80,9 @@ impl<S: TurnEvidenceStore> FullTurnEvidence<'_, S> {
                 value.required("run")?,
                 reference.required("artifact")?,
                 &ReadIdentity {
+                    backend: ivy_contracts::native_backend::BackendIdentity::optional(
+                        initial.get("backend"),
+                    )?,
                     observation_id: s(reference, "observationId")?.clone(),
                     caller_principal_id: self.turns.principal_id.clone(),
                     service_node_id: s(initial, "serviceNodeId")?.clone(),

@@ -37,43 +37,51 @@ pub async fn project_storage_areas(
         if instance.get("componentId") != Some(&"agent-manager".into()) {
             continue;
         }
-        let data = node_path::filesystem_path(&text(
-            layout::service_paths(config, instance)?.required("data")?,
-        )?);
-        let path = data.join("project-backup-paths.json");
-        if !backup_files::exists(&path).await? {
-            continue;
-        }
-        let paths = config::json_file(path, config::CONFIGURATION_BYTES).await?;
-        let paths = paths
-            .as_array()
-            .filter(|a| {
-                a.len() <= 256
-                    && a.iter().all(|v| {
-                        v.as_js_string()
-                            .is_some_and(|s| node_path::is_absolute(context.paths.style, s))
-                    })
-            })
-            .ok_or_else(|| {
-                IvyError::new(
-                    "backup_invalid",
-                    "Invalid cached internal project inventory.",
-                )
-            })?;
-        for path in paths {
-            let cwd = text(path)?;
-            if areas.iter().any(|a| context.paths.inside(&a.path, &cwd)) {
+        let service_paths = layout::service_paths(config, instance)?;
+        for backend in crate::agent_backends::configured_backends(
+            instance.required("settings")?,
+            service_paths.get("data"),
+        )? {
+            let data = node_path::filesystem_path(&text(
+                backend.data_root.ok_or_else(IvyError::internal)?,
+            )?);
+            let path = data.join("project-backup-paths.json");
+            if !backup_files::exists(&path).await? {
                 continue;
             }
-            areas.push(StorageArea {
-                key: concat(&[
+            let paths = config::json_file(path, config::CONFIGURATION_BYTES).await?;
+            let paths = paths
+                .as_array()
+                .filter(|a| {
+                    a.len() <= 256
+                        && a.iter().all(|v| {
+                            v.as_js_string()
+                                .is_some_and(|s| node_path::is_absolute(context.paths.style, s))
+                        })
+                })
+                .ok_or_else(|| {
+                    IvyError::new(
+                        "backup_invalid",
+                        "Invalid cached internal project inventory.",
+                    )
+                })?;
+            for path in paths {
+                let cwd = text(path)?;
+                if areas.iter().any(|a| context.paths.inside(&a.path, &cwd)) {
+                    continue;
+                }
+                let mut prefix = concat(&[
                     "retained-projects/".into(),
                     text(instance.required("instanceId")?)?,
-                    "/".into(),
-                    hash_json(path)?[7..].into(),
-                ]),
-                path: cwd,
-            });
+                ]);
+                if let Some(key) = backend.storage_key()? {
+                    prefix = concat(&[prefix, "/".into(), key.into()]);
+                }
+                areas.push(StorageArea {
+                    key: concat(&[prefix, "/".into(), hash_json(path)?[7..].into()]),
+                    path: cwd,
+                });
+            }
         }
     }
     Ok(areas)
@@ -95,8 +103,15 @@ pub fn restored_storage_areas(
                     && v.get("instanceId") == Some(&IvyJson::String(JsString(id.to_vec())))
             })
         });
+        let scoped = parts.len() == 4;
+        if parts.len() != 3 && !scoped {
+            return Err(IvyError::new(
+                "backup_invalid",
+                "Invalid retained internal project identity.",
+            ));
+        }
         let hash = parts
-            .get(2)
+            .get(if scoped { 3 } else { 2 })
             .filter(|s| s.len() == 64 && s.iter().all(|c| matches!(*c,48..=57|97..=102)))
             .ok_or_else(|| {
                 IvyError::new(
@@ -110,9 +125,36 @@ pub fn restored_storage_areas(
                 "Invalid retained internal project identity.",
             )
         })?;
-        let root = match instance.required("settings")?.get("internalProjectRoot") {
+        let mut selected = None;
+        for backend in
+            crate::agent_backends::configured_backends(instance.required("settings")?, None)?
+        {
+            let matches = if scoped {
+                backend
+                    .storage_key()?
+                    .is_some_and(|key| JsString::from(key).0 == parts[2])
+            } else {
+                backend.identity.is_none()
+            };
+            if matches {
+                selected = Some(backend);
+                break;
+            }
+        }
+        let selected = selected.ok_or_else(|| {
+            IvyError::new(
+                "backup_invalid",
+                "Retained projects must preserve their configured backend and account.",
+            )
+        })?;
+        let root = match selected.settings.get("internalProjectRoot") {
             Some(v) => text(v)?,
-            None => return Err(IvyError::new("backup_invalid", "Retained projects require an internal project root.")),
+            None => {
+                return Err(IvyError::new(
+                    "backup_invalid",
+                    "Retained projects require an internal project root.",
+                ));
+            }
         };
         areas.push(StorageArea {
             key: area.key.clone(),

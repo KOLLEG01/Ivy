@@ -14,7 +14,8 @@ fn data() -> &'static Json {
     static DATA: OnceLock<Json> = OnceLock::new();
     DATA.get_or_init(|| {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let output = reference_data::read(include_bytes!("task-board-native-advance-cases.json.gz"));
+        let output =
+            reference_data::read(include_bytes!("task-board-native-advance-cases.json.gz"));
         parse(
             std::str::from_utf8(&output).unwrap(),
             MANAGEMENT_FRAME_BYTES,
@@ -36,7 +37,7 @@ fn operation(base: &Json, slot: &str, phase: &str, at: &str) -> Json {
         .clone();
     let status = base.required("status").unwrap();
     let pending = matches!(phase, "accepted" | "prevented");
-    Json::object([
+    let mut value = Json::object([
         ("schemaVersion", Json::Number(1.0)),
         ("operationId", "original".into()),
         ("callerPrincipalId", "workflow-owner".into()),
@@ -102,7 +103,17 @@ fn operation(base: &Json, slot: &str, phase: &str, at: &str) -> Json {
                 _ => Json::Null,
             },
         ),
-    ])
+    ]);
+    if let Some(backend) = request.get("backend") {
+        value.insert("backend", backend.clone());
+    }
+    if let Some(owner) = call.get("owner") {
+        value.insert(
+            "serviceNodeId",
+            owner.required("serviceNodeId").unwrap().clone(),
+        );
+    }
+    value
 }
 struct Client {
     input: Json,
@@ -132,6 +143,10 @@ impl Client {
                 )])),
             )
             .unwrap();
+        let source = source.with_backend(
+            ivy_contracts::native_backend::BackendIdentity::optional(status.get("backend"))
+                .unwrap(),
+        );
         let definitions = [
             "thread/resume",
             "turn/start",
@@ -139,7 +154,7 @@ impl Client {
             "turn/interrupt",
         ]
         .into_iter()
-        .map(|m| (m.into(), source.definition(&m.into()).unwrap().clone()))
+        .map(|m| (m.into(), source.definition(&m.into()).unwrap()))
         .collect();
         Self {
             input: input.clone(),
@@ -183,7 +198,7 @@ impl RpcClient for Client {
                     *count += 1;
                     old
                 };
-                let definition = if namespace == "codex" {
+                let definition = if namespace != "agent" {
                     self.definitions.get(&prefix).unwrap().clone()
                 } else {
                     Json::object([
@@ -195,7 +210,7 @@ impl RpcClient for Client {
                         ("outputSchema", Json::Object(vec![])),
                     ])
                 };
-                let hash = if namespace == "codex" {
+                let hash = if namespace != "agent" {
                     if flag(&self.input, "nativeDefinitionChanged") {
                         format!("sha256:{}", "0".repeat(64))
                     } else {
@@ -217,7 +232,13 @@ impl RpcClient for Client {
                         "provider",
                         Json::object([(
                             "node",
-                            Json::object([("serviceNodeId", "native-agent".into())]),
+                            Json::object([(
+                                "serviceNodeId",
+                                self.base
+                                    .required("status")?
+                                    .required("serviceNodeId")?
+                                    .clone(),
+                            )]),
                         )]),
                     ),
                     (
@@ -235,6 +256,16 @@ impl RpcClient for Client {
             assert_eq!(method, "tools.call");
             let name = args.required("qualifiedName")?.as_str()?;
             let status = self.base.required("status")?;
+            assert!(
+                ivy_contracts::native_backend::BackendIdentity::matches(
+                    args.required("arguments")?,
+                    ivy_contracts::native_backend::BackendIdentity::optional(
+                        status.get("backend")
+                    )?
+                    .as_ref()
+                ),
+                "wrong selected account: {args:?}"
+            );
             if name == "agent.operation" {
                 if let Some(code) = self.input.get("fault").and_then(|v| v.get("operation")) {
                     return Err(failure(code.as_js_string().unwrap().clone()));
@@ -252,16 +283,17 @@ impl RpcClient for Client {
                     v
                 };
                 if phase == Json::from("absent") {
+                    let mut absence = Json::object([
+                        ("kind", "agent_operation_absent".into()),
+                        ("operationId", "original".into()),
+                        ("serviceNodeId", status.required("serviceNodeId")?.clone()),
+                        ("epoch", "epoch".into()),
+                    ]);
+                    if let Some(backend) = status.get("backend") {
+                        absence.insert("backend", backend.clone());
+                    }
                     return Err(IvyError::new("not_found", "Original operation is absent.")
-                        .with_details(merge(
-                            &Json::object([
-                                ("kind", "agent_operation_absent".into()),
-                                ("operationId", "original".into()),
-                                ("serviceNodeId", "native-agent".into()),
-                                ("epoch", "epoch".into()),
-                            ]),
-                            self.input.get("absence"),
-                        )));
+                        .with_details(merge(&absence, self.input.get("absence"))));
                 }
                 let at = self
                     .input
@@ -761,7 +793,11 @@ async fn actual_receipt_blobs_and_call_cas_survive_file_reopen_without_redispatc
         let db = Connection::open(&path).unwrap();
         local_journal::initialize(&db).unwrap();
         let allowed = Rc::new(RefCell::new(
-            [hash_json(&run).unwrap(), hash_json(task).unwrap()].into(),
+            [
+                hash_json(&run).unwrap(),
+                hash_json(&stored_task(task)).unwrap(),
+            ]
+            .into(),
         ));
         let next = Cell::new(400);
         let store = JournalStore {
@@ -893,4 +929,308 @@ async fn actual_receipt_blobs_and_call_cas_survive_file_reopen_without_redispatc
     let updates = updates.lock().unwrap();
     assert_eq!(updates.len(), 2);
     assert_eq!(updates[0], updates[1]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn selected_routes_read_original_owners_after_reopen_without_replay_authority() {
+    use ivy_contracts::native_backend::{BackendIdentity, NativeProvider};
+    use ivy_sdk::native_evidence::NativeOwnerIdentity;
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    for provider in [NativeProvider::Codex, NativeProvider::Claude] {
+        for (scoped_original, moved, missing) in [
+            (true, false, false),
+            (true, true, false),
+            (false, true, false),
+            (true, true, true),
+            (false, true, true),
+        ] {
+            let version = match provider {
+                NativeProvider::Codex => "0.163.0",
+                NativeProvider::Claude => "0.142.3",
+            };
+            let groups = data();
+            let mut base = groups
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|g| {
+                    g.required("base")
+                        .unwrap()
+                        .required("status")
+                        .unwrap()
+                        .required("nativeVersion")
+                        .unwrap()
+                        .is_str(version)
+                })
+                .unwrap()
+                .required("base")
+                .unwrap()
+                .clone();
+            let backend =
+                BackendIdentity::new("worker".into(), provider, "primary".into()).unwrap();
+            let mut status = base.required("status").unwrap().clone();
+            status.insert("backend", backend.json());
+            if moved {
+                status.insert("serviceNodeId", "joint-agent".into());
+            }
+            base.insert("status", status.clone());
+            let source = catalogs
+                .checked_native_contract(
+                    &s(&status, "nativeVersion"),
+                    Some(&Json::object([(
+                        "catalogHash",
+                        status.required("catalogHash").unwrap().clone(),
+                    )])),
+                )
+                .unwrap();
+            let selected = source.with_backend(Some(backend.clone()));
+            let mut run = base.required("run").unwrap().clone();
+            let mut original_target = run.required("target").unwrap().clone();
+            if scoped_original {
+                original_target.insert("backend", backend.json());
+            }
+            let mut original_request = run
+                .get("originalRequest")
+                .cloned()
+                .unwrap_or_else(|| Json::Object(vec![]));
+            original_request.insert("target", original_target.clone());
+            run.insert("originalRequest", original_request);
+            run.insert("target", original_target.clone());
+            let mut target = original_target.clone();
+            target.insert("backend", backend.json());
+            target.insert(
+                "serviceNodeId",
+                status.required("serviceNodeId").unwrap().clone(),
+            );
+            let mut plan = run.required("plan").unwrap().clone();
+            if scoped_original {
+                plan.insert("backend", backend.json());
+                let definitions = Json::object(
+                    [
+                        ("threadStart", "thread/start"),
+                        ("threadResume", "thread/resume"),
+                        ("turnStart", "turn/start"),
+                        ("turnInterrupt", "turn/interrupt"),
+                    ]
+                    .map(|(key, method)| {
+                        (
+                            key,
+                            selected.definition_hash(&method.into()).unwrap().into(),
+                        )
+                    }),
+                );
+                plan.insert("definitions", definitions);
+            }
+            run.insert("plan", plan);
+            let mut task = base.required("task").unwrap().clone();
+            if moved || !scoped_original {
+                task.insert(
+                    "nativeRoutes",
+                    Json::Array(vec![Json::object([
+                        ("source", original_target),
+                        ("target", target.clone()),
+                    ])]),
+                );
+            }
+            base.insert("task", task);
+            let mut attached = run.required("calls").unwrap().clone();
+            attached.insert("thread", pin(300, 1.0));
+            run.insert("calls", attached);
+            let mut call = base
+                .required("calls")
+                .unwrap()
+                .required("thread")
+                .unwrap()
+                .clone();
+            if scoped_original {
+                let mut request = call.required("request").unwrap().clone();
+                request.insert("backend", backend.json());
+                call.insert(
+                    "expectedDefinitionHash",
+                    selected
+                        .definition_hash(&s(&request, "method"))
+                        .unwrap()
+                        .into(),
+                );
+                call.insert(
+                    "owner",
+                    NativeOwnerIdentity {
+                        backend: Some(backend.clone()),
+                        service_node_id: "native-agent".into(),
+                        host_id: target.get("hostId").and_then(Json::as_js_string).cloned(),
+                        native_version: s(&request, "nativeVersion"),
+                        native_executable_hash: s(&status, "nativeExecutableHash"),
+                        catalog_hash: selected.catalog_hash().into(),
+                    }
+                    .to_json(),
+                );
+                call.insert("request", request);
+            }
+            let mut calls = base.required("calls").unwrap().clone();
+            calls.insert("thread", call.clone());
+            base.insert("calls", calls);
+            let input = Json::object([
+                ("slot", "thread".into()),
+                (
+                    "operations",
+                    Json::Array(vec![if missing {
+                        "absent".into()
+                    } else {
+                        "outcome_unknown".into()
+                    }]),
+                ),
+            ]);
+            let client = Arc::new(Client::new(&input, &base, Arc::default(), &catalogs));
+            let runtime = DriverRuntime::new(
+                client.clone(),
+                "workflow-owner".into(),
+                "workflow-service".into(),
+                |_| std::future::ready(Ok(Json::Null)),
+                || JsString::from(TIME),
+            );
+            let temp = Temporary::new();
+            let path = temp.0.join("scoped.sqlite");
+            let original_hash = hash_json(&call).unwrap();
+            let original_run_hash = hash_json(&run).unwrap();
+            let mut retained = None;
+            for round in 0..2 {
+                let db = Connection::open(&path).unwrap();
+                local_journal::initialize(&db).unwrap();
+                let allowed = Rc::new(RefCell::new(
+                    [
+                        hash_json(&run).unwrap(),
+                        hash_json(&stored_task(base.required("task").unwrap())).unwrap(),
+                    ]
+                    .into(),
+                ));
+                let next = Cell::new(400);
+                let store = JournalStore {
+                    journal: LocalJournal {
+                        connection: &db,
+                        root_object_id: Some("root".into()),
+                    },
+                    client: client.clone(),
+                    contracts: Policy {
+                        allowed: allowed.clone(),
+                    },
+                    limits: HistoryLimits::default(),
+                    now: || TIME.to_owned(),
+                    new_id: || {
+                        let n = next.get();
+                        next.set(n + 1);
+                        id(n)
+                    },
+                    cache: None,
+                };
+                if round == 0 {
+                    for revision in [1.0, 2.0] {
+                        seed(
+                            &store.journal,
+                            &allowed,
+                            "task-board/run",
+                            200,
+                            revision,
+                            &run,
+                        );
+                        seed(
+                            &store.journal,
+                            &allowed,
+                            "task-board/task",
+                            100,
+                            revision,
+                            base.required("task").unwrap(),
+                        );
+                    }
+                    seed(
+                        &store.journal,
+                        &allowed,
+                        "task-board/native-call",
+                        300,
+                        1.0,
+                        &call,
+                    );
+                }
+                let result = NativeDriver {
+                    store: &store,
+                    runtime: &runtime,
+                    prompts: &NoPrompts,
+                    catalogs: &catalogs,
+                }
+                .advance(&id(200), NativeSlot::Thread)
+                .await;
+                if missing {
+                    assert_eq!(result.unwrap_err().code, "native_absence_mismatch");
+                } else {
+                    result.unwrap();
+                }
+                assert_eq!(*client.invokes.lock().unwrap(), 0);
+                assert_eq!(
+                    hash_json(
+                        &Store::read(&store, "task-board/run", &pin(200, 2.0), true)
+                            .await
+                            .unwrap()
+                            .value
+                    )
+                    .unwrap(),
+                    original_run_hash,
+                    "Following a published current route must not rewrite the original Run"
+                );
+                let saved = Store::read(
+                    &store,
+                    "task-board/native-call",
+                    &Json::String(id(300)),
+                    true,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    hash_json(
+                        &Store::read(&store, "task-board/native-call", &pin(300, 1.0), true)
+                            .await
+                            .unwrap()
+                            .value
+                    )
+                    .unwrap(),
+                    original_hash
+                );
+                if !missing {
+                    assert_eq!(
+                        saved.value.get("ownerPhase"),
+                        Some(&Json::from("outcome_unknown"))
+                    );
+                    let intent = NativeIntent {
+                        store: &store,
+                        catalogs: &catalogs,
+                    };
+                    let expected = intent
+                        .evidence_identity(&run, &saved.value, &"workflow-owner".into())
+                        .unwrap();
+                    assert_eq!(expected.backend, scoped_original.then(|| backend.clone()));
+                    assert_eq!(expected.service_node_id, JsString::from("native-agent"));
+                    let observed = NativeEvidence {
+                        store: &store,
+                        catalogs: &catalogs,
+                    }
+                    .read(
+                        &saved.pin,
+                        saved.value.required("evidence").unwrap(),
+                        &expected,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        observed.get("serviceNodeId"),
+                        Some(&Json::from("native-agent"))
+                    );
+                    let hash = hash_json(&observed).unwrap();
+                    if round == 0 {
+                        retained = Some(hash);
+                    } else {
+                        assert_eq!(retained.as_ref(), Some(&hash));
+                    }
+                }
+            }
+        }
+    }
 }

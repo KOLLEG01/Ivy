@@ -703,7 +703,7 @@ impl<S: RootPublicationStore, C: Fn() -> String, P: RootPublicationChecks, H>
                     .native_update(operation, &mut steps, transcript)
                     .await
             }
-            "archive" | "newThread" | "recoverThread" => {
+            "archive" | "newThread" | "recoverThread" | "migrateNativeRoute" => {
                 self.routes.lifecycle(operation, &mut steps, outcome).await
             }
             "configure" | "savePlan" | "create" => {

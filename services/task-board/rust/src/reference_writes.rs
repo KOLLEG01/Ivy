@@ -11,6 +11,99 @@ use std::{
 };
 
 use ivy_contracts::IvyError;
+
+pub(crate) fn run_source_task(value: &Value) -> std::result::Result<Option<Value>, IvyError> {
+    let phase = f(value, "phase")?;
+    if ["completed", "failed", "cancelled"]
+        .iter()
+        .any(|state| phase.eq(&text(*state)))
+    {
+        return Ok(None);
+    }
+    Ok(Some(obj([
+        ("objectId", f(value, "taskId")?),
+        (
+            "revision",
+            f(&f(value, "originalRequest")?, "expectedRevision")?,
+        ),
+    ])))
+}
+
+/// Legacy Runs can predate source retention. An Unknown observation or verified
+/// native closure must remain publishable after its unprotected source was
+/// pruned. Neither reconstructs that source nor authorizes a new native action.
+pub(crate) async fn run_source_for_write<E, R, F, M>(
+    root: &Value,
+    value: &Value,
+    destination: &Value,
+    read: R,
+    pruned: M,
+) -> std::result::Result<Option<Value>, E>
+where
+    E: From<IvyError>,
+    R: Fn(Value) -> F,
+    F: Future<Output = std::result::Result<Value, E>>,
+    M: Fn(&E) -> bool,
+{
+    let source = run_source_task(value)?;
+    let state = value.get("externalOutcome").and_then(|v| v.get("state"));
+    let pending =
+        value.get("phase") == Some(&text("outcome_unknown")) && state == Some(&text("unknown"));
+    let closed = value.get("phase") == Some(&text("publishing_result"))
+        && ["succeeded", "failed"]
+            .iter()
+            .any(|v| state == Some(&text(*v)));
+    if (!pending && !closed) || destination.get("create").is_some() {
+        return Ok(source);
+    }
+    let address = obj([
+        ("objectId", destination.required("objectId")?.clone()),
+        (
+            "revision",
+            destination.required("expectedRevision")?.clone(),
+        ),
+    ]);
+    let record = read(address.clone()).await?;
+    let object = record.required("object")?;
+    let revision = record.required("revision")?;
+    let content = record.required("content")?;
+    if object.get("contractKey") != Some(&text("task-board/run"))
+        || object.get("id") != address.get("objectId")
+        || object.get("parentId") != Some(root)
+        || object.get("ownerObjectId") != Some(&Value::Null)
+        || revision.get("objectId") != address.get("objectId")
+        || revision.get("revision") != address.get("revision")
+        || content.get("encoding") != Some(&text("json"))
+        || revision.get("contentHash") != Some(&text(hash(content.required("value")?)?))
+    {
+        return Err(IvyError::new(
+            "task_board_scope_mismatch",
+            "A passive Run update requires its exact original stored revision.",
+        )
+        .into());
+    }
+    let previous = content.required("value")?;
+    let unchanged = |v: &Value| {
+        let mut v = v.clone();
+        v.remove("externalOutcome");
+        v.remove("updatedAt");
+        v.remove("phase");
+        v
+    };
+    if previous.get("phase") == Some(&text("outcome_unknown"))
+        && previous.get("externalOutcome").and_then(|v| v.get("state")) == Some(&text("unknown"))
+        && revision.required("references")? == &obj([])
+        && hash(&unchanged(previous))? == hash(&unchanged(value))?
+    {
+        match read(source.as_ref().ok_or_else(IvyError::internal)?.clone()).await {
+            Err(error) if pruned(&error) => return Ok(None),
+            Err(error) => return Err(error),
+            Ok(_) => {}
+        }
+    }
+    Ok(source)
+}
+
 fn objects(value: &Value) -> std::result::Result<Vec<Value>, IvyError> {
     v::items(value)?
         .iter()

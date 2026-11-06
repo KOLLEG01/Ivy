@@ -247,6 +247,7 @@ impl NativeActivationRuntime {
     }
 }
 impl ActivationRuntime for NativeActivationRuntime {
+    fn node_runtime(&self) -> Option<crate::node_runtime::NodeRuntime> { self.preparation.node.clone() }
     fn prepare<'a>(
         &'a self,
         c: &'a OperationContext,

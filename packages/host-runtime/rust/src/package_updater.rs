@@ -1,5 +1,6 @@
 //! Catalog selection and immutable package import. Transport policy is supplied
 //! by the composing host; admission, locking and journal replay stay here.
+pub(crate) mod transfers;
 use crate::{
     IvyError, IvyJson, IvyResult, artifact, config,
     executor_lock::ExecutorLock,
@@ -377,6 +378,7 @@ impl Inner {
         )
         .await?;
         let result = self.import_locked(entry).await;
+        if let Ok(candidate) = &result { crate::storage_retention::candidate_used(&host, candidate).await?; }
         lock.close().await?;
         result
     }
@@ -420,6 +422,7 @@ impl Inner {
                     self.node.as_ref(),
                 )
                 .await?;
+                transfers::complete_existing(host.clone(), text(entry, "archiveHash")?, build.clone()).await?;
                 return Ok(candidate);
             }
             Err(error) if error.code == "not_found" => (),
@@ -442,23 +445,17 @@ impl Inner {
                 self.journal
                     .save_candidate(candidate.clone(), entry.required("manifest")?.clone())
                     .await?;
+                transfers::complete_existing(host.clone(), text(entry, "archiveHash")?, build.clone()).await?;
                 return Ok(candidate);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
             Err(_) => return Err(IvyError::internal()),
         }
         let archive_hash = text(entry, "archiveHash")?;
-        let temporary = config::path_value(host.required("stagingRoot")?)?
-            .join(format!("package-{}", &archive_hash[7..]));
-        let suffix = |suffix: &str| {
-            let mut path = temporary.as_os_str().to_os_string();
-            path.push(suffix);
-            PathBuf::from(path)
-        };
-        let archive = suffix(".tar.gz");
-        let extraction = suffix("-extract");
+        let transfer = transfers::Transfer::begin(host.clone(), archive_hash.clone(), build.clone()).await?;
+        let archive = transfer.archive();
+        let extraction = transfer.extraction();
         let incoming = artifacts.join(format!("incoming-package-{}", &archive_hash[7..]));
-        remove(temporary).await?;
         remove(extraction.clone()).await?;
         remove(incoming.clone()).await?;
         tokio::fs::create_dir_all(archive.parent().ok_or_else(IvyError::internal)?)
@@ -519,9 +516,9 @@ impl Inner {
             Ok(candidate)
         }
         .await;
-        let _ = remove(archive).await;
-        let _ = remove(extraction).await;
-        let _ = remove(incoming).await;
+        if result.as_ref().err().is_none_or(|e: &IvyError| e.outcome != crate::Outcome::Unknown) {
+            transfer.complete().await?;
+        }
         result
     }
     async fn sync(&self, state: &mut State) -> IvyResult<PackageSyncResult> {

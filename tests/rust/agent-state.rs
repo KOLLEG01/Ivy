@@ -1,4 +1,6 @@
 use ivy_agent_manager::local_state::{Limits, LocalAgentState, Pin};
+#[path = "agent-completion-state.rs"]
+mod completion_state;
 
 fn normalized(
     mut saved: ivy_agent_manager::local_state::SavedState,
@@ -75,6 +77,162 @@ fn operation(time: u64, phase: &str) -> IvyJson {
 }
 fn assert_code<T: std::fmt::Debug>(result: ivy_contracts::IvyResult<T>, code: &str) {
     assert_eq!(result.unwrap_err().code, code);
+}
+
+#[test]
+fn original_provider_must_be_seeded_before_retained_state_can_acquire_a_new_route_or_account() {
+    use ivy_contracts::native_backend::{BackendIdentity, NativeProvider};
+    for (provider, kind) in [
+        (NativeProvider::Codex, "operation"),
+        (NativeProvider::Claude, "operation"),
+        (NativeProvider::Codex, "allocation"),
+        (NativeProvider::Claude, "allocation"),
+    ] {
+        let f = Fixture::new();
+        let mut state = f.open(10, 64 * 1024 * 1024);
+        let mut receipt = operation(1, "outcome_unknown");
+        receipt.insert("serviceNodeId", "agent".into());
+        let saved = normalized(state.write(kind, "original", &receipt, None).unwrap());
+        let backend = BackendIdentity::new("native".into(), provider, "work".into()).unwrap();
+        assert_code(
+            state.bind_backend(provider, Some(&backend)),
+            "native_state_migration_required",
+        );
+        state.close().unwrap();
+        let open = |node: &str| {
+            LocalAgentState::open(
+                &f.path(),
+                node.into(),
+                Limits {
+                    max_operations: 10,
+                    max_journal_bytes: 64 * 1024 * 1024,
+                },
+            )
+            .unwrap()
+        };
+        let mut moved = open("joint.agent");
+        assert_code(
+            moved.bind_backend(provider, None),
+            "native_state_migration_required",
+        );
+        assert_code(
+            moved.bind_backend(provider, Some(&backend)),
+            "native_state_migration_required",
+        );
+        moved.close().unwrap();
+        let mut original = open("agent");
+        original.bind_backend(provider, None).unwrap();
+        assert_eq!(
+            original.read(kind, "original").unwrap(),
+            Some(saved.clone())
+        );
+        original.close().unwrap();
+        let foreign_provider = if provider == NativeProvider::Codex {
+            NativeProvider::Claude
+        } else {
+            NativeProvider::Codex
+        };
+        let foreign =
+            BackendIdentity::new("native".into(), foreign_provider, "work".into()).unwrap();
+        let mut moved = open("joint.agent");
+        assert_code(
+            moved.bind_backend(foreign_provider, None),
+            "native_backend_mismatch",
+        );
+        assert_code(
+            moved.bind_backend(foreign_provider, Some(&foreign)),
+            "native_backend_mismatch",
+        );
+        assert_code(
+            moved.bind_backend(provider, Some(&foreign)),
+            "native_backend_mismatch",
+        );
+        moved.bind_backend(provider, Some(&backend)).unwrap();
+        moved.close().unwrap();
+        let mut moved = open("joint.agent");
+        moved.bind_backend(provider, Some(&backend)).unwrap();
+        assert_code(
+            moved.bind_backend(provider, None),
+            "native_backend_mismatch",
+        );
+        let other_account =
+            BackendIdentity::new("native".into(), provider, "personal".into()).unwrap();
+        assert_code(
+            moved.bind_backend(provider, Some(&other_account)),
+            "native_backend_mismatch",
+        );
+        assert_eq!(moved.read(kind, "original").unwrap(), Some(saved));
+        moved.close().unwrap();
+        let db = Connection::open(f.path()).unwrap();
+        let mut query = db.prepare("SELECT key,value FROM state_metadata WHERE key IN ('native_provider','storage_owner') ORDER BY key").unwrap();
+        let metadata: Vec<(String, String)> = query
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            metadata,
+            vec![
+                ("native_provider".into(), provider.as_str().into()),
+                ("storage_owner".into(), "agent".into())
+            ]
+        );
+    }
+}
+
+#[test]
+fn unseeded_storage_rejects_any_foreign_or_missing_receipt_owner_without_changing_rows() {
+    for owner in [Some("foreign.agent"), None] {
+        let f = Fixture::new();
+        let mut state = f.open(10, 64 * 1024 * 1024);
+        let mut own = operation(1, "outcome_unknown");
+        own.insert("serviceNodeId", "agent".into());
+        let first = normalized(state.write("operation", "a-own", &own, None).unwrap());
+        let mut foreign = operation(2, "outcome_unknown");
+        if let Some(owner) = owner {
+            foreign.insert("serviceNodeId", owner.into());
+        }
+        let second = normalized(
+            state
+                .write("operation", "z-foreign", &foreign, None)
+                .unwrap(),
+        );
+        state.close().unwrap();
+        let db = Connection::open(f.path()).unwrap();
+        db.execute("DELETE FROM state_metadata WHERE key='storage_owner'", [])
+            .unwrap();
+        let error = LocalAgentState::open(
+            &f.path(),
+            "agent".into(),
+            Limits {
+                max_operations: 10,
+                max_journal_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, "native_state_migration_required");
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM state_metadata WHERE key='storage_owner'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        for (key, saved) in [("a-own", first), ("z-foreign", second)] {
+            let (revision, json): (i64, String) = db
+                .query_row(
+                    "SELECT revision,value_json FROM state WHERE kind='operation' AND key=?",
+                    [key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(revision, saved.pin.revision);
+            assert_eq!(value(&json), saved.value);
+        }
+    }
 }
 
 #[test]

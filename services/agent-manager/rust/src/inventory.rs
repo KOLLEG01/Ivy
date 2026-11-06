@@ -1,11 +1,12 @@
-//! Complete bounded native snapshots and guarded Hive publication.
+//! Bounded native observations and guarded Hive publication.
 use crate::{
     native_journal::{JournalClock, NativeJournal},
+    project_model::{NativeProject, NativeProjects, ProjectSnapshot},
     registry::{NATIVE_INVENTORY_SCHEMA_VERSION, NATIVE_PROJECT_SCHEMA_VERSION},
 };
 use ivy_contracts::{
-    IvyError, IvyJson, IvyResult, JsString, Outcome, agent_schema::validate_agent, json::canonical,
-    wire_schema::validate_shared,
+    IvyError, IvyJson, IvyResult, JsString, Outcome, agent_schema::validate_agent,
+    json::canonical_size, wire_schema::validate_shared,
 };
 use ivy_host_runtime::codex_rpc::{NativeRpc, RequestOptions as NativeOptions};
 use ivy_sdk::{
@@ -13,15 +14,35 @@ use ivy_sdk::{
     service::{InvocationContext, ServiceConnection, ServiceFuture},
 };
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     sync::{Arc, Mutex},
 };
 
 const SNAPSHOT_BYTES: usize = 9 * 1024 * 1024;
+const SNAPSHOT_HEAP_BYTES: usize = 32 * 1024 * 1024;
+const PAGE_ITEMS: usize = 100;
+const MAXIMUM_PAGES: usize = 64;
+const CURSOR_UNITS: usize = 8192;
+const CURSOR_BYTES: usize = 512 * 1024;
 static NULL: IvyJson = IvyJson::Null;
 pub type InventoryRead =
     dyn Fn(JsString, IvyJson, NativeOptions) -> ServiceFuture<IvyJson> + Send + Sync;
 pub type InventoryClock = dyn Fn() -> f64 + Send + Sync;
+
+#[derive(Clone, Copy)]
+pub(crate) enum ThreadChange {
+    Read { archived: bool },
+    Removed,
+}
+pub(crate) struct ThreadChanges {
+    // The first admitted hint owns this batch time through coalescing and waiting.
+    pub observed_at: Box<str>,
+    pub entries: BTreeMap<JsString, ThreadChange>,
+}
+pub(crate) struct ThreadDelta {
+    pub snapshot: IvyJson,
+    pub removed: Vec<JsString>,
+}
 
 fn require(test: bool, code: &str, message: &str) -> IvyResult<()> {
     if test {
@@ -145,7 +166,7 @@ pub struct NativeInventory {
     epoch: JsString,
     source_kinds: Vec<JsString>,
     read: Arc<InventoryRead>,
-    projects: Mutex<Vec<IvyJson>>,
+    projects: Mutex<Option<ProjectSnapshot>>,
     now: Arc<InventoryClock>,
     observed_at: Arc<JournalClock>,
 }
@@ -191,7 +212,7 @@ impl NativeInventory {
             epoch,
             source_kinds,
             read,
-            projects: Mutex::new(vec![]),
+            projects: Mutex::new(None),
             now,
             observed_at,
         })
@@ -206,13 +227,111 @@ impl NativeInventory {
     }
     pub async fn collect_threads(&self, signal: Option<&InventorySignal>) -> IvyResult<IvyJson> {
         let reader = self.reader(signal, 120_000);
-        match self.thread_snapshot(&reader).await {
+        match self.thread_snapshot(&reader, true).await {
             Err(error) if error.code == "native_inventory_changed" => {
                 reader.check()?;
-                self.thread_snapshot(&reader).await
+                self.thread_snapshot(&reader, true).await
             }
             result => result,
         }
+    }
+    /// A current-partition observation cannot replace the complete Hive set.
+    /// The manager admits it only as a delta with unchanged visible membership.
+    pub(crate) async fn collect_current_threads(
+        &self,
+        signal: Option<&InventorySignal>,
+    ) -> IvyResult<IvyJson> {
+        self.thread_snapshot(&self.reader(signal, 120_000), false)
+            .await
+    }
+    pub(crate) async fn collect_thread_changes(
+        &self,
+        changes: ThreadChanges,
+        signal: Option<&InventorySignal>,
+    ) -> IvyResult<ThreadDelta> {
+        require(
+            changes.entries.len() <= 64,
+            "native_inventory_capacity",
+            "Targeted inventory work exceeds its pending-ID bound.",
+        )?;
+        let reader = self.reader(signal, 120_000);
+        reader.check()?;
+        let observed_at = (self.observed_at)();
+        let reads = changes
+            .entries
+            .values()
+            .any(|change| matches!(change, ThreadChange::Read { .. }));
+        let owned: HashSet<_> = if reads {
+            reader.loaded().await?.into_iter().collect()
+        } else {
+            HashSet::new()
+        };
+        let mut threads = Vec::new();
+        let mut ids = HashSet::new();
+        let mut removed = Vec::new();
+        let (mut bytes, mut heap) = (0, 0);
+        for (id, change) in &changes.entries {
+            match change {
+                ThreadChange::Removed => removed.push(id.clone()),
+                ThreadChange::Read { archived } => {
+                    let result = reader
+                        .read(
+                            "thread/read",
+                            IvyJson::object([
+                                ("threadId", IvyJson::String(id.clone())),
+                                ("includeTurns", false.into()),
+                            ]),
+                        )
+                        .await?;
+                    let thread = property(&result, "thread");
+                    require(
+                        thread.get("id").and_then(IvyJson::as_js_string) == Some(id),
+                        "native_inventory_invalid",
+                        "Native thread read returned a different identity.",
+                    )?;
+                    add_thread(
+                        thread,
+                        *archived,
+                        &owned,
+                        &self.epoch,
+                        &mut threads,
+                        &mut ids,
+                        &mut bytes,
+                        &mut heap,
+                    )?;
+                }
+            }
+        }
+        if reads {
+            let after: HashSet<_> = reader.loaded().await?.into_iter().collect();
+            require(
+                owned == after,
+                "native_inventory_changed",
+                "Loaded ownership changed during the targeted observation.",
+            )?;
+        }
+        reader.check()?;
+        let at = IvyJson::String(observed_at);
+        let snapshot = IvyJson::object([
+            ("observedAt", changes.observed_at.into_string().into()),
+            (
+                "threads",
+                IvyJson::Array(
+                    threads
+                        .into_iter()
+                        .map(|summary| {
+                            IvyJson::object([
+                                ("nativeId", property(&summary, "nativeId").clone()),
+                                ("summary", summary),
+                                ("observedAt", at.clone()),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ]);
+        canonical_size(&snapshot, SNAPSHOT_BYTES)?;
+        Ok(ThreadDelta { snapshot, removed })
     }
     /// Shutdown needs current activity, not persisted conversations or turns.
     pub async fn has_active_threads(&self) -> IvyResult<bool> {
@@ -251,13 +370,20 @@ impl NativeInventory {
         }
         Ok(false)
     }
-    async fn thread_snapshot(&self, reader: &Reader<'_>) -> IvyResult<IvyJson> {
+    async fn thread_snapshot(&self, reader: &Reader<'_>, complete: bool) -> IvyResult<IvyJson> {
+        // A complete observation may span many native pages. Its oldest data
+        // must not become fresh again at the scan or publication's completion.
+        let observed_at = IvyJson::String((self.observed_at)());
         let before = reader.loaded().await?;
         let owned: HashSet<_> = before.iter().cloned().collect();
         let mut threads = Vec::new();
         let mut ids = HashSet::new();
         let mut bytes = 0;
+        let mut heap = 0;
         for archived in [false, true] {
+            if archived && !complete {
+                break;
+            }
             reader
                 .pages(
                     "thread/list",
@@ -288,12 +414,13 @@ impl NativeInventory {
                             &mut threads,
                             &mut ids,
                             &mut bytes,
+                            &mut heap,
                         )
                     },
                 )
                 .await?;
         }
-        for id in &before {
+        for id in before.iter().filter(|_| complete) {
             if !ids.contains(id) {
                 let result = reader
                     .read(
@@ -312,6 +439,7 @@ impl NativeInventory {
                     &mut threads,
                     &mut ids,
                     &mut bytes,
+                    &mut heap,
                 )?;
             }
         }
@@ -321,7 +449,6 @@ impl NativeInventory {
             "native_inventory_changed",
             "Loaded native ownership changed during enumeration; retain the previous snapshot.",
         )?;
-        let observed_at = IvyJson::String((self.observed_at)());
         let result = IvyJson::object([
             ("observedAt", observed_at.clone()),
             (
@@ -340,48 +467,34 @@ impl NativeInventory {
                 ),
             ),
         ]);
-        canonical(&result, SNAPSHOT_BYTES)?;
+        canonical_size(&result, SNAPSHOT_BYTES)?;
         reader.check()?;
         Ok(result)
     }
-    pub fn current_projects(&self, observed_at: Option<JsString>) -> IvyResult<IvyJson> {
-        let observed_at = IvyJson::String(observed_at.unwrap_or_else(|| (self.observed_at)()));
-        let projects = self
+    pub fn current_project_snapshot(&self) -> IvyResult<Option<ProjectSnapshot>> {
+        Ok(self
             .projects
             .lock()
             .map_err(|_| IvyError::internal())?
-            .clone();
-        let mut ids = HashSet::new();
-        require(
-            projects
-                .iter()
-                .all(|p| ids.insert(property(p, "nativeId").as_js_string().unwrap().clone())),
-            "native_inventory_invalid",
-            "Native project inventory contains duplicate IDs.",
-        )?;
-        let result = IvyJson::object([
-            ("observedAt", observed_at.clone()),
-            (
-                "projects",
-                IvyJson::object([
-                    ("source", "native".into()),
-                    ("observedAt", observed_at),
-                    ("projects", IvyJson::Array(projects)),
-                ]),
-            ),
-        ]);
-        validate_agent("ProjectsResult", property(&result, "projects"))?;
-        canonical(&result, SNAPSHOT_BYTES)?;
-        Ok(result)
+            .clone())
     }
     pub async fn collect_projects(&self, signal: Option<&InventorySignal>) -> IvyResult<IvyJson> {
+        Ok(self.collect_project_snapshot(signal).await?.to_json())
+    }
+    pub async fn collect_project_snapshot(
+        &self,
+        signal: Option<&InventorySignal>,
+    ) -> IvyResult<ProjectSnapshot> {
         require(
             self.supports_projects,
             "native_inventory_unavailable",
             "The connected Codex instance does not support project/list.",
         )?;
         let reader = self.reader(signal, 600_000);
-        let projects = reader
+        reader.check()?;
+        let observed_at = (self.observed_at)();
+        let mut projects = Vec::new();
+        reader
             .pages(
                 "project/list",
                 IvyJson::object([
@@ -389,29 +502,28 @@ impl NativeInventory {
                     ("sortDirection", "asc".into()),
                 ]),
                 256,
-                project_summary,
+                |value| {
+                    let project = NativeProject::from_summary(&project_summary(value)?)?;
+                    let size = (
+                        canonical_size(&project.to_json(), SNAPSHOT_BYTES)?,
+                        project.retained_bytes(),
+                    );
+                    projects.push(project);
+                    Ok(size)
+                },
             )
             .await?;
-        *self.projects.lock().map_err(|_| IvyError::internal())? = projects;
-        reader.check()?;
-        self.current_projects(None)
-    }
-    pub async fn collect(&self, signal: Option<&InventorySignal>) -> IvyResult<IvyJson> {
-        let threads = self.collect_threads(signal).await?;
-        let projects = self.collect_projects(signal).await?;
-        let thread_at = threads.required("observedAt")?;
-        let project_at = projects.required("observedAt")?;
-        let observed_at = if thread_at.as_js_string().unwrap() > project_at.as_js_string().unwrap()
-        {
-            thread_at
-        } else {
-            project_at
+        let projects = NativeProjects::new(projects)?;
+        let snapshot = ProjectSnapshot {
+            observed_at,
+            projects,
         };
-        Ok(IvyJson::object([
-            ("observedAt", observed_at.clone()),
-            ("threads", threads.required("threads")?.clone()),
-            ("projects", projects.required("projects")?.clone()),
-        ]))
+        let wire = snapshot.to_json();
+        validate_agent("ProjectsResult", property(&wire, "projects"))?;
+        canonical_size(&wire, SNAPSHOT_BYTES)?;
+        reader.check()?;
+        *self.projects.lock().map_err(|_| IvyError::internal())? = Some(snapshot.clone());
+        Ok(snapshot)
     }
 }
 impl Reader<'_> {
@@ -458,25 +570,33 @@ impl Reader<'_> {
             )
             .with_details(details));
         }
-        Ok(fields(property(&reply, "result"))?.clone())
+        let result = reply
+            .into_object()
+            .and_then(|fields| fields.into_iter().find(|(key, _)| key.eq_str("result")))
+            .map(|(_, result)| result)
+            .unwrap_or(IvyJson::Null);
+        fields(&result)?;
+        Ok(result)
     }
     async fn pages<F>(
         &self,
         method: &str,
         params: IvyJson,
         maximum: usize,
-        mut summarize: F,
-    ) -> IvyResult<Vec<IvyJson>>
+        mut consume: F,
+    ) -> IvyResult<()>
     where
-        F: FnMut(&IvyJson) -> IvyResult<IvyJson> + Send,
+        F: FnMut(&IvyJson) -> IvyResult<(usize, usize)> + Send,
     {
-        let mut result = Vec::new();
         let mut cursors = HashSet::new();
         let mut cursor: Option<JsString> = None;
+        let mut cursor_bytes = 0;
+        let mut count = 0;
         let mut bytes = 0;
-        loop {
+        let mut heap = 0;
+        for page_number in 1..=MAXIMUM_PAGES {
             let mut params = params.clone();
-            params.insert("limit", IvyJson::Number(100.0));
+            params.insert("limit", IvyJson::Number(PAGE_ITEMS as f64));
             if let Some(cursor) = &cursor {
                 params.insert("cursor", IvyJson::String(cursor.clone()));
             }
@@ -490,52 +610,74 @@ impl Reader<'_> {
             )?;
             let data = data.unwrap();
             require(
-                result.len() + data.len() <= maximum,
+                data.len() <= PAGE_ITEMS && count + data.len() <= maximum,
                 "native_inventory_capacity",
-                "Complete native inventory exceeds its declared capacity.",
+                "Native inventory exceeds its page or entry capacity.",
             )?;
-            for value in data {
-                let item = summarize(value)?;
-                bytes += canonical(&item, SNAPSHOT_BYTES)?.len();
+            // Bound continuation work and retained opaque strings independently
+            // of row counts: a filtered native page may contain no rows at all.
+            let next = next.unwrap().as_js_string();
+            if let Some(next) = next {
                 require(
-                    bytes <= SNAPSHOT_BYTES,
+                    !next.0.is_empty() && !cursors.contains(next),
+                    "native_inventory_invalid",
+                    "Native inventory continuation must be nonempty and advance.",
+                )?;
+                let retained = std::mem::size_of::<JsString>() + next.0.len() * 2;
+                require(
+                    next.0.len() <= CURSOR_UNITS
+                        && page_number < MAXIMUM_PAGES
+                        && cursor_bytes + retained <= CURSOR_BYTES,
+                    "native_inventory_capacity",
+                    "Native inventory exceeds its continuation capacity.",
+                )?;
+                cursor_bytes += retained;
+                cursors.insert(next.clone());
+            }
+            for value in data {
+                let size = consume(value)?;
+                bytes += size.0;
+                heap += size.1;
+                require(
+                    bytes <= SNAPSHOT_BYTES && heap <= SNAPSHOT_HEAP_BYTES,
                     "native_inventory_capacity",
                     "Accumulated native inventory exceeds its byte capacity.",
                 )?;
-                result.push(item);
             }
-            cursor = next.unwrap().as_js_string().cloned();
-            let Some(cursor) = &cursor else {
-                break;
+            count += data.len();
+            let Some(next) = next else {
+                return Ok(());
             };
-            require(
-                !cursors.contains(cursor) && cursors.len() < maximum + 1,
-                "native_inventory_invalid",
-                "Native inventory cursor did not advance within its bound.",
-            )?;
-            cursors.insert(cursor.clone());
+            cursor = Some(next.clone());
         }
-        Ok(result)
+        unreachable!("The last page must terminate or reject its continuation")
     }
     async fn loaded(&self) -> IvyResult<Vec<JsString>> {
-        let values = self
-            .pages(
-                "thread/loaded/list",
-                IvyJson::object::<&str>([]),
-                5000,
-                |v| Ok(v.clone()),
-            )
-            .await?;
-        let mut seen = HashSet::new();
         let mut ids = Vec::new();
-        for value in values {
-            let id = value.into_js_string();
+        self.pages(
+            "thread/loaded/list",
+            IvyJson::object::<&str>([]),
+            5000,
+            |value| {
+                let id = value.as_js_string().ok_or_else(|| {
+                    IvyError::new(
+                        "native_inventory_invalid",
+                        "Loaded native thread IDs must be strings.",
+                    )
+                })?;
+                let size = snapshot_size(value)?;
+                ids.push(id.clone());
+                Ok(size)
+            },
+        )
+        .await?;
+        let mut seen = HashSet::new();
+        for id in &ids {
             require(
-                id.as_ref().is_some_and(|id| seen.insert(id.clone())),
+                seen.insert(id),
                 "native_inventory_invalid",
                 "Loaded native thread IDs must be unique strings.",
             )?;
-            ids.push(id.unwrap());
         }
         Ok(ids)
     }
@@ -554,6 +696,12 @@ fn slice(value: &IvyJson, limit: usize) -> IvyResult<IvyJson> {
         _ => Err(IvyError::internal()),
     }
 }
+fn snapshot_size(value: &IvyJson) -> IvyResult<(usize, usize)> {
+    Ok((
+        canonical_size(value, SNAPSHOT_BYTES)?,
+        value.retained_bytes(),
+    ))
+}
 fn add_thread(
     value: &IvyJson,
     archived: bool,
@@ -562,7 +710,8 @@ fn add_thread(
     threads: &mut Vec<IvyJson>,
     ids: &mut HashSet<JsString>,
     bytes: &mut usize,
-) -> IvyResult<IvyJson> {
+    heap: &mut usize,
+) -> IvyResult<(usize, usize)> {
     let thread = fields(value)?;
     let id = property(thread, "id").as_js_string();
     require(
@@ -641,20 +790,22 @@ fn add_thread(
         }
     }
     validate_agent("ThreadSummary", &summary)?;
-    *bytes += canonical(&summary, ivy_contracts::limits::MANAGEMENT_FRAME_BYTES)?.len();
+    let size = snapshot_size(&summary)?;
+    *bytes += size.0;
+    *heap += size.1;
     require(
-        *bytes <= SNAPSHOT_BYTES,
+        *bytes <= SNAPSHOT_BYTES && *heap <= SNAPSHOT_HEAP_BYTES,
         "native_inventory_capacity",
         "Complete native thread summaries exceed their byte capacity.",
     )?;
-    threads.push(summary.clone());
+    threads.push(summary);
     ids.insert(id.unwrap().clone());
     require(
         threads.len() <= 5000,
         "native_inventory_capacity",
         "Complete native thread inventory exceeds its declared capacity.",
     )?;
-    Ok(summary)
+    Ok(size)
 }
 fn project_summary(value: &IvyJson) -> IvyResult<IvyJson> {
     let project = fields(value)?;
@@ -691,17 +842,25 @@ fn project_summary(value: &IvyJson) -> IvyResult<IvyJson> {
         ("position", position.clone()),
         ("recencyAt", recency.clone()),
     ]);
-    validate_agent("ProjectSummary", &summary)?;
     Ok(summary)
 }
 
-async fn publish_kind(
+async fn publish_kind<F>(
     connection: &dyn RpcClient,
     journal: &Mutex<NativeJournal>,
     kind: &str,
-    entries: IvyJson,
+    observed_at: &IvyJson,
+    entries: F,
     signal: Option<&InventorySignal>,
-) -> IvyResult<()> {
+) -> IvyResult<u64>
+where
+    F: Fn() -> IvyResult<IvyJson> + Send,
+{
+    let namespace = journal
+        .lock()
+        .map_err(|_| IvyError::internal())?
+        .inventory_namespace()
+        .to_owned();
     let mut minimum = 0.0;
     for attempt in 0..2 {
         if let Some(signal) = signal {
@@ -712,7 +871,7 @@ async fn publish_kind(
             .map_err(|_| IvyError::internal())?
             .inventory_revision(kind, minimum);
         let params = IvyJson::object([
-            ("namespace", "codex".into()),
+            ("namespace", namespace.as_str().into()),
             ("kind", kind.into()),
             (
                 "schemaVersion",
@@ -725,7 +884,8 @@ async fn publish_kind(
             ),
             ("mode", "snapshot".into()),
             ("snapshotRevision", IvyJson::Number(revision)),
-            ("entries", entries.clone()),
+            ("observedAt", observed_at.clone()),
+            ("entries", entries()?),
         ]);
         match connection
             .request(
@@ -735,7 +895,7 @@ async fn publish_kind(
             )
             .await
         {
-            Ok(_) => return Ok(()),
+            Ok(_) => return Ok(revision as u64),
             Err(error)
                 if error.code == "revision_conflict"
                     && error.outcome == Outcome::NotExecuted
@@ -751,7 +911,7 @@ async fn publish_kind(
                     .clone();
                 require(
                     details.get("serviceNodeId") == Some(&IvyJson::String(owner))
-                        && details.get("namespace") == Some(&"codex".into())
+                        && details.get("namespace") == Some(&namespace.as_str().into())
                         && details.get("kind") == Some(&kind.into()),
                     "target_conflict",
                     "Inventory conflict metadata belongs to a different owner or kind.",
@@ -761,19 +921,20 @@ async fn publish_kind(
             Err(error) => return Err(error),
         }
     }
-    Ok(())
+    Err(IvyError::internal())
 }
 pub async fn publish_native_threads(
     connection: &dyn RpcClient,
     journal: &Mutex<NativeJournal>,
     snapshot: &IvyJson,
     signal: Option<&InventorySignal>,
-) -> IvyResult<()> {
+) -> IvyResult<u64> {
     publish_kind(
         connection,
         journal,
         "thread",
-        snapshot.required("threads")?.clone(),
+        snapshot.required("observedAt")?,
+        || Ok(snapshot.required("threads")?.clone()),
         signal,
     )
     .await
@@ -781,48 +942,96 @@ pub async fn publish_native_threads(
 pub async fn publish_native_projects(
     connection: &dyn RpcClient,
     journal: &Mutex<NativeJournal>,
-    snapshot: &IvyJson,
+    snapshot: &ProjectSnapshot,
     signal: Option<&InventorySignal>,
 ) -> IvyResult<()> {
-    let projects = snapshot
-        .required("projects")?
-        .required("projects")?
-        .as_array()
-        .ok_or_else(IvyError::internal)?;
-    let entries = projects
-        .iter()
-        .map(|summary| {
-            Ok(IvyJson::object([
-                ("nativeId", summary.required("nativeId")?.clone()),
-                ("summary", summary.clone()),
-                ("observedAt", snapshot.required("observedAt")?.clone()),
-            ]))
-        })
-        .collect::<IvyResult<Vec<_>>>()?;
     publish_kind(
         connection,
         journal,
         "project",
-        IvyJson::Array(entries),
+        &IvyJson::String(snapshot.observed_at.clone()),
+        || {
+            Ok(IvyJson::Array(
+                snapshot
+                    .projects
+                    .entries()
+                    .iter()
+                    .map(|project| {
+                        IvyJson::object([
+                            ("nativeId", IvyJson::String(project.native_id.clone())),
+                            ("summary", project.to_json()),
+                            ("observedAt", IvyJson::String(snapshot.observed_at.clone())),
+                        ])
+                    })
+                    .collect(),
+            ))
+        },
         signal,
     )
     .await
+    .map(|_| ())
 }
-pub async fn publish_native_snapshot(
+
+pub(crate) async fn publish_thread_delta(
     connection: &dyn RpcClient,
     journal: &Mutex<NativeJournal>,
-    snapshot: &IvyJson,
-    signal: Option<&InventorySignal>,
-) -> IvyResult<()> {
-    publish_native_threads(connection, journal, snapshot, signal).await?;
-    publish_native_projects(
-        connection,
-        journal,
-        &IvyJson::object([
-            ("observedAt", snapshot.required("observedAt")?.clone()),
-            ("projects", snapshot.required("projects")?.clone()),
-        ]),
-        signal,
-    )
-    .await
+    delta: &ThreadDelta,
+    expected_revision: u64,
+    signal: &InventorySignal,
+) -> IvyResult<u64> {
+    signal.check()?;
+    let (namespace, owner, revision) = {
+        let mut journal = journal.lock().map_err(|_| IvyError::internal())?;
+        (
+            journal.inventory_namespace().to_owned(),
+            journal.owner().service_node_id.clone(),
+            journal.inventory_revision("thread", expected_revision as f64),
+        )
+    };
+    let params = IvyJson::object([
+        ("namespace", namespace.as_str().into()),
+        ("kind", "thread".into()),
+        ("schemaVersion", NATIVE_INVENTORY_SCHEMA_VERSION.into()),
+        ("mode", "delta".into()),
+        ("snapshotRevision", IvyJson::Number(revision)),
+        ("observedAt", delta.snapshot.required("observedAt")?.clone()),
+        (
+            "expectedRevision",
+            IvyJson::Number(expected_revision as f64),
+        ),
+        ("entries", delta.snapshot.required("threads")?.clone()),
+        (
+            "removedNativeIds",
+            IvyJson::Array(delta.removed.iter().cloned().map(IvyJson::String).collect()),
+        ),
+    ]);
+    match connection
+        .request("inventory.sync", params, signal.options.clone())
+        .await
+    {
+        Ok(_) => Ok(revision as u64),
+        Err(error)
+            if error.code == "revision_conflict" && error.outcome == Outcome::NotExecuted =>
+        {
+            let details = error.details.as_ref().unwrap_or(&NULL);
+            validate_shared("InventoryRevisionConflictDetails", details)?;
+            require(
+                details.get("serviceNodeId") == Some(&IvyJson::String(owner))
+                    && details.get("namespace") == Some(&namespace.as_str().into())
+                    && details.get("kind") == Some(&"thread".into()),
+                "target_conflict",
+                "Inventory delta conflict belongs to a different owner or kind.",
+            )?;
+            // A gap requires a newly observed complete snapshot, never a rebased delta.
+            journal
+                .lock()
+                .map_err(|_| IvyError::internal())?
+                .inventory_revision(
+                    "thread",
+                    details.required("currentRevision")?.as_f64().unwrap(),
+                );
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
 }

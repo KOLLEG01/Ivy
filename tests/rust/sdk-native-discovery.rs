@@ -123,6 +123,7 @@ async fn selected_owner_discovery_matches_original_typescript() {
         let t = input.get("target").unwrap();
         let field = |name| t.get(name).unwrap().as_js_string().unwrap().clone();
         let target = NativeTarget {
+            backend: None,
             service_node_id: field("serviceNodeId"),
             host_id: t.get("hostId").and_then(IvyJson::as_js_string).cloned(),
             native_version: field("nativeVersion"),

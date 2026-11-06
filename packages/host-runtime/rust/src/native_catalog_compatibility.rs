@@ -55,6 +55,16 @@ pub async fn verify_configured_native_catalog(
     instance_id: &JsString,
     settings: &IvyJson,
 ) -> IvyResult<()> {
+    for backend in crate::agent_backends::configured_backends(settings, None)? {
+        verify_backend_catalog(artifact_root, instance_id, backend.settings).await?;
+    }
+    Ok(())
+}
+async fn verify_backend_catalog(
+    artifact_root: &Path,
+    instance_id: &JsString,
+    settings: &IvyJson,
+) -> IvyResult<()> {
     let version = field(settings, "nativeVersion")?;
     let executable = field(settings, "nativeExecutableHash")?;
     // The checked selector's public interface uses configuration path strings.
@@ -172,6 +182,10 @@ async fn candidate_catalogs(root: &Path) -> IvyResult<Catalogs> {
     let key = root.as_os_str().to_owned();
     let pending = {
         let mut cache = retained.lock().map_err(|_| IvyError::internal())?;
+        if cache.len() >= 16 && !cache.contains_key(&key) {
+            // Active callers retain their own immutable pending/result handle.
+            cache.clear();
+        }
         cache
             .entry(key.clone())
             .or_insert_with(|| Arc::new(load_catalogs(root.to_owned()).boxed().shared()))
@@ -206,6 +220,7 @@ pub async fn verify_native_catalog_compatibility(
     let catalogs = candidate_catalogs(artifact_root).await?;
     let mut cursor: Option<JsString> = None;
     let mut visited = HashSet::new();
+    let mut discovered = 0usize;
     loop {
         let mut params = IvyJson::object([
             ("serviceName", "agent-manager".into()),
@@ -214,37 +229,59 @@ pub async fn verify_native_catalog_compatibility(
         if let Some(cursor) = &cursor {
             params.insert("cursor", IvyJson::String(cursor.clone()));
         }
-        let page = client
+        let mut page = client
             .request("serviceNodes.list", params, options())
             .await?;
         let nodes = page
-            .required("items")?
-            .as_array()
-            .ok_or_else(IvyError::internal)?
-            .iter()
+            .remove("items")
+            .and_then(IvyJson::into_array)
+            .ok_or_else(IvyError::internal)?;
+        discovered = discovered.saturating_add(nodes.len());
+        if discovered > 1000 {
+            return Err(IvyError::new(
+                "compatibility_unknown",
+                "Native owner discovery exceeded its bounded complete snapshot.",
+            ));
+        }
+        let nodes = nodes
+            .into_iter()
             .filter(|node| {
                 ["connected", "synced", "ready", "desiredEnabled"]
                     .iter()
                     .all(|key| node.get(key).and_then(IvyJson::as_bool) == Some(true))
                     && node.get("stale").and_then(IvyJson::as_bool) != Some(true)
             })
-            .cloned()
             .collect();
         map_concurrent(nodes, 8, |node, _| {
             let client = client.clone(); let catalogs = catalogs.clone();
             async move {
                 let id = field(&node, "serviceNodeId")?;
                 let tools = BoundToolClient::new(client, id.clone(), &[InterfaceRequirement { namespace: "agent".into(), interface_version: "1.0.0".into() }], None)?;
-                let status = tools.read(&"agent.status".into(), IvyJson::object(Vec::<(String,IvyJson)>::new()), ToolCallOptions { request: options(), ..Default::default() }).await?;
-                validate_agent("Status", &status)?;
-                if status.get("serviceNodeId") != node.get("serviceNodeId") || status.get("hostId") != node.get("hostId") || field(&status, "state")? != JsString::from("ready") {
-                    return Err(IvyError::new_js("compatibility_unknown".into(), message(&["Native owner ".into(), id.clone(), " changed during the ".into(), component_id.clone(), " deployment check. Retry with its current identity.".into()])));
-                }
-                let hash = field(&status, "catalogHash")?;
-                let version = field(&status, "nativeVersion")?;
-                let executable = field(&status, "nativeExecutableHash")?;
-                if !catalogs.get(&hash).is_some_and(|selected| selected.version == version && selected.executable == executable) {
-                    return Err(IvyError::new_js("incompatible_native_catalog".into(), message(&[component_id.clone(), " cannot consume the running catalog of ".into(), id, ": native version ".into(), version, ", catalog ".into(), hash, ", executable ".into(), executable, ". Deploy a matching native owner and configuration before retrying this candidate.".into()])));
+                let hosted = node.get("nativeVersion").is_none_or(IvyJson::is_null);
+                let observed = tools.read(&if hosted { "agent.backends" } else { "agent.status" }.into(), IvyJson::object(Vec::<(String,IvyJson)>::new()), ToolCallOptions { request: options(), ..Default::default() }).await?;
+                let statuses = if hosted {
+                    validate_agent("BackendsResult", &observed)?;
+                    observed.required("backends")?.as_array().ok_or_else(IvyError::internal)?.iter().collect::<Vec<_>>()
+                } else {
+                    validate_agent("Status", &observed)?;
+                    vec![&observed]
+                };
+                let mut seen = HashSet::new();
+                for status in statuses {
+                    let backend = ivy_contracts::native_backend::BackendIdentity::optional(status.get("backend"))?;
+                    if hosted && backend.is_none() || !seen.insert(backend.as_ref().map(|backend| backend.id().to_owned())) {
+                        return Err(IvyError::new("compatibility_unknown", "Native owner discovery returned an invalid backend selection."));
+                    }
+                    if status.get("serviceNodeId") != node.get("serviceNodeId") || status.get("hostId") != node.get("hostId") || field(status, "state")? != JsString::from("ready") {
+                        if hosted && status.get("serviceNodeId") == node.get("serviceNodeId") && status.get("hostId") == node.get("hostId") { continue; }
+                        return Err(IvyError::new_js("compatibility_unknown".into(), message(&["Native owner ".into(), id.clone(), " changed during the ".into(), component_id.clone(), " deployment check. Retry with its current identity.".into()])));
+                    }
+                    let hash = field(status, "catalogHash")?;
+                    let version = field(status, "nativeVersion")?;
+                    let executable = field(status, "nativeExecutableHash")?;
+                    if !catalogs.get(&hash).is_some_and(|selected| selected.version == version && selected.executable == executable) {
+                        return Err(IvyError::new_js("incompatible_native_catalog".into(), message(&[component_id.clone(), " cannot consume the running catalog of ".into(), id, ": native version ".into(), version, ", catalog ".into(), hash, ", executable ".into(), executable, ". Deploy a matching native owner and configuration before retrying this candidate.".into()])));
+                    }
                 }
                 Ok(())
             }
@@ -257,10 +294,10 @@ pub async fn verify_native_catalog_compatibility(
         let Some(next) = &cursor else {
             return Ok(());
         };
-        if !visited.insert(next.clone()) {
+        if visited.len() >= 19 || !visited.insert(next.clone()) {
             return Err(IvyError::new(
                 "compatibility_unknown",
-                "Native owner discovery returned a repeated cursor.",
+                "Native owner discovery exceeded its page limit or repeated a cursor.",
             ));
         }
     }

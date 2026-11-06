@@ -5,17 +5,17 @@
   "contracts": [
     {
       "key": "task-board/configuration",
-      "version": "1.2.0",
+      "version": "1.3.0",
       "definition": "#/$defs/Configuration"
     },
     {
       "key": "task-board/task",
-      "version": "3.1.0",
+      "version": "3.5.0",
       "definition": "#/$defs/Task"
     },
     {
       "key": "task-board/run",
-      "version": "3.0.0",
+      "version": "3.1.0",
       "definition": "#/$defs/Run"
     },
     {
@@ -30,7 +30,7 @@
     },
     {
       "key": "task-board/history",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "definition": "#/$defs/History"
     },
     {
@@ -184,6 +184,11 @@
     },
     "newThread": {
       "input": "#/$defs/NewThreadRequest",
+      "output": "#/$defs/ActionOutcome",
+      "mutation": true
+    },
+    "migrateNativeRoute": {
+      "input": "#/$defs/MigrateNativeRouteRequest",
       "output": "#/$defs/ActionOutcome",
       "mutation": true
     },

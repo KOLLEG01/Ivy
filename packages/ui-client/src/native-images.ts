@@ -1,5 +1,6 @@
-import type { RpcClient } from '../../sdk/src/client.js';
-import { nativeRead, record, text } from './native.js';
+import type { Agent, RpcClient } from '../../sdk/src/client.js';
+import { record, text } from './native.js';
+import { backendRead } from './native-backends.js';
 
 /** Resolve paths on the owning host, independently of the browser's operating system. */
 export function nativeImagePath(source: string, cwd: string): string | null {
@@ -43,11 +44,11 @@ export function nativeImageBlob(base64: string): Blob {
   return new Blob([bytes], { type });
 }
 
-export async function readNativeImage(client: RpcClient, node: string, source: string, cwd: string, signal: AbortSignal): Promise<Blob | null> {
+export async function readNativeImage(client: RpcClient, node: string, source: string, cwd: string, signal: AbortSignal, backend?: Agent.BackendIdentity): Promise<Blob | null> {
   const inline = /^data:image\/(?:png|jpeg|gif|webp|avif);base64,(.*)$/i.exec(source);
   if (inline) return nativeImageBlob(inline[1]!);
   const path = nativeImagePath(source, cwd);
   if (!path) return null;
-  const file = record(await nativeRead(client, node, 'codex.fs/readFile', { path }, signal));
+  const file = record(await backendRead(client, { serviceNodeId: node, backend }, 'fs/readFile', { path }, signal));
   return nativeImageBlob(text(file.dataBase64));
 }

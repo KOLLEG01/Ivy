@@ -5,7 +5,7 @@ use crate::{
     rpc::RequestOptions,
     tools::{InterfaceRequirement, ToolCallOptions, ToolClients},
 };
-use ivy_contracts::{agent_schema::validate_agent, native_contract::NativeContract};
+use ivy_contracts::native_contract::NativeContract;
 
 pub type NativeTarget = NativeOwnerIdentity;
 pub struct NativeContractSnapshot {
@@ -33,7 +33,10 @@ async fn management(
         )?
         .call(
             &format!("agent.{name}").into(),
-            IvyJson::object(Vec::<(String, IvyJson)>::new()),
+            target.backend.as_ref().map_or_else(
+                || Ok(IvyJson::object::<&str>([])),
+                |backend| backend.arguments(IvyJson::object::<&str>([])),
+            )?,
             None,
             ToolCallOptions {
                 request: options.clone(),
@@ -53,8 +56,7 @@ pub async fn read_native_contract(
     let before = management(tools, &expected, "status", &options).await?;
     validate_native_status(&before, &expected, None)?;
     let value = management(tools, &expected, "catalog", &options).await?;
-    validate_agent("Catalog", &value)?;
-    let contract = NativeContract::new(&value)?;
+    let contract = NativeContract::from_owned(value, expected.backend.clone())?;
     if JsString::from(contract.catalog_hash()) != expected.catalog_hash
         || contract
             .catalog()
@@ -88,6 +90,6 @@ pub async fn read_native_contract(
     Ok(NativeContractSnapshot {
         target: expected,
         epoch,
-        contract,
+        contract: crate::native_owner::share_selected_catalog(tools, contract)?,
     })
 }

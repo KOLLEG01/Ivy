@@ -37,6 +37,9 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
     async fn read_document(&self, key: &str, address: &Json, primary: bool) -> IvyResult<Document> {
         ReadEvidenceStore::read_document(self.journal, key, address, primary).await
     }
+    async fn read_task_routing(&self, address: &Json) -> IvyResult<Json> {
+        ReadEvidenceStore::read_task_routing(self.journal, address).await
+    }
     async fn write_document(
         &self,
         key: &str,
@@ -92,6 +95,32 @@ impl<
     Q: LifecyclePages,
 > LifecycleStore for LifecycleJournal<'_, '_, R, P, C, I, Q>
 {
+    async fn migration_evidence(
+        &self,
+        catalogs: &ivy_contracts::checked_native_contract::CheckedNativeContracts,
+        call: &Document,
+        expected: &crate::native_intent::EvidenceIdentity,
+    ) -> IvyResult<Json> {
+        crate::native_evidence::NativeEvidence {
+            store: self,
+            catalogs,
+        }
+        .read(&call.pin, call.value.required("evidence")?, expected)
+        .await
+    }
+    fn migration_quiescent(&self, task: &JsString, operation: &JsString) -> IvyResult<()> {
+        if self
+            .journal
+            .journal
+            .route_migration_pending(task, operation)?
+        {
+            return Err(IvyError::new(
+                "task_board_execution_unresolved",
+                "Resolve this ticket's pending operations and original lifecycle outcomes before moving its route.",
+            ));
+        }
+        Ok(())
+    }
     async fn lifecycle_read(
         &self,
         k: &str,

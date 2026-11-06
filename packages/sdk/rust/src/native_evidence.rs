@@ -1,17 +1,77 @@
 //! Original-owner evidence checks; domain permissions remain with the caller.
 use crate::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_contracts::{
-    agent_schema::validate_agent, hash::hash_json, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
+    agent_schema::validate_agent, hash::hash_json, json::{canonical, canonical_size}, limits::MANAGEMENT_FRAME_BYTES,
     validation::equal,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeOwnerIdentity {
+    pub backend: Option<ivy_contracts::native_backend::BackendIdentity>,
     pub service_node_id: JsString,
     pub host_id: Option<JsString>,
     pub native_version: JsString,
     pub native_executable_hash: JsString,
     pub catalog_hash: JsString,
+}
+impl NativeOwnerIdentity {
+    pub fn from_json(value: &IvyJson) -> IvyResult<Self> {
+        validate_agent("NativeOwnerIdentity", value)?;
+        Ok(Self {
+            backend: ivy_contracts::native_backend::BackendIdentity::optional(
+                value.get("backend"),
+            )?,
+            service_node_id: value
+                .required("serviceNodeId")?
+                .as_js_string()
+                .unwrap()
+                .clone(),
+            host_id: value.get("hostId").and_then(IvyJson::as_js_string).cloned(),
+            native_version: value
+                .required("nativeVersion")?
+                .as_js_string()
+                .unwrap()
+                .clone(),
+            native_executable_hash: value
+                .required("nativeExecutableHash")?
+                .as_js_string()
+                .unwrap()
+                .clone(),
+            catalog_hash: value
+                .required("catalogHash")?
+                .as_js_string()
+                .unwrap()
+                .clone(),
+        })
+    }
+    pub fn to_json(&self) -> IvyJson {
+        let mut value = IvyJson::object([
+            (
+                "serviceNodeId",
+                IvyJson::String(self.service_node_id.clone()),
+            ),
+            (
+                "hostId",
+                self.host_id
+                    .clone()
+                    .map(IvyJson::String)
+                    .unwrap_or(IvyJson::Null),
+            ),
+            (
+                "nativeVersion",
+                IvyJson::String(self.native_version.clone()),
+            ),
+            (
+                "nativeExecutableHash",
+                IvyJson::String(self.native_executable_hash.clone()),
+            ),
+            ("catalogHash", IvyJson::String(self.catalog_hash.clone())),
+        ]);
+        if let Some(backend) = &self.backend {
+            value.insert("backend", backend.json());
+        }
+        value
+    }
 }
 #[derive(Clone, Debug)]
 pub struct NativeOperationIdentity {
@@ -61,26 +121,45 @@ pub fn validate_native_payload(
     observation: &IvyJson,
     limits: NativePayloadLimits,
 ) -> IvyResult<()> {
-    let method = observation.get("method").and_then(IvyJson::as_js_string)
-        .ok_or_else(|| IvyError::new("native_method_unsupported", "The method is absent from the exact selected native catalog."))?;
+    let method = observation
+        .get("method")
+        .and_then(IvyJson::as_js_string)
+        .ok_or_else(|| {
+            IvyError::new(
+                "native_method_unsupported",
+                "The method is absent from the exact selected native catalog.",
+            )
+        })?;
     let params = observation.required("params")?;
     let fallback = IvyJson::from("00000000-0000-0000-0000-000000000000");
-    let request_id = observation.get("requestId").filter(|id| !id.is_null()).unwrap_or(&fallback);
+    let request_id = observation
+        .get("requestId")
+        .filter(|id| !id.is_null())
+        .unwrap_or(&fallback);
     let request = IvyJson::object([
-        ("id", request_id.clone()), ("method", IvyJson::String(method.clone())), ("params", params.clone()),
+        ("id", request_id.clone()),
+        ("method", IvyJson::String(method.clone())),
+        ("params", params.clone()),
     ]);
-    canonical(&request, limits.request_bytes)?;
+    canonical_size(&request, limits.request_bytes)?;
     contract.validate_input(method, params, limits.request_bytes)?;
     if let Some(reply) = observation.get("reply").filter(|reply| !reply.is_null()) {
         if !matches!(reply, IvyJson::Object(_)) {
-            return Err(IvyError::new("invalid_frame", "Native reply must be an object."));
+            return Err(IvyError::new(
+                "invalid_frame",
+                "Native reply must be an object.",
+            ));
         }
         let mut response = reply.clone();
         if response.get("id").is_none() {
-            if let Some(id) = observation.get("requestId") { response.insert("id", id.clone()); }
+            if let Some(id) = observation.get("requestId") {
+                response.insert("id", id.clone());
+            }
         }
-        canonical(&response, limits.response_bytes)?;
-        if let Some(result) = reply.get("result") { contract.validate_result(method, result, limits.response_bytes)?; }
+        canonical_size(&response, limits.response_bytes)?;
+        if let Some(result) = reply.get("result") {
+            contract.validate_result(method, result, limits.response_bytes)?;
+        }
     }
     Ok(())
 }
@@ -173,7 +252,8 @@ pub fn validate_native_status(
     validate_agent("Status", value)?;
     let code = code.unwrap_or("native_owner_mismatch");
     require(
-        text(value, "serviceNodeId", &target.service_node_id)
+        ivy_contracts::native_backend::BackendIdentity::matches(value, target.backend.as_ref())
+            && text(value, "serviceNodeId", &target.service_node_id)
             && target
                 .host_id
                 .as_ref()
@@ -207,7 +287,10 @@ pub fn validate_native_operation(
     validate_agent("Operation", value)?;
     let code = code.unwrap_or("native_evidence_mismatch");
     require(
-        text(value, "operationId", &expected.operation_id)
+        ivy_contracts::native_backend::BackendIdentity::matches(
+            value,
+            expected.owner.backend.as_ref(),
+        ) && text(value, "operationId", &expected.operation_id)
             && text(value, "callerPrincipalId", &expected.caller_principal_id)
             && text(value, "serviceNodeId", &expected.owner.service_node_id)
             && text(value, "nativeVersion", &expected.owner.native_version)
@@ -239,7 +322,10 @@ pub fn validate_native_read(
     validate_agent("ReadObservation", value)?;
     let code = code.unwrap_or("native_evidence_mismatch");
     require(
-        text(value, "serviceNodeId", &expected.owner.service_node_id)
+        ivy_contracts::native_backend::BackendIdentity::matches(
+            value,
+            expected.owner.backend.as_ref(),
+        ) && text(value, "serviceNodeId", &expected.owner.service_node_id)
             && text(value, "callerPrincipalId", &expected.caller_principal_id)
             && text(value, "nativeVersion", &expected.owner.native_version)
             && text(
@@ -274,7 +360,7 @@ pub fn validate_native_progress(
     validate_agent("Operation", next)?;
     let code = code.unwrap_or("native_evidence_regressed");
     fn identity(value: &IvyJson) -> IvyJson {
-        IvyJson::object(
+        let mut identity = IvyJson::object(
             [
                 "operationId",
                 "callerPrincipalId",
@@ -287,7 +373,11 @@ pub fn validate_native_progress(
                 "createdAt",
             ]
             .map(|key| (key, field(value, key).clone())),
-        )
+        );
+        if let Some(backend) = value.get("backend") {
+            identity.insert("backend", backend.clone());
+        }
+        identity
     }
     fn rank(value: &IvyJson) -> usize {
         ["accepted", "dispatched", "outcome_unknown"]

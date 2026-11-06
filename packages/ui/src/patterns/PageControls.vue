@@ -5,6 +5,7 @@ defineProps<{
   count: number;
   page: number;
   hasNext: boolean;
+  hasPrevious?: boolean;
   loading?: boolean;
 }>();
 defineEmits<{ next: []; previous: [] }>();
@@ -19,7 +20,7 @@ defineEmits<{ next: []; previous: [] }>();
       <Button
         variant="outline"
         size="sm"
-        :disabled="loading || page <= 1"
+        :disabled="loading || !(hasPrevious ?? page > 1)"
         @click="$emit('previous')"
         ><ChevronLeft aria-hidden="true" />Previous</Button
       ><Button

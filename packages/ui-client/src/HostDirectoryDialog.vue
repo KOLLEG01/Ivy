@@ -15,6 +15,9 @@ import {
 } from "@ivy/ui";
 import { ArrowUp, Folder } from "@lucide/vue";
 import { IvyError, serviceTools } from "../../sdk/src/client.js";
+import { backendArguments, sameNativeBackend } from "../../contracts/src/native-backend.js";
+import { validateAgent } from "../../contracts/src/agent-validation.js";
+import { nativeBackendKey } from './native-backends';
 import type { Agent, RpcClient } from "../../sdk/src/client.js";
 
 /** Browse directories on one AgentManager host and choose an absolute folder. */
@@ -22,6 +25,7 @@ const open = defineModel<boolean>("open", { default: false });
 const props = defineProps<{
   client: RpcClient;
   node: string;
+  backend?: Agent.BackendIdentity | undefined;
   host: string;
   start: string;
   title?: string;
@@ -51,11 +55,13 @@ async function load(target: string, nearest = false) {
       { namespace: "agent", interfaceVersion: "1.0.0" },
     ]).read(
       "agent.listDirectories",
-      { path: target },
+      backendArguments({ path: target }, props.backend),
       {
         signal: controller.signal,
       },
     )) as Agent.DirectoryListResult;
+    validateAgent('DirectoryListResult', value);
+    if (!sameNativeBackend(value.backend, props.backend)) throw new IvyError('native_owner_mismatch', 'Directories must come from the selected account.');
     if (controller.signal.aborted) return;
     folders.value = value.directories;
     parent.value = value.parent ?? "";
@@ -72,8 +78,8 @@ async function load(target: string, nearest = false) {
   }
 }
 watch(
-  open,
-  (value) => {
+  [open, () => props.node, () => nativeBackendKey(props.backend)],
+  ([value]) => {
     if (value) {
       path.value = typed.value = parent.value = "";
       folders.value = [];

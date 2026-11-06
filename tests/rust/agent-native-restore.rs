@@ -486,6 +486,139 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn scoped_native_restore_preserves_accounts_and_other_provider_storage_before_relocation() {
+    use ivy_contracts::native_backend::{BackendIdentity, NativeProvider};
+    fn identity(id: &str, provider: NativeProvider, account: &str) -> BackendIdentity {
+        BackendIdentity::new(id.into(), provider, account.into()).unwrap()
+    }
+    fn scoped(config: &J, other_account: &str) -> J {
+        let mut config = config.clone();
+        let mut instance = field(&config, "instances").as_array().unwrap()[0].clone();
+        let mut primary = field(&instance, "settings").clone();
+        primary.insert(
+            "backend",
+            identity("alpha", NativeProvider::Codex, "personal").json(),
+        );
+        let home = node_path::filesystem_path(
+            primary
+                .required("nativeHome")
+                .unwrap()
+                .as_js_string()
+                .unwrap(),
+        );
+        let other_data = node_path::filesystem_path(
+            config
+                .required("runtimeRoot")
+                .unwrap()
+                .as_js_string()
+                .unwrap(),
+        )
+        .join("instances/agent/claude-data");
+        instance.insert(
+            "settings",
+            J::object([(
+                "backends",
+                J::Array(vec![
+                    J::object([
+                        ("dataRoot", path(home.parent().unwrap())),
+                        ("settings", primary),
+                    ]),
+                    J::object([
+                        ("dataRoot", path(&other_data)),
+                        (
+                            "settings",
+                            J::object([
+                                (
+                                    "backend",
+                                    identity("beta", NativeProvider::Claude, other_account).json(),
+                                ),
+                                ("appServer", J::object([("mode", "claude-adapter".into())])),
+                                ("nativeHome", path(&other_data.join("home"))),
+                                ("nativeVersion", "0.142.3".into()),
+                                ("nativeExecutableHash", digest("other-provider").into()),
+                            ]),
+                        ),
+                    ]),
+                ]),
+            )]),
+        );
+        config.insert("instances", J::Array(vec![instance]));
+        config
+    }
+    for variant in 0..3 {
+        let mut fixture = Fixture::new("0.159.2").await;
+        fixture.original = scoped(&fixture.original, "work");
+        fixture.target = scoped(&fixture.target, if variant == 1 { "other" } else { "work" });
+        if variant == 2 {
+            let mut instance = field(&fixture.target, "instances").as_array().unwrap()[0].clone();
+            let owner = field(field(&instance, "settings"), "backends")
+                .as_array()
+                .unwrap()[0]
+                .clone();
+            instance.insert("settings", J::object([("backends", J::Array(vec![owner]))]));
+            fixture.target.insert("instances", J::Array(vec![instance]));
+        }
+        let local = "instances/agent/claude-data/claude-adapter/state.sqlite";
+        let source = fixture.root.0.join("source").join(local);
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let db = Connection::open(&source).unwrap();
+        db.execute_batch("CREATE TABLE threads(id TEXT PRIMARY KEY,payload TEXT NOT NULL); INSERT INTO threads VALUES ('selected','{\"retained\":true}');").unwrap();
+        drop(db);
+        for root in ["target", "backup"] {
+            let target = fixture.root.0.join(root).join(local);
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::copy(&source, target).unwrap();
+        }
+        let other_before = digest(fs::read(&source).unwrap());
+        let database_before = digest(fs::read(fixture.database()).unwrap());
+        let mut files = field(&fixture.manifest, "files")
+            .as_array()
+            .unwrap()
+            .to_vec();
+        files.push(J::object([
+            ("path", format!("state/{local}").into()),
+            ("hash", other_before.clone().into()),
+            (
+                "bytes",
+                (fs::metadata(&source).unwrap().len() as f64).into(),
+            ),
+            ("mode", 384.0.into()),
+        ]));
+        fixture.manifest.insert("files", J::Array(files));
+        let original_before = snapshot(&fixture.root.0.join("source")).await;
+        let backup_before = snapshot(&fixture.root.0.join("backup")).await;
+        let result = fixture.restore().await;
+        if variant == 0 {
+            let report = result.unwrap();
+            let rows = field(&report, "instances").as_array().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert!(BackendIdentity::matches(
+                &rows[0],
+                Some(&identity("alpha", NativeProvider::Codex, "personal"))
+            ));
+        } else {
+            assert_eq!(result.unwrap_err().code, "target_conflict");
+            assert_eq!(
+                digest(fs::read(fixture.database()).unwrap()),
+                database_before
+            );
+        }
+        assert_eq!(
+            digest(fs::read(fixture.root.0.join("target").join(local)).unwrap()),
+            other_before
+        );
+        assert_eq!(
+            snapshot(&fixture.root.0.join("source")).await,
+            original_before
+        );
+        assert_eq!(
+            snapshot(&fixture.root.0.join("backup")).await,
+            backup_before
+        );
+    }
+}
+
+#[tokio::test]
 async fn copied_native_restore_preserves_wal_lineage_bigints_and_publishes_verified_report() {
     for version in ["0.154.0", "0.158.0", "0.159.2"] {
         let fixture = Fixture::new(version).await;

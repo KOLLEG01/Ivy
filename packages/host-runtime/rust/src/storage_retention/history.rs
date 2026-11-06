@@ -39,7 +39,11 @@ pub(super) async fn load(
     progress: &Progress,
 ) -> IvyResult<Vec<Entry>> {
     let root = path(config, "runtimeRoot")?.join(kind);
+    if let Some(info) = metadata(root.clone()).await? {
+        require(info.is_dir() && !info.file_type().is_symlink() && realpath(root.clone()).await?.parent() == Some(realpath(path(config, "runtimeRoot")?).await?.as_path()), "target_conflict", "Maintenance history must stay directly owned.")?;
+    }
     let mut result = Vec::new();
+    let mut bytes = 0u64;
     for entry in entries(root.clone()).await? {
         let file_type = internal(entry.file_type())?;
         let filename = entry.file_name();
@@ -50,6 +54,10 @@ pub(super) async fn load(
         }
         let name = name.unwrap();
         let directory = root.join(name);
+        for file in ["record.json", "request.json"] {
+            if let Some(info) = metadata(directory.join(file)).await? { bytes = bytes.saturating_add(info.len()); }
+        }
+        require(bytes <= 16 * 1024 * 1024, "limit_exceeded", "Retained maintenance metadata exceeds its byte budget.")?;
         let record = config::json_file_if_present(
             directory.join("record.json"),
             config::CONFIGURATION_BYTES,
@@ -170,9 +178,15 @@ pub(super) async fn collect_plans(
     }
     for plan in plans {
         if keep.contains(&hash_json(&plan)?) { continue; }
+        if !progress.permit_removal("bootstrapPlans") { break; }
         let file = runtime.join("bootstrap-plans").join(format!("{}.json", &hash_json(&plan)?[7..]));
         let info = metadata(file.clone()).await?.ok_or_else(|| IvyError::new("storage_invalid", "A retained bootstrap plan disappeared during collection."))?;
         require(info.is_file() && !info.file_type().is_symlink(), "storage_invalid", "Bootstrap history must remain a regular file.")?;
+        if milliseconds(internal(info.modified())?) > now - 3.0 * 86_400_000.0 {
+            retain(ids, &mut keep, &plan)?;
+            progress.skipped("bootstrapPlans", "grace_period", false);
+            continue;
+        }
         blocking(move || internal(fs::remove_file(&file))).await?;
         progress.removed("bootstrapPlans");
     }
@@ -185,11 +199,18 @@ pub(super) async fn collect_details(
     protected: &BTreeSet<PathBuf>,
     progress: &Progress,
 ) -> IvyResult<()> {
+    let mut recent = 0;
     for entry in history {
         if !entry.obsolete || protected.contains(&entry.directory) {
             progress.skipped("maintenance", "retained_history", false);
             continue;
         }
+        if recent < 20 {
+            recent += 1;
+            progress.skipped("maintenance", "recent_history", false);
+            continue;
+        }
+        if !progress.permit_removal("maintenance") { break; }
         let result: IvyResult<()> = async {
             let value = &entry.record;
             if entry.kind == "bootstrap-maintenance" { validate_host("BootstrapMaintenanceRecord", value)?; }

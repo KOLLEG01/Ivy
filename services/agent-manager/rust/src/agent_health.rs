@@ -1,37 +1,43 @@
 //! Ordered AgentManager health writes retain accepted work and journal warnings.
-use crate::native_journal::NativeJournal;
+use crate::{
+    native_journal::NativeJournal,
+    service_work::{AgentRun, run::Budget},
+};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
-use ivy_host_runtime::health::HealthFile;
+use ivy_host_runtime::health::{HealthFile, truncate_details};
 use ivy_sdk::service::ServiceFuture;
 use std::sync::{Arc, Mutex};
-use tokio::sync::watch;
-
-#[derive(Clone)]
-pub struct HealthRun(watch::Receiver<Option<IvyResult<()>>>);
-impl HealthRun {
-    pub async fn wait(mut self) -> IvyResult<()> {
-        loop {
-            if let Some(result) = self.0.borrow_and_update().clone() {
-                return result;
-            }
-            self.0.changed().await.map_err(|_| IvyError::internal())?;
-        }
-    }
-}
+pub type HealthRun = AgentRun<()>;
 struct Inner {
     file: Arc<HealthFile>,
-    journal: Arc<Mutex<NativeJournal>>,
+    journals: Mutex<Vec<Arc<Mutex<NativeJournal>>>>,
     pending: Mutex<Option<HealthRun>>,
+    budget: Budget,
 }
 #[derive(Clone)]
 pub struct AgentHealth(Arc<Inner>);
 impl AgentHealth {
     pub fn new(file: Arc<HealthFile>, journal: Arc<Mutex<NativeJournal>>) -> Self {
+        Self::with_journals(file, vec![journal])
+    }
+    pub(crate) fn host(file: Arc<HealthFile>) -> Self {
+        Self::with_journals(file, Vec::new())
+    }
+    fn with_journals(file: Arc<HealthFile>, journals: Vec<Arc<Mutex<NativeJournal>>>) -> Self {
         Self(Arc::new(Inner {
             file,
-            journal,
+            journals: Mutex::new(journals),
             pending: Mutex::new(None),
+            budget: Budget::default(),
         }))
+    }
+    pub(crate) fn register(&self, journal: Arc<Mutex<NativeJournal>>) -> IvyResult<()> {
+        self.0
+            .journals
+            .lock()
+            .map_err(|_| IvyError::internal())?
+            .push(journal);
+        Ok(())
     }
     /// Capture the warning at admission, then serialize writes even when a
     /// previous write failed. The awaiting caller does not own cancellation.
@@ -41,25 +47,47 @@ impl AgentHealth {
         generation: Option<u64>,
         message: JsString,
     ) -> IvyResult<HealthRun> {
-        let status = self
+        let mut message = truncate_details(message);
+        for journal in self
             .0
-            .journal
+            .journals
             .lock()
             .map_err(|_| IvyError::internal())?
-            .status();
-        let message = health_message(message, &status)?;
+            .iter()
+        {
+            let status = journal.lock().map_err(|_| IvyError::internal())?.status();
+            let before = message.0.len();
+            message = health_message(message, &status)?;
+            if message.0.len() != before {
+                break;
+            }
+        }
+        let message = truncate_details(message);
         let mut pending = self.0.pending.lock().map_err(|_| IvyError::internal())?;
-        let previous = pending.clone();
-        let (sender, receiver) = watch::channel(None);
-        let run = HealthRun(receiver);
+        let input = message.0.capacity() * 2 + 64;
+        let budget = self.0.budget.clone();
+        let admission = match budget.reserve(true, input) {
+            Ok(admission) => admission,
+            Err(_) if pending.as_ref().is_some_and(HealthRun::cache_only) => {
+                // A completed result retained only for drain must not fill the
+                // call limit after its caller has consumed or dropped it.
+                *pending = None;
+                budget.reserve(true, input)?
+            }
+            Err(error) => return Err(error),
+        };
+        let previous = pending.take();
+        let (mut sender, run) = HealthRun::channel(admission.call.clone());
         *pending = Some(run.clone());
+        drop(pending);
         let file = self.0.file.clone();
         tokio::spawn(async move {
+            let _input = admission;
             if let Some(previous) = previous {
-                let _ = previous.wait().await;
+                let _ = previous.completed().await;
             }
             let result = file.write(ready, message, generation).await;
-            sender.send_replace(Some(result));
+            sender.send(budget.finish_unit(result, true));
         });
         Ok(run)
     }

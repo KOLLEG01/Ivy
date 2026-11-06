@@ -1,6 +1,6 @@
 // Hermetic SDK double: no SDK import, executable discovery, account or network.
 import assert from 'node:assert/strict';
-import { session } from '../../services/agent-manager/claude/bridge/session.mjs';
+import { eventFlow, session } from '../../services/agent-manager/claude/bridge/session.mjs';
 export function fakeSdk() {
   const calls = [];
   const sdk = { query({ prompt, options }) {
@@ -44,9 +44,9 @@ export function fakeSdk() {
 export async function check() {
   const { sdk, calls } = fakeSdk();
   const output = [];
-  const bridge = session(sdk, value => output.push(structuredClone(value)));
+  const bridge = session(sdk, value => output.push(structuredClone(value)), error => { throw error; });
   let id = 0;
-  const receive = (method, params = {}, version = 1) => bridge.receive({ version, id: ++id, method, params });
+  const receive = (method, params = {}, version = 2) => bridge.receive({ version, id: ++id, method, params });
   const messages = [{ type: 'user', message: { role: 'user', content: 'hello' }, parent_tool_use_id: null, origin: { kind: 'human' } }];
   await receive('query/start', { turnId: 'turn-a', options: { cwd: '/fixture', model: 'sonnet' }, messages, permissionCallback: true });
   assert.deepEqual(await Array.fromAsync(calls[0].prompt), messages);
@@ -91,7 +91,7 @@ export async function check() {
   assert.equal(output.at(-1).error.message, 'SDK query already exists');
   const pending = calls[4].permission('Bash', {});
   const discovery = receive('models', { options: { cwd: 'discovery-hold' }, timeoutMs: 30000 });
-  await receive('anything', {}, 2);
+  await receive('anything', {}, 1);
   assert.equal(output.at(-1).error.message, 'SDK bridge version mismatch');
   await bridge.stop();
   await discovery;
@@ -104,7 +104,8 @@ export async function check() {
 if (process.argv[2] === '--check') process.stdout.write(JSON.stringify(await check()));
 if (process.argv[2] === '--transport') {
   const { sdk, calls } = fakeSdk();
-  const bridge = session(sdk, value => process.stdout.write(JSON.stringify(value) + '\n'));
+  const output = eventFlow(value => process.stdout.write(JSON.stringify(value) + '\n'));
+  const bridge = session(sdk, output.send, error => process.stdin.destroy(error));
   const turns = new Map(), ready = new Map();
   let text = '';
   for await (const chunk of process.stdin) {
@@ -112,7 +113,8 @@ if (process.argv[2] === '--transport') {
     let end;
     while ((end = text.indexOf('\n')) >= 0) {
       const message = JSON.parse(text.slice(0, end)); text = text.slice(end + 1);
-      const reply = result => process.stdout.write(JSON.stringify({ version: 1, id: message.id, result }) + '\n');
+      if (message.method === 'event/ack') { output.acknowledge(message.params.sequence); continue; }
+      const reply = result => process.stdout.write(JSON.stringify({ version: 2, id: message.id, result }) + '\n');
       const entry = () => calls[turns.get(message.params.turnId)] ?? calls.find(c => c.options.fixtureTag === message.params.turnId && c.closed === 0);
       if (message.method === 'fixture/awaitTurn') {
         if (entry()) reply(null);
@@ -123,7 +125,7 @@ if (process.argv[2] === '--transport') {
       if (message.method === 'fixture/end') { entry().finish(message.params.error ? new Error(message.params.error) : undefined); reply(null); continue; }
       if (message.method === 'fixture/permission') {
         void entry().permission(message.params.toolName ?? 'Bash', message.params.input ?? { command: 'fixture' }, message.params.toolUseId ?? 'test-tool').then(reply, error => {
-          process.stdout.write(JSON.stringify({ version: 1, id: message.id,
+          process.stdout.write(JSON.stringify({ version: 2, id: message.id,
             error: { name: error.name, message: error.message } }) + '\n');
         });
         continue;
@@ -145,4 +147,5 @@ if (process.argv[2] === '--transport') {
     }
   }
   await bridge.stop();
+  output.stop();
 }

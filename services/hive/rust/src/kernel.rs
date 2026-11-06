@@ -451,6 +451,10 @@ fn domain(
             ("hiveProtocol", IvyJson::Number(1.0)),
             ("runtimeEpoch", IvyJson::String(call.store.runtime_epoch()?)),
             ("ready", true.into()),
+            ("nativeToolTransport", IvyJson::object([
+                ("parameters", "json".into()),
+                ("preReadyOutcome", "not_executed".into()),
+            ])),
             (
                 "serverTime",
                 IvyJson::String(call.runtime.iso_date((call.clock)())?),

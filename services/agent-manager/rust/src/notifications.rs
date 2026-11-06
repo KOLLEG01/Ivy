@@ -55,6 +55,7 @@ fn transport_charge(encoded: &str) -> usize {
 }
 
 pub struct NativeNotifications {
+    backend: Option<ivy_contracts::native_backend::BackendIdentity>,
     service_node_id: JsString,
     native_version: JsString,
     sequence: u64,
@@ -89,6 +90,7 @@ impl NativeNotifications {
         maximum_bytes: usize,
     ) -> Self {
         Self {
+            backend: None,
             service_node_id,
             native_version,
             sequence: start,
@@ -97,6 +99,14 @@ impl NativeNotifications {
             json_bytes: 0,
             events: VecDeque::new(),
         }
+    }
+
+    pub fn with_backend(
+        mut self,
+        backend: Option<ivy_contracts::native_backend::BackendIdentity>,
+    ) -> Self {
+        self.backend = backend;
+        self
     }
 
     pub fn observe(
@@ -123,7 +133,7 @@ impl NativeNotifications {
             ));
         }
         self.sequence += 1;
-        let value = IvyJson::object([
+        let mut value = IvyJson::object([
             ("sequence", IvyJson::Number(self.sequence as f64)),
             (
                 "serviceNodeId",
@@ -138,6 +148,9 @@ impl NativeNotifications {
             ("params", params),
             ("observedAt", IvyJson::String(observed_at.clone())),
         ]);
+        if let Some(backend) = &self.backend {
+            value.insert("backend", backend.json());
+        }
         let encoded = stringify(&value, usize::MAX)?;
         let bytes = encoded.len();
         if bytes.saturating_add(std::mem::size_of::<Event>()) <= self.maximum_bytes {

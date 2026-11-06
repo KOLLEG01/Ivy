@@ -5,8 +5,9 @@ use crate::{
     native_operations::{NativeOperations, NativeRun},
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
-use ivy_host_runtime::codex_rpc::{
-    Events, HookFuture, NativeNotification, NativeRpc, RequestOptions,
+use ivy_host_runtime::{
+    codex_admission::Priority,
+    codex_rpc::{Events, HookFuture, NativeNotification, NativeRpc, RequestOptions},
 };
 use std::sync::{
     Arc,
@@ -31,7 +32,6 @@ impl Default for Observations {
     }
 }
 pub fn journal_events(
-    service_node_id: JsString,
     epoch: JsString,
     operations: &NativeOperations,
     observations: Observations,
@@ -45,19 +45,13 @@ pub fn journal_events(
             move |request| {
                 let memory = memory.clone();
                 let epoch = epoch.clone();
-                let service_node_id = service_node_id.clone();
                 let callback = callback.clone();
                 Box::pin(async move {
-                    let identity = IvyJson::object([
-                        ("serviceNodeId", IvyJson::String(service_node_id)),
-                        ("epoch", IvyJson::String(epoch)),
-                        ("requestId", request.id),
-                    ]);
-                    let input = memory.lock().unwrap().observe_input(
-                        &identity,
-                        &request.method,
-                        &request.params,
-                    )?;
+                    let input = {
+                        let mut journal = memory.lock().unwrap();
+                        let identity = journal.input_identity(&epoch, &request.id);
+                        journal.observe_input(&identity, &request.method, &request.params)?
+                    };
                     callback(input).await
                 })
             }
@@ -178,12 +172,11 @@ impl NativeDispatch {
         let owner = self.clone();
         let action_id = identity.clone();
         let action_method = method.clone();
-        let action_params = params.clone();
         self.operations.run(
             identity,
             method,
             params,
-            move || async move {
+            move |action_params| async move {
                 let memory = owner.operations.journal();
                 let result = async {
                     owner.available()?;
@@ -226,6 +219,15 @@ impl NativeDispatch {
                             }) as HookFuture
                         })
                     };
+                    // Cleanup must use the control capacity already reserved by
+                    // native admission, command retention and both transports.
+                    let priority = if action_method.eq_str("turn/interrupt")
+                        || action_method.eq_str("thread/unsubscribe")
+                    {
+                        Priority::Interaction
+                    } else {
+                        Priority::Background
+                    };
                     owner
                         .rpc
                         .request(
@@ -233,6 +235,7 @@ impl NativeDispatch {
                             action_params,
                             RequestOptions {
                                 request_id: Some(owner.operations.request_id(&action_id)?.into()),
+                                priority,
                                 before_send: Some(before_send),
                                 before_resolve: Some(before_resolve),
                                 ..Default::default()
@@ -261,20 +264,20 @@ impl NativeDispatch {
         input_identity: IvyJson,
         reply: IvyJson,
     ) -> IvyResult<NativeRun> {
-        let params = IvyJson::object([
-            ("identity", input_identity.clone()),
-            ("reply", reply.clone()),
-        ]);
+        let params = IvyJson::object([("identity", input_identity), ("reply", reply)]);
         let owner = self.clone();
         let action_id = identity.clone();
         self.operations.run(
             identity,
             "agent.answer".into(),
             params,
-            move || async move {
+            move |mut params| async move {
                 let memory = owner.operations.journal();
                 let result = async {
                     owner.available()?;
+                    let input_identity =
+                        params.remove("identity").ok_or_else(IvyError::internal)?;
+                    let reply = params.remove("reply").ok_or_else(IvyError::internal)?;
                     let input =
                         memory
                             .lock()

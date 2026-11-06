@@ -80,6 +80,11 @@ pub struct HealthFile {
     launch_id: Option<JsString>,
     writes: Arc<Mutex<()>>,
 }
+/// Retain only the diagnostic prefix that the health file can publish.
+pub fn truncate_details(details: JsString) -> JsString {
+    if details.0.capacity() <= 4096 { details }
+    else { JsString(details.0[..details.0.len().min(4096)].to_vec()) }
+}
 fn now() -> String { chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true) }
 impl HealthFile {
     pub fn new(config: InstanceConfig) -> Self {
@@ -92,6 +97,7 @@ impl HealthFile {
     pub fn boot_id(&self) -> &str { &self.boot_id }
     pub fn launch_id(&self) -> Option<&JsString> { self.launch_id.as_ref() }
     pub async fn write(&self, ready: bool, details: JsString, generation: Option<u64>) -> IvyResult<()> {
+        let details = truncate_details(details);
         let guard = self.writes.clone().lock_owned().await;
         let source = self.config.json();
         let mut value = IvyJson::object([
@@ -105,7 +111,7 @@ impl HealthFile {
             ("observedAt", now().into()),
             ("ready", IvyJson::Bool(ready)),
             ("generation", generation.map(|v| IvyJson::Number(v as f64)).unwrap_or(IvyJson::Null)),
-            ("details", IvyJson::String(JsString(details.0.into_iter().take(4096).collect()))),
+            ("details", IvyJson::String(details)),
         ]);
         if let Some(launch_id) = &self.launch_id { if !launch_id.0.is_empty() { value.insert("launchId", IvyJson::String(launch_id.clone())); } }
         validate_host("Health", &value)?;

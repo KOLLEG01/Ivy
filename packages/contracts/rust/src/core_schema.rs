@@ -1,5 +1,5 @@
 use crate::{
-    IvyError, IvyJson, IvyResult, builtin_schema::SchemaBundle, json::canonical,
+    IvyError, IvyJson, IvyResult, builtin_schema::SchemaBundle, json::canonical_size,
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use std::sync::OnceLock;
@@ -95,7 +95,7 @@ pub fn validate_shared(name: &str, value: &IvyJson) -> IvyResult<()> {
     }
 }
 pub fn validate_host(name: &str, value: &IvyJson) -> IvyResult<()> {
-    canonical(value, MANAGEMENT_FRAME_BYTES)?;
+    canonical_size(value, MANAGEMENT_FRAME_BYTES)?;
     let bundle = HOST
         .get_or_init(|| {
             SchemaBundle::new(&[

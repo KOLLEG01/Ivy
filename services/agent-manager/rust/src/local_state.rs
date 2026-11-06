@@ -4,6 +4,7 @@
 //! This synchronous owner belongs on the serialized storage worker; transactions
 //! must never remain open while awaiting Hive or the native process.
 
+use ivy_contracts::native_backend::{BackendIdentity, NativeProvider};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_contracts::{
     hash::hash_json,
@@ -19,6 +20,9 @@ use std::{
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[path = "local_completions.rs"]
+mod completions;
 
 const RESULT_RESERVATION: i64 = 25 * 1024 * 1024;
 
@@ -37,6 +41,11 @@ CREATE INDEX IF NOT EXISTS state_completion_owner ON state(json_extract(value_js
     AND json_extract(value_json,'$.phase')='succeeded';
 INSERT OR IGNORE INTO state_metadata VALUES ('expired_before','0');
 CREATE TABLE IF NOT EXISTS completion_receipts(operation_key TEXT PRIMARY KEY,released INTEGER NOT NULL) STRICT;
+CREATE TABLE IF NOT EXISTS suppressed_completions(operation_key TEXT NOT NULL,turn_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,epoch TEXT NOT NULL,byte_length INTEGER NOT NULL,PRIMARY KEY(operation_key,turn_id)) STRICT;
+CREATE INDEX IF NOT EXISTS state_pending_completion ON state(json_extract(value_json,'$.params.threadId'),
+  json_extract(value_json,'$.epoch'),key) WHERE kind='operation' AND json_extract(value_json,'$.method')='turn/start'
+    AND json_extract(value_json,'$.phase') IN ('dispatched','outcome_unknown');
 CREATE TABLE IF NOT EXISTS retired_operations(operation_key TEXT PRIMARY KEY,issued_at INTEGER NOT NULL) STRICT;
 CREATE TRIGGER IF NOT EXISTS retired_operation_insert BEFORE INSERT ON state
   WHEN NEW.kind='operation' AND EXISTS(SELECT 1 FROM retired_operations WHERE operation_key=NEW.key)
@@ -67,6 +76,7 @@ pub struct Limits {
 pub struct LocalAgentState {
     db: Option<Connection>,
     pub service_node_id: String,
+    storage_owner: String,
     limits: Limits,
     runtime_epoch: Option<JsString>,
 }
@@ -96,6 +106,76 @@ fn reservation(phase: Option<&str>) -> i64 {
 }
 
 impl LocalAgentState {
+    /// Pin account ownership before admitting work. Removing or changing an
+    /// admitted identity cannot reinterpret retained receipts on the next start.
+    pub fn bind_backend(
+        &mut self,
+        provider: NativeProvider,
+        backend: Option<&BackendIdentity>,
+    ) -> IvyResult<()> {
+        let db = self.db.as_mut().ok_or_else(IvyError::internal)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let previous: Option<String> = tx
+            .query_row(
+                "SELECT value FROM state_metadata WHERE key='backend_identity'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        let selected = backend
+            .map(|backend| canonical(&backend.json(), 1024))
+            .transpose()?;
+        let original_provider: Option<String> = tx
+            .query_row(
+                "SELECT value FROM state_metadata WHERE key='native_provider'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        if original_provider
+            .as_deref()
+            .is_some_and(|saved| saved != provider.as_str())
+            || backend.is_some_and(|backend| backend.provider() != provider)
+            || (previous.is_some() && previous != selected)
+        {
+            return Err(IvyError::new(
+                "native_backend_mismatch",
+                "The retained state belongs to another backend or account.",
+            ));
+        }
+        if original_provider.is_none() {
+            let retained: bool = tx
+                .query_row("SELECT EXISTS(SELECT 1 FROM state)", [], |row| row.get(0))
+                .map_err(storage_error)?;
+            if retained
+                && previous.is_none()
+                && (backend.is_some() || self.service_node_id != self.storage_owner)
+            {
+                return Err(IvyError::new(
+                    "native_state_migration_required",
+                    "Bind the native provider under the original unscoped configuration before moving retained state.",
+                ));
+            }
+            tx.execute(
+                "INSERT INTO state_metadata(key,value) VALUES ('native_provider',?)",
+                [provider.as_str()],
+            )
+            .map_err(storage_error)?;
+        }
+        if let Some(selected) = selected.filter(|_| previous.is_none()) {
+            tx.execute(
+                "INSERT INTO state_metadata(key,value) VALUES ('backend_identity',?)",
+                [selected],
+            )
+            .map_err(storage_error)?;
+        }
+        tx.commit().map_err(storage_error)
+    }
+
     pub fn open(filename: &Path, service_node_id: String, limits: Limits) -> IvyResult<Self> {
         if let Some(parent) = filename
             .parent()
@@ -103,18 +183,108 @@ impl LocalAgentState {
         {
             std::fs::create_dir_all(parent).map_err(|_| IvyError::internal())?;
         }
-        let db = Connection::open(filename).map_err(storage_error)?;
+        let mut db = Connection::open(filename).map_err(storage_error)?;
         db.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DML, false)
             .map_err(storage_error)?;
         db.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DDL, false)
             .map_err(storage_error)?;
         db.execute_batch(SCHEMA).map_err(storage_error)?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        // Seed this on the original installation before moving its data root
+        // into a shared host. Pins identify storage, not the current RPC route.
+        let seeded: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM state_metadata WHERE key='storage_owner')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        if !seeded {
+            let foreign: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM state WHERE kind='operation' AND json_extract(value_json,'$.serviceNodeId') IS NOT ?)",
+                    [&service_node_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if foreign {
+                return Err(IvyError::new(
+                    "native_state_migration_required",
+                    "Seed the storage identity under its original service before moving the backend.",
+                ));
+            }
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO state_metadata(key,value) VALUES ('storage_owner',?)",
+            [&service_node_id],
+        )
+        .map_err(storage_error)?;
+        let storage_owner: String = tx
+            .query_row(
+                "SELECT value FROM state_metadata WHERE key='storage_owner'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        ivy_contracts::wire_schema::validate_shared("Identifier", &storage_owner.clone().into())?;
+        tx.commit().map_err(storage_error)?;
         Ok(Self {
             db: Some(db),
             service_node_id,
+            storage_owner,
             limits,
             runtime_epoch: None,
         })
+    }
+
+    pub(crate) fn storage_owner(&self) -> &str {
+        &self.storage_owner
+    }
+
+    pub(crate) fn native_provider(&self) -> IvyResult<Option<NativeProvider>> {
+        let provider: Option<String> = self
+            .db
+            .as_ref()
+            .ok_or_else(IvyError::internal)?
+            .query_row(
+                "SELECT value FROM state_metadata WHERE key='native_provider'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        match provider.as_deref() {
+            None => Ok(None),
+            Some("codex") => Ok(Some(NativeProvider::Codex)),
+            Some("claude") => Ok(Some(NativeProvider::Claude)),
+            Some(_) => Err(IvyError::new(
+                "native_backend_mismatch",
+                "The retained state has an invalid native provider.",
+            )),
+        }
+    }
+
+    pub(crate) fn backend_identity(
+        &self,
+    ) -> IvyResult<Option<ivy_contracts::native_backend::BackendIdentity>> {
+        let selected: Option<String> = self
+            .db
+            .as_ref()
+            .ok_or_else(IvyError::internal)?
+            .query_row(
+                "SELECT value FROM state_metadata WHERE key='backend_identity'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        selected
+            .map(|selected| {
+                ivy_contracts::native_backend::BackendIdentity::from_json(&parse(&selected, 1024)?)
+            })
+            .transpose()
     }
 
     pub fn set_runtime_epoch(&mut self, epoch: JsString) -> IvyResult<()> {
@@ -145,7 +315,7 @@ impl LocalAgentState {
 
     fn id(&self, kind: &str, key: &str) -> IvyResult<String> {
         Ok(hash_json(&IvyJson::Array(vec![
-            self.service_node_id.clone().into(),
+            self.storage_owner.clone().into(),
             kind.into(),
             key.into(),
         ]))?[7..]
@@ -304,6 +474,25 @@ impl LocalAgentState {
                 [key],
             )
             .map_err(storage_error)?;
+            if let Some(turn) = value
+                .get("reply")
+                .and_then(|v| v.get("result"))
+                .and_then(|v| v.get("turn"))
+                .and_then(|v| text(v, "id"))
+            {
+                if let (Some(thread), Some(epoch)) = (
+                    value.get("params").and_then(|v| text(v, "threadId")),
+                    text(value, "epoch"),
+                ) {
+                    completions::finish(&tx, key, &thread, &turn, &epoch)?;
+                }
+            }
+        }
+        if kind == "operation"
+            && matches!(next_phase.as_deref(), Some("succeeded" | "failed"))
+            && !has_unresolved_outcome(value)?
+        {
+            completions::forget(&tx, key)?;
         }
         tx.commit().map_err(storage_error)?;
         Ok(SavedState {
@@ -336,11 +525,29 @@ impl LocalAgentState {
     }
 
     pub fn release_completion(&self, thread_id: &str, turn_id: &str) -> IvyResult<()> {
-        self.db.as_ref().ok_or_else(IvyError::internal)?.execute("UPDATE completion_receipts SET released=1 WHERE operation_key IN
-            (SELECT key FROM state WHERE kind='operation' AND json_extract(value_json,'$.method')='turn/start'
-              AND json_extract(value_json,'$.phase')='succeeded' AND json_extract(value_json,'$.params.threadId')=?
-              AND json_extract(value_json,'$.reply.result.turn.id')=?)", params![thread_id, turn_id]).map_err(storage_error)?;
-        Ok(())
+        completions::release(
+            self.db.as_ref().ok_or_else(IvyError::internal)?,
+            thread_id,
+            turn_id,
+        )
+    }
+
+    /// Called only for a completion whose optional browser delivery was skipped.
+    /// Intent, evidence and later receipt handling share this serialized owner.
+    pub fn suppress_completion(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        epoch: &str,
+    ) -> IvyResult<()> {
+        let tx = self
+            .db
+            .as_mut()
+            .ok_or_else(IvyError::internal)?
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        completions::suppress(&tx, thread_id, turn_id, epoch)?;
+        tx.commit().map_err(storage_error)
     }
 }
 
@@ -373,17 +580,18 @@ fn make_room(
     // Materialize candidates before deleting, matching SQLite Statement.all.
     let candidates = statement
         .query_map([protected_key], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })
         .map_err(storage_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(storage_error)?;
-    let mut original = db.prepare("SELECT value_json FROM state WHERE kind='operation' AND key=?").map_err(storage_error)?;
+    let mut original = db
+        .prepare("SELECT value_json FROM state WHERE kind='operation' AND key=?")
+        .map_err(storage_error)?;
     for (key, size) in candidates {
-        let json: String = original.query_row([&key], |row| row.get(0)).map_err(storage_error)?;
+        let json: String = original
+            .query_row([&key], |row| row.get(0))
+            .map_err(storage_error)?;
         let value = parse(&json, MANAGEMENT_FRAME_BYTES)?;
         if has_unresolved_outcome(&value)? {
             continue;
@@ -407,6 +615,7 @@ fn make_room(
             [&key],
         )
         .map_err(storage_error)?;
+        completions::forget(db, &key)?;
         boundary = boundary.max(issued_at);
         count -= 1;
         bytes -= size;

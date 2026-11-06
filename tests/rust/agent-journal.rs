@@ -78,6 +78,51 @@ fn input_id(epoch: &str, number: usize) -> IvyJson {
 fn bytes(journal: &NativeJournal) -> usize {
     journal.status().get("bytes").unwrap().as_f64().unwrap() as usize
 }
+
+#[test]
+fn scoped_inputs_reject_equal_request_ids_from_another_account_and_resolve_only_their_owner() {
+    use ivy_contracts::native_backend::{BackendIdentity, NativeProvider};
+    let selected =
+        BackendIdentity::new("primary".into(), NativeProvider::Claude, "one".into()).unwrap();
+    let foreign =
+        BackendIdentity::new("primary".into(), NativeProvider::Claude, "two".into()).unwrap();
+    let mut scoped = NativeJournal::new_scoped(
+        Owner {
+            service_node_id: "fixture.agent-manager".into(),
+            native_version: "0.142.3".into(),
+            native_executable_hash: format!("sha256:{}", "0".repeat(64)).into(),
+        },
+        Limits {
+            max_operations: 100,
+            max_journal_bytes: 64 * MIB,
+            max_pending_inputs: 16,
+        },
+        Some(selected.clone()),
+    )
+    .unwrap();
+    scoped.begin_epoch(&"epoch".into()).unwrap();
+    let identity = scoped.input_identity(&"epoch".into(), &1.0.into());
+    assert!(BackendIdentity::matches(&identity, Some(&selected)));
+    let input = scoped
+        .observe_input(
+            &identity,
+            &"item/tool/requestUserInput".into(),
+            &json(r#"{"threadId":"thread","turnId":"turn"}"#),
+        )
+        .unwrap();
+    assert_eq!(input.required("identity").unwrap(), &identity);
+    let mut wrong = identity.clone();
+    wrong.insert("backend", foreign.json());
+    assert_eq!(scoped.input(&wrong).unwrap_err().code, "target_conflict");
+    wrong.remove("backend");
+    assert_eq!(scoped.input(&wrong).unwrap_err().code, "target_conflict");
+    let resolved = scoped
+        .resolve_input(&"epoch".into(), &1.0.into(), &"thread".into())
+        .unwrap()
+        .unwrap();
+    assert!(resolved.required("state").unwrap().is_str("expired"));
+    assert_eq!(resolved.required("identity").unwrap(), &identity);
+}
 fn finish(journal: &mut NativeJournal, identity: &Identity, reply: &IvyJson) -> IvyJson {
     journal
         .dispatch(identity, &"epoch".into(), &1.0.into())

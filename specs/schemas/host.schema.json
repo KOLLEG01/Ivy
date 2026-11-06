@@ -3,6 +3,36 @@
   "$id": "https://ivy.invalid/schemas/host.schema.json",
   "title": "Host configuration, preparation and durable local deployment protocol",
   "$defs": {
+    "BackendIdentity": {
+      "type": "object",
+      "properties": {
+        "backendId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,63}$",
+          "not": {
+            "enum": [
+              "agent"
+            ]
+          }
+        },
+        "provider": {
+          "enum": [
+            "codex",
+            "claude"
+          ]
+        },
+        "accountId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        }
+      },
+      "required": [
+        "backendId",
+        "provider",
+        "accountId"
+      ],
+      "additionalProperties": false
+    },
     "BuildPlan": {
       "type": "object",
       "properties": {
@@ -2478,6 +2508,9 @@
           "items": {
             "type": "object",
             "properties": {
+              "backend": {
+                "$ref": "#/$defs/BackendIdentity"
+              },
               "instanceId": {
                 "type": "string",
                 "minLength": 1,
@@ -2506,6 +2539,9 @@
           "items": {
             "type": "object",
             "properties": {
+              "backend": {
+                "$ref": "#/$defs/BackendIdentity"
+              },
               "instanceId": {
                 "type": "string",
                 "minLength": 1,
@@ -2819,6 +2855,9 @@
           "items": {
             "type": "object",
             "properties": {
+              "backend": {
+                "$ref": "#/$defs/BackendIdentity"
+              },
               "instanceId": {
                 "type": "string",
                 "minLength": 1,
@@ -4086,6 +4125,51 @@
       ],
       "additionalProperties": false
     },
+    "HostStorageSpace": {
+      "type": "object",
+      "properties": {
+        "observedAt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "availableBytes": {
+          "type": "object",
+          "properties": {
+            "runtime": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "artifacts": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "staging": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "runtime",
+            "artifacts",
+            "staging"
+          ],
+          "additionalProperties": false
+        },
+        "lowSpace": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "observedAt",
+        "availableBytes",
+        "lowSpace"
+      ],
+      "additionalProperties": false
+    },
     "StorageRetentionStatus": {
       "type": "object",
       "properties": {
@@ -4319,6 +4403,9 @@
         },
         "storageRetention": {
           "$ref": "#/$defs/StorageRetentionStatus"
+        },
+        "storageSpace": {
+          "$ref": "#/$defs/HostStorageSpace"
         }
       },
       "required": [

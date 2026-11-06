@@ -1,11 +1,14 @@
 //! Wire-order observations, including native clock inputs arriving during launch.
 use crate::{
-    browser_notices::{BrowserNotices, FormQuery, input_browser_notice, native_browser_notice},
+    browser_notices::{
+        BrowserNotices, FormQuery, Notice, input_browser_notice, native_browser_notice,
+    },
     inventory_manager::InventoryManager,
+    local_state::LocalAgentState,
     native_clock::answer_native_clock,
     native_dispatch::{Observations, journal_events},
     native_journal::{JournalClock, NativeJournal},
-    native_operations::NativeOperations,
+    native_operations::{NativeOperations, NativeRun, ReceiptWork},
     notice_policy::NativeNoticePolicy,
     notifications::NativeNotifications,
     service_link::ServiceLink,
@@ -30,6 +33,8 @@ pub struct ServiceEventSettings {
     pub service: ServiceLink,
     pub closing: Arc<AtomicBool>,
     pub operations: NativeOperations,
+    pub state: Arc<Mutex<LocalAgentState>>,
+    pub receipts: ReceiptWork,
     pub notifications: Arc<Mutex<NativeNotifications>>,
     pub policy: Arc<Mutex<NativeNoticePolicy>>,
     pub query: Arc<FormQuery>,
@@ -73,7 +78,6 @@ impl ServiceEvents {
         let notifications = self.clone();
         let close = self.clone();
         Ok(journal_events(
-            settings.service_node_id.clone(),
             epoch.clone(),
             &settings.operations,
             Observations {
@@ -83,7 +87,12 @@ impl ServiceEvents {
                 }),
                 on_notification: Arc::new(move |value| {
                     let result = notifications.notification(&epoch, value);
-                    Box::pin(async move { result })
+                    Box::pin(async move {
+                        if let Some(run) = result? {
+                            run.wait().await?;
+                        }
+                        Ok(())
+                    })
                 }),
                 on_close: Arc::new(move |_| {
                     let result =
@@ -158,7 +167,7 @@ impl ServiceEvents {
         // cancel dispatch, and no callback waits on its own native RPC actor.
         drop(answer_native_clock(self.journal(), rpc, input));
     }
-    fn send(&self, thread: JsString, notice: IvyJson, turn: Option<JsString>) -> IvyResult<()> {
+    fn send(&self, create: impl FnOnce() -> IvyResult<Option<Notice>>) -> IvyResult<bool> {
         let notices = self
             .0
             .state
@@ -169,11 +178,61 @@ impl ServiceEvents {
         if let Some(notices) = notices {
             // Notices are detached in the original service. Including them in
             // invocation drain would change the shutdown wait boundary.
-            tokio::spawn(async move {
-                let _ = notices.send(thread, notice, turn).await;
-            });
+            return notices.send(create);
         }
-        Ok(())
+        Ok(false)
+    }
+    fn suppress_completion(
+        &self,
+        event: &IvyJson,
+        epoch: &JsString,
+    ) -> IvyResult<Option<NativeRun>> {
+        if event.get("method") != Some(&"turn/completed".into()) {
+            return Ok(None);
+        }
+        fn text(value: &IvyJson) -> Option<&JsString> {
+            value.as_js_string().filter(|v| !v.0.is_empty())
+        }
+        let Some(thread) = event
+            .get("params")
+            .and_then(|v| v.get("threadId"))
+            .and_then(text)
+        else {
+            return Ok(None);
+        };
+        let Some(turn) = event
+            .get("params")
+            .and_then(|v| v.get("turn"))
+            .and_then(|v| v.get("id"))
+            .and_then(text)
+        else {
+            return Ok(None);
+        };
+        // SQLite's existing string boundary is UTF-8. Oversized evidence never
+        // truncates an identity or releases an unproven original receipt.
+        if thread.0.len() > 8192 || turn.0.len() > 8192 {
+            return Ok(None);
+        }
+        let (thread, turn, epoch) = (
+            String::from_utf16_lossy(&thread.0),
+            String::from_utf16_lossy(&turn.0),
+            String::from_utf16_lossy(&epoch.0),
+        );
+        let state = self.0.settings.state.clone();
+        self.0
+            .settings
+            .receipts
+            .track(async move {
+                tokio::task::spawn_blocking(move || {
+                    state
+                        .lock()
+                        .map_err(|_| IvyError::internal())?
+                        .suppress_completion(&thread, &turn, &epoch)
+                })
+                .await
+                .map_err(|_| IvyError::internal())?
+            })
+            .map(Some)
     }
     fn input(&self, input: IvyJson) -> IvyResult<()> {
         let settings = &self.0.settings;
@@ -189,17 +248,20 @@ impl ServiceEvents {
                 self.answer_clock(&rpc, &input);
             }
         } else if settings.service.ready() && !settings.closing.load(Ordering::Acquire) {
-            if let Some(notice) = input_browser_notice(&input, settings.query.as_ref())? {
-                self.send(
-                    input
+            self.send(|| {
+                let Some(payload) = input_browser_notice(&input, settings.query.as_ref())? else {
+                    return Ok(None);
+                };
+                Ok(Some(Notice {
+                    thread: input
                         .required("threadId")?
                         .as_js_string()
                         .ok_or_else(IvyError::internal)?
                         .clone(),
-                    notice,
-                    None,
-                )?;
-            }
+                    payload,
+                    turn: None,
+                }))
+            })?;
             let _ = settings.service.notify(
                 "inputs",
                 IvyJson::object([
@@ -210,8 +272,24 @@ impl ServiceEvents {
         }
         Ok(())
     }
-    fn notification(&self, epoch: &JsString, value: NativeNotification) -> IvyResult<()> {
+    fn notification(
+        &self,
+        epoch: &JsString,
+        value: NativeNotification,
+    ) -> IvyResult<Option<NativeRun>> {
         let settings = &self.0.settings;
+        let inventory_thread = value
+            .params
+            .get("threadId")
+            .and_then(IvyJson::as_js_string)
+            .or_else(|| {
+                value
+                    .params
+                    .get("thread")
+                    .and_then(|thread| thread.get("id"))
+                    .and_then(IvyJson::as_js_string)
+            })
+            .cloned();
         if self.0.activity.receiver_count() != 0
             && [
                 "thread/started",
@@ -241,34 +319,43 @@ impl ServiceEvents {
                     .cloned()
             })
             .flatten();
+        let observed_at = (self.0.clock)();
         let event = settings
             .notifications
             .lock()
             .map_err(|_| IvyError::internal())?
-            .observe_js(epoch, &value.method, value.params, &(self.0.clock)())?;
+            .observe_js(epoch, &value.method, value.params, &observed_at)?;
         let ready = settings.service.ready() && !settings.closing.load(Ordering::Acquire);
-        if ready {
-            if let Some(notice) =
+        let sent = self.send(|| {
+            let Some(payload) =
                 native_browser_notice(&settings.service_node_id, &event, settings.query.as_ref())?
-            {
-                let params = event.get("params").unwrap();
-                self.send(
+            else {
+                return Ok(None);
+            };
+            let params = event.get("params").unwrap();
+            Ok(Some(Notice {
+                thread: params
+                    .required("threadId")?
+                    .as_js_string()
+                    .ok_or_else(IvyError::internal)?
+                    .clone(),
+                payload,
+                turn: Some(
                     params
-                        .required("threadId")?
+                        .required("turn")?
+                        .required("id")?
                         .as_js_string()
                         .ok_or_else(IvyError::internal)?
                         .clone(),
-                    notice,
-                    Some(
-                        params
-                            .required("turn")?
-                            .required("id")?
-                            .as_js_string()
-                            .ok_or_else(IvyError::internal)?
-                            .clone(),
-                    ),
-                )?;
-            }
+                ),
+            }))
+        })?;
+        let cleanup = if sent {
+            None
+        } else {
+            self.suppress_completion(&event, epoch)?
+        };
+        if ready {
             let _ = settings.service.notify("notification", event);
         }
         let inventory = self
@@ -306,13 +393,13 @@ impl ServiceEvents {
                 .flatten()
                 == Some(true);
             if refresh && !internal_activity {
-                inventory.request_threads(ready)?;
+                inventory.observe_thread(ready, method, inventory_thread, &observed_at)?;
             }
             if method.eq_str("project/changed") {
                 inventory.request_projects(ready)?;
                 inventory.request_threads(ready)?;
             }
         }
-        Ok(())
+        Ok(cleanup)
     }
 }

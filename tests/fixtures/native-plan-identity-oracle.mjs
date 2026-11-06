@@ -42,6 +42,22 @@ for(const directory of readdirSync('specs/native').filter(s=>/^codex-/.test(s)))
   const alteredDefinitions={...definitions,threadStart:zero,turnInterrupt:zero};
   add('first definition precedes later mismatch',{...original,definitions:alteredDefinitions});
   rows.push({path,cases});
+  for(const provider of ['codex','claude']){
+    const backend={backendId:'worker',provider,accountId:'primary'};
+    const selected=contract.withBackend(backend);
+    const plan={...original,backend,definitions:Object.fromEntries(Object.entries(methods).map(([key,method])=>[key,selected.definitionHash(method)]))};
+    const scopedCases=[];
+    const add=(name,value)=>scopedCases.push({name,plan:JSON.stringify(value),expected:capture(selected,value)});
+    add('exact selected account',plan);
+    const missing={...plan};delete missing.backend;add('missing backend',missing);
+    add('unscoped plan',original);
+    add('old definition hashes',{...plan,definitions});
+    for(const changed of [{backendId:'other'},{accountId:'other'},{provider:provider==='codex'?'claude':'codex'}])
+      add('different identity '+JSON.stringify(changed),{...plan,backend:{...backend,...changed}});
+    for(const invalid of [null,{},[],{...backend,extra:true},{...backend,backendId:'\ud800'},{...backend,accountId:'\ud800'}])
+      add('invalid backend '+JSON.stringify(invalid),{...plan,backend:invalid});
+    rows.push({path,backend,cases:scopedCases});
+  }
   // Missing methods must preserve the original failure ordering, including the
   // left-hand property access before definitionHash is evaluated.
   for(const removedMethod of Object.values(methods)){

@@ -35,11 +35,7 @@ fn data() -> &'static Json {
     static D: OnceLock<Json> = OnceLock::new();
     D.get_or_init(|| {
         let p = reference_data::read(include_bytes!("task-board-engine-admission-cases.json.gz"));
-        parse(
-            std::str::from_utf8(&p).unwrap(),
-            MANAGEMENT_FRAME_BYTES,
-        )
-        .unwrap()
+        parse(std::str::from_utf8(&p).unwrap(), MANAGEMENT_FRAME_BYTES).unwrap()
     })
 }
 fn error(v: &Json) -> IvyError {
@@ -226,6 +222,142 @@ impl CoordinationStore for World {
 impl AdmissionExecution for Bindings {
     async fn execute(&self, operation: Document) -> IvyResult<Json> {
         self.0.call("execute", [operation.pin, operation.value])
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn public_admission_retains_the_complete_selected_plan_account_before_writes() {
+    use ivy_contracts::native_backend::{BackendIdentity, NativeProvider};
+    let row = data()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| f(row, "name").is_str("0.163.0 savePlan target validated location"))
+        .unwrap();
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let selected =
+        BackendIdentity::new("alpha".into(), NativeProvider::Codex, "personal".into()).unwrap();
+    let draft = f(&f(row, "steps").as_array().unwrap()[0], "request")
+        .required("plan")
+        .unwrap();
+    let identity = Json::object([(
+        "sourceHash",
+        draft.required("catalogSourceHash").unwrap().clone(),
+    )]);
+    let contract = catalogs
+        .checked_native_contract(s(draft, "nativeVersion"), Some(&identity))
+        .unwrap()
+        .with_backend(Some(selected.clone()));
+    for variant in 0..5 {
+        let original = f(row, "boundaries").as_array().unwrap();
+        let mut boundaries = original[..6].to_vec();
+        let mut args = f(&boundaries[5], "args").as_array().unwrap().to_vec();
+        let mut call = args[1].clone();
+        let mut arguments = f(&call, "arguments").clone();
+        arguments.insert("backend", selected.json());
+        call.insert("arguments", arguments);
+        args[1] = call;
+        boundaries[5].insert("args", Json::Array(args));
+        let mut observed = f(&boundaries[5], "value").clone();
+        let backend = match variant {
+            0 => Some(selected.clone()),
+            1 => None,
+            2 => Some(
+                BackendIdentity::new("alpha".into(), NativeProvider::Codex, "work".into()).unwrap(),
+            ),
+            3 => Some(
+                BackendIdentity::new("alpha".into(), NativeProvider::Claude, "personal".into())
+                    .unwrap(),
+            ),
+            _ => Some(
+                BackendIdentity::new("beta".into(), NativeProvider::Codex, "personal".into())
+                    .unwrap(),
+            ),
+        };
+        if let Some(backend) = backend {
+            observed.insert("backend", backend.json());
+        }
+        boundaries[5].insert("value", observed);
+        if variant == 0 {
+            // A matching observation reaches the first operation lookup. Stop
+            // there so every variant proves admission without a write effect.
+            let mut lookup = original[6].clone();
+            lookup.insert(
+                "error",
+                Json::object([
+                    ("code", "selected_project_observed".into()),
+                    ("message", "Selected project observed before writes.".into()),
+                    ("outcome", "not_executed".into()),
+                    ("details", Json::Null),
+                ]),
+            );
+            boundaries.push(lookup);
+        }
+        let replay = Arc::new(Replay {
+            steps: Mutex::new(boundaries.into_iter().collect()),
+            name: format!("selected project {variant}").into(),
+        });
+        let bindings = Bindings(replay.clone());
+        let owner = EngineOwner {
+            service_node_id: "task-node".into(),
+            generation: 7.0,
+        };
+        let runtime = AdmissionRuntime {
+            client: Arc::new(Client(replay.clone())),
+            contracts: &bindings,
+            catalogs: &catalogs,
+            handoff: &|_, _| Box::pin(async { panic!("No handoff in this fixture") }),
+        };
+        let operations = Operations {
+            store: World {
+                replay: replay.clone(),
+                root: Some("root".into()),
+            },
+            now: || "2026-01-02T03:04:05.006Z".to_owned(),
+        };
+        let mut request = f(&f(row, "steps").as_array().unwrap()[0], "request").clone();
+        let mut plan = f(&request, "plan").clone();
+        plan.insert("backend", selected.json());
+        plan.insert(
+            "definitions",
+            Json::object(
+                [
+                    ("threadStart", "thread/start"),
+                    ("threadResume", "thread/resume"),
+                    ("turnStart", "turn/start"),
+                    ("turnInterrupt", "turn/interrupt"),
+                ]
+                .map(|(key, method)| {
+                    (
+                        key,
+                        Json::from(contract.definition_hash(&method.into()).unwrap()),
+                    )
+                }),
+            ),
+        );
+        request.insert("plan", plan);
+        let engine =
+            EngineAdmission::new(&operations, f(row, "settings"), &owner, &runtime, &bindings)
+                .unwrap();
+        let caller = "caller".into();
+        let operation_id = "op".into();
+        let cancelled = || replay.call("cancel", []).map(|_| ());
+        let context = ReadContext {
+            caller_principal_id: &caller,
+            operation_id: &operation_id,
+            generation: 7.0,
+            check_cancelled: &cancelled,
+        };
+        let error = engine.invoke(&request, &context).await.unwrap_err();
+        assert_eq!(
+            error.code,
+            if variant == 0 {
+                "selected_project_observed"
+            } else {
+                "task_board_target_mismatch"
+            }
+        );
+        assert!(replay.steps.lock().unwrap().is_empty());
     }
 }
 #[tokio::test(flavor = "current_thread")]

@@ -4,7 +4,7 @@ use crate::{
     IvyError, IvyJson, IvyResult, JsString,
     agent_schema::validate_agent,
     core_schema::validate_shared,
-    hash::{hash_json, tool_definition_hash},
+    hash::{hash_json, hash_object, tool_definition_hash},
     json::canonical,
     limits::MANAGEMENT_FRAME_BYTES,
     schema::SchemaValidators,
@@ -98,27 +98,73 @@ pub fn native_tool_definition(
     value.insert("nativeSchemaIdentity", IvyJson::String(hash));
     Ok(value)
 }
-struct Definition {
-    value: OnceLock<IvyJson>,
-    hash: OnceLock<String>,
+pub fn backend_tool_definition(
+    catalog: &IvyJson,
+    method: &IvyJson,
+    catalog_hash: Option<&JsString>,
+    backend: Option<&crate::native_backend::BackendIdentity>,
+) -> IvyResult<IvyJson> {
+    let mut definition = native_tool_definition(catalog, method, catalog_hash)?;
+    if let Some(backend) = backend {
+        definition.insert("namespace", backend.id().into());
+        let name = method.required("method")?.as_js_string().unwrap();
+        let mut description = JsString::from(format!("Installed {} ", backend.provider().as_str()));
+        description
+            .0
+            .extend_from_slice(&catalog.required("version")?.as_js_string().unwrap().0);
+        description.0.extend(" method ".encode_utf16());
+        description.0.extend_from_slice(&name.0);
+        description.0.extend(
+            format!(
+                " for backend {} (account {}). Supply its unchanged native arguments. {}",
+                backend.id(),
+                backend.account_id(),
+                if is_read_only_native_method(name) {
+                    "This read-only call does not require an operationId."
+                } else {
+                    "Supply an outer stable operationId."
+                },
+            )
+            .encode_utf16(),
+        );
+        definition.insert("description", IvyJson::String(description));
+    }
+    Ok(definition)
 }
 #[derive(Default)]
 struct SchemaCache {
     values: HashMap<String, Arc<IvyJson>>,
     bytes: usize,
 }
-pub struct NativeContract {
+struct NativeCatalog {
     catalog: IvyJson,
     catalog_hash: String,
-    methods: Vec<(JsString, Definition)>,
+    methods: Vec<JsString>,
     indexes: HashMap<JsString, usize>,
     schemas: Mutex<SchemaCache>,
     validators: SchemaValidators,
 }
+pub struct NativeContract {
+    catalog: Arc<NativeCatalog>,
+    definition_hashes: Vec<OnceLock<String>>,
+    backend: Option<crate::native_backend::BackendIdentity>,
+}
 impl NativeContract {
     pub fn new(catalog: &IvyJson) -> IvyResult<Self> {
-        validate_agent("Catalog", catalog)?;
-        let catalog = catalog.clone();
+        Self::for_backend(catalog, None)
+    }
+    pub fn for_backend(
+        catalog: &IvyJson,
+        backend: Option<crate::native_backend::BackendIdentity>,
+    ) -> IvyResult<Self> {
+        Self::from_owned(catalog.clone(), backend)
+    }
+    /// Take the admitted boundary value without retaining a second catalog tree.
+    pub fn from_owned(
+        catalog: IvyJson,
+        backend: Option<crate::native_backend::BackendIdentity>,
+    ) -> IvyResult<Self> {
+        validate_agent("Catalog", &catalog)?;
         let catalog_hash = hash_json(&catalog)?;
         let mut methods = Vec::new();
         let mut indexes = HashMap::new();
@@ -138,78 +184,109 @@ impl NativeContract {
                     "The selected native catalog contains a duplicate method.",
                 ));
             }
-            methods.push((
-                name,
-                Definition {
-                    value: OnceLock::new(),
-                    hash: OnceLock::new(),
-                },
-            ));
+            methods.push(name);
         }
+        let definition_hashes = (0..methods.len()).map(|_| OnceLock::new()).collect();
         Ok(Self {
-            catalog,
-            catalog_hash,
-            methods,
-            indexes,
-            schemas: Mutex::new(SchemaCache::default()),
-            validators: SchemaValidators::new(),
+            catalog: Arc::new(NativeCatalog {
+                catalog,
+                catalog_hash,
+                methods,
+                indexes,
+                schemas: Mutex::new(SchemaCache::default()),
+                validators: SchemaValidators::new(),
+            }),
+            definition_hashes,
+            backend,
         })
     }
+    /// Account-specific definition hashes share the immutable schema owner.
+    pub fn with_backend(&self, backend: Option<crate::native_backend::BackendIdentity>) -> Self {
+        Self {
+            catalog: self.catalog.clone(),
+            definition_hashes: (0..self.catalog.methods.len())
+                .map(|_| OnceLock::new())
+                .collect(),
+            backend,
+        }
+    }
+    pub fn backend(&self) -> Option<&crate::native_backend::BackendIdentity> {
+        self.backend.as_ref()
+    }
     pub fn catalog(&self) -> &IvyJson {
-        &self.catalog
+        &self.catalog.catalog
     }
     pub fn catalog_hash(&self) -> &str {
-        &self.catalog_hash
+        &self.catalog.catalog_hash
     }
-    fn entry(&self, method: &JsString) -> IvyResult<&Definition> {
-        self.indexes
-            .get(method)
-            .map(|i| &self.methods[*i].1)
-            .ok_or_else(|| {
-                IvyError::new(
-                    "native_method_unsupported",
-                    "The method is absent from the exact selected native catalog.",
-                )
-            })
+    fn index(&self, method: &JsString) -> IvyResult<usize> {
+        self.catalog.indexes.get(method).copied().ok_or_else(|| {
+            IvyError::new(
+                "native_method_unsupported",
+                "The method is absent from the exact selected native catalog.",
+            )
+        })
     }
-    pub fn definition(&self, method: &JsString) -> IvyResult<&IvyJson> {
-        let entry = self.entry(method)?;
-        if entry.value.get().is_none() {
-            let source = &self
-                .catalog
-                .get("clientRequests")
-                .unwrap()
-                .as_array()
-                .unwrap()[self.indexes[method]];
-            let definition = native_tool_definition(
-                &self.catalog,
-                source,
-                Some(&JsString::from(self.catalog_hash.as_str())),
-            )?;
-            let _ = entry.value.set(definition);
-        }
-        Ok(entry.value.get().unwrap())
+    fn method(&self, method: &JsString) -> IvyResult<&IvyJson> {
+        Ok(&self
+            .catalog()
+            .get("clientRequests")
+            .unwrap()
+            .as_array()
+            .unwrap()[self.index(method)?])
+    }
+    /// Definitions are wire projections. Retain only their small hashes, rather
+    /// than another complete pair of schemas for each account and method.
+    pub fn definition(&self, method: &JsString) -> IvyResult<IvyJson> {
+        backend_tool_definition(
+            self.catalog(),
+            self.method(method)?,
+            Some(&JsString::from(self.catalog_hash())),
+            self.backend.as_ref(),
+        )
     }
     pub fn definitions(&self) -> Vec<(JsString, IvyJson)> {
-        self.methods
+        self.catalog
+            .methods
             .iter()
-            .map(|(name, _)| {
+            .map(|name| {
                 (
                     name.clone(),
                     self.definition(name)
-                        .expect("validated native method definition")
-                        .clone(),
+                        .expect("validated native method definition"),
                 )
             })
             .collect()
     }
     pub fn definition_hash(&self, method: &JsString) -> IvyResult<&str> {
-        let entry = self.entry(method)?;
-        if entry.hash.get().is_none() {
-            let hash = tool_definition_hash(self.definition(method)?)?;
-            let _ = entry.hash.set(hash);
+        let hash = &self.definition_hashes[self.index(method)?];
+        if hash.get().is_none() {
+            let source = self.method(method)?;
+            let header = backend_tool_definition(
+                self.catalog(),
+                &IvyJson::object([("method", IvyJson::String(method.clone()))]),
+                Some(&JsString::from(self.catalog_hash())),
+                self.backend.as_ref(),
+            )?;
+            let schema_keys = [
+                JsString::from("inputSchema"),
+                JsString::from("outputSchema"),
+            ];
+            let value = hash_object(
+                header
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .map(|(key, value)| (key, value))
+                    .chain(
+                        schema_keys
+                            .iter()
+                            .filter_map(|key| source.get_key(key).map(|value| (key, value))),
+                    ),
+            )?;
+            let _ = hash.set(value);
         }
-        Ok(entry.hash.get().unwrap())
+        Ok(hash.get().unwrap())
     }
     pub fn verify_definition(
         &self,
@@ -247,6 +324,7 @@ impl NativeContract {
             MANAGEMENT_FRAME_BYTES,
         )?;
         if let Some(value) = self
+            .catalog
             .schemas
             .lock()
             .map_err(|_| IvyError::internal())?
@@ -255,7 +333,7 @@ impl NativeContract {
         {
             return Ok(value.clone());
         }
-        let mut input = self.definition(method)?.get("inputSchema").unwrap().clone();
+        let mut input = self.method(method)?.get("inputSchema").unwrap().clone();
         let root = if let Some(reference) = input.get("$ref") {
             reference_path(
                 &input,
@@ -302,7 +380,11 @@ impl NativeContract {
         }
         strip(&mut input);
         let value = Arc::new(input);
-        let mut cache = self.schemas.lock().map_err(|_| IvyError::internal())?;
+        let mut cache = self
+            .catalog
+            .schemas
+            .lock()
+            .map_err(|_| IvyError::internal())?;
         if let Some(cached) = cache.values.get(&key) {
             return Ok(cached.clone());
         }
@@ -335,7 +417,9 @@ impl NativeContract {
         maximum_bytes: usize,
     ) -> IvyResult<()> {
         let schema = self.input_schema(method, reserved)?;
-        self.validators.validate(&schema, params, maximum_bytes)
+        self.catalog
+            .validators
+            .validate(&schema, params, maximum_bytes)
     }
     pub fn validate_result(
         &self,
@@ -343,11 +427,12 @@ impl NativeContract {
         result: &IvyJson,
         maximum_bytes: usize,
     ) -> IvyResult<()> {
-        self.validators.validate(
-            self.definition(method)?.get("outputSchema").unwrap(),
-            result,
-            maximum_bytes,
-        )
+        self.catalog
+            .validators
+            .validate(self.output_schema(method)?, result, maximum_bytes)
+    }
+    pub fn output_schema(&self, method: &JsString) -> IvyResult<&IvyJson> {
+        Ok(self.method(method)?.get("outputSchema").unwrap())
     }
 }
 type Path = Vec<JsString>;

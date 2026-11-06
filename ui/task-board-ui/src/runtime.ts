@@ -14,12 +14,13 @@ export const wikiPageUrl = (id: string) => new URL('wiki/#/page?id=' + encodeURI
 export const rootWhere = (root: string | null): Wire.QueryPredicate => root === null ? { op: 'isNull', field: 'object.parentId' } : { op: 'eq', field: 'object.parentId', value: root };
 export const and = (...args: Wire.QueryPredicate[]): Wire.QueryPredicate => args.length === 1 ? args[0]! : { op: 'and', args };
 export const taskStatuses: TaskBoard.Task['workflowState'][] = ['backlog', 'todo', 'in_progress', 'waiting', 'review', 'done', 'cancelled'];
-export const taskContractVersions = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0', '2.2.0', '2.3.0', '3.0.0', '3.1.0'];
+const readableVersions = (key: string): string[] => definition.requirements.contracts.find(contract => contract.key === key)?.readVersions ?? ['1.0.0'];
+export const taskContractVersions = readableVersions('task-board/task');
 export const workflowContractVersions = ['1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0', '2.2.0'];
 export const statusTone = (value: string) => ['completed', 'succeeded', 'passed', 'confirmed'].includes(value) ? 'good' as const : ['waiting', 'waiting_input', 'review', 'outcome_unknown', 'unknown', 'local_only', 'cancel_requested', 'blocked', 'pending'].includes(value) ? 'warning' as const : ['failed', 'cancelled'].includes(value) ? 'bad' as const : 'neutral' as const;
 export interface Documents { delivery: TaskBoard.Delivery; task: TaskBoard.Task; run: TaskBoard.Run; result: TaskBoard.Result; review: TaskBoard.Review; history: TaskBoard.History; 'native-plan': TaskBoard.NativePlan; 'native-signals': TaskBoard.NativeSignals; 'native-transcript': TaskBoard.NativeTranscript; 'native-result-page': TaskBoard.NativeResultPage; 'native-read-evidence': TaskBoard.NativeReadEvidence; 'native-full-turn-transcript': TaskBoard.NativeFullTurnTranscript; 'native-turn-snapshot': TaskBoard.NativeTurnSnapshot }
 export interface Document<K extends keyof Documents> { value: Documents[K]; pin: TaskBoard.ObjectPin; read: Operation.ObjectRead; commentRange?: { start: number; end: number; total: number } }
-export const documentContractVersions = (key: keyof Documents): string[] => key === 'task' ? taskContractVersions : key === 'run' ? ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '2.0.0', '2.1.0', '2.2.0', '3.0.0'] : key === 'result' ? ['1.0.0', '2.0.0', '2.1.0', '2.2.0'] : key === 'delivery' ? ['1.0.0', '1.1.0'] : ['1.0.0'];
+export const documentContractVersions = (key: keyof Documents): string[] => readableVersions('task-board/' + key);
 export async function readDocument<K extends keyof Documents>(
   key: K,
   pin: string | TaskBoard.ObjectPin,
@@ -38,8 +39,8 @@ export async function readDocument<K extends keyof Documents>(
         const end = Math.min(commentRange?.before ?? commentStore.length, commentStore.length);
         const start = Math.max(0, end - (commentRange?.limit ?? commentStore.length));
         const entries = await conversationReader.range(commentStore, read.object.id, start, end, signal);
-        decoded.value = { ...task, comments: entries.map(entry => entry.comment),
-          commentDeliveries: entries.flatMap(entry => entry.receipt ? [entry.receipt] : []) } as Documents[K];
+        decoded.value = upgradeTaskRecord({ ...task, comments: entries.map(entry => entry.comment),
+          commentDeliveries: entries.flatMap(entry => entry.receipt ? [entry.receipt] : []) } as TaskBoard.Task) as Documents[K];
         decoded.commentRange = { start, end, total: commentStore.length };
         return decoded;
       }
@@ -52,10 +53,10 @@ export async function readDocument<K extends keyof Documents>(
       if (log.taskId !== read.object.id || !Array.isArray(log.comments) || !Number.isSafeInteger(reference.length) ||
           reference.length < 0 || reference.length > log.comments.length) throw new Error('The ticket conversation prefix is unavailable.');
       const states = new Map(reference.nativeInputs.map(state => [state.commentId, state]));
-      decoded.value = { ...task, comments: log.comments.slice(0, reference.length).map(comment => {
+      decoded.value = upgradeTaskRecord({ ...task, comments: log.comments.slice(0, reference.length).map(comment => {
         const { nativeInput: _input, handoff: _handoff, delivery: _delivery, ...body } = comment;
         return { ...body, ...states.get(comment.commentId) };
-      }) } as Documents[K];
+      }) } as TaskBoard.Task) as Documents[K];
     }
   }
   if (key === 'task') decoded.value = upgradeTaskRecord(decoded.value as TaskBoard.Task) as Documents[K];

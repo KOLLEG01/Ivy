@@ -221,14 +221,35 @@ fn records(base: &Json, row: &Json) -> Vec<Json> {
         .unwrap()
         .iter()
         .map(|d| {
-            row.get("documents")
+            let mut document = row
+                .get("documents")
                 .and_then(Json::as_array)
                 .and_then(|list| {
                     list.iter()
                         .find(|v| same(v.required("pin").unwrap(), d.required("pin").unwrap()))
                 })
                 .unwrap_or(d)
-                .clone()
+                .clone();
+            // The historical proof-only projection omitted the current result
+            // content object. Keep its original pins and proof fields intact.
+            if document
+                .required("key")
+                .unwrap()
+                .is_str("task-board/result")
+            {
+                let mut value = document.required("value").unwrap().clone();
+                if value.get("content").is_none() {
+                    value.insert("content", Json::Object(vec![]));
+                }
+                document.insert("value", value);
+            }
+            if document.required("key").unwrap().is_str("task-board/task") {
+                document.insert(
+                    "value",
+                    super::native_driver::stored_task(document.required("value").unwrap()),
+                );
+            }
+            document
         })
         .collect()
 }
@@ -407,6 +428,94 @@ async fn recovery_proof_selection_matches_original_over_exact_journal_and_receip
             "Recovery mutated its journal"
         );
         assert!(database.is_autocommit());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn context_recovery_refuses_another_account_with_the_same_native_thread_identity() {
+    use ivy_contracts::native_backend::{BackendIdentity, NativeProvider};
+    let data = oracle();
+    let base = data.required("base").unwrap();
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let selected =
+        BackendIdentity::new("primary".into(), NativeProvider::Claude, "one".into()).unwrap();
+    for backend in [
+        Some(BackendIdentity::new("primary".into(), NativeProvider::Claude, "two".into()).unwrap()),
+        Some(BackendIdentity::new("primary".into(), NativeProvider::Codex, "one".into()).unwrap()),
+        None,
+    ] {
+        let row = Json::Object(vec![]);
+        let mut docs = records(base, &row);
+        let mut task = base
+            .required("task")
+            .unwrap()
+            .required("value")
+            .unwrap()
+            .clone();
+        let mut primary = task.required("primaryResourceRef").unwrap().clone();
+        primary.insert("namespace", selected.id().into());
+        task.insert("primaryResourceRef", primary.clone());
+        task.insert("primaryBackend", selected.json());
+        for document in &mut docs {
+            if document.required("key").unwrap().is_str("task-board/run")
+                && same(document.required("pin").unwrap(), &pin(200, 2.0))
+            {
+                let mut value = document.required("value").unwrap().clone();
+                value.insert("primaryResourceRef", primary.clone());
+                value.insert(
+                    "target",
+                    BackendIdentity::select_arguments(
+                        backend.as_ref(),
+                        value.required("target").unwrap().clone(),
+                    )
+                    .unwrap(),
+                );
+                document.insert("value", value);
+            }
+        }
+        let database = Connection::open_in_memory().unwrap();
+        seed(&database, &docs, base, &row);
+        let store = JournalStore {
+            journal: LocalJournal {
+                connection: &database,
+                root_object_id: Some("root".into()),
+            },
+            client: Arc::new(NoRpc),
+            contracts: Policy(
+                docs.iter()
+                    .map(|d| hash_json(d.required("value").unwrap()).unwrap())
+                    .collect(),
+            ),
+            limits: HistoryLimits::default(),
+            now: || String::from("2026-01-02T03:04:05.006Z"),
+            new_id: || JsString::from(uuid::Uuid::new_v4().to_string()),
+            cache: None,
+        };
+        let task = Document {
+            pin: base
+                .required("task")
+                .unwrap()
+                .required("pin")
+                .unwrap()
+                .clone(),
+            value: task,
+            parent_id: Some("root".into()),
+            content_hash: String::new(),
+        };
+        let before = database.total_changes();
+        assert!(
+            !ContextRecovery {
+                store: &store,
+                catalogs: &catalogs,
+                principal_id: "caller".into(),
+                unanswered_question: |_: &Json, _: &JsString| Ok(false)
+            }
+            .unstarted_archived_context(&task)
+            .await
+            .unwrap()
+        );
+        assert_eq!(database.total_changes(), before);
     }
 }
 

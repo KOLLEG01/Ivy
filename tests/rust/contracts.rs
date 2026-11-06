@@ -298,3 +298,6 @@ fn unchanged_typescript_codec_is_the_oracle() {
 
 #[path = "contracts-native-urls.rs"]
 mod native_urls;
+
+#[path = "contracts-json-validation.rs"]
+mod json_validation;

@@ -11,7 +11,7 @@ use crate::{
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, agent_schema::validate_agent,
     checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical,
-    limits::MANAGEMENT_FRAME_BYTES,
+    limits::MANAGEMENT_FRAME_BYTES, native_backend::BackendIdentity,
 };
 use ivy_sdk::{
     native_evidence::NativeOwnerIdentity,
@@ -26,6 +26,9 @@ use ivy_sdk::{
 };
 use std::sync::Arc;
 
+#[path = "native_migration.rs"]
+mod migration;
+
 pub struct LifecycleDocument {
     pub document: Document,
     pub metadata: Json,
@@ -34,6 +37,23 @@ pub struct LifecycleDocument {
 /// readable versions. No local/remote paging or archive policy is guessed here.
 #[allow(async_fn_in_trait)]
 pub trait LifecycleStore: Store {
+    fn migration_quiescent(&self, _task: &JsString, _operation: &JsString) -> IvyResult<()> {
+        Err(IvyError::new(
+            "task_board_route_migration_unsupported",
+            "Route migration requires the owning journal's pending-work check.",
+        ))
+    }
+    async fn migration_evidence(
+        &self,
+        _catalogs: &CheckedNativeContracts,
+        _call: &Document,
+        _expected: &crate::native_intent::EvidenceIdentity,
+    ) -> IvyResult<Json> {
+        Err(IvyError::new(
+            "task_board_route_migration_unsupported",
+            "Route migration requires the owning journal's exact retained native evidence reader.",
+        ))
+    }
     async fn lifecycle_read(
         &self,
         key: &str,
@@ -63,6 +83,7 @@ pub trait LifecycleEngine: LifecyclePolicies {
     async fn cleanup_task_outputs(
         &self,
         node: &JsString,
+        backend: Option<&BackendIdentity>,
         task_key: &JsString,
         operation_id: &JsString,
     ) -> IvyResult<()>;
@@ -110,6 +131,7 @@ impl<R: RpcClient + 'static, P: LifecyclePolicies> LifecycleEngine for Lifecycle
     async fn cleanup_task_outputs(
         &self,
         node: &JsString,
+        backend: Option<&BackendIdentity>,
         task_key: &JsString,
         operation_id: &JsString,
     ) -> IvyResult<()> {
@@ -125,12 +147,20 @@ impl<R: RpcClient + 'static, P: LifecyclePolicies> LifecycleEngine for Lifecycle
             )?
             .call(
                 &"agent.cleanupTaskOutputs".into(),
-                Json::object([("taskKey", Json::String(task_key.clone()))]),
+                BackendIdentity::select_arguments(
+                    backend,
+                    Json::object([("taskKey", Json::String(task_key.clone()))]),
+                )?,
                 Some(operation_id.clone()),
                 ToolCallOptions::default(),
             )
             .await?;
-        validate_agent("TaskOutputCleanup", &result)
+        validate_agent("TaskOutputCleanup", &result)?;
+        require(
+            BackendIdentity::matches(&result, backend),
+            "task_board_target_mismatch",
+            "Output cleanup must retain its selected backend and account.",
+        )
     }
     fn client(&self) -> &dyn RpcClient {
         self.client.as_ref()
@@ -199,8 +229,40 @@ pub struct NativeLifecycle<'a, S, E, O> {
     pub catalogs: &'a CheckedNativeContracts,
 }
 struct TicketContexts {
-    threads: Vec<Json>,
-    output_nodes: Vec<JsString>,
+    threads: Vec<TicketContext>,
+    output_nodes: Vec<(JsString, Option<BackendIdentity>)>,
+}
+struct TicketContext {
+    primary: Json,
+    backend: Option<BackendIdentity>,
+    route: Option<Json>,
+}
+impl TicketContext {
+    fn new(primary: &Json, backend: Option<BackendIdentity>) -> IvyResult<Self> {
+        require(
+            primary.is_null()
+                || eq(primary, "kind", "thread")
+                    && field(primary, "namespace")
+                        .is_str(backend.as_ref().map_or("codex", BackendIdentity::id)),
+            "task_board_primary_mismatch",
+            if backend.is_some() {
+                "The saved native context must retain its original backend and account."
+            } else {
+                "The saved native context must be a Codex thread."
+            },
+        )?;
+        Ok(Self {
+            primary: primary.clone(),
+            backend,
+            route: None,
+        })
+    }
+    fn task(task: &Json) -> IvyResult<Self> {
+        Self::new(
+            field(task, "primaryResourceRef"),
+            BackendIdentity::optional(task.get("primaryBackend"))?,
+        )
+    }
 }
 fn field<'a>(v: &'a Json, k: &str) -> &'a Json {
     static NULL: Json = Json::Null;
@@ -237,8 +299,16 @@ fn join(prefix: &str, v: &JsString) -> JsString {
     s.0.extend(&v.0);
     s
 }
-fn call_key(method: &str, primary: &Json) -> IvyResult<JsString> {
-    Ok(format!("{method}:{}", &hash_json(primary)?[7..]).into())
+fn call_key(
+    method: &str,
+    primary: &Json,
+    backend: Option<&BackendIdentity>,
+) -> IvyResult<JsString> {
+    let scope = backend.map_or_else(
+        || primary.clone(),
+        |backend| Json::Array(vec![primary.clone(), backend.json()]),
+    );
+    Ok(format!("{method}:{}", &hash_json(&scope)?[7..]).into())
 }
 fn path_has(path: &JsString, segment: &str) -> bool {
     let p: Vec<u16> = segment.encode_utf16().collect();
@@ -259,27 +329,13 @@ fn missing(reply: &Json, thread: &JsString) -> IvyResult<bool> {
 }
 fn identity(v: &Json) -> IvyResult<NativeOwnerIdentity> {
     Ok(NativeOwnerIdentity {
+        backend: BackendIdentity::optional(v.get("backend"))?,
         service_node_id: s(v, "serviceNodeId")?.clone(),
         host_id: v.get("hostId").and_then(Json::as_js_string).cloned(),
         native_version: s(v, "nativeVersion")?.clone(),
         native_executable_hash: s(v, "nativeExecutableHash")?.clone(),
         catalog_hash: s(v, "catalogHash")?.clone(),
     })
-}
-fn identity_value(v: &NativeOwnerIdentity) -> Json {
-    Json::object([
-        ("serviceNodeId", Json::String(v.service_node_id.clone())),
-        (
-            "hostId",
-            v.host_id.clone().map(Json::String).unwrap_or(Json::Null),
-        ),
-        ("nativeVersion", Json::String(v.native_version.clone())),
-        (
-            "nativeExecutableHash",
-            Json::String(v.native_executable_hash.clone()),
-        ),
-        ("catalogHash", Json::String(v.catalog_hash.clone())),
-    ])
 }
 impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecycle<'_, S, E, O> {
     async fn retained(&self, operation: &Document, key: &JsString) -> IvyResult<Option<Json>> {
@@ -296,7 +352,11 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
             .find(|c| c.get("key").and_then(Json::as_js_string) == Some(key))
             .cloned())
     }
-    async fn owner(&self, node: &JsString) -> IvyResult<NativeOwner> {
+    async fn owner(
+        &self,
+        node: &JsString,
+        backend: Option<&BackendIdentity>,
+    ) -> IvyResult<NativeOwner> {
         let registration = self
             .engine
             .client()
@@ -306,14 +366,21 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                 RequestOptions::default(),
             )
             .await?;
-        let status =
-            management_read(self.engine.tools(), node, "status", Json::Object(vec![])).await?;
+        let status = management_read(
+            self.engine.tools(),
+            node,
+            "status",
+            BackendIdentity::select_arguments(backend, Json::Object(vec![]))?,
+        )
+        .await?;
         validate_agent("Status", &status)?;
         require(
             eq(&registration, "serviceName", "agent-manager")
                 && status.get("serviceNodeId").and_then(Json::as_js_string) == Some(node)
                 && status.get("hostId") == registration.get("hostId")
-                && status.get("nativeVersion") == registration.get("nativeVersion")
+                && (backend.is_some()
+                    || status.get("nativeVersion") == registration.get("nativeVersion"))
+                && BackendIdentity::matches(&status, backend)
                 && eq(&status, "state", "ready")
                 && status
                     .get("epoch")
@@ -329,11 +396,23 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
             RequestOptions::default(),
         ))
     }
-    fn saved_owner(&self, saved: &Json) -> IvyResult<NativeOwner> {
+    async fn saved_owner(&self, saved: &Json, route: Option<&Json>) -> IvyResult<NativeOwner> {
+        let original = NativeOwnerIdentity::from_json(saved.required("owner")?)?;
+        if let Some(route) = route {
+            let backend = BackendIdentity::optional(route.get("backend"))?;
+            if original.service_node_id != *s(route, "serviceNodeId")?
+                || original.host_id.as_ref() != route.get("hostId").and_then(Json::as_js_string)
+                || original.backend != backend
+            {
+                return self
+                    .owner(s(route, "serviceNodeId")?, backend.as_ref())
+                    .await;
+            }
+        }
         Ok(NativeOwner::new(
             self.engine.tools().clone(),
             self.engine.principal_id().clone(),
-            identity(saved.required("owner")?)?,
+            original,
             RequestOptions::default(),
         ))
     }
@@ -341,6 +420,7 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
         &self,
         operation: &Document,
         key: &JsString,
+        route: Option<&Json>,
         prepare: F,
     ) -> IvyResult<Json>
     where
@@ -362,7 +442,7 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                 "task_board_native_intent_mismatch",
                 "The lifecycle method must belong to the selected native version.",
             )?;
-            let target = identity_value(owner.target());
+            let target = owner.target().to_json();
             let operation_id = self
                 .engine
                 .scoped_operation_id(&Json::Array(vec![
@@ -389,7 +469,9 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                 )
                 .await?
         };
-        let owner = self.saved_owner(&saved)?;
+        let owner = self.saved_owner(&saved, route).await?;
+        let original_owner = NativeOwnerIdentity::from_json(saved.required("owner")?)?;
+        let original_reader = owner.original_operations(original_owner.clone());
         let call = NativeOperationCall {
             operation_id: s(&saved, "operationId")?.clone(),
             method: s(&saved, "method")?.clone(),
@@ -398,7 +480,7 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
         };
         let native_owner = &owner;
         let result = reconcile_native_operation_local(
-            native_owner,
+            &original_reader,
             &call,
             NativeOperationJournal {
                 current: saved.clone(),
@@ -415,6 +497,8 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
             },
             Some(
                 move |original: NativeOperationCall, absence: Json| async move {
+                    require(native_owner.target() == &original_owner,
+                        "task_board_native_route_changed", "A migrated route can read the original lifecycle outcome but cannot dispatch its original call.")?;
                     let status = native_owner.status().await?;
                     require(
                         status.get("epoch") == absence.get("epoch"),
@@ -463,24 +547,21 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
     async fn archive_thread(
         &self,
         operation: &Document,
-        primary: &Json,
+        context: &TicketContext,
         archived: bool,
         only_archived: bool,
     ) -> IvyResult<bool> {
-        require(
-            eq(primary, "namespace", "codex") && eq(primary, "kind", "thread"),
-            "task_board_primary_mismatch",
-            "The saved native context must be a Codex thread.",
-        )?;
+        let primary = &context.primary;
+        let backend = context.backend.as_ref();
         let method = if archived {
             "thread/archive"
         } else {
             "thread/unarchive"
         };
-        let key = call_key(method, primary)?;
+        let key = call_key(method, primary, backend)?;
         let mut selected = None;
         if self.retained(operation, &key).await?.is_none() {
-            let owner = self.owner(s(primary, "serviceNodeId")?).await?;
+            let owner = self.owner(s(primary, "serviceNodeId")?, backend).await?;
             let read = owner
                 .read(
                     &"thread/read".into(),
@@ -538,10 +619,10 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
             selected = Some(owner);
         }
         let observed = self
-            .call(operation, &key, || async {
+            .call(operation, &key, context.route.as_ref(), || async {
                 let owner = match selected {
                     Some(owner) => owner,
-                    None => self.owner(s(primary, "serviceNodeId")?).await?,
+                    None => self.owner(s(primary, "serviceNodeId")?, backend).await?,
                 };
                 Ok((
                     owner,
@@ -594,40 +675,48 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
     ) -> IvyResult<()> {
         let request = operation.value.required("request")?;
         let primary = field(&task.value, "primaryResourceRef");
+        let context = TicketContext::task(&task.value)?;
         require(
             eq(request, "action", "continue")
                 && !primary.is_null()
                 && field(primary, "serviceNodeId")
-                    == field(field(request, "target"), "serviceNodeId"),
+                    == field(field(request, "target"), "serviceNodeId")
+                && BackendIdentity::matches(field(request, "target"), context.backend.as_ref()),
             "task_board_primary_mismatch",
             "Continuation must retain its saved native owner and context.",
         )?;
         require(
-            self.archive_thread(operation, primary, false, true).await?,
+            self.archive_thread(operation, &context, false, true)
+                .await?,
             "task_board_native_restore_failed",
             "The archived native context could not be restored; no replacement was created.",
         )
     }
     async fn contexts(&self, task: &Document, history: bool) -> IvyResult<TicketContexts> {
-        let mut unique = Vec::<(String, Json)>::new();
-        let mut output_nodes = Vec::<JsString>::new();
-        let mut add = |primary: &Json| -> IvyResult<()> {
+        let mut unique = Vec::<(String, TicketContext)>::new();
+        let mut output_nodes = Vec::<(JsString, Option<BackendIdentity>)>::new();
+        let mut add = |primary: &Json, backend: Option<BackendIdentity>| -> IvyResult<()> {
             if !primary.is_null() {
-                let hash = hash_json(primary)?;
-                require(
-                    eq(primary, "namespace", "codex") && eq(primary, "kind", "thread"),
-                    "task_board_primary_mismatch",
-                    "The saved native context must be a Codex thread.",
-                )?;
+                let route =
+                    crate::native_plan::primary_route(&task.value, primary, backend.as_ref())?
+                        .cloned();
+                let (primary, backend) =
+                    crate::native_plan::routed_primary(&task.value, primary, backend)?;
+                let mut context = TicketContext::new(&primary, backend)?;
+                context.route = route;
+                let hash = call_key("context", &primary, context.backend.as_ref())?.to_utf8()?;
                 if let Some((_, previous)) = unique.iter_mut().find(|(key, _)| key == &hash) {
-                    *previous = primary.clone();
+                    *previous = context;
                 } else {
-                    unique.push((hash, primary.clone()));
+                    unique.push((hash, context));
                 }
             }
             Ok(())
         };
-        add(field(&task.value, "primaryResourceRef"))?;
+        add(
+            field(&task.value, "primaryResourceRef"),
+            BackendIdentity::optional(task.value.get("primaryBackend"))?,
+        )?;
         for key in ["task-board/run", "task-board/history"] {
             if key == "task-board/history" && !history {
                 break;
@@ -659,19 +748,35 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                         require(
                             ["completed", "failed", "cancelled"]
                                 .iter()
-                                .any(|phase| eq(&document.value, "phase", phase)),
+                                .any(|phase| eq(&document.value, "phase", phase))
+                                && !["active", "unknown"].iter().any(|state| {
+                                    eq(field(&document.value, "externalOutcome"), "state", state)
+                                }),
                             "task_board_execution_unresolved",
                             "Resolve every native execution attempt before changing the ticket context.",
                         )?;
-                        if let Some(node) = field(&document.value, "target")
+                        if let Some(_node) = field(&document.value, "target")
                             .get("serviceNodeId")
                             .and_then(Json::as_js_string)
                         {
-                            if !output_nodes.contains(node) {
-                                output_nodes.push(node.clone());
+                            let target = crate::native_plan::routed_target(
+                                &task.value,
+                                field(&document.value, "target"),
+                            )?;
+                            let owner = (
+                                s(&target, "serviceNodeId")?.clone(),
+                                BackendIdentity::optional(target.get("backend"))?,
+                            );
+                            if !output_nodes.contains(&owner) {
+                                output_nodes.push(owner);
                             }
                         }
-                        add(field(&document.value, "primaryResourceRef"))?;
+                        add(
+                            field(&document.value, "primaryResourceRef"),
+                            BackendIdentity::optional(
+                                field(&document.value, "target").get("backend"),
+                            )?,
+                        )?;
                     } else {
                         let previous = field(&document.value, "previousTask");
                         if previous.is_null() {
@@ -687,7 +792,12 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                                 .store
                                 .lifecycle_read("task-board/task", previous, true, true)
                                 .await?;
-                            add(field(&old.document.value, "primaryResourceRef"))
+                            add(
+                                field(&old.document.value, "primaryResourceRef"),
+                                BackendIdentity::optional(
+                                    old.document.value.get("primaryBackend"),
+                                )?,
+                            )
                         }
                         .await;
                         if let Err(error) = result {
@@ -706,11 +816,14 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                 }
             }
         }
-        let threads: Vec<Json> = unique.into_iter().map(|(_, primary)| primary).collect();
-        for primary in &threads {
-            let node = s(primary, "serviceNodeId")?;
-            if !output_nodes.contains(node) {
-                output_nodes.push(node.clone());
+        let threads: Vec<TicketContext> = unique.into_iter().map(|(_, context)| context).collect();
+        for context in &threads {
+            let owner = (
+                s(&context.primary, "serviceNodeId")?.clone(),
+                context.backend.clone(),
+            );
+            if !output_nodes.contains(&owner) {
+                output_nodes.push(owner);
             }
         }
         Ok(TicketContexts {
@@ -744,11 +857,16 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
             )?;
         }
         let plan = read_plan(self.store, self.catalogs, allocation.required("intent")?).await?;
+        let backend = BackendIdentity::optional(allocation.required("target")?.get("backend"))?;
         let owner = self
-            .owner(s(allocation.required("target")?, "serviceNodeId")?)
+            .owner(
+                s(allocation.required("target")?, "serviceNodeId")?,
+                backend.as_ref(),
+            )
             .await?;
         require(
-            field(&plan, "nativeVersion").as_js_string() == Some(&owner.target().native_version),
+            field(&plan, "nativeVersion").as_js_string() == Some(&owner.target().native_version)
+                && BackendIdentity::matches(&plan, owner.target().backend.as_ref()),
             "task_board_native_epoch_changed",
             "The new native task must use its freshly allocated plan version.",
         )?;
@@ -758,9 +876,9 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
         )?;
         Ok((owner, plan))
     }
-    async fn new_thread(&self, operation: &Document, task: &Document) -> IvyResult<Json> {
+    async fn new_thread(&self, operation: &Document, task: &Document) -> IvyResult<TicketContext> {
         let observed = self
-            .call(operation, &"new-thread".into(), || async {
+            .call(operation, &"new-thread".into(), None, || async {
                 let (owner, plan) = self.plan(operation, task, None).await?;
                 Ok((
                     owner,
@@ -795,20 +913,31 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
             .as_js_string()
             .cloned()
             .unwrap_or_default();
-        let previous = field(field(&task.value, "primaryResourceRef"), "nativeId");
+        let backend = BackendIdentity::optional(observed.get("backend"))?;
+        let primary = Json::object([
+            ("serviceNodeId", observed.required("serviceNodeId")?.clone()),
+            (
+                "namespace",
+                backend.as_ref().map_or("codex", BackendIdentity::id).into(),
+            ),
+            ("kind", "thread".into()),
+            ("nativeId", Json::String(id.clone())),
+        ]);
         require(
-            field(&thread, "ephemeral") == &Json::Bool(false) && field(&thread, "id") != previous,
+            !id.0.is_empty()
+                && field(&thread, "ephemeral") == &Json::Bool(false)
+                && (!same(&primary, field(&task.value, "primaryResourceRef"))?
+                    || backend != BackendIdentity::optional(task.value.get("primaryBackend"))?),
             "task_board_primary_mismatch",
             "The new native task must return a distinct durable thread identity.",
         )?;
-        Ok(Json::object([
-            ("serviceNodeId", observed.required("serviceNodeId")?.clone()),
-            ("namespace", "codex".into()),
-            ("kind", "thread".into()),
-            ("nativeId", Json::String(id)),
-        ]))
+        TicketContext::new(&primary, backend)
     }
-    async fn recover_thread(&self, operation: &Document, task: &Document) -> IvyResult<Json> {
+    async fn recover_thread(
+        &self,
+        operation: &Document,
+        task: &Document,
+    ) -> IvyResult<TicketContext> {
         let request = field(&operation.value, "request");
         let waiting = field(&task.value, "waiting");
         require(
@@ -837,11 +966,12 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
             .store
             .read("task-board/run", request.required("run")?, true)
             .await?;
-        let key = call_key("thread/resume", primary)?;
+        let context = TicketContext::task(&task.value)?;
+        let key = call_key("thread/resume", primary, context.backend.as_ref())?;
         // Planning and primary admission belong inside the retained-call owner:
         // a saved terminal call must not allocate or prepare another request.
         let observed = self
-            .call(operation, &key, || async {
+            .call(operation, &key, None, || async {
                 let (owner, plan) = self.plan(operation, task, Some(&run.value)).await?;
                 let mut params = object(plan.required("threadResume")?);
                 params.insert("threadId", primary.required("nativeId")?.clone());
@@ -859,14 +989,14 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                 "task_board_primary_mismatch",
                 "Recovery must confirm the original durable thread before reusing it.",
             )?;
-            return Ok(primary.clone());
+            return Ok(context);
         }
         require(
             missing_native_thread(reply, s(primary, "nativeId")?)?,
             "task_board_native_resume_failed",
             "The original context was not confirmed missing; no replacement is authorized.",
         )?;
-        Ok(Json::Null)
+        TicketContext::new(&Json::Null, None)
     }
     async fn membership(
         &self,
@@ -945,13 +1075,19 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
         steps: &mut P,
         outcome: &mut Json,
         task: &Document,
-        primary: Json,
+        context: TicketContext,
         start: bool,
     ) -> IvyResult<()> {
         let at = field(&operation.value, "createdAt");
         let request = field(&operation.value, "request");
         let mut value = object(&task.value);
+        let primary = context.primary;
         value.insert("primaryResourceRef", primary.clone());
+        if let Some(backend) = context.backend {
+            value.insert("primaryBackend", backend.json());
+        } else {
+            value.remove("primaryBackend");
+        }
         value.insert("publication", steps.pin()?);
         value.insert("updatedAt", at.clone());
         value.remove("waiting");
@@ -1050,9 +1186,14 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
     ) -> IvyResult<Json> {
         let request = operation.value.required("request")?;
         require(
-            ["archive", "newThread", "recoverThread"]
-                .iter()
-                .any(|action| eq(request, "action", action)),
+            [
+                "archive",
+                "newThread",
+                "recoverThread",
+                "migrateNativeRoute",
+            ]
+            .iter()
+            .any(|action| eq(request, "action", action)),
             "task_board_native_intent_mismatch",
             "Only retained ticket lifecycle requests reach this program.",
         )?;
@@ -1078,7 +1219,9 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                 "Finish the current execution and publication before changing the ticket context.",
             )?;
             require(
-                eq(request, "action", "archive")
+                ["archive", "migrateNativeRoute"]
+                    .iter()
+                    .any(|action| eq(request, "action", action))
                     || field(&current.metadata, "effectivelyArchived") != &Json::Bool(true),
                 "task_board_record_archived",
                 "Restore the ticket before requesting new work.",
@@ -1089,6 +1232,17 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
         }
         // Admission and aggregate errors remain outside the native-outcome catch.
         let result: IvyResult<()> = async {
+            if eq(request, "action", "migrateNativeRoute") {
+                self.migrate_route(
+                    operation,
+                    steps,
+                    &mut outcome,
+                    &task,
+                    field(&current.metadata, "effectivelyArchived") == &Json::Bool(true),
+                )
+                .await?;
+                return Ok(());
+            }
             if eq(request, "action", "recoverThread") {
                 let primary = self.recover_thread(operation, &task).await?;
                 self.replace(operation, steps, &mut outcome, &task, primary, true)
@@ -1110,23 +1264,31 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                     .await?;
             } else {
                 let primary = field(&task.value, "primaryResourceRef");
-                let mut replacement = Json::Null;
+                let mut replacement = None;
                 if archived {
                     for context in &contexts.threads {
                         self.archive_thread(operation, context, true, false).await?;
                     }
-                    for node in &contexts.output_nodes {
+                    for (node, backend) in &contexts.output_nodes {
                         // A live owner's scoped-ID cache does not survive a
                         // restart. Bind this host effect to the retained archive.
-                        let operation_id: JsString = hash_json(&Json::Array(vec![
+                        let mut cleanup = vec![
                             "task-board-output-cleanup".into(),
                             operation.pin.required("objectId")?.clone(),
                             Json::String(node.clone()),
-                        ]))?
-                        .into();
+                        ];
+                        if let Some(backend) = backend {
+                            cleanup.push(backend.json());
+                        }
+                        let operation_id: JsString = hash_json(&Json::Array(cleanup))?.into();
                         if let Err(error) = self
                             .engine
-                            .cleanup_task_outputs(node, s(&task.value, "taskKey")?, &operation_id)
+                            .cleanup_task_outputs(
+                                node,
+                                backend.as_ref(),
+                                s(&task.value, "taskKey")?,
+                                &operation_id,
+                            )
                             .await
                         {
                             return Err(IvyError::new(
@@ -1142,13 +1304,13 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                     }
                 } else if !primary.is_null()
                     && !self
-                        .archive_thread(operation, primary, false, false)
+                        .archive_thread(operation, &TicketContext::task(&task.value)?, false, false)
                         .await?
                 {
-                    replacement = self.new_thread(operation, &task).await?;
+                    replacement = Some(self.new_thread(operation, &task).await?);
                 }
                 self.membership(operation, &task, archived).await?;
-                if !replacement.is_null() {
+                if let Some(replacement) = replacement {
                     self.replace(operation, steps, &mut outcome, &task, replacement, false)
                         .await?;
                 }

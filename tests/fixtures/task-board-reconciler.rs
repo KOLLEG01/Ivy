@@ -53,11 +53,7 @@ fn data() -> &'static Json {
             .unwrap();
         }
         let o = reference_data::read(include_bytes!("task-board-reconciler-cases.json.gz"));
-        parse(
-            std::str::from_utf8(&o).unwrap(),
-            MANAGEMENT_FRAME_BYTES,
-        )
-        .unwrap()
+        parse(std::str::from_utf8(&o).unwrap(), MANAGEMENT_FRAME_BYTES).unwrap()
     })
 }
 #[derive(Default)]
@@ -123,6 +119,8 @@ struct World<'a> {
     millis: Cell<f64>,
     at: RefCell<JsString>,
     service: JsString,
+    source_checks: Cell<usize>,
+    source_gaps: Cell<usize>,
 }
 impl<'a> World<'a> {
     fn new(input: &'a Json) -> Self {
@@ -211,6 +209,8 @@ impl<'a> World<'a> {
             millis: Cell::new(0.0),
             at: RefCell::new("2026-01-02T00:00:00.000Z".into()),
             service: "task-board-node".into(),
+            source_checks: Cell::new(0),
+            source_gaps: Cell::new(num(input, "sourceGaps") as usize),
         }
     }
     fn event(&self, args: impl IntoIterator<Item = Json>) {
@@ -407,6 +407,13 @@ impl SchedulerStore for World<'_> {
     }
 }
 impl ReconcileStore for World<'_> {
+    async fn protect_sources(&self) -> IvyResult<usize> {
+        self.source_checks.set(self.source_checks.get() + 1);
+        if flag(self.input, "protectSources") {
+            self.fail("protect")?;
+        }
+        Ok(self.source_gaps.get())
+    }
     async fn collect_local(&self) -> IvyResult<()> {
         self.event(["collect".into()]);
         self.fail("collect")
@@ -490,6 +497,59 @@ impl ReconcileEngine for World<'_> {
     async fn delivery(&self, id: &JsString) -> IvyResult<()> {
         self.work("delivery", id).await
     }
+}
+
+#[test]
+fn source_protection_precedes_readiness_and_reuses_the_existing_cleanup_cadence() {
+    let input = Json::object([
+        ("counts", Json::Array(vec![Json::Number(0.0); 4])),
+        ("protectSources", true.into()),
+        ("sourceGaps", Json::Number(1.0)),
+        (
+            "fault",
+            Json::object([
+                ("where", "protect".into()),
+                ("code", "connection_closed".into()),
+            ]),
+        ),
+    ]);
+    let world = World::new(&input);
+    let tasks = Tasks::default();
+    let subject = Reconciler::new(&world, &world, &tasks);
+    let waker = Waker::from(Arc::new(Noop));
+    let mut cx = Context::from_waker(&waker);
+    let mut failed = Box::pin(subject.verify_owner());
+    let Poll::Ready(Err(failure)) = failed.as_mut().poll(&mut cx) else {
+        panic!("Readiness must await source protection");
+    };
+    assert_eq!(failure.code, "connection_closed");
+    drop(failed);
+    let mut ready = Box::pin(subject.verify_owner());
+    assert!(matches!(ready.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+    drop(ready);
+    assert_eq!(world.source_checks.get(), 2);
+    assert!(
+        subject
+            .diagnostics()
+            .iter()
+            .any(|v| f(v, "code") == &Json::from("task_board_source_revision_missing"))
+    );
+    let mut ready = Box::pin(subject.verify_owner());
+    assert!(matches!(ready.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+    drop(ready);
+    assert_eq!(world.source_checks.get(), 2);
+    world.source_gaps.set(0);
+    world.millis.set(60000.0);
+    let mut tick = Box::pin(subject.tick());
+    assert!(tick.as_mut().poll(&mut cx).is_ready());
+    drop(tick);
+    assert_eq!(world.source_checks.get(), 3);
+    assert!(
+        !subject
+            .diagnostics()
+            .iter()
+            .any(|v| f(v, "code") == &Json::from("task_board_source_revision_missing"))
+    );
 }
 
 #[test]

@@ -1,6 +1,7 @@
 //! Codex owns project identities; this owner prepares and validates directories.
 use crate::{
-    local_state::LocalAgentState, project_policy::ProjectPolicy, project_repository::WorkspaceGit,
+    local_state::LocalAgentState, project_model::NativeProjects, project_policy::ProjectPolicy,
+    project_repository::WorkspaceGit,
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_host_runtime::{filesystem, node_path, paths};
@@ -13,7 +14,7 @@ use std::{
 pub type RegisterProject = dyn Fn(IvyJson) -> ServiceFuture<IvyJson> + Send + Sync;
 struct Inner {
     policy: Arc<ProjectPolicy>,
-    native_projects: Mutex<Vec<IvyJson>>,
+    native_projects: Mutex<Arc<NativeProjects>>,
     register: Option<Arc<RegisterProject>>,
     state: Option<Arc<Mutex<LocalAgentState>>>,
     git: Arc<WorkspaceGit>,
@@ -90,7 +91,7 @@ impl ProjectLocations {
     ) -> Self {
         Self(Arc::new(Inner {
             policy: Arc::new(policy),
-            native_projects: Mutex::new(Vec::new()),
+            native_projects: Mutex::new(Arc::new(NativeProjects::default())),
             register,
             state,
             git,
@@ -99,24 +100,28 @@ impl ProjectLocations {
     pub fn defaults(&self) -> IvyJson {
         self.0.policy.defaults()
     }
-    pub async fn cleanup_task_outputs(&self, task_key: &JsString, operation_id: &JsString) -> IvyResult<IvyJson> {
+    pub async fn cleanup_task_outputs(
+        &self,
+        task_key: &JsString,
+        operation_id: &JsString,
+    ) -> IvyResult<IvyJson> {
         let policy = self.0.policy.clone();
         let task_key = task_key.clone();
         let operation_id = operation_id.clone();
         blocking(move || crate::task_outputs::cleanup(&policy, &task_key, &operation_id)).await
     }
-    pub fn set_native_projects(&self, projects: &[IvyJson]) -> IvyResult<()> {
+    pub fn set_native_projects(&self, projects: Arc<NativeProjects>) -> IvyResult<()> {
         *self
             .0
             .native_projects
             .lock()
-            .map_err(|_| IvyError::internal())? = projects.to_vec();
+            .map_err(|_| IvyError::internal())? = projects;
         Ok(())
     }
     pub fn close(&self) -> IvyResult<()> {
-        self.set_native_projects(&[])
+        self.set_native_projects(Arc::new(NativeProjects::default()))
     }
-    fn projects(&self) -> IvyResult<Vec<IvyJson>> {
+    fn projects(&self) -> IvyResult<Arc<NativeProjects>> {
         Ok(self
             .0
             .native_projects
@@ -206,7 +211,7 @@ impl ProjectLocations {
             ]));
         }
         if kind == "internal" || kind == "task" {
-            let project = policy.internal_project(&self.projects()?, expected)?;
+            let project = policy.internal_project(self.projects()?.entries(), expected)?;
             let root = &policy.internal_project_root;
             let path = if kind == "task" {
                 let key = text(selection, "key")?;
@@ -316,7 +321,9 @@ impl ProjectLocations {
             }
             cwd
         };
-        if let Some(project) = policy.existing_project(&self.projects()?, &cwd, expected)? {
+        if let Some(project) =
+            policy.existing_project(self.projects()?.entries(), &cwd, expected)?
+        {
             return Ok(IvyJson::object([
                 ("kind", kind.into()),
                 ("cwd", IvyJson::String(protocol_path(cwd))),
@@ -395,33 +402,27 @@ impl ProjectLocations {
         let mut project = IvyJson::Null;
         let mut use_worktree = false;
         if kind == "existing_project" {
-            let known = self
-                .projects()?
-                .into_iter()
-                .find(|project| project.get("nativeId") == requirement.get("projectId"))
+            let projects = self.projects()?;
+            let known = requirement
+                .get("projectId")
+                .and_then(IvyJson::as_js_string)
+                .and_then(|id| projects.find(id))
                 .ok_or_else(|| {
                     IvyError::new(
                         "not_found",
                         "Requested Codex project is unavailable on this host.",
                     )
                 })?;
-            let entries = known
-                .required("paths")?
-                .as_array()
-                .ok_or_else(IvyError::internal)?;
+            let entries = &known.paths;
             let selected = requirement
                 .get("path")
                 .filter(|value| !value.is_null())
-                .or_else(|| entries.first())
-                .and_then(IvyJson::as_js_string);
+                .map(IvyJson::as_js_string)
+                .unwrap_or_else(|| entries.first());
             require(
                 selected.is_some_and(|selected| {
                     !selected.0.is_empty()
-                        && entries.iter().any(|value| {
-                            value
-                                .as_js_string()
-                                .is_some_and(|path| policy.same_path(path, selected))
-                        })
+                        && entries.iter().any(|path| policy.same_path(path, selected))
                 }),
                 "target_conflict",
                 "Requested project path does not belong to the selected project.",
@@ -442,7 +443,7 @@ impl ProjectLocations {
                 source.clone()
             };
             source_path = Some(source);
-            project = reference(service_node_id, text(&known, "nativeId")?);
+            project = reference(service_node_id, &known.native_id);
         } else if kind == "repository_path" || kind == "new_project_path" {
             let folder = text(requirement, "folderName")?;
             ProjectPolicy::workspace_folder(folder)?;
@@ -559,7 +560,7 @@ impl ProjectLocations {
             .await?
             .unwrap_or(IvyJson::Null);
         let id = policy.workspace_project_id(
-            &self.projects()?,
+            self.projects()?.entries(),
             &intended_path,
             project.get("nativeId").and_then(IvyJson::as_js_string),
         )?;

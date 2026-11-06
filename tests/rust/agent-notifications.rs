@@ -61,6 +61,23 @@ fn observe(events: &mut NativeNotifications, params: IvyJson) {
         )
         .unwrap();
 }
+
+#[test]
+fn native_events_retain_their_account_without_rewriting_provider_parameters() {
+    use ivy_contracts::native_backend::{BackendIdentity, NativeProvider};
+    let backend =
+        BackendIdentity::new("primary".into(), NativeProvider::Claude, "work".into()).unwrap();
+    let mut events = fixture(4096).with_backend(Some(backend.clone()));
+    let params = IvyJson::object([(
+        JsString(vec![0xd800]),
+        IvyJson::String(JsString(vec![0xdfff])),
+    )]);
+    observe(&mut events, params.clone());
+    let page = events.page(0, 100, Some("epoch")).unwrap();
+    let event = &page.required("items").unwrap().as_array().unwrap()[0];
+    assert!(BackendIdentity::matches(event, Some(&backend)));
+    assert_eq!(event.required("params").unwrap(), &params);
+}
 fn number(page: &IvyJson, field: &str) -> f64 {
     page.get(field).unwrap().as_f64().unwrap()
 }
@@ -347,6 +364,8 @@ fn native_event_processing_does_not_duplicate_large_payloads() {
                     journal,
                 ),
                 notifications: notifications.clone(),
+                state: state.clone(),
+                receipts: Default::default(),
                 policy: policy.clone(),
                 query: Arc::new(|_| panic!("An offline observation cannot send a notice")),
             },
@@ -482,7 +501,6 @@ async fn native_resolution_keeps_original_ids_and_follows_successful_observation
     }
     let observed = Arc::new(AtomicBool::new(false));
     let callbacks = journal_events(
-        "fixture.agent".into(),
         "epoch".into(),
         &operations,
         Observations {
@@ -541,7 +559,6 @@ async fn native_resolution_keeps_original_ids_and_follows_successful_observation
         Some(&"pending".into())
     );
     let rejected = journal_events(
-        "fixture.agent".into(),
         "epoch".into(),
         &operations,
         Observations {
@@ -573,7 +590,6 @@ async fn native_resolution_keeps_original_ids_and_follows_successful_observation
     );
     observed.store(false, Ordering::Relaxed);
     let null = journal_events(
-        "fixture.agent".into(),
         "epoch".into(),
         &operations,
         Observations {

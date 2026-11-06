@@ -269,6 +269,8 @@ fn ready<F: Future>(future: F) -> F::Output {
 }
 fn identity(value: &Json) -> EvidenceIdentity {
     EvidenceIdentity {
+        backend: ivy_contracts::native_backend::BackendIdentity::optional(value.get("backend"))
+            .unwrap(),
         operation_id: s(value, "operationId"),
         caller_principal_id: s(value, "callerPrincipalId"),
         service_node_id: s(value, "serviceNodeId"),

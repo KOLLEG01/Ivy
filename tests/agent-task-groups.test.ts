@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { Agent, Operation } from '../packages/contracts/src/generated.js';
-import { groupTasks, isVisibleTask, normalizedPath, projectChoices, partitionInternalTasks } from '../ui/agent-ui/src/task-groups.js';
+import { groupTasks, hostSections, isVisibleTask, normalizedPath, projectChoices, partitionInternalTasks } from '../ui/agent-ui/src/task-groups.js';
+import { nativeHosts } from '../packages/ui-client/src/native-hosts.js';
 
 const project = (nativeId: string, name: string, paths: string[], source: Agent.ProjectSummary['source'] = 'native'): Agent.ProjectSummary =>
   ({ nativeId, name, paths, source });
@@ -66,4 +67,24 @@ test('explicitly unassigned tasks remain outside containing projects and interna
   assert.deepEqual(groups[1]?.tasks, tasks);
   assert.equal(groups[1]?.name, 'No project');
   assert.deepEqual(partitionInternalTasks([{ serviceNodeId: 'node', project: internal }], tasks), { recent: tasks, internal: [] });
+});
+
+test('one physical host retains namespace and account boundaries for equal project and thread IDs', () => {
+  const owners = [
+    { backendId: 'primary', provider: 'codex' as const, accountId: 'work' },
+    { backendId: 'secondary', provider: 'claude' as const, accountId: 'personal' },
+  ];
+  const projects = owners.map(backend => ({ serviceNodeId: 'node', namespace: backend.backendId, backend,
+    project: project('same-project', backend.provider === 'codex' ? 'IvyInternal' : 'User project', ['/shared']) }));
+  const tasks = owners.map(backend => ({ ...task('same-thread', '/shared', 'same-project'),
+    resourceRef: { serviceNodeId: 'node', namespace: backend.backendId, kind: 'thread', nativeId: 'same-thread' } }));
+  assert.deepEqual(partitionInternalTasks(projects, tasks), { internal: [tasks[0]], recent: [tasks[1]] });
+  const sections = hostSections(nativeHosts([
+    { serviceNodeId: 'node', hostId: 'host', connected: true, ready: true },
+    { serviceNodeId: 'sibling', hostId: 'host', connected: true, ready: true },
+  ]), projects, tasks);
+  assert.equal(sections.length, 1); assert.equal(sections[0]!.hostId, 'host');
+  assert.deepEqual(sections[0]!.internal, [tasks[0]]);
+  assert.deepEqual(sections[0]!.groups[0]!.owner.backend, owners[1]);
+  assert.deepEqual(sections[0]!.groups[0]!.tasks, [tasks[1]]);
 });

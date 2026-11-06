@@ -303,7 +303,7 @@ struct World {
 }
 impl World {
     fn new() -> Self {
-        Self {
+        let mut world = Self {
             task: document(
                 "self",
                 4.0,
@@ -332,7 +332,12 @@ impl World {
             reads: RefCell::default(),
             inspections: Cell::new(0),
             failure: RefCell::new(None),
-        }
+        };
+        world.run.value.insert(
+            "target",
+            json(r#"{"hostId":"fixture","serviceNodeId":"agent"}"#),
+        );
+        world
     }
     async fn retry(&self) -> IvyResult<Option<JsString>> {
         FailedRateLimit {

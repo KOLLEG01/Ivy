@@ -34,6 +34,125 @@ unsafe impl GlobalAlloc for Counted {
 static ALLOCATOR: Counted = Counted;
 
 #[test]
+fn account_contracts_share_catalog_schemas_and_release_their_last_owner() {
+    use ivy_contracts::{
+        native_backend::{BackendIdentity, NativeProvider},
+        native_contract::NativeContract,
+    };
+    const CASE: &str = "account_contracts_share_catalog_schemas_and_release_their_last_owner";
+    if std::env::var_os("IVY_TEST_NATIVE_CONTRACT_MEMORY").is_none() {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", CASE, "--test-threads=1", "--nocapture"])
+            .env("IVY_TEST_NATIVE_CONTRACT_MEMORY", "1")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        print!("{}", String::from_utf8_lossy(&result.stdout));
+        return;
+    }
+    let mut catalog = parse(
+        include_str!("../../specs/native/codex-0.154.0/catalog.json"),
+        32 * 1024 * 1024,
+    )
+    .unwrap();
+    let mut method = catalog
+        .required("clientRequests")
+        .unwrap()
+        .as_array()
+        .unwrap()[0]
+        .clone();
+    method.insert("method", "fixture/read".into());
+    method.insert(
+        "inputSchema",
+        IvyJson::object([(
+            "enum",
+            IvyJson::Array(vec![IvyJson::Number(0.0); 32 * 1024]),
+        )]),
+    );
+    method.insert(
+        "outputSchema",
+        IvyJson::object([(
+            "enum",
+            IvyJson::Array(vec![IvyJson::Number(0.0); 32 * 1024]),
+        )]),
+    );
+    catalog.insert("clientRequests", IvyJson::Array(vec![method]));
+    for key in [
+        "serverRequests",
+        "serverNotifications",
+        "clientNotifications",
+        "derivedLegacyTypes",
+    ] {
+        catalog.insert(key, IvyJson::Array(vec![]));
+    }
+    let base = NativeContract::from_owned(catalog, None).unwrap();
+    let method = "fixture/read".into();
+    base.validate_input(&method, &IvyJson::Number(0.0), 1024)
+        .unwrap();
+    base.validate_result(&method, &IvyJson::Number(0.0), 1024)
+        .unwrap();
+    base.definition_hash(&method).unwrap();
+    let identity =
+        BackendIdentity::new("worker".into(), NativeProvider::Codex, "warm".into()).unwrap();
+    let before_clone = LIVE_BYTES.load(Ordering::Relaxed);
+    let redundant = base.catalog().clone();
+    let clone_bytes = LIVE_BYTES.load(Ordering::Relaxed) - before_clone;
+    assert!(
+        clone_bytes >= 2 * 1024 * 1024,
+        "Catalog clone allocated {clone_bytes} bytes"
+    );
+    drop(redundant);
+    let baseline = LIVE_BYTES.load(Ordering::Relaxed);
+    let views = (0..8)
+        .map(|index| {
+            let backend = if index == 0 {
+                identity.clone()
+            } else {
+                BackendIdentity::new(
+                    "worker".into(),
+                    NativeProvider::Codex,
+                    format!("account{index}"),
+                )
+                .unwrap()
+            };
+            let view = base.with_backend(Some(backend));
+            assert!(std::ptr::eq(base.catalog(), view.catalog()));
+            view.validate_input(&method, &IvyJson::Number(0.0), 1024)
+                .unwrap();
+            view.validate_result(&method, &IvyJson::Number(0.0), 1024)
+                .unwrap();
+            view.definition_hash(&method).unwrap();
+            drop(view.definition(&method).unwrap());
+            view
+        })
+        .collect::<Vec<_>>();
+    let extra_bytes = LIVE_BYTES.load(Ordering::Relaxed) - baseline;
+    assert!(
+        extra_bytes < 128 * 1024,
+        "Account contracts retained {extra_bytes} extra bytes beside one catalog and its validators"
+    );
+    drop(base);
+    views[0]
+        .validate_input(&method, &IvyJson::Number(0.0), 1024)
+        .unwrap();
+    let retained = LIVE_BYTES.load(Ordering::Relaxed);
+    drop(views);
+    let released_bytes = retained - LIVE_BYTES.load(Ordering::Relaxed);
+    assert!(
+        released_bytes >= clone_bytes,
+        "Last account owner released only {released_bytes} bytes"
+    );
+    println!(
+        "NativeContract allocation fixture: catalogCloneBytes={clone_bytes}, eightAccountExtraBytes={extra_bytes}, lastOwnerReleasedBytes={released_bytes}"
+    );
+}
+
+#[test]
 fn compiled_properties_retain_one_copy_of_declared_names() {
     let name = "n".repeat(96 * 1024);
     let schema = IvyJson::object([

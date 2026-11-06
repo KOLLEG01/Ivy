@@ -7,6 +7,7 @@ import type { AnySchema } from 'ajv';
 import { canonical } from './canonical.js';
 import { requireThat } from './errors.js';
 import { managementFrameBytes } from './limits.js';
+import { definitionValidator } from './schema-definition.js';
 
 export const automationSchema = automation as Record<string, unknown>;
 const ajv = new Ajv2020({ strict: false, allErrors: false, validateFormats: false, ownProperties: true });
@@ -14,6 +15,6 @@ for (const schema of [automation, operation, host, wire]) ajv.addSchema(schema a
 
 export function validateAutomation(name: string, value: unknown): void {
   canonical(value, managementFrameBytes);
-  const validator = ajv.getSchema(`${String(automationSchema['$id'])}#/$defs/${name}`);
+  const validator = definitionValidator(ajv, automationSchema, name);
   requireThat(validator && validator(value), 'invalid_arguments', 'Value does not match its automation example contract.');
 }

@@ -7,6 +7,7 @@ import { buildIdentity } from '../../packages/host-runtime/src/build-identity.mj
 import { compileRustBackend, compileRustHelpers, rustBackendTargets } from './build-rust-backend.mjs';
 import { stageNativePayloads } from './stage-native-payloads.mjs';
 import { componentBuildInputs } from './build-inputs.mjs';
+import { validateClaudeSdkBridge } from '../package/build-claude-adapter.mjs';
 
 function buildHostUis(root) {
   const uis = readdirSync(resolve(root, 'ui'), { withFileTypes: true }).filter(entry => entry.isDirectory())
@@ -33,6 +34,12 @@ export function buildNativeDeployment({ component, target, root = process.cwd(),
   if (!plan.entrypoint?.executable.startsWith('dist/native/')) throw Error('The component does not declare native entry and readiness commands.');
   target ??= Object.keys(rustBackendTargets).find(target => rustBackendTargets[target] === platform);
   const runtimeFiles = componentBuildInputs({ root, component, platform });
+  if (component === 'agent-manager') {
+    const lock = validateClaudeSdkBridge(resolve(root, 'services/agent-manager/claude'));
+    const catalog = JSON.parse(readFileSync(resolve(root, 'specs/native', `codex-${lock.protocolVersion}`, 'catalog.json'), 'utf8'));
+    if (catalog.version !== lock.protocolVersion || catalog.nativeExecutableHash !== lock.bundleHash)
+      throw Error('Claude SDK catalog pin differs. Regenerate its catalog before preparing AgentManager.');
+  }
   const binaries = ['ivy-health', ...(os === 'win32'
     ? ['ivy-job', ...(component === 'host-executor' ? ['ivy-host-job'] : [])] : [])];
   const requiredBinaries = [...binaries, ...(component === 'host-executor' ? ['ivy', 'ivy-bootstrap-auto-worker', 'ivy-publish-ui'] : [])];

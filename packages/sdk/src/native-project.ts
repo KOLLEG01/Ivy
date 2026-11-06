@@ -4,6 +4,7 @@ import { validateAgent } from '../../contracts/src/agent-validation.js';
 import type { Agent, Wire } from '../../contracts/src/generated.js';
 import { serviceTools } from './client.js';
 import type { RpcClient, RequestOptions } from './client.js';
+import { backendArguments, sameNativeBackend } from '../../contracts/src/native-backend.js';
 
 /** Compare paths on the selected host, including native Windows extended paths. */
 function pathKey(value: string): string {
@@ -33,10 +34,11 @@ export function defaultNativeThreadProject(params: Record<string, Wire.Json>, in
   return result;
 }
 
-export async function nativeThreadProject(client: RpcClient, serviceNodeId: string, params: Record<string, Wire.Json>, options?: RequestOptions): Promise<Record<string, Wire.Json>> {
+export async function nativeThreadProject(client: RpcClient, serviceNodeId: string, params: Record<string, Wire.Json>, options?: RequestOptions, backend?: Agent.BackendIdentity): Promise<Record<string, Wire.Json>> {
   if (params['projectId'] === '') return { ...structuredClone(params), projectId: null };
   if (params['projectId'] != null || params['ephemeral'] === true) return structuredClone(params);
-  const inventory = await serviceTools(client, serviceNodeId, [{ namespace: 'agent', interfaceVersion: '1.0.0' }]).read('agent.projects', {}, options);
+  const inventory = await serviceTools(client, serviceNodeId, [{ namespace: 'agent', interfaceVersion: '1.0.0' }]).read('agent.projects', backendArguments({}, backend), options);
   validateAgent('ProjectsResult', inventory);
+  requireThat(sameNativeBackend((inventory as Agent.ProjectsResult).backend, backend), 'native_owner_mismatch', 'Projects must come from the selected backend and account.');
   return defaultNativeThreadProject(params, inventory as Agent.ProjectsResult);
 }

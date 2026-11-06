@@ -19,14 +19,38 @@ fn probe_pin() -> Json {
     ])
 }
 fn probe_value() -> Json {
-    Json::object([("probe", true.into())])
+    // Exercise the real Task reader with a complete admitted record. The probe
+    // has no workflow action, conversation, native context or publication.
+    let value = parse(
+        r#"{
+        "schemaVersion": 1, "taskKey": "TASK-0001",
+        "fields": {
+            "title": "Read scope probe", "description": "", "acceptanceCriteria": [],
+            "category": null, "control": "user", "priority": 0,
+            "executionRequirement": null, "workspaceRequirement": {"kind": "task_workspace"},
+            "userContact": "ticket", "dueAt": null
+        },
+        "workflowState": "backlog", "publication": null, "primaryResourceRef": null,
+        "claim": null, "attemptCount": 0, "lastRun": null, "lastHistory": null,
+        "latestResult": null, "acceptedReview": null, "comments": [],
+        "commentDeliveries": [], "agentCommentCount": 0, "workRevision": 1,
+        "attachments": [], "createdAt": "2026-01-02T03:04:05.006Z",
+        "updatedAt": "2026-01-02T03:04:05.006Z", "wakeAt": null,
+        "dependencies": [], "runtimeWait": null
+    }"#,
+        MANAGEMENT_FRAME_BYTES,
+    )
+    .unwrap();
+    crate::frozen_contracts::admission("Task", &value).unwrap();
+    value
 }
+const PROBE_TASK_VERSION: &str = "3.3.0";
 // A finite public read admission/transport, independent of the action replay.
 struct ProbeContracts;
 impl Contracts for ProbeContracts {
     fn version(&self, key: &str) -> IvyResult<String> {
         assert_eq!(key, "task-board/task");
-        Ok("1.8.0".into())
+        Ok(PROBE_TASK_VERSION.into())
     }
     fn local(&self, key: &str) -> IvyResult<bool> {
         self.version(key)?;
@@ -35,8 +59,9 @@ impl Contracts for ProbeContracts {
     fn readable_version(&self, key: &str, version: &JsString) -> IvyResult<bool> {
         Ok(version == &JsString::from(self.version(key)?))
     }
-    fn validate_record(&self, key: &str, _: &JsString, value: &Json) -> IvyResult<()> {
-        self.version(key)?;
+    fn validate_record(&self, key: &str, version: &JsString, value: &Json) -> IvyResult<()> {
+        assert_eq!(version, &JsString::from(self.version(key)?));
+        crate::frozen_contracts::admission("Task", value)?;
         assert_eq!(value, &probe_value());
         Ok(())
     }
@@ -67,7 +92,7 @@ impl RpcClient for ProbeClient {
                     "revision",
                     Json::object([
                         ("revision", Json::Number(1.0)),
-                        ("contractVersion", "1.8.0".into()),
+                        ("contractVersion", PROBE_TASK_VERSION.into()),
                         ("mediaType", "application/json".into()),
                         ("contentHash", hash_json(&value)?.into()),
                         (

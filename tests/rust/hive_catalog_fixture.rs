@@ -79,3 +79,39 @@ pub fn project_routing_notification(value: &mut serde_json::Value) {
         *node = serde_json::from_str(&ivy_contracts::json::stringify(&node_to_wire(&routing), usize::MAX).unwrap()).unwrap();
     }
 }
+
+/// Supply the explicit batch field only for the retained, pre-contract traces.
+/// Keep their input hashes, original result assertions and compressed oracles intact.
+pub fn legacy_inventory_source_times(steps: &mut [serde_json::Value], profile: &mut serde_json::Value) {
+    use serde_json::{Value, json};
+    for step in steps {
+        let now = step["now"].as_f64().unwrap_or(100_000.0) as i64;
+        let parameters = if step["op"] == "inventory" && step["method"] == "sync" {
+            &mut step["params"]
+        } else if step["request"]["method"] == "inventory.sync" {
+            &mut step["request"]["params"]
+        } else { continue };
+        assert!(parameters.get("observedAt").is_none(), "This adapter is only for original traces");
+        let entries = parameters["entries"].as_array().unwrap();
+        let observed = match entries.iter().filter_map(|entry| entry["observedAt"].as_str()).max() {
+            Some(value) => value.to_owned(),
+            None => {
+                let iso = chrono::DateTime::from_timestamp_millis(now).unwrap()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                let units = json!(iso.encode_utf16().collect::<Vec<_>>());
+                // The old empty-batch path formatted the clock without parsing it.
+                // The new UTC boundary needs that same finite date observation.
+                let dates = profile["dates"].as_array_mut().unwrap();
+                if let Some(date) = dates.iter().find(|date| date[0] == units) {
+                    assert_eq!(date[1], json!(now));
+                } else { dates.push(json!([units, now])); }
+                let times = profile["iso"].as_array_mut().unwrap();
+                if let Some(time) = times.iter().find(|time| time[0] == now) {
+                    assert_eq!(time[1], json!(iso));
+                } else { times.push(json!([now, iso])); }
+                iso
+            }
+        };
+        parameters["observedAt"] = Value::String(observed);
+    }
+}

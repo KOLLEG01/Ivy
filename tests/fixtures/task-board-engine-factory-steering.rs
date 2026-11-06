@@ -620,7 +620,7 @@ async fn steering_recovers_lost_receipts_or_prevents_replacement_input_without_r
                 .unwrap();
             assert_eq!(
                 f(&prepared.2, "expectedDefinitionHash"),
-                &Json::from(hash_json(catalog.definition(&"turn/steer".into()).unwrap()).unwrap())
+                &Json::from(hash_json(&catalog.definition(&"turn/steer".into()).unwrap()).unwrap())
             );
             let request = f(&prepared.2, "request");
             let params = ivy_sdk::native_parameters::read_native_parameters(

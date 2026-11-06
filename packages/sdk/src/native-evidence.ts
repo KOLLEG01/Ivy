@@ -4,6 +4,7 @@ import { validateAgent } from '../../contracts/src/agent-validation.js';
 import type { Agent, Wire } from '../../contracts/src/generated.js';
 import type { NativeContract } from '../../contracts/src/native-contract.js';
 import type { NativeTarget } from './native.js';
+import { sameNativeBackend } from '../../contracts/src/native-backend.js';
 
 export type NativeOwnerIdentity = Omit<NativeTarget, 'hostId'> & { hostId?: string };
 export interface NativeOperationIdentity extends NativeOwnerIdentity {
@@ -19,7 +20,7 @@ export function nativeInstant(value: string, code = 'native_evidence_mismatch'):
 }
 export function validateNativeStatus(value: unknown, target: NativeOwnerIdentity, code = 'native_owner_mismatch'): asserts value is Agent.Status & { epoch: string } {
   validateAgent('Status', value); const status = value as Agent.Status;
-  requireThat(status.serviceNodeId === target.serviceNodeId && (target.hostId === undefined || status.hostId === target.hostId) &&
+  requireThat(sameNativeBackend(status.backend, target.backend) && status.serviceNodeId === target.serviceNodeId && (target.hostId === undefined || status.hostId === target.hostId) &&
     status.state === 'ready' && status.epoch && status.nativeVersion === target.nativeVersion &&
     status.nativeExecutableHash === target.nativeExecutableHash && status.catalogHash === target.catalogHash,
     code, 'Native readiness requires the exact selected owner, executable and catalog.');
@@ -27,7 +28,7 @@ export function validateNativeStatus(value: unknown, target: NativeOwnerIdentity
 }
 export function validateNativeOperation(value: unknown, expected: NativeOperationIdentity, code = 'native_evidence_mismatch'): asserts value is Agent.Operation {
   validateAgent('Operation', value); const observed = value as Agent.Operation;
-  requireThat(observed.operationId === expected.operationId && observed.callerPrincipalId === expected.callerPrincipalId &&
+  requireThat(sameNativeBackend(observed.backend, expected.backend) && observed.operationId === expected.operationId && observed.callerPrincipalId === expected.callerPrincipalId &&
     observed.serviceNodeId === expected.serviceNodeId && observed.nativeVersion === expected.nativeVersion &&
     observed.nativeExecutableHash === expected.nativeExecutableHash && observed.method === expected.method &&
     canonical(observed.params) === canonical(expected.params) && observed.requestHash === hashJson({ method: expected.method, params: expected.params }),
@@ -36,7 +37,7 @@ export function validateNativeOperation(value: unknown, expected: NativeOperatio
 }
 export function validateNativeRead(value: unknown, expected: NativeReadIdentity, code = 'native_evidence_mismatch'): asserts value is Agent.ReadObservation {
   validateAgent('ReadObservation', value); const observed = value as Agent.ReadObservation;
-  requireThat(observed.serviceNodeId === expected.serviceNodeId && observed.callerPrincipalId === expected.callerPrincipalId &&
+  requireThat(sameNativeBackend(observed.backend, expected.backend) && observed.serviceNodeId === expected.serviceNodeId && observed.callerPrincipalId === expected.callerPrincipalId &&
     observed.nativeVersion === expected.nativeVersion && observed.nativeExecutableHash === expected.nativeExecutableHash &&
     observed.catalogHash === expected.catalogHash && observed.epoch === expected.epoch && observed.method === expected.method &&
     canonical(observed.params) === canonical(expected.params) && observed.requestHash === hashJson({ method: expected.method, params: expected.params }),
@@ -50,7 +51,7 @@ export function validateNativeProgress(previous: Agent.Operation, next: Agent.Op
     serviceNodeId: value.serviceNodeId, nativeVersion: value.nativeVersion, nativeExecutableHash: value.nativeExecutableHash,
     method: value.method, params: value.params, requestHash: value.requestHash, createdAt: value.createdAt });
   const rank = { accepted: 0, dispatched: 1, outcome_unknown: 2, succeeded: 3, failed: 3 };
-  requireThat(canonical(identity(previous)) === canonical(identity(next)) &&
+  requireThat(sameNativeBackend(previous.backend, next.backend) && canonical(identity(previous)) === canonical(identity(next)) &&
     nativeInstant(next.updatedAt, code) >= nativeInstant(previous.updatedAt, code) && rank[next.phase] >= rank[previous.phase] &&
     (previous.epoch === null || previous.epoch === next.epoch) && (previous.requestId === null || previous.requestId === next.requestId) &&
     (!nativeOperationTerminal(previous) || canonical(previous) === canonical(next)),

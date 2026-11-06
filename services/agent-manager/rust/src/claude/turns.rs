@@ -473,14 +473,7 @@ impl Adapter {
         );
     }
     fn item(&self, turn: &JsString, id: &JsString) -> Result<Option<J>> {
-        Ok(self.store.get_turn(turn)?.and_then(|t| {
-            field(&t, "items")
-                .as_array()
-                .unwrap_or(&[])
-                .iter()
-                .find(|i| field(i, "id").as_js_string() == Some(id))
-                .cloned()
-        }))
+        Ok(self.store.get_item(turn, id)?)
     }
     pub(super) fn complete_message(
         &self,
@@ -516,10 +509,7 @@ impl Adapter {
         let thread = string(field(&state.thread, "id"));
         let active = !self.stopped
             && self.active.get(&thread) == Some(turn)
-            && self
-                .store
-                .get_turn(turn)?
-                .is_some_and(|t| is(field(&t, "status"), "inProgress"));
+            && self.store.turn_in_progress(turn)?;
         if !active {
             return Ok(out);
         }
@@ -620,25 +610,16 @@ impl Adapter {
                     self.store.append_item(turn, &item)?;
                     self.item_event(state, turn, &item, true, out)
                 }
-                self.store.update_item(turn, &id, |item| {
-                    let mut item = item.clone();
+                self.store.append_item_delta(
+                    turn,
+                    &id,
                     if thinking {
-                        let first = field(&item, "content")
-                            .as_array()
-                            .and_then(|a| a.first())
-                            .unwrap_or(&NULL);
-                        item.insert(
-                            "content",
-                            J::Array(vec![concat(&[&string(first), &delta]).into_json()]),
-                        );
+                        super::store::ItemDelta::Reasoning
                     } else {
-                        item.insert(
-                            "text",
-                            concat(&[&string(field(&item, "text")), &delta]).into_json(),
-                        )
-                    }
-                    Ok(item)
-                })?;
+                        super::store::ItemDelta::Text
+                    },
+                    &delta,
+                )?;
                 let mut params = J::object([
                     ("threadId", field(&state.thread, "id").clone()),
                     ("turnId", turn.clone().into_json()),
@@ -902,19 +883,12 @@ impl Adapter {
         if is(field(e, "type"), "tool_output_delta") {
             state.output_seen.insert(id.clone());
             let delta = string(field(e, "delta"));
-            self.store.update_item(turn, &id, |mut item| {
-                if is(field(&item, "type"), "commandExecution") {
-                    item.insert(
-                        "aggregatedOutput",
-                        concat(&[
-                            &string(&coalesce(field(&item, "aggregatedOutput"), &"".into())),
-                            &delta,
-                        ])
-                        .into_json(),
-                    )
-                }
-                Ok(item)
-            })?;
+            self.store.append_item_delta(
+                turn,
+                &id,
+                super::store::ItemDelta::CommandOutput,
+                &delta,
+            )?;
             self.notify(
                 &state.peer,
                 "item/commandExecution/outputDelta",
@@ -1014,13 +988,7 @@ impl Adapter {
         let Some(state) = self.turns.get(turn) else {
             return Ok(out);
         };
-        if diff.0.is_empty()
-            || self.stopped
-            || !self
-                .store
-                .get_turn(turn)?
-                .is_some_and(|t| is(field(&t, "status"), "inProgress"))
-        {
+        if diff.0.is_empty() || self.stopped || !self.store.turn_in_progress(turn)? {
             return Ok(out);
         }
         self.store.update_turn_diff(turn, &diff)?;
@@ -1046,10 +1014,7 @@ impl Adapter {
         let thread = string(field(&state.thread, "id"));
         if self.stopped
             || self.active.get(&thread) != Some(turn)
-            || !self
-                .store
-                .get_turn(turn)?
-                .is_some_and(|t| is(field(&t, "status"), "inProgress"))
+            || !self.store.turn_in_progress(turn)?
         {
             return Ok(out);
         }
@@ -1071,10 +1036,7 @@ impl Adapter {
         let thread = string(field(&state.thread, "id"));
         if self.stopped
             || self.active.get(&thread) != Some(turn)
-            || !self
-                .store
-                .get_turn(turn)?
-                .is_some_and(|t| is(field(&t, "status"), "inProgress"))
+            || !self.store.turn_in_progress(turn)?
         {
             return Ok(out);
         }
@@ -1190,11 +1152,7 @@ impl Adapter {
         self.stopped = true;
         let mut states = std::mem::take(&mut self.turns);
         for (turn, state) in &mut states {
-            if self
-                .store
-                .get_turn(turn)?
-                .is_some_and(|t| is(field(&t, "status"), "inProgress"))
-            {
+            if self.store.turn_in_progress(turn)? {
                 state.peer = self
                     .peers
                     .iter()
@@ -1215,6 +1173,7 @@ impl Adapter {
         }
         self.active.clear();
         self.turns.clear();
+        self.clear_callbacks();
         Ok(())
     }
 }

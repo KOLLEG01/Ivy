@@ -7,7 +7,7 @@ import { checkedNativeContract, nativeCatalogPath } from '../packages/contracts/
 
 test('every checked native catalogue admits its exact read observations and prevention while rejecting unknown methods and arguments', () => {
   const versions = readdirSync('specs/native').filter(name => /^codex-\d+\.\d+\.\d+$/.test(name)).map(name => name.slice(6));
-  assert.deepEqual(versions.sort(), ['0.142.3', '0.154.0', '0.158.0', '0.159.2']);
+  assert.deepEqual(versions.sort(), ['0.142.3', '0.154.0', '0.158.0', '0.159.2', '0.163.0']);
   for (const nativeVersion of ['0.144.1', '0.149.1', '0.153.4']) {
     assert.throws(() => checkedNativeContract(nativeVersion), { code: 'native_version_unsupported' });
     assert.throws(() => nativeCatalogPath('.', nativeVersion), { code: 'native_version_unsupported' });

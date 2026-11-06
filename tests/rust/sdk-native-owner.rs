@@ -101,7 +101,17 @@ impl RpcClient for Client {
                 return Ok(IvyJson::object([
                     (
                         "provider",
-                        json(r#"{"node":{"serviceNodeId":"native-agent"}}"#),
+                        IvyJson::object([(
+                            "node",
+                            IvyJson::object([(
+                                "serviceNodeId",
+                                self.input
+                                    .get("target")
+                                    .and_then(|target| target.get("serviceNodeId"))
+                                    .cloned()
+                                    .unwrap_or_else(|| "native-agent".into()),
+                            )]),
+                        )]),
                     ),
                     (
                         "items",
@@ -138,6 +148,72 @@ struct Guard {
     client: Arc<Client>,
     calls: Mutex<usize>,
 }
+
+#[tokio::test]
+async fn native_binding_cache_separates_legacy_backend_and_account_identities() {
+    use ivy_contracts::native_backend::BackendIdentity;
+
+    let name = JsString::from("codex.config/read");
+    let hashes: Vec<JsString> = ['a', 'b', 'c']
+        .into_iter()
+        .map(|value| format!("sha256:{}", value.to_string().repeat(64)).into())
+        .collect();
+    let client = Arc::new(Client {
+        input: IvyJson::object([
+            (
+                "target",
+                json(r#"{"serviceNodeId":"native-agent","nativeVersion":"0.163.0"}"#),
+            ),
+            (
+                "hashes",
+                IvyJson::object([(
+                    "codex.config/read",
+                    IvyJson::Array(hashes.iter().cloned().map(IvyJson::String).collect()),
+                )]),
+            ),
+            ("steps", IvyJson::Array(vec![])),
+        ]),
+        trace: Mutex::new(vec![]),
+        calls: Mutex::new(0),
+        lists: Mutex::new(HashMap::new()),
+        options: RequestOptions::default(),
+    });
+    let tools = ToolClients::new(client.clone());
+    let legacy = tools.native_service_tools("native-agent".into()).unwrap();
+    legacy
+        .binding(&name, Some(&IvyJson::String(hashes[0].clone())))
+        .await
+        .unwrap();
+
+    for (account, expected) in [("default", &hashes[1]), ("other", &hashes[2])] {
+        let backend = BackendIdentity::from_json(&IvyJson::object([
+            ("backendId", "codex".into()),
+            ("provider", "codex".into()),
+            ("accountId", account.into()),
+        ]))
+        .unwrap();
+        for _ in 0..2 {
+            let scoped = tools
+                .native_backend_tools("native-agent".into(), Some(&backend))
+                .unwrap();
+            scoped
+                .binding(&name, Some(&IvyJson::String(expected.clone())))
+                .await
+                .unwrap();
+        }
+    }
+    // Selecting an explicit account must not overwrite the retained legacy binding.
+    legacy
+        .binding(&name, Some(&IvyJson::String(hashes[0].clone())))
+        .await
+        .unwrap();
+    assert_eq!(
+        client.lists.lock().unwrap().get("codex.config/read"),
+        Some(&3)
+    );
+    assert_eq!(*client.calls.lock().unwrap(), 0);
+}
+
 impl NativeDispatchGuard for Guard {
     fn check(&self) -> GuardFuture<'_> {
         Box::pin(async move {
@@ -192,6 +268,8 @@ async fn native_owner_calls_guards_recovery_and_evidence_match_original_typescri
         }
         let t = field(&input, "target");
         let target = NativeOwnerIdentity {
+            backend: ivy_contracts::native_backend::BackendIdentity::optional(t.get("backend"))
+                .unwrap(),
             service_node_id: string(t, "serviceNodeId"),
             host_id: t.get("hostId").and_then(IvyJson::as_js_string).cloned(),
             native_version: string(t, "nativeVersion"),
@@ -233,6 +311,18 @@ async fn native_owner_calls_guards_recovery_and_evidence_match_original_typescri
                         .management("custom", json(r#"{"x":"\ud800"}"#), Some("original".into()))
                         .await?
                 }
+                "managementConflict" => {
+                    owner
+                        .management(
+                            "custom",
+                            IvyJson::object([(
+                                "backend",
+                                field(&client.input, "otherBackend").clone(),
+                            )]),
+                            Some("original".into()),
+                        )
+                        .await?
+                }
                 "dispatch" => {
                     let result = if local {
                         let state = std::rc::Rc::new(std::cell::RefCell::new(0));
@@ -258,6 +348,26 @@ async fn native_owner_calls_guards_recovery_and_evidence_match_original_typescri
                 "interact" => owner.interact(&call, Some(&guard)).await?,
                 "interaction" => owner.interaction(&"original".into()).await?,
                 "operation" => owner.operation(&call).await?,
+                "originalOperation" => {
+                    let selected = field(&client.input, "originalOwner");
+                    let original = NativeOwnerIdentity {
+                        backend: ivy_contracts::native_backend::BackendIdentity::optional(
+                            selected.get("backend"),
+                        )?,
+                        service_node_id: string(selected, "serviceNodeId"),
+                        host_id: selected
+                            .get("hostId")
+                            .and_then(IvyJson::as_js_string)
+                            .cloned(),
+                        native_version: string(selected, "nativeVersion"),
+                        native_executable_hash: string(selected, "nativeExecutableHash"),
+                        catalog_hash: string(selected, "catalogHash"),
+                    };
+                    let retained = owner.original_operations(original);
+                    // Exercise the same receipt-only trait used by reconciliation.
+                    ivy_sdk::native_operation::NativeOperationOwner::operation(&retained, &call)
+                        .await?
+                }
                 "status" => owner.status().await?,
                 "frame" => owner.frame_limits().await?,
                 "read" => {
@@ -319,6 +429,48 @@ async fn native_owner_calls_guards_recovery_and_evidence_match_original_typescri
                         .await?;
                     }
                     IvyJson::Null
+                }
+                "contractAccounts" => {
+                    let first = owner.selected_contract().await?;
+                    let mut other = target.clone();
+                    other.backend = Some(
+                        ivy_contracts::native_backend::BackendIdentity::from_json(field(
+                            &client.input,
+                            "otherBackend",
+                        ))
+                        .unwrap(),
+                    );
+                    let second =
+                        NativeOwner::new(tools, "caller".into(), other, RequestOptions::default())
+                            .selected_contract()
+                            .await?;
+                    assert!(!Arc::ptr_eq(&first, &second));
+                    assert!(std::ptr::eq(first.catalog(), second.catalog()));
+                    let method = field(
+                        field(first.catalog(), "clientRequests")
+                            .as_array()
+                            .unwrap()
+                            .first()
+                            .unwrap(),
+                        "method",
+                    )
+                    .as_js_string()
+                    .unwrap();
+                    assert!(Arc::ptr_eq(
+                        &first.input_schema(method, &[])?,
+                        &second.input_schema(method, &[])?,
+                    ));
+                    IvyJson::object([
+                        (
+                            "sameCatalog",
+                            (first.catalog_hash() == second.catalog_hash()).into(),
+                        ),
+                        ("firstDefinitionHash", first.definition_hash(method)?.into()),
+                        (
+                            "secondDefinitionHash",
+                            second.definition_hash(method)?.into(),
+                        ),
+                    ])
                 }
                 _ => unreachable!(),
             })

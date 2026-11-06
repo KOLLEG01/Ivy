@@ -3,6 +3,7 @@ import wire from '../../../specs/schemas/hive-wire.schema.json' with { type: 'js
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import type { AnySchema } from 'ajv';
 import { managementFrameBytes } from './limits.js';
+import { definitionValidator } from './schema-definition.js';
 import { canonical } from './canonical.js';
 import { requireThat } from './errors.js';
 
@@ -12,7 +13,7 @@ ajv.addSchema(schema as AnySchema);
 ajv.addSchema(wire as AnySchema);
 export function validateHost(name: string, value: unknown): void {
   canonical(value, 32 * 1024 * 1024);
-  const validator = ajv.getSchema(`${schema.$id}#/$defs/${name}`);
+  const validator = definitionValidator(ajv, schema, name);
   requireThat(validator && validator(value), 'invalid_arguments', 'Value does not match its host configuration/operation contract.');
 }
 export const hostSchema = schema;

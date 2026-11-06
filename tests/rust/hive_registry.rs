@@ -505,10 +505,13 @@ pub(super) fn registry_reference(_path: &std::path::Path, steps: &[Value]) -> Va
 fn compare(steps: &[Value]) -> Value {
     let root = Root::new();
     let expected = registry_reference(&root.0.join("reference.sqlite"), steps);
+    let mut current_steps = steps.to_vec();
+    let mut profile = expected["registryRuntime"].clone();
+    catalog_fixture::legacy_inventory_source_times(&mut current_steps, &mut profile);
     let actual = native_with_runtime(
         &root.0.join("native.sqlite"),
-        steps,
-        Some(&expected["registryRuntime"]),
+        &current_steps,
+        Some(&profile),
     );
     assert_eq!(actual["rows"].as_array().unwrap().len(), steps.len());
     for (index, (left, right)) in actual["rows"]

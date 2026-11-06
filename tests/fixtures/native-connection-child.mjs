@@ -1,7 +1,7 @@
 // Protocol-only child; never loads a provider or native account.
 import { createInterface } from 'node:readline';
 import { connect } from 'node:net';
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync, existsSync } from 'node:fs';
 const [mode, home, marker] = process.argv.slice(2);
 writeFileSync(marker, String(process.pid));
 // Raw stderr must be drained independently of protocol output.
@@ -28,6 +28,12 @@ if (mode === 'proxy') {
     const result = request.method === 'initialize'
       ? { codexHome: home, userAgent: ['wrong-version', 'launch-wrong-version'].includes(mode) ? 'codex/0.153.0' : 'codex/0.154.0' }
       : { data: [], nextCursor: null };
-    process.stdout.write(JSON.stringify({ id: request.id, result }) + '\n');
+    const reply = () => process.stdout.write(JSON.stringify({ id: request.id, result }) + '\n');
+    if (mode === 'launch-host' && request.method === 'model/list' && existsSync(marker + '.hold')) {
+      writeFileSync(marker + '.pending', 'yes');
+      const timer = setInterval(() => {
+        if (!existsSync(marker + '.hold')) { clearInterval(timer); reply(); }
+      }, 10);
+    } else reply();
   });
 }

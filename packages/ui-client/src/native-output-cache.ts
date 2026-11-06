@@ -1,7 +1,8 @@
-import type { RpcClient } from "../../sdk/src/client.js";
+import type { Agent, RpcClient } from "../../sdk/src/client.js";
 import type { NativeOutputPage } from "./native-output-page.js";
+import { nativeBackendKey } from './native-backends.js';
 
-type Scope = readonly [node: string, threadId: string, turnId: string];
+type Scope = readonly [node: string, threadId: string, turnId: string, backendKey?: string];
 interface Entry {
   scope: Scope;
   page: NativeOutputPage;
@@ -54,18 +55,20 @@ export class NativeOutputCache {
     this.entries.set(key, { scope, page: preview, size, at: this.now() });
     this.size += size;
   }
-  observeEpoch(node: string, epoch: string): boolean {
-    const previous = this.epochs.get(node);
-    this.epochs.set(node, epoch);
+  observeEpoch(node: string, epoch: string, backend?: Agent.BackendIdentity): boolean {
+    const key = JSON.stringify([node, nativeBackendKey(backend)]);
+    const previous = this.epochs.get(key);
+    this.epochs.set(key, epoch);
     if (!previous || previous === epoch) return false;
-    this.invalidate(node);
+    this.invalidate(node, undefined, backend ?? null);
     return true;
   }
-  invalidate(node?: string, threadId?: string) {
+  invalidate(node?: string, threadId?: string, backend?: Agent.BackendIdentity | null) {
     for (const [key, entry] of this.entries)
       if (
         (!node || entry.scope[0] === node) &&
-        (!threadId || entry.scope[1] === threadId)
+        (!threadId || entry.scope[1] === threadId) &&
+        (backend === undefined || (entry.scope[3] ?? '') === nativeBackendKey(backend ?? undefined))
       )
         this.remove(key);
   }

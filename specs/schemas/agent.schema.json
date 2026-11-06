@@ -3,6 +3,257 @@
   "$id": "https://ivy.invalid/schemas/agent.schema.json",
   "title": "Native Codex projection and AgentManager ownership, observations and outcome journal",
   "$defs": {
+    "BackendIdentity": {
+      "type": "object",
+      "properties": {
+        "backendId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,63}$",
+          "not": {
+            "enum": [
+              "agent"
+            ]
+          }
+        },
+        "provider": {
+          "enum": [
+            "codex",
+            "claude"
+          ]
+        },
+        "accountId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        }
+      },
+      "required": [
+        "backendId",
+        "provider",
+        "accountId"
+      ],
+      "additionalProperties": false
+    },
+    "BackendsInput": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "StorageIdentity": {
+      "type": "object",
+      "properties": {
+        "serviceNodeId": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "originalServiceNodeId": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "provider": {
+          "enum": [
+            "codex",
+            "claude"
+          ]
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
+        }
+      },
+      "required": [
+        "serviceNodeId",
+        "originalServiceNodeId",
+        "provider"
+      ],
+      "additionalProperties": false
+    },
+    "BackendPreparationFailure": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
+        },
+        "serviceNodeId": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "hostId": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "nativeVersion": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "nativeExecutableHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "phase": {
+          "const": "preparation"
+        },
+        "state": {
+          "const": "failed"
+        },
+        "observedAt": {
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "code": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "operationReadsAvailable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "backend",
+        "serviceNodeId",
+        "hostId",
+        "nativeVersion",
+        "nativeExecutableHash",
+        "phase",
+        "state",
+        "observedAt",
+        "code",
+        "operationReadsAvailable"
+      ],
+      "additionalProperties": false
+    },
+    "BackendsResult": {
+      "type": "object",
+      "properties": {
+        "backends": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Status"
+              },
+              {
+                "$ref": "#/$defs/BackendPreparationFailure"
+              }
+            ]
+          },
+          "maxItems": 8
+        }
+      },
+      "required": [
+        "backends"
+      ],
+      "additionalProperties": false
+    },
+    "NativeOwnerIdentity": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
+        },
+        "serviceNodeId": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "hostId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nativeVersion": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "nativeExecutableHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "catalogHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        }
+      },
+      "required": [
+        "serviceNodeId",
+        "nativeVersion",
+        "nativeExecutableHash",
+        "catalogHash"
+      ],
+      "additionalProperties": false
+    },
+    "ServiceSettings": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Settings"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "backends": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "dataRoot": {
+                    "type": "string",
+                    "maxLength": 2048,
+                    "minLength": 1
+                  },
+                  "settings": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/Settings"
+                      },
+                      {
+                        "required": [
+                          "backend",
+                          "appServer"
+                        ],
+                        "anyOf": [
+                          {
+                            "required": [
+                              "nativeHome"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "codexHome"
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "dataRoot",
+                  "settings"
+                ],
+                "additionalProperties": false
+              },
+              "maxItems": 8,
+              "minItems": 1
+            }
+          },
+          "required": [
+            "backends"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
     "Catalog": {
       "type": "object",
       "properties": {
@@ -398,6 +649,9 @@
     "Plan": {
       "type": "object",
       "properties": {
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
+        },
         "nativeVersion": {
           "type": "string",
           "maxLength": 256,
@@ -435,6 +689,9 @@
     "PlanDraft": {
       "type": "object",
       "properties": {
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
+        },
         "nativeVersion": {
           "type": "string",
           "maxLength": 256,
@@ -481,6 +738,9 @@
     "InvocationDraft": {
       "type": "object",
       "properties": {
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
+        },
         "nativeVersion": {
           "type": "string",
           "maxLength": 256,
@@ -957,7 +1217,11 @@
     },
     "EnvironmentDefaultsInput": {
       "type": "object",
-      "properties": {},
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
+        }
+      },
       "required": [],
       "additionalProperties": false
     },
@@ -1033,6 +1297,9 @@
               "type": "null"
             }
           ]
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -1047,7 +1314,11 @@
     },
     "CapabilityProfileInput": {
       "type": "object",
-      "properties": {},
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
+        }
+      },
       "required": [],
       "additionalProperties": false
     },
@@ -1068,6 +1339,9 @@
             "$ref": "#/$defs/ExecutionCapability"
           },
           "maxItems": 64
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -1320,6 +1594,9 @@
             "maxNotificationBytes"
           ],
           "additionalProperties": false
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -1486,6 +1763,9 @@
               "type": "null"
             }
           ]
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -1677,6 +1957,9 @@
         },
         "requestId": {
           "$ref": "#/$defs/RequestId"
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -1703,6 +1986,9 @@
               "type": "null"
             }
           ]
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -1912,6 +2198,9 @@
           "type": "string",
           "maxLength": 64,
           "minLength": 1
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -2223,6 +2512,9 @@
             "mcpIdentity"
           ],
           "additionalProperties": false
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -2434,7 +2726,11 @@
     },
     "StatusInput": {
       "type": "object",
-      "properties": {},
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
+        }
+      },
       "required": [],
       "additionalProperties": false
     },
@@ -2449,6 +2745,9 @@
           "type": "string",
           "maxLength": 192,
           "minLength": 1
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [],
@@ -2552,6 +2851,9 @@
             "additionalProperties": false
           },
           "maxItems": 256
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -2563,7 +2865,11 @@
     },
     "FrameLimitsInput": {
       "type": "object",
-      "properties": {},
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
+        }
+      },
       "required": [],
       "additionalProperties": false
     },
@@ -2578,6 +2884,9 @@
         "dataBase64": {
           "type": "string",
           "maxLength": 11184812
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -2606,6 +2915,9 @@
         },
         "contentHash": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -2656,6 +2968,9 @@
         },
         "managementFrameBytes": {
           "const": 33554432
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -2676,6 +2991,9 @@
       "properties": {
         "operationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -2696,6 +3014,9 @@
         },
         "reply": {
           "$ref": "#/$defs/Reply"
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -2731,6 +3052,9 @@
         },
         "expectedDefinitionHash": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -2765,6 +3089,9 @@
               "type": "null"
             }
           ]
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -2788,6 +3115,9 @@
         },
         "identity": {
           "$ref": "#/$defs/InputIdentity"
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [],
@@ -2817,6 +3147,9 @@
         },
         "truncated": {
           "type": "boolean"
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -2831,6 +3164,9 @@
       "properties": {
         "identity": {
           "$ref": "#/$defs/InputIdentity"
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -2869,6 +3205,9 @@
               }
             }
           ]
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -2891,6 +3230,9 @@
         },
         "reply": {
           "$ref": "#/$defs/Reply"
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -2912,6 +3254,9 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 100
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -2956,6 +3301,9 @@
             "$ref": "#/$defs/Notification"
           },
           "maxItems": 100
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -2970,7 +3318,11 @@
     },
     "ProjectsInput": {
       "type": "object",
-      "properties": {},
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
+        }
+      },
       "required": [],
       "additionalProperties": false
     },
@@ -3050,6 +3402,110 @@
       ],
       "additionalProperties": false
     },
+    "AccountExecutionDefaults": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "permission": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "serviceTier": {
+          "anyOf": [
+            {
+              "enum": [
+                "standard",
+                "fast",
+                "flex"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "model",
+        "mode",
+        "effort",
+        "permission",
+        "serviceTier"
+      ],
+      "additionalProperties": false
+    },
+    "AccountExecutionDefaultsDocument": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "accounts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "backend": {
+                "$ref": "#/$defs/BackendIdentity"
+              },
+              "defaults": {
+                "$ref": "#/$defs/AccountExecutionDefaults"
+              }
+            },
+            "required": [
+              "backend",
+              "defaults"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 128
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "accounts"
+      ],
+      "additionalProperties": false
+    },
     "DirectoryListInput": {
       "type": "object",
       "properties": {
@@ -3057,6 +3513,9 @@
           "type": "string",
           "maxLength": 2048,
           "minLength": 1
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -3103,6 +3562,9 @@
             "additionalProperties": false
           },
           "maxItems": 10000
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -3212,6 +3674,9 @@
           "type": "string",
           "maxLength": 256,
           "minLength": 1
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -3239,6 +3704,9 @@
                 "internal",
                 "task"
               ]
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -3261,6 +3729,9 @@
             },
             "kind": {
               "const": "projectless"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -3307,6 +3778,9 @@
             "internalProjectRoot"
           ],
           "additionalProperties": false
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -3434,6 +3908,9 @@
           "maxLength": 256,
           "minLength": 1,
           "pattern": "^TASK-[0-9]{4,}$"
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -3451,6 +3928,9 @@
         },
         "removed": {
           "type": "boolean"
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -3476,6 +3956,9 @@
         },
         "verifyOrigin": {
           "type": "boolean"
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -3656,6 +4139,9 @@
               "type": "null"
             }
           ]
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -4526,6 +5012,9 @@
             },
             "params": {
               "$ref": "#/$defs/Read01423ThreadReadd0"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -4546,6 +5035,9 @@
             },
             "params": {
               "$ref": "#/$defs/Read01423ThreadTurnsListd0"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -4566,6 +5058,9 @@
             },
             "params": {
               "$ref": "#/$defs/Read01423ThreadItemsListd0"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -4586,6 +5081,9 @@
             },
             "params": {
               "$ref": "#/$defs/Read01540ThreadReadd0"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -4606,6 +5104,9 @@
             },
             "params": {
               "$ref": "#/$defs/Read01540ThreadTurnsListd0"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -4626,6 +5127,9 @@
             },
             "params": {
               "$ref": "#/$defs/Read01540ThreadItemsListd0"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -4646,6 +5150,9 @@
             },
             "params": {
               "$ref": "#/$defs/Read01580ThreadReadd0"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -4666,6 +5173,9 @@
             },
             "params": {
               "$ref": "#/$defs/Read01580ThreadTurnsListd0"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -4686,6 +5196,9 @@
             },
             "params": {
               "$ref": "#/$defs/Read01580ThreadItemsListd0"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -4706,6 +5219,9 @@
             },
             "params": {
               "$ref": "#/$defs/Read01592ThreadReadd0"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -4726,6 +5242,9 @@
             },
             "params": {
               "$ref": "#/$defs/Read01592ThreadTurnsListd0"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -4746,6 +5265,9 @@
             },
             "params": {
               "$ref": "#/$defs/Read01592ThreadItemsListd0"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -4766,6 +5288,9 @@
             },
             "params": {
               "$ref": "#/$defs/Read01630ThreadReadd0"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -4786,6 +5311,9 @@
             },
             "params": {
               "$ref": "#/$defs/Read01630ThreadTurnsListd0"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -4806,6 +5334,9 @@
             },
             "params": {
               "$ref": "#/$defs/Read01630ThreadItemsListd0"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -4867,6 +5398,9 @@
             },
             "reply": {
               "$ref": "#/$defs/Reply"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -4935,6 +5469,9 @@
             },
             "reply": {
               "$ref": "#/$defs/Reply"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -5003,6 +5540,9 @@
             },
             "reply": {
               "$ref": "#/$defs/Reply"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -5071,6 +5611,9 @@
             },
             "reply": {
               "$ref": "#/$defs/Reply"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -5139,6 +5682,9 @@
             },
             "reply": {
               "$ref": "#/$defs/Reply"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -5207,6 +5753,9 @@
             },
             "reply": {
               "$ref": "#/$defs/Reply"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -5275,6 +5824,9 @@
             },
             "reply": {
               "$ref": "#/$defs/Reply"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -5343,6 +5895,9 @@
             },
             "reply": {
               "$ref": "#/$defs/Reply"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -5411,6 +5966,9 @@
             },
             "reply": {
               "$ref": "#/$defs/Reply"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -5479,6 +6037,9 @@
             },
             "reply": {
               "$ref": "#/$defs/Reply"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -5547,6 +6108,9 @@
             },
             "reply": {
               "$ref": "#/$defs/Reply"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -5615,6 +6179,9 @@
             },
             "reply": {
               "$ref": "#/$defs/Reply"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -5683,6 +6250,9 @@
             },
             "reply": {
               "$ref": "#/$defs/Reply"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -5751,6 +6321,9 @@
             },
             "reply": {
               "$ref": "#/$defs/Reply"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [
@@ -5819,6 +6392,9 @@
             },
             "reply": {
               "$ref": "#/$defs/Reply"
+            },
+            "backend": {
+              "$ref": "#/$defs/BackendIdentity"
             }
           },
           "required": [

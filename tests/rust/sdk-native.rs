@@ -17,6 +17,7 @@ fn string(value: &IvyJson, key: &str) -> JsString {
 }
 fn owner(value: &IvyJson) -> NativeOwnerIdentity {
     NativeOwnerIdentity {
+        backend: None,
         service_node_id: string(value, "serviceNodeId"),
         host_id: value.get("hostId").and_then(IvyJson::as_js_string).cloned(),
         native_version: string(value, "nativeVersion"),
@@ -95,6 +96,14 @@ fn retained_plan_identity_matches_original_catalog_and_error_order() {
             catalog.insert("clientRequests", IvyJson::Array(methods));
         }
         let contract = NativeContract::new(&catalog).unwrap();
+        let contract = contract.with_backend(
+            ivy_contracts::native_backend::BackendIdentity::optional(
+                row.get("backend")
+                    .map(|v| parse(&serde_json::to_string(v).unwrap(), 4096).unwrap())
+                    .as_ref(),
+            )
+            .unwrap(),
+        );
         for case in row["cases"].as_array().unwrap() {
             count += 1;
             let plan = parse(case["plan"].as_str().unwrap(), usize::MAX).unwrap();
@@ -360,6 +369,7 @@ fn evidence_validation_keeps_nested_payloads_off_the_native_stack() {
             let params = parse(&format!("{}0{}", "[".repeat(120), "]".repeat(120)), 1000).unwrap();
             let expected = NativeOperationIdentity {
                 owner: NativeOwnerIdentity {
+                    backend: None,
                     service_node_id: "owner".into(),
                     host_id: None,
                     native_version: "version".into(),

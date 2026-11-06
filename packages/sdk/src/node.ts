@@ -27,7 +27,7 @@ export { readNativeContract } from "./native.js";
 export type { NativeTarget, NativeContractSnapshot } from "./native.js";
 export { NativeOwner } from "./native-owner.js";
 export { defaultNativeThreadProject, nativeThreadProject } from "./native-project.js";
-export type { NativeOperationCall } from "./native-owner.js";
+export type { NativeOperationCall, OriginalNativeOperations } from "./native-owner.js";
 export {
   nativeInstant,
   nativeOperationTerminal,

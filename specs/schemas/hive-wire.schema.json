@@ -1683,6 +1683,12 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
+        "observedAt": {
+          "description": "Original source observation time of this batch, including empty snapshots and removal-only deltas; never its delivery time.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
         "entries": {
           "type": "array",
           "items": {

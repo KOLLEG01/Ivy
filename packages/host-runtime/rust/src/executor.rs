@@ -20,6 +20,9 @@ pub type ExecutorFuture<'a, T> = Pin<Box<dyn Future<Output = IvyResult<T>> + Sen
 /// A production composition must supply every boundary; there is no permissive
 /// default for compatibility, preparation or process ownership.
 pub trait ActivationRuntime: Send + Sync {
+    /// Reuse the admitted optional workload runtime during retained preparation
+    /// verification. Native-only compositions need no Node discovery or launch.
+    fn node_runtime(&self) -> Option<crate::node_runtime::NodeRuntime> { None }
     /// Read the captured source plan, check service storage, then call the
     /// existing preparer with the lane's immutable accepted HostConfig.
     fn prepare<'a>(

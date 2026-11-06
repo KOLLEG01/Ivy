@@ -43,11 +43,11 @@ import {
   ToolbarContent,
 } from "@ivy/ui";
 import type { Agent, BoundTool, Transport, Wire } from "../../../packages/sdk/src/client.js";
+import { canonical } from '../../../packages/sdk/src/client.js';
 import { route, usePage } from "../../../packages/ui-client/src/runtime";
 import {
   list,
   modelsFrom,
-  nativeRead,
   optionalTool,
   permissionProfileLabel,
   permissionProfilesFrom,
@@ -55,7 +55,9 @@ import {
   supportsFields,
   text,
 } from "../../../packages/ui-client/src/native";
-import { useNativeAction } from "../../../packages/ui-client/src/native-action";
+import { useNativeAction, nativeActionMethod, nativeActionParams } from "../../../packages/ui-client/src/native-action";
+import { backendRead, nativeMethod, nativeBackendKey, sameBackend, nativeBackendLabel } from '../../../packages/ui-client/src/native-backends';
+import { nativeRouteQuery, nativeStorageOwner } from '../../../packages/ui-client/src/native-route';
 import NativeActionState from "../../../packages/ui-client/src/NativeActionState.vue";
 import NativeInputs from "../../../packages/ui-client/src/NativeInputs.vue";
 import MessageImages from "../../../packages/ui-client/src/MessageImages.vue";
@@ -71,6 +73,7 @@ import {
 } from "../../../packages/ui-client/src/native-modes";
 import { readNativeThreadControl } from "../../../packages/ui-client/src/native-thread-control";
 import { useNativeSettings, effectiveNativeSettings } from "../../../packages/ui-client/src/native-settings";
+import { nativeModelSpeedAvailable, nativeServiceTier, nativeSpeedAvailable } from '../../../packages/ui-client/src/execution-models';
 import {
   messageInput,
   supportsInputType,
@@ -86,14 +89,18 @@ import {
   liveSteps,
 } from "./conversation";
 import type { ConversationItem, ConversationStep } from "./conversation";
-const props = defineProps<{ node: string; threadId: string; turnId: string }>();
+const props = defineProps<{ node: string; backend?: Agent.BackendIdentity | undefined; threadId: string; turnId: string }>();
+const owner = { serviceNodeId: props.node, namespace: props.backend?.backendId ?? 'codex', backend: props.backend };
+const storageOwner = nativeStorageOwner(props.node, props.backend);
+let active = true;
+onBeforeUnmount(() => { active = false; });
 const state = useRemote((signal) =>
-  readNativeThreadControl(client, props.node, props.threadId, signal),
+  readNativeThreadControl(client, props.node, props.threadId, signal, props.backend),
 );
 const imageCwd = computed(() => text(state.value.value?.thread.cwd));
 const imageLoader = computed(() => {
   const node = props.node, cwd = imageCwd.value;
-  return cwd ? (source: string, signal: AbortSignal) => readNativeImage(client, node, source, cwd, signal) : null;
+  return cwd ? (source: string, signal: AbortSignal) => readNativeImage(client, node, source, cwd, signal, props.backend) : null;
 });
 const taskInventory = useRemote(
   (signal) =>
@@ -102,7 +109,7 @@ const taskInventory = useRemote(
       {
         resourceRef: {
           serviceNodeId: props.node,
-          namespace: "codex",
+          namespace: owner.namespace,
           kind: "thread",
           nativeId: props.threadId,
         },
@@ -110,29 +117,29 @@ const taskInventory = useRemote(
       { signal },
     ),
   0,
-  ["inventory/codex/thread/" + props.node],
+  ["inventory/" + owner.namespace + "/thread/" + props.node],
 );
 const capabilities = useRemote(async () => {
   const [send, resume, interrupt, goalSet, goalClear, steer] = await Promise.all(
     [
-      "codex.turn/start",
-      "codex.thread/resume",
-      "codex.turn/interrupt",
-      "codex.thread/goal/set",
-      "codex.thread/goal/clear",
-      "codex.turn/steer",
-    ].map((name) => optionalTool(client, props.node, name)),
+      "turn/start",
+      "thread/resume",
+      "turn/interrupt",
+      "thread/goal/set",
+      "thread/goal/clear",
+      "turn/steer",
+    ].map((name) => optionalTool(client, props.node, nativeMethod(props.backend, name))),
   );
   return { send, resume, interrupt, goalSet, goalClear, steer };
 }, 0, ["services/agent-manager/" + props.node]);
-const settings = useNativeSettings(client, () => props.node, () => text(state.value.value?.thread.cwd));
+const settings = useNativeSettings(client, () => props.node, () => text(state.value.value?.thread.cwd), () => props.backend, false);
 const { models, permissions, modes } = settings;
 const goal = useRemote(async (signal) =>
-  (await optionalTool(client, props.node, "codex.thread/goal/get"))
-    ? nativeRead(
+  (await optionalTool(client, props.node, nativeMethod(props.backend, "thread/goal/get")))
+    ? backendRead(
         client,
-        props.node,
-        "codex.thread/goal/get",
+        owner,
+        "thread/goal/get",
         { threadId: props.threadId },
         signal,
       )
@@ -141,10 +148,10 @@ const goal = useRemote(async (signal) =>
 const turns = usePage(async (signal, cursor) => {
   try {
     const result = record(
-      await nativeRead(
+      await backendRead(
         client,
-        props.node,
-        "codex.thread/turns/list",
+        owner,
+        "thread/turns/list",
         {
           threadId: props.threadId,
           limit: 30,
@@ -171,7 +178,7 @@ const turns = usePage(async (signal, cursor) => {
 });
 const selectedTurn = computed(() => props.turnId);
 const outputScope = () =>
-  [props.node, props.threadId, selectedTurn.value] as const;
+  [props.node, props.threadId, selectedTurn.value, nativeBackendKey(props.backend)] as const;
 const cachedOutput = () => {
   const page = outputCache.read(outputScope());
   return page ? [page] : [];
@@ -218,6 +225,7 @@ const loadOutput = async (reset: boolean, live = false) => {
       scope[2],
       cursor,
       outputController?.signal ?? new AbortController().signal,
+      props.backend,
     );
     if (serial !== outputSerial) return;
     const pages = [page];
@@ -237,6 +245,7 @@ const loadOutput = async (reset: boolean, live = false) => {
           scope[2],
           pages.at(-1)!.nextCursor!,
           outputController!.signal,
+          props.backend,
         ),
       );
       if (serial !== outputSerial) return;
@@ -251,7 +260,7 @@ const loadOutput = async (reset: boolean, live = false) => {
     }
   } catch (cause) {
     if (serial !== outputSerial || outputController?.signal.aborted) return;
-    outputCache.invalidate(scope[0], scope[1]);
+    outputCache.invalidate(scope[0], scope[1], props.backend ?? null);
     if (reset) outputPages.value = [];
     outputPreview.value = false;
     outputError.value =
@@ -291,7 +300,7 @@ const resetOutputView = (preview: boolean) => {
 watch(
   () => state.value.value?.status.epoch,
   (epoch) => {
-    if (epoch && outputCache.observeEpoch(props.node, epoch)) {
+    if (epoch && outputCache.observeEpoch(props.node, epoch, props.backend)) {
       resetOutputView(false);
       void refreshOutput();
     }
@@ -311,38 +320,41 @@ const downloadTurn = () => {
 };
 const action = useNativeAction(
   client,
-  "ivy:agent-task-action:" + base.href + props.node + ":" + props.threadId,
+  "ivy:agent-task-action:" + base.href + storageOwner + ":" + props.threadId,
+  () => props.backend,
 );
 const goalAction = useNativeAction(
   client,
-  "ivy:agent-task-goal:" + base.href + props.node + ":" + props.threadId,
+  "ivy:agent-task-goal:" + base.href + storageOwner + ":" + props.threadId,
+  () => props.backend,
 );
 watch(
   () => action.saved.value,
   (saved) => {
     if (
       saved?.phase === "succeeded" &&
-      saved.call.qualifiedName === "codex.thread/resume" &&
+      nativeActionMethod(saved) === "thread/resume" &&
       saved.call.serviceNodeId === props.node &&
-      record(saved.call.arguments).threadId === props.threadId
+      nativeActionParams(saved).threadId === props.threadId
     )
       void state.refresh();
   },
   { deep: true, immediate: true },
 );
 const draftKey =
-  "ivy:agent-message:" + base.href + props.node + ":" + props.threadId;
+  "ivy:agent-message:" + base.href + storageOwner + ":" + props.threadId;
 const message = ref(""),
   model = ref(""),
   effort = ref(""),
   mode = ref(""),
+  serviceTier = ref(''),
   permission = ref("");
 const goalDraft = ref(""),
   goalEditing = ref(false),
   goalDirty = ref(false);
-const attachments = useMessageAttachments(client, () => props.node);
+const attachments = useMessageAttachments(client, () => props.node, () => props.backend);
 // Messages sent while a turn runs wait here and follow in order; each can instead steer the running turn.
-interface Options { model: string; effort: string; mode: string; permission: string }
+interface Options { model: string; effort: string; mode: string; permission: string; serviceTier?: string }
 interface Queued {
   id: string;
   text: string;
@@ -351,7 +363,7 @@ interface Queued {
   operationId?: string | undefined;
   error?: string | undefined;
 }
-const queueKey = "ivy:agent-queue:" + base.href + props.node + ":" + props.threadId;
+const queueKey = "ivy:agent-queue:" + base.href + storageOwner + ":" + props.threadId;
 const queue = ref<Queued[]>([]);
 try {
   const saved = JSON.parse(sessionStorage.getItem(draftKey) ?? "{}");
@@ -360,13 +372,14 @@ try {
   effort.value = text(saved.effort);
   mode.value = text(saved.mode);
   permission.value = text(saved.permission);
+  serviceTier.value = text(saved.serviceTier);
   if (Array.isArray(saved.attachments)) attachments.restore(saved.attachments);
   const queued = JSON.parse(sessionStorage.getItem(queueKey) ?? "[]");
   if (Array.isArray(queued)) queue.value = queued;
 } catch {
   action.error.value = "The saved message could not be read.";
 }
-watch([message, model, effort, mode, permission, attachments.staged], () => {
+watch([message, model, effort, mode, permission, serviceTier, attachments.staged], () => {
   try {
     sessionStorage.setItem(
       draftKey,
@@ -376,6 +389,7 @@ watch([message, model, effort, mode, permission, attachments.staged], () => {
         effort: effort.value,
         mode: mode.value,
         permission: permission.value,
+        serviceTier: serviceTier.value,
         attachments: attachments.staged.value,
       }),
     );
@@ -412,13 +426,12 @@ const permissionChoices = computed(() =>
 const latestSettings = ref<Record<string, unknown>>({});
 const nativeMode = computed(() => text(record(latestSettings.value.collaborationMode ?? state.value.value?.thread.collaborationMode).mode));
 const nativeSettings = computed(() => {
-  const resumed = action.saved.value?.phase === 'succeeded' && action.saved.value.call.qualifiedName === 'codex.thread/resume' ? record(action.saved.value.result) : {};
+  const resumed = action.saved.value?.phase === 'succeeded' && nativeActionMethod(action.saved.value) === 'thread/resume' ? record(action.saved.value.result) : {};
   const current = { ...resumed, ...record(state.value.value?.source), ...state.value.value?.thread, ...latestSettings.value };
   current.model ||= resumed.model;
   current.reasoningEffort ||= resumed.reasoningEffort;
-  const profile = settings.defaults.value.value?.document[state.value.value?.status.serverType ?? 'codex'];
-  if (profile?.mode && (!nativeMode.value || nativeMode.value === 'default') && turns.value.value?.items.length === 0 && !turns.value.value.nextCursor) current.collaborationMode = null;
-  return effectiveNativeSettings(models.value.value, settings.config.value.value, current, turns.value.value?.items.length === 0 ? profile : null);
+  // Hive creation defaults never change an existing conversation, including an empty one.
+  return effectiveNativeSettings(models.value.value, settings.config.value.value, current);
 });
 const nativeModel = computed(() => nativeSettings.value.model);
 const nativeEffort = computed(() => model.value && model.value !== nativeModel.value
@@ -430,6 +443,8 @@ const modelChoice = computed(() =>
   choices.value.find((value) => value.model === effectiveModel.value),
 );
 const efforts = computed(() => modelChoice.value?.efforts ?? []);
+const speedAvailable = (tier: string, model = effectiveModel.value) => !!nativeServiceTier(tier) && nativeModelSpeedAvailable(choices.value, model, tier) && nativeSpeedAvailable([capabilities.value.value?.send], nativeServiceTier(tier)!, props.backend?.provider ?? state.value.value?.status.serverType);
+const selectedTier = computed(() => serviceTier.value || nativeSettings.value.serviceTier);
 watch(model, () => {
   if (effort.value && !efforts.value.includes(effort.value)) effort.value = "";
 });
@@ -450,13 +465,14 @@ const currentOptions = computed<Options>(() => ({
   effort: effort.value,
   mode: mode.value || (modeChoices.value.some(value => value.mode === nativeSettings.value.mode) && turns.value.value?.items.length === 0 && (!nativeMode.value || nativeMode.value === 'default') ? nativeSettings.value.mode : ''),
   permission: permission.value,
+  serviceTier: serviceTier.value || (speedAvailable(nativeSettings.value.serviceTier) ? nativeSettings.value.serviceTier : ''),
 }));
 const modePayload = computed(() => payloadFor(currentOptions.value));
 const resumedThread = computed(() => {
   const saved = action.saved.value;
   return saved?.phase === "succeeded" &&
-    saved.call.qualifiedName === "codex.thread/resume" &&
-    record(saved.call.arguments).threadId === props.threadId
+    nativeActionMethod(saved) === "thread/resume" &&
+    nativeActionParams(saved).threadId === props.threadId
     ? record(record(saved.result).thread)
     : null;
 });
@@ -509,6 +525,7 @@ const optionsValid = (options: Options) =>
     ).includes(options.effort)) &&
   (!options.permission ||
     permissionChoices.value.some((profile) => profile.id === options.permission)) &&
+  (!options.serviceTier || speedAvailable(options.serviceTier, options.model || nativeModel.value)) &&
   (!options.mode ||
     (!modes.loading.value && !modes.error.value && payloadFor(options) !== null)) &&
   supportsFields(capabilities.value.value?.send, [
@@ -521,6 +538,7 @@ const optionsValid = (options: Options) =>
           ...(options.effort ? ["effort"] : []),
         ]),
     ...(options.permission ? ["permissions"] : []),
+    ...(options.serviceTier ? ['serviceTier'] : []),
   ]);
 const imagesSupported = (binding: BoundTool | undefined) =>
   supportsInputType(binding, "localImage");
@@ -528,7 +546,7 @@ const working = computed(
   () => !!activeTurn.value || threadStatus.value === "active",
 );
 const submitting = ref(false);
-const sending = computed(() => submitting.value || action.pending.value && ['codex.turn/start', 'codex.turn/steer', 'codex.thread/resume'].includes(action.saved.value?.call.qualifiedName ?? ''));
+const sending = computed(() => submitting.value || action.pending.value && ['turn/start', 'turn/steer', 'thread/resume'].includes(nativeActionMethod(action.saved.value)));
 const canResume = computed(
   () =>
     !state.error.value &&
@@ -559,7 +577,7 @@ const canInterrupt = computed(
     !(
       action.saved.value?.label === "Request interruption" &&
       action.saved.value.phase === "succeeded" &&
-      record(action.saved.value.call.arguments).turnId === activeTurn.value.id
+      nativeActionParams(action.saved.value).turnId === activeTurn.value.id
     ) &&
     supportsFields(capabilities.value.value?.interrupt, ["threadId", "turnId"]),
 );
@@ -706,6 +724,7 @@ const argsFor = (item: Pick<Queued, "text" | "attachments" | "options">): Wire.J
         ...(item.options.effort ? { effort: item.options.effort } : {}),
       }),
   ...(item.options.permission ? { permissions: item.options.permission } : {}),
+  ...(item.options.serviceTier ? { serviceTier: item.options.serviceTier === 'standard' ? null : item.options.serviceTier } : {}),
 });
 let dispatching = false;
 const dispatch = async () => {
@@ -730,10 +749,10 @@ const dispatch = async () => {
     }
     // Re-read immediately before sending without adopting another definition hash.
     await state.refresh();
-    if (!knownIdle.value || working.value || queue.value[0]?.id !== item.id) return;
+    if (!active || !knownIdle.value || working.value || queue.value[0]?.id !== item.id) return;
     if (!optionsValid(item.options)) {
       setQueued(item.id, {
-        error: "Its model, reasoning or safety choice is no longer available. Edit it to send it.",
+        error: "Its model, reasoning, safety or speed choice is no longer available. Edit it to send it.",
       });
       return;
     }
@@ -770,7 +789,7 @@ const sendDraft = async () => {
   if (!binding) return;
   if (!attached.value) await resume();
   await state.refresh();
-  if (!knownIdle.value) return;
+  if (!active || !knownIdle.value) return;
   await action.start("Send message", binding, args);
   refresh();
   } finally {
@@ -783,13 +802,13 @@ watch(
     const saved = action.saved.value;
     if (
       phase !== "succeeded" ||
-      saved?.call.qualifiedName !== "codex.turn/start" ||
+      !saved || nativeActionMethod(saved) !== "turn/start" ||
       queue.value.some((item) => item.operationId === saved.operationId)
     )
       return;
     if (
-      JSON.stringify(record(saved.call.arguments).input) ===
-      JSON.stringify(messageInput(message.value, attachments.staged.value))
+      canonical(nativeActionParams(saved).input) ===
+      canonical(messageInput(message.value, attachments.staged.value))
     ) {
       message.value = "";
       attachments.clear();
@@ -798,7 +817,7 @@ watch(
 );
 const submit = () => {
   if (!canSubmit.value) return;
-  if (selectedTurn.value) window.location.hash = route('task', { node: props.node, id: props.threadId });
+  if (selectedTurn.value) window.location.hash = route('task', nativeRouteQuery(owner, { id: props.threadId }));
   if (!working.value && !queue.value.length) {
     void sendDraft();
     return;
@@ -847,6 +866,9 @@ const editQueued = (id: string) => {
   queue.value = queue.value.filter((value) => value.id !== id);
   message.value = [item.text, message.value].filter((value) => value.trim()).join("\n\n");
   attachments.restore(item.attachments);
+  model.value = item.options.model; effort.value = item.options.effort;
+  mode.value = item.options.mode; permission.value = item.options.permission;
+  serviceTier.value = item.options.serviceTier ?? '';
 };
 const removeQueued = (id: string) => {
   queue.value = queue.value.filter((value) => value.id !== id || !!value.operationId);
@@ -965,6 +987,7 @@ const retainNotification = (entry: Agent.Notification) => {
 };
 const receiveProviderNotification = (value: Transport.ProviderNotification) => {
   const payload = record(value.params.payload);
+  if (!sameBackend(payload.backend as Agent.BackendIdentity | undefined, props.backend)) return;
   if (
     typeof payload.sequence !== "number" ||
     typeof payload.epoch !== "string" ||
@@ -992,9 +1015,9 @@ const poll = async () => {
     if (activityEpoch === null && afterSequence === 0) {
       // A future cursor returns the journal's actual high-water mark with gap=true. Bootstrap a
       // bounded recent tail instead of spending minutes paging through unrelated old activity.
-      const head = (await nativeRead(
+      const head = (await backendRead(
         client,
-        props.node,
+        owner,
         "agent.notifications",
         { afterSequence: Number.MAX_SAFE_INTEGER, limit: 1 },
         activityAbort.signal,
@@ -1003,9 +1026,9 @@ const poll = async () => {
       activityEpoch = head.epoch;
       partialLive.value = afterSequence > 0;
     }
-    const page = (await nativeRead(
+    const page = (await backendRead(
       client,
-      props.node,
+      owner,
       "agent.notifications",
       { afterSequence, limit: 100 },
       activityAbort.signal,
@@ -1204,7 +1227,7 @@ const scroller = ref<HTMLElement>(),
 const scrollKey = () =>
   "ivy.agent.scroll:" +
   base.href +
-  props.node +
+  storageOwner +
   ":" +
   props.threadId +
   ":" +
@@ -1306,11 +1329,14 @@ onBeforeUnmount(() => {
     <ToolbarContent>
       <span class="text-muted-foreground" aria-hidden="true">/</span>
       <h1 class="min-w-0 truncate text-sm font-medium">{{ title }}</h1>
+      <span v-if="backend" class="max-w-40 truncate text-xs text-muted-foreground">{{ nativeBackendLabel(backend) }}</span>
       <ActivityIndicator v-if="working" state="working" />
     </ToolbarContent>
     <ToolbarContent side="end">
       <TaskActions
         :node="node"
+        :available="!state.error.value && !!state.value.value"
+        :backend="backend"
         :thread-id="threadId"
         :name="title"
         :project-id="text(state.value.value?.thread.projectId)"
@@ -1364,7 +1390,7 @@ onBeforeUnmount(() => {
             class="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground"
           >
             Showing a linked turn.
-            <a :href="route('task', { node, id: threadId })" class="underline"
+            <a :href="route('task', nativeRouteQuery(owner, { id: threadId }))" class="underline"
               >Show the complete conversation</a
             >
           </p>
@@ -1507,6 +1533,8 @@ onBeforeUnmount(() => {
             :client="client"
             :notifications="notifications"
             :node="node"
+            :backend="backend"
+            :owner-epoch="state.value.value?.status.epoch ?? undefined"
             :thread-id="threadId"
             @attention="requestAttention"
           />
@@ -1549,6 +1577,7 @@ onBeforeUnmount(() => {
         <h2 id="message-heading" class="sr-only">Continue this task</h2>
         <ComposerAttachments
           :items="attachments.items.value"
+          :error="attachments.error.value"
           @remove="attachments.remove"
         />
         <Label for="message" class="sr-only">Message</Label
@@ -1729,6 +1758,11 @@ onBeforeUnmount(() => {
               </option>
             </OptionSelect>
             <Label for="task-permission" class="sr-only">Safety</Label>
+            <Label for="task-speed" class="sr-only">Speed</Label>
+            <OptionSelect id="task-speed" v-model="serviceTier">
+              <option value="">{{ selectedTier === 'flex' ? 'Flexible' : selectedTier === 'fast' ? 'Fast' : selectedTier === 'standard' ? 'Standard' : selectedTier }} · Default</option>
+              <option v-for="tier in ['standard', 'fast', 'flex'] as const" :key="tier" :value="tier" :disabled="!speedAvailable(tier)">{{ tier === 'flex' ? 'Flexible' : tier === 'fast' ? 'Fast' : 'Standard' }}</option>
+            </OptionSelect>
             <OptionSelect
               id="task-permission"
               v-model="permission"
@@ -1750,7 +1784,7 @@ onBeforeUnmount(() => {
             size="icon"
             class="size-9 shrink-0 rounded-full"
             :disabled="!canInterrupt"
-            :loading="action.pending.value && action.saved.value?.call.qualifiedName === 'codex.turn/interrupt'"
+            :loading="action.pending.value && nativeActionMethod(action.saved.value) === 'turn/interrupt'"
             aria-label="Request interruption"
             @click="interrupt"
             ><Square class="size-3.5 fill-current" aria-hidden="true" /></Button

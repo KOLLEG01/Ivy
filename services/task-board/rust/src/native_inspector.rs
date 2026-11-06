@@ -1,6 +1,7 @@
 //! Read-only inspection of an already retained native execution. Search
 //! checkpoints confer neither dispatch authority nor completion authority.
 use crate::{
+    native_plan::{matches_primary, routed_owner, routed_selection, routed_target},
     operations::{Document, mutation},
     read_evidence::{ReadEvidence, ReadEvidenceStore, ReadIdentity},
     turn_output::{page_cursor, turns_params},
@@ -8,11 +9,11 @@ use crate::{
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, agent_schema::validate_agent,
     checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical,
-    limits::MANAGEMENT_FRAME_BYTES,
+    limits::MANAGEMENT_FRAME_BYTES, native_backend::BackendIdentity,
 };
 use ivy_sdk::{
     clock::parse_date,
-    native_evidence::{NativeOwnerIdentity, validate_native_status},
+    native_evidence::validate_native_status,
     tools::{InterfaceRequirement, ToolCallOptions, ToolClients},
 };
 use std::collections::HashSet;
@@ -34,8 +35,9 @@ pub struct NativeInspector<'a, S> {
     pub store: &'a S,
     pub catalogs: &'a CheckedNativeContracts,
 }
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct InspectionContext {
+    pub backend: Option<BackendIdentity>,
     pub run: Json,
     pub native_version: JsString,
     pub catalog_source_hash: JsString,
@@ -46,7 +48,7 @@ pub struct InspectionContext {
 }
 impl InspectionContext {
     pub fn value(&self) -> Json {
-        Json::object([
+        let mut value = Json::object([
             ("run", self.run.clone()),
             ("nativeVersion", Json::String(self.native_version.clone())),
             (
@@ -57,7 +59,11 @@ impl InspectionContext {
             ("epoch", Json::String(self.epoch.clone())),
             ("threadId", Json::String(self.thread_id.clone())),
             ("turnId", Json::String(self.turn_id.clone())),
-        ])
+        ]);
+        if let Some(backend) = &self.backend {
+            value.insert("backend", backend.json());
+        }
+        value
     }
 }
 pub enum Inspection {
@@ -152,24 +158,8 @@ impl<S: InspectionStore> NativeInspector<'_, S> {
     ) -> IvyResult<Json> {
         management_read(self.store.tools(), node, name, args).await
     }
-    fn owner(&self, run: &Json) -> IvyResult<NativeOwnerIdentity> {
-        let plan = run.required("plan")?;
-        let version = text(plan, "nativeVersion")?;
-        let source = self.catalogs.checked_native_contract(
-            &version,
-            Some(&Json::object([(
-                "sourceHash",
-                plan.required("catalogSourceHash")?.clone(),
-            )])),
-        )?;
-        let target = run.required("target")?;
-        Ok(NativeOwnerIdentity {
-            service_node_id: text(target, "serviceNodeId")?,
-            host_id: Some(text(target, "hostId")?),
-            native_version: version,
-            native_executable_hash: text(source.catalog(), "nativeExecutableHash")?,
-            catalog_hash: source.catalog_hash().into(),
-        })
+    async fn routing_task(&self, run: &Json) -> IvyResult<Json> {
+        self.store.read_task_routing(run.required("taskId")?).await
     }
     pub async fn context(&self, run_pin: &Json) -> IvyResult<InspectionContext> {
         self.store.verify_owner().await?;
@@ -181,28 +171,29 @@ impl<S: InspectionStore> NativeInspector<'_, S> {
         let primary = field(value, "primaryResourceRef");
         let target = value.required("target")?;
         require(
-            equal(primary, "namespace", "codex")
-                && equal(primary, "kind", "thread")
-                && primary.get("serviceNodeId") == target.get("serviceNodeId")
+            matches_primary(target, primary)?
                 && has_identity(value, "turnId")
                 && has_identity(value, "nativeEpoch"),
             "task_board_turn_mismatch",
             "Inspection requires an already saved original native primary and turn.",
         )?;
+        let task = self.routing_task(value).await?;
+        let route = routed_target(&task, target)?;
         let status = self
             .management(
-                &text(target, "serviceNodeId")?,
+                &text(&route, "serviceNodeId")?,
                 "status",
-                Json::object(Vec::<(&str, Json)>::new()),
+                BackendIdentity::select_arguments(
+                    BackendIdentity::optional(route.get("backend"))?.as_ref(),
+                    Json::Object(vec![]),
+                )?,
             )
             .await?;
-        validate_native_status(
-            &status,
-            &self.owner(value)?,
-            Some("task_board_native_unavailable"),
-        )?;
-        let plan = value.required("plan")?;
+        let selected = routed_owner(self.catalogs, &task, value)?;
+        validate_native_status(&status, &selected, Some("task_board_native_unavailable"))?;
+        let plan = routed_selection(&task, value)?;
         Ok(InspectionContext {
+            backend: selected.backend,
             run: run_pin.clone(),
             native_version: text(plan, "nativeVersion")?,
             catalog_source_hash: text(plan, "catalogSourceHash")?,
@@ -216,16 +207,21 @@ impl<S: InspectionStore> NativeInspector<'_, S> {
         if !has_identity(run, "nativeEpoch") {
             return Ok(false);
         }
+        let task = self.routing_task(run).await?;
+        let route = routed_target(&task, run.required("target")?)?;
         let status = self
             .management(
-                &text(run.required("target")?, "serviceNodeId")?,
+                &text(&route, "serviceNodeId")?,
                 "status",
-                Json::object(Vec::<(&str, Json)>::new()),
+                BackendIdentity::select_arguments(
+                    BackendIdentity::optional(route.get("backend"))?.as_ref(),
+                    Json::Object(vec![]),
+                )?,
             )
             .await?;
         validate_native_status(
             &status,
-            &self.owner(run)?,
+            &routed_owner(self.catalogs, &task, run)?,
             Some("task_board_native_unavailable"),
         )?;
         let connection = field(&status, "connection");
@@ -250,14 +246,17 @@ impl<S: InspectionStore> NativeInspector<'_, S> {
             .management(
                 &context.service_node_id,
                 "read",
-                Json::object([
-                    (
-                        "nativeVersion",
-                        Json::String(context.native_version.clone()),
-                    ),
-                    ("method", Json::String(method.clone())),
-                    ("params", params.clone()),
-                ]),
+                BackendIdentity::select_arguments(
+                    context.backend.as_ref(),
+                    Json::object([
+                        (
+                            "nativeVersion",
+                            Json::String(context.native_version.clone()),
+                        ),
+                        ("method", Json::String(method.clone())),
+                        ("params", params.clone()),
+                    ]),
+                )?,
             )
             .await?;
         validate_agent("ReadObservation", &observed)?;
@@ -268,6 +267,7 @@ impl<S: InspectionStore> NativeInspector<'_, S> {
         .verify(
             &observed,
             &ReadIdentity {
+                backend: context.backend.clone(),
                 observation_id: text(&observed, "observationId")?,
                 caller_principal_id: self.store.principal_id(),
                 service_node_id: context.service_node_id.clone(),
@@ -433,6 +433,7 @@ impl<S: InspectionStore> NativeInspector<'_, S> {
                         current.value.get("originalRequest"),
                     )?
                     && [
+                        "backend",
                         "threadId",
                         "turnId",
                         "nativeVersion",

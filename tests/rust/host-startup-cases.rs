@@ -1448,5 +1448,10 @@ fn native_filesystem_paths_keep_os_identity_without_creating_future_directories(
         assert!(!paths::inside(&a, &b).unwrap());
     }
     #[cfg(unix)]
-    assert!(!paths::inside(Path::new("/root"), Path::new("/root/..\\child")).unwrap());
+    {
+        // Native Unix paths retain a backslash as part of the filename.
+        assert!(paths::inside(Path::new("/root"), Path::new("/root/..\\child")).unwrap());
+        assert!(!paths::inside(Path::new("/root"), Path::new("/root/../child")).unwrap());
+        assert!(!paths::inside(Path::new("/root"), Path::new("/root-other/child")).unwrap());
+    }
 }

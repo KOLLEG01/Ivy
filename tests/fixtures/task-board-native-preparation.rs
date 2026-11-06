@@ -85,11 +85,11 @@ impl RpcClient for Client {
                 return Err(IvyError::new(code.as_str()?, "Fixture task unavailable."));
             }
             let pinned = params.get("revision").is_some();
-            let value = merge(
+            let value = super::native_driver::stored_task(&merge(
                 self.base
                     .required(if pinned { "initial" } else { "current" })?,
                 self.input.get(if pinned { "initial" } else { "current" }),
-            );
+            ));
             let revision = if pinned { 1.0 } else { 2.0 };
             Ok(Json::object([
                 (
@@ -197,7 +197,7 @@ impl Prompts<'_> {
         self.events.borrow_mut().push(Json::Array(vec![
             "prompt".into(),
             kind.into(),
-            task.clone(),
+            super::native_driver::frozen_prompt_task(task),
             Json::String(owner.clone()),
             flag,
         ]));
@@ -246,7 +246,9 @@ impl TaskPrompts for Prompts<'_> {
 #[tokio::test(flavor = "current_thread")]
 async fn native_preparation_matches_original_plans_task_pins_guards_and_prompt_boundaries() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = reference_data::read(include_bytes!("task-board-native-preparation-cases.json.gz"));
+    let output = reference_data::read(include_bytes!(
+        "task-board-native-preparation-cases.json.gz"
+    ));
     let groups = parse(
         std::str::from_utf8(&output).unwrap(),
         MANAGEMENT_FRAME_BYTES,
@@ -275,7 +277,11 @@ async fn native_preparation_matches_original_plans_task_pins_guards_and_prompt_b
                 },
                 client: client.clone(),
                 contracts: Policy(
-                    [hash_json(&initial).unwrap(), hash_json(&current).unwrap()].into(),
+                    [
+                        hash_json(&super::native_driver::stored_task(&initial)).unwrap(),
+                        hash_json(&super::native_driver::stored_task(&current)).unwrap(),
+                    ]
+                    .into(),
                 ),
                 limits: HistoryLimits::default(),
                 now: || String::from("2026-01-02T03:04:05.006Z"),
@@ -354,4 +360,138 @@ async fn native_preparation_matches_original_plans_task_pins_guards_and_prompt_b
         }
     }
     assert_eq!(count, 430);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn scoped_preparation_pins_owner_before_dispatch_and_rejects_account_substitution() {
+    use ivy_contracts::native_backend::{BackendIdentity, NativeProvider};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let groups = parse(
+        std::str::from_utf8(&reference_data::read(include_bytes!(
+            "task-board-native-preparation-cases.json.gz"
+        )))
+        .unwrap(),
+        MANAGEMENT_FRAME_BYTES,
+    )
+    .unwrap();
+    let base = groups.as_array().unwrap()[0].required("base").unwrap();
+    let catalogs = CheckedNativeContracts::new(root);
+    let db = Connection::open_in_memory().unwrap();
+    local_journal::initialize(&db).unwrap();
+    let client = Arc::new(Client {
+        base: base.clone(),
+        input: Json::Object(vec![]),
+        wire: Mutex::default(),
+    });
+    let store = JournalStore {
+        journal: LocalJournal {
+            connection: &db,
+            root_object_id: Some("root".into()),
+        },
+        client: client.clone(),
+        contracts: Policy(HashSet::new()),
+        limits: HistoryLimits::default(),
+        now: || "2026-01-02T03:04:05.006Z".to_owned(),
+        new_id: || "unused".into(),
+        cache: None,
+    };
+    let events = RefCell::default();
+    let input = Json::Object(vec![]);
+    let prompts = Prompts {
+        events: &events,
+        input: &input,
+    };
+    let intent = NativeIntent {
+        store: &store,
+        catalogs: &catalogs,
+    };
+    for provider in [NativeProvider::Codex, NativeProvider::Claude] {
+        let backend = BackendIdentity::new("worker".into(), provider, "primary".into()).unwrap();
+        let mut run = base.required("run").unwrap().clone();
+        let mut target = run.required("target").unwrap().clone();
+        target.insert("backend", backend.json());
+        run.insert("target", target.clone());
+        run.insert(
+            "primaryResourceRef",
+            Json::object([
+                (
+                    "serviceNodeId",
+                    target.required("serviceNodeId").unwrap().clone(),
+                ),
+                ("namespace", "worker".into()),
+                ("kind", "thread".into()),
+                ("nativeId", "thread".into()),
+            ]),
+        );
+        run.insert("turnId", "turn".into());
+        run.insert("cancellation", Json::Object(vec![]));
+        let mut plan = run.required("plan").unwrap().clone();
+        let source = catalogs
+            .checked_native_contract(
+                &s(&plan, "nativeVersion"),
+                Some(&Json::object([(
+                    "sourceHash",
+                    plan.required("catalogSourceHash").unwrap().clone(),
+                )])),
+            )
+            .unwrap()
+            .with_backend(Some(backend.clone()));
+        plan.insert("backend", backend.json());
+        plan.insert(
+            "definitions",
+            Json::object(
+                [
+                    ("threadStart", "thread/start"),
+                    ("threadResume", "thread/resume"),
+                    ("turnStart", "turn/start"),
+                    ("turnInterrupt", "turn/interrupt"),
+                ]
+                .map(|(key, method)| (key, source.definition_hash(&method.into()).unwrap().into())),
+            ),
+        );
+        run.insert("plan", plan);
+        let before = db.total_changes();
+        let mut call = intent
+            .intended_call(&run, NativeSlot::Interrupt, None, &prompts)
+            .await
+            .unwrap();
+        assert_eq!(
+            call.required("owner").unwrap().get("backend"),
+            Some(&backend.json())
+        );
+        assert_eq!(
+            call.required("request").unwrap().get("backend"),
+            Some(&backend.json())
+        );
+        let request = intent
+            .retain_native_request(call.required("request").unwrap(), &"original".into())
+            .unwrap();
+        call.insert("request", request);
+        call.insert("operationId", "original".into());
+        let original_owner = intent.call_owner(&run, &call).unwrap();
+        let mut moved_target = target.clone();
+        moved_target.insert("serviceNodeId", "replacement-route".into());
+        run.insert("target", moved_target);
+        assert_eq!(intent.call_owner(&run, &call).unwrap(), original_owner);
+        let mut wrong_owner = call.required("owner").unwrap().clone();
+        let foreign = BackendIdentity::new("worker".into(), provider, "foreign".into()).unwrap();
+        wrong_owner.insert("backend", foreign.json());
+        call.insert("owner", wrong_owner);
+        assert_eq!(
+            intent.call_owner(&run, &call).unwrap_err().code,
+            "task_board_evidence_mismatch"
+        );
+        target.insert("backend", foreign.json());
+        run.insert("target", target);
+        assert_eq!(
+            intent
+                .intended_call(&run, NativeSlot::Interrupt, None, &prompts)
+                .await
+                .unwrap_err()
+                .code,
+            "task_board_target_mismatch"
+        );
+        assert_eq!(db.total_changes(), before);
+    }
+    assert!(client.wire.lock().unwrap().is_empty());
 }

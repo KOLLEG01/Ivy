@@ -5,13 +5,16 @@ use crate::{
     native_recovery::fresh_context_recovery,
     operations::Store,
 };
-use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, schema::scalar_types};
+use ivy_contracts::{
+    IvyError, IvyJson as Json, IvyResult, JsString, agent_schema::validate_agent,
+    native_backend::BackendIdentity, schema::scalar_types,
+};
 use ivy_sdk::{
     operation_ids::new_operation_id,
     rpc::{RequestOptions, RpcClient},
     tools::{BoundToolClient, InterfaceRequirement, ToolCallOptions},
 };
-use std::{sync::Arc, task::Poll};
+use std::{collections::HashSet, sync::Arc, task::Poll};
 
 pub const CONFIGURATION_NAME: &str = "TaskBoard configuration";
 
@@ -72,8 +75,17 @@ pub async fn configuration_view<S: Store>(store: &S) -> IvyResult<Json> {
 
 pub fn execution_with_defaults(fields: &Json, defaults: &Json) -> Json {
     let options = field(fields, "nativeOptions");
-    let inherited = field(defaults, "nativeOptions");
-    Json::object([
+    let default_options = field(defaults, "nativeOptions");
+    // A model name and its options are meaningful only within their account.
+    let inherited = if options.get("backend").is_some()
+        && !BackendIdentity::optional(options.get("backend"))
+            .is_ok_and(|backend| BackendIdentity::matches(default_options, backend.as_ref()))
+    {
+        &Json::Null
+    } else {
+        default_options
+    };
+    let mut result = Json::object([
         (
             "executionRequirement",
             nullish(
@@ -107,7 +119,13 @@ pub fn execution_with_defaults(fields: &Json, defaults: &Json) -> Json {
                 ),
             ]),
         ),
-    ])
+    ]);
+    if let Some(backend) = options.get("backend").or_else(|| inherited.get("backend")) {
+        let mut selected = result.required("nativeOptions").unwrap().clone();
+        selected.insert("backend", backend.clone());
+        result.insert("nativeOptions", selected);
+    }
+    result
 }
 
 pub async fn effective_execution<S: Store>(store: &S, task: &Json) -> IvyResult<Json> {
@@ -126,7 +144,7 @@ pub async fn effective_execution<S: Store>(store: &S, task: &Json) -> IvyResult<
         Some(previous) => {
             let turn = previous.required("plan")?.required("turnStart")?;
             let tier = field(turn, "serviceTier");
-            Json::object([
+            let mut retained = Json::object([
                 (
                     "executionRequirement",
                     Json::object([
@@ -164,7 +182,13 @@ pub async fn effective_execution<S: Store>(store: &S, task: &Json) -> IvyResult<
                         ),
                     ]),
                 ),
-            ])
+            ]);
+            if let Some(backend) = previous.required("target")?.get("backend") {
+                let mut options = retained.required("nativeOptions")?.clone();
+                options.insert("backend", backend.clone());
+                retained.insert("nativeOptions", options);
+            }
+            retained
         }
         None => configuration_view(store)
             .await?
@@ -180,8 +204,136 @@ pub async fn supports_execution_options(
     node: &Json,
     options: &Json,
 ) -> IvyResult<bool> {
+    let backend = BackendIdentity::optional(options.get("backend"))?;
+    if backend.is_some() || field(node, "nativeVersion").is_null() {
+        let mut failed = None;
+        for status in execution_statuses(client.clone(), node).await? {
+            let selected = BackendIdentity::optional(status.get("backend"))?;
+            if !field(&status, "state").is_str("ready") || backend.is_some() && selected != backend
+            {
+                continue;
+            }
+            match supports_backend_options(
+                client.clone(),
+                node,
+                selected.as_ref(),
+                status
+                    .required("nativeVersion")?
+                    .as_js_string()
+                    .ok_or_else(IvyError::internal)?,
+                options,
+            )
+            .await
+            {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(error) => {
+                    if failed.is_none() {
+                        failed = Some(error);
+                    }
+                }
+            }
+        }
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        return Ok(false);
+    }
     require_selection(
         configured_text(field(node, "nativeVersion")),
+        "task_board_target_unavailable",
+        "The selected host has no native version.",
+    )?;
+    supports_backend_options(
+        client,
+        node,
+        None,
+        node.required("nativeVersion")?
+            .as_js_string()
+            .ok_or_else(IvyError::internal)?,
+        options,
+    )
+    .await
+}
+
+/// The flat registration is accepted only while the current rollout still uses it.
+/// A host registration advertises its independently ready backend statuses instead.
+pub(crate) async fn execution_statuses(
+    client: Arc<dyn RpcClient>,
+    node: &Json,
+) -> IvyResult<Vec<Json>> {
+    let tools = BoundToolClient::new(
+        client,
+        node.required("serviceNodeId")?
+            .as_js_string()
+            .cloned()
+            .ok_or_else(IvyError::internal)?,
+        &[InterfaceRequirement {
+            namespace: "agent".into(),
+            interface_version: "1.0.0".into(),
+        }],
+        None,
+    )?;
+    let hosted = field(node, "nativeVersion").is_null();
+    let statuses = if hosted {
+        let result = tools
+            .read(
+                &"agent.backends".into(),
+                Json::Object(vec![]),
+                ToolCallOptions::default(),
+            )
+            .await?;
+        validate_agent("BackendsResult", &result)?;
+        result
+            .required("backends")?
+            .as_array()
+            .ok_or_else(IvyError::internal)?
+            .to_vec()
+    } else {
+        vec![
+            tools
+                .read(
+                    &"agent.status".into(),
+                    Json::Object(vec![]),
+                    ToolCallOptions::default(),
+                )
+                .await?,
+        ]
+    };
+    let mut ids = HashSet::new();
+    for status in &statuses {
+        let backend = BackendIdentity::optional(status.get("backend"))?;
+        if hosted || backend.is_some() {
+            validate_agent("Status", status)?;
+        }
+        require_selection(
+            status.get("hostId") == node.get("hostId")
+                && status.get("serviceNodeId") == node.get("serviceNodeId")
+                && (!hosted || backend.is_some())
+                && ids.insert(backend.as_ref().map(|backend| backend.id().to_owned())),
+            "task_board_target_mismatch",
+            "Backend discovery must retain its registered host, owner and unique account selectors.",
+        )?;
+    }
+    Ok(statuses)
+}
+
+pub(crate) async fn supports_backend_options(
+    client: Arc<dyn RpcClient>,
+    node: &Json,
+    backend: Option<&BackendIdentity>,
+    native_version: &JsString,
+    options: &Json,
+) -> IvyResult<bool> {
+    let requested = BackendIdentity::optional(options.get("backend"))?;
+    if requested
+        .as_ref()
+        .is_some_and(|requested| Some(requested) != backend)
+    {
+        return Ok(false);
+    }
+    require_selection(
+        !native_version.0.is_empty(),
         "task_board_target_unavailable",
         "The selected host has no native version.",
     )?;
@@ -197,21 +349,17 @@ pub async fn supports_execution_options(
                 interface_version: "1.0.0".into(),
             },
             InterfaceRequirement {
-                namespace: "codex".into(),
-                interface_version: String::from_utf16_lossy(
-                    &node
-                        .required("nativeVersion")?
-                        .as_js_string()
-                        .ok_or_else(IvyError::internal)?
-                        .0,
-                ),
+                namespace: backend.map_or("codex", BackendIdentity::id).into(),
+                interface_version: String::from_utf16_lossy(&native_version.0),
             },
         ],
         None,
     )?;
     let model = field(options, "model");
     let effort = field(options, "reasoningEffort");
-    if configured_text(model) || configured_text(effort) {
+    let tier = field(options, "serviceTier");
+    let special_tier = configured_text(tier) && !tier.is_str("standard");
+    if configured_text(model) || configured_text(effort) || backend.is_some() && special_tier {
         let mut models = Vec::new();
         let mut cursor = None::<JsString>;
         let mut cursors = Vec::new();
@@ -226,7 +374,11 @@ pub async fn supports_execution_options(
             let operation = new_operation_id(client.clone(), None).await?;
             let page = tools
                 .call(
-                    &"codex.model/list".into(),
+                    &format!(
+                        "{}.model/list",
+                        backend.map_or("codex", BackendIdentity::id)
+                    )
+                    .into(),
                     args,
                     Some(operation),
                     ToolCallOptions::default(),
@@ -244,7 +396,8 @@ pub async fn supports_execution_options(
                 .filter(|text| !text.0.is_empty())
                 .cloned();
             require_selection(
-                models.len() <= 1000 && cursor.as_ref().is_none_or(|next| !cursors.contains(next)),
+                models.len() <= 1000
+                    && cursor.as_ref().is_none_or(|next| cursors.len() < 19 && !cursors.contains(next)),
                 "task_board_model_unavailable",
                 "Model discovery exceeded its complete snapshot limit.",
             )?;
@@ -263,6 +416,20 @@ pub async fn supports_execution_options(
         let Some(selected) = selected else {
             return Ok(false);
         };
+        if backend.is_some()
+            && special_tier
+            && !field(selected, "serviceTiers")
+                .as_array()
+                .unwrap_or(&[])
+                .iter()
+                .any(|value| field(value, "id") == tier)
+            && !field(selected, "additionalSpeedTiers")
+                .as_array()
+                .unwrap_or(&[])
+                .contains(tier)
+        {
+            return Ok(false);
+        }
         if configured_text(effort)
             && !field(selected, "supportedReasoningEfforts")
                 .as_array()
@@ -273,11 +440,16 @@ pub async fn supports_execution_options(
             return Ok(false);
         }
     }
-    let tier = field(options, "serviceTier");
     if configured_text(tier) && tier != &Json::from("standard") {
         let methods = [
-            JsString::from("codex.thread/start"),
-            JsString::from("codex.turn/start"),
+            JsString::from(format!(
+                "{}.thread/start",
+                backend.map_or("codex", BackendIdentity::id)
+            )),
+            JsString::from(format!(
+                "{}.turn/start",
+                backend.map_or("codex", BackendIdentity::id)
+            )),
         ];
         let mut futures = methods
             .each_ref()
@@ -332,6 +504,53 @@ fn require_selection(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     }
 }
 
+/// Both configuration and allocation require the whole bounded registry read
+/// before an available first-page candidate can authorize native work.
+pub(crate) async fn agent_nodes(client: Arc<dyn RpcClient>) -> IvyResult<Vec<Json>> {
+    let mut nodes = Vec::new();
+    let mut cursor = None::<JsString>;
+    let mut cursors = HashSet::new();
+    loop {
+        let mut args = Json::object([
+            ("serviceName", "agent-manager".into()),
+            ("limit", Json::Number(200.0)),
+        ]);
+        if let Some(cursor) = cursor.take() {
+            args.insert("cursor", Json::String(cursor));
+        }
+        let mut page = client
+            .request("serviceNodes.list", args, RequestOptions::default())
+            .await?;
+        let items = page
+            .remove("items")
+            .and_then(Json::into_array)
+            .ok_or_else(IvyError::internal)?;
+        cursor = match page.remove("nextCursor") {
+            Some(Json::Null) => None,
+            Some(value) => Some(
+                value
+                    .into_js_string()
+                    .filter(|text| !text.0.is_empty() && text.0.len() <= 8192)
+                    .ok_or_else(IvyError::internal)?,
+            ),
+            None => return Err(IvyError::internal()),
+        };
+        require_selection(
+            items.len() <= 200
+                && nodes.len() + items.len() <= 1000
+                && cursor
+                    .as_ref()
+                    .is_none_or(|next| cursors.len() < 19 && cursors.insert(next.clone())),
+            "task_board_target_unavailable",
+            "Host discovery exceeded its bounded complete snapshot.",
+        )?;
+        nodes.extend(items);
+        if cursor.is_none() {
+            return Ok(nodes);
+        }
+    }
+}
+
 /// Domain checks use the journal's mandatory exact validator before any RPC.
 pub async fn check_configuration<R: RpcClient + 'static, P: Contracts, C, I>(
     store: &JournalStore<'_, R, P, C, I>,
@@ -347,35 +566,7 @@ pub async fn check_configuration<R: RpcClient + 'static, P: Contracts, C, I>(
     let requirement = field(defaults, "executionRequirement");
     let options = field(defaults, "nativeOptions");
     let host = field(requirement, "kind") == &Json::from("host");
-    let mut nodes = Vec::new();
-    let mut cursor = None::<JsString>;
-    loop {
-        let mut args = Json::object([
-            ("serviceName", "agent-manager".into()),
-            ("limit", Json::Number(200.0)),
-        ]);
-        if let Some(cursor) = cursor.take() {
-            args.insert("cursor", Json::String(cursor));
-        }
-        let page = store
-            .client
-            .request("serviceNodes.list", args, RequestOptions::default())
-            .await?;
-        nodes.extend(
-            field(&page, "items")
-                .as_array()
-                .ok_or_else(IvyError::internal)?
-                .iter()
-                .cloned(),
-        );
-        cursor = field(&page, "nextCursor")
-            .as_js_string()
-            .filter(|text| !text.0.is_empty())
-            .cloned();
-        if cursor.is_none() {
-            break;
-        }
-    }
+    let nodes = agent_nodes(store.client.clone()).await?;
     require_selection(
         !host
             || nodes
@@ -401,7 +592,8 @@ pub async fn check_configuration<R: RpcClient + 'static, P: Contracts, C, I>(
             return Ok(());
         }
         require_selection(
-            !configured_text(field(options, "model"))
+            options.get("backend").is_none()
+                && !configured_text(field(options, "model"))
                 && !configured_text(field(options, "reasoningEffort"))
                 && (!configured_text(field(options, "serviceTier"))
                     || field(options, "serviceTier") == &Json::from("standard")),

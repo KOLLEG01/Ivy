@@ -2,23 +2,35 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { digest } from '../packages/contracts/src/canonical.js';
 import { readNativeThreadControl } from '../packages/ui-client/src/native-thread-control.js';
-import type { RpcClient } from '../packages/sdk/src/client.js';
+import type { Agent, RpcClient } from '../packages/sdk/src/client.js';
 
-function fixture(version = '0.154.0') {
-  const status = { hostId: 'host', serviceNodeId: 'owner', state: 'ready', epoch: 'epoch', nativeVersion: version, nativeExecutableHash: digest('native'), catalogHash: digest('catalog') };
+function fixture(version = '0.154.0', backend?: Agent.BackendIdentity) {
+  const status = { hostId: 'host', serviceNodeId: 'owner', state: 'ready', epoch: 'epoch', nativeVersion: version, nativeExecutableHash: digest('native'), catalogHash: digest('catalog'), ...(backend ? { backend } : {}) };
   const thread: Record<string, unknown> = { id: 'thread', status: { type: 'idle' } };
   let reads = 0;
-  const behavior = { changeEpoch: false };
+  const behavior = { changeEpoch: false, changeAccount: false };
   const client = { async request(method: string, raw: Record<string, unknown>) {
     if (method === 'serviceNodes.get') return { connected: true, synced: true, ready: true, desiredEnabled: true };
     if (method === 'system.status') return { runtimeEpoch: '11111111-1111-4111-8111-111111111111' };
     if (method === 'tools.list') return { provider: { node: { serviceNodeId: 'owner' } }, items: [{ qualifiedName: raw.namespace + '.' + raw.namePrefix, definitionHash: digest('definition'), definition: {} }], nextCursor: null };
     assert.equal(method, 'tools.call');
-    if (raw.qualifiedName === 'agent.status') return { ...status, epoch: behavior.changeEpoch && reads++ ? 'changed' : status.epoch };
-    assert.equal(raw.qualifiedName, 'codex.thread/read'); return { thread };
+    if (raw.qualifiedName === 'agent.status') { assert.deepEqual((raw.arguments as Record<string, unknown>).backend, backend); return { ...status, epoch: behavior.changeEpoch && reads++ ? 'changed' : status.epoch }; }
+    assert.equal(raw.qualifiedName, (backend?.backendId ?? 'codex') + '.thread/read');
+    if (behavior.changeAccount && backend) status.backend = { ...backend, accountId: 'replacement' };
+    return { thread };
   } } as unknown as RpcClient;
-  return { thread, behavior, read: () => readNativeThreadControl(client, 'owner', 'thread', new AbortController().signal) };
+  return { thread, behavior, status, read: () => readNativeThreadControl(client, 'owner', 'thread', new AbortController().signal, backend) };
 }
+
+test('native thread control fences the selected full account before accepting an equal thread ID', async () => {
+  const backend = { backendId: 'secondary', provider: 'claude' as const, accountId: 'personal' }, f = fixture('0.142.3', backend);
+  f.thread.canAcceptDirectInput = true;
+  assert.equal((await f.read()).attached, true);
+  f.status.backend = { ...backend, accountId: 'other' };
+  await assert.rejects(f.read(), /selected service and account/);
+  f.status.backend = backend; f.behavior.changeAccount = true;
+  await assert.rejects(f.read(), /selected service and account/);
+});
 
 test('native capability alone establishes direct input; missing, denied and unsupported ownership stays unavailable', async () => {
   for (const capability of [undefined, null, false, true]) {

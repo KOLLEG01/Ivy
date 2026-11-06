@@ -27,6 +27,89 @@ pub(super) fn replace(v: &J, root: &Path) -> J {
         _ => v.clone(),
     }
 }
+
+#[test]
+fn original_callback_input_buffers_move_through_permission_answers_without_cloning() {
+    let ids: Arc<dyn Fn() -> JsString + Send + Sync> = Arc::new(|| "original-tool".into());
+    let context = v(r#"{"threadId":"original-thread","turnId":"original-turn"}"#);
+    let mut units = Vec::with_capacity(24 * 1024 * 1024 / 2);
+    units.extend([65, 0xd800]);
+    let original_pointer = units.as_ptr();
+    let input = J::object([("command", JsString(units).into())]);
+    let Callback::Permission { event, input } = ask::callback(
+        &context,
+        &J::from("Bash"),
+        input,
+        &J::from("original-tool"),
+        false,
+        &ids,
+    ) else {
+        panic!("Original approval was not requested")
+    };
+    let retained = s(f(&input, "command"));
+    assert_eq!(retained.0.as_ptr(), original_pointer);
+    assert_eq!(retained.0.capacity(), 24 * 1024 * 1024 / 2);
+    assert_eq!(retained.0, [65, 0xd800]);
+    assert_eq!(f(&event, "input"), &input);
+    let result = ask::permission_result(input, &v(r#"{"decision":"accept"}"#), false);
+    let returned = s(f(f(&result, "updatedInput"), "command"));
+    assert_eq!(returned.0.as_ptr(), original_pointer);
+    assert_eq!(returned.0.capacity(), 24 * 1024 * 1024 / 2);
+    assert_eq!(returned.0, [65, 0xd800]);
+
+    let mut units = Vec::with_capacity(24 * 1024 * 1024 / 2);
+    units.extend([81, 0xdc00]);
+    let original_pointer = units.as_ptr();
+    let input = J::object([(
+        "questions",
+        J::Array(vec![J::object([("question", JsString(units).into())])]),
+    )]);
+    let Callback::UserInput {
+        event,
+        input,
+        questions,
+    } = ask::callback(
+        &context,
+        &J::from("AskUserQuestion"),
+        input,
+        &J::from("original-question"),
+        false,
+        &ids,
+    )
+    else {
+        panic!("Original question was not requested")
+    };
+    let retained = s(f(
+        &f(&input, "questions").as_array().unwrap()[0],
+        "question",
+    ));
+    assert_eq!(retained.0.as_ptr(), original_pointer);
+    assert_eq!(retained.0.capacity(), 24 * 1024 * 1024 / 2);
+    assert_eq!(retained.0, [81, 0xdc00]);
+    assert_eq!(f(&event, "questions").as_array().unwrap(), questions);
+    let response = ask::user_input_result(
+        &input,
+        &questions,
+        &v(r#"{"answers":{"q0":{"answers":["Other"],"notes":"answer\ud800"}}}"#),
+    )
+    .unwrap();
+    assert_eq!(f(&response, "behavior"), &J::from("deny"));
+    let payload = parse(&s(f(&response, "message")).to_utf8().unwrap(), usize::MAX).unwrap();
+    assert_eq!(f(&payload, "questions"), f(&input, "questions"));
+    assert_eq!(
+        f(&payload, "answers").as_object().unwrap()[0].1,
+        v(r#""answer\ud800""#)
+    );
+    assert_eq!(
+        s(f(
+            &f(&input, "questions").as_array().unwrap()[0],
+            "question"
+        ))
+        .0
+        .as_ptr(),
+        original_pointer
+    );
+}
 fn normalized(v: &J, root: &Path) -> J {
     let v = normalize(v, root);
     let needle = node_path::from_native(root)
@@ -110,7 +193,7 @@ fn native(root: &Path, spec: &J) -> J {
                         let value = ask::callback(
                             context,
                             f(callback, "name"),
-                            f(callback, "input"),
+                            f(callback, "input").clone(),
                             f(callback, "id"),
                             options.auto_allow,
                             &ids,
@@ -120,7 +203,7 @@ fn native(root: &Path, spec: &J) -> J {
                             Callback::Permission { event, input } => {
                                 calls.push(event);
                                 ask::permission_result(
-                                    &input,
+                                    input,
                                     row.get("decision")
                                         .unwrap_or(&v(r#"{"decision":"accept"}"#)),
                                     false,
@@ -311,11 +394,29 @@ async fn owned_bridge_multiplexes_callbacks_and_stops_with_backpressure() {
         node_executable: node,
         entry: repository.join("tests/fixtures/agent-claude-bridge-transport.mjs"),
         cwd: repository.clone(),
+        job_launcher: Some(
+            PathBuf::from(env!("CARGO_BIN_EXE_ivy-agent-manager"))
+                .parent()
+                .unwrap()
+                .join(if cfg!(windows) {
+                    "ivy-job.exe"
+                } else {
+                    "ivy-job"
+                }),
+        ),
         environment: std::env::vars_os()
-            .filter(|(k, _)| k.to_str().is_some_and(|s|matches!(s.to_ascii_lowercase().as_str(), "systemroot" | "windir" | "temp" | "tmp")))
+            .filter(|(k, _)| {
+                k.to_str().is_some_and(|s| {
+                    matches!(
+                        s.to_ascii_lowercase().as_str(),
+                        "systemroot" | "windir" | "temp" | "tmp"
+                    )
+                })
+            })
             .collect::<BTreeMap<_, _>>(),
     };
-    let (bridge, mut events) = Bridge::spawn(launch, Arc::new(|_| {})).unwrap();
+    let (bridge, mut events) = Bridge::spawn(launch, Arc::new(|_| {})).await.unwrap();
+    let process = bridge.owned_process();
     let call = |method: &str, params: J| {
         let bridge = bridge.clone();
         let method = method.to_owned();
@@ -384,6 +485,21 @@ async fn owned_bridge_multiplexes_callbacks_and_stops_with_backpressure() {
         .await
         .unwrap()
         .unwrap();
+    assert_ne!(
+        process.completion.wait().await.error_code.as_deref(),
+        Some("outcome_unknown")
+    );
+    assert_eq!(
+        process.completion.wait().await.exit_code,
+        Some(0),
+        "Closing SDK stdin must permit its EOF cleanup before the exact-owner stop fallback"
+    );
+    assert!(
+        ivy_host_runtime::process::owned_process_tree_stopped(&process)
+            .await
+            .unwrap()
+    );
+    bridge.stop().await.unwrap();
     assert!(
         call("models", v(r#"{"options":{},"timeoutMs":30000}"#))
             .await

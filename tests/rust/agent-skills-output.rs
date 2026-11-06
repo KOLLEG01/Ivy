@@ -17,12 +17,10 @@ use std::{
 fn oracle() -> &'static IvyJson {
     static DATA: OnceLock<IvyJson> = OnceLock::new();
     DATA.get_or_init(|| {
-        let output = reference_data::read(include_bytes!("../fixtures/agent-skills-output-cases.json.gz"));
-        parse(
-            std::str::from_utf8(&output).unwrap(),
-            4 * 1024 * 1024,
-        )
-        .unwrap()
+        let output = reference_data::read(include_bytes!(
+            "../fixtures/agent-skills-output-cases.json.gz"
+        ));
+        parse(std::str::from_utf8(&output).unwrap(), 4 * 1024 * 1024).unwrap()
     })
 }
 struct Client(Mutex<VecDeque<IvyJson>>);
@@ -129,9 +127,11 @@ async fn authoritative_skills_preparation_matches_original_reads_and_version() {
 }
 
 #[test]
-fn skills_ownership_migration_collisions_and_retention_match_original_effects() {
+fn skills_ownership_keeps_current_reference_effects_and_rejects_legacy_state() {
     let rows = oracle().get("ownership").unwrap().as_array().unwrap();
     assert_eq!(rows.len(), 104);
+    let mut legacy = 0;
+    let mut current = 0;
     for (index, row) in rows.iter().enumerate() {
         let after: Vec<(JsString, String)> = row
             .get("after")
@@ -147,6 +147,22 @@ fn skills_ownership_migration_collisions_and_retention_match_original_effects() 
                 )
             })
             .collect();
+        // Runtime ownership is v2-only. Keep the historical fixture intact,
+        // but require explicit refusal of every legacy input before tree reads.
+        if row.get("state").and_then(|s| s.get("schemaVersion")) == Some(&IvyJson::Number(1.0)) {
+            legacy += 1;
+            match inspect_ownership(
+                row.get("state"),
+                &row.get("authority").unwrap().as_str().unwrap(),
+                &after.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+                |_| panic!("Legacy ownership must be refused before reading a directory"),
+            ) {
+                Err(error) => assert_eq!(error.code, "target_conflict", "legacy case {index}"),
+                Ok(_) => panic!("Legacy ownership was adopted in case {index}"),
+            }
+            continue;
+        }
+        current += 1;
         let before = row.get("beforeTrees").unwrap();
         let tree = |name: &JsString| {
             let value = before.get_key(name).expect("unexpected tree inspection");
@@ -216,6 +232,8 @@ fn skills_ownership_migration_collisions_and_retention_match_original_effects() 
             row.get("selection")
         );
     }
+    assert_eq!(legacy, 24);
+    assert_eq!(current, 80);
 }
 
 #[test]

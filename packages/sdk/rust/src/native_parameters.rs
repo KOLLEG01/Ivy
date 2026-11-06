@@ -2,7 +2,7 @@
 //! RPC calls or publish parameter Objects; workflow policy stays with callers.
 use crate::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_contracts::{
-    agent_schema::validate_agent, json::canonical, native_contract::NativeContract,
+    agent_schema::validate_agent, json::{canonical, canonical_size}, native_contract::NativeContract,
     schema::SchemaValidators,
 };
 use std::sync::OnceLock;
@@ -83,7 +83,7 @@ pub fn save_native_parameters(
     let reserved = names(reserved);
     let mut value = header(contract, method, &reserved);
     value.insert("params", params.clone());
-    canonical(&value, NATIVE_PARAMETERS_BYTES)?;
+    canonical_size(&value, NATIVE_PARAMETERS_BYTES)?;
     contract.validate_template(method, params, &reserved, NATIVE_PARAMETERS_BYTES)?;
     parameters_schema(contract, method, &reserved)?;
     validate_agent("ParametersRef", &value)?;
@@ -99,7 +99,7 @@ pub fn read_native_parameters(
     let reserved = names(reserved);
     let expected = header(contract, method, &reserved);
     validate_agent("ParametersRef", value)?;
-    canonical(value, NATIVE_PARAMETERS_BYTES)?;
+    canonical_size(value, NATIVE_PARAMETERS_BYTES)?;
     parameters_schema(contract, method, &reserved)?;
     if [
         "nativeVersion",

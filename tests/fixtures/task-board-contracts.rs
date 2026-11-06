@@ -7,6 +7,41 @@ use std::collections::HashSet;
 const PUBLISHED: &[(&str, &str, &str)] = &[
     (
         "task-board/task",
+        "3.5.0",
+        "sha256:b466d7f6209da6108f50be0ed34ebd6e1fe525d72a2d6ce461cf541f5092e1f4",
+    ),
+    (
+        "task-board/task",
+        "3.4.0",
+        "sha256:fddc788a275e24bb2ec34a002907be2b1b4aabf0ff626a39a4e24d8b43c5fac5",
+    ),
+    (
+        "task-board/task",
+        "3.3.0",
+        "sha256:1b2a48a69747e58f1d57e3aa43321035683c7b99769b4a223d780ad320139288",
+    ),
+    (
+        "task-board/history",
+        "1.1.0",
+        "sha256:bbc67989864dca6ec3ba598c62b144ea5948dddc1d722d67be2dc6fbac39a7f1",
+    ),
+    (
+        "task-board/task",
+        "3.2.0",
+        "sha256:e2081f2c297ef090348fe5f89d6383b4ba4f3e13da0822eced0ba672d3ba12b5",
+    ),
+    (
+        "task-board/configuration",
+        "1.3.0",
+        "sha256:ac9712db8586b807af5e9e6ec9f0836a8e1d806d4740cee714a6d17243154424",
+    ),
+    (
+        "task-board/run",
+        "3.1.0",
+        "sha256:9e682237cc23479a559b59c84356ebf38e6e649382ef6ad104c5031f34243187",
+    ),
+    (
+        "task-board/task",
         "3.1.0",
         "sha256:b89978d227ef0e54270db7420f0efd52f7dbb597b63fc688852aa679a2fd1de5",
     ),
@@ -281,10 +316,10 @@ fn complete_catalog_preserves_published_definitions_and_return_order() {
     }
     assert_eq!(keys.len(), 15);
     let serialized = stringify(&IvyJson::Array(catalog.clone()), MANAGEMENT_FRAME_BYTES).unwrap();
-    assert_eq!(serialized.len(), 669218);
+    assert_eq!(serialized.len(), 788062);
     assert_eq!(
         digest(serialized.as_bytes()),
-        "sha256:d0fdb15dffbe9e0037ca884734f652cf456556de347718b7f5c2856ba45f41ba"
+        "sha256:2421d35db138f39e9ccfd828ed02636d47e6ec05a89a5127aa79df1313796ff6"
     );
     // The builder returns a new object graph on every call.
     catalog[0] = IvyJson::Null;

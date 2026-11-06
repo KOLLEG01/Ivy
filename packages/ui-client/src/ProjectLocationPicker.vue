@@ -18,9 +18,13 @@ import type { Agent, RpcClient } from "../../sdk/src/client.js";
 import { FolderOpen } from "@lucide/vue";
 import HostDirectoryDialog from "./HostDirectoryDialog.vue";
 import { localeText } from "./runtime.js";
+import { backendArguments } from '../../contracts/src/native-backend.js';
+import { nativeStorageOwner } from './native-route';
+import { sameBackend } from './native-backends';
 const props = defineProps<{
   client: RpcClient;
   node: string;
+  backend?: Agent.BackendIdentity | undefined;
   scope: string;
   defaults?: Agent.ProjectsResult["defaults"] | undefined;
   disabled?: boolean;
@@ -35,7 +39,7 @@ const kind = ref<"normal" | "existing">(props.initialKind ?? "normal"),
   browsing = ref(false),
   busy = ref(false),
   error = ref("");
-const storageKey = "ivy:project-selection:" + props.scope + ":" + props.node;
+const storageKey = "ivy:project-selection:" + props.scope + ":" + nativeStorageOwner(props.node, props.backend);
 const pending = ref<Agent.ProjectSelection | null>(null);
 try {
   pending.value = JSON.parse(sessionStorage.getItem(storageKey) ?? "null");
@@ -67,9 +71,10 @@ async function select() {
     sessionStorage.setItem(storageKey, JSON.stringify(pending.value));
     const location = (await serviceTools(props.client, props.node, [
       { namespace: "agent", interfaceVersion: "1.0.0" },
-    ]).call("agent.resolveProject", {
+    ]).call("agent.resolveProject", backendArguments({
       selection: { ...pending.value },
-    })) as Agent.ProjectLocation;
+    }, props.backend))) as Agent.ProjectLocation;
+    if (!sameBackend(location.backend, props.backend)) throw new Error('The project belongs to another account.');
     sessionStorage.removeItem(storageKey);
     pending.value = null;
     emit("selected", location);
@@ -159,6 +164,7 @@ async function select() {
     v-model:open="browsing"
     :client="client"
     :node="node"
+    :backend="backend"
     :host="host ?? node"
     :start="name.trim() || defaults?.projectRoot || ''"
     title="Choose existing directory"

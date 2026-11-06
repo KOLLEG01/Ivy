@@ -1,4 +1,5 @@
 import { cachedBuild } from "./build-cache.mjs";
+import { browserAgentValidation } from "./browser-agent-validation.mjs";
 import { build } from "vite";
 import vue from "@vitejs/plugin-vue";
 import tailwindcss from "@tailwindcss/vite";
@@ -65,6 +66,7 @@ export async function buildWeb({ uis = null } = {}) {
     "specs",
     "packages/ui-client/src",
     "tools/build/build-web.mjs",
+    "tools/build/browser-agent-validation.mjs",
     "tools/build/build-cache.mjs",
     "docs/logo/ivy-symbol.svg",
   ].map((path) => resolve(project, path));
@@ -100,11 +102,12 @@ export async function buildWeb({ uis = null } = {}) {
           root: resolve(project, "services/hive/console"),
           base: "./",
           resolve: workspaceUi,
-          plugins: [vue(), tailwindcss(), ivyIcon(project)],
+          plugins: [browserAgentValidation(project, distribution), vue(), tailwindcss(), ivyIcon(project)],
           build: {
             outDir: destination,
             emptyOutDir: true,
             target: "es2023",
+            commonjsOptions: { include: [/node_modules/, /browser-agent-validation/] },
             sourcemap: false,
             chunkSizeWarningLimit: 600,
             assetsDir: "assets",
@@ -159,11 +162,12 @@ export async function buildWeb({ uis = null } = {}) {
         root: resolve(project, "ui", uiId),
         base: "./",
         resolve: workspaceUi,
-        plugins: [vue(), tailwindcss(), ivyIcon(project)],
+        plugins: [browserAgentValidation(project, distribution), vue(), tailwindcss(), ivyIcon(project)],
         build: {
           outDir: output,
           emptyOutDir: true,
           target: "es2023",
+          commonjsOptions: { include: [/node_modules/, /browser-agent-validation/] },
           sourcemap: false,
           chunkSizeWarningLimit: 600,
           assetsDir: "assets",
@@ -171,6 +175,7 @@ export async function buildWeb({ uis = null } = {}) {
           rollupOptions: {
             output: {
               manualChunks(id) {
+                if (id.includes(".build-cache/browser-agent-validation")) return "agent-contracts";
                 if (id.includes("node_modules/@milkdown/crepe"))
                   return "editor-ui";
                 if (id.includes("node_modules/@milkdown"))

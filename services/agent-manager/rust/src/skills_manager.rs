@@ -1,11 +1,12 @@
 //! Coalesced managed-skills application and current-layout bootstrap lifetime.
+pub use crate::file_work::FileRun as SkillsRun;
+use crate::file_work::FileWork;
 use crate::skills_files::{
     AppliedSkills, SkillsComparator, apply_skills, fs_path, regular_bytes, resolved_paths,
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
-use std::sync::{Arc, Mutex};
-use tokio::sync::watch;
+use std::sync::Arc;
 pub struct SkillsSettings {
     pub state_home: JsString,
     pub root: JsString,
@@ -55,28 +56,12 @@ impl SkillsStatus {
         ])
     }
 }
-struct State {
-    status: SkillsStatus,
-    running: Option<watch::Receiver<bool>>,
-}
 struct Inner {
     settings: SkillsSettings,
-    state: Mutex<State>,
+    work: FileWork<SkillsStatus>,
 }
 #[derive(Clone)]
 pub struct SkillsManager(Arc<Inner>);
-pub struct SkillsRun(Option<watch::Receiver<bool>>);
-impl SkillsRun {
-    pub async fn wait(mut self) {
-        if let Some(receiver) = self.0.as_mut() {
-            while !*receiver.borrow_and_update() {
-                if receiver.changed().await.is_err() {
-                    break;
-                }
-            }
-        }
-    }
-}
 fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
@@ -112,27 +97,6 @@ fn update(status: &mut SkillsStatus, result: IvyResult<AppliedSkills>) {
     }
     status.observed_at = now();
 }
-struct Completion {
-    owner: Arc<Inner>,
-    sender: Option<watch::Sender<bool>>,
-}
-impl Completion {
-    fn finish(&mut self, result: IvyResult<AppliedSkills>) {
-        let mut state = self.owner.state.lock().unwrap_or_else(|e| e.into_inner());
-        update(&mut state.status, result);
-        state.running = None;
-        if let Some(sender) = self.sender.take() {
-            sender.send_replace(true);
-        }
-    }
-}
-impl Drop for Completion {
-    fn drop(&mut self) {
-        if self.sender.is_some() {
-            self.finish(Err(IvyError::internal()));
-        }
-    }
-}
 impl SkillsManager {
     pub fn new(settings: SkillsSettings) -> Self {
         let status = SkillsStatus {
@@ -146,57 +110,32 @@ impl SkillsManager {
         };
         Self(Arc::new(Inner {
             settings,
-            state: Mutex::new(State {
-                status,
-                running: None,
-            }),
+            work: FileWork::new(status),
         }))
     }
     pub fn status(&self) -> SkillsStatus {
-        self.0
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .status
-            .clone()
+        self.0.work.status()
     }
     pub fn synchronize(&self, connection: Arc<dyn RpcClient>) -> SkillsRun {
-        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(running) = &state.running {
-            return SkillsRun(Some(running.clone()));
-        }
-        let (sender, receiver) = watch::channel(false);
-        state.running = Some(receiver.clone());
-        let owner = self.0.clone();
-        tokio::spawn(async move {
-            let mut completion = Completion {
-                owner: owner.clone(),
-                sender: Some(sender),
-            };
-            let settings = &owner.settings;
-            let result = apply_skills(
-                settings.state_home.clone(),
-                settings.root.clone(),
-                connection,
-                settings.defaults.clone(),
-                settings.host_id.clone(),
-                settings.hive_url.clone(),
-                settings.compare.clone(),
-            )
-            .await;
-            completion.finish(result);
-        });
-        SkillsRun(Some(receiver))
+        self.0.work.start(update, || {
+            let owner = self.0.clone();
+            async move {
+                let settings = &owner.settings;
+                apply_skills(
+                    settings.state_home.clone(),
+                    settings.root.clone(),
+                    connection,
+                    settings.defaults.clone(),
+                    settings.host_id.clone(),
+                    settings.hive_url.clone(),
+                    settings.compare.clone(),
+                )
+                .await
+            }
+        })
     }
     pub fn close(&self) -> SkillsRun {
-        SkillsRun(
-            self.0
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .running
-                .clone(),
-        )
+        self.0.work.close()
     }
     pub async fn bootstrap(&self) -> IvyResult<()> {
         let paths = resolved_paths(

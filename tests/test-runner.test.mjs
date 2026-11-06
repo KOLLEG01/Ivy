@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { inventory, selectTests } from "../tools/testing/test-selection.mjs";
+import { dependencies, inventory, selectTests, typescriptEntries } from "../tools/testing/test-selection.mjs";
 import * as config from "../tools/testing/test-config.mjs";
 
 function temporary(t) {
@@ -172,6 +172,22 @@ test("partial Rust checkouts select registered files under their owning scopes",
     ["tests/rust/service-manager-stop.rs", "host"],
   ]);
   assert.throws(() => selectTests(root, config, { files: ["tests/rust/chat-journal.rs"] }), /Unknown test file/);
+});
+
+test('Node compilation keeps emitted runtime inputs and TS tests separate from browser source assets', t => {
+  const root = temporary(t);
+  for (const dir of ['tests', 'src', 'ui']) mkdirSync(join(root, dir));
+  writeFileSync(join(root, 'tests/one.test.mjs'), "import './fixture.mjs'; load('../ui/panel.ts');");
+  writeFileSync(join(root, 'tests/fixture.mjs'), "import '../dist/src/client.js';");
+  writeFileSync(join(root, 'tests/two.test.ts'), "import '../src/second.js';");
+  writeFileSync(join(root, 'src/client.ts'), 'export const value = 1;');
+  writeFileSync(join(root, 'src/second.ts'), 'export const value = 2;');
+  writeFileSync(join(root, 'ui/panel.ts'), "import './Panel.vue';");
+  writeFileSync(join(root, 'ui/Panel.vue'), '<template>Actual browser source</template>');
+  const tests = ['tests/one.test.mjs', 'tests/two.test.ts'];
+  const inputs = new Set(tests.flatMap(file => [...dependencies(root, file)]));
+  assert(inputs.has('ui/Panel.vue'), 'Browser sources still participate in selection and build fingerprints.');
+  assert.deepEqual(typescriptEntries(root, tests, inputs), ['src/client.ts', 'tests/two.test.ts']);
 });
 
 test("Cargo dispatch groups selected targets and stops after a failed prerequisite or test", (t) => {

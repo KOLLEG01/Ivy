@@ -3,14 +3,20 @@ import { computed, ref, watch } from 'vue';
 import { RemoteState, useRemote } from '@ivy/ui';
 import type { Agent, BrowserNotifications, RpcClient } from '../../sdk/src/client.js';
 import { nativeInputUpdates } from './live';
-import { nativeRead } from './native';
+import { backendRead, nativeBackendKey, sameBackend } from './native-backends';
+import { validateAgent } from '../../contracts/src/agent-validation.js';
 import NativeInput from './NativeInput.vue';
-const props = defineProps<{ hideEmpty?: boolean; retainDrafts?: boolean; node: string; threadId: string; turnId?: string; ownerEpoch?: string | undefined; base: URL; client: RpcClient; notifications: BrowserNotifications }>();
+const props = defineProps<{ hideEmpty?: boolean; retainDrafts?: boolean; node: string; backend?: Agent.BackendIdentity | undefined; threadId: string; turnId?: string; ownerEpoch?: string | undefined; base: URL; client: RpcClient; notifications: BrowserNotifications }>();
 const emit = defineEmits<{ attention: [count: number] }>();
 const { client } = props;
-const pending = useRemote(async signal => await nativeRead(client, props.node, 'agent.inputs', { includeExpired: true, limit: 128 }, signal) as Agent.PendingInputPage, 15000,
-  nativeInputUpdates(props.notifications, props.node, props.threadId));
-const observed = computed(() => pending.value.value?.items.filter(input => input.threadId === props.threadId && (!props.turnId || !input.turnId || input.turnId === props.turnId)) ?? []);
+const pending = useRemote(async signal => {
+  const value = await backendRead(client, { serviceNodeId: props.node, ...(props.backend ? { backend: props.backend } : {}) }, 'agent.inputs', { includeExpired: true, limit: 128 }, signal) as Agent.PendingInputPage;
+  validateAgent('PendingInputPage', value);
+  if (!sameBackend(value.backend, props.backend) || value.items.some(input => input.identity.backend !== undefined && !sameBackend(input.identity.backend, props.backend)))
+    throw new Error('Pending inputs belong to another native account.');
+  return value;
+}, 15000, nativeInputUpdates(props.notifications, props.node, props.threadId, () => props.backend));
+const observed = computed(() => sameBackend(pending.value.value?.backend, props.backend) ? pending.value.value?.items.filter(input => input.threadId === props.threadId && (!props.turnId || !input.turnId || input.turnId === props.turnId)) ?? [] : []);
 const observedIds = computed(() => new Set(observed.value.map(input => JSON.stringify(input.identity))));
 const completed = ref(new Set<string>());
 const responseKey = (id: string) => 'ivy:agent-input:' + props.base.href + id;
@@ -34,6 +40,9 @@ const visible = (input: Agent.PendingInput) => {
     (['pending', 'answering', 'outcome_unknown'].includes(input.state) || unresolved(id));
 };
 const retained = ref(new Map<string, Agent.PendingInput>());
+watch(() => JSON.stringify([props.node, props.threadId, nativeBackendKey(props.backend)]), () => {
+  retained.value = new Map(); completed.value = new Set(); void pending.refresh();
+});
 watch(observed, inputs => {
   for (const input of inputs) if (resolved(input)) {
     try { sessionStorage.removeItem(responseKey(JSON.stringify(input.identity)) + ':draft'); } catch { /* Optional view state. */ }
@@ -60,5 +69,5 @@ watch(() => items.value.filter(item => ['pending', 'answering', 'outcome_unknown
   <RemoteState :loading="pending.loading.value" :error="pending.error.value" :has-data="!!pending.value.value" @retry="pending.refresh" /><p v-if="pending.value.value && !items.length" class="text-sm text-muted-foreground">No retained request for this task in the current snapshot.</p>
   <p v-if="pending.value.value?.truncated" class="text-sm text-muted-foreground">The bounded owner snapshot is truncated; current pending inputs are ordered first.</p>
   <p v-if="ownerEpoch && pending.value.value?.epoch !== ownerEpoch" class="text-sm text-muted-foreground">This run belongs to an earlier native connection. Its retained requests are not answerable here.</p>
-  <div v-for="input in items" :key="JSON.stringify(input.identity)" class="space-y-2"><p v-if="!observedIds.has(JSON.stringify(input.identity))" class="text-sm text-muted-foreground">This request is no longer in the current snapshot. Your response draft is retained.</p><NativeInput :base="base" :client="client" :input="input" :epoch="pending.value.value?.epoch ?? null" :available="observedIds.has(JSON.stringify(input.identity)) && !pending.error.value && (!ownerEpoch || pending.value.value?.epoch === ownerEpoch)" @answered="answerUpdated(input)" /></div>
+  <div v-for="input in items" :key="JSON.stringify(input.identity)" class="space-y-2"><p v-if="!observedIds.has(JSON.stringify(input.identity))" class="text-sm text-muted-foreground">This request is no longer in the current snapshot. Your response draft is retained.</p><p v-if="input.identity.serviceNodeId !== node || !sameBackend(input.identity.backend, backend)" class="text-sm text-muted-foreground">This request retains its original service or account binding and is not answerable through the current route.</p><NativeInput :base="base" :client="client" :input="input" :epoch="pending.value.value?.epoch ?? null" :available="input.identity.serviceNodeId === node && sameBackend(input.identity.backend, backend) && observedIds.has(JSON.stringify(input.identity)) && !pending.error.value && (!ownerEpoch || pending.value.value?.epoch === ownerEpoch)" @answered="answerUpdated(input)" /></div>
 </section></template>

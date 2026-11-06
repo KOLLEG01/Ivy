@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { isUnmaterializedNativeHistory, readNativeOutputPage } from '../packages/ui-client/src/native-output-page.js';
 import { IvyError } from '../packages/contracts/src/errors.js';
 import { hashJson, digest } from '../packages/contracts/src/canonical.js';
-import type { RpcClient, Wire } from '../packages/sdk/src/client.js';
+import type { Agent, RpcClient, Wire } from '../packages/sdk/src/client.js';
 
-function fixture(version = '0.154.0') {
+function fixture(version = '0.154.0', backend?: Agent.BackendIdentity) {
   const node = 'selected-owner', threadId = 'selected-thread', calls: string[] = [];
-  const status = { serviceNodeId: node, state: 'ready', nativeVersion: version, epoch: 'native-epoch', nativeExecutableHash: digest('executable'), catalogHash: digest('catalog') };
+  const status = { serviceNodeId: node, state: 'ready', nativeVersion: version, epoch: 'native-epoch', nativeExecutableHash: digest('executable'), catalogHash: digest('catalog'), ...(backend ? { backend } : {}) };
   const turns: { id: string; status: string; items: Wire.Json[]; completedAt?: number }[] = [{ id: 'turn-one', status: 'completed', items: [{ id: 'item-one', type: 'agentMessage', text: 'Exact saved output.' }] }];
   const state = { supported: false, nativeCode: -32601, outcome: 'completed' as 'completed' | 'unknown', tamper: (value: Record<string, unknown>) => value, itemPage: null as Wire.Json[] | null, statusReads: 0, changeEpoch: false };
   const client = { async request(method: string, raw: Record<string, unknown>) {
@@ -15,23 +15,35 @@ function fixture(version = '0.154.0') {
     if (method === 'system.status') return { runtimeEpoch: '11111111-1111-4111-8111-111111111111' };
     if (method === 'tools.list') return { provider: { node: { serviceNodeId: node } }, items: [{ qualifiedName: raw.namespace + '.' + raw.namePrefix, definitionHash: digest('definition'), definition: {} }], nextCursor: null };
     assert.equal(method, 'tools.call'); const name = raw.qualifiedName as string, args = raw.arguments as Record<string, unknown>; calls.push(name);
-    if (name === 'agent.status') { state.statusReads++; return { ...status, ...(state.changeEpoch && state.statusReads > 1 ? { epoch: 'changed-epoch' } : {}) }; }
-    if (name === 'codex.thread/items/list') {
+    if (name === 'agent.status') { assert.deepEqual(args.backend, backend); state.statusReads++; return { ...status, ...(state.changeEpoch && state.statusReads > 1 ? { epoch: 'changed-epoch' } : {}) }; }
+    if (name === (backend?.backendId ?? 'codex') + '.thread/items/list') {
       if (!state.supported) throw new IvyError('native_error', 'Native original error.', state.outcome, { nativeError: { code: state.nativeCode, message: 'Unsupported.' } });
       return { data: state.itemPage ?? [{ turnId: 'turn-one', item: turns[0]!.items[0] }], nextCursor: args.cursor ? null : 'native-items-next' };
     }
-    assert.equal(name, 'agent.read'); assert.equal(args.method, 'thread/turns/list'); assert.equal(args.nativeVersion, version);
+    assert.equal(name, 'agent.read'); assert.deepEqual(args.backend, backend); assert.equal(args.method, 'thread/turns/list'); assert.equal(args.nativeVersion, version);
     assert.equal(raw.operationId, undefined, 'fallback observations must not create native mutation journal operations');
     const params = args.params as Record<string, unknown>, offset = params.cursor ? Number(String(params.cursor).slice('turn-page-'.length)) : 0;
     assert.equal(params.threadId, threadId); assert.equal(params.limit, 1); assert.equal(params.sortDirection, 'desc');
     const turn = turns[offset], result = { data: turn ? [{ ...turn, items: params.itemsView === 'full' ? structuredClone(turn.items) : [], itemsView: params.itemsView }] : [], nextCursor: offset + 1 < turns.length ? 'turn-page-' + (offset + 1) : null };
     return state.tamper({ schemaVersion: 1, observationId: 'observation-' + calls.length, callerPrincipalId: 'user', serviceNodeId: node, nativeVersion: version,
-      nativeExecutableHash: status.nativeExecutableHash, catalogHash: status.catalogHash, epoch: status.epoch, requestId: calls.length,
+      nativeExecutableHash: status.nativeExecutableHash, catalogHash: status.catalogHash, epoch: status.epoch, requestId: calls.length, ...(backend ? { backend } : {}),
       method: args.method, params, requestHash: hashJson({ method: args.method, params }), observedAt: new Date().toISOString(), reply: { result } });
   } } as unknown as RpcClient;
-  const read = (turn = '', cursor?: string) => readNativeOutputPage(client, node, threadId, turn, cursor, new AbortController().signal);
+  const read = (turn = '', cursor?: string) => readNativeOutputPage(client, node, threadId, turn, cursor, new AbortController().signal, backend);
   return { node, threadId, status, turns, calls, state, client, read };
 }
+
+test('scoped output keeps account-specific cursors and rejects another account observation', async () => {
+  const backend = { backendId: 'secondary', provider: 'claude' as const, accountId: 'personal' }, f = fixture('0.142.3', backend);
+  f.state.supported = true;
+  const first = await f.read(); assert.ok(first.nextCursor);
+  const other = fixture('0.142.3', { ...backend, accountId: 'work' });
+  await assert.rejects(other.read('', first.nextCursor), /another view/); assert.equal(other.calls.length, 0);
+  f.state.supported = false;
+  f.state.tamper = value => ({ ...value, backend: { ...backend, accountId: 'work' } });
+  await assert.rejects(f.read(), /observation does not match/);
+  assert(f.calls.includes('secondary.thread/items/list')); assert(!f.calls.includes('codex.thread/items/list'));
+});
 
 for (const version of ['0.154.0', '0.158.0', '0.159.2']) test('complete native UI output uses the original full observation and bounded item groups for ' + version, async () => {
   const f = fixture(version), big = 'Original large output '.repeat(100000);
@@ -123,7 +135,8 @@ test('only the exact unmaterialized native history error explains a new task wit
   const f = fixture(), nativeError = { code: -32600, message: 'thread selected-thread is not materialized yet; thread/turns/list is unavailable before first user message' };
   f.state.tamper = value => { value.reply = { error: nativeError }; return value; };
   const page = await f.read(); assert.deepEqual(page.items, []); assert.equal(page.download, null); assert.equal(page.nextCursor, null);
-  assert.equal(page.detail, 'Saved history becomes available after the first message.'); assert.equal(f.state.statusReads, 2);
+  assert.equal(page.detail, 'Saved history becomes available after the first message.');
+  assert.equal(f.state.statusReads, 4, 'The unavailable item read and the original fallback observation each fence their native connection.');
   await assert.rejects(f.read('selected-saved-turn'));
   for (const [code, message, outcome] of [[-32601, nativeError.message, 'completed'], [-32600, nativeError.message.replace('selected-thread', 'another-thread'), 'completed'], [-32600, nativeError.message, 'unknown']])
     assert.equal(isUnmaterializedNativeHistory(new IvyError('native_error', 'Native original error', outcome as 'completed' | 'unknown', { nativeError: { code, message } }), 'selected-thread'), false);

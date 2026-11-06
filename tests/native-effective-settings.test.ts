@@ -46,6 +46,7 @@ test("effective composer defaults follow native configuration, server profiles a
     effort: "high",
     mode: "default",
     permission: ":workspace",
+    serviceTier: 'standard',
   });
   const profile = {
     model: "other-model",
@@ -58,6 +59,7 @@ test("effective composer defaults follow native configuration, server profiles a
     effort: "low",
     mode: "plan",
     permission: ":read-only",
+    serviceTier: 'standard',
   });
   assert.deepEqual(
     effectiveNativeSettings(
@@ -76,6 +78,7 @@ test("effective composer defaults follow native configuration, server profiles a
       effort: "low",
       mode: "default",
       permission: ":danger-full-access",
+      serviceTier: 'standard',
     },
   );
   assert.equal(
@@ -87,4 +90,13 @@ test("effective composer defaults follow native configuration, server profiles a
     "server-model",
   );
   assert.equal(effectiveNativeSettings(null, null, null).model, "");
+});
+
+test('native tier, account creation override and configuration resolve without retargeting existing settings', () => {
+  const config = { config: { service_tier: 'fast' } };
+  const profile = { serviceTier: 'flex' as const };
+  assert.equal(effectiveNativeSettings(null, config, null).serviceTier, 'fast');
+  assert.equal(effectiveNativeSettings(null, config, null, profile).serviceTier, 'flex');
+  assert.equal(effectiveNativeSettings(null, config, { serviceTier: null }, profile).serviceTier, 'standard');
+  assert.equal(effectiveNativeSettings(null, config, { serviceTier: 'fast' }, profile).serviceTier, 'fast');
 });

@@ -418,6 +418,8 @@ async fn adopted_publication_rejects_mismatched_proof_claims_and_stale_task_befo
 }
 
 struct Client {
+    node: JsString,
+    backend: Option<Json>,
     turns: Mutex<Json>,
     metadata: Json,
     calls: Mutex<Vec<Json>>,
@@ -452,7 +454,10 @@ impl RpcClient for Client {
                 return Ok(Json::object([
                     (
                         "provider",
-                        Json::object([("node", Json::object([("serviceNodeId", "agent".into())]))]),
+                        Json::object([(
+                            "node",
+                            Json::object([("serviceNodeId", Json::String(self.node.clone()))]),
+                        )]),
                     ),
                     (
                         "items",
@@ -480,11 +485,19 @@ impl RpcClient for Client {
                 ]));
             }
             assert_eq!(method, "tools.call");
+            if let Some(backend) = &self.backend {
+                if f(&params, "arguments").get("backend") != Some(backend) {
+                    return Err(IvyError::new(
+                        "native_backend_required",
+                        "Select the exact admitted backend.",
+                    ));
+                }
+            }
             match f(&params, "qualifiedName").as_str()?.as_str() {
                 "agent.status" => {
                     let c = catalog();
-                    Ok(Json::object([
-                        ("serviceNodeId", "agent".into()),
+                    let mut status = Json::object([
+                        ("serviceNodeId", Json::String(self.node.clone())),
                         ("hostId", "host".into()),
                         ("state", "ready".into()),
                         ("epoch", "replacement-epoch".into()),
@@ -509,7 +522,11 @@ impl RpcClient for Client {
                             ]),
                         ),
                         ("observedMethods", Json::Array(vec![])),
-                    ]))
+                    ]);
+                    if let Some(backend) = &self.backend {
+                        status.insert("backend", backend.clone());
+                    }
+                    Ok(status)
                 }
                 "agent.read" => {
                     let args = f(&params, "arguments");
@@ -560,6 +577,8 @@ impl NativeDriverConnection for Driver {
 fn client() -> Arc<Client> {
     let (metadata, turns) = current_pair();
     Arc::new(Client {
+        node: "agent".into(),
+        backend: None,
         turns: Mutex::new(turns),
         metadata,
         calls: Mutex::default(),
@@ -571,6 +590,129 @@ fn driver(client: Arc<Client>) -> Driver {
         tools: Arc::new(ToolClients::new(client)),
         updates: RefCell::default(),
         valid: Cell::new(true),
+    }
+}
+
+fn migrated(w: &World, node: &str, backend: &Json) -> Json {
+    let mut task = w.final_task();
+    let source = w.saved_run().required("target").unwrap().clone();
+    let target = Json::object([
+        ("hostId", "host".into()),
+        ("serviceNodeId", node.into()),
+        ("backend", backend.clone()),
+    ]);
+    let mut primary = task.required("primaryResourceRef").unwrap().clone();
+    primary.insert("serviceNodeId", node.into());
+    primary.insert("namespace", backend.required("backendId").unwrap().clone());
+    task.insert("primaryResourceRef", primary);
+    task.insert("primaryBackend", backend.clone());
+    task.insert(
+        "nativeRoutes",
+        Json::Array(vec![Json::object([("source", source), ("target", target)])]),
+    );
+    w.put("task-board/task", pin(1), task.clone());
+    task
+}
+
+fn scoped_pair(node: &str, backend: &Json) -> (Json, Json) {
+    let (mut metadata, mut turns) = current_pair();
+    for observation in [&mut metadata, &mut turns] {
+        observation.insert("serviceNodeId", node.into());
+        observation.insert("backend", backend.clone());
+    }
+    (metadata, turns)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn migrated_discovery_uses_the_current_owner_without_rewriting_the_original_run() {
+    let backend = Json::object([
+        ("backendId", "codex".into()),
+        ("provider", "codex".into()),
+        ("accountId", "test".into()),
+    ]);
+    for node in ["agent", "unified-agent"] {
+        let w = idle("todo");
+        let original = w.saved_run();
+        migrated(&w, node, &backend);
+        let (metadata, turns) = scoped_pair(node, &backend);
+        let client = Arc::new(Client {
+            node: node.into(),
+            backend: Some(backend.clone()),
+            metadata,
+            turns: Mutex::new(turns),
+            calls: Mutex::default(),
+            failure: Mutex::new(None),
+        });
+        let driver = driver(client.clone());
+        let subject = NativeAdoption::new(&w, &driver, client.as_ref(), || 0.0);
+        assert_eq!(subject.adopt(&id(1)).await.unwrap(), Some(id(80)));
+        assert_eq!(w.saved_run(), original);
+        assert!(w.writes.borrow().is_empty());
+        assert!(w.creates.borrow().is_empty());
+        for call in client
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|v| f(v, "method") == &Json::from("tools.call"))
+        {
+            assert_eq!(f(f(call, "params"), "serviceNodeId"), &Json::from(node));
+            assert_eq!(f(f(f(call, "params"), "arguments"), "backend"), &backend);
+        }
+        assert_eq!(driver.updates.borrow().len(), 1);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn migrated_adoption_publishes_the_current_route_and_rejects_another_account() {
+    let backend = Json::object([
+        ("backendId", "codex".into()),
+        ("provider", "codex".into()),
+        ("accountId", "test".into()),
+    ]);
+    for wrong_account in [false, true] {
+        let w = idle("review");
+        let original = w.saved_run();
+        migrated(&w, "unified-agent", &backend);
+        let (metadata, mut turns) = scoped_pair("unified-agent", &backend);
+        if wrong_account {
+            let mut wrong = backend.clone();
+            wrong.insert("accountId", "other".into());
+            turns.insert("backend", wrong);
+        }
+        let out = w
+            .publish(Json::object([
+                ("kind", "adoptTurn".into()),
+                ("metadata", metadata),
+                ("turns", turns),
+            ]))
+            .await;
+        assert_eq!(w.saved_run(), original);
+        if wrong_account {
+            assert!(out.is_err());
+            assert!(w.writes.borrow().is_empty());
+            assert!(w.creates.borrow().is_empty());
+            continue;
+        }
+        let out = out.unwrap();
+        let run = w.lookup("task-board/run", f(&out, "run")).unwrap().value;
+        assert_eq!(f(f(&run, "target"), "backend"), &backend);
+        assert_eq!(f(f(&run, "plan"), "backend"), &backend);
+        assert_eq!(
+            f(f(&run, "target"), "serviceNodeId"),
+            &Json::from("unified-agent")
+        );
+        assert_eq!(
+            f(f(&run, "workspace"), "serviceNodeId"),
+            &Json::from("unified-agent")
+        );
+        assert_eq!(
+            f(f(&run, "primaryResourceRef"), "nativeId"),
+            &Json::from("thread")
+        );
+        for key in ["thread", "turn", "interrupt"] {
+            assert_eq!(f(f(&run, "calls"), key), &Json::Null);
+        }
     }
 }
 

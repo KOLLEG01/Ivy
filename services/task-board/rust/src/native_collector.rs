@@ -133,6 +133,7 @@ impl<S: CollectionStore> FullTurnCollector<'_, S> {
             run,
             observed,
             &ReadIdentity {
+                backend: context.backend.clone(),
                 observation_id: s(observed, "observationId")?.clone(),
                 caller_principal_id: principal.clone(),
                 service_node_id: context.service_node_id.clone(),
@@ -649,6 +650,7 @@ impl<S: CollectionStore> NativeCollector<'_, S> {
                 document.value.required("run")?,
                 &turns,
                 &ReadIdentity {
+                    backend: context.backend.clone(),
                     observation_id: s(&turns, "observationId")?.clone(),
                     caller_principal_id: principal.clone(),
                     service_node_id: context.service_node_id,

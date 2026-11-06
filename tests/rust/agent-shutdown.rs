@@ -19,6 +19,8 @@ use ivy_contracts::{
     json::{parse, stringify},
 };
 use ivy_host_runtime::codex_rpc::NativeRpc;
+#[path = "agent-native-reply-receipt.rs"]
+mod completion_receipt;
 use ivy_sdk::service::{InvocationContext, ToolHandler};
 use std::{
     path::PathBuf,
@@ -134,12 +136,7 @@ async fn accepted_native_call_commits_original_receipt_before_retirement_despite
         Arc::new(catalog),
         input,
         output,
-        journal_events(
-            "fixture.agent".into(),
-            "epoch".into(),
-            &operations,
-            Observations::default(),
-        ),
+        journal_events("epoch".into(), &operations, Observations::default()),
     )
     .unwrap();
     let closing = Arc::new(AtomicBool::new(false));
@@ -188,10 +185,7 @@ async fn accepted_native_call_commits_original_receipt_before_retirement_despite
     });
     steps.work = Arc::new(move || {
         let receipts = receipts.clone();
-        Box::pin(async move {
-            receipts.drain().await;
-            Ok(())
-        })
+        Box::pin(async move { receipts.drain().await })
     });
     let close_state = state.clone();
     let after_native = retired.clone();
@@ -411,6 +405,9 @@ struct AsyncNative {
 }
 impl AsyncNative {
     fn new() -> Self {
+        Self::with_browser(true)
+    }
+    fn with_browser(install: bool) -> Self {
         let root = Root::new();
         let state = Arc::new(Mutex::new(
             LocalAgentState::open(
@@ -455,6 +452,8 @@ impl AsyncNative {
             service: service.clone(),
             closing: closing.clone(),
             operations: operations.clone(),
+            state: state.clone(),
+            receipts: Default::default(),
             notifications: Arc::new(Mutex::new(NativeNotifications::new_js(
                 "fixture.agent".into(),
                 "0.159.2".into(),
@@ -490,20 +489,22 @@ impl AsyncNative {
             closing.clone(),
         )
         .unwrap();
-        events
-            .install(
-                inventory.clone(),
-                BrowserNotices::new(BrowserNoticeSettings {
-                    service,
-                    closing: closing.clone(),
-                    operations: operations.clone(),
-                    state: state.clone(),
-                    inventory,
-                    policy,
-                    rpc: rpc.clone(),
-                }),
-            )
-            .unwrap();
+        if install {
+            events
+                .install(
+                    inventory.clone(),
+                    BrowserNotices::new(BrowserNoticeSettings {
+                        service,
+                        closing: closing.clone(),
+                        operations: operations.clone(),
+                        state: state.clone(),
+                        inventory,
+                        policy,
+                        rpc: rpc.clone(),
+                    }),
+                )
+                .unwrap();
+        }
         Self {
             _root: root,
             state,
@@ -781,6 +782,90 @@ async fn acknowledged_turn_keeps_native_owner_and_answers_until_model_and_reply_
             .get("phase"),
         Some(&"succeeded".into())
     );
+    fixture.state.lock().unwrap().close_shared().unwrap();
+}
+
+#[tokio::test]
+async fn completion_before_turn_start_reply_does_not_block_the_native_actor_and_releases_the_original_receipt()
+ {
+    let mut fixture = AsyncNative::with_browser(false);
+    let dispatch = NativeDispatch::new(
+        fixture.rpc.clone(),
+        "epoch".into(),
+        fixture.operations.clone(),
+        fixture.closing.clone(),
+    );
+    let identity = Identity {
+        caller_principal_id: "caller".into(),
+        operation_id: format!(
+            "epoch:{}:early-completion",
+            chrono::Utc::now().timestamp_millis()
+        )
+        .into(),
+    };
+    let call = dispatch
+        .invoke(
+            identity.clone(),
+            "turn/start".into(),
+            IvyJson::object([
+                ("threadId", "root".into()),
+                ("input", IvyJson::Array(vec![])),
+            ]),
+        )
+        .unwrap();
+    let request = fixture.request("turn/start").await;
+    fixture
+        .frame(IvyJson::object([
+            ("method", "turn/completed".into()),
+            (
+                "params",
+                IvyJson::object([
+                    ("threadId", "root".into()),
+                    (
+                        "turn",
+                        IvyJson::object([("id", "turn".into()), ("status", "completed".into())]),
+                    ),
+                ]),
+            ),
+        ]))
+        .await;
+    // This response is read by the very actor that observed completion. Waiting
+    // on settle_turn inside its callback would deadlock until native timeout.
+    fixture
+        .result(
+            &request,
+            IvyJson::object([(
+                "turn",
+                IvyJson::object([("id", "turn".into()), ("status", "inProgress".into())]),
+            )]),
+        )
+        .await;
+    let original = tokio::time::timeout(Duration::from_secs(5), call.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(original.get("phase"), Some(&"succeeded".into()));
+    let db = ivy_store::rusqlite::Connection::open(fixture._root.0.join("async.sqlite")).unwrap();
+    assert_eq!(
+        db.query_row::<i64, _, _>(
+            "SELECT count(*) FROM completion_receipts WHERE released=1",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row::<i64, _, _>("SELECT count(*) FROM suppressed_completions", [], |r| r
+            .get(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        fixture.operations.read(&identity).await.unwrap().unwrap(),
+        original
+    );
+    fixture.rpc.close("fixture_done").await;
     fixture.state.lock().unwrap().close_shared().unwrap();
 }
 

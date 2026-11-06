@@ -438,7 +438,7 @@ fn native_contracts_keep_public_versions_and_local_workflow_routing() {
     let expected: Vec<JsString> = std::iter::once("1.0.0".into())
         .chain((1..=12).map(|minor| format!("1.{minor}.0").into()))
         .chain((0..=3).map(|minor| format!("2.{minor}.0").into()))
-        .chain(["3.0.0".into(), "3.1.0".into()])
+        .chain(["3.0.0".into(), "3.1.0".into(), "3.2.0".into()])
         .collect();
     assert_eq!(versions, expected);
     for version in versions {
@@ -464,8 +464,12 @@ fn native_contracts_keep_public_versions_and_local_workflow_routing() {
         ]
     );
     assert!(contracts.readable_versions("unknown").is_err());
-    assert_eq!(contracts.version("task-board/task").unwrap(), "3.1.0");
-    assert_eq!(contracts.version("task-board/run").unwrap(), "3.0.0");
+    assert_eq!(contracts.version("task-board/task").unwrap(), "3.2.0");
+    assert_eq!(
+        contracts.version("task-board/configuration").unwrap(),
+        "1.3.0"
+    );
+    assert_eq!(contracts.version("task-board/run").unwrap(), "3.1.0");
     assert_eq!(contracts.version("task-board/result").unwrap(), "2.2.0");
     assert_eq!(contracts.version("task-board/comments").unwrap(), "1.0.0");
     assert!(

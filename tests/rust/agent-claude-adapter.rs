@@ -1,7 +1,7 @@
 use ivy_agent_manager::claude::{
     error::{AdapterError, Result},
     models::runtime_model_list,
-    projects::ProjectStore,
+    projects::{ProjectStore, project_comparator},
     rate_limits::RateLimitStore,
 };
 use ivy_contracts::{
@@ -98,6 +98,19 @@ fn public_projection(value: &J) -> J {
         J::Array(values) => J::Array(values.iter().map(public_projection).collect()),
         J::Object(values) => J::object(values.iter().map(|(key, value)| {
             let mut value = value.clone();
+            // The new turn paging contract is verified directly below; the
+            // frozen server had no backwards turn cursor at all.
+            if key == &JsString::from("backwardsCursor")
+                && values.iter().any(|(name, data)| {
+                    name == &JsString::from("data")
+                        && data
+                            .as_array()
+                            .and_then(|a| a.first())
+                            .is_some_and(|t| t.get("itemsView").is_some())
+                })
+            {
+                value = J::Null;
+            }
             // Error class names are fixture metadata; native wire errors retain code/message.
             if key == &JsString::from("error") && value.as_object().is_some() {
                 value.remove("name");
@@ -209,12 +222,20 @@ fn compare(label: &str, actual: J, expected: J) {
         .unwrap();
     }
 }
+#[path = "agent-claude-adapter/commands.rs"]
+mod command_cases;
 #[path = "agent-claude-adapter/driver.rs"]
 mod driver_cases;
 #[path = "agent-claude-adapter/events.rs"]
 mod event_cases;
+#[path = "agent-claude-adapter/event_flow.rs"]
+mod event_flow_cases;
 #[path = "agent-claude-adapter/protocol.rs"]
 mod protocol_cases;
+#[path = "agent-claude-adapter/replies.rs"]
+mod reply_cases;
+#[path = "agent-claude-adapter/reverse.rs"]
+mod reverse_cases;
 #[path = "agent-claude-adapter/sdk.rs"]
 mod sdk_cases;
 #[path = "agent-claude-adapter/workflows.rs"]
@@ -250,9 +271,7 @@ fn local(home: &Path, spec: &J) -> J {
     let lookup = move |id: &JsString| -> Result<Option<J>> {
         Ok(state.lock().unwrap().3.get_key(id).cloned())
     };
-    let compare = Arc::new(|a: &JsString, b: &JsString| {
-        ivy_agent_manager::runtime::compare_names(a, b, false)
-    });
+    let compare = project_comparator().unwrap();
     let style = if f(spec, "style") == &J::from("posix") {
         Style::Posix
     } else {
@@ -335,9 +354,22 @@ fn project_validation_and_pagination_match_original() {
     let native = root.0.join("native");
     fs::create_dir(&original).unwrap();
     fs::create_dir(&native).unwrap();
-    let spec = v(
+    let mut spec = v(
         r#"{"kind":"project","ids":["project"],"steps":[{"op":"create","params":{}},{"op":"create","params":{"idempotencyKey":"a","name":" "}},{"op":"create","params":{"idempotencyKey":"a","name":"yes","roots":null}},{"op":"create","params":{"idempotencyKey":"a","name":"yes","roots":[{"path":"relative"}]}},{"op":"create","params":{"idempotencyKey":"a","name":"yes","roots":[],"metadata":{"x":1}}},{"op":"read","id":"missing"},{"op":"list","params":{"sortDirection":"desc"}},{"op":"list","params":{"cursor":"-1"}},{"op":"list","params":{"cursor":"1.5"}},{"op":"list","params":{"cursor":"9007199254740992"}},{"op":"list","params":{"limit":100}},{"op":"create","params":{"idempotencyKey":"a","name":"yes","roots":[{"path":"C:\\fixture\\folder\\..\\project\\"}]}},{"op":"list","params":{"limit":0}},{"op":"list","params":{"limit":201}}]}"#,
     );
+    spec.insert(
+        "style",
+        if cfg!(windows) { "windows" } else { "posix" }.into(),
+    );
+    if !cfg!(windows) {
+        let J::Array(steps) = spec.get_mut("steps").unwrap() else {
+            unreachable!()
+        };
+        steps[11]
+            .get_mut("params")
+            .unwrap()
+            .insert("roots", v(r#"[{"path":"/fixture/folder/../project/"}]"#));
+    }
     compare(
         "project validation",
         local(&native, &spec),

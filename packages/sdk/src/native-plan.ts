@@ -3,6 +3,7 @@ import { requireThat } from '../../contracts/src/errors.js';
 import { validateAgent } from '../../contracts/src/agent-validation.js';
 import type { Agent } from '../../contracts/src/generated.js';
 import type { NativeContract } from '../../contracts/src/native-contract.js';
+import { sameNativeBackend } from '../../contracts/src/native-backend.js';
 import type { RpcClient, RequestOptions } from './client.js';
 import { saveNativeParameters, readNativeParameters } from './native-parameters.js';
 
@@ -16,12 +17,22 @@ const reserved = (key: typeof keys[number], kind: NativePlanKind) => key === 'th
 /** Raw invocations are transport/evidence bytes, never unvalidated domain state. */
 export function validateNativeInvocation(contract: NativeContract, value: unknown, maximumBytes = 1048576): asserts value is NativeInvocation {
   validateAgent('InvocationDraft', value); const request = value as NativeInvocation;
+  requireThat(sameNativeBackend(request.backend, contract.backend),
+    'native_request_backend_mismatch', 'Native invocation must retain its selected backend and account.');
   requireThat(request.nativeVersion === contract.catalog.version && request.catalogSourceHash === contract.catalog.sourceHash,
     'native_request_catalog_mismatch', 'Native invocation requires its exact retained catalog.');
   contract.validateInput(request.method, request.params, maximumBytes);
 }
 
-export function validateNativePlanIdentity(contract: NativeContract, plan: Pick<Agent.Plan, 'nativeVersion' | 'catalogSourceHash' | 'definitions'>): void {
+export function validateNativePlanIdentity(contract: NativeContract, plan: Pick<Agent.Plan, 'backend' | 'nativeVersion' | 'catalogSourceHash' | 'definitions'>): void {
+  const backend = plan.backend;
+  let selected = false;
+  try {
+    if (backend !== undefined) validateAgent('BackendIdentity', backend);
+    selected = sameNativeBackend(backend, contract.backend);
+  } catch { /* An invalid selector cannot identify the selected account. */ }
+  requireThat(selected,
+    'native_plan_backend_mismatch', 'The plan must retain its selected backend and account.');
   requireThat(plan.nativeVersion === contract.catalog.version && plan.catalogSourceHash === contract.catalog.sourceHash,
     'native_plan_catalog_mismatch', 'The plan must retain its selected native catalog source and version.');
   for (const [key, method] of Object.entries(methods)) requireThat(plan.definitions[key as keyof typeof methods] === contract.definitionHash(method),

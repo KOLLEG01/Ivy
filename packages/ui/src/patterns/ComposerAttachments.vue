@@ -3,7 +3,7 @@ import { CircleAlert, FileText, LoaderCircle, X } from "@lucide/vue";
 import type { ComposerAttachment } from "../lib/composer";
 
 // Files waiting to be sent with a message: image thumbnails or named file chips.
-defineProps<{ items: ComposerAttachment[]; disabled?: boolean }>();
+defineProps<{ items: ComposerAttachment[]; disabled?: boolean; error?: string | null }>();
 defineEmits<{ remove: [id: string] }>();
 </script>
 
@@ -54,4 +54,5 @@ defineEmits<{ remove: [id: string] }>();
       </button>
     </li>
   </ul>
+  <p v-if="error" role="alert" class="px-1 pb-2 text-sm text-destructive">{{ error }}</p>
 </template>

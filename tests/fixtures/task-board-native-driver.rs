@@ -302,6 +302,24 @@ impl<S: Store + ReadEvidenceStore> ReadEvidenceStore for Trace<'_, S> {
     }
 }
 struct Prompts<'a>(&'a State);
+pub(super) fn frozen_prompt_task(value: &Json) -> Json {
+    // These frozen native-workflow cases exercise a projected Task port. Empty
+    // scheduling/conversation defaults added by today's read layer are outside
+    // that projection; all nonempty values remain visible to the comparison.
+    let mut task = value.clone();
+    for (key, empty) in [
+        ("fields", Json::Object(vec![])),
+        ("wakeAt", Json::Null),
+        ("dependencies", Json::Array(vec![])),
+        ("runtimeWait", Json::Null),
+        ("comments", Json::Array(vec![])),
+    ] {
+        if task.get(key) == Some(&empty) {
+            task.remove(key);
+        }
+    }
+    task
+}
 impl TaskPrompts for Prompts<'_> {
     fn task_prompt(&self, t: &Json, o: &JsString, c: Option<&Json>) -> IvyResult<JsString> {
         event(
@@ -309,7 +327,7 @@ impl TaskPrompts for Prompts<'_> {
             [
                 "prompt".into(),
                 "task".into(),
-                t.clone(),
+                frozen_prompt_task(t),
                 Json::String(o.clone()),
                 c.cloned()
                     .unwrap_or_else(|| Json::object([("undefined", true.into())])),
@@ -325,7 +343,7 @@ impl TaskPrompts for Prompts<'_> {
             [
                 "prompt".into(),
                 "update".into(),
-                t.clone(),
+                frozen_prompt_task(t),
                 Json::String(o.clone()),
                 c.into(),
             ],
@@ -361,6 +379,11 @@ fn seed(
     r: f64,
     v: &Json,
 ) {
+    // The original projected tasks predate the stored-record read boundary.
+    // Admit its empty fields/conversation without changing frozen inputs or
+    // native calls, receipts, evidence, pins or expected oracle output.
+    let current_task = (key == "task-board/task").then(|| stored_task(v));
+    let v = current_task.as_ref().unwrap_or(v);
     allowed.borrow_mut().insert(hash_json(v).unwrap());
     if r == 1.0 {
         j.create(key, &id(n), Some(&"root".into()), v, &TIME.into(), &id(n))
@@ -368,6 +391,16 @@ fn seed(
     } else {
         j.update(key, &id(n), r - 1.0, v, &TIME.into()).unwrap();
     }
+}
+pub(super) fn stored_task(value: &Json) -> Json {
+    let mut task = value.clone();
+    if task.get("fields").is_none() {
+        task.insert("fields", Json::Object(vec![]));
+    }
+    if task.get("comments").is_none() {
+        task.insert("comments", Json::Array(vec![]));
+    }
+    task
 }
 fn calls(db: &Connection) -> Json {
     let mut stmt=db.prepare("SELECT d.id,d.name,d.current_revision,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='task-board/native-call' ORDER BY d.rowid").unwrap();
@@ -785,5 +818,250 @@ async fn real_runtime_identity_survives_journal_reopen_on_its_live_connection() 
 
 #[path = "task-board-native-advance.rs"]
 mod advance;
+
+#[tokio::test(flavor = "current_thread")]
+async fn durable_preparation_matches_original_owner_across_published_routes() {
+    use ivy_contracts::native_backend::{BackendIdentity, NativeProvider};
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let data = data();
+    for (provider, version, upgrade) in [
+        (NativeProvider::Codex, "0.163.0", None),
+        (NativeProvider::Claude, "0.142.3", None),
+        (NativeProvider::Codex, "0.159.2", Some("0.163.0")),
+        (NativeProvider::Claude, "0.142.3", Some("0.142.3")),
+    ] {
+        let base = data
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| {
+                g.required("base")
+                    .unwrap()
+                    .required("run")
+                    .unwrap()
+                    .required("plan")
+                    .unwrap()
+                    .required("nativeVersion")
+                    .unwrap()
+                    .is_str(version)
+            })
+            .unwrap()
+            .required("base")
+            .unwrap();
+        let mut run = base.required("run").unwrap().clone();
+        run.insert("turnId", "retained-turn".into());
+        run.insert("nativeEpoch", "epoch".into());
+        run.insert(
+            "primaryResourceRef",
+            Json::object([
+                ("namespace", "codex".into()),
+                ("kind", "thread".into()),
+                (
+                    "serviceNodeId",
+                    run.required("target")
+                        .unwrap()
+                        .required("serviceNodeId")
+                        .unwrap()
+                        .clone(),
+                ),
+                ("nativeId", "retained-thread".into()),
+            ]),
+        );
+        let mut calls = run.required("calls").unwrap().clone();
+        calls.insert("thread", pin(399, 2.0));
+        run.insert("calls", calls);
+        let original_run_hash = hash_json(&run).unwrap();
+        let db = Connection::open_in_memory().unwrap();
+        local_journal::initialize(&db).unwrap();
+        let allowed = Rc::new(RefCell::new(HashSet::new()));
+        let journal = LocalJournal {
+            connection: &db,
+            root_object_id: Some("root".into()),
+        };
+        for revision in [1.0, 2.0] {
+            seed(&journal, &allowed, "task-board/run", 200, revision, &run);
+            seed(
+                &journal,
+                &allowed,
+                "task-board/task",
+                100,
+                revision,
+                base.required("task").unwrap(),
+            );
+        }
+        let next = Cell::new(500);
+        let store = JournalStore {
+            journal,
+            client: Arc::new(NoRpc),
+            contracts: Policy {
+                allowed: allowed.clone(),
+            },
+            limits: HistoryLimits::default(),
+            now: || TIME.to_owned(),
+            new_id: || {
+                let n = next.get();
+                next.set(n + 1);
+                id(n)
+            },
+            cache: None,
+        };
+        let state = State {
+            log: Arc::default(),
+            fault: RefCell::new(Json::Object(vec![])),
+            scopes: RefCell::default(),
+            identities: Cell::new(0),
+            named: Cell::new(0),
+            operation: None,
+        };
+        let prompts = Prompts(&state);
+        let driver = NativeDriver {
+            store: &store,
+            runtime: &state,
+            prompts: &prompts,
+            catalogs: &catalogs,
+        };
+        let origin = Json::object([
+            ("kind", "reattach".into()),
+            ("predecessor", pin(399, 2.0)),
+            ("preparedEpoch", "replacement-epoch".into()),
+        ]);
+        let original_pin = driver
+            .prepare(&id(200), NativeSlot::Thread, Some(&origin))
+            .await
+            .unwrap();
+        let original = Store::read(&store, "task-board/native-call", &original_pin, true)
+            .await
+            .unwrap();
+        let original_hash = hash_json(&original.value).unwrap();
+        let backend = BackendIdentity::new("worker".into(), provider, "primary".into()).unwrap();
+        let mut destination = run.required("target").unwrap().clone();
+        destination.insert("serviceNodeId", "joint-agent".into());
+        destination.insert("backend", backend.json());
+        let mut task = base.required("task").unwrap().clone();
+        task.insert(
+            "nativeRoutes",
+            Json::Array(vec![Json::object([
+                ("source", run.required("target").unwrap().clone()),
+                ("target", destination.clone()),
+            ])]),
+        );
+        seed(&store.journal, &allowed, "task-board/task", 100, 3.0, &task);
+        let mut routed_pin = driver
+            .prepare(&id(200), NativeSlot::Thread, Some(&origin))
+            .await
+            .unwrap();
+        if let Some(version) = upgrade {
+            let replacement = catalogs.checked_native_contract(&version.into(), None).unwrap();
+            let previous_pin = routed_pin.clone();
+            let previous = Store::read(&store, "task-board/native-call", &previous_pin, true).await.unwrap();
+            let previous_hash = hash_json(&previous.value).unwrap();
+            let selection = Json::object([
+                ("nativeVersion", version.into()),
+                ("catalogSourceHash", replacement.catalog().required("sourceHash").unwrap().clone()),
+            ]);
+            let mut route = task.required("nativeRoutes").unwrap().as_array().unwrap()[0].clone();
+            route.insert("catalog", selection.clone());
+            task.insert("nativeRoutes", Json::Array(vec![route.clone()]));
+            seed(&store.journal, &allowed, "task-board/task", 100, 4.0, &task);
+            routed_pin = driver.prepare(&id(200), NativeSlot::Thread, Some(&origin)).await.unwrap();
+            assert_ne!(previous_pin, routed_pin, "A new catalog at the same address cannot reuse a prepared old call");
+            assert_eq!(hash_json(&Store::read(&store, "task-board/native-call", &previous_pin, true).await.unwrap().value).unwrap(), previous_hash);
+            let prepared = Store::read(&store, "task-board/native-call", &routed_pin, true).await.unwrap();
+            for key in ["nativeVersion", "catalogSourceHash"] {
+                assert_eq!(prepared.value.required("request").unwrap().get(key), selection.get(key));
+            }
+            assert_eq!(prepared.value.required("owner").unwrap().get("nativeExecutableHash"), replacement.catalog().get("nativeExecutableHash"));
+            let mut invalid = selection;
+            invalid.insert("catalogSourceHash", format!("sha256:{}", "e".repeat(64)).into());
+            route.insert("catalog", invalid);
+            let mut bad = task.clone();
+            bad.insert("nativeRoutes", Json::Array(vec![route]));
+            seed(&store.journal, &allowed, "task-board/task", 100, 5.0, &bad);
+            let before = db.total_changes();
+            assert!(driver.prepare(&id(200), NativeSlot::Thread, Some(&origin)).await.is_err());
+            assert_eq!(db.total_changes(), before, "Unknown catalog cannot create a new call");
+            seed(&store.journal, &allowed, "task-board/task", 100, 6.0, &task);
+        }
+        assert_ne!(
+            original_pin, routed_pin,
+            "The same origin at a new route needs a distinct call identity"
+        );
+        let routed = Store::read(&store, "task-board/native-call", &routed_pin, true)
+            .await
+            .unwrap();
+        let request = routed.value.required("request").unwrap();
+        assert!(BackendIdentity::matches(request, Some(&backend)));
+        assert_eq!(
+            routed
+                .value
+                .required("owner")
+                .unwrap()
+                .required("serviceNodeId")
+                .unwrap(),
+            destination.required("serviceNodeId").unwrap()
+        );
+        let source = ivy_task_board::native_intent::NativeIntent {
+            store: &store,
+            catalogs: &catalogs,
+        };
+        let resolved = source.resolve_native_request(request).unwrap();
+        assert_eq!(
+            resolved
+                .required("params")
+                .unwrap()
+                .required("threadId")
+                .unwrap(),
+            &Json::from("retained-thread")
+        );
+        let selected = catalogs
+            .checked_native_contract(
+                &s(request, "nativeVersion"),
+                Some(&Json::object([(
+                    "sourceHash",
+                    request.required("catalogSourceHash").unwrap().clone(),
+                )])),
+            )
+            .unwrap()
+            .with_backend(Some(backend));
+        assert_eq!(
+            routed.value.required("expectedDefinitionHash").unwrap(),
+            &Json::from(selected.definition_hash(&"thread/resume".into()).unwrap())
+        );
+        assert_eq!(
+            hash_json(
+                &Store::read(&store, "task-board/native-call", &original_pin, true)
+                    .await
+                    .unwrap()
+                    .value
+            )
+            .unwrap(),
+            original_hash
+        );
+        assert_eq!(
+            hash_json(
+                &Store::read(&store, "task-board/run", &pin(200, 2.0), true)
+                    .await
+                    .unwrap()
+                    .value
+            )
+            .unwrap(),
+            original_run_hash
+        );
+        let before = db.total_changes();
+        assert_eq!(
+            driver
+                .prepare(&id(200), NativeSlot::Thread, Some(&origin))
+                .await
+                .unwrap(),
+            routed_pin
+        );
+        assert_eq!(
+            db.total_changes(),
+            before,
+            "Retrying preparation must reuse the current route's exact call"
+        );
+    }
+}
 #[path = "task-board-native-resume.rs"]
 mod resume;

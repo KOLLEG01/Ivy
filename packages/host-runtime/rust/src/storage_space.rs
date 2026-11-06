@@ -4,6 +4,7 @@ use std::{fs, io, path::{Path, PathBuf}};
 
 const SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 pub trait RetentionProgress: Send + Sync {
+    fn permit_removal(&self, _area: &str) -> bool { true }
     fn removed(&self, area: &str);
     fn skipped(&self, area: &str, reason: &str, requires_attention: bool);
 }
@@ -47,7 +48,26 @@ pub fn storage_is_low(available_bytes: f64, total_bytes: f64) -> bool {
 pub struct RetentionSchedule { next_scheduled: f64, next_pressure: f64 }
 impl RetentionSchedule {
     pub fn new(now: f64) -> Self { Self { next_scheduled: now + 60_000.0, next_pressure: 0.0 } }
-    pub fn due(&self, now: f64, low_space: bool) -> bool { now >= self.next_scheduled || low_space && now >= self.next_pressure }
+    pub fn resume(now: f64, previous: Option<&IvyJson>) -> Self {
+        let mut schedule = Self::new(now);
+        if let Some(previous) = previous {
+            let at = |key| previous.get(key).and_then(IvyJson::as_js_string).map(ivy_sdk::clock::parse_date).filter(|at| at.is_finite());
+            if let Some(started) = at("startedAt") {
+                // Clamp a future wall clock; clock corrections must not stall GC.
+                schedule.next_pressure = started.min(now) + 3_600_000.0;
+                schedule.next_scheduled = if previous.get("state") == Some(&"succeeded".into()) {
+                    at("completedAt").unwrap_or(started).min(now) + 86_400_000.0
+                } else { started.min(now) + 3_600_000.0 };
+            }
+        }
+        schedule
+    }
+    pub fn trigger(&self, now: f64, low_space: bool) -> Option<&'static str> {
+        if now >= self.next_scheduled { Some("scheduled") }
+        else if low_space && now >= self.next_pressure { Some("storage_pressure") }
+        else { None }
+    }
+    pub fn due(&self, now: f64, low_space: bool) -> bool { self.trigger(now, low_space).is_some() }
     pub fn started(&mut self, now: f64) { self.next_scheduled = now + 86_400_000.0; self.next_pressure = now + 3_600_000.0; }
     pub fn failed(&mut self, now: f64) { self.next_scheduled = now + 3_600_000.0; self.next_pressure = now + 3_600_000.0; }
 }
@@ -129,10 +149,10 @@ pub async fn require_storage_space(path: impl Into<PathBuf>, required_bytes: f64
     Ok(())
 }
 pub async fn host_storage_space(config: IvyJson) -> IvyResult<IvyJson> {
-    let roots = ["runtimeRoot", "artifactRoot", "stagingRoot"].iter().map(|key| path_value(config.required(key)?)).collect::<IvyResult<Vec<_>>>()?;
-    let probes = crate::concurrency::map_concurrent(roots, 3, |root, _| async move {
-        internal(tokio::task::spawn_blocking(move || internal(probe(root))).await)?
-    }).await?;
+    internal(tokio::task::spawn_blocking(move || probe_host_storage(&config)).await)?
+}
+pub(crate) fn probe_host_storage(config: &IvyJson) -> IvyResult<IvyJson> {
+    let probes = ["runtimeRoot", "artifactRoot", "stagingRoot"].iter().map(|key| internal(probe(path_value(config.required(key)?)?))).collect::<IvyResult<Vec<_>>>()?;
     Ok(IvyJson::object([
         ("availableBytes", IvyJson::object([("runtime", IvyJson::Number((probes[0].available as f64).min(SAFE_INTEGER))), ("artifacts", IvyJson::Number((probes[1].available as f64).min(SAFE_INTEGER))), ("staging", IvyJson::Number((probes[2].available as f64).min(SAFE_INTEGER)))])),
         ("lowSpace", probes.iter().any(|value| storage_is_low(value.available as f64, value.total as f64)).into()),

@@ -17,7 +17,11 @@ import {
   Input,
   Label,
 } from "@ivy/ui";
-import type { BoundTool } from "../../../packages/sdk/src/client.js";
+import type { Agent, BoundTool } from "../../../packages/sdk/src/client.js";
+import { nativeMethod, sameBackend } from '../../../packages/ui-client/src/native-backends';
+import { nativeRouteQuery, nativeRouteOwner, nativeOwnerKey, nativeStorageOwner } from '../../../packages/ui-client/src/native-route';
+import { canonical } from '../../../packages/sdk/src/client.js';
+import { record } from '../../../packages/ui-client/src/native';
 import { route } from "../../../packages/ui-client/src/runtime";
 import { optionalTool, supportsFields, text } from "../../../packages/ui-client/src/native";
 import { useNativeAction } from "../../../packages/ui-client/src/native-action";
@@ -30,6 +34,8 @@ import { base, client, tr } from "./runtime";
 // actions of both places apart; capabilities are read when the menu first opens.
 const props = defineProps<{
   node: string;
+  available: boolean;
+  backend?: Agent.BackendIdentity | undefined;
   threadId: string;
   name: string;
   projectId: string;
@@ -44,29 +50,47 @@ type Tool = BoundTool | undefined;
 interface Capabilities { rename?: Tool; archive?: Tool; unarchive?: Tool; remove?: Tool; project?: Tool }
 const capabilities = ref<Capabilities | null>(null);
 let loading: Promise<void> | null = null;
-const loadCapabilities = () => loading ??= Promise.all(
-  ["codex.thread/name/set", "codex.thread/archive", "codex.thread/unarchive", "codex.thread/delete", "codex.thread/metadata/update"]
-    .map(name => optionalTool(client, props.node, name)),
+const loadCapabilities = () => { if (!props.available) return; return loading ??= Promise.all(
+  ["thread/name/set", "thread/archive", "thread/unarchive", "thread/delete", "thread/metadata/update"]
+    .map(name => optionalTool(client, props.node, nativeMethod(props.backend, name))),
 ).then(([rename, archive, unarchive, remove, project]) => {
   capabilities.value = { rename, archive, unarchive, remove, project };
-}).catch(() => { loading = null; capabilities.value = {}; });
+}).catch(() => { loading = null; capabilities.value = {}; }); };
 watch(open, value => { if (value) { taskName.value = props.name; taskNameDirty.value = false; void loadCapabilities(); } });
 
-const key = ":" + base.href + props.scope + ":" + props.node + ":" + props.threadId;
-const action = useNativeAction(client, "ivy:agent-task-menu" + key);
+const owner = { serviceNodeId: props.node, namespace: props.backend?.backendId ?? 'codex', backend: props.backend };
+const key = ":" + base.href + props.scope + ":" + nativeStorageOwner(props.node, props.backend) + ":" + props.threadId;
+const action = useNativeAction(client, "ivy:agent-task-menu" + key, () => props.backend);
 // A Codex task that works on a TaskBoard ticket is archived through its ticket, which also archives
 // every Codex task of that ticket; the board then never shows finished work that was archived here.
 const ticketArchive = useObjectArchive(client, "ivy:agent-ticket-archive" + key);
-const owningTicket = async () =>
-  (await client.request("objects.query", {
+const owningTicket = async () => {
+  const id = (await client.request("objects.query", {
     contractKey: "task-board/task",
     where: { op: "and", args: [
       { op: "eq", field: "data:/primaryResourceRef/serviceNodeId", value: props.node },
+      { op: "eq", field: "data:/primaryResourceRef/namespace", value: owner.namespace },
       { op: "eq", field: "data:/primaryResourceRef/nativeId", value: props.threadId },
     ] },
     includeArchived: true,
     limit: 1,
-  })).items[0]?.objectId ?? null;
+  })).items[0]?.objectId;
+  if (!id) return null;
+  const saved = await client.request('objects.read', { objectId: id });
+  if (saved.object.contractKey !== 'task-board/task' || saved.content.encoding !== 'json') throw new Error('The owning ticket could not be verified.');
+  const task = record(saved.content.value), pin = record(task.lastRun);
+  if (canonical(task.primaryResourceRef) !== canonical({ serviceNodeId: props.node, namespace: owner.namespace, kind: 'thread', nativeId: props.threadId }))
+    throw new Error('The ticket conversation changed. Refresh it before archiving.');
+  if (props.backend) {
+    if (!pin.objectId || typeof pin.revision !== 'number') throw new Error('The ticket account has no retained execution proof.');
+    const run = await client.request('objects.read', { objectId: String(pin.objectId), revision: pin.revision });
+    if (run.object.contractKey !== 'task-board/run' || run.content.encoding !== 'json' ||
+        !sameBackend(record(record(run.content.value).target).backend as Agent.BackendIdentity | undefined, props.backend) ||
+        canonical(record(run.content.value).primaryResourceRef) !== canonical(task.primaryResourceRef))
+      throw new Error('The ticket belongs to another account. Open the ticket to manage it.');
+  }
+  return id;
+};
 
 const archivedOverride = ref<boolean | null>(null);
 watch(() => props.archived, () => { archivedOverride.value = null; });
@@ -82,7 +106,7 @@ const settle = () => {
 };
 const rename = async () => {
   const binding = capabilities.value?.rename, name = taskName.value.trim();
-  if (!binding || !name || action.locked.value) return;
+  if (!props.available || !binding || !name || action.locked.value) return;
   await action.start("Rename task", binding, { threadId: props.threadId, name });
   if (action.saved.value?.phase === "succeeded") taskNameDirty.value = false;
   settle();
@@ -90,9 +114,11 @@ const rename = async () => {
 const setArchived = async () => {
   const wasArchived = archived.value,
     binding = wasArchived ? capabilities.value?.unarchive : capabilities.value?.archive;
-  if (action.locked.value || ticketArchive.busy.value) return;
+  if (!props.available || action.locked.value || ticketArchive.busy.value) return;
   ticketArchive.clearError();
-  const ticket = await owningTicket().catch(() => null);
+  let ticket;
+  try { ticket = await owningTicket(); }
+  catch (cause) { action.error.value = cause instanceof Error ? cause.message : String(cause); problemOpen.value = true; return; }
   if (ticket) {
     if (await ticketArchive.run(ticket, !wasArchived)) { archivedOverride.value = !wasArchived; emit("changed"); }
     else problemOpen.value = true;
@@ -107,9 +133,12 @@ const setArchived = async () => {
 const deleteOpen = ref(false), deleteError = ref("");
 const deleteTask = async () => {
   const binding = capabilities.value?.remove;
-  if (!binding || action.locked.value) return;
+  if (!props.available || !binding || action.locked.value) return;
   deleteError.value = "";
-  if (await owningTicket().catch(() => null)) {
+  let ticket;
+  try { ticket = await owningTicket(); }
+  catch (cause) { deleteError.value = cause instanceof Error ? cause.message : String(cause); return; }
+  if (ticket) {
     deleteError.value = tr("Dieser Task gehört zu einem TaskBoard-Ticket. Archiviere ihn stattdessen.",
       "This task belongs to a TaskBoard ticket. Archive it instead.");
     return;
@@ -118,8 +147,8 @@ const deleteTask = async () => {
   if (action.saved.value?.phase === "succeeded") {
     deleteOpen.value = false;
     const current = new URLSearchParams(location.hash.split("?")[1] ?? "");
-    if (location.hash.startsWith("#/task") && current.get("node") === props.node && current.get("id") === props.threadId)
-      location.hash = route("host", { node: props.node });
+    if (location.hash.startsWith("#/task") && nativeOwnerKey(nativeRouteOwner(current)) === nativeOwnerKey(owner) && current.get("id") === props.threadId)
+      location.hash = route("host", nativeRouteQuery(owner));
     emit("changed");
   } else deleteError.value = action.error.value || text(action.saved.value?.detail) ||
     tr("Der Task konnte nicht gelöscht werden.", "The task could not be deleted.");
@@ -164,8 +193,8 @@ const projectOpen = ref(false);
       <DialogHeader>
         <DialogTitle>{{ tr("Task löschen?", "Delete task?") }}</DialogTitle>
         <DialogDescription>{{ tr(
-          "Die Unterhaltung wird dauerhaft aus Codex entfernt. Dateien in ihrem Arbeitsverzeichnis bleiben erhalten.",
-          "The conversation is permanently removed from Codex. Files in its working directory are kept.",
+          "Die Unterhaltung wird dauerhaft aus diesem Account entfernt. Dateien in ihrem Arbeitsverzeichnis bleiben erhalten.",
+          "The conversation is permanently removed from this account. Files in its working directory are kept.",
         ) }}</DialogDescription>
       </DialogHeader>
       <p v-if="deleteError" role="alert" class="text-sm text-destructive">{{ deleteError }}</p>
@@ -195,6 +224,7 @@ const projectOpen = ref(false);
     v-model:open="projectOpen"
     :client="client"
     :node="node"
+    :backend="backend"
     :thread-id="threadId"
     :project-id="projectId"
     :binding="capabilities.project"

@@ -49,6 +49,15 @@ service and health commands run their native executables directly.
   and candidates referenced by unresolved operations or preparation evidence.
   Dependency caches retain only the most recently used cache and caches leased by running
   builds. Shared build leases prevent collection from invalidating dependency links.
+  New compiler caches have explicit ownership under `staging/compiler-cache`; they
+  expire after seven idle days, or one idle hour under pressure, only after all
+  preparations have completed and the shared source/build lease is free. Unmarked
+  historical caches remain excluded. Completed package-import scratch is released
+  at its source; a durable completion marker permits interrupted cleanup to resume.
+  Active, unknown and unrecognized transfers remain retained; an unresolved
+  original import is not downloaded or extracted again. A verified immutable
+  published candidate can resolve its original scratch ownership. Arbitrary source
+  checkouts, standalone transfer archives, account caches and backups are excluded.
   Bootstrap history keeps current, rollback and unresolved maintenance plans plus the
   grace period; older plans no longer pin all historical releases. Candidate deletion
   is journaled and retried after interruption. Eligible preparations and snapshots are
@@ -58,13 +67,24 @@ service and health commands run their native executables directly.
   Completed bootstrap detail files form a ring with no minimum retention duration,
   keeping details for the latest 20 maintenance operations, current rollback evidence
   and unresolved operations.
-  Small request and outcome records remain unchanged for replay and restore; their
-  number grows with operation history. Only detail files named in those records are deleted.
-  Host status includes the last collection outcome, last complete success, deletion
-  counts, free space and grouped reasons for retained entries. A partial
+  Before obsolete completed history is removed, the journal retains its original
+  operation identity and request hash as a replay fence. Unrecognized evidence is retained.
+  Host status separates the historical `storageRetention` outcome and its capacity
+  from `storageSpace`, a native capacity measurement with its own `observedAt`.
+  Manager samples capacity at most once per minute; CLI status measures it afresh.
+  Collection reports the last complete success, deletion counts and grouped reasons
+  for retained entries. A partial
   result explicitly reports blocked areas. Free space is checked every minute;
   below 2 GiB or 10% free, safe collection runs early, at most once per hour.
   Normal collection remains daily; pressure never relaxes reference or grace rules.
+  The existing HostExecutor coordinator owns one automatic collection at a time
+  and drains it on close. Startup resumes the persisted schedule; failed, partial
+  or interrupted attempts retry after an hour. A fresh host waits one minute unless
+  already under pressure. Shared source leases protect capture, preparation and
+  acceptance against retirement. Storage deletion stops admitting work at 128 recorded
+  removals or after 30 seconds; an admitted directory removal drains. Preparation
+  compaction has a separate limit of 64 payloads per automatic pass. Budget
+  exhaustion is reported as partial work and does not relax protection.
   Automatic collection does not scan payloads for byte statistics. Explicit preparation
   inventory still measures sizes; manual compaction reports best-effort measured bytes
   (zero when unavailable), and measurement failures never block verified cleanup.

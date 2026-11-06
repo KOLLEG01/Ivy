@@ -12,6 +12,7 @@ use ivy_contracts::{
     checked_native_contract::CheckedNativeContracts,
     hash::{digest, hash_json},
     json::canonical,
+    native_backend::BackendIdentity,
     native_contract::NativeContract,
 };
 use ivy_sdk::native_evidence::{
@@ -64,7 +65,7 @@ impl<S: Store + ReadEvidenceStore> NativeEvidence<'_, S> {
         expected: &EvidenceIdentity,
         source: &NativeContract,
     ) -> IvyResult<()> {
-        if source.definition(&expected.method).is_err() {
+        if source.output_schema(&expected.method).is_err() {
             return Err(IvyError::new(
                 "task_board_native_method_unsupported",
                 "The evidence method is not in the exact checked native client catalog.",
@@ -74,6 +75,7 @@ impl<S: Store + ReadEvidenceStore> NativeEvidence<'_, S> {
             value,
             &NativeOperationIdentity {
                 owner: NativeOwnerIdentity {
+                    backend: expected.backend.clone(),
                     service_node_id: expected.service_node_id.clone(),
                     host_id: None,
                     native_version: expected.native_version.clone(),
@@ -109,12 +111,27 @@ impl<S: Store + ReadEvidenceStore> NativeEvidence<'_, S> {
             require(
                 call.value.get("operationId").and_then(Json::as_js_string)
                     == Some(&expected.operation_id)
+                    && BackendIdentity::matches(request, expected.backend.as_ref())
                     && request.get("nativeVersion").and_then(Json::as_js_string)
                         == Some(&expected.native_version)
                     && request.get("catalogSourceHash") == source.catalog().get("sourceHash")
                     && request.get("method").and_then(Json::as_js_string) == Some(&expected.method),
                 mismatch,
             )?;
+            if let Some(owner) = call.value.get("owner") {
+                let owner = NativeOwnerIdentity::from_json(owner)?;
+                require(
+                    owner.service_node_id == expected.service_node_id
+                        && owner.backend == expected.backend
+                        && owner.native_version == expected.native_version
+                        && owner.native_executable_hash
+                            == *text(source.catalog(), "nativeExecutableHash")?
+                        && owner.catalog_hash.to_utf8()? == source.catalog_hash(),
+                    mismatch,
+                )?;
+            } else {
+                require(expected.backend.is_none(), mismatch)?;
+            }
             let resolved = self.intent().resolve_native_request(request)?;
             require(
                 hash_json(resolved.required("params")?)? == hash_json(&expected.params)?,
@@ -124,7 +141,7 @@ impl<S: Store + ReadEvidenceStore> NativeEvidence<'_, S> {
                 call.value
                     .get("expectedDefinitionHash")
                     .and_then(Json::as_js_string)
-                    == Some(&hash_json(source.definition(&expected.method)?)?.into()),
+                    == Some(&source.definition_hash(&expected.method)?.into()),
                 mismatch,
             )?;
             Ok(source)
@@ -138,7 +155,15 @@ impl<S: Store + ReadEvidenceStore> NativeEvidence<'_, S> {
                     .required("target")?
                     .get("serviceNodeId")
                     .and_then(Json::as_js_string)
-                    == Some(&expected.service_node_id),
+                    == Some(&expected.service_node_id)
+                    && BackendIdentity::matches(
+                        run.value.required("target")?,
+                        expected.backend.as_ref(),
+                    )
+                    && BackendIdentity::matches(
+                        run.value.required("plan")?,
+                        expected.backend.as_ref(),
+                    ),
                 "Run evidence must come from its original selected native owner.",
             )?;
             let plan = run.value.required("plan")?;
@@ -178,6 +203,9 @@ impl<S: Store + ReadEvidenceStore> NativeEvidence<'_, S> {
         ]);
         for key in HEADERS {
             value.insert(key, observation.required(key)?.clone());
+        }
+        if let Some(backend) = observation.get("backend") {
+            value.insert("backend", backend.clone());
         }
         value.insert("contentHash", content_hash.clone().into());
         value.insert("byteLength", Json::Number(body.len() as f64));
@@ -247,6 +275,10 @@ impl<S: Store + ReadEvidenceStore> NativeEvidence<'_, S> {
         let observation =
             evidence_bytes::read_evidence(self.store, parent, &chunks, ChunkKey::NativeEvidence)?;
         self.verify(&observation, expected, &source)?;
+        require(
+            BackendIdentity::matches(value, expected.backend.as_ref()),
+            "The evidence header must retain its original backend and account.",
+        )?;
         for key in HEADERS {
             require(
                 value.get(key) == observation.get(key),

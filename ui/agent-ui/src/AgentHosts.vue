@@ -20,6 +20,10 @@ import { ArrowRight, Server } from "@lucide/vue";
 import type { Operation } from "../../../packages/sdk/src/client.js";
 import { dateLabel, route } from "../../../packages/ui-client/src/runtime";
 import { record, serviceNodeLabel, text } from "../../../packages/ui-client/src/native";
+import { computed } from 'vue';
+import { nativeHosts } from '../../../packages/ui-client/src/native-hosts';
+import { nativeRouteQuery } from '../../../packages/ui-client/src/native-route';
+import type { NativeBackendScope } from '../../../packages/ui-client/src/native-backends';
 
 type AgentNode = {
   serviceNodeId: string;
@@ -29,11 +33,15 @@ type AgentNode = {
 };
 const props = defineProps<{
   nodes: AgentNode[];
+  accounts: NativeBackendScope[];
   tasks: Operation.InventoryItem[];
   loading: boolean;
   error: string | null;
 }>();
 defineEmits<{ refresh: [] }>();
+const hosts = computed(() => nativeHosts(props.nodes));
+const ownerFor = (item: Operation.InventoryItem) => ({ ...item.resourceRef, backend: props.accounts.find(scope =>
+  scope.serviceNodeId === item.resourceRef.serviceNodeId && (scope.backend?.backendId ?? 'codex') === item.resourceRef.namespace)?.backend });
 
 const hostName = (serviceNodeId: string) =>
   serviceNodeLabel(props.nodes, serviceNodeId);
@@ -61,14 +69,14 @@ const taskName = (summary: unknown, id: string) =>
       <div class="mb-3 flex items-center justify-between gap-3">
         <h2 id="hosts-heading" class="text-sm font-medium">Hosts</h2>
         <span class="text-xs text-muted-foreground"
-          >{{ nodes.filter((item) => item.ready && item.connected).length }} of
-          {{ nodes.length }} ready</span
+          >{{ hosts.filter((item) => item.ready && item.connected).length }} of
+          {{ hosts.length }} ready</span
         >
       </div>
       <ItemGroup class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
         <Item
-          v-for="item in nodes"
-          :key="item.serviceNodeId"
+          v-for="item in hosts"
+          :key="item.hostId"
           as-child
           variant="outline"
           class="rounded-xl"
@@ -119,7 +127,7 @@ const taskName = (summary: unknown, id: string) =>
         <Item
           v-for="item in tasks"
           :key="
-            item.resourceRef.serviceNodeId + ':' + item.resourceRef.nativeId
+            JSON.stringify(ownerFor(item))
           "
           as-child
           variant="outline"
@@ -128,7 +136,7 @@ const taskName = (summary: unknown, id: string) =>
           <a
             :href="
               route('task', {
-                node: item.resourceRef.serviceNodeId,
+                ...nativeRouteQuery(ownerFor(item)),
                 id: item.resourceRef.nativeId,
               })
             "

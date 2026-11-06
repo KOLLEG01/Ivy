@@ -514,7 +514,8 @@ const defs = {
     serverTime: date,
     storageFormat: uint(1),
     publicBaseUrl: str(2048),
-  }),
+    nativeToolTransport: obj({ parameters: { const: "json" }, preReadyOutcome: { const: "not_executed" } }),
+  }, ["callerPrincipalId", "version", "buildId", "hiveProtocol", "runtimeEpoch", "ready", "serverTime", "storageFormat", "publicBaseUrl"]),
 };
 const operations = {};
 function op(

@@ -68,11 +68,7 @@ pub(crate) fn data() -> &'static Json {
     static DATA: OnceLock<Json> = OnceLock::new();
     DATA.get_or_init(|| {
         let o = reference_data::read(include_bytes!("task-board-orchestrator-cases.json.gz"));
-        parse(
-            std::str::from_utf8(&o).unwrap(),
-            MANAGEMENT_FRAME_BYTES,
-        )
-        .unwrap()
+        parse(std::str::from_utf8(&o).unwrap(), MANAGEMENT_FRAME_BYTES).unwrap()
     })
 }
 fn outcome(result: IvyResult<Json>) -> Json {
@@ -207,6 +203,7 @@ struct World<'a> {
     progress: Cell<usize>,
     outputs: Cell<usize>,
     fault: RefCell<Json>,
+    find_observations: RefCell<Option<(Json, Json)>>,
 }
 impl World<'_> {
     fn new(row: &Json) -> World<'_> {
@@ -230,6 +227,7 @@ impl World<'_> {
             progress: Cell::new(0),
             outputs: Cell::new(0),
             fault: RefCell::new(f(row.required("input").unwrap(), "fault").clone()),
+            find_observations: RefCell::default(),
         }
     }
     fn input(&self) -> &Json {
@@ -342,6 +340,7 @@ impl World<'_> {
     fn context(&self) -> InspectionContext {
         let v = self.row.required("context").unwrap();
         InspectionContext {
+            backend: None,
             run: v.required("run").unwrap().clone(),
             native_version: s(v, "nativeVersion").clone(),
             catalog_source_hash: s(v, "catalogSourceHash").clone(),
@@ -569,10 +568,32 @@ impl OrchestrationServices for World<'_> {
                     search: pin(900, 1.0),
                 },
                 Some(v) if v == &JsString::from("absent") => Inspection::Absent,
-                _ => Inspection::Found {
-                    metadata: self.row.required("metadata").unwrap().clone(),
-                    turns: self.row.required("turns").unwrap().clone(),
-                },
+                _ => {
+                    let (mut metadata, mut turns) =
+                        self.find_observations.borrow().clone().unwrap_or_else(|| {
+                            (
+                                self.row.required("metadata").unwrap().clone(),
+                                self.row.required("turns").unwrap().clone(),
+                            )
+                        });
+                    if r.get("objectId") != Some(&Json::String(id(200))) {
+                        let run = self.run(s(r, "objectId"));
+                        let thread_id = f(f(&run.value, "primaryResourceRef"), "nativeId").clone();
+                        for observation in [&mut metadata, &mut turns] {
+                            let mut params = f(observation, "params").clone();
+                            params.insert("threadId", thread_id.clone());
+                            observation.insert("params", params);
+                        }
+                        let mut reply = f(&metadata, "reply").clone();
+                        let mut result = f(&reply, "result").clone();
+                        let mut thread = f(&result, "thread").clone();
+                        thread.insert("id", thread_id);
+                        result.insert("thread", thread);
+                        reply.insert("result", result);
+                        metadata.insert("reply", reply);
+                    }
+                    Inspection::Found { metadata, turns }
+                }
             },
         )
     }

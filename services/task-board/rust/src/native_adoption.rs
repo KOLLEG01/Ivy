@@ -4,6 +4,7 @@ use crate::{
     native_driver::NativeDriverConnection,
     native_inspector::management_read,
     native_lifecycle::LifecycleStore,
+    native_plan::{matches_primary, matches_task_primary, routed_primary, routed_target},
     native_state::finished_run,
     operations::mutation,
     read_evidence::{ReadEvidence, ReadEvidenceStore, ReadIdentity},
@@ -48,6 +49,22 @@ fn missing_thread(message: &JsString) -> bool {
             lower.starts_with(start)
                 && (lower.contains(" not found") || lower.contains(" is archived"))
         })
+}
+/// Resolve only the already admitted address change; the original Run stays intact.
+pub(crate) fn current_target(task: &Json, previous: &Json) -> IvyResult<Option<Json>> {
+    let original = previous.required("target")?;
+    let primary = f(previous, "primaryResourceRef");
+    let backend =
+        ivy_contracts::native_backend::BackendIdentity::optional(original.get("backend"))?;
+    if !matches_primary(original, primary)? {
+        return Ok(None);
+    }
+    let (current, _) = routed_primary(task, primary, backend)?;
+    let target = routed_target(task, original)?;
+    Ok((canonical(&current, MANAGEMENT_FRAME_BYTES)?
+        == canonical(f(task, "primaryResourceRef"), MANAGEMENT_FRAME_BYTES)?
+        && matches_task_primary(&target, task)?)
+    .then_some(target))
 }
 pub fn turns_params(thread: &Json) -> Json {
     Json::object([
@@ -164,6 +181,14 @@ pub fn verify_observations<S: ReadEvidenceStore>(
             f(metadata, "catalogHash").clone(),
         )])),
     )?;
+    let target = current_target(task, previous)?.ok_or_else(|| {
+        IvyError::new(
+            "task_board_primary_mismatch",
+            "Direct adoption requires the admitted current primary.",
+        )
+    })?;
+    let backend = ivy_contracts::native_backend::BackendIdentity::optional(target.get("backend"))?;
+    let source = source.with_backend(backend.clone());
     let primary = f(task, "primaryResourceRef");
     for (observation, method, params) in [
         (
@@ -183,6 +208,7 @@ pub fn verify_observations<S: ReadEvidenceStore>(
         ReadEvidence { store, catalogs }.verify(
             observation,
             &ReadIdentity {
+                backend: source.backend().cloned(),
                 observation_id: s(observation, "observationId")?.clone(),
                 caller_principal_id: principal.clone(),
                 service_node_id: s(primary, "serviceNodeId")?.clone(),
@@ -200,6 +226,11 @@ pub fn verify_observations<S: ReadEvidenceStore>(
         "The observation must identify a new native turn.",
     )?;
     let mut plan = f(previous, "plan").clone();
+    if let Some(backend) = backend {
+        plan.insert("backend", backend.json());
+    } else {
+        plan.remove("backend");
+    }
     plan.insert("nativeVersion", f(metadata, "nativeVersion").clone());
     plan.insert(
         "catalogSourceHash",
@@ -265,7 +296,6 @@ impl<S: LifecycleStore, D: NativeDriverConnection, C: Fn() -> f64> NativeAdoptio
         if !f(value, "claim").is_null()
             || !f(value, "publication").is_null()
             || f(value, "lastRun").is_null()
-            || !eq(primary, "namespace", "codex")
             || !eq(primary, "kind", "thread")
         {
             return Ok(None);
@@ -274,20 +304,19 @@ impl<S: LifecycleStore, D: NativeDriverConnection, C: Fn() -> f64> NativeAdoptio
             .store
             .read("task-board/run", f(value, "lastRun"), true)
             .await?;
-        if !finished_run(&previous.value)
-            || canonical(primary, MANAGEMENT_FRAME_BYTES)?
-                != canonical(
-                    f(&previous.value, "primaryResourceRef"),
-                    MANAGEMENT_FRAME_BYTES,
-                )?
-        {
+        if !finished_run(&previous.value) {
             return Ok(None);
         }
+        let Some(target) = current_target(value, &previous.value)? else {
+            return Ok(None);
+        };
+        let backend =
+            ivy_contracts::native_backend::BackendIdentity::optional(target.get("backend"))?;
         let node = self
             .client
             .request(
                 "serviceNodes.get",
-                Json::object([("serviceNodeId", f(primary, "serviceNodeId").clone())]),
+                Json::object([("serviceNodeId", target.required("serviceNodeId")?.clone())]),
                 RequestOptions::default(),
             )
             .await?;
@@ -301,7 +330,10 @@ impl<S: LifecycleStore, D: NativeDriverConnection, C: Fn() -> f64> NativeAdoptio
             self.driver.tools(),
             s(primary, "serviceNodeId")?,
             "status",
-            Json::object([] as [(&str, Json); 0]),
+            ivy_contracts::native_backend::BackendIdentity::select_arguments(
+                backend.as_ref(),
+                Json::Object(vec![]),
+            )?,
         )
         .await?;
         validate_agent("Status", &status)?;
@@ -315,8 +347,13 @@ impl<S: LifecycleStore, D: NativeDriverConnection, C: Fn() -> f64> NativeAdoptio
         require(
             eq(&node, "serviceName", "agent-manager")
                 && f(&status, "serviceNodeId") == f(primary, "serviceNodeId")
-                && f(&status, "hostId") == f(f(&previous.value, "target"), "hostId")
-                && f(&status, "nativeVersion") == f(&node, "nativeVersion"),
+                && f(&status, "hostId") == f(&target, "hostId")
+                && (status.get("backend").is_some()
+                    || f(&status, "nativeVersion") == f(&node, "nativeVersion"))
+                && ivy_contracts::native_backend::BackendIdentity::matches(
+                    &status,
+                    backend.as_ref(),
+                ),
             "task_board_native_unavailable",
             "Direct turns must belong to the saved native owner.",
         )?;
@@ -324,6 +361,7 @@ impl<S: LifecycleStore, D: NativeDriverConnection, C: Fn() -> f64> NativeAdoptio
             self.driver.tools().clone(),
             self.driver.principal_id().clone(),
             NativeOwnerIdentity {
+                backend,
                 service_node_id: s(&status, "serviceNodeId")?.clone(),
                 host_id: Some(s(&status, "hostId")?.clone()),
                 native_version: s(&status, "nativeVersion")?.clone(),

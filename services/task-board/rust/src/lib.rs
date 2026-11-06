@@ -59,6 +59,7 @@ pub mod read_evidence;
 pub mod reconciler;
 pub mod reconciler_journal;
 pub mod registry;
+pub mod revision_protection;
 pub mod runtime_inputs;
 pub mod scheduler;
 pub mod scheduler_journal;

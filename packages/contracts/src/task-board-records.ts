@@ -93,9 +93,10 @@ export function upgradeTaskRecord(value: TaskBoard.Task): TaskBoard.Task {
     fields: TaskBoard.TaskFields & { dependencies?: string[]; nextReviewAt?: string | null };
     blocker?: { taskId: string }; questionWait?: unknown; scheduledCheck?: unknown;
     consumedBlockers?: unknown; consumedSteps?: unknown; continuation?: unknown; commentStore?: unknown;
+    nativeRoute?: TaskBoard.NativeRoute;
   };
   const { nextSteps, consumedSteps, deliveries, waiting, blocker, questionWait, scheduledCheck,
-    consumedBlockers, continuation, ...base } = prior;
+    consumedBlockers, continuation, nativeRoute, ...base } = prior;
   const { dependencies: fieldDependencies, nextReviewAt, ...fields } = prior.fields;
   const requirement = fields.executionRequirement as StoredRequirement;
   const imported = schedule({ ...(nextSteps ? { nextSteps } : {}), nextReviewAt: nextReviewAt ?? null,
@@ -117,6 +118,7 @@ export function upgradeTaskRecord(value: TaskBoard.Task): TaskBoard.Task {
   const obsoleteIssue = prior.completionIssue?.code.startsWith('task_board_handoff_') ||
     prior.completionIssue?.code.startsWith('task_board_recovery_');
   const task: TaskBoard.Task = { ...base,
+    ...(nativeRoute && !prior.nativeRoutes ? { nativeRoutes: [nativeRoute] } : {}),
     fields: { ...fields, executionRequirement: upgradeRequirement(requirement),
       ...(requirement?.kind === 'capability' ? { requiredCapabilities: [...new Set([...(fields.requiredCapabilities ?? []), requirement.capabilityKey])] } : {}) },
     wakeAt: prior.wakeAt === undefined ? imported.wakeAt : prior.wakeAt,

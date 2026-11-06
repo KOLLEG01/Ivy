@@ -1,3 +1,11 @@
+#[path = "agent-backends.rs"]
+mod backends;
+#[path = "agent-browser-notices.rs"]
+mod browser_notices;
+#[path = "agent-host-runtime.rs"]
+mod host_runtime;
+#[path = "agent-health-work.rs"]
+mod health_work;
 #[path = "../fixtures/reference-data.rs"]
 mod reference_data;
 #[path = "agent-staged-files.rs"]
@@ -6,6 +14,7 @@ mod staged_files;
 mod task_outputs;
 use ivy_agent_manager::{
     agent_health::AgentHealth,
+    backend_routes::{BackendRoute, BackendRoutes},
     browser_notices::{input_browser_notice, native_browser_notice, service_owns_completion},
     capabilities::{CapabilityManagement, SqliteCapabilityStore},
     control::AgentControl,
@@ -32,7 +41,7 @@ use ivy_agent_manager::{
     service_link::ServiceLink,
     service_work::AgentWork,
     staged_files::StagedFiles,
-    startup::start_agent_manager,
+    startup::{start_agent_manager, start_native_agent_manager},
     status::{AgentStatus, StatusConfig, StatusState},
 };
 use ivy_contracts::{
@@ -115,7 +124,7 @@ fn config(root: &Root, version: IvyJson) -> InstanceConfig {
         ("dataRoot", IvyJson::String(node_path::from_native(&root.0))),
         (
             "artifactRoot",
-            IvyJson::String(node_path::from_native(&root.0.join("artifact"))),
+            IvyJson::String(node_path::from_native(&root.0.with_extension("artifact"))),
         ),
     ] {
         config.insert(key, value);
@@ -340,6 +349,7 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
         });
         let native_management = NativeManagement::new(
             NativeManagementOwner {
+                backend: None,
                 service_node_id: "fixture.agent".into(),
                 epoch: "epoch".into(),
                 catalog: catalog.clone(),
@@ -374,6 +384,68 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
             )),
         }
         .compose(&work);
+        // The outer handler owner must preserve the controls reserved deeper in
+        // native admission, even while completed ordinary results stay unread.
+        let mut unread = Vec::new();
+        for _ in 0..56 {
+            unread.push(work.track(Box::pin(async { Ok(IvyJson::Null) })).unwrap());
+        }
+        work.drain_snapshot().await.unwrap();
+        let admission_context = InvocationContext::detached(
+            "fixture".into(),
+            None,
+            1,
+            Default::default(),
+            IvyError::internal(),
+        );
+        let blocked = set.management[&"agent.invoke".into()](
+            IvyJson::object([("method", "account/logout".into())]),
+            admission_context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(blocked.code, "native_capacity");
+        for method in ["turn/interrupt", "thread/unsubscribe"] {
+            let error = set.management[&"agent.invoke".into()](
+                IvyJson::object([("method", method.into())]),
+                admission_context.clone(),
+            )
+            .await
+            .unwrap_err();
+            assert_ne!(
+                error.code, "native_capacity",
+                "Management cleanup must reach its original guards"
+            );
+            let native = JsString::from(format!("codex.{method}"));
+            if let Some(handler) = set.native.get(&native) {
+                let error = handler(IvyJson::Null, admission_context.clone())
+                    .await
+                    .unwrap_err();
+                assert_ne!(
+                    error.code, "native_capacity",
+                    "Advertised native cleanup must reach its original guards"
+                );
+            }
+        }
+        for name in ["agent.prevent", "agent.answer"] {
+            let error = set.management[&name.into()](IvyJson::Null, admission_context.clone())
+                .await
+                .unwrap_err();
+            assert_ne!(
+                error.code, "native_capacity",
+                "Prevention/answers must reach their original guards"
+            );
+        }
+        drop(unread);
+        let routes = BackendRoutes::new(vec![BackendRoute {
+            identity: None,
+            registry,
+            handlers: set,
+            preparation_failure: None,
+        }])
+        .unwrap();
+        let registry = routes.registry().clone();
+        let set = routes.handlers();
         let mut names = set
             .management
             .keys()
@@ -383,6 +455,7 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
         names.sort_by_key(|v| v.as_js_string().unwrap().clone());
         let mut expected_handlers = field(data(), "handlers").as_array().unwrap().to_vec();
         expected_handlers.push("agent.cleanupTaskOutputs".into());
+        expected_handlers.push("agent.backends".into());
         expected_handlers.sort_by_key(|v| v.as_js_string().unwrap().clone());
         same(&IvyJson::Array(names), &IvyJson::Array(expected_handlers));
         let mut expected_native = field(&catalog, "clientRequests")
@@ -400,23 +473,20 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
         let mut actual_native = set.native.keys().cloned().collect::<Vec<_>>();
         actual_native.sort();
         assert_eq!(actual_native, expected_native);
-        let reconciliation = AgentReconciliation::new(
-            ReconciliationSettings {
-                service_node_id: "fixture.agent".into(),
-                owner: ReconciliationOwner {
-                    rpc: rpc.clone(),
-                    epoch: "epoch".into(),
-                    closing: closing.clone(),
-                },
-                journal,
-                state: state.clone(),
-                inventory,
-                environment: None,
-                environment_at: 0.0,
-                health: health.clone(),
+        let reconciliation = AgentReconciliation::new(ReconciliationSettings {
+            service_node_id: "fixture.agent".into(),
+            owner: ReconciliationOwner {
+                rpc: rpc.clone(),
+                epoch: "epoch".into(),
+                closing: closing.clone(),
             },
-            &registry,
-        )
+            journal,
+            state: state.clone(),
+            inventory,
+            environment: None,
+            environment_at: 0.0,
+            health: health.clone(),
+        })
         .unwrap();
         let options = agent_service_options(
             &config,
@@ -475,7 +545,7 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
             IvyError::internal(),
         );
         let catalog_call =
-            options.handlers[&"agent.catalog".into()](IvyJson::Null, context.clone());
+            options.handlers[&"agent.catalog".into()](IvyJson::object::<&str>([]), context.clone());
         assert_eq!(
             work.pending().unwrap(),
             0,
@@ -565,6 +635,8 @@ async fn launch_time_clock_is_answered_after_attach_and_offline_notifications_re
             service: ServiceLink::default(),
             closing: Arc::new(AtomicBool::new(false)),
             operations,
+            state: state.clone(),
+            receipts: Default::default(),
             notifications: notifications.clone(),
             policy: policy.clone(),
             query: Arc::new(|_| panic!("Offline observations cannot construct notice URLs")),
@@ -741,6 +813,38 @@ fn node_runtime(root: &Root) -> NodeRuntime {
         version: "24.18.0".into(),
     }
 }
+#[tokio::test]
+async fn invalid_settings_are_rejected_before_reset_or_kernel_resources() {
+    for entry in ["prepared", "embedded", "native"] {
+        let root = Root::new();
+        let mut value = entry_config(&root);
+        value.get_mut("settings").unwrap().remove("nativeVersion");
+        let error = if entry == "prepared" {
+            start_prepared_agent(InstanceConfig::from_json(value).unwrap(), bindings(&root))
+                .await
+                .err()
+                .unwrap()
+        } else {
+            let build = IvyJson::object([
+                ("buildId", field(&value, "buildId").clone()),
+                ("version", field(&value, "version").clone()),
+            ]);
+            let path = entry_files(&root, &value, &build);
+            let result = if entry == "native" {
+                start_native_agent_manager(path).await
+            } else {
+                start_agent_manager(path, node_runtime(&root), bindings(&root)).await
+            };
+            result.err().unwrap()
+        };
+        assert_eq!(error.outcome, ivy_contracts::Outcome::NotExecuted);
+        assert!(!root.0.join("health.json").exists());
+        assert!(!root.0.join("data/health.json").exists());
+        assert!(!root.0.join("data/journal/agent-runtime.sqlite").exists());
+        assert!(!root.0.join("data/runtime-reset-applied.json").exists());
+    }
+}
+
 #[tokio::test]
 async fn full_entry_resets_before_kernel_start_and_keeps_cleanup_when_waiter_is_dropped() {
     for abandon in [false, true] {

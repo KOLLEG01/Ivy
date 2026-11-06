@@ -12,6 +12,9 @@
     "NativeRequest": {
       "type": "object",
       "properties": {
+        "backend": {
+          "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/BackendIdentity"
+        },
         "nativeVersion": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
         },
@@ -65,6 +68,9 @@
         },
         "serviceNodeId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "backend": {
+          "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -130,6 +136,9 @@
     "NativeOptions": {
       "type": "object",
       "properties": {
+        "backend": {
+          "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/BackendIdentity"
+        },
         "model": {
           "anyOf": [
             {
@@ -2364,6 +2373,78 @@
       ],
       "additionalProperties": false
     },
+    "MigrateNativeRouteRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "migrateNativeRoute"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "taskId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expectedWorkspace": {
+          "$ref": "#/$defs/ExpectedWorkspace"
+        },
+        "run": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "target": {
+          "type": "object",
+          "properties": {
+            "hostId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "serviceNodeId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "backend": {
+              "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/BackendIdentity"
+            }
+          },
+          "required": [
+            "hostId",
+            "serviceNodeId",
+            "backend"
+          ],
+          "additionalProperties": false
+        },
+        "intent": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "workspace": {
+          "$ref": "#/$defs/WorkspaceResolution"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "originalThreadOperationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
+          "description": "Original successful thread operation retained by the selected storage. Used only after the exact local call was collected; never dispatches or recreates it."
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "taskId",
+        "expectedRevision",
+        "run",
+        "target",
+        "intent",
+        "workspace",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
     "RecoverThreadRequest": {
       "type": "object",
       "properties": {
@@ -3506,6 +3587,9 @@
           "$ref": "#/$defs/NewThreadRequest"
         },
         {
+          "$ref": "#/$defs/MigrateNativeRouteRequest"
+        },
+        {
           "$ref": "#/$defs/CancelRequest"
         },
         {
@@ -3550,6 +3634,9 @@
         },
         {
           "$ref": "#/$defs/NewThreadRequest"
+        },
+        {
+          "$ref": "#/$defs/MigrateNativeRouteRequest"
         },
         {
           "$ref": "#/$defs/CancelRequest"
@@ -3803,6 +3890,16 @@
         "completionIssue": {
           "$ref": "#/$defs/CompletionIssue"
         },
+        "primaryBackend": {
+          "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/BackendIdentity"
+        },
+        "nativeRoutes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NativeRoute"
+          },
+          "maxItems": 64
+        },
         "wakeAt": {
           "anyOf": [
             {
@@ -4000,6 +4097,9 @@
     "NativeCall": {
       "type": "object",
       "properties": {
+        "owner": {
+          "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/NativeOwnerIdentity"
+        },
         "operationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
         },
@@ -4156,6 +4256,22 @@
                 "$ref": "#/$defs/Artifact"
               }
             }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "request": {
+                "required": [
+                  "backend"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "owner"
+            ]
           }
         }
       ]
@@ -5488,6 +5604,192 @@
       ],
       "additionalProperties": false
     },
+    "RetainedQuestionRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "comment"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "taskId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expectedWorkspace": {
+          "$ref": "#/$defs/ExpectedWorkspace"
+        },
+        "commentId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "requests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CommentRequest"
+          },
+          "maxItems": 32
+        },
+        "responses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CommentResponse"
+          },
+          "maxItems": 32
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TaskAttachment"
+          },
+          "maxItems": 32
+        },
+        "replyTo": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "agentDelivery": {
+          "enum": [
+            "queue",
+            "none"
+          ],
+          "description": "For a user comment on an agent-controlled task, queue asks TaskBoard to start or resume agent work; none records the comment without scheduling it. Omitted means queue. Worker comments use the task userContact route instead."
+        },
+        "recipient": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "user"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "task"
+                },
+                "taskId": {
+                  "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+                }
+              },
+              "required": [
+                "kind",
+                "taskId"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "questionSource": {
+          "type": "object",
+          "properties": {
+            "taskId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "commentId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            }
+          },
+          "required": [
+            "taskId",
+            "commentId"
+          ],
+          "additionalProperties": false
+        },
+        "sourceTaskId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
+          "description": "For a directed agent message, identify the different sending task and explicitly set authorKind=agent and agentDelivery=queue. Ordinary worker updates never wake themselves."
+        },
+        "authorKind": {
+          "enum": [
+            "user",
+            "agent"
+          ],
+          "description": "Use agent for worker-authored comments; these never enqueue their own execution."
+        },
+        "purpose": {
+          "const": "question"
+        },
+        "contactUser": {
+          "type": "boolean",
+          "description": "Request contact through the configured Main or voice route for an important question. Routine updates stay in the ticket. Completion contact is automatic."
+        },
+        "moveToTodo": {
+          "type": "boolean",
+          "description": "Explicitly reopen a Done task with this comment. Otherwise new comments are processed without reopening task work."
+        },
+        "nativeInput": {
+          "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/PendingInput"
+        },
+        "handoff": {
+          "$ref": "#/$defs/Handoff",
+          "description": "Required for a worker handoff. Declare whether the overall task is ready for review or remains waiting. Applied only after confirmed native completion."
+        },
+        "resolvesQuestions": {
+          "type": "array",
+          "items": {
+            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+          },
+          "maxItems": 32,
+          "uniqueItems": true,
+          "description": "Explicitly resolve these ordinary ticket questions with the explanation in body. Native inputs must be answered at their owner."
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "taskId",
+        "expectedRevision",
+        "commentId",
+        "body",
+        "requests",
+        "responses",
+        "attachments",
+        "replyTo",
+        "purpose"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "recipient"
+                ]
+              },
+              {
+                "required": [
+                  "nativeInput"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
     "RetainedDurableRequest": {
       "anyOf": [
         {
@@ -5498,6 +5800,9 @@
         },
         {
           "$ref": "#/$defs/RetainedEditRequest"
+        },
+        {
+          "$ref": "#/$defs/RetainedQuestionRequest"
         }
       ]
     },
@@ -5508,32 +5813,7 @@
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
         },
         "owner": {
-          "type": "object",
-          "properties": {
-            "serviceNodeId": {
-              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-            },
-            "hostId": {
-              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-            },
-            "nativeVersion": {
-              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-            },
-            "nativeExecutableHash": {
-              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
-            },
-            "catalogHash": {
-              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
-            }
-          },
-          "required": [
-            "serviceNodeId",
-            "hostId",
-            "nativeVersion",
-            "nativeExecutableHash",
-            "catalogHash"
-          ],
-          "additionalProperties": false
+          "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/NativeOwnerIdentity"
         },
         "operationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
@@ -5613,7 +5893,11 @@
             "2.2.0",
             "2.3.0",
             "3.0.0",
-            "3.1.0"
+            "3.1.0",
+            "3.2.0",
+            "3.3.0",
+            "3.4.0",
+            "3.5.0"
           ]
         },
         "payload": {
@@ -5665,6 +5949,9 @@
                   "type": "integer",
                   "minimum": 1,
                   "maximum": 9007199254740991
+                },
+                "expectedArchived": {
+                  "type": "boolean"
                 }
               },
               "required": [
@@ -6548,6 +6835,9 @@
             "additionalProperties": false
           },
           "maxItems": 100
+        },
+        "backend": {
+          "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -6656,6 +6946,9 @@
           },
           "maxItems": 16,
           "minItems": 1
+        },
+        "backend": {
+          "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -6731,6 +7024,9 @@
           },
           "maxItems": 16,
           "minItems": 1
+        },
+        "backend": {
+          "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -6818,6 +7114,9 @@
           "minLength": 24,
           "maxLength": 24,
           "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "backend": {
+          "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -6948,6 +7247,9 @@
           "minLength": 24,
           "maxLength": 24,
           "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "backend": {
+          "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/BackendIdentity"
         }
       },
       "required": [
@@ -6963,6 +7265,55 @@
         "turn",
         "status",
         "createdAt"
+      ],
+      "additionalProperties": false
+    },
+    "NativeRoute": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/Target"
+        },
+        "target": {
+          "type": "object",
+          "properties": {
+            "hostId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "serviceNodeId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "backend": {
+              "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/BackendIdentity"
+            }
+          },
+          "required": [
+            "hostId",
+            "serviceNodeId",
+            "backend"
+          ],
+          "additionalProperties": false
+        },
+        "catalog": {
+          "type": "object",
+          "properties": {
+            "nativeVersion": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "catalogSourceHash": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+            }
+          },
+          "required": [
+            "nativeVersion",
+            "catalogSourceHash"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "source",
+        "target"
       ],
       "additionalProperties": false
     },

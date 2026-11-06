@@ -150,15 +150,57 @@ fn cli_version(stdout: &str, version: &JsString) -> bool {
 pub fn start_native_process(
     options: NativeProcessOptions,
 ) -> impl Future<Output = IvyResult<AgentNativeConnection>> + Send {
+    start_owned(options, None)
+}
+/// The service boundary already validated these settings and this exact catalog.
+pub(crate) fn start_validated_native_process(
+    options: NativeProcessOptions,
+    catalog: Arc<IvyJson>,
+) -> impl Future<Output = IvyResult<AgentNativeConnection>> + Send {
+    start_owned(options, Some(catalog))
+}
+fn start_owned(
+    options: NativeProcessOptions,
+    catalog: Option<Arc<IvyJson>>,
+) -> impl Future<Output = IvyResult<AgentNativeConnection>> + Send {
     let (send, receive) = oneshot::channel();
     tokio::spawn(async move {
-        let _ = send.send(start(options).await);
+        let _ = send.send(start(options, catalog).await);
     });
     async move { receive.await.map_err(|_| IvyError::internal())? }
 }
-async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection> {
+pub(crate) async fn load_native_catalog(
+    artifact_root: &JsString,
+    settings: &IvyJson,
+    style: node_path::Style,
+) -> IvyResult<Arc<IvyJson>> {
+    let version = text(settings, "nativeVersion")?;
+    require(
+        exact_version(version),
+        "native_catalog_unavailable",
+        "Native version must identify an exact generated catalog.",
+    )?;
+    let dist = node_path::join(style, &[artifact_root.clone(), "dist".into()]);
+    let catalog_path = native_catalog_path(&dist, version, None, None)?;
+    let catalog =
+        config::json_file(node_path::filesystem_path(&catalog_path), 2 * 1024 * 1024).await?;
+    validate_agent("Catalog", &catalog)?;
+    require(
+        catalog.get("version") == Some(&IvyJson::String(version.clone()))
+            && catalog.get("nativeExecutableHash") == settings.get("nativeExecutableHash"),
+        "native_build_mismatch",
+        "Native settings do not match the generated catalog executable identity.",
+    )?;
+    Ok(Arc::new(catalog))
+}
+async fn start(
+    options: NativeProcessOptions,
+    catalog: Option<Arc<IvyJson>>,
+) -> IvyResult<AgentNativeConnection> {
     let settings = &options.settings;
-    validate_agent("Settings", settings)?;
+    if catalog.is_none() {
+        validate_agent("Settings", settings)?;
+    }
     let context = options.home_inputs.context();
     let paths = context.paths;
     let home = resolve_codex_home_json(settings, &context)?;
@@ -211,22 +253,10 @@ async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection
     }
     require_clear_process_stop_fence(node_path::filesystem_path(&options.data_root)).await?;
     let version = text(settings, "nativeVersion")?;
-    require(
-        exact_version(version),
-        "native_catalog_unavailable",
-        "Native version must identify an exact generated catalog.",
-    )?;
-    let dist = node_path::join(paths.style, &[options.artifact_root.clone(), "dist".into()]);
-    let catalog_path = native_catalog_path(&dist, version, None, None)?;
-    let catalog =
-        config::json_file(node_path::filesystem_path(&catalog_path), 2 * 1024 * 1024).await?;
-    validate_agent("Catalog", &catalog)?;
-    require(
-        catalog.get("version") == Some(&IvyJson::String(version.clone()))
-            && catalog.get("nativeExecutableHash") == settings.get("nativeExecutableHash"),
-        "native_build_mismatch",
-        "Native settings do not match the generated catalog executable identity.",
-    )?;
+    let catalog = match catalog {
+        Some(catalog) => catalog,
+        None => load_native_catalog(&options.artifact_root, settings, paths.style).await?,
+    };
     let executable = native_realpath(node_path::filesystem_path(text(
         settings,
         "nativeExecutable",
@@ -400,19 +430,6 @@ async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection
             [
                 ("CLAUDE_CONFIG_DIR", config.clone().into_os_string()),
                 ("CLAUDE_CODEX_HOME", adapter_home.clone().into_os_string()),
-                ("IVY_CLAUDE_SDK_NODE", executable.clone().into_os_string()),
-                (
-                    "IVY_CLAUDE_ACCOUNT_HOME",
-                    node_path::to_native(&options.home_inputs.account_home).into_os_string(),
-                ),
-                (
-                    "IVY_CLAUDE_SDK_ENTRY",
-                    adapter_script
-                        .as_ref()
-                        .ok_or_else(IvyError::internal)?
-                        .clone()
-                        .into_os_string(),
-                ),
                 ("CLAUDE_CODEX_CLI", cli.clone().into_os_string()),
                 ("CLAUDE_CODEX_RUNTIME_TYPE", "agent-sdk-sidecar".into()),
                 ("CLAUDE_CODEX_PROVIDER", "claude-code".into()),
@@ -422,10 +439,6 @@ async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection
                 (
                     "CLAUDE_CODEX_DEFAULT_MODEL",
                     node_path::to_native(text(claude, "defaultModel")?).into_os_string(),
-                ),
-                (
-                    "CLAUDE_CODEX_COMPAT_VERSION",
-                    node_path::to_native(version).into_os_string(),
                 ),
                 (
                     "CLAUDE_CODEX_MCP_SERVERS",
@@ -440,14 +453,53 @@ async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection
             .map(|(key, value)| (key.into(), value)),
         );
     }
-    let executable = if claude.is_some() {
-        ivy_host_runtime::native_plan::native_binary_path(
-            &node_path::filesystem_path(&options.artifact_root),
-            "ivy-agent-manager",
+    if let (Some(claude), Some(adapter_home)) = (claude, adapter_home) {
+        let project_compare = crate::claude::projects::project_comparator()?;
+        let epoch = JsString::from(uuid::Uuid::new_v4().to_string());
+        let events = (options.begin_epoch)(epoch.clone())?;
+        return crate::claude_connection::connect_agent_claude(
+            crate::claude::runtime::Launch {
+                home: adapter_home,
+                codex_home: native_home.clone(),
+                account_home: node_path::filesystem_path(&options.home_inputs.account_home),
+                compat_version: version.clone(),
+                default_model: text(claude, "defaultModel")?.clone(),
+                project_compare,
+                sdk: crate::claude::bridge::BridgeLaunch {
+                    node_executable: executable.clone(),
+                    entry: adapter_script.ok_or_else(IvyError::internal)?,
+                    cwd: native_home.clone(),
+                    environment: process::runtime_environment(&environment),
+                    job_launcher: Some(job_launcher),
+                },
+                mcp_servers_path: Some(data_root.join("claude-mcp.json")),
+                auto_worktree: false,
+                worktree_root: None,
+                subagent_completed: None,
+                subagent_watchdog_ms: None,
+            },
+            NativeConnectionSettings {
+                epoch,
+                catalog,
+                expected_home: native_home,
+                native_version: version.clone(),
+                client_version: options.client_version,
+                mode: NativeMode::ClaudeAdapter,
+                home_source: home.source,
+                owns_native_home: owned_home.is_some(),
+                executable,
+                windows_shell,
+                socket_path: None,
+                daemon: None,
+                record_stop: OwnedProcessEvidence::new(node_path::filesystem_path(
+                    &options.data_root,
+                ))
+                .callback(),
+            },
+            events,
         )
-    } else {
-        executable
-    };
+        .await;
+    }
     let executables = BTreeMap::from([("codex".into(), executable.clone())]);
     let run = |args| {
         let command = process::Command {
@@ -475,20 +527,9 @@ async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection
             .await
         }
     };
-    let version_probe = run(if claude.is_some() {
-        vec!["--claude-stdio".into(), "--help".into()]
-    } else {
-        vec!["--version".into()]
-    })
-    .await?;
+    let version_probe = run(vec!["--version".into()]).await?;
     require(
-        if claude.is_some() {
-            version_probe
-                .stdout
-                .contains("claude-codex-adapter app-server")
-        } else {
-            cli_version(&version_probe.stdout, version)
-        },
+        cli_version(&version_probe.stdout, version),
         "native_build_mismatch",
         "Actual public native CLI version differs from its pinned schema catalog.",
     )?;
@@ -549,18 +590,14 @@ async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection
             .and_then(IvyJson::as_js_string)
             .cloned()
     });
-    let mode = if claude.is_some() {
-        NativeMode::ClaudeAdapter
-    } else if external {
+    let mode = if external {
         NativeMode::ExternalProxy
     } else {
         NativeMode::OwnedStdio
     };
     let epoch = JsString::from(uuid::Uuid::new_v4().to_string());
     let events = (options.begin_epoch)(epoch.clone())?;
-    let args = if claude.is_some() {
-        vec!["--claude-stdio".into()]
-    } else if external {
+    let args = if external {
         vec![
             "app-server".into(),
             "proxy".into(),
@@ -613,7 +650,7 @@ async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection
         child,
         NativeConnectionSettings {
             epoch,
-            catalog: Arc::new(catalog),
+            catalog,
             expected_home,
             native_version: version.clone(),
             client_version: options.client_version,

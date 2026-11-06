@@ -6,7 +6,7 @@ use crate::{
     native_dispatch::{NativeDispatch, caller_identity},
     native_journal::JournalClock,
     native_operations::NativeOperations,
-    registry::agent_registry,
+    registry::backend_registry,
 };
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, Outcome,
@@ -15,6 +15,7 @@ use ivy_contracts::{
         MANAGEMENT_FRAME_BYTES, NATIVE_ANSWER_FRAME_BYTES, NATIVE_FRAME_BYTES,
         NATIVE_REQUEST_FRAME_BYTES,
     },
+    native_backend::BackendIdentity,
     native_contract::is_read_only_native_method,
 };
 use ivy_host_runtime::{
@@ -28,10 +29,16 @@ use std::{
 };
 
 pub(crate) fn native_read_timeout_ms(method: &JsString, params: &IvyJson) -> u64 {
-    if method == &JsString::from("thread/read") && params.get("includeTurns") == Some(&false.into()) { 15_000 } else { 120_000 }
+    if method == &JsString::from("thread/read") && params.get("includeTurns") == Some(&false.into())
+    {
+        15_000
+    } else {
+        120_000
+    }
 }
 
 pub struct NativeManagementOwner {
+    pub backend: Option<BackendIdentity>,
     pub service_node_id: JsString,
     pub epoch: JsString,
     pub catalog: Arc<IvyJson>,
@@ -56,6 +63,7 @@ pub struct NativeManagement(Arc<Inner>);
 
 const TOOLS: &[&str] = &[
     "catalog",
+    "storageIdentity",
     "discover",
     "frameLimits",
     "prevent",
@@ -84,6 +92,67 @@ fn property_string(args: &IvyJson, key: &str) -> IvyResult<JsString> {
 }
 fn array<'a>(value: &'a IvyJson, key: &str) -> &'a [IvyJson] {
     value.get(key).and_then(IvyJson::as_array).unwrap()
+}
+
+pub(crate) async fn read_operation(
+    operations: &NativeOperations,
+    service_node_id: &JsString,
+    args: &IvyJson,
+    context: InvocationContext,
+) -> IvyResult<IvyJson> {
+    let operation_id = property_string(args, "operationId")?;
+    let identity = caller_identity(context.caller_principal_id, Some(operation_id.clone()))?;
+    operations.read(&identity).await?.ok_or_else(|| {
+        let epoch = operations.journal().lock().unwrap().epoch().cloned();
+        IvyError::new(
+            "not_found",
+            "Native operation was not found for this caller.",
+        )
+        .with_details(IvyJson::object([
+            ("kind", "agent_operation_absent".into()),
+            ("operationId", IvyJson::String(operation_id)),
+            ("serviceNodeId", IvyJson::String(service_node_id.clone())),
+            ("epoch", epoch.map(IvyJson::String).unwrap_or(IvyJson::Null)),
+        ]))
+    })
+}
+pub(crate) fn frame_limits(
+    service_node_id: &JsString,
+    catalog: &IvyJson,
+    catalog_hash: &str,
+    journal: &std::sync::Mutex<crate::native_journal::NativeJournal>,
+) -> IvyResult<IvyJson> {
+    let epoch = journal
+        .lock()
+        .map_err(|_| IvyError::internal())?
+        .epoch()
+        .cloned();
+    Ok(IvyJson::object([
+        ("serviceNodeId", IvyJson::String(service_node_id.clone())),
+        ("nativeVersion", catalog.required("version")?.clone()),
+        (
+            "nativeExecutableHash",
+            catalog.required("nativeExecutableHash")?.clone(),
+        ),
+        ("catalogHash", catalog_hash.into()),
+        ("epoch", epoch.map(IvyJson::String).unwrap_or(IvyJson::Null)),
+        (
+            "requestFrameBytes",
+            IvyJson::Number(NATIVE_REQUEST_FRAME_BYTES as f64),
+        ),
+        (
+            "receivedFrameBytes",
+            IvyJson::Number(NATIVE_FRAME_BYTES as f64),
+        ),
+        (
+            "answerFrameBytes",
+            IvyJson::Number(NATIVE_ANSWER_FRAME_BYTES as f64),
+        ),
+        (
+            "managementFrameBytes",
+            IvyJson::Number(MANAGEMENT_FRAME_BYTES as f64),
+        ),
+    ]))
 }
 
 /// Return the original native result, or direct the caller to its retained
@@ -150,7 +219,7 @@ impl NativeManagement {
         interactions: NativeInteractions,
         clock: Arc<JournalClock>,
     ) -> IvyResult<Self> {
-        let registry = agent_registry(&owner.catalog)?;
+        let registry = backend_registry(&owner.catalog, owner.backend.as_ref())?;
         let mut definitions = HashMap::new();
         for tool in array(&array(&registry, "namespaces")[0], "tools") {
             // The original Map uses the last definition for duplicate names.
@@ -219,7 +288,14 @@ impl NativeManagement {
                     .unwrap()
                     .clone();
                 let read_only = is_read_only_native_method(&method);
-                let mut name = JsString::from("codex.");
+                let mut name = JsString::from(format!(
+                    "{}.",
+                    self.0
+                        .owner
+                        .backend
+                        .as_ref()
+                        .map_or("codex", BackendIdentity::id)
+                ));
                 name.0.extend_from_slice(&method.0);
                 let owner = self.clone();
                 let handler: ToolHandler = Arc::new(move |args, context| {
@@ -295,63 +371,25 @@ impl NativeManagement {
     async fn call(
         &self,
         name: &str,
-        args: IvyJson,
+        mut args: IvyJson,
         context: InvocationContext,
     ) -> IvyResult<IvyJson> {
         let state = &self.0;
         match name {
-            "catalog" => {
-                state.dispatch.available()?;
-                Ok(state.owner.catalog.as_ref().clone())
-            }
-            "discover" => {
-                state.dispatch.available()?;
-                discover_native_tools(
-                    &state.owner.catalog,
-                    array(&array(&state.registry, "namespaces")[0], "tools"),
-                    &args,
-                    &state.owner.platform,
-                )
-            }
-            "frameLimits" => {
-                let epoch = state.operations.journal().lock().unwrap().epoch().cloned();
-                Ok(IvyJson::object([
-                    (
-                        "serviceNodeId",
-                        IvyJson::String(state.owner.service_node_id.clone()),
-                    ),
-                    (
-                        "nativeVersion",
-                        state.owner.catalog.required("version")?.clone(),
-                    ),
-                    (
-                        "nativeExecutableHash",
-                        state
-                            .owner
-                            .catalog
-                            .required("nativeExecutableHash")?
-                            .clone(),
-                    ),
-                    ("catalogHash", state.catalog_hash.clone().into()),
-                    ("epoch", epoch.map(IvyJson::String).unwrap_or(IvyJson::Null)),
-                    (
-                        "requestFrameBytes",
-                        IvyJson::Number(NATIVE_REQUEST_FRAME_BYTES as f64),
-                    ),
-                    (
-                        "receivedFrameBytes",
-                        IvyJson::Number(NATIVE_FRAME_BYTES as f64),
-                    ),
-                    (
-                        "answerFrameBytes",
-                        IvyJson::Number(NATIVE_ANSWER_FRAME_BYTES as f64),
-                    ),
-                    (
-                        "managementFrameBytes",
-                        IvyJson::Number(MANAGEMENT_FRAME_BYTES as f64),
-                    ),
-                ]))
-            }
+            "catalog" => Ok(state.owner.catalog.as_ref().clone()),
+            "storageIdentity" => state.operations.storage_identity(),
+            "discover" => discover_native_tools(
+                &state.owner.catalog,
+                array(&array(&state.registry, "namespaces")[0], "tools"),
+                &args,
+                &state.owner.platform,
+            ),
+            "frameLimits" => frame_limits(
+                &state.owner.service_node_id,
+                &state.owner.catalog,
+                &state.catalog_hash,
+                &state.operations.journal(),
+            ),
             "prevent" => {
                 state.dispatch.available()?;
                 require(
@@ -383,13 +421,16 @@ impl NativeManagement {
                         .and_then(IvyJson::as_js_string)
                         .cloned(),
                 )?;
+                let method = method.unwrap().clone();
+                args.required("params")?;
+                let params = args.remove("params").unwrap();
                 state
                     .operations
                     .run(
                         identity,
-                        method.unwrap().clone(),
-                        args.required("params")?.clone(),
-                        || async { Err(IvyError::internal()) },
+                        method,
+                        params,
+                        |_| async { Err(IvyError::internal()) },
                         true,
                     )?
                     .wait()
@@ -402,13 +443,12 @@ impl NativeManagement {
                     "Dispatch requires its bound native method and original operation identity.",
                 )?;
                 let identity = caller_identity(context.caller_principal_id, context.operation_id)?;
+                let method = args.required("method")?.as_js_string().unwrap().clone();
+                args.required("params")?;
+                let params = args.remove("params").unwrap();
                 state
                     .dispatch
-                    .invoke(
-                        identity,
-                        args.required("method")?.as_js_string().unwrap().clone(),
-                        args.required("params")?.clone(),
-                    )?
+                    .invoke(identity, method, params)?
                     .wait()
                     .await
             }
@@ -427,9 +467,10 @@ impl NativeManagement {
                         identity.caller_principal_id,
                         identity.operation_id,
                         args.required("method")?.as_js_string().unwrap().clone(),
-                        args.required("params")?.clone(),
+                        args.remove("params").ok_or_else(IvyError::internal)?,
                         move |request| async move {
-                            let timeout_ms = native_read_timeout_ms(&request.method, &request.params);
+                            let timeout_ms =
+                                native_read_timeout_ms(&request.method, &request.params);
                             rpc.request(
                                 request.method,
                                 request.params,
@@ -463,25 +504,13 @@ impl NativeManagement {
             }
             "read" => self.read(args, &context).await,
             "operation" => {
-                let operation_id = property_string(&args, "operationId")?;
-                let identity =
-                    caller_identity(context.caller_principal_id, Some(operation_id.clone()))?;
-                state.operations.read(&identity).await?.ok_or_else(|| {
-                    let epoch = state.operations.journal().lock().unwrap().epoch().cloned();
-                    IvyError::new(
-                        "not_found",
-                        "Native operation was not found for this caller.",
-                    )
-                    .with_details(IvyJson::object([
-                        ("kind", "agent_operation_absent".into()),
-                        ("operationId", IvyJson::String(operation_id)),
-                        (
-                            "serviceNodeId",
-                            IvyJson::String(state.owner.service_node_id.clone()),
-                        ),
-                        ("epoch", epoch.map(IvyJson::String).unwrap_or(IvyJson::Null)),
-                    ]))
-                })
+                read_operation(
+                    &state.operations,
+                    &state.owner.service_node_id,
+                    &args,
+                    context,
+                )
+                .await
             }
             "inputs" => state.operations.journal().lock().unwrap().inputs(&args),
             "inputDefinition" => self.input_definition(&args),
@@ -501,13 +530,13 @@ impl NativeManagement {
                         .and_then(IvyJson::as_js_string)
                         .cloned(),
                 )?;
+                args.required("identity")?;
+                let input_identity = args.remove("identity").unwrap();
+                args.required("reply")?;
+                let reply = args.remove("reply").unwrap();
                 state
                     .dispatch
-                    .answer(
-                        identity,
-                        args.required("identity")?.clone(),
-                        args.required("reply")?.clone(),
-                    )?
+                    .answer(identity, input_identity, reply)?
                     .wait()
                     .await
             }

@@ -196,8 +196,9 @@ impl AgentShutdownWork {
         let receipts = self.receipts.clone();
         let inventory = self.inventory.clone();
         Box::pin(async move {
-            let _ = tokio::join!(snapshot, receipts.drain(), inventory.drain());
-            Ok(())
+            let (invocations, receipts, inventory) =
+                tokio::join!(snapshot, receipts.drain(), inventory.drain());
+            invocations.and(receipts).and(inventory)
         })
     }
 }

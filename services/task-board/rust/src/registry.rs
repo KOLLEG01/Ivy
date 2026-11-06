@@ -55,7 +55,9 @@ impl TaskBoardRegistry {
             if !matches!(name.as_str(), "workspace" | "markCommentsRead") {
                 let mcp_name = match name.as_str() {
                     "edit" | "retargetQuestion" | "transition" | "defer" | "reassign"
-                    | "newThread" | "cancel" | "archive" => "task_update".to_owned(),
+                    | "newThread" | "migrateNativeRoute" | "cancel" | "archive" => {
+                        "task_update".to_owned()
+                    }
                     "read" | "operation" | "operationReceipt" => "task_read".to_owned(),
                     "list" | "categories" => "task_list".to_owned(),
                     _ => {

@@ -416,10 +416,12 @@ fn compare_with_error_codes(steps: &[Value], changed: &[(usize, &str)]) -> Value
     for step in &mut expanded {
         step["identityTables"] = true.into();
     }
+    let mut profile = expected["registryRuntime"].clone();
+    catalog_fixture::legacy_inventory_source_times(&mut expanded, &mut profile);
     let actual = native(
         &root.0.join("native.sqlite"),
         &expanded,
-        &expected["registryRuntime"],
+        &profile,
     );
     let actual_rows = actual["rows"].as_array().unwrap();
     let original_rows = expected["rows"].as_array().unwrap();
@@ -551,6 +553,12 @@ fn compare_with_error_codes(steps: &[Value], changed: &[(usize, &str)]) -> Value
     for (index, (a, b)) in actual_rows.iter().zip(original_rows).enumerate() {
         let mut native = normalized(a, &aliases, &requests, false);
         let mut original = normalized(b, &no_aliases, &requests, true);
+        if steps[index]["request"]["method"] == "system.status" && native["value"]["kind"] == "result" {
+            let capability = json!({"parameters":"json","preReadyOutcome":"not_executed"});
+            assert_eq!(native["value"]["value"]["nativeToolTransport"], capability);
+            // The retained implementation predates the positive admission field.
+            original["value"]["value"]["nativeToolTransport"] = capability;
+        }
         for row in [&mut native, &mut original] {
             if let Some(notifications) = row.get_mut("notifications").and_then(Value::as_array_mut) {
                 for notification in notifications { catalog_fixture::project_routing_notification(notification); }

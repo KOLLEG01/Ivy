@@ -1,6 +1,6 @@
 //! Portable service policy. Account identities, credentials and devices stay local.
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
 use crate::node_path::{self, Style};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
 use std::path::Path;
 
 /// Omitted fields inherit defaults. Explicit nulls, arrays and values replace them.
@@ -35,7 +35,13 @@ pub fn default_service_settings(
     ivy_root: &Path,
     config_path: &Path,
 ) -> IvyResult<IvyJson> {
-    default_service_settings_for_paths(component, settings, &node_path::from_native(ivy_root), &node_path::from_native(config_path), Style::native())
+    default_service_settings_for_paths(
+        component,
+        settings,
+        &node_path::from_native(ivy_root),
+        &node_path::from_native(config_path),
+        Style::native(),
+    )
 }
 
 /// Resolve lexical defaults in the selected host's path flavor, without a
@@ -47,6 +53,29 @@ pub fn default_service_settings_for_paths(
     config_path: &JsString,
     style: Style,
 ) -> IvyResult<IvyJson> {
+    if component == "agent-manager" && settings.get("backends").is_some() {
+        let entries = crate::agent_backends::configured_backends(settings, None)?;
+        let mut backends = Vec::with_capacity(entries.len());
+        for backend in entries {
+            backends.push(IvyJson::object([
+                (
+                    "dataRoot",
+                    backend.data_root.cloned().ok_or_else(IvyError::internal)?,
+                ),
+                (
+                    "settings",
+                    default_service_settings_for_paths(
+                        component,
+                        backend.settings,
+                        ivy_root,
+                        config_path,
+                        style,
+                    )?,
+                ),
+            ]));
+        }
+        return Ok(IvyJson::object([("backends", IvyJson::Array(backends))]));
+    }
     let source = match component {
         "host-executor" | "service-manager" => "{}",
         "hive" => {
@@ -76,16 +105,29 @@ pub fn default_service_settings_for_paths(
         }
         "hive" => {
             let mut backup = defaults.required("backup")?.clone();
-            backup.insert("directory", IvyJson::String(node_path::join(style, &[ivy_root.clone(), "backups".into(), "hive".into()])));
+            backup.insert(
+                "directory",
+                IvyJson::String(node_path::join(
+                    style,
+                    &[ivy_root.clone(), "backups".into(), "hive".into()],
+                )),
+            );
             defaults.insert("backup", backup);
         }
         "phone-bridge" => {
             let windows = style == Style::Windows;
-            defaults.insert("native", IvyJson::object([("executable", if windows {
-                "dist/native/phone/Ivy.PhoneRuntime.exe"
-            } else {
-                "dist/native/linux-x64/ivy-phone-native"
-            }.into())]));
+            defaults.insert(
+                "native",
+                IvyJson::object([(
+                    "executable",
+                    if windows {
+                        "dist/native/phone/Ivy.PhoneRuntime.exe"
+                    } else {
+                        "dist/native/linux-x64/ivy-phone-native"
+                    }
+                    .into(),
+                )]),
+            );
             if windows {
                 defaults.insert("audio", parse(r#"{"captureBufferMs":20,"queueMs":80,"renderLatencyMs":20,"sourceMode":"system_excluding_runtime"}"#, 1024)?);
             } else {

@@ -1,4 +1,5 @@
-//! Native JSONL over caller-owned streams. No process launch, retry or daemon kill.
+//! Native protocol over caller-owned streams or in-process values.
+//! No process launch, retry or daemon kill.
 //! One actor serializes protocol state and durable hooks. Dropping a request
 //! waiter does not cancel dispatch or its eventual before-resolve commit.
 use super::codex_admission::{NativeAdmission, PendingRequest, Priority, ResponseOwner, Timeout};
@@ -22,6 +23,13 @@ use tokio::{
     task::JoinHandle,
     time::Instant,
 };
+#[path = "codex_rpc_frames.rs"]
+mod frames;
+pub use frames::{NativeFrame, NativeFrameReceiver, NativeFrameSender};
+#[path = "codex_rpc_commands.rs"]
+mod commands;
+#[path = "codex_rpc_replies.rs"]
+mod replies;
 
 pub use ivy_contracts::limits::{
     NATIVE_ANSWER_FRAME_BYTES, NATIVE_FRAME_BYTES, NATIVE_REQUEST_FRAME_BYTES,
@@ -83,14 +91,41 @@ impl Default for Events {
 
 type Answer<T> = oneshot::Sender<IvyResult<T>>;
 enum Command {
-    Request(JsString, IvyJson, RequestOptions, Answer<IvyJson>),
+    Request(JsString, IvyJson, RequestOptions, replies::Answer),
     Notify(JsString, IvyJson, Answer<()>),
     Answer(JsString, IvyJson, IvyJson, BeforeSend, Answer<()>),
     Close(String),
 }
+struct CommandMessage {
+    command: Command,
+    _retained: Option<commands::Reservation>,
+}
 enum Incoming {
     Frame(IvyJson),
+    Local(frames::NativeFrame),
     Close(String),
+}
+enum Writer {
+    Stream(mpsc::UnboundedSender<Vec<u8>>),
+    Local(frames::Writer),
+}
+enum PreparedWrite {
+    Bytes(Vec<u8>),
+    Local(frames::NativeFrame),
+}
+impl Writer {
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Stream(w) => w.is_closed(),
+            Self::Local(w) => w.closed(),
+        }
+    }
+    fn prepare(&self, value: IvyJson, maximum: usize, control: bool) -> IvyResult<PreparedWrite> {
+        match self {
+            Self::Stream(_) => encoded(&value, maximum).map(PreparedWrite::Bytes),
+            Self::Local(w) => w.prepare(value, maximum, control).map(PreparedWrite::Local),
+        }
+    }
 }
 struct Pending {
     key: String,
@@ -98,7 +133,8 @@ struct Pending {
     method: JsString,
     options: RequestOptions,
     deadline: Instant,
-    response: Answer<IvyJson>,
+    response: replies::Answer,
+    call: replies::Call,
 }
 struct Tasks(Vec<JoinHandle<()>>);
 impl Drop for Tasks {
@@ -111,7 +147,8 @@ impl Drop for Tasks {
 
 #[derive(Clone)]
 pub struct NativeRpc {
-    commands: mpsc::Sender<Command>,
+    commands: mpsc::Sender<CommandMessage>,
+    command_budget: Arc<commands::Budget>,
     state: watch::Receiver<Option<String>>,
     catalog: Arc<IvyJson>,
 }
@@ -126,6 +163,47 @@ impl NativeRpc {
         W: AsyncWrite + Unpin + Send + 'static,
         R: AsyncRead + Unpin + Send + 'static,
     {
+        let (incoming_tx, incoming) = mpsc::channel(1);
+        let (writes, write_rx) = mpsc::unbounded_channel();
+        let buffered = Arc::new(AtomicUsize::new(0));
+        let tasks = Tasks(vec![
+            tokio::spawn(read_stream(output, incoming_tx.clone())),
+            tokio::spawn(write_stream(input, write_rx, incoming_tx, buffered.clone())),
+        ]);
+        Self::start_transport(
+            catalog,
+            events,
+            Writer::Stream(writes),
+            buffered,
+            incoming,
+            tasks,
+        )
+    }
+    /// Reuse admission, durable hooks, reply validation and close ordering while
+    /// moving protocol values directly between Rust owners, without JSONL.
+    pub fn start_frames(
+        catalog: Arc<IvyJson>,
+        events: Events,
+    ) -> IvyResult<(Self, NativeFrameReceiver, NativeFrameSender)> {
+        let (writer, output, input, incoming) = frames::channels();
+        let rpc = Self::start_transport(
+            catalog,
+            events,
+            Writer::Local(writer),
+            Arc::new(AtomicUsize::new(0)),
+            incoming,
+            Tasks(vec![]),
+        )?;
+        Ok((rpc, output, input))
+    }
+    fn start_transport(
+        catalog: Arc<IvyJson>,
+        events: Events,
+        writes: Writer,
+        buffered: Arc<AtomicUsize>,
+        incoming: mpsc::Receiver<Incoming>,
+        tasks: Tasks,
+    ) -> IvyResult<Self> {
         validate_agent("Catalog", &catalog)?;
         let definitions = |name| -> IvyResult<BTreeMap<JsString, MethodParameters>> {
             let mut map = BTreeMap::new();
@@ -158,15 +236,9 @@ impl NativeRpc {
         let client_notifications = definitions("clientNotifications")?;
         let (commands, receiver) = mpsc::channel(64);
         let (state_tx, state) = watch::channel(None);
-        let (incoming_tx, incoming) = mpsc::channel(1);
-        let (writes, write_rx) = mpsc::unbounded_channel();
-        let buffered = Arc::new(AtomicUsize::new(0));
-        let tasks = Tasks(vec![
-            tokio::spawn(read_stream(output, incoming_tx.clone())),
-            tokio::spawn(write_stream(input, write_rx, incoming_tx, buffered.clone())),
-        ]);
         let actor = Actor {
             admission: NativeAdmission::default(),
+            replies: replies::Budget::new(),
             pending: Vec::new(),
             observation_prefix: format!("observation-{}:", uuid::Uuid::new_v4()),
             observation_sequence: 0,
@@ -185,6 +257,7 @@ impl NativeRpc {
         });
         Ok(Self {
             commands,
+            command_budget: Arc::new(commands::Budget::new()),
             state,
             catalog,
         })
@@ -207,8 +280,29 @@ impl NativeRpc {
         }
     }
     pub async fn close(&self, code: impl Into<String>) {
-        let _ = self.commands.send(Command::Close(code.into())).await;
+        let _ = self
+            .commands
+            .send(CommandMessage {
+                command: Command::Close(code.into()),
+                _retained: None,
+            })
+            .await;
         self.closed().await;
+    }
+    fn enqueue(&self, command: Command) -> IvyResult<()> {
+        if self.commands.is_closed() {
+            return Err(unavailable());
+        }
+        let retained = self.command_budget.reserve(&command)?;
+        self.commands
+            .try_send(CommandMessage {
+                command,
+                _retained: Some(retained),
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => commands::capacity(),
+                mpsc::error::TrySendError::Closed(_) => unavailable(),
+            })
     }
     pub async fn request(
         &self,
@@ -217,19 +311,14 @@ impl NativeRpc {
         options: RequestOptions,
     ) -> IvyResult<IvyJson> {
         let (tx, rx) = oneshot::channel();
-        self.commands
-            .send(Command::Request(method, params, options, tx))
-            .await
-            .map_err(|_| unavailable())?;
+        self.enqueue(Command::Request(method, params, options, tx))?;
         rx.await
+            .map(|completion| completion.result)
             .unwrap_or_else(|_| Err(unknown("native_connection_closed")))
     }
     pub async fn notify(&self, method: JsString, params: IvyJson) -> IvyResult<()> {
         let (tx, rx) = oneshot::channel();
-        self.commands
-            .send(Command::Notify(method, params, tx))
-            .await
-            .map_err(|_| unavailable())?;
+        self.enqueue(Command::Notify(method, params, tx))?;
         rx.await
             .unwrap_or_else(|_| Err(unknown("native_connection_closed")))
     }
@@ -242,10 +331,7 @@ impl NativeRpc {
         before_send: BeforeSend,
     ) -> IvyResult<()> {
         let (tx, rx) = oneshot::channel();
-        self.commands
-            .send(Command::Answer(method, id, reply, before_send, tx))
-            .await
-            .map_err(|_| unavailable())?;
+        self.enqueue(Command::Answer(method, id, reply, before_send, tx))?;
         rx.await
             .unwrap_or_else(|_| Err(unknown("native_connection_closed")))
     }
@@ -329,6 +415,7 @@ struct MethodParameters {
 }
 struct Actor {
     admission: NativeAdmission,
+    replies: replies::Budget,
     pending: Vec<Pending>,
     observation_prefix: String,
     observation_sequence: u64,
@@ -337,7 +424,7 @@ struct Actor {
     notifications: BTreeMap<JsString, MethodParameters>,
     client_notifications: BTreeMap<JsString, MethodParameters>,
     events: Events,
-    writes: mpsc::UnboundedSender<Vec<u8>>,
+    writes: Writer,
     buffered: Arc<AtomicUsize>,
     state: watch::Sender<Option<String>>,
 }
@@ -352,29 +439,40 @@ impl Actor {
                 })
             })
     }
-    fn writable(&self) -> IvyResult<()> {
+    fn writable(&self, control: bool) -> IvyResult<()> {
         require(
             !self.writes.is_closed(),
             "native_unavailable",
             "Native connection is unavailable.",
         )?;
         require(
-            self.buffered.load(Ordering::SeqCst) < NATIVE_ANSWER_FRAME_BYTES,
+            match &self.writes {
+                Writer::Stream(_) => {
+                    self.buffered.load(Ordering::SeqCst) < NATIVE_ANSWER_FRAME_BYTES
+                }
+                Writer::Local(writer) => writer.writable(control),
+            },
             "native_capacity",
             "Native write buffer is full; no new native request was sent.",
         )
     }
-    fn write(&self, bytes: Vec<u8>) -> IvyResult<()> {
-        let len = bytes.len();
-        self.buffered.fetch_add(len, Ordering::SeqCst);
-        self.writes.send(bytes).map_err(|_| {
-            self.buffered.fetch_sub(len, Ordering::SeqCst);
-            unknown("native_write_failed")
-        })
+    fn write(&self, frame: PreparedWrite) -> IvyResult<()> {
+        match (&self.writes, frame) {
+            (Writer::Stream(writer), PreparedWrite::Bytes(bytes)) => {
+                let len = bytes.len();
+                self.buffered.fetch_add(len, Ordering::SeqCst);
+                writer.send(bytes).map_err(|_| {
+                    self.buffered.fetch_sub(len, Ordering::SeqCst);
+                    unknown("native_write_failed")
+                })
+            }
+            (Writer::Local(writer), PreparedWrite::Local(frame)) => writer.send(frame),
+            _ => unreachable!("native transport owns its prepared value"),
+        }
     }
     async fn run(
         mut self,
-        mut commands: mpsc::Receiver<Command>,
+        mut commands: mpsc::Receiver<CommandMessage>,
         mut incoming: mpsc::Receiver<Incoming>,
     ) {
         let code = loop {
@@ -388,11 +486,12 @@ impl Actor {
             tokio::select! {
                 message = incoming.recv() => match message {
                     Some(Incoming::Frame(frame)) => if let Err(error) = self.frame(frame).await { break error.code; },
+                    Some(Incoming::Local(frame)) => if let Err(error) = self.frame(frame.value).await { break error.code; },
                     Some(Incoming::Close(code)) => break code,
                     None => break "native_connection_closed".into(),
                 },
                 command = commands.recv() => match command {
-                    Some(Command::Close(code)) => break code,
+                    Some(CommandMessage { command: Command::Close(code), .. }) => break code,
                     Some(command) => if let Some(code) = self.command(command).await { break code; },
                     None => break "native_connection_closed".into(),
                 },
@@ -406,7 +505,7 @@ impl Actor {
                             if self.observation(&p.id) { self.admission.complete(&id); }
                             let error = IvyError::new("native_observation_deadline", "Background observation expired; active turns remain connected.")
                                 .with_outcome(Outcome::Unknown).with_details(details(&p));
-                            let _ = p.response.send(Err(error));
+                            self.replies.finish(p.response, Err(error), p.call, p.options.priority == Priority::Interaction);
                         }, Timeout::Inactive => {},
                     }
                 }
@@ -423,12 +522,17 @@ impl Actor {
         self.admission.close();
         for p in self.pending.drain(..) {
             let error = unknown(&code).with_details(details(&p));
-            let _ = p.response.send(Err(error));
+            self.replies.finish(
+                p.response,
+                Err(error),
+                p.call,
+                p.options.priority == Priority::Interaction,
+            );
         }
         while let Ok(command) = commands.try_recv() {
-            match command {
+            match command.command {
                 Command::Request(_, _, _, tx) => {
-                    let _ = tx.send(Err(unavailable()));
+                    let _ = tx.send(replies::Completion::rejected(unavailable()));
                 }
                 Command::Notify(_, _, tx) | Command::Answer(_, _, _, _, tx) => {
                     let _ = tx.send(Err(unavailable()));
@@ -438,11 +542,14 @@ impl Actor {
         }
         self.state.send_replace(Some(code));
     }
-    async fn command(&mut self, command: Command) -> Option<String> {
+    async fn command(&mut self, message: CommandMessage) -> Option<String> {
+        // The command owns admission through preparation, durable hooks and
+        // transfer, even when its original receiver has been dropped.
+        let CommandMessage { command, _retained } = message;
         match command {
             Command::Request(method, params, options, response) => {
-                let mut prepare = || -> IvyResult<(IvyJson, String, Vec<u8>)> {
-                    self.writable()?;
+                let prepare = || -> IvyResult<(IvyJson, String, PreparedWrite, replies::Call)> {
+                    self.writable(options.priority == Priority::Interaction)?;
                     self.admission
                         .check_capacity(options.detach_on_timeout, options.priority)
                         .map_err(|e| IvyError::new(e.code(),
@@ -493,20 +600,24 @@ impl Actor {
                         "native_state_conflict",
                         "Native request ID is already in use.",
                     )?;
-                    let bytes = encoded(
-                        &IvyJson::object([
+                    let call = self
+                        .replies
+                        .reserve_call(options.priority == Priority::Interaction)?;
+                    let bytes = self.writes.prepare(
+                        IvyJson::object([
                             ("id", id.clone()),
                             ("method", IvyJson::String(method.clone())),
                             ("params", params),
                         ]),
                         NATIVE_REQUEST_FRAME_BYTES,
+                        options.priority == Priority::Interaction,
                     )?;
-                    Ok((id, id_key, bytes))
+                    Ok((id, id_key, bytes, call))
                 };
-                let (id, id_key, bytes) = match prepare() {
+                let (id, id_key, bytes, call) = match prepare() {
                     Ok(v) => v,
                     Err(e) => {
-                        let _ = response.send(Err(e));
+                        let _ = response.send(replies::Completion::rejected(e));
                         return None;
                     }
                 };
@@ -525,7 +636,12 @@ impl Actor {
                 if let Some(hook) = &options.before_send {
                     if let Err(error) = hook(id.clone()).await {
                         self.admission.cancel_before_send(&id_key);
-                        let _ = response.send(Err(error));
+                        self.replies.finish(
+                            response,
+                            Err(error),
+                            call,
+                            options.priority == Priority::Interaction,
+                        );
                         return None;
                     }
                 }
@@ -536,6 +652,7 @@ impl Actor {
                     options,
                     deadline,
                     response,
+                    call,
                 });
                 if self.write(bytes).is_err() {
                     return Some("native_write_failed".into());
@@ -543,7 +660,7 @@ impl Actor {
             }
             Command::Notify(method, params, response) => {
                 let result = (|| {
-                    self.writable()?;
+                    self.writable(true)?;
                     let definition = self.client_notifications.get(&method).ok_or_else(|| {
                         IvyError::new(
                             "native_method_unavailable",
@@ -554,7 +671,9 @@ impl Actor {
                     if !definition.absent {
                         frame.insert("params", params);
                     }
-                    let bytes = encoded(&frame, NATIVE_ANSWER_FRAME_BYTES)?;
+                    let bytes = self
+                        .writes
+                        .prepare(frame, NATIVE_ANSWER_FRAME_BYTES, true)?;
                     self.write(bytes)
                 })();
                 let close = result
@@ -567,7 +686,7 @@ impl Actor {
             }
             Command::Answer(method, id, reply, hook, response) => {
                 let prepare = || {
-                    self.writable()?;
+                    self.writable(true)?;
                     validate_agent_frame(&id, NativeFrameKind::RequestId)?;
                     validate_agent_frame(&reply, NativeFrameKind::Reply)?;
                     require(
@@ -576,10 +695,10 @@ impl Actor {
                         "Server request is absent from the installed native catalog.",
                     )?;
                     let mut frame = IvyJson::object([("id", id.clone())]);
-                    for (name, value) in reply.as_object().expect("validated object") {
-                        frame.insert(name.clone(), value.clone());
+                    for (name, value) in reply.into_object().expect("validated object") {
+                        frame.insert(name, value);
                     }
-                    encoded(&frame, NATIVE_ANSWER_FRAME_BYTES)
+                    self.writes.prepare(frame, NATIVE_ANSWER_FRAME_BYTES, true)
                 };
                 let result = match prepare() {
                     Ok(bytes) => match hook(id).await {
@@ -599,7 +718,7 @@ impl Actor {
         }
         None
     }
-    async fn frame(&mut self, frame: IvyJson) -> IvyResult<()> {
+    async fn frame(&mut self, mut frame: IvyJson) -> IvyResult<()> {
         require(
             frame.as_object().is_some(),
             "native_invalid_frame",
@@ -639,21 +758,15 @@ impl Actor {
                 "native_invalid_frame",
                 "Native method is missing required parameters.",
             )?;
-            let params = frame.get("params").cloned().unwrap_or(IvyJson::Null);
+            let method = method.clone();
             if let Some(id) = frame.get("id") {
                 validate_agent_frame(id, NativeFrameKind::RequestId)?;
-                (self.events.on_request)(NativeRequest {
-                    id: id.clone(),
-                    method: method.clone(),
-                    params,
-                })
-                .await?;
+            }
+            let params = frame.remove("params").unwrap_or(IvyJson::Null);
+            if let Some(id) = frame.remove("id") {
+                (self.events.on_request)(NativeRequest { id, method, params }).await?;
             } else {
-                (self.events.on_notification)(NativeNotification {
-                    method: method.clone(),
-                    params,
-                })
-                .await?;
+                (self.events.on_notification)(NativeNotification { method, params }).await?;
             }
             return Ok(());
         }
@@ -680,9 +793,9 @@ impl Actor {
             "native_invalid_frame",
             "Native response requires exactly one result or error.",
         )?;
-        let reply = match frame.get("result") {
-            Some(result) => IvyJson::object([("result", result.clone())]),
-            None => IvyJson::object([("error", frame.get("error").unwrap().clone())]),
+        let reply = match frame.remove("result") {
+            Some(result) => IvyJson::object([("result", result)]),
+            None => IvyJson::object([("error", frame.remove("error").unwrap())]),
         };
         validate_agent_frame(&reply, NativeFrameKind::Reply)?;
         if let Some(index) = self.pending.iter().position(|p| p.key == id_key) {
@@ -698,7 +811,12 @@ impl Actor {
             }
             let p = self.pending.remove(index);
             self.admission.complete(&id_key);
-            let _ = p.response.send(Ok(reply));
+            self.replies.finish(
+                p.response,
+                Ok(reply),
+                p.call,
+                p.options.priority == Priority::Interaction,
+            );
         } else {
             self.admission.complete(&id_key);
         }

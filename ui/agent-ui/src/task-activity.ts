@@ -1,5 +1,6 @@
-import type { Operation } from '../../../packages/sdk/src/client.js';
+import type { Agent, Operation } from '../../../packages/sdk/src/client.js';
 import { record, text } from '../../../packages/ui-client/src/native.js';
+import { nativeResourceKey } from '../../../packages/ui-client/src/native-route.js';
 
 export type TaskActivity = 'working' | 'unread' | null;
 /** A lifecycle event observed live; it outranks the inventory until the inventory can have caught up. */
@@ -9,12 +10,12 @@ export interface SeenTasks { since: number; tasks: Record<string, number> }
 
 export const liveStateMs = 90_000;
 const seenLimit = 500;
-export const taskKey = (serviceNodeId: string, threadId: string) => serviceNodeId + ':' + threadId;
+export const taskKey = (serviceNodeId: string, threadId: string, namespace = 'codex', backend?: Agent.BackendIdentity) => nativeResourceKey({ serviceNodeId, namespace, kind: 'thread', nativeId: threadId }, backend);
 
-export function taskActivity(item: Operation.InventoryItem, live: Map<string, LiveTaskState>, seen: SeenTasks, openKey: string, now = Date.now()): TaskActivity {
-  const key = taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId), summary = record(item.summary), event = live.get(key);
+export function taskActivity(item: Operation.InventoryItem, live: Map<string, LiveTaskState>, seen: SeenTasks, openKey: string, now = Date.now(), backend?: Agent.BackendIdentity): TaskActivity {
+  const key = taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId, item.resourceRef.namespace, backend), summary = record(item.summary), event = live.get(key);
   const fresh = event && now - event.at < liveStateMs ? event : undefined;
-  if (fresh ? fresh.working : text(record(summary.status).type) === 'active') return 'working';
+  if (fresh ? fresh.working : !item.stale && text(record(summary.status).type) === 'active') return 'working';
   if (key === openKey) return null;
   const lastSeen = seen.tasks[key] ?? seen.since, updatedAt = Number(summary.updatedAt) * 1000;
   return (fresh && fresh.at > lastSeen) || (Number.isFinite(updatedAt) && updatedAt > lastSeen) ? 'unread' : null;

@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "hive_inventory_observation.rs"]
+mod observation;
+
 pub(super) fn ok(steps: &mut Vec<Value>, mut step: Value) -> usize {
     step["requireSuccess"] = true.into();
     push(steps, step)
@@ -408,7 +411,14 @@ fn measured_inventory_pages(steps: &[Value]) {
             }
         }
     }
-    fn execute(kernel: &mut Kernel, step: Value) -> IvyJson {
+    fn execute(kernel: &mut Kernel, mut step: Value) -> IvyJson {
+        // This retained measurement fixture uses one fixed source time throughout.
+        if step["request"]["method"] == "inventory.sync" {
+            let entries = step["request"]["params"]["entries"].as_array().unwrap();
+            assert!(!entries.is_empty());
+            assert!(entries.iter().all(|entry| entry["observedAt"] == "1970-01-01T00:01:40Z"));
+            step["request"]["params"]["observedAt"] = "1970-01-01T00:01:40Z".into();
+        }
         let result = kernel
             .execute(
                 &IvyJson::from_serde(&step["context"]).unwrap(),

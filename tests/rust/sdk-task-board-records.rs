@@ -96,6 +96,32 @@ fn task() -> Json {
         r#"{"schemaVersion":1,"fields":{"control":"agent","executionRequirement":null},"workflowState":"todo","comments":[],"updatedAt":"2026-10-20T00:00:00.000Z"}"#,
     )
 }
+
+#[test]
+fn retained_single_owner_route_upgrades_without_changing_original_addresses() {
+    let route = parse(
+        r#"{"source":{"hostId":"host","serviceNodeId":"old"},"target":{"hostId":"host","serviceNodeId":"joint","backend":{"backendId":"codex","provider":"codex","accountId":"main"}}}"#,
+    );
+    ivy_contracts::native_backend::BackendIdentity::from_json(
+        route
+            .required("target")
+            .unwrap()
+            .required("backend")
+            .unwrap(),
+    )
+    .unwrap();
+    let mut input = task();
+    input.insert("nativeRoute", route.clone());
+    let before = input.clone();
+    let upgraded = upgrade_task_record(&input).unwrap();
+    assert!(upgraded.get("nativeRoute").is_none());
+    assert_eq!(
+        upgraded.get("nativeRoutes"),
+        Some(&Json::Array(vec![route]))
+    );
+    assert_eq!(input, before);
+    assert_eq!(upgrade_task_record(&upgraded).unwrap(), upgraded);
+}
 fn question(sequence: usize) -> Json {
     let mut comment = parse(
         r#"{"commentId":"q","sequence":1,"author":{"serviceNodeId":"example","generation":1},"authorKind":"agent","purpose":"question","recipient":{"kind":"user"},"body":"keep\ud800","requests":[],"responses":[],"replyTo":null}"#,

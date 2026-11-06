@@ -197,8 +197,9 @@ impl RpcClient for Client {
                     ("observedMethods", Json::Array(vec![])),
                 ])),
                 "agent.inputs" => Ok(Json::object([
+                    ("epoch", "epoch".into()),
                     ("items", Json::Array(vec![])),
-                    ("nextCursor", Json::Null),
+                    ("truncated", false.into()),
                 ])),
                 "agent.read" => {
                     let a = params.required("arguments")?;
@@ -412,6 +413,7 @@ impl OrchestrationPolicies for Engine<'_, '_> {
                     panic!("Empty native input fixture cannot publish comments")
                 },
             },
+            self.catalogs,
             r,
         )
         .await
@@ -459,7 +461,21 @@ async fn concrete_orchestration_persists_verified_terminal_evidence_reopens_and_
     let catalogs =
         CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
     let catalog = catalogs
-        .checked_native_contract(&"0.159.2".into(), None)
+        .checked_native_contract(
+            &"0.159.2".into(),
+            Some(&Json::object([(
+                "sourceHash",
+                row.required("run")
+                    .unwrap()
+                    .required("value")
+                    .unwrap()
+                    .required("plan")
+                    .unwrap()
+                    .required("catalogSourceHash")
+                    .unwrap()
+                    .clone(),
+            )])),
+        )
         .unwrap()
         .catalog()
         .clone();
@@ -494,6 +510,8 @@ async fn concrete_orchestration_persists_verified_terminal_evidence_reopens_and_
                 .required("value")
                 .unwrap()
                 .clone();
+            task.insert("fields", Json::Object(vec![]));
+            task.insert("nativeRoutes", Json::Array(vec![]));
             if handoff {
                 task.insert(
                     "comments",

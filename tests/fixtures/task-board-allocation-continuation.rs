@@ -57,6 +57,10 @@ fn continuation_requires_own_terminal_known_run_and_same_context() {
         ),
         (
             "externalOutcome",
+            Json::object([("state", "unknown".into())]),
+        ),
+        (
+            "externalOutcome",
             Json::object([("state", "outcome_unknown".into())]),
         ),
     ] {
@@ -173,5 +177,115 @@ fn continuation_accepts_native_owner_resolved_alias_without_changing_saved_works
             continuation_workspace(&task.value, &previous, &observed(changed), Some(&canonical))
                 .is_err()
         );
+    }
+}
+
+#[test]
+fn migrated_continuation_uses_current_addresses_without_rewriting_the_original_run() {
+    use ivy_contracts::hash::hash_json;
+    use ivy_contracts::native_backend::NativeProvider;
+    for scoped in [false, true] {
+        let backend =
+            BackendIdentity::new("joint".into(), NativeProvider::Codex, "primary".into()).unwrap();
+        let old = scoped.then(|| {
+            BackendIdentity::new("previous".into(), NativeProvider::Codex, "primary".into())
+                .unwrap()
+        });
+        let source = BackendIdentity::select_arguments(
+            old.as_ref(),
+            Json::object([
+                ("hostId", "physical".into()),
+                ("serviceNodeId", "old-node".into()),
+            ]),
+        )
+        .unwrap();
+        let target = backend
+            .arguments(Json::object([
+                ("hostId", "physical".into()),
+                ("serviceNodeId", "joint-node".into()),
+            ]))
+            .unwrap();
+        let primary = Json::object([
+            ("serviceNodeId", "old-node".into()),
+            (
+                "namespace",
+                old.as_ref().map_or("codex", BackendIdentity::id).into(),
+            ),
+            ("kind", "thread".into()),
+            ("nativeId", "saved".into()),
+        ]);
+        let workspace = Json::object([
+            ("hostId", "physical".into()),
+            ("serviceNodeId", "old-node".into()),
+            ("canonicalCwd", r"\\?\D:\work\Größe".into()),
+            ("intendedPath", r"D:\work\Größe".into()),
+            (
+                "repository",
+                Json::object([("commit", "original".into()), ("dirty", true.into())]),
+            ),
+            (
+                "project",
+                Json::object([
+                    ("serviceNodeId", "old-node".into()),
+                    (
+                        "namespace",
+                        old.as_ref().map_or("codex", BackendIdentity::id).into(),
+                    ),
+                    ("kind", "project".into()),
+                    ("nativeId", "same-project".into()),
+                ]),
+            ),
+        ]);
+        let mut run = run();
+        run.insert("target", source.clone());
+        run.insert("workspace", workspace.clone());
+        run.insert("primaryResourceRef", primary.clone());
+        let original = hash_json(&run).unwrap();
+        let mut task = task();
+        let mut current_primary = primary;
+        current_primary.insert("serviceNodeId", "joint-node".into());
+        current_primary.insert("namespace", backend.id().into());
+        task.value.insert("primaryResourceRef", current_primary);
+        task.value.insert("primaryBackend", backend.json());
+        task.value.insert(
+            "nativeRoutes",
+            Json::Array(vec![Json::object([
+                ("source", source.clone()),
+                ("target", target.clone()),
+            ])]),
+        );
+        validate_continuation(&task, &run).unwrap();
+        assert_eq!(routed_target(&task.value, &source).unwrap(), target);
+        let moved = routed_workspace(&task.value, &source, &workspace).unwrap();
+        assert_eq!(moved.get("serviceNodeId"), Some(&"joint-node".into()));
+        for key in ["canonicalCwd", "intendedPath", "repository"] {
+            assert_eq!(moved.get(key), workspace.get(key));
+        }
+        let project = moved.required("project").unwrap();
+        assert_eq!(project.get("serviceNodeId"), Some(&"joint-node".into()));
+        assert_eq!(project.get("namespace"), Some(&"joint".into()));
+        assert_eq!(project.get("nativeId"), Some(&"same-project".into()));
+        let mut foreign_workspace = workspace.clone();
+        foreign_workspace.insert("hostId", "foreign".into());
+        assert_eq!(
+            routed_workspace(&task.value, &source, &foreign_workspace)
+                .unwrap_err()
+                .code,
+            "task_board_workspace_mismatch"
+        );
+        let mut foreign_run = run.clone();
+        let mut target = source.clone();
+        target.insert(
+            "backend",
+            BackendIdentity::new("wrong".into(), NativeProvider::Codex, "foreign".into())
+                .unwrap()
+                .json(),
+        );
+        foreign_run.insert("target", target);
+        assert_eq!(
+            validate_continuation(&task, &foreign_run).unwrap_err().code,
+            "task_board_execution_unresolved"
+        );
+        assert_eq!(hash_json(&run).unwrap(), original);
     }
 }

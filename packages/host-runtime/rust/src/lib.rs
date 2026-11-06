@@ -4,6 +4,7 @@ pub mod build_identity;
 pub mod candidate_identity;
 pub mod accepted_configuration;
 pub mod actions;
+pub mod agent_backends;
 pub mod host_actions;
 pub mod artifact;
 #[path="artifact/file_record.rs"]

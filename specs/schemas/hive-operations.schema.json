@@ -2103,6 +2103,22 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 2048
+        },
+        "nativeToolTransport": {
+          "type": "object",
+          "properties": {
+            "parameters": {
+              "const": "json"
+            },
+            "preReadyOutcome": {
+              "const": "not_executed"
+            }
+          },
+          "required": [
+            "parameters",
+            "preReadyOutcome"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

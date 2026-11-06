@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { nativeVersions } from "./checked-native-versions.mjs";
+import { nativeBackendIdentity } from "./native-backend-identity.mjs";
 const ref = (name) => ({ $ref: "#/$defs/" + name });
 const wire = (name) => ({
   $ref: "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/" + name,
@@ -43,6 +44,46 @@ const notificationMethod = object({
   inputSource: { enum: ["native-json", "native-typescript-and-json-types"] },
 });
 const definitions = {
+  BackendIdentity: nativeBackendIdentity,
+  BackendsInput: object({}),
+  StorageIdentity: object({
+    serviceNodeId: id,
+    originalServiceNodeId: id,
+    provider: { enum: ["codex", "claude"] },
+  }),
+  BackendPreparationFailure: object({
+    backend: ref("BackendIdentity"),
+    serviceNodeId: id,
+    hostId: id,
+    nativeVersion: id,
+    nativeExecutableHash: hash,
+    phase: { const: "preparation" },
+    state: { const: "failed" },
+    observedAt: time,
+    code: id,
+    operationReadsAvailable: bool,
+  }),
+  BackendsResult: object({ backends: array({ anyOf: [ref("Status"), ref("BackendPreparationFailure")] }, 8) }),
+  NativeOwnerIdentity: object({
+    backend: ref("BackendIdentity"),
+    serviceNodeId: id,
+    hostId: nullable(id),
+    nativeVersion: id,
+    nativeExecutableHash: hash,
+    catalogHash: hash,
+  }, ["serviceNodeId", "nativeVersion", "nativeExecutableHash", "catalogHash"]),
+  ServiceSettings: {
+    oneOf: [
+      ref("Settings"),
+      object({ backends: { ...array(object({
+        dataRoot: { ...text(2048), minLength: 1 },
+        settings: { allOf: [ref("Settings"), {
+          required: ["backend", "appServer"],
+          anyOf: [{ required: ["nativeHome"] }, { required: ["codexHome"] }],
+        }] },
+      }), 8), minItems: 1 } }),
+    ],
+  },
   Catalog: object({
     schemaVersion: { const: 1 },
     provider: { const: "codex" },
@@ -80,6 +121,7 @@ const definitions = {
   }),
   Plan: object(
     {
+      backend: ref("BackendIdentity"),
       nativeVersion: id,
       catalogSourceHash: hash,
       definitions: ref("PlanDefinitions"),
@@ -101,6 +143,7 @@ const definitions = {
   // before any workflow write; durable plans contain their bounded validated parameter envelopes directly.
   PlanDraft: object(
     {
+      backend: ref("BackendIdentity"),
       nativeVersion: id,
       catalogSourceHash: hash,
       definitions: ref("PlanDefinitions"),
@@ -119,6 +162,7 @@ const definitions = {
     ],
   ),
   InvocationDraft: object({
+    backend: ref("BackendIdentity"),
     nativeVersion: id,
     catalogSourceHash: hash,
     method: {
@@ -131,7 +175,7 @@ const definitions = {
       ],
     },
     params: { type: "object", additionalProperties: wire("Json") },
-  }),
+  }, ["nativeVersion", "catalogSourceHash", "method", "params"]),
   WindowsShell: object({
     executable: { ...text(2048), minLength: 1 },
     executableHash: hash,
@@ -586,6 +630,14 @@ const definitions = {
     codex: ref('ExecutionDefaults'),
     claude: ref('ExecutionDefaults'),
   }),
+  AccountExecutionDefaults: object({
+    model: nullable(text(256)), mode: nullable(text(64)), effort: nullable(text(64)), permission: nullable(text(256)),
+    serviceTier: nullable({ enum: ['standard', 'fast', 'flex'] }),
+  }),
+  AccountExecutionDefaultsDocument: object({
+    schemaVersion: { const: 1 },
+    accounts: array(object({ backend: ref('BackendIdentity'), defaults: ref('AccountExecutionDefaults') }), 128),
+  }),
   DirectoryListInput: object({ path: { ...text(2048), minLength: 1 } }),
   DirectoryListResult: object({
     path: text(2048),
@@ -861,6 +913,24 @@ definitions.ReadObservation = {
     }),
   ),
 };
+// The backend selector belongs to Ivy's envelope. Provider JSON is unchanged.
+const optionalBackend = (definition) => {
+  if (definition.oneOf) { definition.oneOf.forEach(optionalBackend); return; }
+  definition.properties.backend = ref("BackendIdentity");
+};
+for (const name of [
+  "Settings", "StatusInput", "NativeDiscoveryInput", "FrameLimitsInput",
+  "PreventInput", "OperationInput", "ReadInput",
+  "PendingInputQuery", "InputDefinitionQuery", "AnswerInput", "NotificationQuery",
+  "ProjectsInput", "ProjectResolveInput", "WorkspaceResolveInput", "DirectoryListInput",
+  "StageFileInput", "ConfigureCapabilitiesInput",
+  "CapabilityProfileInput", "EnvironmentDefaultsInput", "TaskOutputCleanupInput",
+  "Status", "StorageIdentity", "NativeDiscovery", "FrameLimits", "Operation", "OperationAbsence",
+  "Interaction", "ReadObservation", "InputIdentity", "PendingInputPage", "InputDefinition",
+  "NotificationPage", "Notification", "InputNotification", "ProjectsResult", "ProjectLocation",
+  "WorkspaceResolution", "DirectoryListResult", "StagedFile", "CapabilityProfile",
+  "TaskOutputCleanup",
+]) optionalBackend(definitions[name]);
 const document = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: "https://ivy.invalid/schemas/agent.schema.json",

@@ -5,6 +5,13 @@ import { createRequire } from "node:module";
 import ts from "typescript";
 import * as vue from "vue";
 import { parse, compileScript } from "@vue/compiler-sfc";
+import { sameNativeBackend } from '../dist/packages/contracts/src/native-backend.js';
+import * as nativeBackend from '../dist/packages/contracts/src/native-backend.js';
+import * as nativeBackends from '../dist/packages/ui-client/src/native-backends.js';
+import * as nativeRoute from '../dist/packages/ui-client/src/native-route.js';
+import { nativeActionMethod, nativeActionParams } from '../dist/packages/ui-client/src/native-action.js';
+import { canonical } from '../dist/packages/sdk/src/client.js';
+import * as executionModels from '../dist/packages/ui-client/src/execution-models.js';
 
 // Exercise the actual composable and SFC setup with controlled transports and time.
 const require = createRequire(import.meta.url);
@@ -13,7 +20,9 @@ function load(file, bindings = {}) {
   if (file.endsWith(".vue")) source = compileScript(parse(source).descriptor, { id: file }).content;
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const module = { exports: {} };
-  new Function("require", "module", "exports", code)(name => name in bindings ? bindings[name] : require(name), module, module.exports);
+  new Function("require", "module", "exports", code)(name => name in bindings ? bindings[name] : name === '../../contracts/src/native-backend.js' ? nativeBackend :
+    name === './native-backends.js' ? nativeBackends : name === '../../../packages/ui-client/src/native-route' ? nativeRoute :
+    name === '../../../packages/ui-client/src/execution-models' ? executionModels : require(name), module, module.exports);
   return module.exports;
 }
 const remote = load("packages/ui/src/composables/remote.ts");
@@ -43,7 +52,7 @@ test("native panels share owner readiness, suppress outage calls and recover wit
   const { nativeRead } = load("packages/ui-client/src/native.ts", { "../../sdk/src/client.js": {
     IvyError,
     canonical: JSON.stringify,
-    discover: async (_client, method, target) => { discoveries.push(target.serviceNodeId); return { method, ...target }; },
+    discover: async (_client, method, target) => { discoveries.push(target.serviceNodeId); return { method, definition: {}, ...target }; },
     callBound: async (_client, binding) => { calls.push(binding.serviceNodeId); if (failure) throw failure; return {}; },
     newOperationId: async () => "read-operation",
   } });
@@ -80,7 +89,7 @@ test("native failures retain known contracts and do not block other tasks, while
   const client = { request: async () => ({ connected: true, synced: true, ready: true, desiredEnabled: true }) };
   const { nativeRead } = load("packages/ui-client/src/native.ts", { "../../sdk/src/client.js": {
     IvyError, canonical: JSON.stringify, newOperationId: async () => "read-operation",
-    discover: async (_client, method, target) => { discoveries++; return { method, version, ...target }; },
+    discover: async (_client, method, target) => { discoveries++; return { method, definition: {}, version, ...target }; },
     callBound: async (_client, binding, args) => {
       if (binding.version !== version) throw new IvyError("tool_definition_changed", "Changed definition");
       if (args.threadId === "broken") throw new IvyError("native_error", "Native task failed");
@@ -106,7 +115,7 @@ test("native capability discovery and identical reads are shared with independen
     discover: async (_client, method, target) => {
       discoveries.push([target.serviceNodeId, method]);
       if (method === "codex.absent") throw new IvyError("not_found", "Absent");
-      return { method, ...target };
+      return { method, definition: {}, ...target };
     },
     callBound: async (_client, binding, args, _operation, options) => {
       calls.push([binding.serviceNodeId, args]); signals.push(options.signal);
@@ -291,6 +300,100 @@ function setup(t) {
 }
 async function settle() { for (let i = 0; i < 20; i++) await Promise.resolve(); await vue.nextTick(); }
 async function advance(t, ms) { t.mock.timers.tick(ms); await settle(); }
+
+function attachmentsFixture(t, call, backend) {
+  const mount = setup(t);
+  const { useMessageAttachments } = load('packages/ui-client/src/message-attachments.ts', {
+    '../../sdk/src/client.js': { serviceTools: () => ({ call }) },
+  });
+  let api;
+  mount({ setup() { api = useMessageAttachments({}, () => 'owner', backend); return {}; } });
+  return api;
+}
+async function settleFiles() { for (let i = 0; i < 8; i++) { await new Promise(setImmediate); await settle(); } }
+
+test('Attachment staging encodes bounded slices and waits for the original upload before preparing another', async t => {
+  const backend = { backendId: 'primary', provider: 'codex', accountId: 'work' }, calls = [];
+  let release;
+  const api = attachmentsFixture(t, async (name, args) => {
+    calls.push({ name, args });
+    if (calls.length === 1) await new Promise(resolve => { release = resolve; });
+    return { backend: args.backend, path: '/staged/' + args.name };
+  }, () => backend);
+  const bytes = Uint8Array.from({ length: 100001 }, (_, n) => n % 256);
+  const first = new File([bytes], 'first.bin'), second = new File(['second bytes'], 'second.txt');
+  const slice = first.slice.bind(first);
+  let largest = 0, secondReads = 0;
+  first.arrayBuffer = async () => { throw Error('The complete file must not be materialized.'); };
+  first.slice = (start, end) => { const part = slice(start, end); largest = Math.max(largest, part.size); return part; };
+  const nextSlice = second.slice.bind(second);
+  second.slice = (...args) => { secondReads++; return nextSlice(...args); };
+  api.add([first, second]); await settleFiles();
+  assert.equal(calls.length, 1); assert.equal(secondReads, 0, 'No encoded backlog while the first RPC is unresolved.');
+  assert.equal(largest, 24576);
+  assert.equal(calls[0].args.dataBase64, Buffer.from(bytes).toString('base64'));
+  assert.deepEqual(calls[0].args.backend, backend);
+  release(); await settleFiles();
+  assert.equal(calls.length, 2); assert(secondReads > 0);
+  assert.equal(calls[1].args.dataBase64, Buffer.from('second bytes').toString('base64'));
+  assert.deepEqual(api.staged.value.map(value => value.path), ['/staged/first.bin', '/staged/second.txt']);
+});
+
+test('Attachment staging rejects large or excessive admission and clearing drops queued file work', async t => {
+  const backend = { backendId: 'primary', provider: 'codex', accountId: 'work' }, calls = [];
+  let release;
+  const api = attachmentsFixture(t, async (_name, args) => { calls.push(args); await new Promise(resolve => { release = resolve; }); return { backend, path: '/staged/file' }; }, () => backend);
+  const oversized = new File(['x'], 'oversized.png', { type: 'image/png' });
+  Object.defineProperty(oversized, 'size', { value: 8 * 1024 * 1024 + 1 });
+  oversized.slice = () => { throw Error('Oversized input must fail before file reads.'); };
+  api.add([oversized]); await settleFiles();
+  assert.equal(calls.length, 0); assert.equal(api.items.value[0].previewUrl, null); assert.equal(api.items.value[0].state, 'failed');
+  api.clear();
+  api.add(Array.from({ length: 9 }, (_, n) => new File(['small'], 'file-' + n)));
+  await settleFiles();
+  assert.equal(api.items.value.length, 8); assert.match(api.error.value, /At most 8/); assert.equal(calls.length, 1);
+  api.clear(); release(); await settleFiles();
+  assert.equal(calls.length, 1); assert.equal(api.items.value.length, 0); assert.equal(api.error.value, null);
+  let releasePreparation;
+  const large = Array.from({ length: 5 }, (_, n) => {
+    const file = new File(['small allocation'], 'large-' + n);
+    Object.defineProperty(file, 'size', { value: 8 * 1024 * 1024 });
+    file.slice = () => ({ arrayBuffer: () => new Promise(resolve => { releasePreparation = () => resolve(new ArrayBuffer(1)); }) });
+    return file;
+  });
+  api.add(large); await settle();
+  assert.equal(api.items.value.length, 4); assert.match(api.error.value, /At most 32 MiB/);
+  api.clear(); releasePreparation(); await settleFiles();
+  assert.equal(calls.length, 1, 'Clearing the bounded raw-file queue cancels preparation before another RPC.');
+});
+
+test('Attachment staging keeps the account captured before preparation and drops removed queued files', async t => {
+  const original = { backendId: 'primary', provider: 'codex', accountId: 'work' }, backend = vue.ref(original), calls = [];
+  const api = attachmentsFixture(t, async (_name, args) => { calls.push(args); return { backend: args.backend, path: '/staged/file' }; }, () => backend.value);
+  let release;
+  const first = new File(['held'], 'held.txt'), queued = new File(['queued'], 'queued.txt');
+  first.slice = () => ({ arrayBuffer: () => new Promise(resolve => { release = () => resolve(new TextEncoder().encode('held').buffer); }) });
+  queued.slice = () => { throw Error('A removed queue entry must not be read.'); };
+  api.add([first, queued]); await settle();
+  api.remove(api.items.value[1].id);
+  backend.value = { ...original, accountId: 'personal' };
+  release(); await settleFiles();
+  assert.equal(calls.length, 0); assert.equal(api.items.value.length, 1); assert.match(api.items.value[0].detail, /account changed/);
+});
+
+test('Attachment staging does not adopt a newly selected account for queued preparation', async t => {
+  const original = { backendId: 'primary', provider: 'codex', accountId: 'work' }, backend = vue.ref(original), calls = [];
+  const api = attachmentsFixture(t, async (_name, args) => { calls.push(args); return { backend: args.backend, path: '/staged/file' }; }, () => backend.value);
+  let release, queuedReads = 0;
+  const first = new File(['held'], 'held.txt'), queued = new File(['queued'], 'queued.txt');
+  first.slice = () => ({ arrayBuffer: () => new Promise(resolve => { release = () => resolve(new TextEncoder().encode('held').buffer); }) });
+  queued.slice = () => { queuedReads++; throw Error('A stale account queue entry must not be read.'); };
+  api.add([first, queued]); await settle();
+  backend.value = { ...original, accountId: 'personal' };
+  release(); await settleFiles();
+  assert.equal(calls.length, 0); assert.equal(queuedReads, 0);
+  assert(api.items.value.every(item => item.state === 'failed' && /account changed/.test(item.detail)));
+});
 
 test('live loaders take their initial snapshot after acknowledgement and retain bounded HTTP fallback', async t => {
   const mount = setup(t), notifications = new Notifications();
@@ -527,7 +630,27 @@ test("Native inputs receive only their owner and task hints and recover after re
   assert.equal(reads, 5);
 });
 
-function agentTask(t, connected = true, failures = new Set()) {
+test('Native input live hints keep equal thread IDs and capabilities within the current account', async t => {
+  const mount = setup(t), notifications = new Notifications();
+  const account = { backendId: 'secondary', provider: 'claude', accountId: 'personal' };
+  let selected = account, reads = 0;
+  mount({ setup() { remote.useRemote(async () => ++reads, 15000, nativeInputUpdates(notifications, 'owner', 'same-thread', () => selected)); return {}; } });
+  await settle();
+  for (const backend of [undefined, { ...account, accountId: 'other' }, { ...account, provider: 'codex' }]) {
+    notifications.emit('owner', 'inputs', { backend, threadId: 'same-thread' });
+    notifications.emit('owner', 'capabilities', { backend });
+  }
+  await advance(t, 250); assert.equal(reads, 1);
+  notifications.emit('owner', 'inputs', { backend: account, threadId: 'same-thread' });
+  await advance(t, 250); assert.equal(reads, 2);
+  selected = { ...account, accountId: 'other' };
+  notifications.emit('owner', 'inputs', { backend: account, threadId: 'same-thread' });
+  await advance(t, 250); assert.equal(reads, 2);
+  notifications.emit('owner', 'notification', { backend: selected, method: 'serverRequest/resolved', params: { threadId: 'same-thread' } });
+  await advance(t, 250); assert.equal(reads, 3);
+});
+
+function agentTask(t, connected = true, failures = new Set(), backend) {
   const mount = setup(t), notifications = new Notifications();
   notifications.connected = connected;
   const reads = { state: 0, goal: 0, turns: 0, output: 0, journal: 0 }, holds = new Map(), signals = [];
@@ -539,24 +662,29 @@ function agentTask(t, connected = true, failures = new Set()) {
     await holds.get(kind);
     return value;
   };
+  const readProvider = async (_client, _node, method, args, signal) => {
+    if (method === nativeBackends.nativeMethod(backend, 'thread/goal/get')) return read("goal", { goal: null }, signal);
+    if (method === nativeBackends.nativeMethod(backend, 'thread/turns/list')) return read("turns", { data: [], nextCursor: null }, signal);
+    assert.equal(method, "agent.notifications");
+    return read("journal", { items: journal.filter(item => item.sequence > args.afterSequence),
+      epoch: "epoch", throughSequence: journal.length, hasMore: false, gap: false }, signal);
+  };
   const component = load("ui/agent-ui/src/AgentTask.vue", {
+    "../../../packages/sdk/src/client.js": { canonical },
     "@lucide/vue": {}, "@ivy/ui": ui,
     "../../../packages/ui-client/src/runtime": runtime,
     "../../../packages/ui-client/src/native": {
       ...native,
       nativeModels: async () => ({ data: [] }),
-      optionalTool: async (_client, _node, method) => method === "codex.thread/goal/get" ? {} : undefined,
-      nativeRead: async (_client, _node, method, args, signal) => {
-        if (method === "codex.thread/goal/get") return read("goal", { goal: null }, signal);
-        if (method === "codex.thread/turns/list") return read("turns", { data: [], nextCursor: null }, signal);
-        assert.equal(method, "agent.notifications");
-        return read("journal", { items: journal.filter(item => item.sequence > args.afterSequence),
-          epoch: "epoch", throughSequence: journal.length, hasMore: false, gap: false }, signal);
-      },
+      optionalTool: async (_client, _node, method) => method === nativeBackends.nativeMethod(backend, 'thread/goal/get') ? {} : undefined,
+      nativeRead: readProvider,
     },
+    "../../../packages/ui-client/src/native-backends": { ...nativeBackends,
+      backendRead: (_client, scope, method, args, signal) => readProvider(_client, scope.serviceNodeId,
+        method.startsWith('agent.') ? method : nativeBackends.nativeMethod(scope.backend, method), args, signal) },
     "../../../packages/ui-client/src/native-thread-control": {
       readNativeThreadControl: (_client, _node, _thread, signal) =>
-        read("state", { attached: true, status: { epoch: "epoch" }, thread: { name: "Task", status: { type: "idle" } } }, signal),
+        read("state", { attached: true, status: { epoch: "epoch", backend }, thread: { name: "Task", status: { type: "idle" } } }, signal),
     },
     "../../../packages/ui-client/src/native-output-page": {
       isUnmaterializedNativeHistory: () => false,
@@ -564,6 +692,7 @@ function agentTask(t, connected = true, failures = new Set()) {
         read("output", { mode: "items", items: [], nextCursor: null }, signal),
     },
     "../../../packages/ui-client/src/native-action": {
+      nativeActionMethod, nativeActionParams,
       useNativeAction: () => ({ saved: vue.ref(null), locked: vue.ref(false), error: vue.ref(null) }),
     },
     "../../../packages/ui-client/src/native-modes": {},
@@ -579,13 +708,13 @@ function agentTask(t, connected = true, failures = new Set()) {
       }),
       effectiveNativeSettings: () => ({}),
     },
-    "../../../packages/ui-client/src/object-archive": load("packages/ui-client/src/object-archive.ts", { "../../sdk/src/client.js": {} }),
     "../../../packages/ui-client/src/message-attachments": load("packages/ui-client/src/message-attachments.ts", { "../../sdk/src/client.js": {} }),
     "../../../packages/ui-client/src/NativeActionState.vue": {},
     "../../../packages/ui-client/src/NativeInputs.vue": {},
     "../../../packages/ui-client/src/TaskProjectDialog.vue": {},
     "../../../packages/ui-client/src/MessageImages.vue": {},
     "../../../packages/ui-client/src/native-images": {},
+    "./TaskActions.vue": {},
     "./conversation": load("ui/agent-ui/src/conversation.ts", {
       "../../../packages/ui-client/src/native": native,
       "../../../packages/ui-client/src/message-images": load("packages/ui-client/src/message-images.ts", { "./native": native }),
@@ -595,15 +724,28 @@ function agentTask(t, connected = true, failures = new Set()) {
       outputCache: new (load("packages/ui-client/src/native-output-cache.ts").NativeOutputCache)(),
     },
   }).default;
-  const state = mount(component, { node: "owner", threadId: "task", turnId: "" }, notifications);
+  const state = mount(component, { node: "owner", backend, threadId: "task", turnId: "" }, notifications);
   return { state, notifications, reads, failures, holds, signals,
     emit(method, params = {}) {
-      const entry = { method, params: { threadId: "task", ...params }, epoch: "epoch", sequence: journal.length + 1, observedAt: new Date().toISOString() };
+      const entry = { backend, method, params: { threadId: "task", ...params }, epoch: "epoch", sequence: journal.length + 1, observedAt: new Date().toISOString() };
       journal.push(entry);
       if (notifications.connected) notifications.emit("owner", "notification", entry);
     },
   };
 }
+
+test('Agent account hints cannot update an equal thread ID or trigger another account snapshot', async t => {
+  const backend = { backendId: 'secondary', provider: 'claude', accountId: 'personal' }, f = agentTask(t, true, new Set(), backend);
+  await settle(); await advance(t, 600);
+  const before = { ...f.reads };
+  for (const foreign of [undefined, { ...backend, provider: 'codex' }, { ...backend, accountId: 'work' }]) {
+    f.notifications.emit('owner', 'notification', { backend: foreign, method: 'thread/name/updated', params: { threadId: 'task', threadName: 'Wrong account' },
+      epoch: 'epoch', sequence: 1, observedAt: new Date().toISOString() });
+  }
+  await advance(t, 600); assert.deepEqual(f.reads, before); assert.equal(f.state.state.value.value.thread.name, 'Task');
+  f.emit('thread/name/updated', { threadName: 'Personal task' });
+  await advance(t, 600); assert.equal(f.state.state.value.value.thread.name, 'Personal task'); assert.deepEqual(f.reads, before);
+});
 
 test("Agent snapshots retry failed reads with a healthy socket and stop after recovery", async t => {
   const f = agentTask(t, true, new Set(["state", "goal", "turns", "output"]));

@@ -6,6 +6,7 @@ export interface EffectiveSettings {
   mode: string;
   effort: string;
   permission: string;
+  serviceTier: string;
 }
 export function nativeConfiguredHome(status: Agent.Status | null | undefined): string {
   return status?.connection?.actualHome || text(record(status?.initialized).codexHome) || status?.instructions?.home || '';
@@ -14,7 +15,7 @@ export function effectiveNativeSettings(
   models: unknown,
   configuration: unknown,
   current: unknown,
-  defaults?: Partial<Agent.ExecutionDefaults> | null,
+  defaults?: Partial<Agent.AccountExecutionDefaults> | null,
 ): EffectiveSettings {
   const config = record(record(configuration).config),
     thread = record(current),
@@ -55,6 +56,8 @@ export function effectiveNativeSettings(
   return {
     model,
     effort: choice?.efforts.length === 0 ? "" : effort,
+    serviceTier: 'serviceTier' in thread ? text(thread.serviceTier) || 'standard' :
+      defaults?.serviceTier || text(config.service_tier) || 'standard',
     mode:
       text(collaboration.mode) ||
       defaults?.mode ||

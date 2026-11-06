@@ -59,7 +59,13 @@ impl RpcClient for Client {
                         "provider",
                         Json::object([(
                             "node",
-                            Json::object([("serviceNodeId", "native-agent".into())]),
+                            Json::object([(
+                                "serviceNodeId",
+                                self.input
+                                    .required("context")?
+                                    .required("serviceNodeId")?
+                                    .clone(),
+                            )]),
                         )]),
                     ),
                     (
@@ -91,6 +97,13 @@ impl RpcClient for Client {
                 ]));
             }
             assert_eq!(method, "tools.call");
+            assert!(ivy_contracts::native_backend::BackendIdentity::matches(
+                params.required("arguments")?,
+                ivy_contracts::native_backend::BackendIdentity::optional(
+                    self.input.required("context")?.get("backend")
+                )?
+                .as_ref()
+            ));
             if params.required("qualifiedName")?.as_str()? == "agent.status" {
                 return Ok(self.input.required("status")?.clone());
             }
@@ -129,6 +142,9 @@ impl RpcClient for Client {
                     .into(),
                 ),
             ]);
+            if let Some(backend) = base.get("backend") {
+                value.insert("backend", backend.clone());
+            }
             for (k, v) in step.as_object().unwrap() {
                 value.insert(k.clone(), v.clone());
             }
@@ -169,6 +185,18 @@ impl ReadEvidenceStore for Memory {
                 Json::Bool(upgrade),
             ],
         );
+        if key == "task-board/task" {
+            return Ok(Document {
+                pin: address.clone(),
+                value: self
+                    .input
+                    .get("currentTask")
+                    .cloned()
+                    .unwrap_or_else(|| Json::Object(vec![])),
+                parent_id: None,
+                content_hash: String::new(),
+            });
+        }
         assert_eq!(key, "task-board/run");
         let run = self.input.required("run")?;
         let value = if address.get("revision").and_then(Json::as_f64) == Some(1.0) {
@@ -265,6 +293,8 @@ impl InspectionStore for Memory {
 }
 fn context(v: &Json) -> InspectionContext {
     InspectionContext {
+        backend: ivy_contracts::native_backend::BackendIdentity::optional(v.get("backend"))
+            .unwrap(),
         run: v.required("run").unwrap().clone(),
         native_version: text(v, "nativeVersion"),
         catalog_source_hash: text(v, "catalogSourceHash"),
@@ -336,6 +366,7 @@ async fn native_inspection_preserves_original_identity_and_search_checkpoints() 
         ("revision", Json::Number(2.0)),
     ]);
     let run = Json::object([
+        ("taskId", "task".into()),
         (
             "target",
             Json::object([
@@ -909,6 +940,135 @@ async fn native_inspection_preserves_original_identity_and_search_checkpoints() 
         ]),
         Ok(vec!["false"]),
     );
+    for provider in ["codex", "claude"] {
+        let backend = Json::object([
+            ("backendId", "worker".into()),
+            ("provider", provider.into()),
+            ("accountId", "primary".into()),
+        ]);
+        let foreign = changed(&backend, "accountId", "foreign".into());
+        let mut scoped_run = run.clone();
+        scoped_run.insert(
+            "target",
+            changed(run.required("target").unwrap(), "backend", backend.clone()),
+        );
+        scoped_run.insert(
+            "plan",
+            changed(run.required("plan").unwrap(), "backend", backend.clone()),
+        );
+        scoped_run.insert(
+            "primaryResourceRef",
+            changed(
+                run.required("primaryResourceRef").unwrap(),
+                "namespace",
+                "worker".into(),
+            ),
+        );
+        let scoped_context = changed(&context_value, "backend", backend.clone());
+        let scoped_status = changed(&status, "backend", backend.clone());
+        let selected = Json::object([
+            ("run", scoped_run),
+            ("context", scoped_context),
+            ("status", scoped_status.clone()),
+        ]);
+        add(
+            &format!("{provider} scoped inspection"),
+            selected.clone(),
+            Ok(vec!["found"]),
+        );
+        add(
+            &format!("{provider} foreign status"),
+            changed(
+                &selected,
+                "status",
+                changed(&scoped_status, "backend", foreign.clone()),
+            ),
+            Err("task_board_native_unavailable"),
+        );
+        add(
+            &format!("{provider} foreign read"),
+            changed(
+                &selected,
+                "steps",
+                Json::Array(vec![changed(&found(), "backend", foreign.clone())]),
+            ),
+            Err("task_board_evidence_mismatch"),
+        );
+        let destination = changed(
+            &changed(run.required("target").unwrap(), "backend", backend.clone()),
+            "serviceNodeId",
+            "joint-agent".into(),
+        );
+        let moved_context = changed(
+            &changed(&context_value, "backend", backend.clone()),
+            "serviceNodeId",
+            "joint-agent".into(),
+        );
+        let moved_status = changed(
+            &changed(&status, "backend", backend.clone()),
+            "serviceNodeId",
+            "joint-agent".into(),
+        );
+        let routed = Json::object([
+            ("action", "context".into()),
+            ("run", run.clone()),
+            (
+                "currentTask",
+                Json::object([(
+                    "nativeRoutes",
+                    Json::Array(vec![Json::object([
+                        ("source", run.required("target").unwrap().clone()),
+                        ("target", destination),
+                    ])]),
+                )]),
+            ),
+            ("context", moved_context),
+            ("status", moved_status.clone()),
+        ]);
+        add(
+            &format!("{provider} published current route"),
+            routed.clone(),
+            Ok(vec!["context"]),
+        );
+        add(
+            &format!("{provider} published route foreign account"),
+            changed(
+                &routed,
+                "status",
+                changed(&moved_status, "backend", foreign.clone()),
+            ),
+            Err("task_board_native_unavailable"),
+        );
+        let version = if provider == "codex" { "0.163.0" } else { "0.142.3" };
+        let current = catalogs.checked_native_contract(&version.into(), None).unwrap();
+        let selection = Json::object([
+            ("nativeVersion", version.into()),
+            ("catalogSourceHash", current.catalog().required("sourceHash").unwrap().clone()),
+        ]);
+        let mut upgraded = routed.clone();
+        let mut ticket = upgraded.required("currentTask").unwrap().clone();
+        let mut route = ticket.required("nativeRoutes").unwrap().as_array().unwrap()[0].clone();
+        route.insert("catalog", selection.clone());
+        ticket.insert("nativeRoutes", Json::Array(vec![route]));
+        upgraded.insert("currentTask", ticket);
+        let mut upgraded_status = moved_status.clone();
+        for key in ["nativeVersion", "nativeExecutableHash", "catalogHash"] {
+            upgraded_status.insert(key, match key {
+                "nativeVersion" => version.into(),
+                "catalogHash" => current.catalog_hash().into(),
+                _ => current.catalog().required(key).unwrap().clone(),
+            });
+        }
+        let mut upgraded_context = upgraded.required("context").unwrap().clone();
+        for key in ["nativeVersion", "catalogSourceHash"] {
+            upgraded_context.insert(key, selection.required(key).unwrap().clone());
+        }
+        upgraded.insert("status", upgraded_status.clone());
+        upgraded.insert("context", upgraded_context);
+        add(&format!("{provider} explicitly selected current catalog"), upgraded.clone(), Ok(vec!["context"]));
+        add(&format!("{provider} current catalog rejects stale status"), changed(&upgraded, "status", moved_status), Err("task_board_native_unavailable"));
+        add(&format!("{provider} new status cannot implicitly replace retained catalog"), changed(&routed, "status", upgraded_status), Err("task_board_native_unavailable"));
+    }
     let mut retry_adapter_passes = 0;
     for (name, input, expected) in &rows {
         let i = input;
@@ -1003,6 +1163,7 @@ async fn native_inspection_preserves_original_identity_and_search_checkpoints() 
                 assert_eq!(values.len(), kinds.len(), "{name}");
                 for (value, kind) in values.iter().zip(kinds) {
                     match *kind {
+                        "context" => assert_eq!(value, i.required("context").unwrap(), "{name}"),
                         "true" | "false" => {
                             assert_eq!(value.as_bool(), Some(*kind == "true"), "{name}")
                         }

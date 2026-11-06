@@ -108,7 +108,7 @@ impl Cache {
         }
         let value =
             parse(&String::from_utf8_lossy(bytes), usize::MAX).map_err(|_| IvyError::internal())?;
-        let contract = Arc::new(NativeContract::new(&value)?);
+        let contract = Arc::new(NativeContract::from_owned(value, None)?);
         self.catalogs
             .insert(path.to_owned(), (hash, Arc::downgrade(&contract)));
         Ok(contract)

@@ -7,16 +7,21 @@ use super::{
     policy,
     projects::ProjectStore,
     rate_limits::RateLimitStore,
-    store::{PINNED_SECTION_ID, SessionStore, ThreadList, ThreadSort},
+    store::{
+        ItemsView, PINNED_SECTION_ID, PageRequest, SessionStore, ThreadList, ThreadSort, TurnCursor,
+    },
     value::*,
 };
-use ivy_contracts::{IvyJson as J, JsString};
+use ivy_contracts::{IvyJson as J, JsString, json::stringify_size, limits::NATIVE_FRAME_BYTES};
+use ivy_host_runtime::codex_rpc::NativeFrame;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-pub type FileReader = Arc<dyn Fn(&JsString) -> Result<JsString> + Send + Sync>;
+/// The byte allowance is derived from this request's native response envelope.
+pub type FileReader = Arc<dyn Fn(&JsString, usize) -> Result<JsString> + Send + Sync>;
 pub type Worktree = Arc<dyn Fn(&JsString, &JsString) -> Result<JsString> + Send + Sync>;
 pub struct AdapterClock {
     pub seconds: super::store::Clock,
@@ -98,9 +103,10 @@ struct Reverse {
     turn: JsString,
     item: JsString,
     callback: J,
-    event: J,
+    command: JsString,
     questions: Option<Vec<J>>,
     started: f64,
+    _retained: Option<OwnedSemaphorePermit>,
 }
 pub(super) struct TurnState {
     pub(super) peer: JsString,
@@ -136,6 +142,7 @@ pub struct Adapter {
     next_call: u64,
     usage_waiters: Vec<(JsString, J)>,
     reverse: Vec<Reverse>,
+    reverse_bytes: Arc<Semaphore>,
     pub(super) command_allow: BTreeMap<JsString, BTreeSet<JsString>>,
     pub(super) tokens: BTreeMap<JsString, J>,
     pub(super) stopped: bool,
@@ -166,6 +173,7 @@ impl Adapter {
             next_call: 1,
             usage_waiters: vec![],
             reverse: vec![],
+            reverse_bytes: Arc::new(Semaphore::new(64 * 1024 * 1024)),
             command_allow: BTreeMap::new(),
             tokens: BTreeMap::new(),
             stopped: false,
@@ -448,50 +456,39 @@ impl Adapter {
                 };
                 J::object([("thread", self.to_thread(&t, &turns)?)])
             }
-            "thread/turns/list" => {
-                let view = if is(field(p, "itemsView"), "full") {
-                    "full"
-                } else if is(field(p, "itemsView"), "notLoaded") {
-                    "notLoaded"
-                } else {
-                    "summary"
-                };
-                J::object([
-                    (
-                        "data",
-                        J::Array(
-                            self.store
-                                .list_turns(&string(&str_or(field(p, "threadId"), &"".into())))?
-                                .iter()
-                                .map(|t| policy::turn_view(t, view))
-                                .collect(),
-                        ),
-                    ),
-                    ("nextCursor", J::Null),
-                    ("backwardsCursor", J::Null),
-                ])
-            }
+            "thread/turns/list" => self.turns_list(p)?,
             "thread/items/list" => self.items_list(p)?,
             "thread/loaded/list" => {
-                let values = self
-                    .peers
-                    .iter()
-                    .map(|(t, _)| J::String(t.clone()))
-                    .collect::<Vec<_>>();
+                let start = if field(p, "cursor").is_null() {
+                    0.0
+                } else {
+                    cursor_offset(field(p, "cursor"))?
+                };
+                if !safe_integer(start) || start < 0.0 || start > self.peers.len() as f64 {
+                    return Err(AdapterError::new("invalid loaded cursor"));
+                }
                 let limit = field(p, "limit")
                     .as_f64()
-                    .filter(|n| n.is_finite())
-                    .unwrap_or(if values.is_empty() {
-                        50.0
-                    } else {
-                        values.len() as f64
-                    });
+                    .unwrap_or(self.peers.len().max(1) as f64);
+                if !safe_integer(limit) || limit < 1.0 {
+                    return Err(AdapterError::new("invalid loaded limit"));
+                }
+                let data = self
+                    .peers
+                    .iter()
+                    .map(|(id, _)| id)
+                    .skip(start as usize)
+                    .take(limit as usize)
+                    .cloned()
+                    .map(J::String)
+                    .collect::<Vec<_>>();
+                let end = start as usize + data.len();
                 J::object([
-                    ("data", J::Array(array_slice(&values, 0.0, limit))),
+                    ("data", J::Array(data)),
                     (
                         "nextCursor",
-                        if (values.len() as f64) > limit {
-                            JsString::from(limit.to_string()).into_json()
+                        if end < self.peers.len() {
+                            end.to_string().into()
                         } else {
                             J::Null
                         },
@@ -572,14 +569,31 @@ impl Adapter {
                 ),
             )]),
             "config/read" => self.config_read()?,
-            "fs/readFile" => J::object([(
-                "dataBase64",
-                (self.env.read_base64)(&string(&str_or(
-                    &coalesce(field(p, "path"), field(p, "filePath")),
-                    &"".into(),
-                )))?
-                .into_json(),
-            )]),
+            "fs/readFile" => {
+                let envelope = J::object([
+                    ("jsonrpc", "2.0".into()),
+                    ("id", id.clone()),
+                    ("result", J::object([("dataBase64", "".into())])),
+                ]);
+                let overhead = stringify_size(&envelope, NATIVE_FRAME_BYTES).map_err(|_| {
+                    AdapterError::typed("native_capacity", "Native file response exceeds byte limit")
+                })?;
+                let maximum_units = (NATIVE_FRAME_BYTES - overhead).min(
+                    NativeFrame::MAXIMUM_VALUE_BYTES.saturating_sub(envelope.retained_bytes()) / 2,
+                );
+                let maximum_bytes = maximum_units / 4 * 3;
+                J::object([(
+                    "dataBase64",
+                    (self.env.read_base64)(
+                        &string(&str_or(
+                            &coalesce(field(p, "path"), field(p, "filePath")),
+                            &"".into(),
+                        )),
+                        maximum_bytes,
+                    )?
+                    .into_json(),
+                )])
+            }
             _ => {
                 return Err(AdapterError::new(concat(&[
                     &"method not implemented: ".into(),
@@ -1059,44 +1073,65 @@ impl Adapter {
             ),
         ]))
     }
+    fn turns_list(&self, p: &J) -> Result<J> {
+        let thread = self.thread(field(p, "threadId"))?;
+        let view = match field(p, "itemsView").as_str().ok().as_deref() {
+            Some("full") => (ItemsView::Full, "full"),
+            Some("notLoaded") => (ItemsView::NotLoaded, "notLoaded"),
+            _ => (ItemsView::Summary, "summary"),
+        };
+        let cursor = if field(p, "cursor").is_null() {
+            None
+        } else {
+            Some(TurnCursor::decode(
+                &field(p, "cursor")
+                    .as_str()
+                    .map_err(|_| AdapterError::new("invalid turn cursor"))?,
+            )?)
+        };
+        let limit = if field(p, "limit").is_null() {
+            100.0
+        } else {
+            number(field(p, "limit"))
+        };
+        if !safe_integer(limit) || !(1.0..=100.0).contains(&limit) {
+            return Err(AdapterError::new("invalid turn limit"));
+        }
+        let page = self.store.turns_page(
+            &string(field(&thread, "id")),
+            cursor.as_ref(),
+            limit as u32,
+            !is(field(p, "sortDirection"), "asc"),
+            view.0,
+        )?;
+        Ok(J::object([
+            (
+                "data",
+                J::Array(
+                    page.data
+                        .iter()
+                        .map(|t| policy::turn_view(t, view.1))
+                        .collect(),
+                ),
+            ),
+            (
+                "nextCursor",
+                page.next.map(|c| c.encode().into()).unwrap_or(J::Null),
+            ),
+            (
+                "backwardsCursor",
+                page.backwards.map(|c| c.encode().into()).unwrap_or(J::Null),
+            ),
+        ]))
+    }
     fn items_list(&self, p: &J) -> Result<J> {
         let thread = self.thread(field(p, "threadId"))?;
-        let turns = self.store.list_turns(&string(field(&thread, "id")))?;
-        let requested = field(p, "turnId").as_js_string();
-        if requested.is_some_and(|s| {
-            !s.0.is_empty()
-                && !turns
-                    .iter()
-                    .any(|t| field(t, "id").as_js_string() == Some(s))
-        }) {
-            return Err(AdapterError::new(concat(&[
-                &"turn does not belong to thread: ".into(),
-                requested.unwrap(),
-            ])));
-        }
-        let mut entries = vec![];
-        for turn in &turns {
-            if requested
-                .is_some_and(|s| !s.0.is_empty() && field(turn, "id").as_js_string() != Some(s))
-            {
-                continue;
-            }
-            for item in field(turn, "items").as_array().unwrap_or(&[]) {
-                entries.push(J::object([
-                    ("turnId", field(turn, "id").clone()),
-                    ("item", item.clone()),
-                ]))
-            }
-        }
-        if is(field(p, "sortDirection"), "desc") {
-            entries.reverse()
-        }
         let start = if field(p, "cursor").is_null() {
             0.0
         } else {
             cursor_offset(field(p, "cursor"))?
         };
-        if !safe_integer(start) || start < 0.0 || start > entries.len() as f64 {
+        if !safe_integer(start) || start < 0.0 {
             return Err(AdapterError::new("invalid item cursor"));
         }
         let limit = if field(p, "limit").is_null() {
@@ -1107,26 +1142,37 @@ impl Adapter {
         if !safe_integer(limit) || !(1.0..=100.0).contains(&limit) {
             return Err(AdapterError::new("invalid item limit"));
         }
-        let data = array_slice(&entries, start, start + limit);
-        let end = start + data.len() as f64;
+        let requested = field(p, "turnId")
+            .as_js_string()
+            .filter(|s| !s.0.is_empty());
+        let page = self.store.items_page(
+            &string(field(&thread, "id")),
+            requested,
+            PageRequest {
+                offset: start as u64,
+                limit: limit as u32,
+                descending: is(field(p, "sortDirection"), "desc"),
+            },
+        )?;
+        let end = start as u64 + page.data.len() as u64;
         Ok(J::object([
             (
                 "nextCursor",
-                if end < entries.len() as f64 {
-                    JsString::from(end.to_string()).into_json()
+                if page.has_more {
+                    end.to_string().into()
                 } else {
                     J::Null
                 },
             ),
             (
                 "backwardsCursor",
-                if data.is_empty() {
+                if page.data.is_empty() {
                     J::Null
                 } else {
-                    JsString::from(start.to_string()).into_json()
+                    (start as u64).to_string().into()
                 },
             ),
-            ("data", J::Array(data)),
+            ("data", J::Array(page.data)),
         ]))
     }
     fn config_read(&self) -> Result<J> {
@@ -1245,6 +1291,115 @@ impl Adapter {
             ("layers", J::Null),
         ]))
     }
+    fn push_reverse(&mut self, mut pending: Reverse) -> Result<()> {
+        let mut bytes =
+            std::mem::size_of::<Reverse>().saturating_add(pending.callback.retained_bytes());
+        for value in [
+            &pending.request_id,
+            &pending.peer,
+            &pending.thread,
+            &pending.turn,
+            &pending.item,
+            &pending.command,
+        ] {
+            bytes = bytes.saturating_add(value.0.capacity().saturating_mul(2));
+        }
+        if let Some(questions) = &pending.questions {
+            bytes = bytes.saturating_add(
+                questions
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<J>()),
+            );
+            for question in questions {
+                bytes = bytes.saturating_add(
+                    question
+                        .retained_bytes()
+                        .saturating_sub(std::mem::size_of::<J>()),
+                );
+            }
+        }
+        if self.reverse.len() >= 32 {
+            return Err(AdapterError::typed(
+                "native_capacity",
+                "Pending native callback capacity is full.",
+            ));
+        }
+        pending._retained = Some(self.reserve_callback_input(bytes)?);
+        self.reverse.push(pending);
+        Ok(())
+    }
+    /// Driver input and native reverse projections have different owners but
+    /// share this one retained-memory pool through their actual consumption.
+    pub(super) fn reserve_callback_input(&self, bytes: usize) -> Result<OwnedSemaphorePermit> {
+        let capacity = || {
+            AdapterError::typed(
+                "native_capacity",
+                "Pending native callback capacity is full.",
+            )
+        };
+        if bytes > 64 * 1024 * 1024 {
+            return Err(capacity());
+        }
+        self.reverse_bytes
+            .clone()
+            .try_acquire_many_owned(bytes as u32)
+            .map_err(|_| capacity())
+    }
+    /// An original SDK cancellation or finished turn expires its native requests.
+    /// It never grants permission or manufactures an SDK reply.
+    pub fn cancel_callbacks(
+        &mut self,
+        turn: &JsString,
+        callback_id: Option<u64>,
+    ) -> Result<Vec<Effect>> {
+        let mut out = vec![];
+        let mut target = None;
+        while let Some(index) = self.reverse.iter().position(|pending| {
+            &pending.turn == turn
+                && callback_id.is_none_or(|id| {
+                    field(&pending.callback, "callbackId").as_f64() == Some(id as f64)
+                })
+        }) {
+            let pending = self.reverse.remove(index);
+            self.notify(
+                &pending.peer,
+                "serverRequest/resolved",
+                J::object([
+                    ("threadId", pending.thread.clone().into_json()),
+                    ("requestId", pending.request_id.into_json()),
+                ]),
+                &mut out,
+            );
+            target = Some((pending.peer, pending.thread));
+        }
+        if let Some((peer, thread)) = target {
+            if !self.stopped
+                && self.active.get(&thread) == Some(turn)
+                && self.store.turn_in_progress(turn)?
+            {
+                let mut flags = vec![];
+                for (questions, flag) in
+                    [(false, "waitingOnApproval"), (true, "waitingOnUserInput")]
+                {
+                    if self.reverse.iter().any(|pending| {
+                        pending.thread == thread && pending.questions.is_some() == questions
+                    }) {
+                        flags.push(flag.into());
+                    }
+                }
+                self.status(
+                    &peer,
+                    &thread,
+                    J::object([("type", "active".into()), ("activeFlags", J::Array(flags))]),
+                    &mut out,
+                )?;
+            }
+        }
+        Ok(out)
+    }
+    pub(super) fn clear_callbacks(&mut self) {
+        self.reverse.clear();
+    }
     pub fn permission_request(
         &mut self,
         turn: &JsString,
@@ -1262,7 +1417,7 @@ impl Adapter {
         let result = (|| -> Result<()> {
             if self.stopped || self.active.get(&string(field(&state.thread, "id"))) != Some(turn) {
                 out.push(Effect::Permission {
-                    callback: callback.clone(),
+                    callback,
                     result: J::object([("decision", "cancel".into())]),
                 });
                 return Ok(());
@@ -1307,7 +1462,7 @@ impl Adapter {
                     .is_some_and(|set| !command.0.is_empty() && set.contains(&command))
             {
                 out.push(Effect::Permission {
-                    callback: callback.clone(),
+                    callback,
                     result: J::object([("decision", "accept".into())]),
                 });
                 return Ok(());
@@ -1333,7 +1488,7 @@ impl Adapter {
             if bash {
                 for (key, value) in [
                     ("approvalId", request.clone().into_json()),
-                    ("command", command.into_json()),
+                    ("command", command.clone().into_json()),
                     (
                         "cwd",
                         string(&coalesce(field(field(event, "input"), "cwd"), &"".into()))
@@ -1357,17 +1512,18 @@ impl Adapter {
             } else {
                 params.insert("grantRoot", J::Null)
             }
-            self.reverse.push(Reverse {
+            self.push_reverse(Reverse {
                 request_id: request.clone(),
                 peer: state.peer.clone(),
                 thread,
                 turn: turn.clone(),
                 item,
-                callback: callback.clone(),
-                event: event.clone(),
+                callback,
+                command,
                 questions: None,
                 started: 0.0,
-            });
+                _retained: None,
+            })?;
             out.push(Effect::Send {
                 peer: self
                     .peers
@@ -1461,17 +1617,18 @@ impl Adapter {
                 ("questions", J::Array(normalized.clone())),
                 ("isBlocking", true.into()),
             ]);
-            self.reverse.push(Reverse {
+            self.push_reverse(Reverse {
                 request_id: request.clone(),
                 peer: state.peer.clone(),
                 thread,
                 turn: turn.clone(),
                 item: string(field(&item, "id")),
-                callback: callback.clone(),
-                event: event.clone(),
+                callback,
+                command: JsString::default(),
                 questions: Some(normalized),
                 started,
-            });
+                _retained: None,
+            })?;
             out.push(Effect::Send {
                 peer: self
                     .peers
@@ -1524,10 +1681,7 @@ impl Adapter {
         }
         let active = !self.stopped
             && self.active.get(&pending.thread) == Some(&pending.turn)
-            && self
-                .store
-                .get_turn(&pending.turn)?
-                .is_some_and(|t| is(field(&t, "status"), "inProgress"));
+            && self.store.turn_in_progress(&pending.turn)?;
         if let Some(questions) = pending.questions {
             let answers = if active {
                 super::items::normalize_answers(field(message, "result"), &questions)
@@ -1577,10 +1731,7 @@ impl Adapter {
                 "cancel".into()
             };
             if is(&decision, "acceptForSession") {
-                let command = string(&coalesce(
-                    field(field(&pending.event, "input"), "command"),
-                    &"".into(),
-                ));
+                let command = pending.command;
                 if !command.0.is_empty() {
                     self.command_allow
                         .entry(pending.thread)

@@ -2,6 +2,7 @@ import { Ajv2020 } from 'ajv/dist/2020.js';
 import type { AnySchema, ValidateFunction } from 'ajv';
 import { requireThat } from './errors.js';
 import { wireSchema } from './wire-schema.js';
+import { definitionValidator } from './schema-definition.js';
 
 // Services need the shared registry contract, but not Hive's operation and host
 // schema trees. Keep this validator as the small wire-only boundary.
@@ -12,7 +13,7 @@ const validators = new Map<string, ValidateFunction>();
 export function validateShared(name: string, value: unknown): void {
   let validator = validators.get(name);
   if (!validator) {
-    validator = ajv.getSchema(`${String(wireSchema['$id'])}#/$defs/${name}`);
+    validator = definitionValidator(ajv, wireSchema, name);
     requireThat(validator, 'internal_error', 'Unknown shared contract.');
     validators.set(name, validator);
   }
@@ -22,7 +23,7 @@ export function validateShared(name: string, value: unknown): void {
 export function matchesShared(name: string, value: unknown): boolean {
   let validator = validators.get(name);
   if (!validator) {
-    validator = ajv.getSchema(`${String(wireSchema['$id'])}#/$defs/${name}`);
+    validator = definitionValidator(ajv, wireSchema, name);
     requireThat(validator, 'internal_error', 'Unknown shared contract.');
     validators.set(name, validator);
   }

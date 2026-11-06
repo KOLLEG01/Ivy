@@ -66,7 +66,7 @@ pub use crate::executor_lock::ExecutorLock;
 #[derive(Clone, Copy)]
 pub struct HistoryLimits { pub count: usize, pub bytes: usize }
 impl Default for HistoryLimits { fn default() -> Self { Self { count: 10_000, bytes: 64 * 1024 * 1024 } } }
-struct State { db: Connection, config: IvyJson, clock: Arc<dyn Clock> }
+struct State { db: Connection, config: IvyJson, clock: Arc<dyn Clock>, storage_space: Option<(i64, IvyJson)> }
 #[derive(Default)]
 struct RetentionIds { seen:BTreeSet<String>, order:Vec<String> }
 impl RetentionIds {
@@ -241,7 +241,12 @@ impl HostJournal {
         })).await
     }
     pub async fn accept(&self, request: IvyJson, source_snapshot: Option<IvyJson>) -> IvyResult<IvyJson> {
-        self.with(move |s| s.accept(&request, source_snapshot.as_ref())).await
+        let lease = if source_snapshot.is_some() {
+            Some(crate::source::storage_lease(path(self.config().await?.required("stagingRoot")?)?).await?)
+        } else { None };
+        let result = self.with(move |s| s.accept(&request, source_snapshot.as_ref())).await;
+        if let Some(lease) = lease { lease.close().await?; }
+        result
     }
     pub async fn advance(&self, deployment_id: &str, expected_phase: &str, phase: &str, change: IvyJson) -> IvyResult<IvyJson> {
         let id = deployment_id.to_owned(); let expected = expected_phase.to_owned(); let phase = phase.to_owned();
@@ -438,7 +443,7 @@ impl State {
         let format: i64 = internal(db.query_row("PRAGMA user_version", [], |r| r.get(0)))?;
         require(format == 0 || format == 1, "unsupported_storage", "Host journal format is not supported by this executor.")?;
         internal(db.execute_batch(SCHEMA))?;
-        let state = Self { db, config, clock };
+        let state = Self { db, config, clock, storage_space: None };
         state.transaction(|s| {
             let host = s.config.required("hostId")?.as_str()?;
             require(s.text("SELECT value FROM meta WHERE key=?", "hostId")?.is_none_or(|v| v == host), "target_conflict", "A host journal cannot be reused for another host identity.")?;
@@ -607,7 +612,7 @@ impl State {
         }
         Ok(result)
     }
-    fn status(&self, executor: Option<&IvyJson>) -> IvyResult<IvyJson> {
+    fn status(&mut self, executor: Option<&IvyJson>) -> IvyResult<IvyJson> {
         let retention = self.storage_retention_status()?;
         let executor = executor.filter(|v| fresh_executor_status(v, self.clock.as_ref()));
         let observed = self.current_observations(executor)?;
@@ -630,6 +635,13 @@ impl State {
         let unfinished = self.entries("SELECT entry_json FROM operations WHERE phase NOT IN ('succeeded','rolled_back','failed','needs_attention') ORDER BY created_at,deployment_id LIMIT 200", [])?.into_iter().map(|v| v.required("record").cloned()).collect::<IvyResult<Vec<_>>>()?;
         let mut status = IvyJson::object([("schemaVersion", IvyJson::Number(1.0)), ("hostId", self.config.required("hostId")?.clone()), ("observedAt", now.into()), ("executor", executor.cloned().unwrap_or(IvyJson::Null)), ("instances", IvyJson::Array(instances)), ("unfinished", IvyJson::Array(unfinished))]);
         if let Some(retention) = retention { status.insert("storageRetention", retention); }
+        let at = self.clock.utc_millis();
+        if self.storage_space.as_ref().is_none_or(|(sampled, _)| at < *sampled || at.saturating_sub(*sampled) >= 60_000) {
+            let mut space = crate::storage_space::probe_host_storage(&self.config)?;
+            space.insert("observedAt", status.required("observedAt")?.clone());
+            self.storage_space = Some((at, space));
+        }
+        status.insert("storageSpace", self.storage_space.as_ref().unwrap().1.clone());
         validate_host("HostStatus", &status)?; Ok(status)
     }
 }
@@ -859,16 +871,18 @@ impl State {
     }
     fn retention_candidate_order(&self) -> IvyResult<Vec<String>> {
         let mut protected = RetentionIds::default();
+        let mut selected = BTreeSet::new();
         for table in ["installed", "runtime_targets", "observations"] {
             let mut statement = internal(self.db.prepare(&format!("SELECT value FROM {table}")))?;
             let rows = internal(statement.query_map([], |r| r.get::<_, String>(0)))?;
             for row in rows {
                 let value = decoded(&internal(row)?)?;
-                if let Some(id) = value.get("candidateId").and_then(non_null) { protected.insert(id.as_str()?); }
+                if let Some(id) = value.get("candidateId").and_then(non_null) { let id = id.as_str()?; selected.insert(id.clone()); protected.insert(id); }
             }
         }
         let mut statement = internal(self.db.prepare("SELECT entry_json FROM operations ORDER BY created_at DESC,operation_id DESC"))?;
         let rows = internal(statement.query_map([], |r| r.get::<_, String>(0)))?;
+        let mut predecessors = BTreeMap::new();
         for row in rows {
             let entry = decoded(&internal(row)?)?;
             if !completed(entry.required("record")?.required("phase")?) {
@@ -876,7 +890,34 @@ impl State {
                 for id in [field(&value, "candidateId"), field(&value, "previousCandidateId"), field(field(&value, "request"), "candidateId"), field(field(field(&value, "activation"), "previousTarget"), "candidateId")] {
                     if let Some(id) = non_null(id) { protected.insert(id.as_str()?); }
                 }
+            } else if field(field(&entry, "record"), "phase") == &"succeeded".into()
+                && ["deploy", "rollback"].iter().any(|action| field(field(&entry, "request"), "action") == &IvyJson::from(*action)) {
+                let text = |value: &IvyJson| value.as_js_string().and_then(|s| s.to_utf8().ok());
+                if let Some(current) = text(field(&entry, "candidateId")).filter(|id| selected.contains(id)) {
+                    let prior = text(field(&entry, "previousCandidateId")).or_else(|| text(field(field(field(&entry, "activation"), "previousTarget"), "candidateId")));
+                    if let Some(prior) = prior.filter(|id| id != &current) { predecessors.entry(current).or_insert(prior); }
+                }
             }
+        }
+        let mut statement = internal(self.db.prepare("SELECT manifest_json FROM candidates ORDER BY candidate_id LIMIT 10001"))?;
+        let rows = internal(statement.query_map([], |row| row.get::<_, String>(0)))?;
+        let mut releases = BTreeMap::new();
+        for (index, row) in rows.enumerate() {
+            require(index < 10000, "limit_exceeded", "Host rollback inventory exceeds its retention limit.")?;
+            let manifest = decoded(&internal(row)?)?;
+            releases.insert(manifest.required("buildId")?.as_str()?, (manifest.required("componentId")?.as_str()?, manifest.required("version")?.as_str()?));
+        }
+        for current in selected {
+            let Some((component, version)) = releases.get(&current) else { continue; };
+            if let Some(prior) = predecessors.get(&current).filter(|prior| releases.get(*prior).is_some_and(|(c, _)| c == component)) {
+                protected.insert(prior.clone()); continue;
+            }
+            let mut prior: Option<(&String, &String)> = None;
+            for (id, (c, v)) in &releases {
+                if c == component && json::compare_versions(v, version).ok() == Some(std::cmp::Ordering::Less)
+                    && prior.is_none_or(|(_, best)| json::compare_versions(v, best).ok() == Some(std::cmp::Ordering::Greater)) { prior = Some((id, v)); }
+            }
+            if let Some((id, _)) = prior { protected.insert(id.clone()); }
         }
         Ok(protected.order)
     }

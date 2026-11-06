@@ -101,6 +101,7 @@ fn catalog(
 }
 fn owner(expected: &Json, contract: &NativeContract) -> IvyResult<NativeOwnerIdentity> {
     Ok(NativeOwnerIdentity {
+        backend: None,
         service_node_id: string(expected, "serviceNodeId")?.clone(),
         host_id: None,
         native_version: string(expected, "nativeVersion")?.clone(),
@@ -140,7 +141,7 @@ pub async fn verify_chat_native_request(
         Some(field(request, "catalogSourceHash")?),
     )?;
     let method = string(request, "method")?;
-    let definition_hash = hash_json(source.definition(method)?)?;
+    let definition_hash = source.definition_hash(method)?.to_owned();
     require(
         request.get("nativeVersion") == plan.get("nativeVersion")
             && request.get("catalogSourceHash") == plan.get("catalogSourceHash")

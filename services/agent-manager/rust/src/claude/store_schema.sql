@@ -27,13 +27,31 @@
         started_at INTEGER,
         completed_at INTEGER,
         duration_ms INTEGER,
-        items_json TEXT NOT NULL,
         diff TEXT NOT NULL DEFAULT '',
         error_json TEXT,
         FOREIGN KEY(thread_id) REFERENCES threads(id)
       );
       CREATE INDEX IF NOT EXISTS idx_threads_updated ON threads(updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_turns_thread ON turns(thread_id, started_at);
+      CREATE TABLE IF NOT EXISTS turn_items (
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL,
+        item_key TEXT,
+        kind TEXT,
+        body_json TEXT NOT NULL,
+        PRIMARY KEY(turn_id, position)
+      );
+      CREATE INDEX IF NOT EXISTS idx_turn_items_key ON turn_items(turn_id, item_key, position);
+      CREATE INDEX IF NOT EXISTS idx_turn_items_kind ON turn_items(turn_id, kind, position);
+      CREATE TABLE IF NOT EXISTS item_deltas (
+        id INTEGER PRIMARY KEY,
+        turn_id TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        target INTEGER NOT NULL CHECK(target BETWEEN 0 AND 2),
+        delta_json TEXT NOT NULL,
+        FOREIGN KEY(turn_id, position) REFERENCES turn_items(turn_id, position) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_item_deltas_item ON item_deltas(turn_id, position, id);
       CREATE TABLE IF NOT EXISTS thread_sections (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,

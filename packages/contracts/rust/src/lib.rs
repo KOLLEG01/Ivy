@@ -19,6 +19,7 @@ pub mod json;
 pub mod limits;
 mod native_catalog_path;
 pub mod native_contract;
+pub mod native_backend;
 pub mod operation;
 pub mod published_contracts;
 pub mod re2;

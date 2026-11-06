@@ -58,9 +58,59 @@ fn expanded_definition_schema_uses_a_new_immutable_contract_version() {
         .unwrap();
     assert_eq!(
         required.get("readVersions"),
-        Some(&json(r#"["1.0.0","1.1.0"]"#))
+        Some(&json(r#"["1.0.0","1.1.0","1.2.0","1.3.0"]"#))
     );
-    assert_eq!(required.get("writeVersions"), Some(&json(r#"["1.1.0"]"#)));
+    assert_eq!(required.get("writeVersions"), Some(&json(r#"["1.3.0"]"#)));
+}
+
+#[test]
+fn native_mcp_settings_preserve_the_complete_backend_selector() {
+    let configuration = json(
+        r#"{"serviceNodeId":"host.agent","cwd":"/fixture","server":"fixture","tools":["echo"],"backend":{"backendId":"worker","provider":"codex","accountId":"work"}}"#,
+    );
+    let parsed = parse_schema("mcpSchema", &configuration).unwrap();
+    assert_eq!(parsed.get("backend"), configuration.get("backend"));
+    let mut definition = task();
+    definition.insert("mcp", configuration.clone());
+    let parsed = parse_schema("taskSchema", &definition).unwrap();
+    assert_eq!(
+        parsed.required("mcp").unwrap().get("backend"),
+        configuration.get("backend")
+    );
+    // Hive validates the advertised immutable contract, not the local parser.
+    let registered = registry();
+    let contract = registered
+        .required("contracts")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|contract| contract.get("key") == Some(&"data-collector/definition".into()))
+        .unwrap();
+    let bundle = ivy_contracts::builtin_schema::SchemaBundle::from_documents(vec![
+        contract.required("jsonSchema").unwrap().clone(),
+    ])
+    .unwrap();
+    let mut saved_task = definition;
+    saved_task.remove("enabled");
+    saved_task.remove("script");
+    let document = IvyJson::object([
+        ("schemaVersion", IvyJson::Number(1.0)),
+        ("homeServiceNodeId", "collector".into()),
+        ("task", saved_task),
+        ("script", json(r#"{"objectId":"script","revision":1}"#)),
+    ]);
+    assert!(bundle.matches("#", &document).unwrap());
+    for backend in [
+        json(r#"{"backendId":"worker","provider":"other","accountId":"work"}"#),
+        json(r#"{"backendId":"../worker","provider":"codex","accountId":"work"}"#),
+        json(r#"{"backendId":"worker","provider":"codex"}"#),
+        json(r#"{"backendId":"worker","provider":"codex","accountId":"work","unknown":true}"#),
+    ] {
+        let mut invalid = configuration.clone();
+        invalid.insert("backend", backend);
+        assert!(parse_schema("mcpSchema", &invalid).is_err());
+    }
 }
 
 #[test]

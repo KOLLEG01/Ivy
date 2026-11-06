@@ -63,6 +63,7 @@ impl AssignmentNative<'_, '_, '_> {
             self.tools.clone(),
             text(self.evidence.settings.required("identity")?, "principalId")?,
             NativeOwnerIdentity {
+                backend: None,
                 service_node_id: text(target, "serviceNodeId")?,
                 host_id: Some(text(target, "hostId")?),
                 native_version: text(target, "nativeVersion")?,

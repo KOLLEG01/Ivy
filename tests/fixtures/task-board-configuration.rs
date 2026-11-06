@@ -325,6 +325,137 @@ fn outcome(result: IvyResult<Json>) -> Json {
     }
 }
 
+async fn check(
+    client: Arc<Client>,
+    value: &Json,
+    service_node_id: Option<&JsString>,
+    allow_unavailable: bool,
+) -> IvyResult<()> {
+    let database = Connection::open_in_memory().unwrap();
+    local_journal::initialize(&database).unwrap();
+    let before = database.total_changes();
+    let journal = JournalStore {
+        journal: LocalJournal {
+            connection: &database,
+            root_object_id: Some("root".into()),
+        },
+        client: client.clone(),
+        contracts: Policy {
+            value_hash: hash_json(value).unwrap(),
+            reject: flag(&client.input, "reject"),
+            trace: client.trace.clone(),
+        },
+        limits: HistoryLimits {
+            count: 1000,
+            bytes: 32 * 1024 * 1024,
+        },
+        now: || String::from("2026-01-02T03:04:05.000Z"),
+        new_id: || JsString::from("unused"),
+        cache: None,
+    };
+    let result = check_configuration(&journal, value, service_node_id, allow_unavailable).await;
+    assert_eq!(
+        database.total_changes(),
+        before,
+        "Configuration discovery changed SQLite"
+    );
+    result
+}
+
+#[tokio::test]
+async fn configuration_rejects_repeated_and_endless_registry_pages_without_writes() {
+    for repeated in [false, true] {
+        let mut node = super::execution_backends::registered_host();
+        node.insert("connected", false.into());
+        let pages: Vec<_> = (0..21)
+            .map(|index| {
+                let page = Json::object([
+                    (
+                        "items",
+                        Json::Array(if index == 0 {
+                            vec![node.clone()]
+                        } else {
+                            vec![]
+                        }),
+                    ),
+                    (
+                        "nextCursor",
+                        if index == 20 {
+                            Json::Null
+                        } else {
+                            format!("nodes-{}", if repeated { 1 } else { index + 1 }).into()
+                        },
+                    ),
+                ]);
+                ivy_contracts::core_schema::validate_output("serviceNodes.list", &page).unwrap();
+                page
+            })
+            .collect();
+        let client = Arc::new(Client {
+            input: Json::object([("nodePages", Json::Array(pages))]),
+            trace: Arc::default(),
+            calls: Mutex::default(),
+        });
+        let error = check(client.clone(), &initial_configuration(), None, true)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "task_board_target_unavailable");
+        assert_eq!(
+            client.calls.lock().unwrap().node_page,
+            if repeated { 2 } else { 20 }
+        );
+        assert!(
+            client
+                .trace
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|row| row.as_array().unwrap()[0].is_str("rpc"))
+                .all(|row| row.as_array().unwrap()[1].is_str("serviceNodes.list"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn model_discovery_bounds_empty_pages_before_issuing_another_operation() {
+    let mut node = super::execution_backends::registered_host();
+    node.insert("nativeVersion", "0.163.0".into());
+    let mut pages: Vec<_> = (0..20)
+        .map(|index| {
+            Json::object([
+                ("data", Json::Array(vec![])),
+                ("nextCursor", format!("models-{}", index + 1).into()),
+            ])
+        })
+        .collect();
+    pages.push(Json::object([(
+        "error",
+        Json::object([("code", "discovery_unavailable".into())]),
+    )]));
+    let client = Arc::new(Client {
+        input: Json::object([
+            ("node", node.clone()),
+            (
+                "models",
+                Json::object([("native-agent", Json::Array(pages))]),
+            ),
+        ]),
+        trace: Arc::default(),
+        calls: Mutex::default(),
+    });
+    let error = supports_execution_options(
+        client.clone(),
+        &node,
+        &Json::object([("model", "requested".into())]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "task_board_model_unavailable");
+    let calls = client.calls.lock().unwrap();
+    assert_eq!(calls.models.get(&JsString::from("native-agent")), Some(&20));
+    assert_eq!(calls.issued.len(), 20);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn configuration_and_discovery_match_original_defaults_guards_and_rpc_traces() {
     let bytes = if let Some(path) = std::env::var_os("IVY_TASK_BOARD_CONFIGURATION_FIXTURE") {
@@ -376,42 +507,15 @@ async fn configuration_and_discovery_match_original_defaults_guards_and_rpc_trac
             .await
             .map(Json::Bool),
             "check" => {
-                let database = Connection::open_in_memory().unwrap();
-                local_journal::initialize(&database).unwrap();
-                let before = database.total_changes();
                 let value = input.required("value").unwrap();
-                let journal = JournalStore {
-                    journal: LocalJournal {
-                        connection: &database,
-                        root_object_id: Some("root".into()),
-                    },
-                    client: client.clone(),
-                    contracts: Policy {
-                        value_hash: hash_json(value).unwrap(),
-                        reject: flag(input, "reject"),
-                        trace: trace.clone(),
-                    },
-                    limits: HistoryLimits {
-                        count: 1000,
-                        bytes: 32 * 1024 * 1024,
-                    },
-                    now: || String::from("2026-01-02T03:04:05.000Z"),
-                    new_id: || JsString::from("unused"),
-                    cache: None,
-                };
-                let result = check_configuration(
-                    &journal,
+                check(
+                    client.clone(),
                     value,
                     input.get("serviceNodeId").and_then(Json::as_js_string),
                     flag(input, "allowUnavailable"),
                 )
-                .await;
-                assert_eq!(
-                    database.total_changes(),
-                    before,
-                    "Configuration discovery changed SQLite"
-                );
-                result.map(|()| Json::Null)
+                .await
+                .map(|()| Json::Null)
             }
             _ => panic!("Unknown configuration case {method}"),
         };
@@ -432,7 +536,8 @@ async fn configuration_and_discovery_match_original_defaults_guards_and_rpc_trac
             canonical(&actual, MANAGEMENT_FRAME_BYTES).unwrap(),
             canonical(row.required("expected").unwrap(), MANAGEMENT_FRAME_BYTES).unwrap(),
             "{}",
-            row.required("name").unwrap().as_str().unwrap()
+            ivy_contracts::json::stringify(row.required("name").unwrap(), MANAGEMENT_FRAME_BYTES)
+                .unwrap()
         );
     }
 }

@@ -8,7 +8,6 @@ use crate::{
     },
     native_observations::{NativeObservations, NativeThreadState},
     native_operation::{NativeOperationCall, NativeOperationOwner},
-    native_project::native_thread_project,
     native_turn_contents::{ContractFuture, NativeTurnOwner},
     rpc::{RequestFuture, RequestOptions},
     tools::{BoundTool, InterfaceRequirement, ToolCallOptions, ToolClients, call_bound},
@@ -36,6 +35,26 @@ pub(crate) struct ContractEntry {
 }
 pub(crate) type ContractCache = Mutex<VecDeque<(String, Arc<ContractEntry>)>>;
 
+pub(crate) fn share_selected_catalog(
+    tools: &ToolClients,
+    selected: NativeContract,
+) -> IvyResult<NativeContract> {
+    let cache = tools
+        .native_contracts
+        .lock()
+        .map_err(|_| IvyError::internal())?;
+    for (_, entry) in cache.iter() {
+        if let Some(Ok(contract)) = entry.lookup.peek() {
+            if contract.catalog_hash() == selected.catalog_hash()
+                && contract.catalog() == selected.catalog()
+            {
+                return Ok(contract.with_backend(selected.backend().cloned()));
+            }
+        }
+    }
+    Ok(selected)
+}
+
 /// Share the same ToolClients per RPC connection to share the bounded catalog cache.
 #[derive(Clone)]
 pub struct NativeOwner {
@@ -43,6 +62,12 @@ pub struct NativeOwner {
     caller: JsString,
     target: NativeOwnerIdentity,
     options: RequestOptions,
+}
+/// Read retained operations through a current route without changing their
+/// original owner. This handle has no dispatch or absence-retry authority.
+pub struct OriginalNativeOperations {
+    route: NativeOwner,
+    original: NativeOwnerIdentity,
 }
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
@@ -81,6 +106,12 @@ impl NativeOwner {
     pub fn caller(&self) -> &JsString {
         &self.caller
     }
+    pub fn original_operations(&self, original: NativeOwnerIdentity) -> OriginalNativeOperations {
+        OriginalNativeOperations {
+            route: self.clone(),
+            original,
+        }
+    }
     fn check_signal(&self) -> IvyResult<()> {
         if self.options.cancellation.is_cancelled() {
             Err(self.options.cancel_error.clone())
@@ -110,6 +141,9 @@ impl NativeOwner {
         ]);
         if let Some(host) = &self.target.host_id {
             identity.insert("hostId", IvyJson::String(host.clone()));
+        }
+        if let Some(backend) = &self.target.backend {
+            identity.insert("backend", backend.json());
         }
         let key = hash_json(&identity)?;
         let entry =
@@ -175,12 +209,21 @@ impl NativeOwner {
         expected_definition_hash: Option<&JsString>,
     ) -> IvyResult<Arc<BoundTool>> {
         self.check_signal()?;
-        let mut name = JsString::from("codex.");
+        let mut name = JsString::from(format!(
+            "{}.",
+            self.target
+                .backend
+                .as_ref()
+                .map_or("codex", |backend| backend.id())
+        ));
         name.0.extend(&method.0);
         let expected = expected_definition_hash.cloned().map(IvyJson::String);
         let binding = self
             .tools
-            .native_service_tools(self.target.service_node_id.clone())?
+            .native_backend_tools(
+                self.target.service_node_id.clone(),
+                self.target.backend.as_ref(),
+            )?
             .binding(&name, expected.as_ref())
             .await?;
         self.check_signal()?;
@@ -261,6 +304,10 @@ impl NativeOwner {
         N: Fn(X) -> X,
     {
         self.check_signal()?;
+        let args = ivy_contracts::native_backend::BackendIdentity::select_arguments(
+            self.target.backend.as_ref(),
+            args,
+        )?;
         let tools = self.tools.service_tools(
             self.target.service_node_id.clone(),
             &[InterfaceRequirement {
@@ -334,7 +381,10 @@ impl NativeOwner {
         let value = self.management("frameLimits", empty(), None).await?;
         validate_agent("FrameLimits", &value)?;
         require(
-            text(&value, "serviceNodeId")? == self.target.service_node_id
+            ivy_contracts::native_backend::BackendIdentity::matches(
+                &value,
+                self.target.backend.as_ref(),
+            ) && text(&value, "serviceNodeId")? == self.target.service_node_id
                 && text(&value, "nativeVersion")? == self.target.native_version
                 && text(&value, "nativeExecutableHash")? == self.target.native_executable_hash
                 && text(&value, "catalogHash")? == self.target.catalog_hash
@@ -349,19 +399,28 @@ impl NativeOwner {
     }
     pub async fn thread_start_params(&self, params: &IvyJson) -> IvyResult<IvyJson> {
         self.check_signal()?;
-        native_thread_project(
+        crate::native_project::native_thread_project_for_backend(
             &self.tools,
             &self.target.service_node_id,
+            self.target.backend.as_ref(),
             params,
             self.options.clone(),
         )
         .await
     }
     pub fn check_operation(&self, value: &IvyJson, call: &NativeOperationCall) -> IvyResult<()> {
+        self.check_original_operation(value, call, &self.target)
+    }
+    fn check_original_operation(
+        &self,
+        value: &IvyJson,
+        call: &NativeOperationCall,
+        original: &NativeOwnerIdentity,
+    ) -> IvyResult<()> {
         validate_native_operation(
             value,
             &NativeOperationIdentity {
-                owner: self.target.clone(),
+                owner: original.clone(),
                 caller_principal_id: self.caller.clone(),
                 operation_id: call.operation_id.clone(),
                 method: call.method.clone(),
@@ -371,6 +430,13 @@ impl NativeOwner {
         )
     }
     pub async fn operation(&self, call: &NativeOperationCall) -> IvyResult<IvyJson> {
+        self.original_operation(call, &self.target).await
+    }
+    async fn original_operation(
+        &self,
+        call: &NativeOperationCall,
+        original: &NativeOwnerIdentity,
+    ) -> IvyResult<IvyJson> {
         match self
             .management(
                 "operation",
@@ -380,14 +446,17 @@ impl NativeOwner {
             .await
         {
             Ok(value) => {
-                self.check_operation(&value, call)?;
+                self.check_original_operation(&value, call, original)?;
                 Ok(value)
             }
             Err(error) if error.code == "not_found" => {
                 let absence = error.details.unwrap_or(IvyJson::Null);
                 validate_agent("OperationAbsence", &absence)?;
                 require(
-                    text(&absence, "serviceNodeId")? == self.target.service_node_id
+                    ivy_contracts::native_backend::BackendIdentity::matches(
+                        &absence,
+                        original.backend.as_ref(),
+                    ) && text(&absence, "serviceNodeId")? == original.service_node_id
                         && text(&absence, "operationId")? == call.operation_id,
                     "native_absence_mismatch",
                     "Only exact owner-produced absence can identify an unobserved original operation.",
@@ -469,10 +538,17 @@ impl NativeOwner {
     }
     async fn reassess_native(&self, call: &NativeOperationCall) -> IvyResult<()> {
         self.status().await?;
-        let tools = self
-            .tools
-            .native_service_tools(self.target.service_node_id.clone())?;
-        let mut name = JsString::from("codex.");
+        let tools = self.tools.native_backend_tools(
+            self.target.service_node_id.clone(),
+            self.target.backend.as_ref(),
+        )?;
+        let mut name = JsString::from(format!(
+            "{}.",
+            self.target
+                .backend
+                .as_ref()
+                .map_or("codex", |backend| backend.id())
+        ));
         name.0.extend(&call.method.0);
         let fresh = tools.refresh(&tools.binding(&name, None).await?).await?;
         require(
@@ -505,7 +581,10 @@ impl NativeOwner {
             .await?;
         validate_agent("Interaction", &value)?;
         require(
-            text(&value, "operationId")? == call.operation_id,
+            ivy_contracts::native_backend::BackendIdentity::matches(
+                &value,
+                self.target.backend.as_ref(),
+            ) && text(&value, "operationId")? == call.operation_id,
             "native_observation_invalid",
             "Interaction reply identity differs.",
         )?;
@@ -521,7 +600,10 @@ impl NativeOwner {
             .await?;
         validate_agent("Interaction", &value)?;
         require(
-            text(&value, "operationId")? == *operation_id,
+            ivy_contracts::native_backend::BackendIdentity::matches(
+                &value,
+                self.target.backend.as_ref(),
+            ) && text(&value, "operationId")? == *operation_id,
             "native_observation_invalid",
             "Interaction lookup identity differs.",
         )?;
@@ -611,6 +693,23 @@ impl NativeOwner {
                 )
             })?;
         NativeObservations::new(&contract).native_thread_state(result)
+    }
+}
+impl OriginalNativeOperations {
+    pub async fn operation(&self, call: &NativeOperationCall) -> IvyResult<IvyJson> {
+        self.route.original_operation(call, &self.original).await
+    }
+    pub fn check_operation(&self, value: &IvyJson, call: &NativeOperationCall) -> IvyResult<()> {
+        self.route
+            .check_original_operation(value, call, &self.original)
+    }
+}
+impl NativeOperationOwner for OriginalNativeOperations {
+    fn operation<'a>(&'a self, call: &'a NativeOperationCall) -> RequestFuture<'a> {
+        Box::pin(OriginalNativeOperations::operation(self, call))
+    }
+    fn check_operation(&self, value: &IvyJson, call: &NativeOperationCall) -> IvyResult<()> {
+        OriginalNativeOperations::check_operation(self, value, call)
     }
 }
 impl NativeOperationOwner for NativeOwner {

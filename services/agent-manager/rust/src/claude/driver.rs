@@ -2,7 +2,7 @@
 //! waits never occupy the owner's receive loop or its shutdown channel.
 use super::{
     ask::{self, Callback},
-    bridge::Bridge,
+    bridge::{Bridge, SdkEvent, SdkReply},
     error::{AdapterError, Result},
     protocol::{Adapter, Effect},
     sdk_events::SdkTurn,
@@ -11,6 +11,7 @@ use super::{
     workflow::{EventSink, IoFuture, WorkflowFiles},
 };
 use ivy_contracts::{IvyJson as J, JsString};
+use ivy_host_runtime::codex_rpc::NativeFrame;
 use std::{
     collections::BTreeMap,
     sync::{
@@ -19,7 +20,7 @@ use std::{
     },
 };
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{OwnedSemaphorePermit, mpsc, oneshot},
     task::{AbortHandle, JoinHandle, JoinSet},
     time::Duration,
 };
@@ -34,10 +35,24 @@ pub struct Bindings {
     pub git_diff: Arc<dyn Fn(JsString) -> IoFuture<JsString> + Send + Sync>,
 }
 type Ack = oneshot::Sender<Result<()>>;
+enum NativeMessage {
+    Value(J),
+    Frame(NativeFrame),
+}
+impl std::ops::Deref for NativeMessage {
+    type Target = J;
+    fn deref(&self) -> &J {
+        match self {
+            Self::Value(value) => value,
+            Self::Frame(frame) => frame,
+        }
+    }
+}
 enum Input {
+    BridgeFailed(AdapterError),
     Native {
         peer: JsString,
-        message: J,
+        message: NativeMessage,
         reply: Ack,
     },
     PeerClosed(JsString),
@@ -53,7 +68,7 @@ enum Input {
     },
     RuntimeReply {
         id: u64,
-        result: Result<J>,
+        result: Result<Option<SdkReply>>,
     },
     Diff {
         turn: JsString,
@@ -70,8 +85,7 @@ enum Input {
     },
 }
 enum TurnInput {
-    Message(JsString, J),
-    End(JsString, Option<AdapterError>),
+    Frame(JsString, SdkEvent),
 }
 struct Running {
     id: JsString,
@@ -87,7 +101,9 @@ enum PendingKind {
 }
 struct Pending {
     turn: JsString,
+    query: JsString,
     kind: PendingKind,
+    _retained: Option<OwnedSemaphorePermit>,
 }
 #[derive(Clone)]
 pub struct Handle {
@@ -96,6 +112,14 @@ pub struct Handle {
 }
 impl Handle {
     pub async fn receive(&self, peer: JsString, message: J) -> Result<()> {
+        self.receive_message(peer, NativeMessage::Value(message))
+            .await
+    }
+    pub async fn receive_frame(&self, peer: JsString, message: NativeFrame) -> Result<()> {
+        self.receive_message(peer, NativeMessage::Frame(message))
+            .await
+    }
+    async fn receive_message(&self, peer: JsString, message: NativeMessage) -> Result<()> {
         let (reply, receiver) = oneshot::channel();
         self.sender
             .send(Input::Native {
@@ -125,7 +149,7 @@ impl Handle {
 pub fn spawn(
     adapter: Adapter,
     bridge: Bridge,
-    events: mpsc::Receiver<J>,
+    events: mpsc::Receiver<SdkEvent>,
     bindings: Bindings,
 ) -> (Handle, JoinHandle<Result<()>>) {
     let (sender, receiver) = mpsc::channel(128);
@@ -153,7 +177,7 @@ pub fn spawn(
 struct Owner {
     adapter: Adapter,
     bridge: Bridge,
-    events: mpsc::Receiver<J>,
+    events: mpsc::Receiver<SdkEvent>,
     bindings: Bindings,
     sender: mpsc::Sender<Input>,
     receiver: mpsc::Receiver<Input>,
@@ -210,6 +234,7 @@ impl Owner {
     }
     fn input(&mut self, input: Input) -> Result<()> {
         match input {
+            Input::BridgeFailed(error) => return Err(error),
             Input::Native {
                 peer,
                 message,
@@ -234,8 +259,17 @@ impl Owner {
                 }
             }
             Input::RuntimeReply { id, result } => {
+                let (result, original) = match result {
+                    Ok(Some(mut reply)) => (
+                        Ok(std::mem::replace(&mut reply.value, J::Null)),
+                        Some(reply),
+                    ),
+                    Ok(None) => (Ok(J::Null), None),
+                    Err(error) => (Err(error), None),
+                };
                 let effects = self.adapter.runtime_reply(id, result)?;
                 self.effects(effects, None)?;
+                drop(original);
             }
             Input::Diff { turn, diff, reply } => {
                 let result = self
@@ -246,6 +280,8 @@ impl Owner {
             }
             Input::Finished { turn, result } => {
                 self.running.retain(|running| running.id != turn);
+                let effects = self.adapter.cancel_callbacks(&turn, None)?;
+                self.effects(effects, None)?;
                 self.pending.retain(|_, pending| pending.turn != turn);
                 self.cancel_watchdog(&turn);
                 if result.is_ok() {
@@ -475,8 +511,10 @@ impl Owner {
                 while !state.is_finished() {
                     let result = tokio::select! {
                         input=receiver.recv()=>match input {
-                            Some(TurnInput::Message(id, message)) if id == query_id => state.message(&message).await,
-                            Some(TurnInput::End(id, error)) if id == query_id => state.end(error).await,
+                            Some(TurnInput::Frame(id, frame)) if id == query_id => {
+                                if is(field(&frame,"type"),"message") { state.message(field(&frame,"message")).await }
+                                else { state.end(if field(&frame,"error").is_null(){None}else{Some(AdapterError::new(text(field(field(&frame,"error"),"message"))))}).await }
+                            },
                             Some(_) => Ok(()),
                             None => state.end(None).await,
                         },
@@ -573,41 +611,42 @@ impl Owner {
         let owner = self.sender.clone();
         let bridge = self.bridge.clone();
         self.jobs.spawn(async move {
-            let result = async {
-                let mut value = J::Null;
+            let result: Result<Option<SdkReply>> = async {
+                let mut value = None;
                 for (call, params) in request? {
                     let result = bridge.call(call, params).await;
                     if method == "interrupt" {
                         continue;
                     }
-                    value = result?;
+                    value = Some(result?);
                 }
                 if method == "usage" {
-                    Ok(
-                        if field(&value, "rate_limits_available")
+                    if let Some(reply) = &mut value {
+                        reply.value = if field(reply, "rate_limits_available")
                             .as_bool()
                             .unwrap_or(false)
                         {
-                            coalesce(field(&value, "rate_limits"), &J::Null)
+                            reply.value.remove("rate_limits").unwrap_or(J::Null)
                         } else {
                             J::Null
-                        },
-                    )
-                } else {
-                    Ok(value)
+                        };
+                    }
                 }
+                Ok(value)
             }
             .await;
             let _ = owner.send(Input::RuntimeReply { id, result }).await;
         });
     }
-    fn bridge_event(&mut self, frame: J) -> Result<Option<(mpsc::Sender<TurnInput>, TurnInput)>> {
-        let kind = field(&frame, "type");
-        if is(kind, "transportError") {
+    fn bridge_event(
+        &mut self,
+        mut frame: SdkEvent,
+    ) -> Result<Option<(mpsc::Sender<TurnInput>, TurnInput)>> {
+        if is(field(&frame, "type"), "transportError") {
             return Err(AdapterError::new(text(field(&frame, "message"))));
         }
         let turn = string(field(&frame, "turnId"));
-        if is(kind, "permission") {
+        if is(field(&frame, "type"), "permission") {
             let callback_id = field(&frame, "callbackId")
                 .as_f64()
                 .filter(|n| safe_integer(*n) && *n >= 0.0)
@@ -624,56 +663,76 @@ impl Owner {
                         ("behavior", "deny".into()),
                         ("message", "turn already finished".into()),
                     ])),
+                    None,
                 );
                 return Ok(None);
             };
             let turn = running.id.clone();
+            let query = string(field(&frame, "turnId"));
+            let callback_identity = J::object([("callbackId", (callback_id as f64).into())]);
+            let input = frame.take_input();
             let callback = ask::callback(
                 &running.context,
                 field(&frame, "toolName"),
-                field(&frame, "input"),
+                input,
                 field(&frame, "toolUseId"),
                 running.auto_allow,
                 &self.adapter.ids,
             );
             let effects = match callback {
                 Callback::Immediate(result) => {
-                    self.sdk_reply(callback_id, Ok(result));
+                    self.sdk_reply(callback_id, Ok(result), None);
                     return Ok(None);
                 }
                 Callback::Permission { event, input } => {
-                    self.pending.insert(
+                    self.retain_callback(
                         callback_id,
                         Pending {
                             turn: turn.clone(),
+                            query,
                             kind: PendingKind::Permission(input),
+                            _retained: None,
                         },
-                    );
+                    )?;
                     self.adapter
-                        .permission_request(&turn, &event, frame.clone())?
+                        .permission_request(&turn, &event, callback_identity)?
                 }
                 Callback::UserInput {
                     event,
                     input,
                     questions,
                 } => {
-                    self.pending.insert(
+                    self.retain_callback(
                         callback_id,
                         Pending {
                             turn: turn.clone(),
+                            query,
                             kind: PendingKind::UserInput { input, questions },
+                            _retained: None,
                         },
-                    );
+                    )?;
                     self.adapter
-                        .user_input_request(&turn, &event, frame.clone())?
+                        .user_input_request(&turn, &event, callback_identity)?
                 }
             };
             self.effects(effects, None)?;
             return Ok(None);
         }
-        if is(kind, "callbackCancelled") {
-            if let Some(id) = field(&frame, "callbackId").as_f64() {
-                self.pending.remove(&(id as u64));
+        if is(field(&frame, "type"), "callbackCancelled") {
+            if let Some(id) = field(&frame, "callbackId")
+                .as_f64()
+                .filter(|n| safe_integer(*n) && *n >= 0.0)
+                .map(|n| n as u64)
+            {
+                if self
+                    .pending
+                    .get(&id)
+                    .is_some_and(|pending| pending.query == turn)
+                {
+                    let pending = self.pending.remove(&id).unwrap();
+                    let effects = self.adapter.cancel_callbacks(&pending.turn, Some(id))?;
+                    self.effects(effects, None)?;
+                }
             }
             return Ok(None);
         }
@@ -684,24 +743,44 @@ impl Owner {
         else {
             return Ok(None);
         };
-        let input = if is(kind, "message") {
-            TurnInput::Message(turn, field(&frame, "message").clone())
-        } else if is(kind, "end") {
-            TurnInput::End(
-                turn,
-                if field(&frame, "error").is_null() {
-                    None
-                } else {
-                    Some(AdapterError::new(text(field(
-                        field(&frame, "error"),
-                        "message",
-                    ))))
-                },
-            )
-        } else {
+        if !is(field(&frame, "type"), "message") && !is(field(&frame, "type"), "end") {
             return Ok(None);
+        }
+        Ok(Some((
+            running.sender.clone(),
+            TurnInput::Frame(turn, frame),
+        )))
+    }
+    fn retain_callback(&mut self, id: u64, mut pending: Pending) -> Result<()> {
+        if self.pending.contains_key(&id) {
+            return Err(AdapterError::new("Repeated SDK callback identifier"));
+        }
+        let (input, questions) = match &pending.kind {
+            PendingKind::Permission(input) => (input, None),
+            PendingKind::UserInput { input, questions } => (input, Some(questions)),
         };
-        Ok(Some((running.sender.clone(), input)))
+        let mut bytes = std::mem::size_of::<Pending>()
+            .saturating_add(256)
+            .saturating_add(input.retained_bytes())
+            .saturating_add(pending.turn.0.capacity().saturating_mul(2))
+            .saturating_add(pending.query.0.capacity().saturating_mul(2));
+        if let Some(questions) = questions {
+            bytes = bytes.saturating_add(
+                questions
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<J>()),
+            );
+            for question in questions {
+                bytes = bytes.saturating_add(
+                    question
+                        .retained_bytes()
+                        .saturating_sub(std::mem::size_of::<J>()),
+                );
+            }
+        }
+        pending._retained = Some(self.adapter.reserve_callback_input(bytes)?);
+        self.pending.insert(id, pending);
+        Ok(())
     }
     fn permission_reply(&mut self, callback: J, result: J) {
         let Some(id) = field(&callback, "callbackId").as_f64().map(|n| n as u64) else {
@@ -714,7 +793,7 @@ impl Owner {
         let response = match pending.kind {
             PendingKind::Permission(input) => {
                 if error.is_null() {
-                    Ok(ask::permission_result(&input, &result, false))
+                    Ok(ask::permission_result(input, &result, false))
                 } else {
                     Err(AdapterError::new(text(field(error, "message"))))
                 }
@@ -736,10 +815,11 @@ impl Owner {
                 }))
             }
         };
-        self.sdk_reply(id, response)
+        self.sdk_reply(id, response, pending._retained)
     }
-    fn sdk_reply(&mut self, id: u64, result: Result<J>) {
+    fn sdk_reply(&mut self, id: u64, result: Result<J>, retained: Option<OwnedSemaphorePermit>) {
         let bridge = self.bridge.clone();
+        let owner = self.sender.clone();
         let mut params = J::object([("callbackId", J::Number(id as f64))]);
         match result {
             Ok(value) => params.insert("result", value),
@@ -752,7 +832,13 @@ impl Owner {
             ),
         };
         self.jobs.spawn(async move {
-            let _ = bridge.call("permission/reply", params).await;
+            let result = bridge.call("permission/reply", params).await;
+            drop(retained);
+            if let Err(error) = result {
+                // An already accepted native answer must not leave its SDK
+                // callback silently pending after command admission failed.
+                let _ = owner.send(Input::BridgeFailed(error)).await;
+            }
         });
     }
 }

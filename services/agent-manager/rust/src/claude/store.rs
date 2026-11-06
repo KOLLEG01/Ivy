@@ -20,6 +20,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[path = "store_items.rs"]
+mod records;
+pub use records::{ItemDelta, ItemsView, Page, PageRequest, TurnCursor, TurnPage};
+
 pub const PINNED_SECTION_ID: &str = "01984de2-8f74-7c91-a3b2-5c5e937cf318";
 pub const PINNED_SECTION_NAME: &str = "Pinned";
 pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
@@ -292,7 +296,11 @@ impl SessionStore {
         IvyJson::Number((self.clock)())
     }
     fn migrate(&self) -> Result<()> {
+        self.transaction(|| self.migrate_schema())
+    }
+    fn migrate_schema(&self) -> Result<()> {
         self.db.execute_batch(include_str!("store_schema.sql"))?;
+        self.migrate_items()?;
         for (column, definition) in [
             ("is_pinned", "INTEGER NOT NULL DEFAULT 0"),
             ("section_id", "TEXT"),
@@ -886,7 +894,6 @@ impl SessionStore {
         .map(|key| field(turn, key).clone())
         .collect::<Vec<_>>();
         values.extend([
-            encode(field(turn, "items"))?.into(),
             field(turn, "diff").clone(),
             if field(turn, "error").is_null() {
                 IvyJson::Null
@@ -894,15 +901,24 @@ impl SessionStore {
                 encode(field(turn, "error"))?.into()
             },
         ]);
-        self.run("INSERT INTO turns (id, thread_id, status, started_at, completed_at, duration_ms, items_json, diff, error_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, started_at=excluded.started_at, completed_at=excluded.completed_at, duration_ms=excluded.duration_ms, items_json=excluded.items_json, diff=excluded.diff, error_json=excluded.error_json",&values)?;
-        Ok(())
+        self.transaction(|| {
+            self.run("INSERT INTO turns (id, thread_id, status, started_at, completed_at, duration_ms, diff, error_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, started_at=excluded.started_at, completed_at=excluded.completed_at, duration_ms=excluded.duration_ms, diff=excluded.diff, error_json=excluded.error_json",&values)?;
+            self.replace_turn_items(&stored_string(field(turn, "id")), item_array(turn)?)
+        })
     }
     pub fn get_turn(&self, id: &JsString) -> Result<Option<IvyJson>> {
         self.one(
             "SELECT * FROM turns WHERE id = ?",
             &[IvyJson::String(id.clone())],
         )?
-        .map(|row| row_to_turn(&row))
+        .map(|row| {
+            let mut turn = row_to_turn(&row)?;
+            turn.insert(
+                "items",
+                IvyJson::Array(self.turn_items(id, ItemsView::Full)?),
+            );
+            Ok(turn)
+        })
         .transpose()
     }
     pub fn list_turns(&self, thread: &JsString) -> Result<Vec<IvyJson>> {
@@ -911,7 +927,14 @@ impl SessionStore {
             &[IvyJson::String(thread.clone())],
         )?
         .iter()
-        .map(row_to_turn)
+        .map(|row| {
+            let mut turn = row_to_turn(row)?;
+            turn.insert(
+                "items",
+                IvyJson::Array(self.turn_items(&stored_string(field(row, "id")), ItemsView::Full)?),
+            );
+            Ok(turn)
+        })
         .collect()
     }
     pub fn delete_recent_turns(&self, thread: &JsString, count: f64) -> Result<usize> {
@@ -930,111 +953,26 @@ impl SessionStore {
         }
         Ok(rows.len())
     }
-    pub fn append_item(&self, id: &JsString, item: &IvyJson) -> Result<Option<IvyJson>> {
-        let Some(mut turn) = self.get_turn(id)? else {
-            return Ok(None);
-        };
-        let mut items = item_array(&turn)?.to_vec();
-        items.push(decode(&encode(item)?.into())?);
-        turn.insert("items", IvyJson::Array(items));
-        self.upsert_turn(&turn)?;
-        Ok(Some(turn))
-    }
-    pub fn update_item(
-        &self,
-        id: &JsString,
-        item_id: &JsString,
-        mut updater: impl FnMut(IvyJson) -> Result<IvyJson>,
-    ) -> Result<Option<IvyJson>> {
-        let Some(mut turn) = self.get_turn(id)? else {
-            return Ok(None);
-        };
-        let items = item_array(&turn)?;
-        let mut next = Vec::with_capacity(items.len());
-        for item in items {
-            if item.is_null() {
-                return Err(StoreError {
-                    name: "invalid_data",
-                    message: "Stored turn items must be objects.".into(),
-                    code: None,
-                });
-            }
-            next.push(if field(item, "id").as_js_string() == Some(item_id) {
-                updater(item.clone())?
-            } else {
-                item.clone()
-            });
-        }
-        turn.insert("items", IvyJson::Array(next));
-        self.upsert_turn(&turn)?;
-        Ok(Some(turn))
-    }
-    pub fn update_item_and_move_to_end(
-        &self,
-        id: &JsString,
-        item_id: &JsString,
-        updater: impl FnOnce(IvyJson) -> Result<IvyJson>,
-    ) -> Result<Option<IvyJson>> {
-        let Some(mut turn) = self.get_turn(id)? else {
-            return Ok(None);
-        };
-        let items = item_array(&turn)?;
-        let mut index = None;
-        for (i, item) in items.iter().enumerate() {
-            if item.is_null() {
-                return Err(StoreError {
-                    name: "invalid_data",
-                    message: "Stored turn items must be objects.".into(),
-                    code: None,
-                });
-            }
-            if field(item, "id").as_js_string() == Some(item_id) {
-                index = Some(i);
-                break;
-            }
-        }
-        let Some(index) = index else {
-            return Ok(Some(turn));
-        };
-        let mut next = items.to_vec();
-        let current = next.remove(index);
-        let updated = updater(current)?;
-        next.push(updated);
-        turn.insert("items", IvyJson::Array(next));
-        self.upsert_turn(&turn)?;
-        Ok(Some(turn))
-    }
     pub fn complete_turn(
         &self,
         id: &JsString,
         status: &JsString,
         error: &IvyJson,
     ) -> Result<Option<IvyJson>> {
-        let Some(mut turn) = self.get_turn(id)? else {
-            return Ok(None);
-        };
         let now = self.now();
-        let duration = if field(&turn, "startedAt").is_null() {
-            IvyJson::Null
-        } else {
-            IvyJson::Number(nonnegative(
-                (number(&now) - number(field(&turn, "startedAt"))) * 1000.0,
-            ))
-        };
-        turn.insert("status", IvyJson::String(status.clone()));
-        turn.insert("completedAt", now);
-        turn.insert("durationMs", duration);
-        turn.insert("error", error.clone());
-        self.upsert_turn(&turn)?;
-        Ok(Some(turn))
+        self.run("UPDATE turns SET status=?, completed_at=?, duration_ms=CASE WHEN started_at IS NULL THEN NULL ELSE MAX(0, (? - started_at) * 1000) END, error_json=? WHERE id=?", &[
+            IvyJson::String(status.clone()), now.clone(), now,
+            if error.is_null() { IvyJson::Null } else { encode(error)?.into() },
+            IvyJson::String(id.clone()),
+        ])?;
+        self.get_turn(id)
     }
     pub fn update_turn_diff(&self, id: &JsString, diff: &JsString) -> Result<Option<IvyJson>> {
-        let Some(mut turn) = self.get_turn(id)? else {
-            return Ok(None);
-        };
-        turn.insert("diff", IvyJson::String(diff.clone()));
-        self.upsert_turn(&turn)?;
-        Ok(Some(turn))
+        self.run(
+            "UPDATE turns SET diff=? WHERE id=?",
+            &[IvyJson::String(diff.clone()), IvyJson::String(id.clone())],
+        )?;
+        self.get_turn(id)
     }
     /// Startup touches unfinished runs, without reading every archived transcript.
     pub fn recover_in_progress_turns(&self, message: &JsString) -> Result<usize> {
@@ -1042,7 +980,7 @@ impl SessionStore {
     }
     fn recover_in_progress_at(&self, message: &JsString, now: &IvyJson) -> Result<usize> {
         let rows = self.all(
-            "SELECT id, thread_id, started_at, items_json FROM turns WHERE status = ?",
+            "SELECT id, thread_id, started_at FROM turns WHERE status = ?",
             &["inProgress".into()],
         )?;
         let error = encode(&IvyJson::object([(
@@ -1059,7 +997,11 @@ impl SessionStore {
                     (number(now) - number(field(row, "started_at"))) * 1000.0,
                 ))
             };
-            self.run("UPDATE turns SET status = ?, completed_at = ?, duration_ms = ?, error_json = ?, items_json = ? WHERE id = ?",&["interrupted".into(),now.clone(),duration,error.clone().into(),terminalize_items(&text(field(row,"items_json")),message,true,false)?.into(),field(row,"id").clone()])?;
+            self.transaction(|| {
+                self.repair_turn_items(&stored_string(field(row, "id")), message, true, false)?;
+                self.run("UPDATE turns SET status=?, completed_at=?, duration_ms=?, error_json=? WHERE id=?", &["interrupted".into(), now.clone(), duration, error.clone().into(), field(row, "id").clone()])?;
+                Ok(())
+            })?;
             let thread = stored_string(field(row, "thread_id"));
             if !seen.contains(&thread) {
                 seen.push(thread);
@@ -1081,21 +1023,22 @@ impl SessionStore {
         let mut count = self.recover_in_progress_at(message, &now)?;
         let idle = encode(&IvyJson::object([("type", "idle".into())]))?;
         let rows = self.all(
-            "SELECT id, thread_id, status, items_json FROM turns WHERE status <> ?",
+            "SELECT id, thread_id, status FROM turns WHERE status <> ?",
             &["inProgress".into()],
         )?;
         let mut repairs = Vec::new();
         for row in rows {
             let completed = is(field(&row, "status"), "completed");
-            let old = text(field(&row, "items_json"));
-            let next = terminalize_items(&old, message, !completed, completed)?;
-            if next == old {
+            if !self.transaction(|| {
+                self.repair_turn_items(
+                    &stored_string(field(&row, "id")),
+                    message,
+                    !completed,
+                    completed,
+                )
+            })? {
                 continue;
             }
-            self.run(
-                "UPDATE turns SET items_json = ? WHERE id = ?",
-                &[next.into(), field(&row, "id").clone()],
-            )?;
             let thread = stored_string(field(&row, "thread_id"));
             if !repairs.contains(&thread) {
                 repairs.push(thread);
@@ -1270,7 +1213,7 @@ fn row_to_turn(row: &IvyJson) -> Result<IvyJson> {
         ("startedAt", nullable_number(field(row, "started_at"))),
         ("completedAt", nullable_number(field(row, "completed_at"))),
         ("durationMs", nullable_number(field(row, "duration_ms"))),
-        ("items", decode(field(row, "items_json"))?),
+        ("items", IvyJson::Array(Vec::new())),
         (
             "diff",
             IvyJson::String(stored_string(&coalesce(field(row, "diff"), &"".into()))),
@@ -1285,68 +1228,50 @@ fn row_to_turn(row: &IvyJson) -> Result<IvyJson> {
         ),
     ]))
 }
-fn terminalize_items(
-    source: &str,
+fn terminalize_item(
+    mut item: IvyJson,
     message: &JsString,
     terminalize_activity: bool,
     strip_completed: bool,
-) -> Result<String> {
-    let Some(parsed) = parse(source, usize::MAX).ok().and_then(IvyJson::into_array) else {
-        return Ok("[]".into());
-    };
-    let mut items = Vec::new();
-    for mut item in parsed {
-        if item.is_null() {
-            continue;
+) -> Option<IvyJson> {
+    if item.is_null() {
+        return None;
+    }
+    if item.as_object().is_none() {
+        return Some(item);
+    }
+    if is(field(&item, "type"), "subAgentActivity") {
+        if strip_completed {
+            return None;
         }
-        if item.as_object().is_none() {
-            items.push(item);
-            continue;
+        if is(field(&item, "kind"), "completed")
+            || (terminalize_activity
+                && (is(field(&item, "kind"), "started") || is(field(&item, "kind"), "interacted")))
+        {
+            item.insert("kind", "interrupted".into());
+            return Some(item);
         }
-        if is(field(&item, "type"), "subAgentActivity") {
-            if strip_completed {
-                continue;
-            }
-            if is(field(&item, "kind"), "completed")
-                || (terminalize_activity
-                    && (is(field(&item, "kind"), "started")
-                        || is(field(&item, "kind"), "interacted")))
-            {
-                item.insert("kind", "interrupted".into());
-                items.push(item);
-                continue;
+    }
+    if is(field(&item, "type"), "collabAgentToolCall") {
+        if let Some(IvyJson::Object(states)) = item.get_mut("agentsStates") {
+            for (_, state) in states {
+                if state.as_object().is_some()
+                    && (is(field(state, "status"), "pendingInit")
+                        || is(field(state, "status"), "running"))
+                {
+                    state.insert("status", "errored".into());
+                    state.insert(
+                        "message",
+                        coalesce(field(state, "message"), &IvyJson::String(message.clone())),
+                    );
+                }
             }
         }
-        if is(field(&item, "type"), "collabAgentToolCall") {
-            let states = field(&item, "agentsStates");
-            let next = if let Some(states) = states.as_object() {
-                Some(IvyJson::object(states.iter().map(|(id, state)| {
-                    let mut next = state.clone();
-                    if next.as_object().is_some()
-                        && (is(field(&next, "status"), "pendingInit")
-                            || is(field(&next, "status"), "running"))
-                    {
-                        next.insert("status", "errored".into());
-                        next.insert(
-                            "message",
-                            coalesce(field(&next, "message"), &IvyJson::String(message.clone())),
-                        );
-                    }
-                    (id.clone(), next)
-                })))
-            } else {
-                item.get("agentsStates").cloned()
-            };
-            if is(field(&item, "status"), "inProgress") {
-                item.insert("status", "failed".into());
-            }
-            if let Some(next) = next {
-                item.insert("agentsStates", next);
-            }
-        } else if is(field(&item, "status"), "inProgress") {
+        if is(field(&item, "status"), "inProgress") {
             item.insert("status", "failed".into());
         }
-        items.push(item);
+    } else if is(field(&item, "status"), "inProgress") {
+        item.insert("status", "failed".into());
     }
-    encode(&IvyJson::Array(items))
+    Some(item)
 }

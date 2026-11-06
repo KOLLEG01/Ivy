@@ -70,6 +70,69 @@ async fn apply(root: &Root, settings: IvyJson) -> ivy_contracts::IvyResult<()> {
 }
 
 #[tokio::test]
+async fn reset_markers_and_acknowledgements_retain_the_selected_native_account() {
+    use ivy_contracts::native_backend::{BackendIdentity, NativeProvider};
+    let selected =
+        BackendIdentity::new("alpha".into(), NativeProvider::Codex, "personal".into()).unwrap();
+    for variant in 0..5 {
+        let root = Root::new();
+        let data = root.0.join("data");
+        let home = root.0.join("home");
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(home.join("sessions")).unwrap();
+        let file = home.join("sessions/retained");
+        fs::write(&file, b"preserve unless admitted").unwrap();
+        let mut configured = settings(&home);
+        configured.insert("backend", selected.json());
+        let mut reset = marker();
+        let actual = match variant {
+            1 => None,
+            2 => Some(
+                BackendIdentity::new("alpha".into(), NativeProvider::Codex, "other".into())
+                    .unwrap(),
+            ),
+            3 => Some(
+                BackendIdentity::new("alpha".into(), NativeProvider::Claude, "personal".into())
+                    .unwrap(),
+            ),
+            _ => Some(selected.clone()),
+        };
+        if let Some(actual) = actual {
+            reset.insert("backend", actual.json());
+        }
+        save(&data.join("runtime-reset.json"), &reset);
+        if variant == 4 {
+            let mut applied = reset.clone();
+            applied.insert(
+                "backend",
+                BackendIdentity::new("alpha".into(), NativeProvider::Codex, "other".into())
+                    .unwrap()
+                    .json(),
+            );
+            save(&data.join("runtime-reset-applied.json"), &applied);
+        }
+        let result = apply(&root, configured.clone()).await;
+        if variant == 0 {
+            result.unwrap();
+            assert!(!file.exists());
+            let applied = ivy_contracts::json::parse(
+                &fs::read_to_string(data.join("runtime-reset-applied.json")).unwrap(),
+                4096,
+            )
+            .unwrap();
+            assert!(BackendIdentity::matches(&applied, Some(&selected)));
+            fs::create_dir_all(home.join("sessions")).unwrap();
+            fs::write(&file, b"new work").unwrap();
+            apply(&root, configured).await.unwrap();
+            assert_eq!(fs::read(file).unwrap(), b"new work");
+        } else {
+            assert_eq!(result.unwrap_err().code, "native_backend_mismatch");
+            assert_eq!(fs::read(file).unwrap(), b"preserve unless admitted");
+        }
+    }
+}
+
+#[tokio::test]
 async fn native_reset_markers_preserve_scope_files_and_idempotent_acknowledgements() {
     let root = Root::new();
     let data = root.0.join("data");

@@ -1,4 +1,10 @@
 use ivy_host_runtime::{codex_admission, codex_rpc};
+#[path = "agent-native-commands.rs"]
+mod command_cases;
+#[path = "agent-native-replies.rs"]
+mod completion_cases;
+#[path = "agent-native-frame-owner.rs"]
+mod owner_cases;
 #[path = "codex-transport.rs"]
 mod primitives;
 
@@ -26,6 +32,151 @@ fn catalog() -> IvyJson {
     value(include_str!(
         "../../specs/native/codex-0.154.0/catalog.json"
     ))
+}
+#[tokio::test]
+async fn in_process_moves_lossless_values_and_preserves_commit_order() {
+    let (rpc, mut peer, incoming) =
+        NativeRpc::start_frames(Arc::new(catalog()), Events::default()).unwrap();
+    let mut units = Vec::with_capacity(1024 * 1024);
+    units.extend([65, 0xd800, 0xdc01, 0xdfff]);
+    let pointer = units.as_ptr() as usize;
+    let capacity = units.capacity();
+    let sent = Arc::new(AtomicUsize::new(0));
+    let committed = Arc::new(AtomicUsize::new(0));
+    let sent_hook = sent.clone();
+    let committed_hook = committed.clone();
+    let client = rpc.clone();
+    let call = tokio::spawn(async move {
+        client
+            .request(
+                "account/logout".into(),
+                IvyJson::String(JsString(units)),
+                RequestOptions {
+                    request_id: Some("local".into()),
+                    before_send: Some(Arc::new(move |_| {
+                        sent_hook.fetch_add(1, Ordering::SeqCst);
+                        Box::pin(async { Ok(()) })
+                    })),
+                    before_resolve: Some(Arc::new(move |_, reply| {
+                        assert_eq!(reply.get("result"), Some(&value(r#""\udfff\ud800""#)));
+                        committed_hook.fetch_add(1, Ordering::SeqCst);
+                        Box::pin(async { Ok(()) })
+                    })),
+                    ..Default::default()
+                },
+            )
+            .await
+    });
+    let frame = peer.recv().await.unwrap();
+    assert_eq!(sent.load(Ordering::SeqCst), 1);
+    let text = frame.get("params").unwrap().as_js_string().unwrap();
+    assert_eq!(
+        text.0.as_ptr() as usize,
+        pointer,
+        "request allocation was copied or encoded"
+    );
+    assert_eq!(text.0.capacity(), capacity);
+    incoming
+        .try_send(IvyJson::object([
+            ("id", "local".into()),
+            ("result", value(r#""\udfff\ud800""#)),
+        ]))
+        .unwrap();
+    assert!(result(call).await.is_ok());
+    assert_eq!(committed.load(Ordering::SeqCst), 1);
+    rpc.close("complete").await;
+}
+
+#[tokio::test]
+async fn in_process_heap_limits_reject_before_hooks_and_reserve_controls() {
+    use codex_admission::Priority;
+    let (rpc, mut peer, incoming) =
+        NativeRpc::start_frames(Arc::new(catalog()), Events::default()).unwrap();
+    let hooks = Arc::new(AtomicUsize::new(0));
+    let (observed, mut observations) = tokio::sync::mpsc::unbounded_channel();
+    let mut pending = vec![];
+    for index in 0..7 {
+        let mut text = Vec::with_capacity(4 * 1024 * 1024);
+        text.push(65);
+        let client = rpc.clone();
+        let hooks = hooks.clone();
+        let observed = observed.clone();
+        let call = tokio::spawn(async move {
+            client
+                .request(
+                    "account/logout".into(),
+                    IvyJson::String(JsString(text)),
+                    RequestOptions {
+                        request_id: Some(format!("bulk-{index}").into()),
+                        before_send: Some(Arc::new(move |_| {
+                            hooks.fetch_add(1, Ordering::SeqCst);
+                            observed.send(()).unwrap();
+                            Box::pin(async { Ok(()) })
+                        })),
+                        ..Default::default()
+                    },
+                )
+                .await
+        });
+        if index < 6 {
+            tokio::time::timeout(Duration::from_secs(5), observations.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            pending.push(call);
+        } else {
+            let error = result(call).await.unwrap_err();
+            assert_eq!(error.code, "native_capacity");
+            assert_eq!(error.outcome, Outcome::NotExecuted);
+        }
+    }
+    assert_eq!(hooks.load(Ordering::SeqCst), 6);
+    let control = request(
+        &rpc,
+        "control",
+        RequestOptions {
+            priority: Priority::Interaction,
+            ..Default::default()
+        },
+    );
+    for _ in 0..6 {
+        let _ = peer.recv().await.unwrap();
+    }
+    let frame = peer.recv().await.unwrap();
+    assert_eq!(frame.get("id"), Some(&"control".into()));
+    incoming
+        .try_send(IvyJson::object([
+            ("id", "control".into()),
+            ("result", IvyJson::Null),
+        ]))
+        .unwrap();
+    assert!(result(control).await.is_ok());
+
+    let mut huge = Vec::with_capacity(25 * 1024 * 1024);
+    huge.push(65);
+    assert_eq!(
+        incoming
+            .try_send(IvyJson::String(JsString(huge)))
+            .unwrap_err()
+            .code,
+        "native_capacity"
+    );
+    // Queue consumption returned its reservations, including the rejected frame.
+    let retry = request(&rpc, "bulk-6", RequestOptions::default());
+    let frame = peer.recv().await.unwrap();
+    assert_eq!(frame.get("id"), Some(&"bulk-6".into()));
+    incoming
+        .try_send(IvyJson::object([
+            ("id", "bulk-6".into()),
+            ("result", IvyJson::Null),
+        ]))
+        .unwrap();
+    assert!(result(retry).await.is_ok());
+    drop(incoming);
+    assert_eq!(rpc.closed().await, "native_connection_closed");
+    for call in pending {
+        assert_eq!(result(call).await.unwrap_err().outcome, Outcome::Unknown);
+    }
 }
 struct Peer {
     input: BufReader<DuplexStream>,
@@ -317,15 +468,31 @@ async fn expired_automatic_observations_release_slots_and_keep_late_replies_safe
     for _ in 0..=16 {
         let owner = rpc.clone();
         let pending = tokio::spawn(async move {
-            owner.request("account/logout".into(), IvyJson::Null, RequestOptions { timeout_ms: 10, detach_on_timeout: true, ..Default::default() }).await
+            owner
+                .request(
+                    "account/logout".into(),
+                    IvyJson::Null,
+                    RequestOptions {
+                        timeout_ms: 10,
+                        detach_on_timeout: true,
+                        ..Default::default()
+                    },
+                )
+                .await
         });
         let sent = peer.sent().await;
         ids.push(sent.required("id").unwrap().clone());
-        assert_eq!(result(pending).await.unwrap_err().code, "native_observation_deadline");
+        assert_eq!(
+            result(pending).await.unwrap_err().code,
+            "native_observation_deadline"
+        );
     }
     assert!(rpc.connected());
     let reused = request(&rpc, &ids[0].as_str().unwrap(), RequestOptions::default());
-    assert_eq!(result(reused).await.unwrap_err().code, "native_state_conflict");
+    assert_eq!(
+        result(reused).await.unwrap_err().code,
+        "native_state_conflict"
+    );
     peer.reply(ids[0].clone()).await;
     peer.reply(ids.last().unwrap().clone()).await;
     let active = request(&rpc, "active", RequestOptions::default());
@@ -494,6 +661,8 @@ async fn wire_and_hook_transcript_preserves_ids_order_and_reply_bytes() {
     rpc.close("fixture_closed").await;
     assert_eq!(
         IvyJson::Array(trace.lock().unwrap().clone()),
-        value(r#"["intent",{"sent":{"id":"i\ud800","method":"account/logout","params":null}},"receipt",{"reply":{"result":{"untouched":["Grüße",null,false]}}},{"sent":{"method":"initialized"}},{"request":{"id":-2,"method":"currentTime/read","params":{"threadId":"original"}}},{"request":{"id":"-2","method":"currentTime/read","params":{"threadId":"original"}}},{"notification":{"method":"serverRequest/resolved","params":{"requestId":-2,"threadId":"original"}}},"answer-intent",{"sent":{"id":-2,"result":{}}},"answer-intent",{"sent":{"id":"-2","result":{}}},{"close":"fixture_closed"}]"#)
+        value(
+            r#"["intent",{"sent":{"id":"i\ud800","method":"account/logout","params":null}},"receipt",{"reply":{"result":{"untouched":["Grüße",null,false]}}},{"sent":{"method":"initialized"}},{"request":{"id":-2,"method":"currentTime/read","params":{"threadId":"original"}}},{"request":{"id":"-2","method":"currentTime/read","params":{"threadId":"original"}}},{"notification":{"method":"serverRequest/resolved","params":{"requestId":-2,"threadId":"original"}}},"answer-intent",{"sent":{"id":-2,"result":{}}},"answer-intent",{"sent":{"id":"-2","result":{}}},{"close":"fixture_closed"}]"#
+        )
     );
 }

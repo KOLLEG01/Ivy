@@ -5,13 +5,22 @@ use super::{
     store::Clock,
     value::{self, Compare, IdSource, cursor_offset, field, nonempty_string, number, string},
 };
-use ivy_contracts::{IvyJson, JsString};
+use ivy_contracts::{IvyJson, IvyResult, JsString};
 use ivy_host_runtime::node_path::{self, Style};
+use ivy_sdk::collation::LocaleComparator;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
+
+/// Capture the host locale once at launch. The pinned project metadata
+/// fingerprint preserves locale ordering, including stable equivalent keys.
+pub fn project_comparator() -> IvyResult<Compare> {
+    let locale = LocaleComparator::system()?;
+    Ok(Arc::new(move |left, right| locale.compare(left, right)))
+}
 
 pub type ThreadLookup<'a> = dyn Fn(&JsString) -> Result<Option<IvyJson>> + 'a;
 pub struct ProjectStore {

@@ -6,6 +6,7 @@ use crate::{
     executor_lock::ExecutorLock,
     package_updater::{PackageClient, PackageUpdater},
     scheduler,
+    storage_retention::{AutomaticRetention, RetentionBindings},
 };
 use futures_util::FutureExt;
 use ivy_contracts::core_schema::validate_host;
@@ -351,6 +352,7 @@ struct Status {
     active: Vec<String>,
     configuration_code: Option<JsString>,
     package_code: Option<JsString>,
+    retention_code: Option<JsString>,
     revision: Option<IvyJson>,
     hash: Option<IvyJson>,
 }
@@ -372,9 +374,10 @@ impl StatusWriter {
         let mut code = snapshot
             .configuration_code
             .or(snapshot.package_code)
+            .or(snapshot.retention_code)
             .map(IvyJson::String)
             .unwrap_or(IvyJson::Null);
-        if state == "ready" && (code.is_null() || code == "storage_retention_attention".into()) {
+        if state == "ready" && code.is_null() {
             if let Some(retention) = self
                 .base
                 .storage_retention_status()
@@ -538,6 +541,8 @@ impl Coordinator {
     }
     async fn run(self) -> IvyResult<()> {
         let mut active: Vec<Active> = Vec::new();
+        let mut retention = AutomaticRetention::default();
+        let retention_bindings = Arc::new(RetentionBindings { node: self.runtime.node_runtime(), clock: self.clock.clone() });
         let mut failure = None;
         let pulse_cancel = CancellationToken::new();
         let mut pulse = None;
@@ -551,6 +556,12 @@ impl Coordinator {
             }));
             let mut next_configuration=0.0;let mut next_bootstrap_restart=0.0;let mut next_package=0.0;let mut next_reconcile=0.0;let mut last_hint=String::new();
             while !self.cancel.is_cancelled(){
+                let result = retention.tick(&self.base, retention_bindings.clone()).await;
+                match result {
+                    Err(_) => self.status.value.lock().map_err(|_|IvyError::internal())?.retention_code = Some("storage_retention_attention".into()),
+                    Ok(true) => self.status.value.lock().map_err(|_|IvyError::internal())?.retention_code = None,
+                    Ok(false) => {},
+                }
                 if self.clock.utc_millis() as f64 >= next_reconcile {
                     next_reconcile = self.clock.utc_millis() as f64 + 1000.0;
                     self.reconcile_retained(&active).await?;
@@ -644,6 +655,7 @@ impl Coordinator {
                 failure = result.err();
             }
         }
+        retention.close().await;
         pulse_cancel.cancel();
         if let Some(pulse) = pulse {
             let _ = pulse.await;

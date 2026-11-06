@@ -36,6 +36,23 @@ fn storage_pressure_and_retry_boundaries() {
     assert!(schedule.due(3_603_000.0, false));
 }
 
+#[test]
+fn retention_resumes_completed_and_interrupted_attempts_without_restart_storms() {
+    let at = 1_792_483_200_000.0;
+    let stamp = chrono::DateTime::from_timestamp_millis(at as i64).unwrap().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let mut previous = IvyJson::object([("startedAt", stamp.clone().into()), ("completedAt", stamp.into()), ("state", "succeeded".into())]);
+    let schedule = RetentionSchedule::resume(at + 1000.0, Some(&previous));
+    assert!(!schedule.due(at + 59_000.0, true));
+    assert_eq!(schedule.trigger(at + 3_600_000.0, true), Some("storage_pressure"));
+    assert_eq!(schedule.trigger(at + 86_400_000.0, false), Some("scheduled"));
+    for state in ["running", "partial", "failed"] {
+        previous.insert("state", state.into());
+        let schedule = RetentionSchedule::resume(at + 1000.0, Some(&previous));
+        assert!(!schedule.due(at + 3_599_999.0, true));
+        assert!(schedule.due(at + 3_600_000.0, false));
+    }
+}
+
 #[tokio::test]
 async fn storage_inventory_counts_hardlinks_without_following_directory_links() {
     let fixture = ServiceFixture::new();

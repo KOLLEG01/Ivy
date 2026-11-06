@@ -1,5 +1,6 @@
 //! Consume the existing host reset intent before creating any native owner.
 use crate::native_launch::NativeHomeInputs;
+use ivy_contracts::native_backend::BackendIdentity;
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_host_runtime::{
     codex_home::resolve_codex_home_json,
@@ -91,6 +92,13 @@ async fn apply(
         return Ok(());
     };
     valid_marker(&marker)?;
+    let backend = BackendIdentity::optional(settings.get("backend"))?;
+    if !BackendIdentity::matches(&marker, backend.as_ref()) {
+        return Err(IvyError::new(
+            "native_backend_mismatch",
+            "Runtime reset must retain its selected backend and account.",
+        ));
+    }
     let applied_path = native_path::lexical(&data_root.join("runtime-reset-applied.json"));
     let applied = json_file(&applied_path, CONFIGURATION_BYTES)
         .await
@@ -99,6 +107,12 @@ async fn apply(
         && applied.get("resetId") == marker.get("resetId")
         && applied.get("runtimeEpoch") == marker.get("runtimeEpoch")
     {
+        if !BackendIdentity::matches(&applied, backend.as_ref()) {
+            return Err(IvyError::new(
+                "native_backend_mismatch",
+                "Runtime reset acknowledgement belongs to another backend or account.",
+            ));
+        }
         return Ok(());
     }
     if settings.is_null() {

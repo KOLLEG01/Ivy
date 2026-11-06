@@ -926,6 +926,7 @@ async fn real_sdk_session_keeps_disk_fence_and_rejects_changed_history_authority
         Arc::new(ivy_sdk::tools::ToolClients::new(client.clone())),
         "caller".into(),
         ivy_sdk::native_evidence::NativeOwnerIdentity {
+            backend: None,
             service_node_id: "native-agent".into(),
             host_id: None,
             native_version: "0.159.2".into(),

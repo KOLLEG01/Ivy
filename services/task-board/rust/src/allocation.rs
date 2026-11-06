@@ -1,21 +1,25 @@
 //! Select a current eligible native host and retain its immutable execution plan.
 //! Selection does not create a Run or authorize native execution.
 use crate::{
-    configuration::{effective_execution, supports_execution_options},
+    configuration::{
+        agent_nodes, effective_execution, execution_statuses, supports_backend_options,
+    },
     native_intent::TaskPrompts,
+    native_plan::{matches_task_primary, routed_primary, routed_target, routed_workspace},
     native_recovery::fresh_context_recovery,
     operations::{Document, Store, mutation},
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     checked_native_contract::CheckedNativeContracts, json::canonical,
-    limits::MANAGEMENT_FRAME_BYTES,
+    limits::MANAGEMENT_FRAME_BYTES, native_backend::BackendIdentity,
+    native_contract::NativeContract,
 };
 use ivy_sdk::{
     native_evidence::NativeOwnerIdentity,
     native_owner::NativeOwner,
     native_plan::{NativePlanKind, save_native_plan, validate_native_plan_draft},
-    native_project::native_thread_project,
+    native_project::native_thread_project_for_backend,
     rpc::{RequestOptions, RpcClient},
     tools::{BoundToolClient, InterfaceRequirement, ToolCallOptions, ToolClients},
 };
@@ -230,21 +234,34 @@ pub async fn shared_project_owner<S: AllocationStore>(
     Ok(None)
 }
 struct Candidate {
+    backend: Option<BackendIdentity>,
     node: Json,
-    catalog: Json,
+    catalog: Arc<NativeContract>,
     workspace: Json,
 }
+fn execution_target(node: &Json, backend: Option<&BackendIdentity>) -> IvyResult<Json> {
+    BackendIdentity::select_arguments(
+        backend,
+        Json::object([
+            ("hostId", node.required("hostId")?.clone()),
+            ("serviceNodeId", node.required("serviceNodeId")?.clone()),
+        ]),
+    )
+}
 fn validate_continuation(task: &Document, run: &Json) -> IvyResult<()> {
+    let (primary, backend) = routed_primary(
+        &task.value,
+        field(run, "primaryResourceRef"),
+        BackendIdentity::optional(field(run, "target").get("backend"))?,
+    )?;
     require(
         run.get("taskId") == task.pin.get("objectId")
-            && same(
-                field(run, "primaryResourceRef"),
-                field(&task.value, "primaryResourceRef"),
-            )?
+            && same(&primary, field(&task.value, "primaryResourceRef"))?
+            && backend == BackendIdentity::optional(task.value.get("primaryBackend"))?
             && ["completed", "failed", "cancelled"]
                 .iter()
                 .any(|phase| eq(run, "phase", phase))
-            && !["active", "outcome_unknown"]
+            && !["active", "unknown", "outcome_unknown"]
                 .iter()
                 .any(|state| eq(field(run, "externalOutcome"), "state", state)),
         "task_board_execution_unresolved",
@@ -342,24 +359,13 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
             field(&effective, "executionRequirement")
         };
         let mut skipped = Vec::<JsString>::new();
-        let listed = self
-            .engine
-            .client()
-            .request(
-                "serviceNodes.list",
-                Json::object([
-                    ("serviceName", "agent-manager".into()),
-                    ("limit", Json::Number(200.0)),
-                ]),
-                RequestOptions::default(),
-            )
-            .await?;
+        let listed = agent_nodes(self.engine.client()).await?;
         let mut nodes = vec![];
-        for node in arr(listed.required("items")?) {
+        for node in listed {
             if eq(requirement, "kind", "host") && node.get("hostId") != requirement.get("hostId") {
                 continue;
             }
-            let prefix = concat([s(node, "hostId")?.clone(), ": ".into()]);
+            let prefix = concat([s(&node, "hostId")?.clone(), ": ".into()]);
             if let Some(recovery) = &recovery {
                 let target = recovery.required("target")?;
                 if node.get("hostId") != target.get("hostId")
@@ -374,7 +380,10 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                 }
             }
             let primary = field(&task.value, "primaryResourceRef");
-            if !primary.is_null() && node.get("serviceNodeId") != primary.get("serviceNodeId") {
+            if retain_workspace
+                && !primary.is_null()
+                && node.get("serviceNodeId") != primary.get("serviceNodeId")
+            {
                 skipped.push(concat([
                     prefix,
                     "the task conversation belongs to AgentManager ".into(),
@@ -384,14 +393,14 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
             }
             if ["connected", "synced", "ready"]
                 .iter()
-                .any(|k| (field(node, k).as_bool() != Some(true)))
+                .any(|k| (field(&node, k).as_bool() != Some(true)))
             {
                 skipped.push(concat([
                     prefix,
                     "AgentManager is ".into(),
-                    if (field(node, "connected").as_bool() != Some(true)) {
+                    if (field(&node, "connected").as_bool() != Some(true)) {
                         "disconnected"
-                    } else if (field(node, "synced").as_bool() != Some(true)) {
+                    } else if (field(&node, "synced").as_bool() != Some(true)) {
                         "not synchronized"
                     } else {
                         "not ready"
@@ -400,7 +409,7 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                 ]));
                 continue;
             }
-            nodes.push(node.clone());
+            nodes.push(node);
         }
         let required = arr(field(field(&task.value, "fields"), "requiredCapabilities"));
         let mut candidates = vec![];
@@ -408,7 +417,28 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
         let mut unsupported = false;
         let mut capability_gap: Option<(JsString, Vec<JsString>)> = None;
         for node in nodes {
-            let result: IvyResult<Option<Candidate>> = async {
+            let statuses = match execution_statuses(self.engine.client(), &node).await {
+                Ok(statuses) => statuses,
+                Err(error) => {
+                    skipped.push(concat([
+                        s(&node, "hostId")?.clone(),
+                        ": ".into(),
+                        error.message_js(),
+                    ]));
+                    continue;
+                }
+            };
+            for status in statuses {
+                let result: IvyResult<Option<Candidate>> = async {
+                let backend = BackendIdentity::optional(status.get("backend"))?;
+                let target = execution_target(&node, backend.as_ref())?;
+                if effective.required("nativeOptions")?.get("backend").is_some()
+                    && !BackendIdentity::matches(effective.required("nativeOptions")?, backend.as_ref()) {
+                    return Ok(None);
+                }
+                if let Some(previous) = &recovery {
+                    if !same(previous.required("target")?, &target)? { return Ok(None); }
+                }
                 let tools = BoundToolClient::new(
                     self.engine.client(),
                     s(&node, "serviceNodeId")?.clone(),
@@ -418,13 +448,6 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                     }],
                     None,
                 )?;
-                let status = tools
-                    .read(
-                        &"agent.status".into(),
-                        Json::Object(vec![]),
-                        ToolCallOptions::default(),
-                    )
-                    .await?;
                 if !eq(&status, "state", "ready")
                     || status.get("hostId") != node.get("hostId")
                     || status.get("serviceNodeId") != node.get("serviceNodeId")
@@ -439,7 +462,7 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                 let profile = tools
                     .read(
                         &"agent.capabilities".into(),
-                        Json::Object(vec![]),
+                        BackendIdentity::select_arguments(backend.as_ref(), Json::Object(vec![]))?,
                         ToolCallOptions::default(),
                     )
                     .await?;
@@ -464,12 +487,9 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                     return Ok(None);
                 }
                 let workspace = if let Some(previous) = &continuation {
-                    let target = Json::object([
-                        ("hostId", node.required("hostId")?.clone()),
-                        ("serviceNodeId", node.required("serviceNodeId")?.clone()),
-                    ]);
                     require(
-                        same(field(&previous.value, "target"), &target)?,
+                        same(&routed_target(&task.value, field(&previous.value, "target"))?, &target)?
+                            && matches_task_primary(&target, &task.value)?,
                         "task_board_workspace_mismatch",
                         "Conversation continuation must retain its original native host.",
                     )?;
@@ -477,6 +497,7 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                         self.engine.tools().clone(),
                         self.engine.principal_id().clone(),
                         NativeOwnerIdentity {
+                            backend: backend.clone(),
                             service_node_id: s(&node, "serviceNodeId")?.clone(),
                             host_id: Some(s(&status, "hostId")?.clone()),
                             native_version: s(&status, "nativeVersion")?.clone(),
@@ -501,7 +522,11 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                             true,
                         )
                         .await?;
-                    let previous_workspace = previous.value.required("workspace")?;
+                    let previous_workspace = routed_workspace(
+                        &task.value,
+                        previous.value.required("target")?,
+                        previous.value.required("workspace")?,
+                    )?;
                     let cwd = observed
                         .get("reply")
                         .and_then(|reply| reply.get("result"))
@@ -520,7 +545,7 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                             tools
                                 .call(
                                     &"agent.resolveWorkspace".into(),
-                                    Json::object([
+                                    BackendIdentity::select_arguments(backend.as_ref(), Json::object([
                                         ("taskKey", task.value.required("taskKey")?.clone()),
                                         (
                                             "requirement",
@@ -530,7 +555,7 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                                             ]),
                                         ),
                                         ("prepare", false.into()),
-                                    ]),
+                                    ]))?,
                                     None,
                                     ToolCallOptions::default(),
                                 )
@@ -539,19 +564,21 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                     } else {
                         None
                     };
-                    continuation_workspace(
+                    require(resolved.as_ref().is_none_or(|workspace| BackendIdentity::matches(workspace, backend.as_ref())),
+                        "task_board_target_mismatch", "Workspace resolution must retain the selected backend and account.")?;
+                    BackendIdentity::select_arguments(backend.as_ref(), continuation_workspace(
                         &task.value,
-                        previous_workspace,
+                        &previous_workspace,
                         &observed,
                         resolved
                             .as_ref()
                             .and_then(|workspace| workspace.get("canonicalCwd")),
-                    )?
+                    )?)?
                 } else {
                     tools
                         .call(
                             &"agent.resolveWorkspace".into(),
-                            Json::object([
+                            BackendIdentity::select_arguments(backend.as_ref(), Json::object([
                                 ("taskKey", task.value.required("taskKey")?.clone()),
                                 (
                                     "requirement",
@@ -561,7 +588,7 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                                         .clone(),
                                 ),
                                 ("prepare", false.into()),
-                            ]),
+                            ]))?,
                             None,
                             ToolCallOptions::default(),
                         )
@@ -579,13 +606,29 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                 let catalog = tools
                     .read(
                         &"agent.catalog".into(),
-                        Json::Object(vec![]),
+                        BackendIdentity::select_arguments(backend.as_ref(), Json::Object(vec![]))?,
                         ToolCallOptions::default(),
                     )
                     .await?;
-                if !supports_execution_options(
+                require(
+                    BackendIdentity::matches(&profile, backend.as_ref())
+                        && BackendIdentity::matches(&workspace, backend.as_ref())
+                        && Some(&Json::from(ivy_contracts::hash::hash_json(&catalog)?)) == status.get("catalogHash")
+                        && catalog.get("version") == status.get("nativeVersion")
+                        && catalog.get("nativeExecutableHash") == status.get("nativeExecutableHash"),
+                    "task_board_target_mismatch", "Native discovery must retain the selected backend, account and executable.",
+                )?;
+                let checked = self.catalogs.checked_native_contract(s(&status, "nativeVersion")?, Some(&Json::object([
+                    ("catalogHash", status.required("catalogHash")?.clone()),
+                    ("nativeExecutableHash", status.required("nativeExecutableHash")?.clone()),
+                ])))?;
+                drop(catalog);
+                let catalog = Arc::new(checked.with_backend(backend.clone()));
+                if !supports_backend_options(
                     self.engine.client(),
                     &node,
+                    backend.as_ref(),
+                    s(&status, "nativeVersion")?,
                     effective.required("nativeOptions")?,
                 )
                 .await?
@@ -594,34 +637,36 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                     return Ok(None);
                 }
                 Ok(Some(Candidate {
+                    backend,
                     node: node.clone(),
                     catalog,
                     workspace,
                 }))
             }
             .await;
-            match result {
-                Ok(Some(candidate)) => candidates.push(candidate),
-                Ok(None) => {}
-                Err(error) => {
-                    if [
-                        "not_found",
-                        "target_conflict",
-                        "task_board_project_unavailable",
-                        "task_board_project_mismatch",
-                        "task_board_workspace_mismatch",
-                    ]
-                    .contains(&error.code.as_str())
-                    {
-                        if workspace_failure.is_none() {
-                            workspace_failure = Some(error)
+                match result {
+                    Ok(Some(candidate)) => candidates.push(candidate),
+                    Ok(None) => {}
+                    Err(error) => {
+                        if [
+                            "not_found",
+                            "target_conflict",
+                            "task_board_project_unavailable",
+                            "task_board_project_mismatch",
+                            "task_board_workspace_mismatch",
+                        ]
+                        .contains(&error.code.as_str())
+                        {
+                            if workspace_failure.is_none() {
+                                workspace_failure = Some(error)
+                            }
+                        } else {
+                            skipped.push(concat([
+                                s(&node, "hostId")?.clone(),
+                                ": ".into(),
+                                error.message_js(),
+                            ]));
                         }
-                    } else {
-                        skipped.push(concat([
-                            s(&node, "hostId")?.clone(),
-                            ": ".into(),
-                            error.message_js(),
-                        ]));
                     }
                 }
             }
@@ -678,7 +723,7 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
             };
             return Err(IvyError::new_js(code.into(), detail));
         }
-        let mut runs = HashMap::<JsString, usize>::new();
+        let mut runs = HashMap::<(JsString, Option<BackendIdentity>), usize>::new();
         let mut cursor = None;
         loop {
             let mut options = Json::object([
@@ -724,7 +769,10 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                     )
                     .await?;
                 *runs
-                    .entry(s(run.value.required("target")?, "serviceNodeId")?.clone())
+                    .entry((
+                        s(run.value.required("target")?, "serviceNodeId")?.clone(),
+                        BackendIdentity::optional(run.value.required("target")?.get("backend"))?,
+                    ))
                     .or_default() += 1;
             }
             cursor = field(&page, "nextCursor")
@@ -747,12 +795,12 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
             project(b)
                 .cmp(&project(a))
                 .then_with(|| {
-                    runs.get(&text(field(&a.node, "serviceNodeId")))
+                    runs.get(&(text(field(&a.node, "serviceNodeId")), a.backend.clone()))
                         .copied()
                         .unwrap_or(0)
                         .cmp(
                             &runs
-                                .get(&text(field(&b.node, "serviceNodeId")))
+                                .get(&(text(field(&b.node, "serviceNodeId")), b.backend.clone()))
                                 .copied()
                                 .unwrap_or(0),
                         )
@@ -760,6 +808,12 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                 .then_with(|| {
                     text(field(&a.node, "serviceNodeId"))
                         .cmp(&text(field(&b.node, "serviceNodeId")))
+                })
+                .then_with(|| {
+                    a.backend
+                        .as_ref()
+                        .map(BackendIdentity::id)
+                        .cmp(&b.backend.as_ref().map(BackendIdentity::id))
                 })
         });
         let mut selected = None;
@@ -801,8 +855,12 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                     interface_version: "1.0.0".into(),
                 },
                 InterfaceRequirement {
-                    namespace: "codex".into(),
-                    interface_version: s(&selected.catalog, "version")?.to_utf8()?,
+                    namespace: selected
+                        .backend
+                        .as_ref()
+                        .map_or("codex", BackendIdentity::id)
+                        .into(),
+                    interface_version: s(selected.catalog.catalog(), "version")?.to_utf8()?,
                 },
             ],
             None,
@@ -813,16 +871,24 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
             tools
                 .call(
                     &"agent.resolveWorkspace".into(),
-                    Json::object([
-                        ("taskKey", task.value.required("taskKey")?.clone()),
-                        ("requirement", requirement.clone()),
-                        ("prepare", true.into()),
-                    ]),
+                    BackendIdentity::select_arguments(
+                        selected.backend.as_ref(),
+                        Json::object([
+                            ("taskKey", task.value.required("taskKey")?.clone()),
+                            ("requirement", requirement.clone()),
+                            ("prepare", true.into()),
+                        ]),
+                    )?,
                     Some(operation_id.clone()),
                     ToolCallOptions::default(),
                 )
                 .await?
         };
+        require(
+            BackendIdentity::matches(&workspace, selected.backend.as_ref()),
+            "task_board_target_mismatch",
+            "Prepared workspace must retain the selected backend and account.",
+        )?;
         if continuation.is_none() {
             if let Some(owner) = self.owner(task, &selected.node, &workspace).await? {
                 return Err(IvyError::new_js(
@@ -846,13 +912,21 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
             )?;
         }
         let names: Vec<JsString> = [
-            "codex.thread/start",
-            "codex.thread/resume",
-            "codex.turn/start",
-            "codex.turn/interrupt",
+            "thread/start",
+            "thread/resume",
+            "turn/start",
+            "turn/interrupt",
         ]
         .into_iter()
-        .map(JsString::from)
+        .map(|method| {
+            JsString::from(format!(
+                "{}.{method}",
+                selected
+                    .backend
+                    .as_ref()
+                    .map_or("codex", BackendIdentity::id)
+            ))
+        })
         .collect();
         let mut futures = names
             .iter()
@@ -934,11 +1008,11 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
         let mut draft = Json::object([
             (
                 "nativeVersion",
-                selected.catalog.required("version")?.clone(),
+                selected.catalog.catalog().required("version")?.clone(),
             ),
             (
                 "catalogSourceHash",
-                selected.catalog.required("sourceHash")?.clone(),
+                selected.catalog.catalog().required("sourceHash")?.clone(),
             ),
             (
                 "location",
@@ -998,9 +1072,13 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
             ),
             ("turnStart", turn),
         ]);
-        let start = native_thread_project(
+        if let Some(backend) = &selected.backend {
+            draft.insert("backend", backend.json());
+        }
+        let start = native_thread_project_for_backend(
             self.engine.tools(),
             s(&selected.node, "serviceNodeId")?,
+            selected.backend.as_ref(),
             draft.required("threadStart")?,
             RequestOptions::default(),
         )
@@ -1015,17 +1093,11 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
             draft.insert("location", location);
         }
         draft.insert("threadStart", start);
-        let contract = self.catalogs.checked_native_contract(
-            s(&draft, "nativeVersion")?,
-            Some(&Json::object([(
-                "sourceHash",
-                draft.required("catalogSourceHash")?.clone(),
-            )])),
-        )?;
-        validate_native_plan_draft(&contract, &draft, NativePlanKind::TaskBoard)?;
+        let contract = selected.catalog.as_ref();
+        validate_native_plan_draft(contract, &draft, NativePlanKind::TaskBoard)?;
         plan_semantics(&draft)?;
         let plan = save_native_plan(
-            &contract,
+            contract,
             &draft,
             NativePlanKind::TaskBoard,
             self.store.root_object_id().as_ref(),
@@ -1072,16 +1144,11 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
         };
         let mut workspace = workspace;
         workspace.remove("nativeProjectId");
+        workspace.remove("backend");
         Ok(Json::object([
             (
                 "target",
-                Json::object([
-                    ("hostId", selected.node.required("hostId")?.clone()),
-                    (
-                        "serviceNodeId",
-                        selected.node.required("serviceNodeId")?.clone(),
-                    ),
-                ]),
+                execution_target(&selected.node, selected.backend.as_ref())?,
             ),
             ("workspace", workspace),
             ("intent", intent),

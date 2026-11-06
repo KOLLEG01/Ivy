@@ -15,18 +15,20 @@ import {
   newOperationId,
   serviceTools,
 } from "../../../packages/sdk/src/client.js";
-import { nativeRead } from "../../../packages/ui-client/src/native";
+import { backendRead, nativeBackendLabel } from '../../../packages/ui-client/src/native-backends';
+import { backendArguments } from '../../../packages/contracts/src/native-backend';
 import { route } from "../../../packages/ui-client/src/runtime";
 import AgentEnvironment from "./AgentEnvironment.vue";
 import AgentInstructions from "./AgentInstructions.vue";
 import { client } from "./runtime";
 
-const props = defineProps<{ node: string }>();
+const props = defineProps<{ node: string; backend?: Agent.BackendIdentity | undefined }>();
+const owner = { serviceNodeId: props.node, backend: props.backend };
 const status = useRemote(
   async (signal) =>
-    (await nativeRead(
+    (await backendRead(
       client,
-      props.node,
+      owner,
       "agent.status",
       {},
       signal,
@@ -35,9 +37,9 @@ const status = useRemote(
 );
 const capabilityProfile = useRemote(
   async (signal) =>
-    (await nativeRead(
+    (await backendRead(
       client,
-      props.node,
+      owner,
       "agent.capabilities",
       {},
       signal,
@@ -81,7 +83,7 @@ const saveCapabilities = async () => {
       { namespace: "agent", interfaceVersion: "1.0.0" },
     ]).call(
       "agent.configureCapabilities",
-      { operationId, expectedRevision: current.revision, capabilities },
+      backendArguments({ operationId, expectedRevision: current.revision, capabilities }, props.backend),
       operationId,
     );
     capabilityDirty.value = false;
@@ -101,7 +103,7 @@ const saveCapabilities = async () => {
 <template>
   <div class="mx-auto w-full max-w-4xl px-4 py-6 md:px-8">
     <PageHeader
-      :title="`${status.value.value?.hostId ?? node} settings`"
+      :title="`${status.value.value?.hostId ?? node} settings${backend ? ' · ' + nativeBackendLabel(backend) : ''}`"
       :loading="status.loading.value || capabilityProfile.loading.value"
       :updated-at="status.updatedAt.value"
       ><Button variant="ghost" size="sm" as-child
@@ -131,7 +133,7 @@ const saveCapabilities = async () => {
               ? "This AgentManager"
               : "Shared user daemon / external server"
           }}</PropertyItem>
-          <PropertyItem label="Codex home"
+          <PropertyItem label="Account home"
             ><span class="break-all">{{
               status.value.value.connection.actualHome
             }}</span></PropertyItem
@@ -177,9 +179,12 @@ const saveCapabilities = async () => {
         </div>
       </SettingsSection>
 
-      <SettingsSection title="Defaults by server type" description="Model, working mode, reasoning effort and safety for new tasks.">
+      <SettingsSection v-if="!backend" title="Defaults by server type" description="Model, working mode, reasoning effort and safety for new tasks.">
         <p class="mb-3 text-sm">Server type: {{ status.value.value.serverType === 'claude' ? 'Claude' : 'Codex' }}</p>
         <Button variant="outline" as-child><a :href="route('settings')">Configure server defaults</a></Button>
+      </SettingsSection>
+      <SettingsSection v-else title="Execution defaults" description="New tasks use this account's Hive defaults and native configuration.">
+        <Button variant="link" as-child><a :href="route('settings')">Account defaults</a></Button>
       </SettingsSection>
 
       <SettingsSection

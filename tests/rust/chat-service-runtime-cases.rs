@@ -1,5 +1,7 @@
 #[path = "../fixtures/reference-data.rs"]
 mod reference_data;
+#[path = "../fixtures/chat-backend-schema.rs"]
+mod backend_schema;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_chat_bridge::{
     admission::ChatAdmission,
@@ -48,6 +50,18 @@ fn equal(a: &Json, b: &Json, label: &str) {
         canonical(b, usize::MAX).unwrap(),
         "{label}"
     );
+}
+fn checked_registry_frames(value: &Json) -> Json {
+    let mut frames = value.as_array().unwrap().to_vec();
+    for frame in &mut frames {
+        if frame.get("method").is_some_and(|v| v.is_str("registry.sync")) {
+            let registry = backend_schema::registry_without_checked_backends(
+                frame.required("params").unwrap(),
+            );
+            frame.insert("params", registry);
+        }
+    }
+    Json::Array(frames)
 }
 fn result(value: IvyResult<()>) -> Json {
     match value {
@@ -736,12 +750,12 @@ async fn service_start_reconnect_health_control_and_close_match_original_main() 
             "caught domain errors must not hide unexpected RPCs",
         );
         equal(
-            field(&actual, "handshakes"),
+            &checked_registry_frames(field(&actual, "handshakes")),
             field(field(row, "peer"), "handshakes"),
             "identity, complete registry and notification filters",
         );
         equal(
-            &rpc_set(&actual),
+            &checked_registry_frames(&rpc_set(&actual)),
             &rpc_set(field(row, "peer")),
             "exact concurrent pure RPC request/response sets",
         );

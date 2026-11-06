@@ -331,7 +331,30 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
     ) -> IvyResult<Document> {
         let mut value = document.value;
         if key == "task-board/task" {
-            let owner = document.pin.required("objectId")?;
+            let mut owner = document.pin.required("objectId")?.clone();
+            if value.get("commentStore").is_some_and(|v| !v.is_null())
+                && let Some(parent) = document.parent_id.as_ref()
+                && Some(parent) != self.journal.root_object_id.as_ref()
+                && self.journal.key(parent)?.as_deref() == Some("task-board/operation")
+            {
+                let operation = self.journal.read(
+                    "task-board/operation",
+                    &Json::String(parent.clone()),
+                    true,
+                )?;
+                owner = operation
+                    .value
+                    .required("request")?
+                    .get("taskId")
+                    .filter(|id| id.as_js_string().is_some())
+                    .cloned()
+                    .ok_or_else(|| {
+                        IvyError::new(
+                            "task_board_scope_mismatch",
+                            "A prepared conversation must belong to its original task operation.",
+                        )
+                    })?;
+            }
             value = match persistent_reads::read_legacy_conversation(
                 self.client.as_ref(),
                 &value,
@@ -612,6 +635,29 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
             .await
     }
 
+    fn validate_local_record(&self, key: &str, document: &Document) -> IvyResult<String> {
+        let mut version = self.contracts.version(key)?;
+        if let Some(parent) = document.parent_id.as_ref()
+            && Some(parent) != self.journal.root_object_id.as_ref()
+            && self.journal.key(parent)?.as_deref() == Some("task-board/operation")
+        {
+            let operation =
+                self.journal
+                    .read("task-board/operation", &Json::String(parent.clone()), true)?;
+            if let Some(captured) = persistent_reads::local_reads::prepared_version(
+                key,
+                &document.pin,
+                &document.content_hash,
+                &operation.value,
+            )? {
+                version = captured;
+            }
+        }
+        self.contracts
+            .validate_record(key, &version.clone().into(), &document.value)?;
+        Ok(version)
+    }
+
     async fn record(
         &self,
         key: &str,
@@ -625,15 +671,16 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
             .ok_or_else(IvyError::internal)?;
         if self.contracts.local(key)? || self.journal.key(id)?.as_deref() == Some(key) {
             let document = self.journal.read(key, address, primary)?;
-            self.contracts.validate_record(
-                key,
-                &self.contracts.version(key)?.into(),
-                &document.value,
-            )?;
+            let version = self.validate_local_record(key, &document)?;
+            let metadata = if version != self.contracts.version(key)? {
+                Some(self.journal.metadata(id, &version)?)
+            } else {
+                None
+            };
             return Ok(ReadRecord {
                 document,
                 archived: false,
-                metadata: None,
+                metadata,
             });
         }
         let cache_key = address.as_js_string().is_none().then(|| {
@@ -752,11 +799,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         {
             let found = self.journal.named(key, name, parent)?;
             if let Some(document) = &found {
-                self.contracts.validate_record(
-                    key,
-                    &self.contracts.version(key)?.into(),
-                    &document.value,
-                )?;
+                self.validate_local_record(key, document)?;
             }
             return Ok(found);
         }
@@ -821,7 +864,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         }
     }
 
-    fn references(&self, key: &str, value: &Json) -> IvyResult<Json> {
+    async fn references(&self, key: &str, value: &Json, destination: &Json) -> IvyResult<Json> {
         let mut references = Json::object(Vec::<(String, Json)>::new());
         match key {
             "task-board/task" => {
@@ -865,6 +908,25 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                 )?;
                 for (index, pin) in attachments.into_iter().enumerate() {
                     references.insert(format!("attachment-{index}"), pin.clone());
+                }
+            }
+            "task-board/run" => {
+                if let Some(pin) = reference_writes::run_source_for_write(
+                    &nullable(self.journal.root_object_id.as_ref()),
+                    value,
+                    destination,
+                    |params| {
+                        self.client
+                            .request("objects.read", params, RequestOptions::default())
+                    },
+                    |error: &IvyError| {
+                        error.code == "revision_pruned"
+                            && error.outcome_json() == Json::from("not_executed")
+                    },
+                )
+                .await?
+                {
+                    references.insert("source-task", pin);
                 }
             }
             "task-board/delivery" => {
@@ -963,14 +1025,14 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         let published;
         let (value, references) = if key == "task-board/task"
             && create.is_none()
-            && ["2.2.0", "2.3.0", "3.0.0", "3.1.0"].contains(&version.as_str())
+            && persistent_reads::task_comments::comment_node_version(&version).is_some()
         {
             published = self
                 .publish_task_content(value, destination, &version)
                 .await?;
             (&published.0, published.1.clone())
         } else {
-            (value, self.references(key, value)?)
+            (value, self.references(key, value, destination).await?)
         };
         let identity = if retained {
             mutation.clone()
@@ -998,7 +1060,13 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                 destination.required("expectedRevision")?.clone(),
             );
             if key == "task-board/task" {
-                params.insert("expectedArchived", false.into());
+                params.insert(
+                    "expectedArchived",
+                    destination
+                        .get("expectedArchived")
+                        .cloned()
+                        .unwrap_or(false.into()),
+                );
             }
         }
         let result = match self
@@ -1173,6 +1241,16 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
     }
     async fn read_document(&self, key: &str, address: &Json, primary: bool) -> IvyResult<Document> {
         Store::read(self, key, address, primary).await
+    }
+    async fn read_task_routing(&self, address: &Json) -> IvyResult<Json> {
+        let mut task = self
+            .read_record("task-board/task", address, true, true)
+            .await?;
+        let routes = task
+            .value
+            .remove("nativeRoutes")
+            .unwrap_or_else(|| Json::Array(vec![]));
+        Ok(Json::object([("nativeRoutes", routes)]))
     }
     async fn write_document(
         &self,

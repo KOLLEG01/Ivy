@@ -1,5 +1,7 @@
 import { callBound, canonical, discover, IvyError, newOperationId } from '../../sdk/src/client.js';
 import type { BoundTool, RpcClient, Wire } from '../../sdk/src/client.js';
+import type { Agent } from '../../sdk/src/client.js';
+import { sameNativeBackend } from '../../contracts/src/native-backend.js';
 
 export type JsonRecord = { [key: string]: Wire.Json };
 export const record = (value: unknown): JsonRecord => value && typeof value === 'object' && !Array.isArray(value) ? value as JsonRecord : {};
@@ -16,9 +18,9 @@ export function serviceNodeLabel(nodes: readonly { serviceNodeId: string; hostId
   }
   return nodes.some(node => node.hostId === owner.hostId && node.serviceNodeId !== serviceNodeId) ? serviceNodeId : owner.hostId;
 }
-export function confirmsAbsence(error: IvyError, call: Wire.ToolCall): boolean {
+export function confirmsAbsence(error: IvyError, call: Wire.ToolCall, backend?: Agent.BackendIdentity): boolean {
   const evidence = record(error.details);
-  return error.code === 'not_found' && error.outcome === 'not_executed' && evidence.kind === 'agent_operation_absent' && evidence.serviceNodeId === call.serviceNodeId && evidence.operationId === call.operationId && (typeof evidence.epoch === 'string' || evidence.epoch === null);
+  return error.code === 'not_found' && error.outcome === 'not_executed' && evidence.kind === 'agent_operation_absent' && evidence.serviceNodeId === call.serviceNodeId && evidence.operationId === call.operationId && sameNativeBackend(evidence.backend as Agent.BackendIdentity | undefined, backend) && (typeof evidence.epoch === 'string' || evidence.epoch === null);
 }
 
 // Schema inspection supports local references only. Hive/native remain authoritative validators.
@@ -70,12 +72,14 @@ function observeCatalog(client: RpcClient, node: string, value: Wire.Json): void
   if (status.serviceNodeId !== node || fields.some(field => typeof status[field] !== 'string' || !status[field])) return;
   let catalogs = nativeCatalogs.get(client);
   if (!catalogs) nativeCatalogs.set(client, catalogs = new Map());
-  const identity = canonical(fields.map(field => status[field]!)), previous = catalogs.get(node);
+  const namespace = text(record(status.backend).backendId) || 'codex', key = node + '\u0000' + namespace;
+  const identity = canonical([status.backend ?? null, ...fields.map(field => status[field]!)]), previous = catalogs.get(key);
   if (previous && previous !== identity) {
     const bindings = readBindings.get(client);
-    for (const key of bindings?.keys() ?? []) if (key.startsWith(node + '\u0000')) bindings!.delete(key);
+    for (const bindingKey of bindings?.keys() ?? []) if (bindingKey.startsWith(node + '\u0000' + namespace + '.')) bindings!.delete(bindingKey);
+    readReadiness.get(client)?.delete(key);
   }
-  catalogs.set(node, identity);
+  catalogs.set(key, identity);
 }
 type BindingRequest = { method: string; resolve: (binding: BoundTool | undefined) => void; reject: (error: unknown) => void };
 const bindingRequests = new WeakMap<RpcClient, Map<string, BindingRequest[]>>();
@@ -140,22 +144,28 @@ function readBinding(client: RpcClient, node: string, method: string): Promise<B
   return binding;
 }
 async function executeRead(client: RpcClient, node: string, method: string, args: Wire.Json, signal: AbortSignal): Promise<Wire.Json> {
+  // Service readiness is shared. A selected provider's outage is confined to its
+  // namespace, including the same backend's management observations.
+  const namespace = method === 'agent.backends' ? '$host' : method.startsWith('agent.') ? text(record(record(args).backend).backendId) || 'codex' : method.split('.')[0]!;
+  const failureKey = node + '\u0000' + namespace;
   for (let attempt = 0; ; attempt++) {
     signal?.throwIfAborted();
     await readyForRead(client, node);
+    const unavailable = readReadiness.get(client)?.get(failureKey);
+    if (unavailable?.error && Date.now() < unavailable.until) throw unavailable.error;
     signal?.throwIfAborted();
     const binding = await readBinding(client, node, method);
     if (!binding) throw new IvyError('not_found', 'The exact tool is not in the selected provider catalog.');
     try {
       signal?.throwIfAborted();
-      const value = await callBound(client, binding, args, method.startsWith('codex.') ? await newOperationId(client) : undefined, signal ? { signal } : {});
+      const value = await callBound(client, binding, args, binding.definition.nativeMethod ? await newOperationId(client) : undefined, signal ? { signal } : {});
       if (method === 'agent.status') observeCatalog(client, node, value);
       return value;
     } catch (error) {
       if (!signal?.aborted && error instanceof IvyError && error.code === 'tool_definition_changed')
         readBindings.get(client)?.delete(node + '\u0000' + method);
       if (!signal?.aborted && error instanceof IvyError && ['service_unavailable', 'service_not_ready', 'native_capacity'].includes(error.code))
-        readReadiness.get(client)?.set(node, { until: Date.now() + readinessMs, error });
+        readReadiness.get(client)?.set(failureKey, { until: Date.now() + readinessMs, error });
       if (attempt || !(error instanceof IvyError) || error.code !== 'tool_definition_changed') throw error;
     }
   }
@@ -197,23 +207,23 @@ export async function nativeRead(client: RpcClient, node: string, method: string
 export async function optionalTool(client: RpcClient, node: string, method: string) {
   return readBinding(client, node, method);
 }
-export async function nativeModels(client: RpcClient, node: string, signal?: AbortSignal): Promise<JsonRecord> {
+export async function nativeModels(client: RpcClient, node: string, signal?: AbortSignal, namespace = 'codex'): Promise<JsonRecord> {
   const data: Wire.Json[] = [], cursors = new Set<string>(); let cursor: string | null = null;
   const timeout = AbortSignal.timeout(35000), bounded = signal ? AbortSignal.any([timeout, signal]) : timeout;
   do {
     // Hidden models include configured defaults outside the native picker; they stay selectable.
-    const page = record(await nativeRead(client, node, 'codex.model/list', { limit: 100, includeHidden: true, ...(cursor ? { cursor } : {}) }, bounded));
+    const page = record(await nativeRead(client, node, namespace + '.model/list', { limit: 100, includeHidden: true, ...(cursor ? { cursor } : {}) }, bounded));
     data.push(...list(page.data)); cursor = text(page.nextCursor) || null;
     if (data.length > 1000 || cursor && cursors.has(cursor) || cursors.size >= 20) throw new IvyError('native_models_unavailable', 'Native model discovery exceeded its bounded complete snapshot.');
     if (cursor) cursors.add(cursor);
   } while (cursor);
   return { data, nextCursor: null, observedAt: new Date().toISOString() };
 }
-export async function nativePermissionProfiles(client: RpcClient, node: string, cwd?: string, signal?: AbortSignal): Promise<JsonRecord> {
+export async function nativePermissionProfiles(client: RpcClient, node: string, cwd?: string, signal?: AbortSignal, namespace = 'codex'): Promise<JsonRecord> {
   const data: Wire.Json[] = [], cursors = new Set<string>(); let cursor: string | null = null;
   const timeout = AbortSignal.timeout(35000), bounded = signal ? AbortSignal.any([timeout, signal]) : timeout;
   do {
-    const page = record(await nativeRead(client, node, 'codex.permissionProfile/list', { limit: 100, ...(cwd ? { cwd } : {}), ...(cursor ? { cursor } : {}) }, bounded));
+    const page = record(await nativeRead(client, node, namespace + '.permissionProfile/list', { limit: 100, ...(cwd ? { cwd } : {}), ...(cursor ? { cursor } : {}) }, bounded));
     data.push(...list(page.data)); cursor = text(page.nextCursor) || null;
     if (data.length > 1000 || cursor && cursors.has(cursor) || cursors.size >= 20) throw new IvyError('native_permission_profiles_unavailable', 'Native permission profile discovery exceeded its bounded complete snapshot.');
     if (cursor) cursors.add(cursor);
@@ -228,11 +238,12 @@ export function permissionProfileLabel(id: string): string {
   const builtIn: Record<string, string> = { ':read-only': 'Read only', ':workspace': 'Workspace', ':danger-full-access': 'Full access' };
   return builtIn[id] ?? id.replace(/^:/, '').replace(/[-_]+/g, ' ').replace(/\b\w/g, value => value.toUpperCase());
 }
-export interface NativeModel { id: string; model: string; name: string; description: string; efforts: string[]; defaultEffort: string; isDefault: boolean; hidden: boolean }
+export interface NativeModel { id: string; model: string; name: string; description: string; efforts: string[]; defaultEffort: string; isDefault: boolean; hidden: boolean; serviceTiers?: string[] }
 /** Native picker models first, then models the native picker hides. */
 export function modelsFrom(value: unknown): NativeModel[] {
   const models = list(record(value).data).flatMap(entry => { const m = record(entry), efforts = list(m.supportedReasoningEfforts).map(e => text(record(e).reasoningEffort)).filter(Boolean);
-    return typeof m.model === 'string' && typeof m.id === 'string' ? [{ id: m.id, model: m.model, name: text(m.displayName, m.model), description: text(m.description), efforts, defaultEffort: text(m.defaultReasoningEffort), isDefault: m.isDefault === true, hidden: m.hidden === true }] : []; });
+    return typeof m.model === 'string' && typeof m.id === 'string' ? [{ id: m.id, model: m.model, name: text(m.displayName, m.model), description: text(m.description), efforts, defaultEffort: text(m.defaultReasoningEffort), isDefault: m.isDefault === true, hidden: m.hidden === true,
+      serviceTiers: [...new Set([...list(m.serviceTiers).map(tier => text(record(tier).id)), ...list(m.additionalSpeedTiers).filter((tier): tier is string => typeof tier === 'string')].filter(Boolean))] }] : []; });
   return [...models.filter(model => !model.hidden), ...models.filter(model => model.hidden)];
 }
 export function nativeText(item: unknown): string {

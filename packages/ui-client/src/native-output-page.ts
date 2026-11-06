@@ -1,6 +1,8 @@
 import { callBound, canonical, discover, IvyError, nativeVersions } from '../../sdk/src/client.js';
-import type { RpcClient, Wire } from '../../sdk/src/client.js';
-import { nativeRead, record, text } from './native.js';
+import type { Agent, RpcClient, Wire } from '../../sdk/src/client.js';
+import { record, text } from './native.js';
+import { backendArguments } from '../../contracts/src/native-backend.js';
+import { backendRead, nativeBackendKey, sameBackend } from './native-backends.js';
 
 interface Cursor {
   format: 'ivy-native-output-1'; scope: string; mode: 'items' | 'search' | 'full'; nativeCursor: string | null;
@@ -50,40 +52,43 @@ function nativeItemEntry(value: Wire.Json, selectedTurn: string): Wire.Json {
 }
 
 /** Existing item pagination first; only an exact first-page native -32601 permits full-turn reads. */
-export async function readNativeOutputPage(client: RpcClient, node: string, threadId: string, selectedTurn: string, cursor: string | undefined, signal: AbortSignal): Promise<NativeOutputPage> {
-  const scope = canonical([node, threadId, selectedTurn]), prior = parseCursor(cursor, scope);
+export async function readNativeOutputPage(client: RpcClient, node: string, threadId: string, selectedTurn: string, cursor: string | undefined, signal: AbortSignal, backend?: Agent.BackendIdentity): Promise<NativeOutputPage> {
+  const owner = { serviceNodeId: node, backend };
+  const scope = canonical([node, threadId, selectedTurn, nativeBackendKey(backend)]), prior = parseCursor(cursor, scope);
   if (!prior) completeTurns.delete(client);
   const bounded = AbortSignal.any([signal, AbortSignal.timeout(35000)]);
   const encode = (value: Omit<Cursor, 'format' | 'scope'>) => canonical({ format: 'ivy-native-output-1', scope, ...value });
   if (!prior || prior.mode === 'items') {
     try {
-      const page = record(await nativeRead(client, node, 'codex.thread/items/list', { threadId, limit: 50, sortDirection: 'desc',
+      const page = record(await backendRead(client, owner, 'thread/items/list', { threadId, limit: 50, sortDirection: 'desc',
         ...(selectedTurn ? { turnId: selectedTurn } : {}), ...(prior?.nativeCursor ? { cursor: prior.nativeCursor } : {}) }, bounded));
       if (!Array.isArray(page.data)) return fail('Native item response is missing its data.');
       const next = nextNative(page.nextCursor);
       if (next !== null && next === prior?.nativeCursor) return fail('Native item continuation did not advance.');
       return { items: page.data.map(item => nativeItemEntry(item, selectedTurn)), nextCursor: next === null ? null : encode({ mode: 'items', nativeCursor: next, epoch: null, offset: 0, turnId: null, turnHash: null }), mode: 'items', detail: '', download: null };
     } catch (error) {
+      if (error instanceof IvyError && ['native_owner_changed', 'native_owner_mismatch'].includes(error.code)) return fail('The native connection changed. Reload saved output from its original account.');
       if (prior || !(error instanceof IvyError) || error.code !== 'native_error' || error.outcome !== 'completed' || record(record(error.details).nativeError).code !== -32601) throw error;
     }
   }
 
-  const before = record(await nativeRead(client, node, 'agent.status', {}, bounded));
+  const before = record(await backendRead(client, owner, 'agent.status', {}, bounded));
   if (before.serviceNodeId !== node || before.state !== 'ready' || !text(before.epoch) || !nativeVersions.includes(text(before.nativeVersion)) ||
     !/^sha256:[a-f0-9]{64}$/.test(text(before.nativeExecutableHash)) || !/^sha256:[a-f0-9]{64}$/.test(text(before.catalogHash)) ||
     prior && prior.epoch !== before.epoch) return fail('The native connection changed. Reload saved output from its current owner.');
   const epoch = text(before.epoch), binding = await discover(client, 'agent.read', { serviceNodeId: node });
   if (binding.serviceNodeId !== node) return fail('Native output discovery returned another owner.');
   const checkOwner = async () => {
-    const after = record(await nativeRead(client, node, 'agent.status', {}, bounded));
+    const after = record(await backendRead(client, owner, 'agent.status', {}, bounded));
     if (after.state !== 'ready' || ['serviceNodeId', 'epoch', 'nativeVersion', 'nativeExecutableHash', 'catalogHash'].some(key => after[key] !== before[key]))
       fail('The native connection changed while reading saved output. Reload this view.');
   };
   const read = async (nativeCursor: string | null, itemsView: 'notLoaded' | 'full') => {
     const method = 'thread/turns/list', params = { threadId, cursor: nativeCursor, limit: 1, sortDirection: 'desc', itemsView };
-    const observed = record(await callBound(client, binding, { nativeVersion: before.nativeVersion!, method, params }, undefined, { signal: bounded }));
+    const observed = record(await callBound(client, binding, backendArguments({ nativeVersion: before.nativeVersion!, method, params }, backend), undefined, { signal: bounded }));
     if (observed.schemaVersion !== 1 || !text(observed.observationId) || !text(observed.callerPrincipalId) || !Number.isFinite(Date.parse(text(observed.observedAt))) ||
       !(typeof observed.requestId === 'string' || typeof observed.requestId === 'number' && Number.isSafeInteger(observed.requestId)) ||
+      !sameBackend(observed.backend as Agent.BackendIdentity | undefined, backend) ||
       observed.method !== method || canonical(observed.params) !== canonical(params) || observed.requestHash !== await hash({ method, params }) ||
       ['serviceNodeId', 'epoch', 'nativeVersion', 'nativeExecutableHash', 'catalogHash'].some(key => observed[key] !== before[key]))
       return fail('The native read observation does not match the requested owner, connection or turn page.');

@@ -32,7 +32,7 @@ async function add(label,action,steps,edit=()=>{}){
    const name=params.namespace+'.'+params.namePrefix,index=lists.get(name)??0;lists.set(name,index+1);
    if(input.listErrors?.[name]?.[index])throw failure(input.listErrors[name][index]);
    const hash=input.hashes?.[name]?.[index]??digest(params.namespace==='agent'?'a':'b');
-   return {provider:{node:{serviceNodeId:'native-agent'}},items:[{qualifiedName:name,definition:{namespace:params.namespace,name:params.namePrefix,interfaceVersion:params.namespace==='agent'?'1.0.0':target.nativeVersion,inputSchema:{},outputSchema:{}},definitionHash:hash,catalogHash:digest('c')}],nextCursor:null};
+   return {provider:{node:{serviceNodeId:input.target.serviceNodeId}},items:[{qualifiedName:name,definition:{namespace:params.namespace,name:params.namePrefix,interfaceVersion:params.namespace==='agent'?'1.0.0':target.nativeVersion,inputSchema:{},outputSchema:{}},definitionHash:hash,catalogHash:digest('c')}],nextCursor:null};
   }
   assert.equal(method,'tools.call');const step=input.steps[calls++];assert(step,'unexpected call');
   if(input.cancelAfter===calls)controller.abort(cancel);
@@ -42,10 +42,17 @@ async function add(label,action,steps,edit=()=>{}){
  const guard=async()=>{trace.push({guard:++guards});if(input.cancelGuard===guards)controller.abort(cancel);if(input.guardErrors?.[guards-1])throw failure(input.guardErrors[guards-1]);};
  async function run(){
   if(action==='management')return owner.management('custom',{x:'\ud800'},'original');
+  if(action==='managementConflict')return owner.management('custom',{backend:input.otherBackend},'original');
   if(action==='dispatch')return (await owner.dispatch(input.call,guard))??null;
   if(action==='interact')return owner.interact(input.call,guard);
   if(action==='interaction')return owner.interaction('original');
   if(action==='operation')return owner.operation(input.call);
+  if(action==='originalOperation'){
+   const original=structuredClone(input.originalOwner),retained=owner.originalOperations(original);
+   original.serviceNodeId='changed-after-selection';
+   assert.equal('dispatch' in retained,false);
+   return retained.operation(input.call);
+  }
   if(action==='status')return owner.status();
   if(action==='frame')return owner.frameLimits();
   if(action==='read')return owner.read(input.call.method,input.call.params,input.epoch,input.allowError);
@@ -66,6 +73,15 @@ async function add(label,action,steps,edit=()=>{}){
   if(action==='contractCache'){
    for(const index of [...Array(16).keys(),0,16,0])await new NativeOwner(client,'caller',{...input.target,hostId:'host'+index}).selectedContract();
    return null;
+  }
+  if(action==='contractAccounts'){
+   const first=await owner.selectedContract();
+   const second=await new NativeOwner(client,'caller',{...input.target,backend:input.otherBackend}).selectedContract();
+   assert.notEqual(first,second);
+   const method=catalog.clientRequests[0].method;
+   assert.equal(first.catalog,second.catalog);
+   assert.equal(first.inputSchema(method),second.inputSchema(method));
+   return {sameCatalog:first.catalogHash===second.catalogHash,firstDefinitionHash:first.definitionHash(method),secondDefinitionHash:second.definitionHash(method)};
   }
   throw Error(action);
  }
@@ -110,5 +126,61 @@ await add('contract-retry','contractRetry',[{error:err()},...discovery]);
 await add('contract-cancel-observer','contract',discovery,i=>i.cancelAfter=3);
 await add('contract-concurrent','contractConcurrent',discovery);
 await add('contract-fifo-eviction','contractCache',[...Array(17).keys(),0].flatMap(index=>[{value:{...status,hostId:'host'+index}},{value:catalog},{value:{...status,hostId:'host'+index}}]));
+const backendA={backendId:'codex',provider:'codex',accountId:'work'};
+const backendB={...backendA,accountId:'personal'};
+for(const action of ['management','dispatch','interact','interaction','operation','status','frame','read']){
+ const value={management:{ok:true},dispatch:operation,interact:interaction,interaction,operation,status,frame,read:observation}[action];
+ await add('backend-'+action,action,[{value:action==='management'?value:{...value,backend:backendA}}],i=>i.target.backend=backendA);
+ if(action!=='management'&&action!=='dispatch')await add('backend-wrong-account-'+action,action,[{value:{...value,backend:backendB}}],i=>i.target.backend=backendA);
+}
+await add('backend-before-send-conflict','managementConflict',[],i=>{i.target.backend=backendA;i.otherBackend=backendB;});
+await add('backend-unscoped-before-send-conflict','managementConflict',[],i=>i.otherBackend=backendA);
+for(const backend of [{...backendA,backendId:'worker'}, {backendId:'claude',provider:'claude',accountId:'personal'}]){
+ for(const action of ['dispatch','interact']) {
+  const value=action==='dispatch'?operation:interaction;
+  await add('named-backend-'+backend.backendId+'-'+action,action,[{value:{...value,backend}}],i=>i.target.backend=backend);
+  assert.equal(JSON.parse(rows.at(-1).expected).ok,true);
+  await add('named-backend-refresh-'+backend.backendId+'-'+action,action,
+   [changed(),{value:{...status,backend}},{value:{...value,backend}}],i=>{
+    i.target.backend=backend;i.hashes={['agent.'+(action==='dispatch'?'invoke':'interact')]:[digest('a'),digest('d')]};
+   });
+  assert.equal(JSON.parse(rows.at(-1).expected).ok,true);
+ }
+}
+await add('backend-catalog-cache-accounts','contractAccounts',[
+ {value:{...status,backend:backendA}},{value:catalog},{value:{...status,backend:backendA}},
+ {value:{...status,backend:backendB}},{value:catalog},{value:{...status,backend:backendB}},
+],i=>{i.target.backend=backendA;i.otherBackend=backendB;});
+for(const [label,second] of [
+ ['foreign-account',[{value:{...status,backend:backendA}}]],
+ ['changed-catalog',[{value:{...status,backend:backendB}},{value:{...catalog,sourceHash:digest('f')}}]],
+ ['changed-epoch',[{value:{...status,backend:backendB}},{value:catalog},{value:{...status,backend:backendB,epoch:'new-epoch'}}]],
+]){
+ await add('shared-catalog-rejects-'+label,'contractAccounts',[
+  {value:{...status,backend:backendA}},{value:catalog},{value:{...status,backend:backendA}},...second,
+ ],i=>{i.target.backend=backendA;i.otherBackend=backendB;});
+ assert.equal(JSON.parse(rows.at(-1).expected).ok,false);
+}
 assert(rows.some(r=>JSON.parse(r.expected).ok));assert(rows.length>=80);
+const relocated=i=>{i.originalOwner=structuredClone(i.target);i.target={...i.target,serviceNodeId:'shared-agent',backend:backendA};};
+for(const phase of ['accepted','dispatched','outcome_unknown','succeeded','failed']){
+ const value={...operation,phase,epoch:phase==='accepted'?null:'old-epoch',requestId:phase==='accepted'?null:'old-request',
+  code:['outcome_unknown','failed'].includes(phase)?'original_failure':null,reply:phase==='succeeded'?{result:{original:'\ud800'}}:null};
+ await add('relocated-original-'+phase,'originalOperation',[{value}],relocated);
+ assert.equal(JSON.parse(rows.at(-1).expected).ok,true);
+}
+for(const change of [{serviceNodeId:'other'}, {callerPrincipalId:'other'}, {backend:backendA}, {params:{changed:true}}, {requestHash:digest('f')}]){
+ await add('relocated-original-mismatch','originalOperation',[{value:{...operation,...change}}],relocated);
+ assert.equal(JSON.parse(rows.at(-1).expected).error.data.code,'native_evidence_mismatch');
+}
+await add('relocated-current-absence-is-not-original-absence','originalOperation',[
+ {error:err('not_found','not_executed',{...absence,serviceNodeId:'shared-agent',backend:backendA})},
+],relocated);
+assert.equal(JSON.parse(rows.at(-1).expected).error.data.code,'native_absence_mismatch');
+await add('relocated-original-after-native-upgrade','originalOperation',[{value:operation}],i=>{
+ relocated(i);i.target.nativeVersion='0.163.0';i.target.nativeExecutableHash=digest('e');i.target.catalogHash=digest('f');
+});
+assert.equal(JSON.parse(rows.at(-1).expected).ok,true);
+await add('relocated-original-current-check-rejects','operation',[{value:operation}],i=>{i.target.serviceNodeId='shared-agent';i.target.backend=backendA;});
+assert.equal(JSON.parse(rows.at(-1).expected).error.data.code,'native_evidence_mismatch');
 process.stdout.write(JSON.stringify(rows));

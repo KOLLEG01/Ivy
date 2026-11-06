@@ -374,9 +374,12 @@ impl<S: Store, I: RetryInspection> FailedRateLimit<'_, S, I> {
         let value = &task.value;
         let primary = field(value, "primaryResourceRef");
         let last = field(value, "lastRun");
+        let backend =
+            ivy_contracts::native_backend::BackendIdentity::optional(value.get("primaryBackend"))?;
         if !equal(field(value, "runtimeWait"), "reason", "host")
             || primary.is_null()
-            || !equal(primary, "namespace", "codex")
+            || !field(primary, "namespace")
+                .is_str(backend.as_ref().map_or("codex", |backend| backend.id()))
             || !equal(primary, "kind", "thread")
             || last.is_null()
         {
@@ -384,6 +387,9 @@ impl<S: Store, I: RetryInspection> FailedRateLimit<'_, S, I> {
         }
         let run = self.store.read("task-board/run", last, true).await?;
         let r = &run.value;
+        if !crate::native_plan::matches_task_primary(r.required("target")?, value)? {
+            return Ok(None);
+        }
         if r.get("taskId") != task.pin.get("objectId")
             || !equal(r, "phase", "failed")
             || !equal(field(r, "externalOutcome"), "code", "native_failed")

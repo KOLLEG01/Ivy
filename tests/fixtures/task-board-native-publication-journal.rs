@@ -522,7 +522,7 @@ impl NativePublicationEvidence for Engine {
     async fn read(&self, _: &Json, _: &Json, _: &EvidenceIdentity) -> IvyResult<Json> {
         panic!("No native call exists")
     }
-    async fn intended(&self, _: &Json, _: &Json) -> IvyResult<Json> {
+    async fn intended(&self, _: &Json, _: &Json, _: &Json) -> IvyResult<Json> {
         panic!("No native call exists")
     }
     fn resolve(&self, _: &Json) -> IvyResult<Json> {

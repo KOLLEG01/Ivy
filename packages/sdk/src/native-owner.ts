@@ -3,48 +3,69 @@ import { IvyError, requireThat } from '../../contracts/src/errors.js';
 import { validateAgent } from '../../contracts/src/agent-validation.js';
 import type { Agent, Wire } from '../../contracts/src/generated.js';
 import type { NativeContract } from '../../contracts/src/native-contract.js';
-import { callBound, nativeServiceTools, serviceTools } from './client.js';
+import { callBound, nativeBackendTools, serviceTools } from './client.js';
 import type { RpcClient, RequestOptions } from './client.js';
 import { readNativeContract } from './native.js';
 import { nativeThreadState } from './native-observations.js';
 import { validateNativeOperation, validateNativeRead, validateNativeStatus } from './native-evidence.js';
 import type { NativeOwnerIdentity } from './native-evidence.js';
 import { nativeThreadProject } from './native-project.js';
+import { backendArguments, sameNativeBackend } from '../../contracts/src/native-backend.js';
 
 export interface NativeOperationCall { operationId: string; method: string; params: Wire.Json; definitionHash: string }
-const contracts = new WeakMap<RpcClient, Map<string, Promise<NativeContract>>>();
+/** Receipt reads retain the original identity and grant no dispatch authority. */
+export interface OriginalNativeOperations {
+  operation(call: NativeOperationCall): Promise<Agent.Operation | Agent.OperationAbsence>;
+  checkOperation(value: unknown, call: NativeOperationCall): void;
+}
+interface ContractEntry { pending: Promise<NativeContract>; value?: NativeContract }
+const contracts = new WeakMap<RpcClient, Map<string, ContractEntry>>();
 
 /** Exact native owner transport. Domain claims and permission to act remain with the caller. */
 export class NativeOwner {
   readonly target: NativeOwnerIdentity;
   constructor(readonly client: RpcClient, readonly caller: string, target: NativeOwnerIdentity, readonly options: RequestOptions = {}) {
-    this.target = Object.freeze(structuredClone(target));
+    const selected = structuredClone(target);
+    if (selected.backend) Object.freeze(selected.backend);
+    this.target = Object.freeze(selected);
   }
   private checkSignal(): void { this.options.signal?.throwIfAborted(); }
+  originalOperations(original: NativeOwnerIdentity): OriginalNativeOperations {
+    const retained = structuredClone(original);
+    return Object.freeze({
+      operation: (call: NativeOperationCall) => this.originalOperation(call, retained),
+      checkOperation: (value: unknown, call: NativeOperationCall) => this.checkOriginalOperation(value, call, retained),
+    });
+  }
   async selectedContract(): Promise<NativeContract> {
     this.checkSignal(); const key = hashJson(this.target);
     let cache = contracts.get(this.client); if (!cache) { cache = new Map(); contracts.set(this.client, cache); }
-    let pending = cache.get(key);
-    if (!pending) {
-      pending = (async () => {
+    let entry = cache.get(key);
+    if (!entry) {
+      const pending = (async () => {
         const hostId = this.target.hostId ?? (await this.status()).hostId;
-        return (await readNativeContract(this.client, { ...this.target, hostId })).contract;
+        const observed = (await readNativeContract(this.client, { ...this.target, hostId })).contract;
+        // Admission still observes this account on both sides of discovery.
+        // Only the admitted immutable catalog/schema owner is shared.
+        const retained = [...cache.values()].find(candidate => candidate.value?.catalogHash === observed.catalogHash)?.value;
+        const value = retained ? retained.withBackend(this.target.backend) : observed;
+        entry!.value = value; return value;
       })();
       if (cache.size >= 16) cache.delete(cache.keys().next().value!);
-      cache.set(key, pending); const selected = cache;
-      void pending.catch(() => { if (selected.get(key) === pending) selected.delete(key); });
+      entry = { pending }; cache.set(key, entry); const selected = cache, original = entry;
+      void pending.catch(() => { if (selected.get(key) === original) selected.delete(key); });
     }
-    const contract = await pending; this.checkSignal(); return contract;
+    const contract = await entry.pending; this.checkSignal(); return contract;
   }
   async binding(method: string, expectedDefinitionHash?: string) {
-    this.checkSignal(); const binding = await nativeServiceTools(this.client, this.target.serviceNodeId).binding('codex.' + method, expectedDefinitionHash);
+    this.checkSignal(); const binding = await nativeBackendTools(this.client, this.target.serviceNodeId, this.target.backend).binding((this.target.backend?.backendId ?? 'codex') + '.' + method, expectedDefinitionHash);
     this.checkSignal(); return binding;
   }
   management(name: string, args: Wire.Json, operationId?: string): Promise<Wire.Json> {
     return this.callManagement(name, args, operationId);
   }
   private async callManagement(name: string, args: Wire.Json, operationId?: string, beforeSend: () => Promise<void> = async () => {}, reconcileUnknown = false, reassess: () => Promise<void> = async () => {}): Promise<Wire.Json> {
-    this.checkSignal(); const original = structuredClone(args);
+    this.checkSignal(); const original = backendArguments(structuredClone(args), this.target.backend);
     const tools = serviceTools(this.client, this.target.serviceNodeId, [{ namespace: 'agent', interfaceVersion: '1.0.0' }]);
     let binding = await tools.binding('agent.' + name);
     for (let attempt = 0; ; attempt++) {
@@ -79,26 +100,32 @@ export class NativeOwner {
   }
   async frameLimits(): Promise<Agent.FrameLimits> {
     const value = await this.management('frameLimits', {}); validateAgent('FrameLimits', value); const limits = value as Agent.FrameLimits;
-    requireThat(limits.serviceNodeId === this.target.serviceNodeId && limits.nativeVersion === this.target.nativeVersion &&
+    requireThat(sameNativeBackend(limits.backend, this.target.backend) && limits.serviceNodeId === this.target.serviceNodeId && limits.nativeVersion === this.target.nativeVersion &&
       limits.nativeExecutableHash === this.target.nativeExecutableHash && limits.catalogHash === this.target.catalogHash && limits.epoch,
       'native_owner_mismatch', 'Frame limits must come from the exact selected native owner.'); return limits;
   }
   /** Resolve membership before the caller retains its immutable start request. */
   threadStartParams(params: Record<string, Wire.Json>): Promise<Record<string, Wire.Json>> {
     this.checkSignal();
-    return nativeThreadProject(this.client, this.target.serviceNodeId, params, this.options);
+    return nativeThreadProject(this.client, this.target.serviceNodeId, params, this.options, this.target.backend);
   }
   checkOperation(value: unknown, call: NativeOperationCall): void {
-    validateNativeOperation(value, { ...this.target, callerPrincipalId: this.caller, ...call });
+    this.checkOriginalOperation(value, call, this.target);
+  }
+  private checkOriginalOperation(value: unknown, call: NativeOperationCall, original: NativeOwnerIdentity): void {
+    validateNativeOperation(value, { ...original, callerPrincipalId: this.caller, ...call });
   }
   async operation(call: NativeOperationCall): Promise<Agent.Operation | Agent.OperationAbsence> {
+    return this.originalOperation(call, this.target);
+  }
+  private async originalOperation(call: NativeOperationCall, owner: NativeOwnerIdentity): Promise<Agent.Operation | Agent.OperationAbsence> {
     const original = structuredClone(call);
     try {
-      const value = await this.management('operation', { operationId: original.operationId }); this.checkOperation(value, original); return value as Agent.Operation;
+      const value = await this.management('operation', { operationId: original.operationId }); this.checkOriginalOperation(value, original, owner); return value as Agent.Operation;
     } catch (error) {
       if (!(error instanceof IvyError && error.code === 'not_found')) throw error;
       validateAgent('OperationAbsence', error.details); const absence = error.details as Agent.OperationAbsence;
-      requireThat(absence.serviceNodeId === this.target.serviceNodeId && absence.operationId === original.operationId,
+      requireThat(sameNativeBackend(absence.backend, owner.backend) && absence.serviceNodeId === owner.serviceNodeId && absence.operationId === original.operationId,
         'native_absence_mismatch', 'Only exact owner-produced absence can identify an unobserved original operation.'); return absence;
     }
   }
@@ -117,8 +144,8 @@ export class NativeOwner {
   }
   private async reassessNative(call: NativeOperationCall): Promise<void> {
     await this.status();
-    const tools = nativeServiceTools(this.client, this.target.serviceNodeId);
-    const fresh = await tools.refresh(await tools.binding('codex.' + call.method));
+    const tools = nativeBackendTools(this.client, this.target.serviceNodeId, this.target.backend);
+    const fresh = await tools.refresh(await tools.binding((this.target.backend?.backendId ?? 'codex') + '.' + call.method));
     requireThat(fresh.definitionHash === call.definitionHash, 'tool_definition_changed',
       'Envelope recovery cannot change the original native method definition.');
   }
@@ -129,12 +156,12 @@ export class NativeOwner {
       method: original.method, params: original.params, expectedDefinitionHash: binding.definitionHash }, original.operationId, beforeSend,
       false, () => this.reassessNative(original));
     validateAgent('Interaction', value);
-    requireThat((value as Agent.Interaction).operationId === original.operationId, 'native_observation_invalid', 'Interaction reply identity differs.');
+    requireThat(sameNativeBackend((value as Agent.Interaction).backend, this.target.backend) && (value as Agent.Interaction).operationId === original.operationId, 'native_observation_invalid', 'Interaction reply identity differs.');
     return value as Agent.Interaction;
   }
   async interaction(operationId: string): Promise<Agent.Interaction> {
     const value = await this.management('interaction', { operationId }); validateAgent('Interaction', value);
-    requireThat((value as Agent.Interaction).operationId === operationId, 'native_observation_invalid', 'Interaction lookup identity differs.');
+    requireThat(sameNativeBackend((value as Agent.Interaction).backend, this.target.backend) && (value as Agent.Interaction).operationId === operationId, 'native_observation_invalid', 'Interaction lookup identity differs.');
     return value as Agent.Interaction;
   }
   async read(method: Agent.ReadObservation['method'], params: Wire.Json, epoch?: string, allowError = false): Promise<Agent.ReadObservation> {

@@ -14,7 +14,8 @@ import {
   useRemote,
 } from "@ivy/ui";
 import type { Agent, BoundTool, RpcClient } from "../../sdk/src/client.js";
-import { nativeRead } from "./native";
+import { backendRead } from './native-backends';
+import { nativeStorageOwner } from './native-route';
 import { useNativeAction } from "./native-action";
 import NativeActionState from "./NativeActionState.vue";
 import { localeText as tr } from "./runtime";
@@ -23,6 +24,7 @@ const open = defineModel<boolean>("open", { default: false });
 const props = defineProps<{
   client: RpcClient;
   node: string;
+  backend?: Agent.BackendIdentity | undefined;
   threadId: string;
   projectId: string;
   binding: BoundTool;
@@ -32,9 +34,9 @@ const emit = defineEmits<{ changed: [] }>();
 const project = ref(props.projectId);
 const projects = useRemote(
   async (signal) =>
-    (await nativeRead(
+    (await backendRead(
       props.client,
-      props.node,
+      { serviceNodeId: props.node, backend: props.backend },
       "agent.projects",
       {},
       signal,
@@ -42,7 +44,8 @@ const projects = useRemote(
 );
 const action = useNativeAction(
   props.client,
-  "ivy:task-project:" + props.scope + props.node + ":" + props.threadId,
+  "ivy:task-project:" + props.scope + nativeStorageOwner(props.node, props.backend) + ":" + props.threadId,
+  () => props.backend,
 );
 const completed = () => {
   if (action.saved.value?.phase === "succeeded") {

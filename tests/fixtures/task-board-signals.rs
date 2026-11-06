@@ -16,6 +16,7 @@ use ivy_task_board::{
 };
 use std::{
     cell::RefCell,
+    collections::BTreeMap,
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -77,7 +78,10 @@ impl RpcClient for Client {
                         "provider",
                         Json::object([(
                             "node",
-                            Json::object([("serviceNodeId", "native-agent".into())]),
+                            Json::object([(
+                                "serviceNodeId",
+                                params.required("serviceNodeId")?.clone(),
+                            )]),
                         )]),
                     ),
                     (
@@ -137,6 +141,8 @@ struct Store {
     owners: RefCell<usize>,
     write_index: RefCell<usize>,
     pass: RefCell<usize>,
+    task_reads: RefCell<usize>,
+    retained: RefCell<BTreeMap<String, Document>>,
 }
 impl BlobStore for Store {
     type Pin = Json;
@@ -157,6 +163,28 @@ impl ReadEvidenceStore for Store {
             &self.trace,
             ["read".into(), key.into(), address.clone(), upgrade.into()],
         );
+        if key == "task-board/task" {
+            let mut reads = self.task_reads.borrow_mut();
+            let value = self
+                .input
+                .get("tasks")
+                .and_then(Json::as_array)
+                .map(|tasks| {
+                    let task = tasks
+                        .get(*reads)
+                        .unwrap_or_else(|| tasks.last().unwrap())
+                        .clone();
+                    *reads += 1;
+                    task
+                })
+                .unwrap_or_else(|| Json::Object(vec![]));
+            return Ok(Document {
+                pin: address.clone(),
+                value,
+                parent_id: None,
+                content_hash: String::new(),
+            });
+        }
         let value = self
             .input
             .get("runs")
@@ -201,23 +229,55 @@ impl ReadEvidenceStore for Store {
             *self.saved.borrow_mut() = checkpoint(self.input.get("winner"));
             return Err(IvyError::new(failure.to_utf8()?, "fixture write"));
         }
-        let revision = self
-            .saved
-            .borrow()
+        let by_name = self.input.get("retainByName").and_then(Json::as_bool) == Some(true);
+        let retained_name = if by_name {
+            destination
+                .get("create")
+                .map(|create| text(create, "name").to_utf8().unwrap())
+                .or_else(|| {
+                    self.retained
+                        .borrow()
+                        .iter()
+                        .find(|(_, d)| d.pin.get("objectId") == destination.get("objectId"))
+                        .map(|(name, _)| name.clone())
+                })
+        } else {
+            None
+        };
+        let previous = if by_name {
+            retained_name
+                .as_ref()
+                .and_then(|name| self.retained.borrow().get(name).cloned())
+        } else {
+            self.saved.borrow().clone()
+        };
+        let revision = previous
             .as_ref()
             .map(|saved| saved.pin.get("revision").unwrap().as_f64().unwrap())
             .unwrap_or(0.0)
             + 1.0;
+        let object_id = if by_name {
+            previous
+                .as_ref()
+                .map(|d| d.pin.required("objectId").unwrap().clone())
+                .unwrap_or_else(|| format!("signal-{}", self.retained.borrow().len() + 1).into())
+        } else {
+            "00000000-0000-4000-8000-000000000900".into()
+        };
         let pin = Json::object([
-            ("objectId", "00000000-0000-4000-8000-000000000900".into()),
+            ("objectId", object_id),
             ("revision", Json::Number(revision)),
         ]);
-        *self.saved.borrow_mut() = Some(Document {
+        let document = Document {
             pin: pin.clone(),
             value: value.clone(),
             parent_id: Some(text(&self.pin, "objectId")),
             content_hash: String::new(),
-        });
+        };
+        if let Some(name) = retained_name {
+            self.retained.borrow_mut().insert(name, document.clone());
+        }
+        *self.saved.borrow_mut() = Some(document);
         self.writes.borrow_mut().push(Json::object([
             ("pin", pin.clone()),
             ("value", value.clone()),
@@ -251,7 +311,13 @@ impl InspectionStore for Store {
                 Json::String(parent.clone()),
             ],
         );
-        Ok(self.saved.borrow().clone())
+        Ok(
+            if self.input.get("retainByName").and_then(Json::as_bool) == Some(true) {
+                self.retained.borrow().get(name).cloned()
+            } else {
+                self.saved.borrow().clone()
+            },
+        )
     }
     fn tools(&self) -> &ToolClients {
         &self.tools
@@ -332,6 +398,7 @@ async fn advisory_signals_preserve_context_cursors_checkpoints_and_conflicts() {
     let mut run = json(
         r#"{"phase":"running","target":{"serviceNodeId":"native-agent","hostId":"fixture"},"plan":{"nativeVersion":"0.159.2"},"primaryResourceRef":{"namespace":"codex","kind":"thread","serviceNodeId":"native-agent","nativeId":"thread"},"turnId":"turn","nativeEpoch":"epoch"}"#,
     );
+    run.insert("taskId", "task".into());
     run.insert(
         "plan",
         merge(
@@ -811,6 +878,135 @@ async fn advisory_signals_preserve_context_cursors_checkpoints_and_conflicts() {
         1,
     );
     assert_eq!(rows.len(), 65);
+    for provider in [
+        ivy_contracts::native_backend::NativeProvider::Codex,
+        ivy_contracts::native_backend::NativeProvider::Claude,
+    ] {
+        let backend = ivy_contracts::native_backend::BackendIdentity::new(
+            "primary".into(),
+            provider,
+            "one".into(),
+        )
+        .unwrap();
+        let foreign = ivy_contracts::native_backend::BackendIdentity::new(
+            "primary".into(),
+            provider,
+            "two".into(),
+        )
+        .unwrap();
+        let mut scoped = base.clone();
+        let mut selected_run = run.clone();
+        for key in ["target", "plan"] {
+            selected_run.insert(
+                key,
+                backend
+                    .arguments(selected_run.required(key).unwrap().clone())
+                    .unwrap(),
+            );
+        }
+        let mut primary = selected_run.required("primaryResourceRef").unwrap().clone();
+        primary.insert("namespace", backend.id().into());
+        selected_run.insert("primaryResourceRef", primary);
+        scoped.insert("run", selected_run);
+        scoped.insert("status", backend.arguments(status.clone()).unwrap());
+        let mut input = pending_input(1.0, empty());
+        input.insert(
+            "identity",
+            backend
+                .arguments(input.required("identity").unwrap().clone())
+                .unwrap(),
+        );
+        scoped.insert(
+            "pending",
+            Json::Array(vec![
+                backend
+                    .arguments(pending(vec![input.clone()], empty()))
+                    .unwrap(),
+            ]),
+        );
+        let item = backend.arguments(notification(1.0, empty())).unwrap();
+        scoped.insert(
+            "pages",
+            Json::Array(vec![
+                backend
+                    .arguments(page(vec![item.clone()], empty()))
+                    .unwrap(),
+            ]),
+        );
+        rows.push((
+            format!("scoped {}", provider.as_str()),
+            scoped.clone(),
+            Ok(vec![Some(1.0)]),
+            1,
+        ));
+        let mut wrong = scoped.clone();
+        wrong.insert("saved", saved(Json::object([("backend", foreign.json())])));
+        rows.push((
+            "foreign checkpoint".into(),
+            wrong,
+            Err("task_board_identity_conflict"),
+            0,
+        ));
+        let mut wrong = scoped.clone();
+        let mut wrong_input = input.clone();
+        let mut identity = input.required("identity").unwrap().clone();
+        identity.insert("backend", foreign.json());
+        wrong_input.insert("identity", identity);
+        wrong.insert(
+            "pending",
+            Json::Array(vec![
+                backend
+                    .arguments(pending(vec![wrong_input], empty()))
+                    .unwrap(),
+            ]),
+        );
+        rows.push((
+            "foreign pending identity".into(),
+            wrong,
+            Err("task_board_target_mismatch"),
+            0,
+        ));
+        let mut wrong = scoped.clone();
+        let mut wrong_item = item;
+        wrong_item.insert("backend", foreign.json());
+        wrong.insert(
+            "pages",
+            Json::Array(vec![
+                backend.arguments(page(vec![wrong_item], empty())).unwrap(),
+            ]),
+        );
+        rows.push((
+            "foreign notification".into(),
+            wrong,
+            Err("task_board_native_notification_conflict"),
+            0,
+        ));
+        let mut wrong = scoped;
+        wrong.insert(
+            "pending",
+            Json::Array(vec![foreign.arguments(pending(vec![], empty())).unwrap()]),
+        );
+        rows.push((
+            "foreign signal page".into(),
+            wrong,
+            Err("task_board_target_mismatch"),
+            0,
+        ));
+        let mut racing = rows
+            .iter()
+            .find(|row| row.0 == format!("scoped {}", provider.as_str()))
+            .unwrap()
+            .1
+            .clone();
+        racing.insert("writeErrors", Json::Array(vec!["revision_conflict".into()]));
+        racing.insert("winner", saved(Json::object([("backend", foreign.json())])));
+        rows.push((
+            "foreign competing checkpoint".into(),
+            racing,
+            Err("task_board_identity_conflict"),
+            0,
+        ));
+    }
     for (name, input, expected, expected_writes) in &rows {
         let trace: Trace = Arc::default();
         let client = Arc::new(Client {
@@ -831,6 +1027,8 @@ async fn advisory_signals_preserve_context_cursors_checkpoints_and_conflicts() {
             owners: RefCell::default(),
             write_index: RefCell::default(),
             pass: RefCell::default(),
+            task_reads: RefCell::default(),
+            retained: RefCell::default(),
         };
         let subject = NativeSignals::new(NativeInspector {
             store: &store,
@@ -876,6 +1074,22 @@ async fn advisory_signals_preserve_context_cursors_checkpoints_and_conflicts() {
         assert_eq!(writes.len(), *expected_writes, "{name}");
         for write in writes.iter() {
             let value = write.required("value").unwrap();
+            assert!(
+                ivy_contracts::native_backend::BackendIdentity::matches(
+                    value,
+                    ivy_contracts::native_backend::BackendIdentity::optional(
+                        input
+                            .required("run")
+                            .unwrap()
+                            .required("target")
+                            .unwrap()
+                            .get("backend")
+                    )
+                    .unwrap()
+                    .as_ref()
+                ),
+                "{name}"
+            );
             assert_eq!(value.get("run"), Some(&run_pin), "{name}");
             assert_eq!(
                 value.get("turnId"),
@@ -944,6 +1158,28 @@ async fn advisory_signals_preserve_context_cursors_checkpoints_and_conflicts() {
             }
         }
         let trace = trace.lock().unwrap();
+        for row in trace
+            .iter()
+            .filter_map(Json::as_array)
+            .filter(|row| row[0].is_str("rpc") && row[2].get("qualifiedName").is_some())
+        {
+            assert!(
+                ivy_contracts::native_backend::BackendIdentity::matches(
+                    row[2].required("arguments").unwrap(),
+                    ivy_contracts::native_backend::BackendIdentity::optional(
+                        input
+                            .required("run")
+                            .unwrap()
+                            .required("target")
+                            .unwrap()
+                            .get("backend")
+                    )
+                    .unwrap()
+                    .as_ref()
+                ),
+                "{name}"
+            );
+        }
         let notifications: Vec<_> = trace
             .iter()
             .filter_map(|v| {
@@ -981,4 +1217,303 @@ async fn advisory_signals_preserve_context_cursors_checkpoints_and_conflicts() {
         }
     }
     println!("{} native advisory signal scenarios", rows.len());
+}
+
+#[tokio::test]
+async fn routed_signals_keep_original_checkpoints_and_exact_current_input_owners() {
+    use ivy_contracts::native_backend::{BackendIdentity, NativeProvider};
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    for (provider, version) in [
+        (NativeProvider::Codex, "0.163.0"),
+        (NativeProvider::Claude, "0.142.3"),
+    ] {
+        for (original_scoped, routed_scoped) in [(false, true), (true, true)] {
+            let backend = BackendIdentity::new("primary".into(), provider, "one".into()).unwrap();
+            let contract = catalogs
+                .checked_native_contract(&version.into(), None)
+                .unwrap();
+            let pin = json(r#"{"objectId":"run","revision":2}"#);
+            let select = |node: &str, scoped: bool| {
+                let target =
+                    Json::object([("serviceNodeId", node.into()), ("hostId", "fixture".into())]);
+                if scoped {
+                    backend.arguments(target).unwrap()
+                } else {
+                    target
+                }
+            };
+            let original = select("native-agent", original_scoped);
+            let next = select("next", routed_scoped);
+            let last = select("last", routed_scoped);
+            let mut plan = Json::object([
+                ("nativeVersion", version.into()),
+                (
+                    "catalogSourceHash",
+                    contract.catalog().required("sourceHash").unwrap().clone(),
+                ),
+            ]);
+            if original_scoped {
+                plan = backend.arguments(plan).unwrap();
+            }
+            let run = Json::object([
+                ("taskId", "task".into()),
+                ("phase", "running".into()),
+                ("target", original.clone()),
+                ("plan", plan),
+                (
+                    "primaryResourceRef",
+                    Json::object([
+                        (
+                            "namespace",
+                            if original_scoped {
+                                backend.id().into()
+                            } else {
+                                "codex".into()
+                            },
+                        ),
+                        ("kind", "thread".into()),
+                        ("serviceNodeId", "native-agent".into()),
+                        ("nativeId", "thread".into()),
+                    ]),
+                ),
+                ("turnId", "turn".into()),
+                ("nativeEpoch", "epoch".into()),
+            ]);
+            let mut tasks = Vec::new();
+            let mut statuses = Vec::new();
+            let mut pages = Vec::new();
+            let mut inputs = Vec::new();
+            for (index, target) in [&original, &next, &last].into_iter().enumerate() {
+                let epoch = if index == 0 { "epoch" } else { "moved" };
+                let task = Json::object([(
+                    "nativeRoutes",
+                    Json::Array(if index == 0 {
+                        vec![]
+                    } else {
+                        let mut routes = vec![Json::object([
+                            ("source", original.clone()),
+                            ("target", target.clone()),
+                        ])];
+                        if index == 2 {
+                            routes.push(Json::object([
+                                ("source", next.clone()),
+                                ("target", target.clone()),
+                            ]));
+                        }
+                        routes
+                    }),
+                )]);
+                tasks.extend([task.clone(), task]);
+                let mut status = json(
+                    r#"{"hostId":"fixture","pid":42,"state":"ready","observedAt":"2026-01-02T03:04:05.006Z","code":null,"initialized":{},"pendingInputs":0,"operations":{"retained":0,"maximum":100,"bytes":0,"maximumBytes":1048576},"observedMethods":[]}"#,
+                );
+                for (key, value) in [
+                    (
+                        "serviceNodeId",
+                        target.required("serviceNodeId").unwrap().clone(),
+                    ),
+                    ("nativeVersion", version.into()),
+                    ("epoch", epoch.into()),
+                    ("catalogHash", contract.catalog_hash().into()),
+                    (
+                        "nativeExecutableHash",
+                        contract
+                            .catalog()
+                            .required("nativeExecutableHash")
+                            .unwrap()
+                            .clone(),
+                    ),
+                ] {
+                    status.insert(key, value);
+                }
+                let selected = BackendIdentity::optional(target.get("backend")).unwrap();
+                let scoped =
+                    |value| BackendIdentity::select_arguments(selected.as_ref(), value).unwrap();
+                statuses.extend([scoped(status.clone()), scoped(status)]);
+                let identity = Json::object([
+                    (
+                        "serviceNodeId",
+                        target.required("serviceNodeId").unwrap().clone(),
+                    ),
+                    ("epoch", epoch.into()),
+                    ("requestId", 1.0.into()),
+                ]);
+                let input =
+                    pending_input(1.0, Json::object([("identity", scoped(identity.clone()))]));
+                let stale = pending_input(
+                    2.0,
+                    Json::object([(
+                        "identity",
+                        scoped(merge(
+                            &identity,
+                            json(r#"{"epoch":"retired","requestId":2}"#),
+                        )),
+                    )]),
+                );
+                inputs.push(scoped(pending(
+                    vec![input, stale],
+                    Json::object([("epoch", epoch.into())]),
+                )));
+                let item = scoped(notification(
+                    1.0,
+                    Json::object([
+                        (
+                            "serviceNodeId",
+                            target.required("serviceNodeId").unwrap().clone(),
+                        ),
+                        ("epoch", epoch.into()),
+                        ("nativeVersion", version.into()),
+                    ]),
+                ));
+                pages.push(scoped(page(
+                    vec![item],
+                    Json::object([("epoch", epoch.into())]),
+                )));
+            }
+            let mut retained_statuses = statuses.clone();
+            retained_statuses.extend([
+                statuses.last().unwrap().clone(),
+                statuses.last().unwrap().clone(),
+            ]);
+            let mut reopened_page = pages.last().unwrap().clone();
+            reopened_page.insert("items", Json::Array(vec![]));
+            pages.push(reopened_page);
+            let input = Json::object([
+                ("run", run.clone()),
+                ("status", statuses[0].clone()),
+                ("statuses", Json::Array(retained_statuses)),
+                ("tasks", Json::Array(tasks.clone())),
+                ("pending", Json::Array(inputs)),
+                ("pages", Json::Array(pages)),
+                ("retainByName", true.into()),
+            ]);
+            let make = |input: Json| {
+                let trace: Trace = Arc::default();
+                let client = Arc::new(Client {
+                    input: input.clone(),
+                    trace: trace.clone(),
+                    status: Mutex::default(),
+                    pending: Mutex::default(),
+                    pages: Mutex::default(),
+                });
+                Store {
+                    input,
+                    pin: pin.clone(),
+                    time: "2026-01-02T03:04:05.006Z".into(),
+                    tools: ToolClients::new(client),
+                    trace,
+                    saved: RefCell::default(),
+                    writes: RefCell::default(),
+                    owners: RefCell::default(),
+                    write_index: RefCell::default(),
+                    pass: RefCell::default(),
+                    task_reads: RefCell::default(),
+                    retained: RefCell::default(),
+                }
+            };
+            let store = make(input.clone());
+            let subject = NativeSignals::new(NativeInspector {
+                store: &store,
+                catalogs: &catalogs,
+            });
+            let mut pins = Vec::new();
+            for _ in 0..3 {
+                pins.push(subject.step(&"run".into()).await.unwrap().unwrap());
+            }
+            assert!(
+                pins.windows(2)
+                    .all(|pins| pins[0].get("objectId") != pins[1].get("objectId"))
+            );
+            let retained = store.retained.borrow().clone();
+            assert_eq!(retained.len(), 3);
+            for target in [&original, &next, &last] {
+                let saved = retained
+                    .values()
+                    .find(|d| d.value.get("serviceNodeId") == target.get("serviceNodeId"))
+                    .unwrap();
+                let inputs = saved.value.required("inputs").unwrap().as_array().unwrap();
+                assert_eq!(inputs.len(), 1);
+                assert_eq!(
+                    inputs[0].required("identity").unwrap().get("serviceNodeId"),
+                    target.get("serviceNodeId")
+                );
+                assert!(BackendIdentity::matches(
+                    inputs[0].required("identity").unwrap(),
+                    BackendIdentity::optional(target.get("backend"))
+                        .unwrap()
+                        .as_ref()
+                ));
+                assert!(inputs[0].get("params").is_none());
+            }
+            let reopened = NativeSignals::new(NativeInspector {
+                store: &store,
+                catalogs: &catalogs,
+            });
+            assert_eq!(
+                reopened.step(&"run".into()).await.unwrap(),
+                pins.last().cloned()
+            );
+            assert_eq!(store.writes.borrow().len(), 3);
+            assert_eq!(store.input.get("run"), Some(&run));
+            for (name, before) in retained {
+                assert_eq!(
+                    hash_json(&store.retained.borrow()[&name].value).unwrap(),
+                    hash_json(&before.value).unwrap()
+                );
+            }
+            let trace = store.trace.lock().unwrap();
+            let cursors: Vec<_> = trace
+                .iter()
+                .filter_map(Json::as_array)
+                .filter(|row| {
+                    row[0].is_str("rpc")
+                        && row[2]
+                            .get("qualifiedName")
+                            .is_some_and(|v| v.is_str("agent.notifications"))
+                })
+                .map(|row| {
+                    row[2]
+                        .required("arguments")
+                        .unwrap()
+                        .required("afterSequence")
+                        .unwrap()
+                        .as_f64()
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(cursors, vec![0.0, 0.0, 0.0, 1.0]);
+            drop(trace);
+            let mut race = input;
+            race.insert(
+                "tasks",
+                Json::Array(vec![tasks[2].clone(), tasks[4].clone()]),
+            );
+            race.insert(
+                "statuses",
+                Json::Array(vec![statuses[2].clone(), statuses[4].clone()]),
+            );
+            race.insert("status", statuses[2].clone());
+            let pending = scoped_page_for_race(&race, "pending");
+            let notifications = scoped_page_for_race(&race, "pages");
+            race.insert("pending", pending);
+            race.insert("pages", notifications);
+            let race_store = make(race);
+            let race_subject = NativeSignals::new(NativeInspector {
+                store: &race_store,
+                catalogs: &catalogs,
+            });
+            assert_eq!(
+                race_subject.step(&"run".into()).await.unwrap_err().code,
+                "task_board_native_epoch_changed"
+            );
+            assert!(race_store.writes.borrow().is_empty());
+        }
+    }
+}
+
+fn scoped_page_for_race(input: &Json, key: &str) -> Json {
+    Json::Array(vec![
+        input.required(key).unwrap().as_array().unwrap()[1].clone(),
+    ])
 }

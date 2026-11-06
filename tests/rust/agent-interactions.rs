@@ -1,10 +1,7 @@
 #[path = "../fixtures/reference-data.rs"]
 mod reference_data;
 use ivy_agent_manager::interactions::{Limits, NativeInteractions};
-use ivy_contracts::{
-    IvyError, IvyJson, Outcome,
-    json::{parse, stringify},
-};
+use ivy_contracts::{IvyError, IvyJson, Outcome, json::parse};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -31,6 +28,8 @@ mod native_shell_cases;
 mod service_kernel;
 #[path = "agent-shutdown.rs"]
 mod shutdown_cases;
+#[path = "agent-interaction-results.rs"]
+mod result_owner_cases;
 
 fn json(s: &str) -> IvyJson {
     parse(s, 1024 * 1024).unwrap()
@@ -238,17 +237,17 @@ async fn ttl_is_measured_from_completion_and_prior_identity_precedes_pruning() {
 }
 
 #[tokio::test]
-async fn cache_charges_escaped_utf16_reply_bytes_at_exact_boundary() {
+async fn cache_charges_retained_utf16_capacity_instead_of_wire_length() {
     let id = json(r#""\ud800""#).as_js_string().unwrap().clone();
-    let value = json(
-        r#"{"operationId":"\ud800","epoch":"epoch","reply":{"result":{"turn":{"id":"turn"}}}}"#,
-    );
-    let bytes = stringify(&value, 1024).unwrap().len();
-    for budget in [bytes, bytes + 1] {
+    for capacity in [16, 65536] {
+        let mut units = Vec::with_capacity(capacity);
+        units.push(0xd800);
+        let response =
+            IvyJson::object([("result", IvyJson::String(ivy_contracts::JsString(units)))]);
         let cache = NativeInteractions::new(
             "epoch".into(),
             Limits {
-                bytes: budget,
+                bytes: 8192,
                 ..limits(10)
             },
         );
@@ -259,16 +258,104 @@ async fn cache_charges_escaped_utf16_reply_bytes_at_exact_boundary() {
                     id.clone(),
                     "m".into(),
                     IvyJson::Null,
-                    |_| async { Ok(reply()) }
+                    |_| async move { Ok(response) }
                 )
                 .unwrap()
                 .wait()
                 .await
                 .unwrap(),
-            value
+            json(r#"{"operationId":"\ud800","epoch":"epoch","reply":{"result":"\ud800"}}"#)
         );
-        assert_eq!(cache.lookup(&"c".into(), &id).is_ok(), budget > bytes);
+        assert_eq!(cache.lookup(&"c".into(), &id).is_ok(), capacity == 16);
     }
+}
+
+#[tokio::test]
+async fn pending_payloads_reserve_memory_before_dispatch_and_are_not_evicted() {
+    let cache = NativeInteractions::new(
+        "epoch".into(),
+        Limits {
+            bytes: 12_000,
+            ..limits(10)
+        },
+    );
+    let input = || IvyJson::String(ivy_contracts::JsString(vec![97; 4096]));
+    let (send, receive) = oneshot::channel();
+    let first = cache
+        .run("c".into(), "one".into(), "m".into(), input(), |_| async {
+            receive.await.unwrap()
+        })
+        .unwrap();
+    let denied = cache
+        .run("c".into(), "two".into(), "m".into(), input(), |_| async {
+            panic!("over-budget input dispatched")
+        })
+        .unwrap_err();
+    assert_eq!(denied.code, "native_capacity");
+    assert_eq!(denied.outcome, Outcome::NotExecuted);
+    assert!(cache.lookup(&"c".into(), &"one".into()).is_ok());
+    send.send(Ok(reply())).unwrap();
+    first.wait().await.unwrap();
+    cache
+        .run("c".into(), "two".into(), "m".into(), input(), |_| async {
+            Ok(reply())
+        })
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn large_unknown_error_is_charged_and_idle_pruning_releases_completed_replies() {
+    let now = Arc::new(AtomicU64::new(100));
+    let clock = now.clone();
+    let cache = NativeInteractions::with_clock(
+        "epoch".into(),
+        Limits {
+            bytes: 8192,
+            ..limits(10)
+        },
+        Arc::new(move || clock.load(Ordering::Relaxed)),
+    );
+    let error = IvyError::new("outcome_unknown", "Lost")
+        .with_outcome(Outcome::Unknown)
+        .with_details(IvyJson::String(ivy_contracts::JsString(
+            Vec::with_capacity(65536),
+        )));
+    assert!(error.retained_bytes() >= 131072);
+    let result = cache
+        .run(
+            "c".into(),
+            "large".into(),
+            "m".into(),
+            IvyJson::Null,
+            |_| async move { Err(error) },
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap_err();
+    assert_eq!(result.outcome, Outcome::Unknown);
+    let expired = cache.lookup(&"c".into(), &"large".into()).unwrap_err();
+    assert_eq!(expired.code, "interaction_expired");
+    assert_eq!(expired.outcome, Outcome::Unknown);
+    cache
+        .run(
+            "c".into(),
+            "small".into(),
+            "m".into(),
+            IvyJson::Null,
+            |_| async { Ok(reply()) },
+        )
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    assert_eq!(cache.prune().unwrap(), 0);
+    now.store(200, Ordering::Relaxed);
+    assert_eq!(cache.prune().unwrap(), 1);
+    assert_eq!(cache.prune().unwrap(), 0);
 }
 
 #[tokio::test]
@@ -300,7 +387,7 @@ async fn unchanged_typescript_cache_matches_error_replay_ttl_and_fifo_trace() {
     let cache = NativeInteractions::with_clock(
         "epoch".into(),
         Limits {
-            bytes: 1024,
+            bytes: 1024 * 1024,
             ..limits(3)
         },
         Arc::new(move || clock.load(Ordering::Relaxed)),

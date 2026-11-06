@@ -462,9 +462,9 @@ impl Prepared {
         )
         .await
         .unwrap();
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let bytes =
-            std::fs::read_to_string(root.join("services/host-executor/deploy.json")).unwrap();
+            std::fs::read_to_string(repository.join("services/host-executor/deploy.json")).unwrap();
         let mut plan = ivy_contracts::json::parse(&bytes, usize::MAX).unwrap();
         plan.insert("componentId", "fixture".into());
         plan.insert("checks", IvyJson::Array(vec![]));
@@ -674,8 +674,7 @@ impl Prepared {
             "linked-temp" | "registered-cleanup-failure" => {
                 fs::remove_dir_all(root.join("source")).unwrap();
                 #[cfg(windows)]
-                std::os::windows::fs::symlink_dir(base.join("outside"), root.join("source"))
-                    .unwrap();
+                directory_link(&base.join("outside"), &root.join("source"));
                 #[cfg(unix)]
                 std::os::unix::fs::symlink(base.join("outside"), root.join("source")).unwrap();
             }

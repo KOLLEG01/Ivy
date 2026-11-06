@@ -31,6 +31,8 @@ const TIME: &str = "2026-01-02T03:04:05.000Z";
 mod client;
 #[path = "task-board-local-pages.rs"]
 mod pages;
+#[path = "task-board-retained-publication.rs"]
+mod retained_publication;
 
 const TABLES: [&str; 11] = [
     "documents",
@@ -197,6 +199,143 @@ fn document(value: Document) -> Json {
         ("contentHash", value.content_hash.into()),
     ])
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn task_routing_projection_preserves_archive_root_and_contract_admission() {
+    let task_id = JsString::from("00000000-0000-4000-8000-000000000100");
+    let routes = Json::Array(vec![Json::object([
+        (
+            "source",
+            Json::object([("serviceNodeId", "native-agent".into())]),
+        ),
+        (
+            "target",
+            Json::object([("serviceNodeId", "joint-agent".into())]),
+        ),
+    ])]);
+    let task = Json::object([
+        (
+            "fields",
+            Json::object([("description", "Task context. ".repeat(8192).into())]),
+        ),
+        ("comments", Json::Array(vec![])),
+        ("nativeRoutes", routes.clone()),
+    ]);
+    for (archived, parent, version, error) in [
+        (false, "root", "1.0.0", None),
+        (true, "root", "1.0.0", None),
+        (true, "other", "1.0.0", Some("task_board_scope_mismatch")),
+        (true, "root", "2.0.0", Some("task_board_contract_mismatch")),
+    ] {
+        let db = Connection::open_in_memory().unwrap();
+        local_journal::initialize(&db).unwrap();
+        let changes_before = db.total_changes();
+        let client = Arc::new(Client {
+            input: Json::object([(
+                "readResult",
+                Json::object([
+                    (
+                        "object",
+                        Json::object([
+                            ("id", Json::String(task_id.clone())),
+                            ("contractKey", "task-board/task".into()),
+                            ("parentId", parent.into()),
+                            ("effectivelyArchived", archived.into()),
+                        ]),
+                    ),
+                    (
+                        "revision",
+                        Json::object([
+                            ("revision", 1.0.into()),
+                            ("contractVersion", version.into()),
+                            ("mediaType", "application/json".into()),
+                            ("contentHash", hash_json(&task).unwrap().into()),
+                            (
+                                "byteLength",
+                                (canonical(&task, MANAGEMENT_FRAME_BYTES).unwrap().len() as f64)
+                                    .into(),
+                            ),
+                        ]),
+                    ),
+                    (
+                        "content",
+                        Json::object([("encoding", "json".into()), ("value", task.clone())]),
+                    ),
+                ]),
+            )]),
+            trace: Mutex::default(),
+        });
+        let store = JournalStore {
+            journal: LocalJournal {
+                connection: &db,
+                root_object_id: Some("root".into()),
+            },
+            client: client.clone(),
+            contracts: FixtureContracts {
+                local: HashSet::new(),
+                allowed: [hash_json(&task).unwrap()].into(),
+            },
+            limits: HistoryLimits::default(),
+            now: || TIME.into(),
+            new_id: || panic!("Routing reads must not create records"),
+            cache: None,
+        };
+        let inspected = InspectionJournal::new(&store, "caller".into(), "task-board-node".into());
+        let lifecycle = ivy_task_board::lifecycle_journal::LifecycleJournal {
+            journal: &store,
+            pages: &(),
+        };
+        let comments = ivy_task_board::native_comments::NativeCommentJournal {
+            inspection: &inspected,
+            native_comment: (),
+        };
+        for result in [
+            inspected
+                .read_task_routing(&Json::String(task_id.clone()))
+                .await,
+            lifecycle
+                .read_task_routing(&Json::String(task_id.clone()))
+                .await,
+            comments
+                .read_task_routing(&Json::String(task_id.clone()))
+                .await,
+        ] {
+            match error {
+                Some(code) => assert_eq!(result.unwrap_err().code, code),
+                None => assert_eq!(
+                    hash_json(&result.unwrap()).unwrap(),
+                    hash_json(&Json::object([("nativeRoutes", routes.clone())])).unwrap()
+                ),
+            }
+        }
+        assert_eq!(
+            *client.trace.lock().unwrap(),
+            vec![
+                Json::Array(vec![
+                    "objects.read".into(),
+                    Json::object([("objectId", Json::String(task_id.clone()))]),
+                ]);
+                3
+            ]
+        );
+        if archived && parent == "root" && version == "1.0.0" {
+            assert_eq!(
+                Store::read(
+                    &store,
+                    "task-board/task",
+                    &Json::String(task_id.clone()),
+                    true
+                )
+                .await
+                .unwrap_err()
+                .code,
+                "task_board_record_archived",
+            );
+            assert_eq!(client.trace.lock().unwrap().len(), 4);
+        }
+        assert_eq!(db.total_changes(), changes_before);
+    }
+}
 fn snapshot(db: &Connection) -> Json {
     Json::object(TABLES.into_iter().map(|table| {
         let mut statement = db
@@ -244,13 +383,43 @@ async fn inspection_owner_and_saved_primary_guards_use_the_journal_connection() 
     .unwrap();
     let catalogs = ivy_contracts::checked_native_contract::CheckedNativeContracts::new(root);
     for row in rows.as_array().unwrap() {
-        let input = row.required("input").unwrap();
+        let mut input = row.required("input").unwrap().clone();
+        let task_id: JsString = "00000000-0000-4000-8000-000000000699".into();
+        let mut run = input.required("run").unwrap().clone();
+        run.insert("taskId", Json::String(task_id.clone()));
+        input.insert("run", run.clone());
+        let mut read_result = input.required("readResult").unwrap().clone();
+        let mut content = read_result.required("content").unwrap().clone();
+        content.insert("value", run.clone());
+        read_result.insert("content", content);
+        input.insert("readResult", read_result);
         let db = Connection::open_in_memory().unwrap();
         local_journal::initialize(&db).unwrap();
         let client = Arc::new(Client {
             input: input.clone(),
             trace: Mutex::default(),
         });
+        let task = Json::object([
+            ("fields", Json::Object(vec![])),
+            ("comments", Json::Array(vec![])),
+        ]);
+        let journal = LocalJournal {
+            connection: &db,
+            root_object_id: Some("root".into()),
+        };
+        journal
+            .create(
+                "task-board/task",
+                &"Current task".into(),
+                Some(&"root".into()),
+                &task,
+                &TIME.into(),
+                &task_id,
+            )
+            .unwrap();
+        let documents_before: i64 = db
+            .query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))
+            .unwrap();
         let store = JournalStore {
             journal: LocalJournal {
                 connection: &db,
@@ -258,8 +427,12 @@ async fn inspection_owner_and_saved_primary_guards_use_the_journal_connection() 
             },
             client: client.clone(),
             contracts: FixtureContracts {
-                local: HashSet::new(),
-                allowed: [hash_json(input.required("run").unwrap()).unwrap()].into(),
+                local: ["task-board/task".into()].into(),
+                allowed: [
+                    hash_json(input.required("run").unwrap()).unwrap(),
+                    hash_json(&task).unwrap(),
+                ]
+                .into(),
             },
             limits: HistoryLimits::default(),
             now: || TIME.into(),
@@ -268,8 +441,8 @@ async fn inspection_owner_and_saved_primary_guards_use_the_journal_connection() 
         };
         let inspection = InspectionJournal::new(
             &store,
-            string(input, "principal"),
-            string(input, "serviceNodeId"),
+            string(&input, "principal"),
+            string(&input, "serviceNodeId"),
         );
         let mut outcomes = vec![];
         for _ in 0..input.get("repeat").and_then(Json::as_f64).unwrap_or(1.0) as usize {
@@ -313,7 +486,7 @@ async fn inspection_owner_and_saved_primary_guards_use_the_journal_connection() 
         assert_eq!(
             db.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            0
+            documents_before
         );
     }
 }
@@ -1067,6 +1240,103 @@ async fn result_publication_keeps_current_artifacts_and_retained_finding_evidenc
             expected.insert("artifact-1", evidence.required("object").unwrap().clone());
         }
         assert_eq!(sent.required("references").unwrap(), &expected);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn remote_run_writes_retain_the_original_task_until_completion() {
+    for retained in [false, true] {
+        for completed in [false, true] {
+            let db = Connection::open_in_memory().unwrap();
+            local_journal::initialize(&db).unwrap();
+            let original = Json::object([
+                ("objectId", "original-task".into()),
+                ("revision", Json::Number(7.0)),
+            ]);
+            let value = Json::object([
+                ("taskId", "original-task".into()),
+                (
+                    "phase",
+                    if completed { "completed" } else { "running" }.into(),
+                ),
+                (
+                    "originalRequest",
+                    Json::object([("expectedRevision", Json::Number(7.0))]),
+                ),
+            ]);
+            let client = Arc::new(Client {
+                input: Json::object([(
+                    "writeResult",
+                    Json::object([
+                        ("object", Json::object([("id", "run".into())])),
+                        ("revision", Json::object([("revision", Json::Number(2.0))])),
+                    ]),
+                )]),
+                trace: Mutex::default(),
+            });
+            let store = JournalStore {
+                journal: LocalJournal {
+                    connection: &db,
+                    root_object_id: None,
+                },
+                client: client.clone(),
+                contracts: FixtureContracts {
+                    local: HashSet::new(),
+                    allowed: [hash_json(&value).unwrap()].into(),
+                },
+                limits: HistoryLimits::default(),
+                now: || TIME.into(),
+                new_id: || "unused-local-id".into(),
+                cache: None,
+            };
+            let destination = Json::object([
+                ("objectId", "run".into()),
+                ("expectedRevision", Json::Number(1.0)),
+            ]);
+            if retained {
+                store
+                    .write_prepared(
+                        "task-board/run",
+                        &value,
+                        &"original-write".into(),
+                        &destination,
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                store
+                    .write("task-board/run", &value, "original-write", &destination)
+                    .await
+                    .unwrap();
+            }
+            let trace = client.trace.lock().unwrap();
+            let writes: Vec<_> = trace
+                .iter()
+                .filter_map(|entry| {
+                    let entry = entry.as_array().unwrap();
+                    (entry[0] == Json::from("objects.write")).then_some(&entry[1])
+                })
+                .collect();
+            assert_eq!(writes.len(), 1, "One accepted write must publish one Run");
+            assert_eq!(
+                writes[0]
+                    .required("content")
+                    .unwrap()
+                    .required("value")
+                    .unwrap(),
+                &value
+            );
+            let expected = if completed {
+                Json::object([] as [(&str, Json); 0])
+            } else {
+                Json::object([("source-task", original)])
+            };
+            assert_eq!(
+                writes[0].required("references").unwrap(),
+                &expected,
+                "retained={retained}, completed={completed}: source revision must survive current-only task retention until the Run terminates"
+            );
+        }
     }
 }
 

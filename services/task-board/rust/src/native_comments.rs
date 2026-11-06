@@ -2,13 +2,15 @@
 //! This does not answer native inputs or confer native execution authority.
 use crate::{
     evidence_bytes::{BlobStore, ChunkKey},
-    native_inspector::{InspectionStore, management_read},
+    native_inspector::{InspectionStore, NativeInspector, management_read},
+    native_plan::{read_target_matches, routed_target},
     operations::Document,
     read_evidence::ReadEvidenceStore,
 };
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::stringify,
-    limits::MANAGEMENT_FRAME_BYTES,
+    IvyError, IvyJson as Json, IvyResult, JsString, agent_schema::validate_agent,
+    checked_native_contract::CheckedNativeContracts, hash::hash_json, json::stringify,
+    limits::MANAGEMENT_FRAME_BYTES, native_backend::BackendIdentity,
 };
 use ivy_sdk::tools::ToolClients;
 use std::future::Future;
@@ -42,6 +44,9 @@ impl<S: ReadEvidenceStore, W> ReadEvidenceStore for NativeCommentJournal<'_, S, 
     }
     async fn read_document(&self, key: &str, address: &Json, primary: bool) -> IvyResult<Document> {
         self.inspection.read_document(key, address, primary).await
+    }
+    async fn read_task_routing(&self, address: &Json) -> IvyResult<Json> {
+        self.inspection.read_task_routing(address).await
     }
     async fn write_document(
         &self,
@@ -216,6 +221,29 @@ fn contains_comment(task: &Json, id: &str) -> bool {
             .any(|comment| field(comment, "commentId").as_js_string() == Some(&id.into()))
     })
 }
+fn question_for_run(comment: &Json, run_id: &JsString) -> bool {
+    field(comment, "purpose").is_str("question")
+        && field(field(comment, "author"), "source").is_str("native")
+        && field(field(comment, "run"), "objectId").as_js_string() == Some(run_id)
+}
+fn recorded_question(task: &Json, id: &str, run_id: &JsString, input: &Json) -> bool {
+    field(task, "comments").as_array().is_some_and(|comments| {
+        comments.iter().any(|comment| {
+            field(comment, "commentId").is_str(id)
+                && question_for_run(comment, run_id)
+                && [
+                    "identity",
+                    "method",
+                    "params",
+                    "observedAt",
+                    "threadId",
+                    "turnId",
+                ]
+                .iter()
+                .all(|key| field(field(comment, "nativeInput"), key) == field(input, key))
+        })
+    })
+}
 fn request(
     task: &Json,
     id: &str,
@@ -247,6 +275,7 @@ fn request(
 
 pub async fn sync_native_comments<S: NativeCommentStore>(
     store: &S,
+    catalogs: &CheckedNativeContracts,
     run_id: &JsString,
 ) -> IvyResult<()> {
     let run = store
@@ -265,33 +294,129 @@ pub async fn sync_native_comments<S: NativeCommentStore>(
     {
         return Ok(());
     }
-    let target = field(&run.value, "target");
+    let original = run.value.required("target")?;
+    let target = routed_target(&current.value, original)?;
+    let recorded: Vec<JsString> = field(&current.value, "comments")
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|comment| question_for_run(comment, run_id))
+        .filter_map(|comment| field(comment, "commentId").as_js_string().cloned())
+        .collect();
+    let backend = BackendIdentity::optional(target.get("backend"))?;
+    let mut retired = Vec::new();
+    for comment in field(&current.value, "comments")
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|_| target != *original)
+    {
+        if !question_for_run(comment, run_id) {
+            continue;
+        }
+        let input = field(comment, "nativeInput");
+        let identity = field(input, "identity");
+        let Some(service) = field(identity, "serviceNodeId").as_js_string() else {
+            continue;
+        };
+        let previous_backend = BackendIdentity::optional(identity.get("backend"))?;
+        if Some(service) == field(&target, "serviceNodeId").as_js_string()
+            && previous_backend == backend
+            || !read_target_matches(
+                &current.value,
+                original,
+                service,
+                previous_backend.as_ref(),
+                true,
+            )?
+            || field(input, "threadId") != field(primary, "nativeId")
+            || present(field(input, "turnId"))
+                && field(input, "turnId") != field(&run.value, "turnId")
+        {
+            continue;
+        }
+        let hash = hash_json(identity)?;
+        if field(comment, "commentId").is_str(&format!("native-question-{}", &hash[7..]))
+            && !contains_comment(&current.value, &format!("native-response-{}", &hash[7..]))
+            && !retired.contains(identity)
+        {
+            retired.push(identity.clone());
+        }
+    }
+    drop(current);
+    let inspector = NativeInspector { store, catalogs };
+    let context = if target != *original {
+        Some(inspector.context(&run.pin).await?)
+    } else {
+        None
+    };
+    let epoch = context
+        .as_ref()
+        .map(|context| Json::String(context.epoch.clone()))
+        .unwrap_or_else(|| field(&run.value, "nativeEpoch").clone());
     let page = management_read(
         store.tools(),
-        &text(target, "serviceNodeId")?,
+        &text(&target, "serviceNodeId")?,
         "inputs",
-        Json::object([
-            ("includeExpired", true.into()),
-            ("limit", Json::Number(128.0)),
-        ]),
+        BackendIdentity::select_arguments(
+            backend.as_ref(),
+            Json::object([
+                ("includeExpired", true.into()),
+                ("limit", Json::Number(128.0)),
+            ]),
+        )?,
     )
     .await?;
+    validate_agent("PendingInputPage", &page)?;
+    if !BackendIdentity::matches(&page, backend.as_ref()) {
+        return Err(IvyError::new(
+            "task_board_target_mismatch",
+            "Native input pages must retain the selected backend and account.",
+        ));
+    }
+    if let Some(context) = context.as_ref() {
+        if page.get("epoch") != Some(&epoch) || inspector.context(&run.pin).await? != *context {
+            return Err(IvyError::new(
+                "task_board_native_epoch_changed",
+                "The selected owner changed while reading native inputs.",
+            ));
+        }
+    }
     for input in page
         .required("items")?
         .as_array()
         .ok_or_else(IvyError::internal)?
     {
         let identity = input.required("identity")?;
-        if field(identity, "serviceNodeId") != field(target, "serviceNodeId")
+        if field(identity, "serviceNodeId") != field(&target, "serviceNodeId")
+            || !BackendIdentity::matches(identity, backend.as_ref())
             || field(input, "threadId") != field(primary, "nativeId")
             || present(field(input, "turnId"))
                 && field(input, "turnId") != field(&run.value, "turnId")
-            || field(identity, "epoch") != field(&run.value, "nativeEpoch")
         {
             continue;
         }
         let hash = hash_json(identity)?;
         let question_id = format!("native-question-{}", &hash[7..]);
+        let historical = field(identity, "epoch") != &epoch;
+        // A previous connection cannot introduce a new question. Only finish
+        // mirroring a question already recorded by this Run's native owner.
+        let historical_task = if historical {
+            if !recorded.contains(&JsString::from(question_id.as_str()))
+                || !["answered", "expired"]
+                    .iter()
+                    .any(|state| field(input, "state").is_str(state))
+            {
+                continue;
+            }
+            let task = input_task(store, &task_id, run_id, original, &target).await?;
+            if !recorded_question(&task.value, &question_id, run_id, input) {
+                continue;
+            }
+            Some(task)
+        } else {
+            None
+        };
         let secret = stringify(input.required("params")?, MANAGEMENT_FRAME_BYTES)?
             .contains("\"isSecret\":true");
         let mut retained = input.clone();
@@ -301,9 +426,10 @@ pub async fn sync_native_comments<S: NativeCommentStore>(
         let reply = field(field(input, "reply"), "result");
         let answer = answer_text(reply)?;
         let body = question_text(input.required("params")?)?;
-        let task = store
-            .read_document("task-board/task", &Json::String(task_id.clone()), true)
-            .await?;
+        let task = match historical_task {
+            Some(task) => task,
+            None => input_task(store, &task_id, run_id, original, &target).await?,
+        };
         if !contains_comment(&task.value, &question_id) {
             let mut pending = retained.clone();
             for (key, value) in [
@@ -332,15 +458,17 @@ pub async fn sync_native_comments<S: NativeCommentStore>(
             );
             store.native_comment(&request).await?;
         }
+        drop(task);
         if !["answered", "expired"]
             .iter()
             .any(|state| field(input, "state").as_js_string() == Some(&(*state).into()))
         {
             continue;
         }
-        let task = store
-            .read_document("task-board/task", &Json::String(task_id.clone()), true)
-            .await?;
+        let task = input_task(store, &task_id, run_id, original, &target).await?;
+        if historical && !recorded_question(&task.value, &question_id, run_id, input) {
+            continue;
+        }
         let response_id = format!("native-response-{}", &hash[7..]);
         if contains_comment(&task.value, &response_id) {
             continue;
@@ -362,5 +490,111 @@ pub async fn sync_native_comments<S: NativeCommentStore>(
         )?;
         store.native_comment(&request).await?;
     }
+    // Historical requests remain with their original connection. Read only
+    // unresolved, recorded identities from explicitly published former owners;
+    // never reinterpret them as inputs of the selected destination.
+    for identity in retired {
+        let hash = hash_json(&identity)?;
+        let question_id = format!("native-question-{}", &hash[7..]);
+        let response_id = format!("native-response-{}", &hash[7..]);
+        let task = input_task(store, &task_id, run_id, original, &target).await?;
+        if contains_comment(&task.value, &response_id) {
+            continue;
+        }
+        drop(task);
+        let previous_backend = BackendIdentity::optional(identity.get("backend"))?;
+        let page = management_read(
+            store.tools(),
+            &text(&identity, "serviceNodeId")?,
+            "inputs",
+            BackendIdentity::select_arguments(
+                previous_backend.as_ref(),
+                Json::object([
+                    ("identity", identity.clone()),
+                    ("includeExpired", true.into()),
+                ]),
+            )?,
+        )
+        .await;
+        // Losing an old owner cannot prove expiration or transfer authority.
+        let Ok(page) = page else {
+            continue;
+        };
+        validate_agent("PendingInputPage", &page)?;
+        if !BackendIdentity::matches(&page, previous_backend.as_ref()) {
+            return Err(IvyError::new(
+                "task_board_target_mismatch",
+                "Historical input pages must retain their original backend and account.",
+            ));
+        }
+        for input in page
+            .required("items")?
+            .as_array()
+            .ok_or_else(IvyError::internal)?
+        {
+            if input.get("identity") != Some(&identity)
+                || !["answered", "expired"]
+                    .iter()
+                    .any(|state| field(input, "state").is_str(state))
+            {
+                continue;
+            }
+            let task = input_task(store, &task_id, run_id, original, &target).await?;
+            if !recorded_question(&task.value, &question_id, run_id, input)
+                || contains_comment(&task.value, &response_id)
+            {
+                continue;
+            }
+            let secret = stringify(input.required("params")?, MANAGEMENT_FRAME_BYTES)?
+                .contains("\"isSecret\":true");
+            let mut retained = input.clone();
+            if secret {
+                retained.insert("reply", Json::Null);
+            }
+            let body = if field(input, "state").is_str("expired") {
+                "This request has expired.".into()
+            } else if secret {
+                "A confidential response was provided.".into()
+            } else {
+                JsString(
+                    answer_text(field(field(input, "reply"), "result"))?
+                        .0
+                        .into_iter()
+                        .take(16_000)
+                        .collect(),
+                )
+            };
+            let request = request(
+                &Json::object([("pin", task.pin), ("taskId", Json::String(task_id.clone()))]),
+                &response_id,
+                "update",
+                body,
+                retained,
+                question_id.clone().into(),
+            )?;
+            store.native_comment(&request).await?;
+        }
+    }
     Ok(())
+}
+
+async fn input_task<S: NativeCommentStore>(
+    store: &S,
+    task_id: &JsString,
+    run_id: &JsString,
+    original: &Json,
+    target: &Json,
+) -> IvyResult<Document> {
+    let task = store
+        .read_document("task-board/task", &Json::String(task_id.clone()), true)
+        .await?;
+    if field(field(field(&task.value, "claim"), "run"), "objectId").as_js_string() != Some(run_id)
+        || routed_target(&task.value, original)? != *target
+    {
+        return Err(IvyError::new(
+            "task_board_identity_conflict",
+            "Native input comments require the same current Run and selected route.",
+        ));
+    }
+    Ok(task)
 }

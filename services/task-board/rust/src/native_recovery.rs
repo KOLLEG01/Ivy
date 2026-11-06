@@ -172,8 +172,12 @@ fn same(value: Option<&Json>, expected: &Json) -> IvyResult<bool> {
 }
 fn primary(task: &Json) -> Option<&Json> {
     let value = field(task, "primaryResourceRef");
+    let backend =
+        ivy_contracts::native_backend::BackendIdentity::optional(task.get("primaryBackend"))
+            .ok()?;
     (!value.is_null()
-        && value.get("namespace") == Some(&Json::from("codex"))
+        && field(value, "namespace")
+            .is_str(backend.as_ref().map_or("codex", |backend| backend.id()))
         && value.get("kind") == Some(&Json::from("thread"))
         && !field(task, "lastRun").is_null())
     .then_some(value)
@@ -286,6 +290,7 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
         let value = &run.value;
         if value.get("taskId").and_then(Json::as_js_string) != Some(task_id)
             || !same(value.get("primaryResourceRef"), primary)?
+            || !crate::native_plan::matches_primary(value.required("target")?, primary)?
             || field(value, "phase") != &Json::from("failed")
             || field(value, "externalOutcome").get("state") != Some(&Json::from("failed"))
             || !field(value, "turnId").is_null()
@@ -363,6 +368,12 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
                     true,
                 )
                 .await?;
+                if !crate::native_plan::matches_task_primary(
+                    run.value.required("target")?,
+                    &task.value,
+                )? {
+                    return Ok(false);
+                }
                 let Some(proof) = self
                     .unstarted_attempt(string(&task.pin, "objectId")?, primary, &run)
                     .await?
@@ -409,6 +420,12 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
                     let run = Store::read(self.store, "task-board/run", &pin, true).await?;
                     if !same(run.value.get("primaryResourceRef"), primary)? {
                         return Ok(!first);
+                    }
+                    if !crate::native_plan::matches_task_primary(
+                        run.value.required("target")?,
+                        &task.value,
+                    )? {
+                        return Ok(false);
                     }
                     if first
                         && context_recovery_history(

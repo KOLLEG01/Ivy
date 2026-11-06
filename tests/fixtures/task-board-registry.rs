@@ -103,7 +103,7 @@ async fn native_registry_keeps_management_private_and_preserves_schema_and_reade
                 == Some(true)
         })
         .count();
-    assert_eq!(guarded, 8);
+    assert_eq!(guarded, 9);
     assert_eq!(
         namespace.required("guideMarkdown").unwrap(),
         &Json::String(text(&catalog()).guide_markdown)
@@ -290,7 +290,7 @@ async fn native_registry_keeps_management_private_and_preserves_schema_and_reade
         .unwrap();
     assert_eq!(
         task.required("writeVersions").unwrap(),
-        &json(r#"["3.1.0"]"#)
+        &json(r#"["3.2.0"]"#)
     );
     assert!(
         task.required("readVersions")

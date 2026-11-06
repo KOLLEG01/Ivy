@@ -75,7 +75,7 @@ impl AdmittedSchema {
 
 /// Enforce the submitted-schema language, graph limits and RE2 pattern syntax.
 pub fn admit_schema(schema: &IvyJson) -> IvyResult<AdmittedSchema> {
-    crate::json::canonical(schema, 256 * 1024)?;
+    crate::json::canonical_size(schema, 256 * 1024)?;
     const KEYWORDS: &[&str] = &[
         "$schema",
         "$id",

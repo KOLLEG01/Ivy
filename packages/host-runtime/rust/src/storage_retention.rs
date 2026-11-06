@@ -16,6 +16,8 @@ use std::{
     time::UNIX_EPOCH,
 };
 mod history;
+mod automatic;
+pub use automatic::AutomaticRetention;
 
 pub struct RetentionBindings {
     pub node: Option<NodeRuntime>,
@@ -66,7 +68,8 @@ async fn entries(root: PathBuf) -> IvyResult<Vec<fs::DirEntry>> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(_) => return Err(IvyError::internal()),
         };
-        let mut values = internal(values.collect::<Result<Vec<_>, _>>())?;
+        let mut values = internal(values.take(10001).collect::<Result<Vec<_>, _>>())?;
+        require(values.len() <= 10000, "limit_exceeded", "Retention directory inventory exceeds its bound.")?;
         values.sort_by_key(|v| v.file_name());
         Ok(values)
     })
@@ -105,8 +108,8 @@ fn version_name(value: &J) -> bool {
                 && (p.len() == 1 || !p.starts_with('0'))
         })
 }
-#[derive(Default)]
-struct Progress(Mutex<Option<J>>);
+struct Progress(Mutex<Option<J>>, std::time::Instant);
+impl Default for Progress { fn default() -> Self { Self(Mutex::new(None), std::time::Instant::now()) } }
 impl Progress {
     fn get(&self) -> Option<J> {
         self.0.lock().unwrap().clone()
@@ -121,6 +124,11 @@ impl Progress {
     }
 }
 impl RetentionProgress for Progress {
+    fn permit_removal(&self, area: &str) -> bool {
+        let removed = self.get().and_then(|s| s.get("removed").cloned()).and_then(|v| v.as_object().map(|o| o.iter().filter_map(|(_, n)| n.as_f64()).sum::<f64>())).unwrap_or(0.0);
+        if removed < 128.0 && self.1.elapsed() < std::time::Duration::from_secs(30) { true }
+        else { self.skipped(area, "collection_budget", false); false }
+    }
     fn removed(&self, area: &str) {
         self.update(|status| {
             let mut removed = status.get("removed").unwrap().clone();
@@ -163,7 +171,8 @@ impl RetentionProgress for Progress {
     }
 }
 async fn owned_candidate(config: &J, id: &str) -> IvyResult<Option<(PathBuf, f64)>> {
-    let parent = path(config, "artifactRoot")?.join("candidates");
+    let artifacts = path(config, "artifactRoot")?;
+    let parent = artifacts.join("candidates");
     let path = parent.join(id);
     let Some(info) = metadata(path.clone()).await? else {
         return Ok(None);
@@ -171,7 +180,9 @@ async fn owned_candidate(config: &J, id: &str) -> IvyResult<Option<(PathBuf, f64
     if !info.is_dir() || info.file_type().is_symlink() {
         return Ok(None);
     }
+    let parent_info = metadata(parent.clone()).await?.ok_or_else(IvyError::internal)?;
     let actual_parent = realpath(parent).await?;
+    if parent_info.file_type().is_symlink() || actual_parent.parent() != Some(realpath(artifacts).await?.as_path()) { return Ok(None); }
     let actual = realpath(path.clone()).await?;
     if actual.parent() != Some(actual_parent.as_path())
         || actual.file_name() != Some(std::ffi::OsStr::new(id))
@@ -211,6 +222,16 @@ async fn finish_removal(
     }
     journal.finish_candidate_retirement(&id).await?;
     progress.removed("candidates");
+    Ok(())
+}
+/// Verified preparation/import renews its handoff grace under the build lock.
+/// Read-only inventory never renews retention.
+pub(crate) async fn candidate_used(config: &J, candidate: &J) -> IvyResult<()> {
+    let id = candidate.required("candidateId")?.as_str()?;
+    if let Some((root, _)) = owned_candidate(config, &id[7..]).await? {
+        let now = ivy_sdk::clock::SystemClock.utc_millis();
+        blocking(move || internal(crate::filesystem::set_times_ms(&root, now, now))).await?;
+    }
     Ok(())
 }
 /// Work admitted by this call owns collection locks through status publication;
@@ -291,6 +312,8 @@ async fn collect(
         bootstrap_lock =
             Some(ExecutorLock::acquire(runtime.join("bootstrap-maintenance-lock"), false).await?);
         journal.collect_obsolete_state().await?;
+        crate::package_updater::transfers::collect(config.clone(), progress.clone()).await?;
+        crate::dependency_cache::compiler::collect(&config, now, progress.get().unwrap().get("lowSpace") == Some(&true.into()), progress.clone()).await?;
         crate::dependency_cache::collect_dependency_caches(
             path(&config, "stagingRoot")?,
             progress.clone(),
@@ -313,7 +336,7 @@ async fn collect(
                 .get("code")
                 .filter(|v| !v.is_null() && **v != "already_compacted".into())
             {
-                progress.skipped("payloads", &code.as_str()?, true);
+                progress.skipped("payloads", &code.as_str()?, *code != "collection_budget".into());
             }
         }
         let cutoff = now as f64 - 3.0 * 24.0 * 60.0 * 60.0 * 1000.0;
@@ -349,13 +372,7 @@ async fn collect(
             }
         }
         let candidates = journal.storage_retention_candidates().await?;
-        let mut newest = std::collections::BTreeMap::<String, (String, String)>::new();
         for (candidate, manifest) in &candidates {
-            let component = candidate.required("componentId")?.as_str()?;
-            let created = candidate.required("createdAt")?.as_str()?;
-            if newest.get(&component).is_none_or(|(at, _)| &created > at) {
-                newest.insert(component, (created, candidate.required("candidateId")?.as_str()?));
-            }
             if !manifest.get("version").is_some_and(version_name) {
                 protected.insert(candidate.required("candidateId")?.as_str()?);
             }
@@ -363,6 +380,7 @@ async fn collect(
         let mut removed = 0;
         let mut failures = Vec::new();
         for candidate in journal.pending_candidate_retirements().await? {
+            if !progress.permit_removal("candidates") { break; }
             let mut build_lock = None;
             let removal: IvyResult<()> = async {
                 let build = candidate.required("buildId")?.as_str()?;
@@ -389,6 +407,7 @@ async fn collect(
             }
         }
         for (candidate, retained_manifest) in candidates {
+            if !progress.permit_removal("candidates") { break; }
             let id = candidate.required("candidateId")?.as_str()?;
             if protected.contains(&id) {
                 progress.skipped("candidates", "protected_release", false);
@@ -396,7 +415,7 @@ async fn collect(
             }
             let directory = owned_candidate(&config, &id[7..]).await?;
             if directory.as_ref().is_some_and(|(_, mtime)| *mtime > cutoff)
-                && newest.get(&candidate.required("componentId")?.as_str()?).is_some_and(|(_, latest)| latest == &id) {
+                || candidate.get("createdAt").and_then(J::as_js_string).is_some_and(|at| ivy_sdk::clock::parse_date(at) > cutoff) {
                 progress.skipped("candidates", "grace_period", false);
                 continue;
             }
@@ -441,6 +460,10 @@ async fn collect(
                     )
                     .await?,
                 );
+                if owned_candidate(&config, &id[7..]).await?.is_some_and(|(_, at)| at > cutoff) {
+                    progress.skipped("candidates", "grace_period", false);
+                    return Ok(());
+                }
                 if !journal.retire_candidate(&id).await? {
                     progress.skipped("candidates", "protected_release", false);
                     return Ok(());
@@ -470,7 +493,7 @@ async fn collect(
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|v| v.get("requiresAttention") == Some(&true.into()));
+                .any(|v| v.get("requiresAttention") == Some(&true.into()) || v.get("reason") == Some(&"collection_budget".into()));
             status.insert(
                 "state",
                 if partial {

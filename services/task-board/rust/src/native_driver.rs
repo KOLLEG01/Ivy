@@ -6,7 +6,7 @@ use crate::{
     native_evidence::NativeEvidence,
     native_inspector::management_read,
     native_intent::{NativeIntent, NativeSlot, TaskPrompts},
-    native_plan::catalog,
+    native_plan::{catalog, matches_primary, routed_owner, routed_selection, routed_target},
     operations::{Document, Store, mutation},
     read_evidence::ReadEvidenceStore,
 };
@@ -16,9 +16,7 @@ use ivy_contracts::{
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::{
-    native_evidence::{
-        NativeOwnerIdentity, NativeReadIdentity, validate_native_read, validate_native_status,
-    },
+    native_evidence::{NativeReadIdentity, validate_native_read, validate_native_status},
     native_observations::NativeObservations,
     native_operation::{
         NativeOperationCall, NativeOperationJournal, NativeReconciliation,
@@ -136,36 +134,42 @@ pub struct NativeDriver<'a, S, R, P> {
     pub catalogs: &'a CheckedNativeContracts,
 }
 impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriver<'_, S, R, P> {
-    fn native_owner(&self, run: &Json, call: &Json) -> IvyResult<NativeOwner> {
-        let request = call.required("request")?;
-        let source = catalog(self.catalogs, request)?;
-        let target = run.required("target")?;
+    fn native_owner(&self, task: &Json, run: &Json) -> IvyResult<NativeOwner> {
         Ok(NativeOwner::new(
             self.runtime.tools().clone(),
             self.runtime.principal_id().clone(),
-            NativeOwnerIdentity {
-                service_node_id: string(target, "serviceNodeId")?.clone(),
-                host_id: target.get("hostId").and_then(Json::as_js_string).cloned(),
-                native_version: string(request, "nativeVersion")?.clone(),
-                native_executable_hash: string(source.catalog(), "nativeExecutableHash")?.clone(),
-                catalog_hash: source.catalog_hash().into(),
-            },
+            routed_owner(self.catalogs, task, run)?,
             RequestOptions::default(),
         ))
     }
     pub async fn status(&self, run: &Json, call: &Json) -> IvyResult<Json> {
+        let task =
+            Store::read(self.store, "task-board/task", run.required("taskId")?, true).await?;
+        self.status_for_task(&task.value, run, call).await
+    }
+    async fn status_for_task(&self, task: &Json, run: &Json, call: &Json) -> IvyResult<Json> {
+        let target = routed_target(task, run.required("target")?)?;
         // The original reads before selecting the retained catalog. Keep that
         // failure order and its domain-specific readiness error.
         let value = management_read(
             self.runtime.tools(),
-            string(run.required("target")?, "serviceNodeId")?,
+            string(&target, "serviceNodeId")?,
             "status",
-            Json::object([] as [(&str, Json); 0]),
+            ivy_contracts::native_backend::BackendIdentity::select_arguments(
+                ivy_contracts::native_backend::BackendIdentity::optional(target.get("backend"))?
+                    .as_ref(),
+                Json::object([] as [(&str, Json); 0]),
+            )?,
         )
         .await?;
+        NativeIntent {
+            store: self.store,
+            catalogs: self.catalogs,
+        }
+        .call_owner(run, call)?;
         validate_native_status(
             &value,
-            self.native_owner(run, call)?.target(),
+            self.native_owner(task, run)?.target(),
             Some("task_board_native_unavailable"),
         )?;
         Ok(value)
@@ -211,9 +215,7 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
         {
             return Ok(false);
         }
-        let identity_matches = field(primary, "namespace") == &Json::from("codex")
-            && field(primary, "kind") == &Json::from("thread")
-            && primary.get("serviceNodeId") == run.required("target")?.get("serviceNodeId");
+        let identity_matches = matches_primary(run.required("target")?, primary)?;
         let params_match = if identity_matches {
             let request = NativeIntent {
                 store: self.store,
@@ -229,12 +231,14 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
             "task_board_primary_mismatch",
             "The uncertain resume must identify the saved native context.",
         )?;
-        let status = self.status(run, &call.value).await?;
+        let status = self
+            .status_for_task(&current.task.value, run, &call.value)
+            .await?;
         if status.get("epoch") == call.value.get("epoch") {
             return Ok(false);
         }
         let read = self
-            .native_owner(run, &call.value)?
+            .native_owner(&current.task.value, run)?
             .read(
                 &"thread/read".into(),
                 Json::object([
@@ -329,7 +333,9 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
             catalogs: self.catalogs,
         };
         let expected = intent.evidence_identity(run, &call.value, self.runtime.principal_id())?;
-        let owner = self.native_owner(run, &call.value)?;
+        let owner = self.native_owner(&current.task.value, run)?;
+        let original_owner = intent.call_owner(run, &call.value)?;
+        let original_reader = owner.original_operations(original_owner.clone());
         let previous = if !field(&call.value, "evidence").is_null() {
             Some(
                 evidence
@@ -352,7 +358,7 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
         let owner_ref = &owner;
         let native_request_ref = &native_request;
         let reconciled = reconcile_native_operation_local(
-            &owner,
+            &original_reader,
             &original,
             NativeOperationJournal {
                 current: Json::Null,
@@ -386,7 +392,9 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
                 let current = current_ref;
                 let call = call_ref;
                 let native_request = native_request_ref;
-                let status = self.status(run,&call.value).await?;
+                require(owner.target() == &original_owner,
+                    "task_board_native_route_changed", "A different current route cannot dispatch an original call. Reconcile its retained owner without replay.")?;
+                let status = self.status_for_task(&current.task.value,run,&call.value).await?;
                 require(absence.get("epoch")==status.get("epoch"),
                     "task_board_native_epoch_changed", "Absence and current native status must come from the same epoch.")?;
                 let thread_pin = field(field(run,"calls"),"thread");
@@ -422,11 +430,11 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
                     let params = Json::object([
                         ("threadId",primary.required("nativeId")?.clone()),("includeTurns",false.into()),
                     ]);
-                    let snapshot = management_read(self.runtime.tools(),string(run.required("target")?,"serviceNodeId")?,
-                        "read",Json::object([
+                    let snapshot = management_read(self.runtime.tools(),&owner.target().service_node_id,
+                        "read",ivy_contracts::native_backend::BackendIdentity::select_arguments(owner.target().backend.as_ref(),Json::object([
                             ("nativeVersion",request.required("nativeVersion")?.clone()),
                             ("method","thread/read".into()),("params",params.clone()),
-                        ]),
+                        ]))?,
                     ).await?;
                     validate_native_read(&snapshot,&NativeReadIdentity {
                         owner:owner.target().clone(),caller_principal_id:self.runtime.principal_id().clone(),
@@ -435,8 +443,7 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
                     let result = snapshot.required("reply")?.get("result");
                     require(result.is_some(),"task_board_native_unavailable",
                         "Turn dispatch requires a successful fresh native primary observation.")?;
-                    let source = self.catalogs.checked_native_contract(string(&snapshot,"nativeVersion")?,
-                        Some(&Json::object([("catalogHash",snapshot.required("catalogHash")?.clone())])))?;
+                    let source = catalog(self.catalogs, request)?;
                     let state = NativeObservations::new(&source).native_thread_state(result.unwrap())?;
                     require(state.thread.get("id")==primary.get("nativeId")
                         && field(&state.thread,"ephemeral")==&Json::Bool(false) && state.can_start_turn,
@@ -573,14 +580,33 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
             "task_board_claim_inactive",
             "Only an active claim may prepare execution; retained turns may reattach for observation or cancellation.",
         )?;
+        let mut scope = vec![
+            "task-board-native-call".into(),
+            current.run.value.required("operationId")?.clone(),
+            slot.as_str().into(),
+            origin.clone(),
+        ];
+        let target = routed_target(&current.task.value, current.run.value.required("target")?)?;
+        if canonical(&target, MANAGEMENT_FRAME_BYTES)?
+            != canonical(
+                current.run.value.required("target")?,
+                MANAGEMENT_FRAME_BYTES,
+            )?
+        {
+            // A prepared, unattached call at the old address cannot become a
+            // new call at another owner merely because preparation is retried.
+            scope.push(target);
+        }
+        let selection = routed_selection(&current.task.value, &current.run.value)?;
+        let plan = current.run.value.required("plan")?;
+        if selection.get("nativeVersion") != plan.get("nativeVersion")
+            || selection.get("catalogSourceHash") != plan.get("catalogSourceHash")
+        {
+            scope.push(selection.clone());
+        }
         let operation_id = self
             .runtime
-            .scoped_operation_id(&Json::Array(vec![
-                "task-board-native-call".into(),
-                current.run.value.required("operationId")?.clone(),
-                slot.as_str().into(),
-                origin.clone(),
-            ]))
+            .scoped_operation_id(&Json::Array(scope))
             .await?;
         let mut name = JsString::from("Native call ");
         name.0.extend_from_slice(&operation_id.0);
@@ -591,7 +617,13 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
                 catalogs: self.catalogs,
             };
             let mut value = intent
-                .intended_call(&current.run.value, slot, Some(origin), self.prompts)
+                .intended_call_for_task(
+                    &current.run.value,
+                    slot,
+                    Some(origin),
+                    self.prompts,
+                    Some(&current.task.value),
+                )
                 .await?;
             let request =
                 intent.retain_native_request(value.required("request")?, &operation_id)?;

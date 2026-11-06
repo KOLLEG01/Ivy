@@ -7,19 +7,19 @@ use crate::{
     service_link::ServiceLink,
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json};
-use ivy_host_runtime::codex_rpc::{NativeRpc, RequestOptions as NativeOptions};
+use ivy_host_runtime::codex_rpc::NativeRpc;
 use ivy_sdk::{
     browser_notice::publish_browser_notice,
     rpc::{RequestOptions, RpcClient},
 };
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
-use tokio::sync::watch;
+use tokio::sync::Semaphore;
+
+const NOTICE_IN_FLIGHT: usize = 8;
+const NOTICE_BYTES: usize = 1024 * 1024;
 
 /// The Shared owner supplies URLSearchParams serialization, including its
 /// USVString boundary. This owner only selects the original ordered fields.
@@ -142,7 +142,6 @@ pub async fn service_owns_completion(
     }
 }
 
-type PolicyRead = watch::Receiver<Option<IvyResult<()>>>;
 pub struct BrowserNoticeSettings {
     pub service: ServiceLink,
     pub closing: Arc<AtomicBool>,
@@ -152,91 +151,77 @@ pub struct BrowserNoticeSettings {
     pub policy: Arc<Mutex<NativeNoticePolicy>>,
     pub rpc: NativeRpc,
 }
-struct Inner {
-    settings: BrowserNoticeSettings,
-    reads: Mutex<HashMap<JsString, PolicyRead>>,
-}
 #[derive(Clone)]
 pub struct BrowserNotices(Arc<Inner>);
+struct Inner {
+    settings: BrowserNoticeSettings,
+    slots: Arc<Semaphore>,
+    bytes: Arc<Semaphore>,
+}
+pub(crate) struct Notice {
+    pub thread: JsString,
+    pub payload: IvyJson,
+    pub turn: Option<JsString>,
+}
 impl BrowserNotices {
     pub fn new(settings: BrowserNoticeSettings) -> Self {
         Self(Arc::new(Inner {
             settings,
-            reads: Mutex::new(HashMap::new()),
+            slots: Arc::new(Semaphore::new(NOTICE_IN_FLIGHT)),
+            bytes: Arc::new(Semaphore::new(NOTICE_BYTES)),
         }))
     }
-    async fn policy(&self, thread: JsString) -> IvyResult<()> {
-        let mut work = {
-            let mut reads = self.0.reads.lock().map_err(|_| IvyError::internal())?;
-            if let Some(work) = reads.get(&thread) {
-                work.clone()
-            } else {
-                let (sender, work) = watch::channel(None);
-                let revision = self
-                    .0
-                    .settings
-                    .policy
-                    .lock()
-                    .map_err(|_| IvyError::internal())?
-                    .revision();
-                reads.insert(thread.clone(), work.clone());
-                let owner = self.clone();
-                tokio::spawn(async move {
-                    let result = async {
-                        let reply = owner
-                            .0
-                            .settings
-                            .rpc
-                            .request(
-                                "thread/read".into(),
-                                IvyJson::object([
-                                    ("threadId", IvyJson::String(thread.clone())),
-                                    ("includeTurns", false.into()),
-                                ]),
-                                NativeOptions {
-                                    timeout_ms: 15_000,
-                                    detach_on_timeout: true,
-                                    ..Default::default()
-                                },
-                            )
-                            .await?;
-                        if reply.get("error").is_some() {
-                            return Err(IvyError::new(
-                                "native_inventory_unavailable",
-                                "Cannot determine the task's notification policy.",
-                            ));
-                        }
-                        owner
-                            .0
-                            .settings
-                            .policy
-                            .lock()
-                            .map_err(|_| IvyError::internal())?
-                            .set_thread(
-                                thread.clone(),
-                                reply.required("result")?.required("thread")?,
-                                Some(revision),
-                            );
-                        Ok(())
-                    }
-                    .await;
-                    owner
-                        .0
-                        .reads
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .remove(&thread);
-                    sender.send_replace(Some(result));
-                });
-                work
-            }
-        };
-        loop {
-            if let Some(result) = work.borrow_and_update().clone() {
-                return result;
-            }
-            work.changed().await.map_err(|_| IvyError::internal())?;
+    /// Optional browser delivery must not accumulate tasks behind slow Hive or
+    /// metadata reads, or wait on the native actor invoking this callback.
+    /// Reserve before rendering; false asks the caller to account for a skipped completion.
+    pub(crate) fn send(
+        &self,
+        create: impl FnOnce() -> IvyResult<Option<Notice>>,
+    ) -> IvyResult<bool> {
+        let settings = &self.0.settings;
+        if !settings.service.ready() || settings.closing.load(Ordering::Acquire) {
+            return Ok(false);
         }
+        let Ok(slot) = self.0.slots.clone().try_acquire_owned() else {
+            return Ok(false);
+        };
+        let Some(notice) = create()? else {
+            return Ok(false);
+        };
+        // Reserve owned identity strings and the SDK publisher's payload copies.
+        // Native/Hive response bodies have separate budgets.
+        let bytes = notice
+            .payload
+            .retained_bytes()
+            .saturating_mul(3)
+            .saturating_add(notice.thread.0.capacity().saturating_mul(2))
+            .saturating_add(
+                notice
+                    .turn
+                    .as_ref()
+                    .map_or(0, |v| v.0.capacity().saturating_mul(2)),
+            );
+        let owner = self.clone();
+        let work = async move {
+            let _ = owner
+                .publish(notice.thread, notice.payload, notice.turn)
+                .await;
+        };
+        // Charge the actual future layout plus permit/task allocation overhead.
+        let bytes = bytes
+            .saturating_add(std::mem::size_of_val(&work))
+            .saturating_add(512);
+        let Ok(bytes) = u32::try_from(bytes) else {
+            return Ok(false);
+        };
+        let Ok(bytes) = self.0.bytes.clone().try_acquire_many_owned(bytes) else {
+            return Ok(false);
+        };
+        tokio::spawn(async move {
+            let (_slot, _bytes) = (slot, bytes);
+            work.await;
+        });
+        Ok(true)
     }
     async fn receipt(
         &self,
@@ -260,7 +245,7 @@ impl BrowserNotices {
         .await
         .map_err(|_| IvyError::internal())?
     }
-    pub async fn send(
+    async fn publish(
         &self,
         thread: JsString,
         notice: IvyJson,
@@ -291,7 +276,7 @@ impl BrowserNotices {
             .is_internal(&thread)?
             .is_none();
         if unknown {
-            self.policy(thread.clone()).await?;
+            NativeNoticePolicy::ensure(&settings.policy, &settings.rpc, thread.clone()).await?;
         }
         let external = settings
             .policy

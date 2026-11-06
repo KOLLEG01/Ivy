@@ -125,7 +125,9 @@ pub async fn relocate_projects(
                 .iter()
                 .filter(|v| v.get("componentId") == Some(&"agent-manager".into()))
             {
-                let path = native(&field(&layout::service_paths(&config, instance)?, "data")?)?
+                let service_paths = layout::service_paths(&config, instance)?;
+                for backend in configured_backends(instance.required("settings")?, service_paths.get("data"))? {
+                let path = config::path_value(backend.data_root.ok_or_else(IvyError::internal)?)?
                     .join("project-backup-paths.json");
                 if !backup_files::exists(&path).await? {
                     continue;
@@ -134,8 +136,11 @@ pub async fn relocate_projects(
                     .iter()
                     .find(|v| v.get("instanceId") == instance.get("instanceId"))
                     .ok_or_else(IvyError::internal)?;
-                let value = |instance: &J| -> IvyResult<JsString> {
-                    match instance.required("settings")?.get("internalProjectRoot") {
+                let old = configured_backends(prior.required("settings")?, None)?.into_iter()
+                    .find(|old| old.identity == backend.identity)
+                    .ok_or_else(|| IvyError::new("backup_invalid", "Retained projects must preserve their configured backend and account."))?;
+                let value = |settings: &J| -> IvyResult<JsString> {
+                    match settings.get("internalProjectRoot") {
                         Some(v) => text(v),
                         None => Err(IvyError::new(
                             "backup_invalid",
@@ -143,15 +148,16 @@ pub async fn relocate_projects(
                         )),
                     }
                 };
-                let before = value(prior)?;
-                let after = value(instance)?;
+                let before = value(old.settings)?;
+                let after = value(backend.settings)?;
                 let paths = config::json_file(path.clone(), config::CONFIGURATION_BYTES).await?;
                 let areas = project_storage::restored_storage_areas(&config, &captured, &storage)?;
-                let prefix = concat(&[
+                let mut prefix = concat(&[
                     "retained-projects/".into(),
                     field(instance, "instanceId")?,
-                    "/".into(),
                 ]);
+                if let Some(key) = backend.storage_key()? { prefix = concat(&[prefix, "/".into(), key.into()]); }
+                let prefix = concat(&[prefix, "/".into()]);
                 let mut result = Vec::new();
                 for cwd in array(&paths)? {
                     let cwd = text(cwd)?;
@@ -175,6 +181,7 @@ pub async fn relocate_projects(
                     }));
                 }
                 config::atomic_json(path, J::Array(result)).await?;
+                }
             }
             Ok(())
         })

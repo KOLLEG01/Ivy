@@ -38,9 +38,27 @@ export function nativeToolDefinition(catalog: Agent.Catalog, method: Agent.Catal
     nativeMethod: method.method, nativeSchemaIdentity: catalogHash };
 }
 
+export function backendToolDefinition(catalog: Agent.Catalog, method: Agent.Catalog['clientRequests'][number], catalogHash = hashJson(catalog), backend?: Agent.BackendIdentity): Wire.ToolDefinition {
+  const definition = nativeToolDefinition(catalog, method, catalogHash);
+  if (backend) {
+    definition.namespace = backend.backendId;
+    definition.description = `Installed ${backend.provider} ${catalog.version} method ${method.method} for backend ${backend.backendId} (account ${backend.accountId}). Supply its unchanged native arguments. ` +
+      (isReadOnlyNativeMethod(method.method) ? 'This read-only call does not require an operationId.' : 'Supply an outer stable operationId.');
+  }
+  return definition;
+}
+
 const freeze = (value: unknown): void => {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) { for (const child of Object.values(value)) freeze(child); Object.freeze(value); }
 };
+
+interface NativeCatalog {
+  catalog: Agent.Catalog;
+  catalogHash: string;
+  methods: Map<string, Agent.Catalog['clientRequests'][number]>;
+  validators: SchemaValidators;
+  schemas: Map<string, Schema>;
+}
 
 /** Exact selected native contract, shared by the SDK, AgentManager and native consumers. */
 export class NativeContract {
@@ -48,16 +66,28 @@ export class NativeContract {
   readonly catalogHash: string;
   private readonly methods = new Map<string, Wire.ToolDefinition>();
   private readonly definitionHashes = new Map<string, string>();
-  private readonly validators = new SchemaValidators();
-  private readonly schemas = new Map<string, Schema>();
-  constructor(catalog: Agent.Catalog) {
-    validateAgent('Catalog', catalog);
-    this.catalog = structuredClone(catalog); freeze(this.catalog); this.catalogHash = hashJson(this.catalog);
+  private readonly owner: NativeCatalog;
+  readonly backend: Agent.BackendIdentity | undefined;
+  constructor(catalog: Agent.Catalog | NativeContract, backend?: Agent.BackendIdentity) {
+    if (catalog instanceof NativeContract) this.owner = catalog.owner;
+    else {
+      validateAgent('Catalog', catalog);
+      const snapshot = structuredClone(catalog); freeze(snapshot);
+      const methods = new Map<string, Agent.Catalog['clientRequests'][number]>();
+      for (const method of snapshot.clientRequests) {
+        requireThat(!methods.has(method.method), 'native_catalog_invalid', 'The selected native catalog contains a duplicate method.');
+        methods.set(method.method, method);
+      }
+      this.owner = { catalog: snapshot, catalogHash: hashJson(snapshot), methods, validators: new SchemaValidators(), schemas: new Map() };
+    }
+    if (backend) validateAgent('BackendIdentity', backend);
+    this.backend = backend && Object.freeze(structuredClone(backend));
+    this.catalog = this.owner.catalog; this.catalogHash = this.owner.catalogHash;
     for (const method of this.catalog.clientRequests) {
-      requireThat(!this.methods.has(method.method), 'native_catalog_invalid', 'The selected native catalog contains a duplicate method.');
-      const definition = nativeToolDefinition(this.catalog, method, this.catalogHash); freeze(definition); this.methods.set(method.method, definition);
+      const definition = backendToolDefinition(this.catalog, method, this.catalogHash, this.backend); freeze(definition); this.methods.set(method.method, definition);
     }
   }
+  withBackend(backend?: Agent.BackendIdentity): NativeContract { return new NativeContract(this, backend); }
   definition(method: string): Wire.ToolDefinition {
     const value = this.methods.get(method);
     requireThat(value, 'native_method_unsupported', 'The method is absent from the exact selected native catalog.'); return value;
@@ -77,7 +107,7 @@ export class NativeContract {
   /** Close only this adapter's outer arguments. Nested extension objects retain native semantics. */
   inputSchema(method: string, reserved: readonly string[] = []): Schema {
     const names = [...new Set(reserved)].sort(), key = canonical({ method, reserved: names });
-    const cached = this.schemas.get(key); if (cached !== undefined) return cached;
+    const cached = this.owner.schemas.get(key); if (cached !== undefined) return cached;
     const input = structuredClone(this.definition(method).inputSchema) as Schema;
     let root = input;
     if (typeof input === 'object' && input['$ref'] !== undefined) {
@@ -119,15 +149,15 @@ export class NativeContract {
       for (const name of ['anyOf', 'oneOf', 'allOf']) if (Array.isArray(node[name])) for (const child of node[name]) strip(child);
       for (const name of ['items', 'additionalProperties', 'if', 'then', 'else', 'not']) strip(node[name]);
     };
-    strip(input); freeze(input); this.schemas.set(key, input); return input;
+    strip(input); freeze(input); this.owner.schemas.set(key, input); return input;
   }
   validateInput(method: string, params: unknown, maximumBytes = 1024 * 1024): void {
-    this.validators.validate(this.inputSchema(method), params, maximumBytes);
+    this.owner.validators.validate(this.inputSchema(method), params, maximumBytes);
   }
   validateTemplate(method: string, params: unknown, reserved: readonly string[], maximumBytes = 1024 * 1024): void {
-    this.validators.validate(this.inputSchema(method, reserved), params, maximumBytes);
+    this.owner.validators.validate(this.inputSchema(method, reserved), params, maximumBytes);
   }
   validateResult(method: string, result: unknown, maximumBytes = 1024 * 1024): void {
-    this.validators.validate(this.definition(method).outputSchema, result, maximumBytes);
+    this.owner.validators.validate(this.definition(method).outputSchema, result, maximumBytes);
   }
 }

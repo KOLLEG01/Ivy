@@ -1,5 +1,8 @@
 //! Native SQLite document projections and retained handoff failures.
-use crate::{journal_store::Contracts, local_journal::LocalJournal};
+use crate::{
+    journal_store::Contracts,
+    local_journal::{LocalJournal, require},
+};
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json};
 use ivy_store::rusqlite::{
     OptionalExtension, params_from_iter,
@@ -11,6 +14,61 @@ pub struct SqliteReads<'a, C, Parse, Failure> {
     pub contracts: &'a C,
     pub parse: Parse,
     pub sqlite_failure: Failure,
+}
+
+pub(crate) fn prepared_version(
+    key: &str,
+    pin: &Json,
+    content_hash: &str,
+    operation: &Json,
+) -> IvyResult<Option<String>> {
+    let mut captured = None;
+    for write in operation
+        .get("writes")
+        .and_then(Json::as_array)
+        .unwrap_or(&[])
+    {
+        let payload = write.get("payload");
+        if payload.and_then(|v| v.get("object")) != Some(pin) {
+            continue;
+        }
+        require(
+            captured.is_none()
+                && write.get("contractKey") == Some(&Json::from(key))
+                && payload.and_then(|v| v.get("mediaType"))
+                    == Some(&Json::from("application/json"))
+                && payload.and_then(|v| v.get("contentHash")) == Some(&Json::from(content_hash)),
+            "task_board_evidence_mismatch",
+            "The prepared payload must match its unique original publication and bytes.",
+        )?;
+        captured = Some(
+            write
+                .required("contractVersion")?
+                .as_js_string()
+                .ok_or_else(IvyError::internal)?
+                .to_utf8()?,
+        );
+    }
+    // During staging recovery the payload may precede its committed write entry.
+    Ok(captured)
+}
+
+impl LocalJournal<'_> {
+    /// Read only current heads and return one bit; provider replies stay in SQLite.
+    pub fn route_migration_pending(&self, task: &JsString, except: &JsString) -> IvyResult<bool> {
+        self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM documents d JOIN revisions r
+             ON r.id=d.id AND r.revision=d.current_revision
+             WHERE d.key='task-board/operation' AND d.id<>?1
+               AND json_extract(r.value_json,'$.request.taskId')=?2
+               AND (json_extract(r.value_json,'$.phase') IN ('accepted','preparing','publishing','needs_attention')
+                 OR json_extract(r.value_json,'$.error.execution')='unknown'
+                 OR EXISTS(SELECT 1 FROM json_each(r.value_json,'$.nativeCalls') c
+                   WHERE COALESCE(json_extract(c.value,'$.observation.phase'),'') NOT IN ('succeeded','failed'))))",
+            [crate::local_journal::text(except), crate::local_journal::text(task)],
+            |row| row.get(0),
+        ).map_err(ivy_store::sqlite::error)
+    }
 }
 fn parameters(args: &[Option<&Json>]) -> IvyResult<Vec<Value>> {
     args.iter()
@@ -208,6 +266,27 @@ impl<C: Contracts, Parse, Failure> SqliteReads<'_, C, Parse, Failure> {
         } else {
             head[3].string()?.into()
         };
+        let content_hash = hash_json(&value)?;
+        let mut version = self.contracts.version(key)?;
+        let root = self
+            .journal
+            .root_object_id
+            .clone()
+            .map(Json::String)
+            .unwrap_or(Json::Null);
+        if parent != Json::Null
+            && parent != root
+            && self.key::<E>(Some(&parent))?.as_deref() == Some("task-board/operation")
+        {
+            let operation = self.document::<E>("task-board/operation", &parent, true)?;
+            if let Some(captured) =
+                prepared_version(key, &pin, &content_hash, operation.required("value")?)?
+            {
+                self.contracts
+                    .validate_record(key, &captured.clone().into(), &value)?;
+                version = captured;
+            }
+        }
         let metadata = Json::object([
             ("id", id.clone()),
             ("parentId", parent),
@@ -218,7 +297,7 @@ impl<C: Contracts, Parse, Failure> SqliteReads<'_, C, Parse, Failure> {
             ("icon", Json::Null),
             ("contractKey", key.into()),
             ("currentRevision", current_revision.clone()),
-            ("contractVersion", self.contracts.version(key)?.into()),
+            ("contractVersion", version.clone().into()),
             ("archivedAt", Json::Null),
             ("effectivelyArchived", false.into()),
             ("createdAt", head[5].string()?.into()),
@@ -227,8 +306,8 @@ impl<C: Contracts, Parse, Failure> SqliteReads<'_, C, Parse, Failure> {
         let revision_record = Json::object([
             ("objectId", id.clone()),
             ("revision", revision.clone()),
-            ("contractVersion", self.contracts.version(key)?.into()),
-            ("contentHash", hash_json(&value)?.into()),
+            ("contractVersion", version.into()),
+            ("contentHash", content_hash.into()),
             ("mediaType", "application/json".into()),
             ("byteLength", Json::Number(encoded.len() as f64)),
             ("createdAt", row[3].string()?.into()),

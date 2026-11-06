@@ -21,6 +21,42 @@ fn data() -> &'static Json {
         .unwrap()
     })
 }
+fn current_task() -> Json {
+    Json::object([
+        ("fields", Json::Object(vec![])),
+        ("comments", Json::Array(vec![])),
+        ("nativeRoutes", Json::Array(vec![])),
+    ])
+}
+fn current_run(original: &Json) -> Json {
+    let mut run = original.clone();
+    run.insert("taskId", Json::String(id(100)));
+    run
+}
+fn original_trace(log: &[Json]) -> Vec<Json> {
+    let expected = Json::Array(vec![
+        "read".into(),
+        "task-board/task".into(),
+        Json::String(id(100)),
+        true.into(),
+    ]);
+    log.iter()
+        .filter(|row| {
+            let fields = row.as_array().unwrap();
+            if fields.first() == Some(&Json::from("read"))
+                && fields.get(1) == Some(&Json::from("task-board/task"))
+            {
+                // Current-route admission and inspection now read this actual
+                // seeded Task; compare every original RPC/result/write unchanged.
+                assert_eq!(**row, expected);
+                false
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect()
+}
 struct Client {
     row: Json,
     log: Arc<Mutex<Vec<Json>>>,
@@ -274,7 +310,9 @@ async fn collectors_match_original_traces_checkpoints_and_partial_effects_over_a
                 )
                 .unwrap();
             }
-            let run = row.required("run").unwrap();
+            let run = current_run(row.required("run").unwrap());
+            let run = &run;
+            let task = current_task();
             let log = Arc::default();
             let client = Arc::new(Client::new(row, Arc::clone(&log)));
             let current_id = RefCell::new(id(400));
@@ -285,13 +323,24 @@ async fn collectors_match_original_traces_checkpoints_and_partial_effects_over_a
                 },
                 client: client.clone(),
                 contracts: Policy {
-                    allowed: HashSet::from([hash_json(run).unwrap()]),
+                    allowed: HashSet::from([hash_json(run).unwrap(), hash_json(&task).unwrap()]),
                 },
                 limits: HistoryLimits::default(),
                 now: || "2026-01-02T03:04:05.006Z".to_owned(),
                 new_id: || current_id.borrow().clone(),
                 cache: None,
             };
+            store
+                .journal
+                .create(
+                    "task-board/task",
+                    &id(100),
+                    Some(&"root".into()),
+                    &task,
+                    &"2026-01-02T03:04:05.006Z".into(),
+                    &id(100),
+                )
+                .unwrap();
             store
                 .journal
                 .create(
@@ -413,7 +462,7 @@ async fn collectors_match_original_traces_checkpoints_and_partial_effects_over_a
             }
             let actual = Json::object([
                 ("results", Json::Array(results)),
-                ("trace", Json::Array(log.lock().unwrap().clone())),
+                ("trace", Json::Array(original_trace(&log.lock().unwrap()))),
                 ("documents", documents(&db)),
             ]);
             assert_eq!(
@@ -469,7 +518,9 @@ async fn inspection_journal_collects_with_fresh_ids_reopens_and_refuses_owner_lo
             .iter()
             .find(|r| s(r, "name") == &JsString::from(name))
             .unwrap();
-        let run = row.required("run").unwrap();
+        let run = current_run(row.required("run").unwrap());
+        let run = &run;
+        let task = current_task();
         let temp = Temp(std::env::temp_dir().join(format!(
             "task-board-collection-{}.sqlite",
             uuid::Uuid::new_v4()
@@ -487,7 +538,7 @@ async fn inspection_journal_collects_with_fresh_ids_reopens_and_refuses_owner_lo
                 },
                 client: client.clone(),
                 contracts: Policy {
-                    allowed: HashSet::from([hash_json(run).unwrap()]),
+                    allowed: HashSet::from([hash_json(run).unwrap(), hash_json(&task).unwrap()]),
                 },
                 limits: HistoryLimits::default(),
                 now: || "2026-01-02T03:04:05.006Z".to_owned(),
@@ -501,6 +552,17 @@ async fn inspection_journal_collects_with_fresh_ids_reopens_and_refuses_owner_lo
                 catalogs: &catalogs,
             };
             if round == 0 {
+                store
+                    .journal
+                    .create(
+                        "task-board/task",
+                        &id(100),
+                        Some(&"root".into()),
+                        &task,
+                        &"2026-01-02T03:04:05.006Z".into(),
+                        &id(100),
+                    )
+                    .unwrap();
                 store
                     .journal
                     .create(

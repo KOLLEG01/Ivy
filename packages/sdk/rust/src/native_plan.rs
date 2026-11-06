@@ -5,7 +5,8 @@ use crate::native_parameters::{
 };
 use crate::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_contracts::{
-    agent_schema::validate_agent, json::canonical, native_contract::NativeContract,
+    agent_schema::validate_agent, json::canonical_size, native_backend::BackendIdentity,
+    native_contract::NativeContract,
 };
 
 #[derive(Clone, Copy)]
@@ -33,6 +34,12 @@ pub fn validate_native_invocation(
     maximum_bytes: usize,
 ) -> IvyResult<()> {
     validate_agent("InvocationDraft", value)?;
+    if !BackendIdentity::matches(value, contract.backend()) {
+        return Err(IvyError::new(
+            "native_request_backend_mismatch",
+            "Native invocation must retain its selected backend and account.",
+        ));
+    }
     if value.get("nativeVersion") != contract.catalog().get("version")
         || value.get("catalogSourceHash") != contract.catalog().get("sourceHash")
     {
@@ -53,7 +60,7 @@ pub fn validate_native_plan_draft(
     kind: NativePlanKind,
 ) -> IvyResult<()> {
     validate_agent("PlanDraft", draft)?;
-    canonical(draft, NATIVE_PARAMETERS_BYTES)?;
+    canonical_size(draft, NATIVE_PARAMETERS_BYTES)?;
     validate_native_plan_identity(contract, draft)?;
     if let Some(location) = draft.get("location") {
         for (index, (key, _)) in PARAMETERS.iter().enumerate() {
@@ -111,7 +118,13 @@ pub fn read_native_plan(
     validate_agent("Plan", &draft)?;
     validate_native_plan_identity(contract, &draft)?;
     for (key, method) in PARAMETERS {
-        let value = read_native_parameters(contract, &method.into(), plan.get(key).unwrap(), &reserved(key, kind), parent_id)?;
+        let value = read_native_parameters(
+            contract,
+            &method.into(),
+            plan.get(key).unwrap(),
+            &reserved(key, kind),
+            parent_id,
+        )?;
         draft.insert(key, value);
     }
     validate_native_plan_draft(contract, &draft, kind)?;
@@ -123,6 +136,12 @@ pub fn read_native_plan(
 pub fn validate_native_plan_identity(contract: &NativeContract, plan: &IvyJson) -> IvyResult<()> {
     if plan.is_null() {
         return Err(IvyError::internal());
+    }
+    if !BackendIdentity::matches(plan, contract.backend()) {
+        return Err(IvyError::new(
+            "native_plan_backend_mismatch",
+            "The plan must retain its selected backend and account.",
+        ));
     }
     if plan.get("nativeVersion") != contract.catalog().get("version")
         || plan.get("catalogSourceHash") != contract.catalog().get("sourceHash")

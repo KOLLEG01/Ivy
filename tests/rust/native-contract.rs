@@ -25,6 +25,122 @@ fn expected(value: &serde_json::Value) -> IvyJson {
     parse(&serde_json::to_string(value).unwrap(), usize::MAX).unwrap()
 }
 #[test]
+fn borrowed_definition_hash_keeps_the_wire_projections_field_lookup() {
+    use ivy_contracts::{
+        hash::tool_definition_hash,
+        native_backend::{BackendIdentity, NativeProvider},
+    };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut catalog = parse(
+        &std::fs::read_to_string(root.join("specs/native/codex-0.159.2/catalog.json")).unwrap(),
+        usize::MAX,
+    )
+    .unwrap();
+    let mut source = catalog
+        .required("clientRequests")
+        .unwrap()
+        .as_array()
+        .unwrap()[0]
+        .clone();
+    source.insert("method", "fixture/read".into());
+    source.insert("inputSchema", true.into());
+    source.insert("outputSchema", true.into());
+    // IvyJson also admits programmatically assembled objects. The borrowed hash
+    // must use the same lookup as the actual wire definition, even when a raw
+    // object has duplicate keys that canonical object hashing would collapse.
+    let IvyJson::Object(fields) = &mut source else {
+        unreachable!()
+    };
+    fields.push(("inputSchema".into(), false.into()));
+    fields.push(("outputSchema".into(), false.into()));
+    catalog.insert("clientRequests", IvyJson::Array(vec![source]));
+    let base = NativeContract::from_owned(catalog, None).unwrap();
+    let scoped = base.with_backend(Some(
+        BackendIdentity::new("worker".into(), NativeProvider::Codex, "work".into()).unwrap(),
+    ));
+    for contract in [&base, &scoped] {
+        let method = "fixture/read".into();
+        let definition = contract.definition(&method).unwrap();
+        assert_eq!(definition.get("inputSchema"), Some(&true.into()));
+        assert_eq!(definition.get("outputSchema"), Some(&true.into()));
+        assert_eq!(
+            contract.definition_hash(&method).unwrap(),
+            tool_definition_hash(&definition).unwrap()
+        );
+    }
+}
+#[test]
+fn account_projections_share_catalog_and_schema_owners_without_sharing_definitions() {
+    use ivy_contracts::native_backend::{BackendIdentity, NativeProvider};
+    use std::sync::Arc;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut catalog = parse(
+        &std::fs::read_to_string(root.join("specs/native/codex-0.159.2/catalog.json")).unwrap(),
+        usize::MAX,
+    )
+    .unwrap();
+    let method: JsString = "thread/read".into();
+    let mut source = catalog
+        .required("clientRequests")
+        .unwrap()
+        .as_array()
+        .unwrap()[0]
+        .clone();
+    source.insert("method", IvyJson::String(method.clone()));
+    source.insert("inputSchema", parse(r#"{"type":"object","properties":{"threadId":{"type":"string"},"extension":{}},"required":["threadId"]}"#, 1000).unwrap());
+    source.insert("outputSchema", true.into());
+    catalog.insert("clientRequests", IvyJson::Array(vec![source]));
+    let original = catalog.clone();
+    let base = NativeContract::from_owned(catalog, None).unwrap();
+    let identity = |id: &str, provider, account: &str| {
+        Some(BackendIdentity::new(id.into(), provider, account.into()).unwrap())
+    };
+    let a = base.with_backend(identity("worker", NativeProvider::Codex, "work"));
+    let b = base.with_backend(identity("claude", NativeProvider::Claude, "personal"));
+    let c = a.with_backend(identity("worker", NativeProvider::Codex, "personal"));
+    assert!(std::ptr::eq(base.catalog(), a.catalog()));
+    assert!(std::ptr::eq(a.catalog(), b.catalog()));
+    assert!(std::ptr::eq(a.catalog(), c.catalog()));
+    let schema = a.input_schema(&method, &[]).unwrap();
+    assert!(Arc::ptr_eq(&schema, &b.input_schema(&method, &[]).unwrap()));
+    assert!(Arc::ptr_eq(&schema, &c.input_schema(&method, &[]).unwrap()));
+    assert_ne!(
+        a.definition_hash(&method).unwrap(),
+        b.definition_hash(&method).unwrap()
+    );
+    assert_ne!(
+        a.definition_hash(&method).unwrap(),
+        c.definition_hash(&method).unwrap()
+    );
+    let mut projection = a.definition(&method).unwrap();
+    projection.insert("inputSchema", false.into());
+    assert_ne!(projection, a.definition(&method).unwrap());
+    let params = parse(
+        r#"{"threadId":"saved","extension":{"opaque":"\ud800"}}"#,
+        1000,
+    )
+    .unwrap();
+    for contract in [&base, &a, &b, &c] {
+        contract.validate_input(&method, &params, 1000).unwrap();
+        assert!(
+            contract
+                .validate_input(&method, &IvyJson::Null, 1000)
+                .is_err()
+        );
+        assert_eq!(contract.catalog(), &original);
+    }
+    assert!(
+        a.verify_definition(
+            &method,
+            &b.definition(&method).unwrap(),
+            &b.definition_hash(&method).unwrap().into()
+        )
+        .is_err()
+    );
+    drop(base);
+    a.validate_input(&method, &params, 1000).unwrap();
+}
+#[test]
 fn native_projection_requires_typed_names_and_keeps_utf16() {
     let catalog = IvyJson::object([("version", "1.2.3".into())]);
     let method = IvyJson::object([("method", "thread/read".into())]);
@@ -192,7 +308,10 @@ fn retained_catalogs_and_projections_match_typescript() {
             row["source"].as_str().unwrap().into()
         };
         let mut original = parse(&source, usize::MAX).unwrap();
-        let selected = NativeContract::new(&original);
+        let backend = row.get("backend").map(|value| {
+            ivy_contracts::native_backend::BackendIdentity::from_json(&expected(value)).unwrap()
+        });
+        let selected = NativeContract::for_backend(&original, backend);
         let label = row["path"].as_str().or(row["label"].as_str()).unwrap();
         assert_eq!(
             capture(
@@ -231,7 +350,7 @@ fn retained_catalogs_and_projections_match_typescript() {
             );
             let definition = contract.definition(&name).unwrap();
             assert_eq!(
-                summary(definition).unwrap(),
+                summary(&definition).unwrap(),
                 expected(&method["definition"]),
                 "{label}: {name:?}"
             );
@@ -325,7 +444,7 @@ fn retained_catalogs_and_projections_match_typescript() {
             }
         }
         assert_eq!(
-            capture(contract.definition(&"unrecognized/method".into()).cloned()),
+            capture(contract.definition(&"unrecognized/method".into())),
             expected(&row["unknown"])
         );
         assert_eq!(

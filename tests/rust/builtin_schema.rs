@@ -1,4 +1,34 @@
-use ivy_contracts::{builtin_schema::SchemaBundle, json::parse};
+use ivy_contracts::{IvyJson, builtin_schema::SchemaBundle, json::parse};
+
+#[test]
+fn named_schema_rejects_a_legacy_id_keyword_while_transport_keeps_its_original_data_id() {
+    use ivy_contracts::core_schema::validate_transport;
+    let error = validate_transport("ProviderCall/properties", &IvyJson::Null).unwrap_err();
+    assert_eq!(
+        error.to_wire(),
+        ivy_contracts::IvyError::internal().to_wire()
+    );
+    let value = IvyJson::object([
+        ("jsonrpc", "2.0".into()),
+        ("id", "original-request".into()),
+        ("method", "provider.invoke".into()),
+        (
+            "params",
+            IvyJson::object([
+                ("qualifiedName", "agent.read".into()),
+                ("arguments", IvyJson::object([] as [(&str, IvyJson); 0])),
+                (
+                    "definitionHash",
+                    format!("sha256:{}", "0".repeat(64)).into(),
+                ),
+                ("generation", 1.0.into()),
+                ("callerPrincipalId", "caller".into()),
+            ]),
+        ),
+    ]);
+    validate_transport("ProviderCall", &value).unwrap();
+    assert_eq!(value.get("id"), Some(&"original-request".into()));
+}
 
 #[test]
 fn trusted_document_pointers_select_declared_schemas_only() {

@@ -2,7 +2,7 @@
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, agent_bundle::bundled_schema,
     agent_schema::validate_agent, browser_notice::browser_notice_topic, hash::hash_json,
-    json::parse, native_contract::native_tool_definition,
+    json::parse, native_backend::BackendIdentity, native_contract::backend_tool_definition,
 };
 use std::sync::OnceLock;
 
@@ -209,6 +209,40 @@ fn codex_summary(name: &JsString, group: &JsString, metadata: &Metadata) -> IvyR
 }
 
 pub fn agent_registry(catalog: &IvyJson) -> IvyResult<IvyJson> {
+    backend_registry(catalog, None)
+}
+/// An unavailable backend cannot advertise unverified native definitions.
+pub(crate) fn management_registry() -> IvyResult<IvyJson> {
+    let mut registry = metadata()?.registry.clone();
+    let namespaces = registry
+        .remove("namespaces")
+        .ok_or_else(IvyError::internal)?;
+    registry.insert(
+        "namespaces",
+        IvyJson::Array(
+            namespaces
+                .into_array()
+                .ok_or_else(IvyError::internal)?
+                .into_iter()
+                .filter(|namespace| namespace.get("namespace") == Some(&"agent".into()))
+                .collect(),
+        ),
+    );
+    Ok(registry)
+}
+fn backend_group(group: JsString, backend: Option<&BackendIdentity>) -> JsString {
+    if let Some(backend) = backend {
+        let mut result = JsString::from(backend.id());
+        result.0.extend_from_slice(&group.0[5..]);
+        result
+    } else {
+        group
+    }
+}
+pub fn backend_registry(
+    catalog: &IvyJson,
+    backend: Option<&BackendIdentity>,
+) -> IvyResult<IvyJson> {
     validate_agent("Catalog", catalog)?;
     let catalog_hash = JsString::from(hash_json(catalog)?);
     let metadata = metadata()?;
@@ -219,12 +253,23 @@ pub fn agent_registry(catalog: &IvyJson) -> IvyResult<IvyJson> {
         .unwrap()
         .into_array()
         .unwrap();
+    if let Some(backend) = backend {
+        for group in &mut groups {
+            let name = backend_group(
+                group.required("group")?.as_js_string().unwrap().clone(),
+                Some(backend),
+            );
+            group.insert("group", IvyJson::String(name));
+        }
+    }
     let mut tools = Vec::new();
     for method in catalog.required("clientRequests")?.as_array().unwrap() {
         let name = method.required("method")?.as_js_string().unwrap();
-        let group = codex_group(name);
-        let summary = codex_summary(name, &group, metadata)?;
-        let mut definition = native_tool_definition(catalog, method, Some(&catalog_hash))?;
+        let original_group = codex_group(name);
+        let summary = codex_summary(name, &original_group, metadata)?;
+        let group = backend_group(original_group, backend);
+        let mut definition =
+            backend_tool_definition(catalog, method, Some(&catalog_hash), backend)?;
         definition.insert(
             "discovery",
             IvyJson::object([
@@ -247,6 +292,20 @@ pub fn agent_registry(catalog: &IvyJson) -> IvyResult<IvyJson> {
     }
     namespaces[0].insert("tools", IvyJson::Array(tools));
     namespaces[0].insert("discoveryGroups", IvyJson::Array(groups));
+    if let Some(backend) = backend {
+        namespaces[0].insert("namespace", backend.id().into());
+        namespaces[0].insert(
+            "description",
+            format!(
+                "{} backend {} (account {})",
+                backend.provider().as_str(),
+                backend.id(),
+                backend.account_id()
+            )
+            .into(),
+        );
+        namespaces[0].insert("guideMarkdown", "Use the selected backend's unchanged native arguments. Keep its original operation identity after an uncertain reply. Manage pending inputs through the agent namespace with this exact backend and account.".into());
+    }
     registry.insert("namespaces", IvyJson::Array(namespaces));
     Ok(registry)
 }

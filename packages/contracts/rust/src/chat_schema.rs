@@ -1,11 +1,11 @@
 use crate::{
-    IvyError, IvyJson, IvyResult, builtin_schema::SchemaBundle, json::canonical,
+    IvyError, IvyJson, IvyResult, builtin_schema::SchemaBundle, json::canonical_size,
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use std::sync::OnceLock;
 
 pub fn validate_chat(name: &str, value: &IvyJson) -> IvyResult<()> {
-    canonical(value, MANAGEMENT_FRAME_BYTES)?;
+    canonical_size(value, MANAGEMENT_FRAME_BYTES)?;
     static BUNDLE: OnceLock<IvyResult<SchemaBundle>> = OnceLock::new();
     let bundle = BUNDLE
         .get_or_init(|| {

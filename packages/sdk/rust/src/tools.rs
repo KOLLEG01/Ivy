@@ -77,8 +77,8 @@ pub async fn discover(
     let mut cursor = None;
     loop {
         let mut params = IvyJson::object([("namespace", IvyJson::String(namespace.clone()))]);
-        for (key,value) in selectors.as_object().ok_or_else(IvyError::internal)? {
-            params.insert(key.clone(),value.clone());
+        for (key, value) in selectors.as_object().ok_or_else(IvyError::internal)? {
+            params.insert(key.clone(), value.clone());
         }
         params.insert("namePrefix", IvyJson::String(name.clone()));
         if let Some(cursor) = cursor {
@@ -199,22 +199,39 @@ impl ToolClients {
                 "Stable service Tools require at least one namespace interface version.",
             ));
         }
-        self.selected(service_node_id, requirements, None)
+        self.selected(service_node_id, requirements, None, None)
     }
     pub fn native_service_tools(&self, service_node_id: JsString) -> IvyResult<BoundToolClient> {
-        self.selected(service_node_id, &[], Some("codex".into()))
+        self.native_backend_tools(service_node_id, None)
+    }
+    pub fn native_backend_tools(
+        &self,
+        service_node_id: JsString,
+        backend: Option<&ivy_contracts::native_backend::BackendIdentity>,
+    ) -> IvyResult<BoundToolClient> {
+        self.selected(
+            service_node_id,
+            &[],
+            Some(backend.map_or("codex", |backend| backend.id()).into()),
+            backend,
+        )
     }
     fn selected(
         &self,
         service_node_id: JsString,
         requirements: &[InterfaceRequirement],
         dynamic: Option<JsString>,
+        backend: Option<&ivy_contracts::native_backend::BackendIdentity>,
     ) -> IvyResult<BoundToolClient> {
         let mut sorted = requirements.to_vec();
         sorted.sort_by(|a, b| a.namespace.cmp(&b.namespace));
         let key = ivy_contracts::json::canonical(
             &IvyJson::object([
                 ("serviceNodeId", IvyJson::String(service_node_id.clone())),
+                (
+                    "backend",
+                    backend.map_or(IvyJson::Null, |value| value.json()),
+                ),
                 (
                     "dynamicNamespace",
                     dynamic.clone().map_or(IvyJson::Null, IvyJson::String),

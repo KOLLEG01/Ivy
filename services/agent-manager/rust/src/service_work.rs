@@ -3,21 +3,20 @@ use ivy_contracts::{IvyError, IvyJson, IvyResult};
 use ivy_sdk::service::{ServiceFuture, ToolHandler};
 use std::{
     collections::BTreeMap,
+    future::Future,
     sync::{Arc, Mutex},
 };
 use tokio::sync::watch;
 
-#[derive(Clone)]
-pub struct AgentRun(watch::Receiver<Option<IvyResult<IvyJson>>>);
-impl AgentRun {
-    pub async fn wait(mut self) -> IvyResult<IvyJson> {
-        loop {
-            if let Some(result) = self.0.borrow_and_update().clone() {
-                return result;
-            }
-            self.0.changed().await.map_err(|_| IvyError::internal())?;
-        }
-    }
+#[path = "service_run.rs"]
+pub(crate) mod run;
+pub use run::AgentRun;
+#[derive(Clone, Copy)]
+enum HandlerKind {
+    Request,
+    Answer,
+    Control,
+    Invoke,
 }
 #[derive(Default)]
 struct State {
@@ -25,6 +24,7 @@ struct State {
     replies_closed: bool,
     next: u64,
     pending: BTreeMap<u64, (bool, watch::Receiver<bool>)>,
+    budget: run::Budget,
 }
 #[derive(Clone, Default)]
 pub struct AgentWork(Arc<Mutex<State>>);
@@ -33,6 +33,7 @@ struct Completion {
     index: u64,
     released: bool,
     done: Option<watch::Sender<bool>>,
+    report: Option<Arc<dyn Fn(IvyError) + Send + Sync>>,
 }
 impl Completion {
     fn release(&mut self) {
@@ -54,6 +55,9 @@ impl Completion {
 }
 impl Drop for Completion {
     fn drop(&mut self) {
+        if let Some(report) = self.report.take() {
+            report(IvyError::internal());
+        }
         self.release();
         self.finish();
     }
@@ -70,14 +74,42 @@ impl AgentWork {
     /// Mirrors track(promise): admitting the future owns its execution. Dropping
     /// an invocation or joining waiter cannot cancel the underlying operation.
     pub fn track(&self, future: ServiceFuture<IvyJson>) -> IvyResult<AgentRun> {
-        self.track_with(|| future, false)
+        self.track_with(|| future, false, false, 0)
     }
     fn track_with(
         &self,
         create: impl FnOnce() -> ServiceFuture<IvyJson>,
         reply: bool,
+        control: bool,
+        input: usize,
     ) -> IvyResult<AgentRun> {
-        let (result, receiver) = watch::channel(None);
+        let completion = self.reserve(reply, None)?;
+        let budget = self
+            .0
+            .lock()
+            .map_err(|_| IvyError::internal())?
+            .budget
+            .clone();
+        let admission = budget.reserve(control, input)?;
+        let (mut result, receiver) = AgentRun::channel(admission.call.clone());
+        let future = create();
+        tokio::spawn(async move {
+            let _input = admission;
+            let mut completion = completion;
+            let value = future.await;
+            // The original registers its Set deletion reaction before a caller
+            // can await the returned promise. Drain completion follows the reply.
+            completion.release();
+            result.send(budget.finish(value, control));
+            completion.finish();
+        });
+        Ok(receiver)
+    }
+    fn reserve(
+        &self,
+        reply: bool,
+        report: Option<Arc<dyn Fn(IvyError) + Send + Sync>>,
+    ) -> IvyResult<Completion> {
         let (done, complete) = watch::channel(false);
         let index = {
             let mut state = self.0.lock().map_err(|_| IvyError::internal())?;
@@ -95,23 +127,49 @@ impl AgentWork {
             state.pending.insert(index, (reply, complete));
             index
         };
-        let completion = Completion {
+        Ok(Completion {
             owner: self.clone(),
             index,
             released: false,
             done: Some(done),
-        };
-        let future = create();
+            report,
+        })
+    }
+    /// Receipt writers share admission/completion accounting, with no unused
+    /// result channel. Reporting precedes removal and the drain notification.
+    pub(crate) fn spawn_reported(
+        &self,
+        future: impl Future<Output = IvyResult<()>> + Send + 'static,
+        report: Arc<dyn Fn(IvyError) + Send + Sync>,
+    ) -> IvyResult<()> {
+        let completion = self.reserve(false, Some(report))?;
         tokio::spawn(async move {
             let mut completion = completion;
             let value = future.await;
-            // The original registers its Set deletion reaction before a caller
-            // can await the returned promise. Drain completion follows the reply.
+            if let (Some(report), Err(error)) = (completion.report.take(), value) {
+                report(error);
+            }
             completion.release();
-            result.send_replace(Some(value));
             completion.finish();
         });
-        Ok(AgentRun(receiver))
+        Ok(())
+    }
+    /// Unlike an invocation snapshot, receipt drain includes work accepted while
+    /// earlier receipts settle. The native owner closes before the final drain.
+    pub(crate) async fn drain(&self) -> IvyResult<()> {
+        loop {
+            let next = self
+                .0
+                .lock()
+                .map_err(|_| IvyError::internal())?
+                .pending
+                .first_key_value()
+                .map(|(_, (_, complete))| complete.clone());
+            let Some(complete) = next else {
+                return Ok(());
+            };
+            Self::wait_complete(complete).await;
+        }
     }
     /// Capture the current work set immediately. Later requests are not silently
     /// added to this snapshot; the enclosing service owns invocation retirement.
@@ -173,33 +231,57 @@ impl AgentWork {
     }
     fn wait_snapshot(snapshot: IvyResult<Vec<watch::Receiver<bool>>>) -> ServiceFuture<()> {
         Box::pin(async move {
-            for mut complete in snapshot? {
-                loop {
-                    if *complete.borrow_and_update() {
-                        break;
-                    }
-                    if complete.changed().await.is_err() {
-                        break;
-                    }
-                }
+            for complete in snapshot? {
+                Self::wait_complete(complete).await;
             }
             Ok(())
         })
     }
+    async fn wait_complete(mut complete: watch::Receiver<bool>) {
+        while !*complete.borrow_and_update() {
+            if complete.changed().await.is_err() {
+                break;
+            }
+        }
+    }
     pub fn handler(&self, handler: ToolHandler) -> ToolHandler {
-        self.wrap(handler, false)
+        self.wrap(handler, HandlerKind::Request)
     }
     /// Answers to an existing native input remain admissible while calls drain.
     pub fn reply_handler(&self, handler: ToolHandler) -> ToolHandler {
-        self.wrap(handler, true)
+        self.wrap(handler, HandlerKind::Answer)
     }
-    fn wrap(&self, handler: ToolHandler, reply: bool) -> ToolHandler {
+    pub(crate) fn control_handler(&self, handler: ToolHandler) -> ToolHandler {
+        self.wrap(handler, HandlerKind::Control)
+    }
+    pub(crate) fn invoke_handler(&self, handler: ToolHandler) -> ToolHandler {
+        self.wrap(handler, HandlerKind::Invoke)
+    }
+    fn wrap(&self, handler: ToolHandler, kind: HandlerKind) -> ToolHandler {
         let owner = self.clone();
-        Arc::new(
-            move |args, context| match owner.track_with(|| handler(args, context), reply) {
+        Arc::new(move |args, context| {
+            let reply = matches!(kind, HandlerKind::Answer);
+            let control = matches!(kind, HandlerKind::Answer | HandlerKind::Control)
+                || (matches!(kind, HandlerKind::Invoke)
+                    && args
+                        .get("method")
+                        .and_then(IvyJson::as_js_string)
+                        .is_some_and(|method| {
+                            method.eq_str("turn/interrupt") || method.eq_str("thread/unsubscribe")
+                        }));
+            let input = args
+                .retained_bytes()
+                .saturating_add(context.caller_principal_id.0.capacity().saturating_mul(2))
+                .saturating_add(
+                    context
+                        .operation_id
+                        .as_ref()
+                        .map_or(0, |id| id.0.capacity().saturating_mul(2)),
+                );
+            match owner.track_with(|| handler(args, context), reply, control, input) {
                 Ok(run) => Box::pin(run.wait()),
                 Err(error) => Box::pin(async move { Err(error) }),
-            },
-        )
+            }
+        })
     }
 }

@@ -83,6 +83,15 @@ pub async fn native_thread_project(
     params: &IvyJson,
     options: RequestOptions,
 ) -> IvyResult<IvyJson> {
+    native_thread_project_for_backend(tools, service_node_id, None, params, options).await
+}
+pub async fn native_thread_project_for_backend(
+    tools: &ToolClients,
+    service_node_id: &JsString,
+    backend: Option<&ivy_contracts::native_backend::BackendIdentity>,
+    params: &IvyJson,
+    options: RequestOptions,
+) -> IvyResult<IvyJson> {
     if let Some(value) = explicit(params) {
         return Ok(value);
     }
@@ -96,7 +105,10 @@ pub async fn native_thread_project(
     let inventory = selected
         .read(
             &"agent.projects".into(),
-            IvyJson::object(Vec::<(String, IvyJson)>::new()),
+            backend.map_or_else(
+                || Ok(IvyJson::object::<&str>([])),
+                |backend| backend.arguments(IvyJson::object::<&str>([])),
+            )?,
             ToolCallOptions {
                 request: options,
                 ..Default::default()
@@ -104,5 +116,11 @@ pub async fn native_thread_project(
         )
         .await?;
     validate_agent("ProjectsResult", &inventory)?;
+    if !ivy_contracts::native_backend::BackendIdentity::matches(&inventory, backend) {
+        return Err(IvyError::new(
+            "native_owner_mismatch",
+            "Projects must come from the selected backend and account.",
+        ));
+    }
     default_native_thread_project(params, &inventory)
 }

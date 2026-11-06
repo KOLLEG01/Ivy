@@ -713,6 +713,7 @@ async fn real_native_owner_waits_for_disk_commit_and_refuses_failed_writer() {
             Arc::new(ivy_sdk::tools::ToolClients::new(client.clone())),
             "caller".into(),
             ivy_sdk::native_evidence::NativeOwnerIdentity {
+                backend: None,
                 service_node_id: "native-agent".into(),
                 host_id: None,
                 native_version: "0.159.2".into(),

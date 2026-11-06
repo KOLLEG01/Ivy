@@ -8,6 +8,7 @@ import { Ajv2020 } from 'ajv/dist/2020.js';
 import type { AnySchema, ValidateFunction } from 'ajv';
 import { fail, requireThat } from './errors.js';
 import type { Operation } from './generated.js';
+import { definitionValidator } from './schema-definition.js';
 
 export { wireSchema };
 export const operationSchema = operation as Record<string, unknown>;
@@ -92,10 +93,14 @@ export function isUiMetadata(value: unknown): value is Operation.UiMetadata {
   return Boolean(get(`${String(operationSchema['$id'])}#/$defs/UiMetadata`)(value));
 }
 export function validateShared(name: string, value: unknown): void {
-  requireThat(get(`${String(wireSchema['$id'])}#/$defs/${name}`)(value), 'invalid_arguments', 'Value does not match its shared contract.');
+  const validator = definitionValidator(ajv, wireSchema, name);
+  if (!validator) throw new Error(`Unknown internal schema: ${String(wireSchema['$id'])}#/$defs/${name}`);
+  requireThat(validator(value), 'invalid_arguments', 'Value does not match its shared contract.');
 }
 export function validateTransport(name: string, value: unknown): void {
-  requireThat(get(`${String(transportSchema['$id'])}#/$defs/${name}`)(value), 'invalid_frame', 'Invalid provider transport frame.');
+  const validator = definitionValidator(ajv, transportSchema, name);
+  if (!validator) throw new Error(`Unknown internal schema: ${String(transportSchema['$id'])}#/$defs/${name}`);
+  requireThat(validator(value), 'invalid_frame', 'Invalid provider transport frame.');
 }
 
 /** Used by the live Hive path; the expensive service-domain schema trees stay out of this module. */

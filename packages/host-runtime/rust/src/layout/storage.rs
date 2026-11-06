@@ -88,26 +88,50 @@ pub fn host_storage_areas(
             }
         }
         if instance.get("componentId") == Some(&"agent-manager".into()) {
-            let path = instance
-                .required("settings")?
-                .get("internalProjectRoot")
-                .and_then(IvyJson::as_js_string)
-                .cloned()
-                .unwrap_or_else(|| {
-                    node_path::join(
-                        context.paths.style,
-                        &[
-                            context.account_home.clone(),
-                            ".ivy".into(),
-                            "codex-projects".into(),
-                        ],
-                    )
-                });
-            if !areas.iter().any(|a| contains(context, &a.path, &path)) {
-                areas.push(StorageArea {
-                    key: concat(&["projects/".into(), id]),
-                    path,
-                });
+            for backend in
+                crate::agent_backends::configured_backends(instance.required("settings")?, None)?
+            {
+                let suffix = backend.storage_key()?;
+                if let Some(data) = backend.data_root {
+                    let data = text(data)?;
+                    if !areas
+                        .iter()
+                        .any(|area| contains(context, &area.path, &data))
+                    {
+                        areas.push(StorageArea {
+                            key: concat(&[
+                                "backends/".into(),
+                                id.clone(),
+                                "/".into(),
+                                suffix.clone().ok_or_else(IvyError::internal)?.into(),
+                                "/data".into(),
+                            ]),
+                            path: data,
+                        });
+                    }
+                }
+                let path = backend
+                    .settings
+                    .get("internalProjectRoot")
+                    .and_then(IvyJson::as_js_string)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        node_path::join(
+                            context.paths.style,
+                            &[
+                                context.account_home.clone(),
+                                ".ivy".into(),
+                                "codex-projects".into(),
+                            ],
+                        )
+                    });
+                if !areas.iter().any(|a| contains(context, &a.path, &path)) {
+                    let mut key = concat(&["projects/".into(), id.clone()]);
+                    if let Some(suffix) = suffix {
+                        key = concat(&[key, "/".into(), suffix.into()]);
+                    }
+                    areas.push(StorageArea { key, path });
+                }
             }
         }
     }

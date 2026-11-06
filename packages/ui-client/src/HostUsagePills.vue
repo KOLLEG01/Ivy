@@ -1,34 +1,32 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useElementSize } from '@vueuse/core';
 import { useRemote } from '@ivy/ui';
-import type { HiveClient, Operation } from '../../sdk/src/client.js';
+import type { Agent, HiveClient } from '../../sdk/src/client.js';
 import HostUsage from './HostUsage.vue';
-import { serviceNodeLabel } from './native';
+import { nativeHosts, nativeServiceNodes } from './native-hosts';
+import { nativeBackendScopes } from './native-backends';
 
-const props = defineProps<{ client: HiveClient; host?: string | null | undefined; node?: string | undefined }>();
-const remote = useRemote(async signal => {
-  const items: Operation.ServiceNode[] = [];
-  let cursor: string | null = null;
-  do {
-    const page: Operation.ServiceNodesListResult = await props.client.request('serviceNodes.list', {
-      serviceName: 'agent-manager', limit: 200, ...(cursor ? { cursor } : {}),
-    }, { signal });
-    items.push(...page.items); cursor = page.nextCursor;
-  } while (cursor);
-  return items;
-}, 30000, ['services/agent-manager']);
+const props = defineProps<{ client: HiveClient; host?: string | null | undefined; node?: string | undefined; backend?: Agent.BackendIdentity | undefined }>();
+const remote = useRemote(signal => nativeServiceNodes(props.client, signal), 30000, ['services/agent-manager']);
 const nodes = computed(() => (remote.value.value ?? []).filter(item =>
   props.node ? item.serviceNodeId === props.node : props.host === undefined || item.hostId === props.host));
+const hosts = computed(() => nativeHosts(nodes.value));
+const accounts = useRemote(async signal => (await Promise.all(nodes.value.filter(node => node.connected).map(async node => {
+  try { return await nativeBackendScopes(props.client, node, signal); }
+  catch { signal.throwIfAborted(); return []; }
+}))).flat(), 30000, ['services/agent-manager']);
+watch(nodes, () => void accounts.refresh());
 const element = ref<HTMLElement>();
 const { width } = useElementSize(element);
-const compact = computed(() => width.value < nodes.value.length * 112);
+const compact = computed(() => width.value < hosts.value.length * 112);
 </script>
 
 <template>
-  <div v-if="nodes.length" ref="element" data-slot="host-usage" class="host-usage-pills" :style="{ '--usage-count': nodes.length }" aria-label="Host usage">
-    <HostUsage v-for="item in nodes" :key="item.serviceNodeId" :client="client" :node="item.serviceNodeId"
-      :label="serviceNodeLabel(remote.value.value ?? [], item.serviceNodeId)" :ready="item.ready && item.connected" :compact="compact" />
+  <div v-if="hosts.length" ref="element" data-slot="host-usage" class="host-usage-pills" :style="{ '--usage-count': hosts.length }" aria-label="Host usage">
+    <HostUsage v-for="item in hosts" :key="item.hostId" :client="client" :node="item.serviceNodeId" :backend="backend"
+      :accounts="(accounts.value.value ?? []).filter(scope => scope.hostId === item.hostId)"
+      :label="item.hostId" :ready="item.ready && item.connected" :compact="compact" />
   </div>
 </template>
 

@@ -1,4 +1,5 @@
 //! Shared build leases protect cache links without serializing independent builds.
+pub(crate) mod compiler;
 use crate::{IvyError, IvyResult, executor_lock::ExecutorLock, native_path};
 use ivy_sdk::clock::{Clock,SystemClock};
 use std::{path::PathBuf,time::Duration};
@@ -39,7 +40,7 @@ async fn collect(staging:PathBuf,progress:Arc<dyn RetentionProgress>)->IvyResult
     for name in names{
         let target=root.join(&name);let checked=target.clone();let check_root=root.clone();let check_staging=staging.clone();let check_boundary=boundary.clone();
         blocking(move||{guard(&check_staging,&check_root,&check_boundary)?;if !internal(paths::inside(&check_boundary,&internal(paths::realpath(&checked))?))?{return Err(IvyError::new("target_conflict","Dependency cache leaves its storage root."));}Ok(())}).await?;
-        if name.starts_with(".retiring-"){crate::filesystem::remove_payload(target,true,0).await?;progress.removed("payloads");continue}
+        if name.starts_with(".retiring-"){if !progress.permit_removal("dependency-cache"){continue}crate::filesystem::remove_payload(target,true,0).await?;progress.removed("payloads");continue}
         let check=target.clone();let key=format!("sha256:{name}");let used=blocking(move||{
             let metadata=match read_json(&check.join("cache.json"),65536){Ok(value)=>Some(value),Err(FileError::Missing)=>None,Err(error)=>return Err(error.error())};
             if metadata.as_ref().and_then(|value|value.get("key"))!=Some(&key.into()){return Ok(None)}
@@ -50,6 +51,7 @@ async fn collect(staging:PathBuf,progress:Arc<dyn RetentionProgress>)->IvyResult
     // Admitted names use only fixed-width lower-case hexadecimal digits.
     caches.sort_by(|left,right|right.1.total_cmp(&left.1).then_with(||left.0.cmp(&right.0)));
     for(name,used_at)in caches.into_iter().skip(1){
+        if !progress.permit_removal("dependency-cache"){break}
         let lock=match ExecutorLock::acquire(staging.join("dependency-cache-locks").join(&name),false).await{
             Ok(lock)=>lock,Err(error) if error.code=="executor_already_running"=>{progress.skipped("dependency-cache","active_build",false);continue},Err(error)=>return Err(error),
         };

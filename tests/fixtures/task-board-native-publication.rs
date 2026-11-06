@@ -212,6 +212,7 @@ struct World {
     pending: Cell<usize>,
     failure: RefCell<Option<Json>>,
     workspace_reads: Cell<usize>,
+    workspace_observation: RefCell<Option<Json>>,
     cleanup: Cell<usize>,
     released: Cell<usize>,
     snapshot: RefCell<Json>,
@@ -233,6 +234,7 @@ impl World {
             pending: Cell::new(0),
             failure: RefCell::new(None),
             workspace_reads: Cell::new(0),
+            workspace_observation: RefCell::new(None),
             cleanup: Cell::new(0),
             released: Cell::new(0),
             snapshot: RefCell::new(Json::object([
@@ -480,6 +482,9 @@ impl NativePublicationEngine for World {
     }
     async fn workspace(&self, _: &Json, run: &Json) -> IvyResult<Json> {
         self.workspace_reads.set(self.workspace_reads.get() + 1);
+        if let Some(observed) = self.workspace_observation.borrow().as_ref() {
+            return Ok(observed.clone());
+        }
         let mut w = f(run, "workspace").clone();
         w.insert("nativeProjectId", "unpublished-native-id".into());
         Ok(w)
@@ -513,6 +518,9 @@ impl NativePublicationEvidence for World {
         principal: &JsString,
     ) -> IvyResult<EvidenceIdentity> {
         Ok(EvidenceIdentity {
+            backend: ivy_contracts::native_backend::BackendIdentity::optional(
+                run.get("target").and_then(|target| target.get("backend")),
+            )?,
             caller_principal_id: principal.clone(),
             service_node_id: s(f(run, "target"), "serviceNodeId").clone(),
             native_version: "native".into(),
@@ -529,7 +537,7 @@ impl NativePublicationEvidence for World {
             .map(|(_, o)| o.clone())
             .ok_or_else(|| IvyError::new("not_found", "Saved owner proof unavailable."))
     }
-    async fn intended(&self, _: &Json, origin: &Json) -> IvyResult<Json> {
+    async fn intended(&self, _: &Json, _: &Json, origin: &Json) -> IvyResult<Json> {
         let documents = self.documents.borrow();
         let call = &documents
             .iter()
@@ -679,6 +687,215 @@ async fn only_successful_review_handoffs_make_final_results_and_root_notificatio
                     .get("nativeProjectId")
                     .is_none()
             );
+        }
+    }
+}
+
+#[tokio::test]
+async fn completion_observes_the_current_workspace_without_rewriting_its_original_owner() {
+    use ivy_contracts::native_backend::{BackendIdentity, NativeProvider};
+    use std::sync::Mutex;
+    struct WorkspaceClient {
+        target: Json,
+        observed: Json,
+        calls: Mutex<Vec<Json>>,
+    }
+    impl RpcClient for WorkspaceClient {
+        fn request<'a>(
+            &'a self,
+            method: &'a str,
+            params: Json,
+            _: RequestOptions,
+        ) -> RequestFuture<'a> {
+            Box::pin(async move {
+                assert_eq!(
+                    params.get("serviceNodeId"),
+                    self.target.get("serviceNodeId")
+                );
+                if method == "tools.list" {
+                    return Ok(Json::object([
+                        ("provider", Json::object([("node", self.target.clone())])),
+                        (
+                            "items",
+                            Json::Array(vec![Json::object([
+                                ("qualifiedName", "agent.resolveWorkspace".into()),
+                                (
+                                    "definition",
+                                    Json::object([
+                                        ("namespace", "agent".into()),
+                                        ("name", "resolveWorkspace".into()),
+                                        ("interfaceVersion", "1.0.0".into()),
+                                        (
+                                            "annotations",
+                                            Json::object([("readOnlyHint", true.into())]),
+                                        ),
+                                        ("inputSchema", Json::object([] as [(&str, Json); 0])),
+                                        ("outputSchema", Json::object([] as [(&str, Json); 0])),
+                                    ]),
+                                ),
+                                (
+                                    "definitionHash",
+                                    format!("sha256:{}", "a".repeat(64)).into(),
+                                ),
+                                ("catalogHash", format!("sha256:{}", "b".repeat(64)).into()),
+                            ])]),
+                        ),
+                        ("nextCursor", Json::Null),
+                    ]));
+                }
+                assert_eq!(method, "tools.call");
+                assert!(f(&params, "qualifiedName").is_str("agent.resolveWorkspace"));
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(f(&params, "arguments").clone());
+                Ok(self.observed.clone())
+            })
+        }
+    }
+    for provider in [NativeProvider::Codex, NativeProvider::Claude] {
+        for original_scoped in [false, true] {
+            for moved in ["none", "service", "backend"] {
+                let old = BackendIdentity::new("previous".into(), provider, "one".into()).unwrap();
+                let backend =
+                    BackendIdentity::new("primary".into(), provider, "one".into()).unwrap();
+                let mut run = base_run();
+                if original_scoped {
+                    let target = old.arguments(f(&run, "target").clone()).unwrap();
+                    run.insert("target", target);
+                }
+                let mut project = primary();
+                project.insert("kind", "project".into());
+                project.insert("nativeId", "project".into());
+                if original_scoped {
+                    project.insert("namespace", old.id().into());
+                }
+                let mut workspace = f(&run, "workspace").clone();
+                workspace.insert("project", project);
+                let repo = ivy_contracts::json::parse(
+                    r#"{"name":"repo","branch":"main","commit":"original","dirty":false,"originName":"origin","originUrl":"https://example.invalid/repo.git","originState":"confirmed","remoteRef":null,"observedAt":"2026-01-02T03:04:05.006Z","limitation":null}"#,
+                    4096,
+                ).unwrap();
+                workspace.insert("repository", repo);
+                run.insert("workspace", workspace.clone());
+                let mut task = base_task();
+                task.insert("comments", Json::Array(vec![handoff("review")]));
+                let mut target = f(&run, "target").clone();
+                let mut observed = workspace.clone();
+                let selected = if moved == "none" {
+                    original_scoped.then_some(&old)
+                } else {
+                    target.insert("backend", backend.json());
+                    if moved == "service" {
+                        target.insert("serviceNodeId", "next".into());
+                    }
+                    task.insert(
+                        "nativeRoutes",
+                        Json::Array(vec![Json::object([
+                            ("source", f(&run, "target").clone()),
+                            ("target", target.clone()),
+                        ])]),
+                    );
+                    observed.insert("serviceNodeId", f(&target, "serviceNodeId").clone());
+                    set(
+                        &mut observed,
+                        "project",
+                        "serviceNodeId",
+                        f(&target, "serviceNodeId").clone(),
+                    );
+                    set(&mut observed, "project", "namespace", backend.id().into());
+                    Some(&backend)
+                };
+                observed = BackendIdentity::select_arguments(selected, observed).unwrap();
+                observed.insert("nativeProjectId", "private-observation".into());
+                set(&mut observed, "repository", "commit", "current".into());
+                let client = Arc::new(WorkspaceClient {
+                    target: target.clone(),
+                    observed: observed.clone(),
+                    calls: Mutex::default(),
+                });
+                let runtime = NativePublicationRuntime::new(
+                    client.clone(),
+                    "board".into(),
+                    Json::Null,
+                    World::new(task.clone(), run.clone()),
+                );
+                assert_eq!(runtime.workspace(&task, &run).await.unwrap(), observed);
+                let calls = client.calls.lock().unwrap();
+                assert_eq!(calls.len(), 1);
+                assert!(BackendIdentity::matches(&calls[0], selected));
+                assert_eq!(f(&calls[0], "prepare").as_bool(), Some(false));
+                assert_eq!(f(&calls[0], "verifyOrigin"), &true.into());
+                assert_eq!(
+                    calls[0].get("requirement"),
+                    f(&task, "fields").get("workspaceRequirement")
+                );
+                drop(calls);
+                for failure in [
+                    "none", "host", "service", "backend", "account", "provider", "path", "project",
+                ] {
+                    let mut observed = observed.clone();
+                    match failure {
+                        "none" => {}
+                        "host" => observed.insert("hostId", "other".into()),
+                        "service" => observed.insert("serviceNodeId", "other".into()),
+                        "path" => observed.insert("intendedPath", "/other".into()),
+                        "project" => set(&mut observed, "project", "nativeId", "other".into()),
+                        _ => {
+                            let other = BackendIdentity::new(
+                                if failure == "backend" {
+                                    "other"
+                                } else {
+                                    selected.map_or("primary", BackendIdentity::id)
+                                }
+                                .into(),
+                                if failure == "provider" {
+                                    if provider == NativeProvider::Codex {
+                                        NativeProvider::Claude
+                                    } else {
+                                        NativeProvider::Codex
+                                    }
+                                } else {
+                                    provider
+                                },
+                                if failure == "account" { "two" } else { "one" }.into(),
+                            )
+                            .unwrap();
+                            observed.insert("backend", other.json());
+                        }
+                    }
+                    let w = World::new(task.clone(), run.clone());
+                    *w.workspace_observation.borrow_mut() = Some(observed.clone());
+                    w.complete().await.unwrap();
+                    let saved = w.saved_run();
+                    assert_eq!(saved.get("target"), run.get("target"));
+                    assert_eq!(
+                        saved.get("primaryResourceRef"),
+                        run.get("primaryResourceRef")
+                    );
+                    let result = w.result();
+                    let repository = f(f(&result, "content"), "repositoryResult");
+                    let fresh = failure == "none";
+                    assert_eq!(
+                        f(repository, "commit"),
+                        &Json::from(if fresh { "current" } else { "original" })
+                    );
+                    assert_eq!(
+                        f(repository, "serviceNodeId"),
+                        f(if fresh { &observed } else { &workspace }, "serviceNodeId")
+                    );
+                    assert_eq!(
+                        f(repository, "project"),
+                        f(if fresh { &observed } else { &workspace }, "project")
+                    );
+                    if moved != "none" || !fresh {
+                        assert_eq!(saved.get("workspace"), Some(&workspace));
+                    }
+                    assert!(f(&saved, "workspace").get("nativeProjectId").is_none());
+                    assert!(f(&saved, "workspace").get("backend").is_none());
+                    assert!(f(&w.final_task(), "workflowState").is_str("review"));
+                }
+            }
         }
     }
 }
@@ -930,6 +1147,201 @@ fn native_call(number: u32, method: &str, origin: Json, phase: Option<&str>) -> 
             phase.map(|_| proof(number + 100)).unwrap_or(Json::Null),
         ),
     ])
+}
+
+#[tokio::test]
+async fn scoped_call_attachment_requires_its_complete_prepared_owner() {
+    for (routed, upgrade) in [
+        (false, None),
+        (true, None),
+        (true, Some("replacement")),
+        (true, Some("native")),
+    ] {
+        for changed in [
+            "none",
+            "plan-account",
+            "request-source",
+            "request-account",
+            "owner-account",
+            "owner-service",
+            "request-version",
+            "owner-version",
+            "owner-catalog",
+            "owner-executable",
+            "previous-catalog",
+        ] {
+            if upgrade.is_none() && changed == "previous-catalog" {
+                continue;
+            }
+            let backend = Json::object([
+                ("backendId", "worker".into()),
+                ("provider", "claude".into()),
+                ("accountId", "primary".into()),
+            ]);
+            let mut run = base_run();
+            let original_target = run.required("target").unwrap().clone();
+            let mut task = base_task();
+            if routed {
+                let mut target = original_target.clone();
+                target.insert("backend", backend.clone());
+                target.insert("serviceNodeId", "joint-agent".into());
+                task.insert(
+                    "nativeRoutes",
+                    Json::Array(vec![Json::object([
+                        ("source", original_target),
+                        ("target", target),
+                    ])]),
+                );
+            } else {
+                set(&mut run, "target", "backend", backend.clone());
+                set(&mut run, "primaryResourceRef", "namespace", "worker".into());
+            }
+            let source_hash: Json = format!("sha256:{}", "d".repeat(64)).into();
+            run.insert(
+                "plan",
+                Json::object([
+                    ("nativeVersion", "native".into()),
+                    ("catalogSourceHash", source_hash.clone()),
+                ]),
+            );
+            if !routed {
+                set(&mut run, "plan", "backend", backend.clone());
+            }
+            let selected_source = if upgrade.is_some() {
+                let selected_source: Json = format!("sha256:{}", "f".repeat(64)).into();
+                let mut routes = task
+                    .required("nativeRoutes")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .to_vec();
+                routes[0].insert(
+                    "catalog",
+                    Json::object([
+                        ("nativeVersion", upgrade.unwrap().into()),
+                        ("catalogSourceHash", selected_source.clone()),
+                    ]),
+                );
+                task.insert("nativeRoutes", Json::Array(routes));
+                selected_source
+            } else {
+                source_hash
+            };
+            let mut call = native_call(
+                10,
+                "thread/resume",
+                Json::object([("kind", "initial".into())]),
+                None,
+            );
+            set(&mut call, "request", "backend", backend.clone());
+            set(&mut call, "request", "catalogSourceHash", selected_source);
+            set(
+                &mut call,
+                "request",
+                "nativeVersion",
+                upgrade.unwrap_or("native").into(),
+            );
+            set(
+                &mut call,
+                "request",
+                "params",
+                Json::object([
+                    (
+                        "nativeExecutableHash",
+                        format!("sha256:{}", "a".repeat(64)).into(),
+                    ),
+                    ("catalogHash", format!("sha256:{}", "b".repeat(64)).into()),
+                ]),
+            );
+            call.insert(
+                "owner",
+                Json::object([
+                    ("backend", backend.clone()),
+                    (
+                        "serviceNodeId",
+                        if routed {
+                            "joint-agent".into()
+                        } else {
+                            "agent".into()
+                        },
+                    ),
+                    ("hostId", "host".into()),
+                    ("nativeVersion", upgrade.unwrap_or("native").into()),
+                    (
+                        "nativeExecutableHash",
+                        format!("sha256:{}", "a".repeat(64)).into(),
+                    ),
+                    ("catalogHash", format!("sha256:{}", "b".repeat(64)).into()),
+                ]),
+            );
+            let mut foreign = backend;
+            foreign.insert("accountId", "foreign".into());
+            match changed {
+                "plan-account" => set(&mut run, "plan", "backend", foreign),
+                "request-source" => set(
+                    &mut call,
+                    "request",
+                    "catalogSourceHash",
+                    format!("sha256:{}", "e".repeat(64)).into(),
+                ),
+                "request-account" => set(&mut call, "request", "backend", foreign),
+                "owner-account" => set(&mut call, "owner", "backend", foreign),
+                "owner-service" => set(&mut call, "owner", "serviceNodeId", "other".into()),
+                "request-version" => set(&mut call, "request", "nativeVersion", "other".into()),
+                "owner-version" => set(&mut call, "owner", "nativeVersion", "other".into()),
+                "owner-catalog" => set(
+                    &mut call,
+                    "owner",
+                    "catalogHash",
+                    format!("sha256:{}", "c".repeat(64)).into(),
+                ),
+                "owner-executable" => set(
+                    &mut call,
+                    "owner",
+                    "nativeExecutableHash",
+                    format!("sha256:{}", "c".repeat(64)).into(),
+                ),
+                "previous-catalog" => {
+                    set(
+                        &mut call,
+                        "request",
+                        "catalogSourceHash",
+                        format!("sha256:{}", "d".repeat(64)).into(),
+                    );
+                    set(&mut call, "request", "nativeVersion", "native".into());
+                    set(&mut call, "owner", "nativeVersion", "native".into());
+                }
+                _ => {}
+            }
+            let original_plan = run.required("plan").unwrap().clone();
+            let original_target = run.required("target").unwrap().clone();
+            let world = World::new(task, run);
+            world.put("task-board/native-call", pin(10), call);
+            let result = world
+                .publish(Json::object([
+                    ("kind", "attachCall".into()),
+                    ("slot", "thread".into()),
+                    ("call", pin(10)),
+                ]))
+                .await;
+            if changed == "none" {
+                result.unwrap();
+                assert_eq!(f(f(&world.saved_run(), "calls"), "thread"), &pin(10));
+                assert_eq!(
+                    world.saved_run().required("target").unwrap(),
+                    &original_target
+                );
+                assert_eq!(world.saved_run().required("plan").unwrap(), &original_plan);
+            } else {
+                assert_eq!(
+                    result.unwrap_err().code,
+                    "task_board_native_intent_mismatch",
+                    "{changed}"
+                );
+                assert!(world.writes.borrow().is_empty());
+            }
+        }
+    }
 }
 fn owner(phase: &str, result: Json) -> Json {
     Json::object([

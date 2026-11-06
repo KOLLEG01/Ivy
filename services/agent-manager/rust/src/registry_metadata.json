@@ -100,6 +100,16 @@
         "tools": [
           {
             "namespace": "agent",
+            "name": "backends",
+            "interfaceVersion": "1.0.0",
+            "description": "List this host's native backends with their explicit provider/account identity and independent status. Keep the selected backend in subsequent management calls.",
+            "discovery": { "mcp": { "name": "agent_manager_backends", "surface": "ivy" } },
+            "inputSchema": { "$agentSchema": "BackendsInput" },
+            "outputSchema": { "$agentSchema": "BackendsResult" },
+            "annotations": { "readOnlyHint": true, "idempotentHint": true }
+          },
+          {
+            "namespace": "agent",
             "name": "status",
             "interfaceVersion": "1.0.0",
             "description": "Check this host’s Codex version, connection identity and operation capacity.",
@@ -122,6 +132,15 @@
               "readOnlyHint": true,
               "idempotentHint": true
             }
+          },
+          {
+            "namespace": "agent",
+            "name": "storageIdentity",
+            "interfaceVersion": "1.0.0",
+            "description": "Read the persisted original service and provider of this backend's retained state. This does not initialize, move or reinterpret stored work.",
+            "inputSchema": { "$agentSchema": "StatusInput" },
+            "outputSchema": { "$agentSchema": "StorageIdentity" },
+            "annotations": { "readOnlyHint": true, "idempotentHint": true }
           },
           {
             "namespace": "agent",
@@ -662,7 +681,7 @@
           },
           {
             "topic": "agent.notification",
-            "version": "1.0.0",
+          "version": "1.1.0",
             "title": "Agent notification",
             "description": "A durable native AgentManager notification was retained.",
             "payloadSchema": {
@@ -672,7 +691,7 @@
           },
           {
             "topic": "agent.capabilities",
-            "version": "1.0.0",
+          "version": "1.1.0",
             "title": "Agent capabilities changed",
             "description": "The AgentManager capability profile changed.",
             "payloadSchema": {
@@ -706,6 +725,18 @@
           "$agentSchema": "ExecutionDefaultsDocument"
         },
         "specMarkdown": "Composer defaults for new tasks, stored at /ivy-agent-execution-defaults. Codex and Claude profiles are independent. Null fields inherit the connected native server configuration. Existing tasks retain their native settings. AgentUI writes with user permissions and object CAS."
+      },
+      {
+        "key": "agent/account-execution-defaults",
+        "version": "1.0.0",
+        "owner": { "kind": "service", "serviceName": "agent-manager" },
+        "mediaType": "application/json",
+        "retention": {
+          "objects": { "mode": "retain" },
+          "revisions": { "mode": "bounded", "maximumCount": 100 }
+        },
+        "jsonSchema": { "$agentSchema": "AccountExecutionDefaultsDocument" },
+        "specMarkdown": "Composer defaults for new tasks at /ivy-agent-account-execution-defaults. At most 128 unique full backend/provider/account identities; null fields inherit that account's native configuration. An equal provider, backend ID or account name alone is not a match. Existing conversations retain their settings. Provider-wide legacy defaults remain separate and are never attributed to an account. AgentUI writes with user permissions and object CAS."
       },
       {
         "key": "agent/instructions",

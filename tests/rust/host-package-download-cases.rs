@@ -141,7 +141,11 @@ async fn package_import_streams_real_archive_validates_and_replays_registered_an
         node(),
         client.clone(),
     );
+    let legacy = path(f.config.required("stagingRoot").unwrap()).join(format!("package-{}.tar.gz", &id(&entry, "archiveHash")[7..]));
+    fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    fs::write(&legacy, b"unowned historical transfer").unwrap();
     let imported = updater.import_package(entry.clone()).await.unwrap();
+    assert_eq!(fs::read(&legacy).unwrap(), b"unowned historical transfer");
     let expected = J::object([
         ("candidateId", build.clone().into()),
         ("componentId", "domain".into()),
@@ -212,10 +216,8 @@ async fn package_import_streams_real_archive_validates_and_replays_registered_an
     );
     assert!(
         !path(f.config.required("stagingRoot").unwrap())
-            .join(format!(
-                "package-{}-extract",
-                &id(&entry, "archiveHash")[7..]
-            ))
+            .join("package-transfers")
+            .join(&id(&entry, "archiveHash")[7..])
             .exists()
     );
     assert!(
@@ -251,11 +253,13 @@ async fn package_import_streams_real_archive_validates_and_replays_registered_an
         if failure == "changed-archive" {
             selected.insert("archiveHash", hash("unexpected-download"));
         }
-        let temporary = path(f.config.required("stagingRoot").unwrap()).join(format!(
-            "package-{}.tar.gz",
-            &id(&selected, "archiveHash")[7..]
-        ));
+        let directory = path(f.config.required("stagingRoot").unwrap()).join("package-transfers").join(&id(&selected, "archiveHash")[7..]);
+        let temporary = directory.join("archive.tar.gz");
         if failure == "stale-download" {
+            fs::create_dir_all(&directory).unwrap();
+            config::atomic_json(directory.join("transfer.json"), J::object([
+                ("schemaVersion", J::Number(1.0)), ("archiveHash", selected.required("archiveHash").unwrap().clone()), ("buildId", selected.required("buildId").unwrap().clone()), ("completed", false.into())
+            ])).await.unwrap();
             fs::write(&temporary, b"retained interrupted download").unwrap();
         }
         let requests = server.requests.lock().unwrap().len();
@@ -265,11 +269,12 @@ async fn package_import_streams_real_archive_validates_and_replays_registered_an
             if failure == "changed-archive" {
                 "artifact_changed"
             } else {
-                "internal_error"
+                "outcome_unknown"
             }
         );
-        assert_eq!(server.requests.lock().unwrap().len(), requests + 1);
-        assert!(!temporary.exists());
+        assert_eq!(server.requests.lock().unwrap().len(), requests + usize::from(failure == "changed-archive"));
+        if failure == "stale-download" { assert_eq!(fs::read(&temporary).unwrap(), b"retained interrupted download"); }
+        else { assert!(!temporary.exists()); }
         assert!(!destination.exists());
         assert_eq!(
             f.journal.candidate(&build).await.unwrap_err().code,

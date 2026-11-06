@@ -34,6 +34,14 @@ intervals below 30 minutes retain it until the next run plus a minute (at most
 Disablement, deletion, definition changes and connection replacement retire the
 old context. The run's HTTP endpoint, token and cancellation are always separate.
 Collector contexts disable `node_repl` and `cua_repl`; ordinary agents keep them.
+Set `mcp.readOnly: true` only when every granted tool is read-only. After an epoch
+change, recovery requires a confirmed native process stop or a complete fresh
+loaded-context list proving the old thread absent. Uncertain reads retain their
+original calls in a bounded quarantine before new reads can start; uncertain
+external writes continue to block their task. No old call or unsubscribe is replayed.
+Within the same epoch, a confirmed unsubscribe of that task's ephemeral context
+can also retire an uncertain read. The next granted read starts a fresh context,
+so a failed source cannot poison later reads in the same collector run.
 
 For Ivy calls use an explicit direct binding instead:
 

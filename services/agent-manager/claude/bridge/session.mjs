@@ -1,36 +1,104 @@
 // Private vendor-SDK transport. Native protocol, policy and persistence live in Rust.
-const version = 1;
+export const version = 2;
+const queryLimit = 16, discoveryLimit = 8, callbackLimit = 32;
+const capacity = () => Object.assign(new Error('SDK active work capacity is occupied'), { name: 'native_capacity' });
 const denied = { behavior: 'deny', message: 'turn already finished' };
 const iterable = async function* (messages) { yield* messages; };
 const failure = error => ({ name: error?.name ?? 'Error', message: String(error?.message ?? error) });
 
-export function session(sdk, send) {
+// Credits cover original events through Rust processing. RPC replies bypass
+// these windows, so a stalled message consumer cannot hold a control response.
+export function eventFlow(write) {
+  const data = { active: 0, maximum: 1, waiting: [], limit: queryLimit };
+  const control = { active: 0, maximum: 8, waiting: [], limit: 96 };
+  const pending = new Map();
+  let next = 0, closed = false;
+  function take(lane) {
+    if (closed) return Promise.resolve(false);
+    if (lane.active < lane.maximum) { lane.active++; return Promise.resolve(true); }
+    if (lane.waiting.length >= lane.limit) return Promise.reject(capacity());
+    return new Promise(resolve => lane.waiting.push(resolve));
+  }
+  function release(lane) {
+    const waiting = closed ? undefined : lane.waiting.shift();
+    if (waiting) waiting(true);
+    else lane.active--;
+  }
+  return {
+    async send(frame) {
+      if (Object.hasOwn(frame, 'id')) { if (!closed) await write(frame); return; }
+      const lane = frame.type === 'message' ? data : control;
+      if (!await take(lane)) return;
+      if (closed) { release(lane); return; }
+      if (next === Number.MAX_SAFE_INTEGER) { release(lane); throw capacity(); }
+      const sequence = ++next;
+      let finish;
+      const consumed = new Promise(resolve => { finish = () => { release(lane); resolve(); }; });
+      pending.set(sequence, finish);
+      try {
+        const writing = write({ ...frame, eventSequence: sequence });
+        frame = undefined;
+        await writing;
+        await consumed;
+      } catch (error) {
+        if (pending.delete(sequence)) finish();
+        throw error;
+      }
+    },
+    acknowledge(sequence) {
+      if (!Number.isSafeInteger(sequence) || sequence <= 0 || !pending.has(sequence)) {
+        throw new Error('Invalid SDK event credit');
+      }
+      const finish = pending.get(sequence);
+      pending.delete(sequence);
+      finish();
+    },
+    stop() {
+      closed = true;
+      for (const finish of pending.values()) finish();
+      pending.clear();
+      for (const lane of [data, control]) {
+        for (const waiting of lane.waiting.splice(0)) waiting(false);
+      }
+    },
+  };
+}
+
+export function session(sdk, send, onTransportError) {
   const queries = new Map(), callbacks = new Map(), discoveries = new Set();
   let nextCallback = 0, stopped = false;
-  const emit = value => send({ version, ...value });
+  const emit = async value => {
+    try {
+      const sending = send({ version, ...value });
+      value = undefined;
+      await sending;
+    }
+    catch (error) { onTransportError(error); throw error; }
+  };
   function cancelCallbacks(turnId) {
     for (const [id, callback] of callbacks) if (callback.turnId === turnId) {
       callbacks.delete(id); callback.finish(denied);
-      void emit({ type: 'callbackCancelled', turnId, callbackId: id });
+      void emit({ type: 'callbackCancelled', turnId, callbackId: id }).catch(() => {});
     }
   }
   function close(entry, error) {
     if (entry.closed) return;
     entry.closed = true;
-    queries.delete(entry.turnId);
     cancelCallbacks(entry.turnId);
     entry.controller.abort();
     entry.query.close();
-    void emit({ type: 'end', turnId: entry.turnId, ...(error ? { error: failure(error) } : {}) });
+    void emit({ type: 'end', turnId: entry.turnId, ...(error ? { error: failure(error) } : {}) })
+      .catch(() => {}).finally(() => queries.delete(entry.turnId));
   }
   function permission(entry, toolName, input, options) {
     if (entry.closed || options.signal?.aborted) return Promise.resolve(denied);
+    if (callbacks.size >= callbackLimit) return Promise.reject(capacity());
     return new Promise((resolve, reject) => {
       const callbackId = ++nextCallback;
       const abort = () => {
         if (!callbacks.delete(callbackId)) return;
         finish(denied);
-        void emit({ type: 'callbackCancelled', turnId: entry.turnId, callbackId });
+        void emit({ type: 'callbackCancelled', turnId: entry.turnId, callbackId }).catch(() => {});
       };
       const finish = (value, error) => {
         options.signal?.removeEventListener('abort', abort);
@@ -40,10 +108,11 @@ export function session(sdk, send) {
       callbacks.set(callbackId, { turnId: entry.turnId, finish });
       options.signal?.addEventListener('abort', abort, { once: true });
       void emit({ type: 'permission', turnId: entry.turnId, callbackId,
-        toolName, input, toolUseId: options.toolUseID });
+        toolName, input, toolUseId: options.toolUseID }).catch(() => {});
     });
   }
   async function discover(method, params) {
+    if (discoveries.size >= discoveryLimit) throw capacity();
     const controller = new AbortController();
     const query = sdk.query({ prompt: iterable([]), options: { ...params.options, abortController: controller } });
     const entry = { controller, query };
@@ -64,6 +133,7 @@ export function session(sdk, send) {
     if (stopped) throw new Error('SDK bridge stopped');
     if (method === 'query/start') {
       if (queries.has(params.turnId)) throw new Error('SDK query already exists');
+      if (queries.size >= queryLimit) throw capacity();
       const controller = new AbortController();
       const entry = { turnId: params.turnId, controller, closed: false };
       const options = { ...params.options, abortController: controller };
@@ -72,9 +142,11 @@ export function session(sdk, send) {
       queries.set(entry.turnId, entry);
       void (async () => {
         try {
-          for await (const message of entry.query) {
+          for await (let message of entry.query) {
             if (entry.closed) break;
-            await emit({ type: 'message', turnId: entry.turnId, message });
+            const sending = emit({ type: 'message', turnId: entry.turnId, message });
+            message = undefined;
+            await sending;
           }
           close(entry);
         } catch (error) { close(entry, error); }

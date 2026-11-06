@@ -122,6 +122,7 @@ impl<'a, 'engine, 'store, 'journal> TriageNative<'a, 'engine, 'store, 'journal> 
                 "principalId",
             )?,
             NativeOwnerIdentity {
+                backend: None,
                 service_node_id: text(target, "serviceNodeId")?,
                 host_id: Some(text(target, "hostId")?),
                 native_version: text(target, "nativeVersion")?,

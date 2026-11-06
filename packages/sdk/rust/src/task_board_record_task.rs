@@ -202,6 +202,11 @@ fn scheduling_context(task: &Json, comments: &mut Vec<Json>) -> IvyResult<()> {
 pub(super) fn json(task: &Json) -> IvyResult<Json> {
     let prior = findings::preserve_task(value::borrow(task))?;
     let mut current = object(&prior)?;
+    if let Some(route) = current.remove("nativeRoute") {
+        if current.get("nativeRoutes").is_none() {
+            current.insert("nativeRoutes", Json::Array(vec![route]));
+        }
+    }
     for key in [
         "nextSteps",
         "consumedSteps",

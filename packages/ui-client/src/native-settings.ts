@@ -5,55 +5,26 @@ import {
   modelsFrom,
   nativeModels,
   nativePermissionProfiles,
-  nativeRead,
   optionalTool,
 } from "./native.js";
+import { backendRead, nativeAccountRead, nativeMethod, nativeBackendKey } from './native-backends.js';
+import { accountExecutionProfile, readAccountExecutionDefaults } from './execution-defaults.js';
 export { effectiveNativeSettings, nativeConfiguredHome } from "./native-effective-settings.js";
-
-export const executionDefaultsPath = "/ivy-agent-execution-defaults";
-export const emptyExecutionDefaults = (): Agent.ExecutionDefaults => ({
-  model: null,
-  mode: null,
-  effort: null,
-  permission: null,
-});
-export async function readExecutionDefaults(client: RpcClient) {
-  const object = await client
-    .request("objects.stat", { path: executionDefaultsPath })
-    .catch((cause) => {
-      if ((cause as { code?: string }).code === "not_found") return null;
-      throw cause;
-    });
-  if (!object || object.effectivelyArchived) return null;
-  const value = await client.request("objects.read", {
-    objectId: object.id,
-    revision: object.currentRevision,
-  });
-  if (
-    value.object.contractKey !== "agent/execution-defaults" ||
-    value.revision.contractVersion !== "1.0.0" ||
-    value.content.encoding !== "json"
-  )
-    throw new Error(
-      "Agent execution defaults have a different document contract.",
-    );
-  return {
-    object,
-    document: value.content.value as unknown as Agent.ExecutionDefaultsDocument,
-  };
-}
 
 /** Each capability loads independently and retries after transient failures. */
 export function useNativeSettings(
   client: RpcClient,
   node: () => string,
   cwd: () => string,
+  backend: () => Agent.BackendIdentity | undefined = () => undefined,
+  creationDefaults = true,
 ) {
   const services = () => [node() ? "services/agent-manager/" + node() : "services/agent-manager"];
   const models = useRemote(
     async (signal) => {
       if (!node()) return { data: [] };
-      const result = await nativeModels(client, node(), signal);
+      const result = await nativeAccountRead(client, { serviceNodeId: node(), backend: backend() }, owner =>
+        nativeModels(client, owner.serviceNodeId, signal, owner.backend?.backendId), signal);
       if (!modelsFrom(result).length) throw new Error('The native server returned no available models.');
       return result;
     },
@@ -63,8 +34,8 @@ export function useNativeSettings(
   const modes = useRemote(
     async (signal) =>
       node() &&
-      (await optionalTool(client, node(), "codex.collaborationMode/list"))
-        ? nativeRead(client, node(), "codex.collaborationMode/list", {}, signal)
+      (await optionalTool(client, node(), nativeMethod(backend(), "collaborationMode/list")))
+        ? backendRead(client, { serviceNodeId: node(), backend: backend() }, "collaborationMode/list", {}, signal)
         : null,
     0,
     services,
@@ -72,19 +43,20 @@ export function useNativeSettings(
   const permissions = useRemote(
     async (signal) =>
       node() &&
-      (await optionalTool(client, node(), "codex.permissionProfile/list"))
-        ? nativePermissionProfiles(client, node(), cwd() || undefined, signal)
+      (await optionalTool(client, node(), nativeMethod(backend(), "permissionProfile/list")))
+        ? nativeAccountRead(client, { serviceNodeId: node(), backend: backend() }, owner =>
+            nativePermissionProfiles(client, owner.serviceNodeId, cwd() || undefined, signal, owner.backend?.backendId), signal)
         : null,
     0,
     services,
   );
   const config = useRemote(
     async (signal) =>
-      node() && cwd() && (await optionalTool(client, node(), "codex.config/read"))
-        ? nativeRead(
+      node() && cwd() && (await optionalTool(client, node(), nativeMethod(backend(), "config/read")))
+        ? backendRead(
             client,
-            node(),
-            "codex.config/read",
+            { serviceNodeId: node(), backend: backend() },
+            "config/read",
             { ...(cwd() ? { cwd: cwd() } : {}), includeLayers: false },
             signal,
           )
@@ -92,9 +64,8 @@ export function useNativeSettings(
     0,
     services,
   );
-  const defaults = useRemote(() => readExecutionDefaults(client), 0, [
-    "objects/agent/execution-defaults",
-  ]);
+  const defaults = useRemote(signal => creationDefaults ? readAccountExecutionDefaults(client, signal) : Promise.resolve(null), 0, ['objects/agent/account-execution-defaults']);
+  const profile = computed(() => accountExecutionProfile(defaults.value.value?.document, backend()));
   watch(cwd, () => {
     void config.refresh();
     void permissions.refresh();
@@ -107,5 +78,9 @@ export function useNativeSettings(
     void config.refresh();
     void defaults.refresh();
   };
-  return { models, modes, permissions, config, defaults, choices, refresh };
+  watch(() => [node(), nativeBackendKey(backend())].join('\u0000'), () => {
+    for (const capability of [models, modes, permissions, config]) capability.value.value = null;
+    void models.refresh(); void modes.refresh(); void permissions.refresh(); void config.refresh();
+  });
+  return { models, modes, permissions, config, defaults, profile, choices, refresh };
 }

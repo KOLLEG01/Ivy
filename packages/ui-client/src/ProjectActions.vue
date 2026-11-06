@@ -6,18 +6,20 @@ import { Pencil, Trash2 } from '@lucide/vue';
 import type { Agent, RpcClient } from '../../sdk/src/client.js';
 import { discover } from '../../sdk/src/client.js';
 import { useNativeAction } from './native-action';
+import { nativeMethod } from './native-backends';
+import { nativeStorageOwner } from './native-route';
 
-const props = defineProps<{ client: RpcClient; node: string; project: Agent.ProjectSummary }>();
+const props = defineProps<{ client: RpcClient; node: string; backend?: Agent.BackendIdentity | undefined; project: Agent.ProjectSummary }>();
 const emit = defineEmits<{ changed: [] }>();
 const mode = ref<'rename' | 'remove'>('rename'), open = ref(false), name = ref('');
-const action = useNativeAction(props.client, 'ivy:project-action:' + props.node + ':' + props.project.nativeId);
+const action = useNativeAction(props.client, 'ivy:project-action:' + nativeStorageOwner(props.node, props.backend) + ':' + props.project.nativeId, () => props.backend);
 const message = computed(() => action.error.value || (action.saved.value?.phase === 'failed' ? action.saved.value.detail : ''));
 const choose = (value: 'rename' | 'remove') => { mode.value = value; name.value = props.project.name; open.value = true; };
 async function apply() {
   if (action.locked.value) return;
   try {
     const method = mode.value === 'rename' ? 'project/update' : 'project/delete';
-    const binding = await discover(props.client, 'codex.' + method, { serviceNodeId: props.node });
+    const binding = await discover(props.client, nativeMethod(props.backend, method), { serviceNodeId: props.node });
     await action.start(mode.value === 'rename' ? 'Rename project' : 'Remove project', binding,
       { projectId: props.project.nativeId, ...(mode.value === 'rename' ? { name: name.value.trim() } : {}) });
   } catch (cause) { action.error.value = cause instanceof Error ? cause.message : String(cause); }
@@ -37,7 +39,7 @@ watch(() => action.saved.value?.phase, phase => { if (phase === 'succeeded') { o
     <DialogContent>
       <DialogHeader>
         <DialogTitle>{{ mode === 'rename' ? 'Rename project' : 'Remove project' }}</DialogTitle>
-        <DialogDescription>{{ mode === 'rename' ? 'Choose the project name shown by Codex.' : 'Remove “' + project.name + '” from Codex. Files in its working directories are kept.' }}</DialogDescription>
+        <DialogDescription>{{ mode === 'rename' ? 'Choose the project name shown by this account.' : 'Remove “' + project.name + '” from this account. Files in its working directories are kept.' }}</DialogDescription>
       </DialogHeader>
       <Field v-if="mode === 'rename'">
         <Label :for="'project-name-' + project.nativeId">Project name</Label>

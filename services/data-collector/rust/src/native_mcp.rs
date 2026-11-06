@@ -9,6 +9,7 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, Outcome, agent_schema::validate_agent,
+    native_backend::BackendIdentity,
 };
 use ivy_sdk::{
     native_evidence::NativeOwnerIdentity,
@@ -93,6 +94,7 @@ struct Inner {
     client: Arc<dyn RpcClient>,
     tools: Arc<ToolClients>,
     configuration: IvyJson,
+    backend: Option<BackendIdentity>,
     signal: CancellationToken,
     closed: CancellationToken,
     state: Arc<AsyncMutex<State>>,
@@ -112,6 +114,7 @@ impl NativeMcpSession {
         signal: CancellationToken,
         contexts: Contexts,
     ) -> IvyResult<Self> {
+        let backend = BackendIdentity::optional(configuration.get("backend"))?;
         if !absolute(&text(&configuration, "cwd")?) {
             return Err(IvyError::new(
                 "configuration_invalid",
@@ -122,6 +125,7 @@ impl NativeMcpSession {
             client,
             tools,
             configuration,
+            backend,
             signal,
             closed: CancellationToken::new(),
             state: Arc::new(AsyncMutex::new(State::default())),
@@ -134,6 +138,7 @@ impl NativeMcpSession {
             client: self.0.client.clone(),
             tools: self.0.tools.clone(),
             configuration: self.0.configuration.clone(),
+            backend: self.0.backend.clone(),
             signal,
             closed: self.0.closed.clone(),
             state: self.0.state.clone(),
@@ -150,21 +155,42 @@ impl NativeMcpSession {
     }
     async fn initialize(&self, state: &mut State) -> IvyResult<()> {
         if let Some(context) = &mut state.context {
-            same_epoch(
-                &owner(context, self.0.tools.clone(), &self.0.signal),
-                &context.epoch,
-            )
-            .await?;
-            if context.thread.is_none() {
-                let owner = owner(context, self.0.tools.clone(), &self.0.signal);
-                let operation = owner.operation(&context.start).await?;
-                context.thread = Some(started(result(context, &operation)?)?);
-                self.0.contexts.save(context).await?;
+            let native = owner(context, self.0.tools.clone(), &self.0.signal);
+            let status = native.status().await?;
+            if status.get("epoch").and_then(IvyJson::as_js_string) != Some(&context.epoch)
+                || context.pending.is_some()
+            {
+                if self.0.configuration.get("readOnly") != Some(&true.into()) {
+                    self.0.closed.cancel();
+                    return Err(unresolved());
+                }
+                let _cleanup = self.0.contexts.cleanup.lock().await;
+                self.0.contexts.mark_closing(context).await?;
+                if let Some(mut saved) = self.0.contexts.read(context.key()?).await? {
+                    retire_context(
+                        &self.0.contexts,
+                        &mut saved,
+                        self.0.client.clone(),
+                        self.0.tools.clone(),
+                        &mut state.dispatch,
+                    )
+                    .await?;
+                }
+                state.context = None;
+                state.dispatch = None;
+            } else {
+                if context.thread.is_none() {
+                    let operation = native.operation(&context.start).await?;
+                    context.thread = Some(started(result(context, &operation)?)?);
+                    self.0.contexts.save(context).await?;
+                }
+                return Ok(());
             }
-            return Ok(());
         }
+        let service_node_id = text(&self.0.configuration, "serviceNodeId")?;
+        let backend = self.0.backend.clone();
         let service = self.0.tools.service_tools(
-            text(&self.0.configuration, "serviceNodeId")?,
+            service_node_id.clone(),
             &[InterfaceRequirement {
                 namespace: "agent".into(),
                 interface_version: "1.0.0".into(),
@@ -173,12 +199,20 @@ impl NativeMcpSession {
         let status = service
             .call(
                 &"agent.status".into(),
-                object(),
+                BackendIdentity::select_arguments(backend.as_ref(), object())?,
                 None,
                 ToolCallOptions::default(),
             )
             .await?;
         validate_agent("Status", &status)?;
+        if status.get("serviceNodeId") != Some(&IvyJson::String(service_node_id))
+            || !BackendIdentity::matches(&status, backend.as_ref())
+        {
+            return Err(IvyError::new(
+                "native_owner_mismatch",
+                "The MCP status must come from the selected service, backend and account.",
+            ));
+        }
         if model::optional_text(&status, "state").as_deref() != Some("ready")
             || status.get("epoch").is_none_or(|v| v.is_null())
         {
@@ -193,6 +227,7 @@ impl NativeMcpSession {
             .request("system.status", object(), RequestOptions::default())
             .await?;
         let target = NativeOwnerIdentity {
+            backend,
             service_node_id: text(&status, "serviceNodeId")?,
             host_id: Some(text(&status, "hostId")?),
             native_version: text(&status, "nativeVersion")?,
@@ -205,24 +240,33 @@ impl NativeMcpSession {
             target.clone(),
             Self::options(&self.0.signal),
         );
+        let contract = owner.selected_contract().await?;
+        for method in [
+            "config/read",
+            "thread/start",
+            "mcpServer/tool/call",
+            "thread/unsubscribe",
+        ] {
+            contract.definition(&method.into())?;
+        }
         let cwd = self.0.configuration.required("cwd")?.clone();
         let config = {
-            let effective = self
-                .0
-                .tools
-                .native_service_tools(target.service_node_id.clone())?
-                .read(
-                    &"codex.config/read".into(),
-                    IvyJson::object([
-                        ("cwd", cwd.clone()),
-                        ("includeLayers", false.into()),
-                    ]),
-                    ToolCallOptions {
-                        request: Self::options(&self.0.signal),
-                        expected_caller_principal_id: Some(owner.caller().clone()),
-                    },
+            // The management selector fences account changes between status,
+            // discovery and this read. It creates no durable operation receipt.
+            let read = prepare(
+                &owner,
+                self.0.client.clone(),
+                "config/read",
+                IvyJson::object([("cwd", cwd.clone()), ("includeLayers", false.into())]),
+            )
+            .await?;
+            let observed = owner.interact(&read, None).await?;
+            let effective = observed.required("reply")?.get("result").ok_or_else(|| {
+                IvyError::new(
+                    "native_read_failed",
+                    "The selected backend configuration read failed.",
                 )
-                .await?;
+            })?;
             let servers = effective.required("config")?.get("mcp_servers");
             let mut overrides = object();
             for name in ["node_repl", "cua_repl"] {
@@ -294,7 +338,9 @@ async fn prepare(
     params: IvyJson,
 ) -> IvyResult<NativeOperationCall> {
     let method = JsString::from(method);
-    let binding = owner.binding(&method, None).await?;
+    let contract = owner.selected_contract().await?;
+    let expected = JsString::from(contract.definition_hash(&method)?);
+    let binding = owner.binding(&method, Some(&expected)).await?;
     Ok(NativeOperationCall {
         operation_id: new_operation_id(client, None).await?,
         method,
@@ -418,6 +464,132 @@ async fn discard_unsent(
     *context = saved;
     Ok(false)
 }
+async fn uncertain_read(
+    contexts: &Contexts,
+    context: &Context,
+    owner: &NativeOwner,
+) -> IvyResult<bool> {
+    if let Some(call) = &context.pending {
+        let operation = owner.operation(call).await?;
+        if operation.get("epoch").and_then(IvyJson::as_js_string) != Some(&context.epoch) {
+            return Err(unresolved());
+        }
+        if model::optional_text(&operation, "phase").as_deref() == Some("outcome_unknown") {
+            let id = context.task_id.clone().ok_or_else(unresolved)?;
+            let row = contexts
+                .store
+                .call(move |s| s.get(&id, false))
+                .await?
+                .ok_or_else(unresolved)?;
+            let mcp = row.required("task")?.required("mcp")?;
+            // This explicit operator contract also covers recovery of an already
+            // recorded read. Filesystem permissions alone never imply safe MCP reads.
+            if mcp.get("readOnly") != Some(&true.into())
+                || mcp.get("serviceNodeId").and_then(IvyJson::as_js_string)
+                    != Some(&context.owner.service_node_id)
+                || !BackendIdentity::matches(mcp, context.owner.backend.as_ref())
+                || call.method != JsString::from("mcpServer/tool/call")
+                || call.params.get("threadId").and_then(IvyJson::as_js_string)
+                    != context.thread.as_ref()
+                || call.params.get("server") != mcp.get("server")
+                || !mcp
+                    .get("tools")
+                    .and_then(IvyJson::as_array)
+                    .is_some_and(|tools| tools.iter().any(|t| Some(t) == call.params.get("tool")))
+            {
+                return Err(unresolved());
+            }
+            return Ok(true);
+        } else {
+            settled(context, &operation)?;
+        }
+    }
+    Ok(false)
+}
+/// A manager epoch change is not a native process stop. In particular, an
+/// external server can still contain the old context and its outstanding work.
+async fn retired_epoch(
+    contexts: &Contexts,
+    context: &Context,
+    owner: &NativeOwner,
+    client: Arc<dyn RpcClient>,
+) -> IvyResult<bool> {
+    let status = owner.status().await?;
+    let epoch = text(&status, "epoch")?;
+    if epoch == context.epoch {
+        return Ok(false);
+    }
+    if status.get("state") != Some(&"ready".into()) {
+        return Err(unresolved());
+    }
+    let thread = context.thread.as_ref().ok_or_else(unresolved)?;
+    let mut uncertain = uncertain_read(contexts, context, owner).await?;
+    if context.unsubscribe.is_some() {
+        // Even uncertain local cleanup keeps its original identity. It cannot
+        // affect an external system, but is never resent into the new epoch.
+        uncertain = true;
+    }
+    let stopped = status.get("connection").is_some_and(|connection| {
+        connection.get("ownsServer") == Some(&true.into())
+            && connection.get("mode") == Some(&"owned-stdio".into())
+    }) && status
+        .get("processStops")
+        .and_then(IvyJson::as_array)
+        .is_some_and(|stops| {
+            stops.iter().any(|stop| {
+                stop.get("epoch").and_then(IvyJson::as_js_string) == Some(&context.epoch)
+            })
+        });
+    let mut proof = IvyJson::object([
+        ("epoch", IvyJson::String(epoch.clone())),
+        ("observedAt", status.required("observedAt")?.clone()),
+        (
+            "reason",
+            if stopped {
+                "native_process_stopped"
+            } else {
+                "context_absent"
+            }
+            .into(),
+        ),
+    ]);
+    if !stopped {
+        let call = prepare(
+            owner,
+            client,
+            "thread/loaded/list",
+            IvyJson::object([("limit", 100.0.into())]),
+        )
+        .await?;
+        same_epoch(owner, &epoch).await?;
+        let observation = owner.interact(&call, None).await?;
+        if observation.get("epoch").and_then(IvyJson::as_js_string) != Some(&epoch) {
+            return Err(unresolved());
+        }
+        let value = observation.required("reply")?.required("result")?;
+        // A partial page or an ambiguous reply does not prove absence.
+        if value
+            .get("nextCursor")
+            .is_some_and(|cursor| !cursor.is_null())
+            || value
+                .required("data")?
+                .as_array()
+                .ok_or_else(unresolved)?
+                .iter()
+                .any(|id| id.as_js_string() == Some(thread))
+        {
+            return Err(unresolved());
+        }
+        same_epoch(owner, &epoch).await?;
+        proof.insert("operationId", IvyJson::String(call.operation_id));
+    }
+    if uncertain {
+        contexts.quarantine(context, proof).await?;
+    } else {
+        contexts.retire(context).await?;
+    }
+    Ok(true)
+}
 /// Only this context's original receipts authorize retirement. Unknown outcomes
 /// remain in SQLite; neither starts nor uncertain unsubscriptions are replayed.
 async fn retire_context(
@@ -428,6 +600,9 @@ async fn retire_context(
     admission: &mut Option<Dispatch>,
 ) -> IvyResult<()> {
     let owner = owner(context, tools, &CancellationToken::new());
+    if retired_epoch(contexts, context, &owner, client.clone()).await? {
+        return Ok(());
+    }
     if context.thread.is_none() {
         let operation = owner.operation(&context.start).await?;
         if model::optional_text(&operation, "phase").as_deref() == Some("failed") {
@@ -439,10 +614,7 @@ async fn retire_context(
         context.thread = Some(started(result(context, &operation)?)?);
         contexts.save(context).await?;
     }
-    if let Some(call) = &context.pending {
-        let operation = owner.operation(call).await?;
-        settled(context, &operation)?;
-    }
+    let uncertain = uncertain_read(contexts, context, &owner).await?;
     if let Some(call) = &context.unsubscribe {
         let operation = owner.operation(call).await?;
         result(context, &operation)?;
@@ -484,7 +656,23 @@ async fn retire_context(
         };
         result(context, &operation)?;
     }
-    contexts.retire(context).await
+    if uncertain {
+        contexts
+            .quarantine(
+                context,
+                IvyJson::object([
+                    ("reason", "read_context_unsubscribed".into()),
+                    ("epoch", IvyJson::String(context.epoch.clone())),
+                    (
+                        "operationId",
+                        IvyJson::String(context.unsubscribe.as_ref().unwrap().operation_id.clone()),
+                    ),
+                ]),
+            )
+            .await
+    } else {
+        contexts.retire(context).await
+    }
 }
 impl TaskMcp for NativeMcpSession {
     fn call(&self, tool: JsString, args: IvyJson) -> ServiceFuture<IvyJson> {

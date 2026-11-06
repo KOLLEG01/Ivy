@@ -136,6 +136,15 @@ async fn roots(staging:PathBuf)->IvyResult<Vec<PathBuf>>{
     }).await
 }
 async fn record_at(staging:PathBuf,root:PathBuf)->IvyResult<Option<IvyJson>>{blocking(move||read_record(&staging,&root)).await}
+pub(crate) async fn compiler_cache_referenced(staging: PathBuf) -> IvyResult<bool> {
+    for root in roots(staging.clone()).await? {
+        match record_at(staging.clone(), root).await {
+            Ok(Some(record)) if record.get("phase") == Some(&"compacted".into()) => {},
+            _ => return Ok(true),
+        }
+    }
+    Ok(false)
+}
 async fn checked_boundary(staging:PathBuf,root:PathBuf)->IvyResult<PathBuf>{blocking(move||owned_root(&staging,&root)).await}
 async fn actual(path:PathBuf)->IvyResult<PathBuf>{blocking(move||internal(realpath(&path))).await}
 fn path_field(value:&IvyJson,key:&str)->IvyResult<PathBuf>{crate::config::path_value(value.required(key)?)}
@@ -240,13 +249,14 @@ pub async fn compact_preparations(host:IvyJson,only_build_id:Option<String>,meas
     }).await)?
 }
 async fn compact_all(host:&IvyJson,journal:&HostJournal,only:Option<String>,measure:bool,node:Option<&NodeRuntime>)->IvyResult<IvyJson>{
-    let staging=path_field(host,"stagingRoot")?;let mut entries=Vec::new();
+    let staging=path_field(host,"stagingRoot")?;let mut entries=Vec::new();let mut compacted=0;
     for root in roots(staging.clone()).await?{
         let id=root.file_name().and_then(|v|v.to_str()).ok_or_else(IvyError::internal)?[6..].to_owned();
         let mut entry=IvyJson::object([("preparationId",id.into()),("action","retained".into()),("candidateId",IvyJson::Null),("reclaimedBytes",IvyJson::Number(0.0)),("code",IvyJson::Null)]);
         let mut lock=None;
         let operation=async{
             let Some(record)=record_at(staging.clone(),root.clone()).await?else{entry.insert("code","preparation_unrecognized".into());return Ok(true)};
+            if !measure && compacted>=64 { entry.insert("code","collection_budget".into());return Ok(true); }
             let build=record.required("buildId")?.as_str()?;if only.as_ref().is_some_and(|filter|!filter.is_empty()&&filter!=&build){return Ok(false)}
             entry.insert("candidateId",record.get("candidate").and_then(|v|v.get("candidateId")).cloned().unwrap_or(IvyJson::Null));
             lock=Some(ExecutorLock::acquire(staging.join("build-locks").join(build.get(7..).unwrap_or_default()),false).await?);
@@ -254,7 +264,9 @@ async fn compact_all(host:&IvyJson,journal:&HostJournal,only:Option<String>,meas
             let phase=record.required("phase")?.as_str()?;
             if phase=="building"{save_preparation(staging.clone(),record_change(&record,"unknown","preparation_interrupted".into())).await?;}
             if !["publishing","verified","compacted"].contains(&phase.as_str())&&!(phase=="unknown"&&record.get("candidate").is_some_and(|v|!v.is_null())){entry.insert("code",record.get("errorCode").filter(|v|!v.is_null()).cloned().unwrap_or("preparation_interrupted".into()));return Ok(true)}
-            entry=compact_preparation_locked(journal,record,false,measure,node).await?;Ok::<bool,IvyError>(true)
+            entry=compact_preparation_locked(journal,record,false,measure,node).await?;
+            if ["compacted","recovered"].iter().any(|a|entry.get("action")==Some(&IvyJson::from(*a))){compacted+=1;}
+            Ok::<bool,IvyError>(true)
         }.await;
         if let Some(lock)=lock{lock.close().await?;}
         match operation{Ok(true)=>entries.push(entry),Ok(false)=>{},Err(e)=>{if e.code=="executor_already_running"{entry.insert("action","busy".into());}entry.insert("code",e.code.into());entries.push(entry);}}

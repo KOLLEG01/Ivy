@@ -4,7 +4,7 @@ use crate::{
     rpc::RequestFuture,
 };
 use ivy_contracts::{
-    checked_native_contract::CheckedNativeContracts, json::canonical,
+    checked_native_contract::CheckedNativeContracts, json::canonical_size,
     native_contract::NativeContract,
 };
 use std::{collections::HashSet, future::Future, pin::Pin, sync::Arc};
@@ -299,7 +299,7 @@ pub async fn read_native_turn_contents(
     let mut pages = Vec::new();
     let mut visited = HashSet::new();
     let mut cursor = IvyJson::Null;
-    let mut bytes = canonical(snapshot, maximum)?.len();
+    let mut bytes = canonical_size(snapshot, maximum)?;
     loop {
         let observed = owner
             .read(
@@ -329,10 +329,10 @@ pub async fn read_native_turn_contents(
                 "native_turn_changed",
                 "The native turn changed while reading its contents.",
             )?;
-            canonical(&full, maximum)?;
+            canonical_size(&full, maximum)?;
             return Ok(full);
         }
-        let size = canonical(&observed, maximum)?.len();
+        let size = canonical_size(&observed, maximum)?;
         require(
             size <= maximum.saturating_sub(bytes),
             "native_turn_contents_limit",

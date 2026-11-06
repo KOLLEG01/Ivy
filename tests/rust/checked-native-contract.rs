@@ -46,7 +46,7 @@ fn capture(result: IvyResult<IvyJson>) -> IvyJson {
 #[test]
 fn claude_catalog_keeps_saved_plan_identity_and_selects_rust_sdk_by_default() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let catalogs = CheckedNativeContracts::new(repo);
+    let catalogs = CheckedNativeContracts::new(&repo);
     let version = "0.142.3".into();
     let rust_identity = IvyJson::object([
         (
@@ -75,8 +75,37 @@ fn claude_catalog_keeps_saved_plan_identity_and_selects_rust_sdk_by_default() {
     let saved = catalogs
         .checked_native_contract(&version, Some(&saved_identity))
         .unwrap();
-    assert_eq!(current.catalog_hash(), rust.catalog_hash());
+    let lock = parse(
+        &std::fs::read_to_string(repo.join("services/agent-manager/claude/adapter.lock.json"))
+            .unwrap(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(
+        current.catalog().get("nativeExecutableHash"),
+        lock.get("bundleHash")
+    );
+    assert_ne!(current.catalog_hash(), rust.catalog_hash());
+    assert_ne!(rust.catalog_hash(), saved.catalog_hash());
     assert_ne!(current.catalog_hash(), saved.catalog_hash());
+    let mismatched_build = IvyJson::object([
+        (
+            "sourceHash",
+            rust_identity.get("sourceHash").unwrap().clone(),
+        ),
+        (
+            "nativeExecutableHash",
+            lock.get("bundleHash").unwrap().clone(),
+        ),
+    ]);
+    assert_eq!(
+        catalogs
+            .checked_native_contract(&version, Some(&mismatched_build))
+            .err()
+            .unwrap()
+            .code,
+        "native_catalog_mismatch"
+    );
     // Saved TaskBoard plans pin the source hash even after the live owner changes.
     let saved_plan = IvyJson::object([(
         "sourceHash",
@@ -175,7 +204,10 @@ fn candidate_reuse_keeps_file_changes_errors_and_failed_selections_fresh() {
         "aarch64" => "arm64",
         other => other,
     };
-    write(&directory.join(format!("catalog.{platform}-{architecture}.json")), &catalog);
+    write(
+        &directory.join(format!("catalog.{platform}-{architecture}.json")),
+        &catalog,
+    );
     let default = store.checked_native_contract(&version, None).unwrap();
     assert!(Arc::ptr_eq(&selected, &default));
 

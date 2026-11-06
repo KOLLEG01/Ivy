@@ -191,13 +191,12 @@ pub async fn prepare_candidate(
     runtime: PreparationRuntime,
 ) -> IvyResult<IvyJson> {
     internal(
-        tokio::spawn(prepare(
-            snapshot,
-            component_id,
-            config,
-            bootstrap_root,
-            runtime,
-        ))
+        tokio::spawn(async move {
+            let lease = source::storage_lease(field(&config, "stagingRoot")?).await?;
+            let result = prepare(snapshot, component_id, config, bootstrap_root, runtime).await;
+            lease.close().await?;
+            result
+        })
         .await,
     )?
 }
@@ -307,6 +306,7 @@ async fn prepare(
                 runtime.node.as_ref(),
             )
             .await?;
+            crate::storage_retention::candidate_used(&config, &candidate).await?;
             return Ok(candidate);
         }
         let previous: IvyResult<IvyJson> = async {
@@ -323,7 +323,7 @@ async fn prepare(
         }
         .await;
         match previous {
-            Ok(candidate) => return Ok(candidate),
+            Ok(candidate) => { crate::storage_retention::candidate_used(&config, &candidate).await?; return Ok(candidate); },
             Err(error) if error.code == "not_found" => {}
             Err(error) => return Err(error),
         }
@@ -356,7 +356,7 @@ async fn prepare(
         environment.insert("IVY_BUILD_ID".into(), build_id.clone().into());
         environment.insert(
             "IVY_BUILD_CACHE_ROOT".into(),
-            staging.join("build-cache").into_os_string(),
+            dependency_cache::compiler::begin(staging.clone()).await?.into_os_string(),
         );
         progress
             .step("copying-source".into(), StepOptions::default())

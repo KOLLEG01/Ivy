@@ -9,7 +9,7 @@ use crate::{
     journal_store::Contracts,
     lifecycle_journal::{LifecycleJournal, LifecyclePages},
     native_lifecycle::LifecycleStore,
-    native_plan::read_plan,
+    native_plan::{matches_task_primary, owner, read_plan},
     native_recovery::fresh_context_recovery,
     wake::{WakeStore, should_wake, validate_dependencies},
 };
@@ -17,7 +17,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     checked_native_contract::CheckedNativeContracts, hash::digest, json::canonical,
-    limits::JSON_OBJECT_CONTENT_BYTES, whatwg_url::parse_url,
+    limits::JSON_OBJECT_CONTENT_BYTES, native_backend::BackendIdentity, whatwg_url::parse_url,
 };
 use ivy_sdk::{
     native_evidence::native_instant,
@@ -453,6 +453,12 @@ impl<S: CheckStore> TaskChecks<'_, S> {
             "No work or new input is pending.",
         )?;
         let plan = read_plan(self.store, self.catalogs, intent).await?;
+        let backend = BackendIdentity::optional(target.get("backend"))?;
+        require(
+            BackendIdentity::matches(&plan, backend.as_ref()),
+            "task_board_target_mismatch",
+            "The native plan must retain its selected backend and account.",
+        )?;
         plan_semantics(&plan)?;
         if !f(&plan, "location").is_null() {
             require(
@@ -477,20 +483,37 @@ impl<S: CheckStore> TaskChecks<'_, S> {
                 && eq(&node, "serviceName", "agent-manager")
                 && f(&node, "ready").as_bool() == Some(true)
                 && f(&node, "connected").as_bool() == Some(true)
-                && f(&node, "nativeVersion") == f(&plan, "nativeVersion"),
+                && (backend.is_some() || f(&node, "nativeVersion") == f(&plan, "nativeVersion")),
             "task_board_target_unavailable",
             "The selected native owner is not ready at the exact plan version.",
         )?;
+        if backend.is_some() {
+            let status = crate::native_inspector::management_read(
+                self.tools,
+                s(target, "serviceNodeId")?,
+                "status",
+                BackendIdentity::select_arguments(backend.as_ref(), Json::Object(vec![]))?,
+            )
+            .await?;
+            ivy_sdk::native_evidence::validate_native_status(
+                &status,
+                &owner(self.catalogs, target, &plan)?,
+                Some("task_board_target_unavailable"),
+            )?;
+        }
         for (method, key) in [
             ("thread/start", "threadStart"),
             ("thread/resume", "threadResume"),
             ("turn/start", "turnStart"),
             ("turn/interrupt", "turnInterrupt"),
         ] {
-            let name = JsString::from(format!("codex.{method}"));
+            let name = JsString::from(format!(
+                "{}.{method}",
+                backend.as_ref().map_or("codex", BackendIdentity::id)
+            ));
             let tool = self
                 .tools
-                .native_service_tools(s(&node, "serviceNodeId")?.clone())?
+                .native_backend_tools(s(&node, "serviceNodeId")?.clone(), backend.as_ref())?
                 .binding(&name, None)
                 .await?;
             let tool = tool.value();
@@ -510,9 +533,7 @@ impl<S: CheckStore> TaskChecks<'_, S> {
         )?;
         if !f(task, "primaryResourceRef").is_null() {
             require(
-                f(f(task, "primaryResourceRef"), "serviceNodeId") == f(target, "serviceNodeId")
-                    && eq(f(task, "primaryResourceRef"), "namespace", "codex")
-                    && eq(f(task, "primaryResourceRef"), "kind", "thread"),
+                matches_task_primary(target, task)?,
                 "task_board_primary_mismatch",
                 "The primary context must remain on its original selected native owner.",
             )?;

@@ -354,6 +354,7 @@ async fn outlook_and_teams_preserve_page_continuations_and_gap_backoff() {
         "secretary-principal".into(),
         NativeOwnerIdentity {
             service_node_id: "fixture.agent".into(),
+            backend: None,
             host_id: Some("fixture-host".into()),
             native_version: "1".into(),
             native_executable_hash: format!("sha256:{}", "a".repeat(64)).into(),

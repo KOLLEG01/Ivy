@@ -15,6 +15,7 @@ use crate::{
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     checked_native_contract::CheckedNativeContracts, hash::hash_json,
+    native_backend::BackendIdentity,
 };
 use ivy_sdk::{
     native_plan::{NativePlanKind, save_native_plan, validate_native_plan_draft},
@@ -236,20 +237,28 @@ impl<'a, S: Store, C: Fn() -> String, P: Contracts, E: AdmissionExecution>
                 )?
                 .call(
                     &"agent.resolveProject".into(),
-                    Json::object([
-                        (
-                            "selection",
-                            Json::object([
-                                ("kind", "existing".into()),
-                                ("cwd", f(location, "cwd").clone()),
-                            ]),
-                        ),
-                        ("expectedProjectId", f(location, "projectId").clone()),
-                    ]),
+                    BackendIdentity::select_arguments(
+                        contract.backend(),
+                        Json::object([
+                            (
+                                "selection",
+                                Json::object([
+                                    ("kind", "existing".into()),
+                                    ("cwd", f(location, "cwd").clone()),
+                                ]),
+                            ),
+                            ("expectedProjectId", f(location, "projectId").clone()),
+                        ]),
+                    )?,
                     None,
                     ToolCallOptions::default(),
                 )
                 .await?;
+                require(
+                    BackendIdentity::matches(&observed, contract.backend()),
+                    "task_board_target_mismatch",
+                    "The plan project must retain its selected backend and account.",
+                )?;
                 require(
                     f(&observed, "cwd") == f(location, "cwd"),
                     "task_board_project_mismatch",

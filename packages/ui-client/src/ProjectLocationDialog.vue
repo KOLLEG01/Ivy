@@ -13,6 +13,7 @@ const open = defineModel<boolean>("open", { default: false });
 defineProps<{
   client: RpcClient;
   node: string;
+  backend?: Agent.BackendIdentity | undefined;
   scope: string;
   host?: string | undefined;
   defaults?: Agent.ProjectsResult["defaults"];
@@ -39,6 +40,8 @@ const select = (location: Agent.ProjectLocation) => {
         v-if="open"
         :client="client"
         :node="node"
+        :backend="backend"
+        :key="JSON.stringify([node, backend])"
         :scope="scope"
         :host="host"
         :defaults="defaults"

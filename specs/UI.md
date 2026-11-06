@@ -99,11 +99,27 @@ Console must remain useful without registered apps/providers. A failed request c
 navigation/views. Host reports are cached observations; build/recovery stays with host tools.
 HostConfig secrets use the [same protected projection](DEPLOYMENT.md) in Settings and generic reads.
 
-AgentUI shows resolved native model, working mode, reasoning effort and permission defaults in both composers. Capability reads recover independently and retain successful options during refresh. Hive settings store separate Codex and Claude profiles at `/ivy-agent-execution-defaults`; null fields inherit native configuration and profiles apply to new work. Completion notices open the complete conversation; explicit turn links show a scope banner only when other turns are excluded.
+AgentUI groups services by physical host and keeps provider/account selection explicit. Task navigation reads one visible page, with earlier/later navigation and existing live invalidation; projects remain a bounded catalog. Namespace and full account identity belong to project, thread, unread, draft, queue, scroll and output-cache keys. New tasks require an explicit account. Account changes retain separate drafts and never move a conversation or pending action.
+
+Both composers show resolved native model, working mode, reasoning effort, permission and speed. Capability reads recover independently. New tasks resolve the selected account's native configuration and its full-identity Hive profile at `/ivy-agent-account-execution-defaults` (at most 128 profiles). The old provider-wide document remains separate; copying a profile into an account is explicit. Existing conversations never apply creation defaults. Default edits retain their CAS base across refreshes and retry an uncertain write with its original mutation ID. Speed requires native method support and the selected model's advertised tiers; the pinned Claude adapter has no tier implementation. Standard sends native null. Drafts, first messages and queued messages retain the chosen tier.
+
+Host discovery uses the same bounded complete registry loader in AgentUI, TaskBoard and usage. Native reads, actions, files, images, limits and input controls retain their account. Host usage presents one physical host with account-specific readings. TaskBoard conversation links use the pinned original Run and matching resource reference, never current creation defaults. Completion notices open the complete conversation; explicit turn links show a scope banner only when other turns are excluded.
+
+Attachment preparation encodes Blob slices and awaits each upload before preparing the next. New admission allows eight files, 8 MiB per file and 32 MiB of queued raw files. Queued preparation retains the account selected when files were added; removed or abandoned files do not dispatch new uploads. Existing staged references remain intact. Server staging bounds decoding across accounts and sweeps only a small slice of its own flat retention tree per upload.
 
 `IvyInternal` tasks produce no browser notices, unread badges or activity-triggered inventory reads. Determine membership from native project IDs, falling back to containing project roots only when membership is absent. Keep native lifecycle events and pending inputs available to their owners and manually opened conversations.
 
 Native actions show waiting on their submit button and reconcile the original receipt automatically without replaying mutations. Keep routine pending and successful receipts out of the conversation. Confirmed failures appear immediately; after two minutes, distinguish work still in progress from an unconfirmed result with concise feedback. Retain the draft and operation identity across reload, and offer a retry only after the original owner confirms absence.
+
+Scoped native actions retain the complete backend/provider/account and exact caller-bound
+Agent envelope before dispatch. Provider parameters stay unchanged. Receipt checks bind the
+original executable, method and request hash; compact checkpoints prevent regression and
+terminal-result replacement without retaining a second native payload. Reads always consult
+the original account. A retry keeps the complete call and ID, requires that account to remain
+selected, and cannot turn an earlier uncertain dispatch into a definite failure. Secret
+answers retain only identity and hashes in browser storage; re-entry must match the original.
+Pending-input schemas, current snapshots and live hints use the same account. Requests
+retaining another service owner remain visible and unanswerable through the current route.
 
 Display the native failure message returned to the original caller. Refresh a retained terminal failure once when opening its view; checking its receipt never resends the action. TaskBoard action notices can be dismissed after a confirmed terminal outcome without changing the original workflow receipt.
 

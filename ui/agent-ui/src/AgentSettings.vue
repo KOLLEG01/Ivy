@@ -11,7 +11,7 @@ defineProps<{ node: string }>();
 <template>
   <div class="mx-auto w-full max-w-4xl px-4 py-6 md:px-8">
     <PageHeader title="Hive settings" />
-    <SettingsSection :title="tr('Defaults je Servertyp', 'Defaults by server type')" :description="tr('Getrennte Vorgaben für Codex und Claude.', 'Separate defaults for Codex and Claude.')"><AgentDefaults /></SettingsSection>
+    <SettingsSection :title="tr('Defaults je Account', 'Defaults by account')" :description="tr('Getrennte Vorgaben für jeden Provider und Account.', 'Separate defaults for each provider and account.')"><AgentDefaults /></SettingsSection>
     <SettingsSection
       title="Agent instructions"
       description="AgentManager uses the packaged template until a Hive AGENTS.md override is enabled here."

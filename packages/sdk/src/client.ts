@@ -8,6 +8,7 @@ import { RequestQueue } from "./request-queue.js";
 import { ReadBatcher } from "./read-batcher.js";
 import { isReadRequest } from "../../contracts/src/read-request.js";
 import type {
+  Agent,
   Operation,
   OperationName,
   Params,
@@ -401,6 +402,7 @@ function selectedTools(
   serviceNodeId: string,
   requirements: readonly InterfaceRequirement[],
   dynamicNamespace: string | null,
+  backend: Agent.BackendIdentity | null = null,
 ): BoundToolClient {
   let providers = toolClients.get(client);
   if (!providers) {
@@ -415,6 +417,7 @@ function selectedTools(
         a.namespace.localeCompare(b.namespace),
       ),
       dynamicNamespace,
+      backend,
     });
   let selected = providers.get(key);
   if (!selected) {
@@ -453,7 +456,13 @@ export function nativeServiceTools(
   client: RpcClient,
   serviceNodeId: string,
 ): BoundToolClient {
-  return selectedTools(client, serviceNodeId, [], "codex");
+  return nativeBackendTools(client, serviceNodeId);
+}
+
+/** Select the native namespace of one explicit backend; definitions remain hash-fenced. */
+export function nativeBackendTools(client: RpcClient, serviceNodeId: string,
+  backend?: Agent.BackendIdentity): BoundToolClient {
+  return selectedTools(client, serviceNodeId, [], backend?.backendId ?? "codex", backend ?? null);
 }
 
 export function responseValue(frame: unknown, id: string): unknown {

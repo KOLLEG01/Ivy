@@ -1,5 +1,6 @@
 //! Native backup ownership and references, using the executing host context.
 use crate::{
+    agent_backends::{AgentBackend, configured_backends},
     codex_home::{
         HomeContext, expected_server_home_json, instance_owned_codex_home_data_json,
         uses_external_app_server_json,
@@ -47,11 +48,22 @@ impl NativeBackupPolicy {
         &self,
         config: &IvyJson,
         instance: &IvyJson,
+        backend: &AgentBackend<'_>,
     ) -> IvyResult<Option<JsString>> {
-        let paths = service_paths_for_style(config, instance, self.storage.paths.style)?;
+        let paths = if backend.data_root.is_none() {
+            Some(service_paths_for_style(
+                config,
+                instance,
+                self.storage.paths.style,
+            )?)
+        } else {
+            None
+        };
         instance_owned_codex_home_data_json(
-            instance.required("settings")?,
-            paths.get("data"),
+            backend.settings,
+            backend
+                .data_root
+                .or_else(|| paths.as_ref().and_then(|paths| paths.get("data"))),
             &self.homes(),
         )
     }
@@ -60,31 +72,35 @@ impl NativeBackupPolicy {
         let mut rows = Vec::new();
         for instance in agents(config)? {
             let settings = instance.get("settings").ok_or_else(IvyError::internal)?;
-            if uses_external_app_server_json(settings)? {
-                continue;
+            for backend in configured_backends(settings, None)? {
+                let settings = backend.settings;
+                if uses_external_app_server_json(settings)? {
+                    continue;
+                }
+                let Some(home) = self.owned_home(config, instance, &backend)? else {
+                    continue;
+                };
+                let path = node_path::join(
+                    self.storage.paths.style,
+                    &[home, "tmp".into(), "arg0".into()],
+                );
+                let path = storage_path(config, &path, &self.storage)?;
+                let prefix: Vec<u16> = "state/".encode_utf16().collect();
+                let path = if path.0.starts_with(&prefix) {
+                    JsString(path.0[prefix.len()..].to_vec())
+                } else {
+                    path
+                };
+                let mut row = IvyJson::object([
+                    ("instanceId", instance.required("instanceId")?.clone()),
+                    ("path", IvyJson::String(path)),
+                    ("kind", "codex-arg0-helper-cache".into()),
+                ]);
+                if let Some(identity) = &backend.identity {
+                    row.insert("backend", identity.json());
+                }
+                rows.push(row);
             }
-            let paths = service_paths_for_style(config, instance, self.storage.paths.style)?;
-            let Some(home) =
-                instance_owned_codex_home_data_json(settings, paths.get("data"), &self.homes())?
-            else {
-                continue;
-            };
-            let path = node_path::join(
-                self.storage.paths.style,
-                &[home, "tmp".into(), "arg0".into()],
-            );
-            let path = storage_path(config, &path, &self.storage)?;
-            let prefix: Vec<u16> = "state/".encode_utf16().collect();
-            let path = if path.0.starts_with(&prefix) {
-                JsString(path.0[prefix.len()..].to_vec())
-            } else {
-                path
-            };
-            rows.push(IvyJson::object([
-                ("instanceId", instance.required("instanceId")?.clone()),
-                ("path", IvyJson::String(path)),
-                ("kind", "codex-arg0-helper-cache".into()),
-            ]));
         }
         self.sort(&mut rows, "path")?;
         Ok(rows)
@@ -94,38 +110,44 @@ impl NativeBackupPolicy {
         let mut rows = Vec::new();
         for instance in agents(config)? {
             let settings = instance.get("settings").ok_or_else(IvyError::internal)?;
-            if !uses_external_app_server_json(settings)? {
-                let paths = service_paths_for_style(config, instance, self.storage.paths.style)?;
-                if instance_owned_codex_home_data_json(settings, paths.get("data"), &self.homes())?
-                    .is_some()
-                {
-                    continue;
+            for backend in configured_backends(settings, None)? {
+                let settings = backend.settings;
+                if !uses_external_app_server_json(settings)? {
+                    if self.owned_home(config, instance, &backend)?.is_some() {
+                        continue;
+                    }
                 }
-            }
-            let selected = expected_server_home_json(settings, &self.homes())?;
-            let Some(home) = selected
-                .as_js_string()
-                .filter(|home| node_path::is_absolute(self.storage.paths.style, home))
-            else {
-                return Err(IvyError::new("target_conflict", SHARED_HOME_CONFLICT));
-            };
-            // Preserve the original short-circuit: shared-home roots are built
-            // only after the external/owned branch and absolute-string check.
-            let areas = host_storage_areas(config, &self.storage)?;
-            for root in areas.iter().map(|a| Some(&a.path)).chain([
-                config.get("artifactRoot").and_then(IvyJson::as_js_string),
-                config.get("stagingRoot").and_then(IvyJson::as_js_string),
-            ]) {
-                let root = root.ok_or_else(IvyError::internal)?;
-                if self.storage.paths.inside(root, home) || self.storage.paths.inside(home, root) {
+                let selected = expected_server_home_json(settings, &self.homes())?;
+                let Some(home) = selected
+                    .as_js_string()
+                    .filter(|home| node_path::is_absolute(self.storage.paths.style, home))
+                else {
                     return Err(IvyError::new("target_conflict", SHARED_HOME_CONFLICT));
+                };
+                // Preserve the original short-circuit: shared-home roots are built
+                // only after the external/owned branch and absolute-string check.
+                let areas = host_storage_areas(config, &self.storage)?;
+                for root in areas.iter().map(|a| Some(&a.path)).chain([
+                    config.get("artifactRoot").and_then(IvyJson::as_js_string),
+                    config.get("stagingRoot").and_then(IvyJson::as_js_string),
+                ]) {
+                    let root = root.ok_or_else(IvyError::internal)?;
+                    if self.storage.paths.inside(root, home)
+                        || self.storage.paths.inside(home, root)
+                    {
+                        return Err(IvyError::new("target_conflict", SHARED_HOME_CONFLICT));
+                    }
                 }
+                let mut row = IvyJson::object([
+                    ("instanceId", instance.required("instanceId")?.clone()),
+                    ("path", selected),
+                    ("kind", "external-user-state".into()),
+                ]);
+                if let Some(identity) = &backend.identity {
+                    row.insert("backend", identity.json());
+                }
+                rows.push(row);
             }
-            rows.push(IvyJson::object([
-                ("instanceId", instance.required("instanceId")?.clone()),
-                ("path", selected),
-                ("kind", "external-user-state".into()),
-            ]));
         }
         self.sort(&mut rows, "instanceId")?;
         Ok(rows)

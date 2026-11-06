@@ -3,9 +3,16 @@ use crate::{
     local_state::{LocalAgentState, Pin, SavedState},
     native_clock::NATIVE_CLOCK_PRINCIPAL,
     native_journal::{Identity, NativeJournal},
+    service_work::{
+        AgentWork,
+        run::{Reply, Sender},
+    },
 };
 use ivy_contracts::{
-    IvyError, IvyJson, IvyResult, JsString, agent_schema::validate_agent, hash::hash_json,
+    IvyError, IvyJson, IvyResult, JsString,
+    agent_schema::validate_agent,
+    hash::{hash_json, hash_object},
+    native_backend::NativeProvider,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -13,11 +20,19 @@ use std::{
     pin::Pin as FuturePin,
     sync::{Arc, Mutex},
 };
-use tokio::sync::watch;
+
+#[path = "native_operation_admission.rs"]
+mod admission;
 
 pub type StoreFuture<'a, T> = FuturePin<Box<dyn Future<Output = IvyResult<T>> + Send + 'a>>;
 pub trait NativeOperationStore: Send + Sync {
     fn service_node_id(&self) -> &JsString;
+    fn storage_identity(&self) -> Option<(&JsString, NativeProvider)> {
+        None
+    }
+    fn owns_receipt(&self, value: &IvyJson) -> bool {
+        value.get("serviceNodeId") == Some(&IvyJson::String(self.service_node_id().clone()))
+    }
     fn read(&self, key: String) -> StoreFuture<'_, Option<SavedState>>;
     fn write(
         &self,
@@ -32,24 +47,41 @@ pub trait NativeOperationStore: Send + Sync {
 pub struct SqliteOperationStore {
     state: Arc<Mutex<LocalAgentState>>,
     service_node_id: JsString,
+    storage_owner: JsString,
+    storage_provider: Option<NativeProvider>,
+    backend: Option<ivy_contracts::native_backend::BackendIdentity>,
 }
 impl SqliteOperationStore {
     pub fn new(state: Arc<Mutex<LocalAgentState>>) -> IvyResult<Self> {
-        let service_node_id = state
-            .lock()
-            .map_err(|_| IvyError::internal())?
-            .service_node_id
-            .clone()
-            .into();
+        let locked = state.lock().map_err(|_| IvyError::internal())?;
+        let service_node_id = locked.service_node_id.clone().into();
+        let storage_owner = locked.storage_owner().into();
+        let storage_provider = locked.native_provider()?;
+        let backend = locked.backend_identity()?;
+        drop(locked);
         Ok(Self {
             state,
             service_node_id,
+            storage_owner,
+            storage_provider,
+            backend,
         })
     }
 }
 impl NativeOperationStore for SqliteOperationStore {
     fn service_node_id(&self) -> &JsString {
         &self.service_node_id
+    }
+    fn storage_identity(&self) -> Option<(&JsString, NativeProvider)> {
+        Some((&self.storage_owner, self.storage_provider?))
+    }
+    fn owns_receipt(&self, value: &IvyJson) -> bool {
+        let service = value.get("serviceNodeId").and_then(IvyJson::as_js_string);
+        let selected =
+            ivy_contracts::native_backend::BackendIdentity::matches(value, self.backend.as_ref());
+        (service == Some(&self.service_node_id) && selected)
+            || (service == Some(&self.storage_owner)
+                && (selected || value.get("backend").is_none()))
     }
     fn read(&self, key: String) -> StoreFuture<'_, Option<SavedState>> {
         let state = self.state.clone();
@@ -86,24 +118,7 @@ impl NativeOperationStore for SqliteOperationStore {
     }
 }
 
-type Receipt = Option<IvyResult<IvyJson>>;
-#[derive(Clone)]
-pub struct NativeRun {
-    result: watch::Receiver<Receipt>,
-}
-impl NativeRun {
-    pub async fn wait(mut self) -> IvyResult<IvyJson> {
-        loop {
-            if let Some(result) = self.result.borrow_and_update().clone() {
-                return result;
-            }
-            self.result
-                .changed()
-                .await
-                .map_err(|_| IvyError::internal())?;
-        }
-    }
-}
+pub use crate::service_work::AgentRun as NativeRun;
 struct Active {
     key: String,
     request_hash: String,
@@ -122,6 +137,7 @@ struct Inner {
     store: Arc<dyn NativeOperationStore>,
     memory: Arc<Mutex<NativeJournal>>,
     active: Mutex<ActiveCalls>,
+    admission: admission::Admission,
 }
 #[derive(Clone)]
 pub struct NativeOperations {
@@ -132,105 +148,55 @@ pub struct NativeOperations {
 /// Shutdown drains these tasks before closing the shared SQLite connection.
 #[derive(Clone, Default)]
 pub struct ReceiptWork {
-    state: Arc<Mutex<ReceiptTasks>>,
-}
-#[derive(Default)]
-struct ReceiptTasks {
-    next: u64,
-    tasks: BTreeMap<u64, watch::Receiver<bool>>,
-}
-struct ReceiptCompletion {
-    work: ReceiptWork,
-    index: u64,
-    sender: Option<watch::Sender<bool>>,
-    report: Arc<dyn Fn(IvyError) + Send + Sync>,
-}
-impl ReceiptCompletion {
-    fn finish(&mut self) {
-        self.work.state.lock().unwrap().tasks.remove(&self.index);
-        if let Some(sender) = self.sender.take() {
-            sender.send_replace(true);
-        }
-    }
-}
-impl Drop for ReceiptCompletion {
-    fn drop(&mut self) {
-        if self.sender.is_some() {
-            (self.report)(IvyError::internal());
-            self.finish();
-        }
-    }
+    work: AgentWork,
 }
 impl ReceiptWork {
+    pub(crate) fn track(
+        &self,
+        work: impl Future<Output = IvyResult<()>> + Send + 'static,
+    ) -> IvyResult<NativeRun> {
+        self.work.track(Box::pin(async move {
+            work.await?;
+            Ok(IvyJson::Null)
+        }))
+    }
     fn spawn(
         &self,
         work: impl Future<Output = IvyResult<()>> + Send + 'static,
         report: Arc<dyn Fn(IvyError) + Send + Sync>,
     ) -> IvyResult<()> {
-        let (sender, receiver) = watch::channel(false);
-        let index = {
-            let mut state = self.state.lock().unwrap();
-            let index = state.next;
-            state.next = state.next.checked_add(1).ok_or_else(IvyError::internal)?;
-            state.tasks.insert(index, receiver);
-            index
-        };
-        let mut completion = ReceiptCompletion {
-            work: self.clone(),
-            index,
-            sender: Some(sender),
-            report,
-        };
-        tokio::spawn(async move {
-            if let Err(error) = work.await {
-                (completion.report)(error);
-            }
-            completion.finish();
-        });
-        Ok(())
+        self.work.spawn_reported(work, report)
     }
-    pub async fn drain(&self) {
-        loop {
-            let next = self
-                .state
-                .lock()
-                .unwrap()
-                .tasks
-                .first_key_value()
-                .map(|(_, value)| value.clone());
-            let Some(mut receiver) = next else {
-                return;
-            };
-            loop {
-                if *receiver.borrow_and_update() {
-                    break;
-                }
-                if receiver.changed().await.is_err() {
-                    break;
-                }
-            }
-        }
+    /// Individual writer failures use their existing observer. Preserve errors
+    /// from the work owner so shutdown can finish cleanup and report failure.
+    pub async fn drain(&self) -> IvyResult<()> {
+        self.work.drain().await
     }
 }
 // The task owns completion, independently of callers dropping their wait handles.
 struct Completion {
     inner: Arc<Inner>,
     index: u64,
-    work: Option<watch::Sender<Receipt>>,
-    claimed: watch::Sender<Receipt>,
+    work: Option<Sender>,
+    claimed: Sender,
+    control: bool,
 }
 impl Completion {
     fn finish(&mut self, result: IvyResult<IvyJson>) {
-        let unclaimed = self.claimed.borrow().is_none();
-        if unclaimed {
-            self.claimed.send_replace(Some(result.clone()));
+        // Drop the coordinator's old claim/result handles before retaining the
+        // final result. Actual duplicate observers keep their original claim.
+        {
+            let mut active = self.inner.active.lock().unwrap();
+            if let Some(call) = active.calls.remove(&self.index) {
+                active.indices.remove(&call.key);
+            }
         }
-        let mut active = self.inner.active.lock().unwrap();
-        if let Some(call) = active.calls.remove(&self.index) {
-            active.indices.remove(&call.key);
+        let result = self.inner.admission.budget.finish(result, self.control);
+        if self.claimed.pending() {
+            self.claimed.send(result.clone());
         }
-        if let Some(work) = self.work.take() {
-            work.send_replace(Some(result));
+        if let Some(mut work) = self.work.take() {
+            work.send(result);
         }
     }
 }
@@ -264,11 +230,31 @@ impl NativeOperations {
                 store,
                 memory,
                 active: Mutex::new(ActiveCalls::default()),
+                admission: admission::Admission::new(),
             }),
         }
     }
     pub fn journal(&self) -> Arc<Mutex<NativeJournal>> {
         self.inner.memory.clone()
+    }
+    /// Report the persisted origin, independently of the current RPC route.
+    /// Missing provider provenance must be seeded by the original owner.
+    pub fn storage_identity(&self) -> IvyResult<IvyJson> {
+        let (original_service, provider) =
+            self.inner.store.storage_identity().ok_or_else(|| {
+                IvyError::new(
+                    "native_state_migration_required",
+                    "The retained state has no original native provider identity.",
+                )
+            })?;
+        Ok(IvyJson::object([
+            (
+                "serviceNodeId",
+                self.inner.store.service_node_id().clone().into(),
+            ),
+            ("originalServiceNodeId", original_service.clone().into()),
+            ("provider", provider.as_str().into()),
+        ]))
     }
     /// Installs the service's terminal callback. A weak coordinator avoids a
     /// journal -> callback -> coordinator -> journal ownership cycle.
@@ -312,7 +298,7 @@ impl NativeOperations {
                 .map(|call| call.work.clone())
         };
         if let Some(work) = work {
-            let _ = work.wait().await;
+            let _ = work.completed().await;
         }
         self.read(identity).await?;
         Ok(())
@@ -337,7 +323,7 @@ impl NativeOperations {
                 return;
             };
             cursor = index + 1;
-            let _ = work.wait().await;
+            let _ = work.completed().await;
         }
     }
     pub async fn read(&self, identity: &Identity) -> IvyResult<Option<IvyJson>> {
@@ -351,8 +337,7 @@ impl NativeOperations {
                 == Some(&IvyJson::String(identity.caller_principal_id.clone()))
                 && saved.value.get("operationId")
                     == Some(&IvyJson::String(identity.operation_id.clone()))
-                && saved.value.get("serviceNodeId")
-                    == Some(&IvyJson::String(self.inner.store.service_node_id().clone())),
+                && self.inner.store.owns_receipt(&saved.value),
             "target_conflict",
             "Receipt identity differs from its Hive key.",
         )?;
@@ -362,11 +347,27 @@ impl NativeOperations {
         {
             let active = self.inner.active.lock().unwrap().indices.contains_key(&key);
             if !active && terminal(&live) {
-                if hash_json(&live)? != hash_json(&saved.value)? {
-                    self.inner
+                let observed_hash = hash_json(&live)?;
+                if observed_hash != hash_json(&saved.value)? {
+                    if let Err(error) = self
+                        .inner
                         .store
-                        .write(key, live.clone(), Some(saved.pin))
-                        .await?;
+                        .write(key.clone(), live.clone(), Some(saved.pin))
+                        .await
+                    {
+                        if error.code != "revision_conflict" {
+                            return Err(error);
+                        }
+                        // Another observer may have saved this exact terminal
+                        // receipt. Confirm it; never repeat the stale CAS or
+                        // accept a different owner, request, outcome or payload.
+                        let current = self.inner.store.read(key).await?;
+                        if !current.as_ref().is_some_and(|saved| {
+                            hash_json(&saved.value).is_ok_and(|hash| hash == observed_hash)
+                        }) {
+                            return Err(error);
+                        }
+                    }
                 }
                 self.inner
                     .memory
@@ -394,14 +395,14 @@ impl NativeOperations {
         prevent: bool,
     ) -> IvyResult<NativeRun>
     where
-        F: FnOnce() -> Fut + Send + 'static,
+        F: FnOnce(IvyJson) -> Fut + Send + 'static,
         Fut: Future<Output = IvyResult<IvyJson>> + Send + 'static,
     {
         let key = Self::key(&identity)?;
-        let request_hash = hash_json(&IvyJson::object([
-            ("method", IvyJson::String(method.clone())),
-            ("params", params.clone()),
-        ]))?;
+        let request_hash = hash_object([
+            (&"method".into(), &IvyJson::String(method.clone())),
+            (&"params".into(), &params),
+        ])?;
         let mut active = self.inner.active.lock().unwrap();
         if let Some(prior) = active
             .indices
@@ -413,24 +414,43 @@ impl NativeOperations {
                 "mutation_conflict",
                 "Operation has different arguments.",
             )?;
+            let retained = self
+                .inner
+                .admission
+                .reserve(&identity, &method, &params, true, prevent)?;
             let claimed = prior.claimed.clone();
             let manager = self.clone();
-            let (sender, result) = watch::channel(None);
+            let (mut sender, result) = NativeRun::channel(retained.call.clone());
+            let control = retained.control;
             // Eager even if the duplicate waiter is dropped, as with Promise.then.
             tokio::spawn(async move {
+                let _retained = retained;
                 let result = async {
-                    let value = claimed.wait().await?;
-                    Ok(manager.read(&identity).await?.unwrap_or(value))
+                    let original = claimed.shared().await?;
+                    if original.value.is_err() {
+                        return Ok(original);
+                    }
+                    Ok(match manager.read(&identity).await? {
+                        Some(value) => manager.inner.admission.budget.finish(Ok(value), control),
+                        None => original,
+                    })
                 }
                 .await;
-                sender.send_replace(Some(result));
+                sender.send(match result {
+                    Ok(value) => value,
+                    Err(error) => manager.inner.admission.budget.finish(Err(error), control),
+                });
             });
-            return Ok(NativeRun { result });
+            return Ok(result);
         }
+        let retained = self
+            .inner
+            .admission
+            .reserve(&identity, &method, &params, false, prevent)?;
         let index = active.next;
         active.next = active.next.checked_add(1).ok_or_else(IvyError::internal)?;
-        let (work, result) = watch::channel(None);
-        let (claimed, claim) = watch::channel(None);
+        let (work, result) = NativeRun::channel(retained.call.clone());
+        let (claimed, claim) = NativeRun::channel(retained.call.clone());
         let thread_id = params
             .as_object()
             .and_then(|_| params.get("threadId"))
@@ -444,10 +464,8 @@ impl NativeOperations {
                 request_hash: request_hash.clone(),
                 method: method.clone(),
                 thread_id,
-                work: NativeRun {
-                    result: result.clone(),
-                },
-                claimed: NativeRun { result: claim },
+                work: result.clone(),
+                claimed: claim,
             },
         );
         let mut completion = Completion {
@@ -455,9 +473,11 @@ impl NativeOperations {
             index,
             work: Some(work),
             claimed,
+            control: retained.control,
         };
         let manager = self.clone();
         tokio::spawn(async move {
+            let _retained = retained;
             let result = manager
                 .execute(
                     identity,
@@ -467,12 +487,13 @@ impl NativeOperations {
                     request_hash,
                     action,
                     prevent,
-                    &completion.claimed,
+                    &mut completion.claimed,
+                    completion.control,
                 )
                 .await;
             completion.finish(result);
         });
-        Ok(NativeRun { result })
+        Ok(result)
     }
     async fn execute<F, Fut>(
         &self,
@@ -483,10 +504,11 @@ impl NativeOperations {
         request_hash: String,
         action: F,
         prevent: bool,
-        claimed: &watch::Sender<Receipt>,
+        claimed: &mut Sender,
+        control: bool,
     ) -> IvyResult<IvyJson>
     where
-        F: FnOnce() -> Fut,
+        F: FnOnce(IvyJson) -> Fut,
         Fut: Future<Output = IvyResult<IvyJson>>,
     {
         if let Some(existing) = self.read(&identity).await? {
@@ -495,11 +517,27 @@ impl NativeOperations {
                 "mutation_conflict",
                 "Operation has different original arguments.",
             )?;
-            claimed.send_replace(Some(Ok(existing.clone())));
             return Ok(existing);
         }
         let (accepted, intent) = {
             let mut memory = self.inner.memory.lock().unwrap();
+            // A missing store observation does not erase the original journal
+            // owner. Never reclaim, prevent again or forget an already known
+            // operation merely because its durable read is temporarily absent.
+            if let Some(prior) = memory.get(&identity)? {
+                drop(memory);
+                require(
+                    self.inner.store.owns_receipt(&prior),
+                    "target_conflict",
+                    "The journal receipt belongs to another native owner.",
+                )?;
+                require(
+                    prior.get("requestHash") == Some(&IvyJson::from(request_hash.as_str())),
+                    "mutation_conflict",
+                    "Operation has different original arguments.",
+                )?;
+                return Ok(prior);
+            }
             let accepted = if prevent {
                 memory.prevent(&identity, &method, &params)?
             } else {
@@ -530,8 +568,25 @@ impl NativeOperations {
             (accepted, intent)
         };
         validate_agent("Operation", &intent)?;
-        let saved = match self.inner.store.write(key.clone(), intent, None).await {
-            Ok(saved) => saved,
+        enum Claim {
+            Prevented(IvyJson),
+            Accepted(Arc<Reply>),
+        }
+        let claim = if prevent {
+            Claim::Prevented(accepted)
+        } else {
+            match self.inner.admission.budget.retain(Ok(accepted), control) {
+                Ok(value) => Claim::Accepted(value),
+                Err(error) => {
+                    self.inner.memory.lock().unwrap().forget(&identity)?;
+                    return Err(error);
+                }
+            }
+        };
+        // The store owns the persisted intent. Keep only its CAS pin while the
+        // native action runs, rather than another complete receipt body.
+        let pin = match self.inner.store.write(key.clone(), intent, None).await {
+            Ok(saved) => saved.pin,
             Err(error) => {
                 self.inner.memory.lock().unwrap().forget(&identity)?;
                 if [
@@ -555,16 +610,18 @@ impl NativeOperations {
                 return Err(error);
             }
         };
-        claimed.send_replace(Some(Ok(accepted.clone())));
-        if prevent {
-            self.inner
-                .memory
-                .lock()
-                .unwrap()
-                .retained_in_hive(&identity)?;
-            return Ok(accepted);
+        match claim {
+            Claim::Prevented(accepted) => {
+                self.inner
+                    .memory
+                    .lock()
+                    .unwrap()
+                    .retained_in_hive(&identity)?;
+                return Ok(accepted);
+            }
+            Claim::Accepted(value) => claimed.send(value),
         }
-        let result = match action().await {
+        let result = match action(params).await {
             Ok(result) => result,
             Err(error) => {
                 let mut memory = self.inner.memory.lock().unwrap();
@@ -579,7 +636,7 @@ impl NativeOperations {
         };
         self.inner
             .store
-            .write(key, result.clone(), Some(saved.pin))
+            .write(key, result.clone(), Some(pin))
             .await?;
         if terminal(&result) {
             self.inner

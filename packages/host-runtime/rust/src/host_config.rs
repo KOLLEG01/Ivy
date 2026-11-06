@@ -156,6 +156,33 @@ fn additional_storage_admitted(
     })
 }
 
+fn backend_data_admitted(
+    backends: &[(usize, PathBuf)],
+    data: &[PathBuf],
+    services: &[Vec<PathBuf>],
+    storage: &[(usize, PathBuf)],
+    roots: &[PathBuf],
+    configuration: &Path,
+) -> bool {
+    backends.iter().enumerate().all(|(index, (owner, path))| {
+        path.is_absolute()
+            && !inside(path, configuration)
+            && backends
+                .iter()
+                .enumerate()
+                .all(|(other, (_, root))| index == other || separate(root, path))
+            && (inside(&data[*owner], path)
+                || roots.iter().all(|root| separate(root, path))
+                    && services[*owner].iter().all(|root| separate(root, path)))
+            && services.iter().enumerate().all(|(other, paths)| {
+                *owner == other || paths.iter().all(|root| separate(root, path))
+            })
+            && storage
+                .iter()
+                .all(|(other, root)| *owner == *other || separate(root, path))
+    })
+}
+
 /// Only overlap coverage is used here, never storage keys or iteration order.
 /// hostStorageAreas removes descendants already covered by earlier roots. The
 /// unreduced union has the same bidirectional overlap coverage without locale
@@ -180,27 +207,31 @@ fn shared_home_paths(config: &IvyJson, context: &HostContext) -> IvyResult<Vec<P
             continue;
         }
         let settings = instance.required("settings")?;
-        if !codex_home::uses_external_app_server_json(settings)?
-            && codex_home::instance_owned_codex_home_json(
-                settings,
-                &field(&layout::service_paths(config, instance)?, "data")?,
-                &context.home_context(),
-            )?
-            .is_some()
-        {
-            continue;
+        let paths = layout::service_paths(config, instance)?;
+        for backend in crate::agent_backends::configured_backends(settings, paths.get("data"))? {
+            let settings = backend.settings;
+            if !codex_home::uses_external_app_server_json(settings)?
+                && codex_home::instance_owned_codex_home_data_json(
+                    settings,
+                    backend.data_root,
+                    &context.home_context(),
+                )?
+                .is_some()
+            {
+                continue;
+            }
+            let home = codex_home::expected_server_home_json(settings, &context.home_context())?;
+            let home = home
+                .as_js_string()
+                .map(native_path::to_native)
+                .filter(|home| home.is_absolute() && roots.iter().all(|root| separate(root, home)));
+            require(
+                home.is_some(),
+                "target_conflict",
+                "Shared Codex homes must not overlap owned host, service, project or software storage. Use explicit owned-stdio for an instance-owned home.",
+            )?;
+            homes.push(home.unwrap());
         }
-        let home = codex_home::expected_server_home_json(settings, &context.home_context())?;
-        let home = home
-            .as_js_string()
-            .map(native_path::to_native)
-            .filter(|home| home.is_absolute() && roots.iter().all(|root| separate(root, home)));
-        require(
-            home.is_some(),
-            "target_conflict",
-            "Shared Codex homes must not overlap owned host, service, project or software storage. Use explicit owned-stdio for an instance-owned home.",
-        )?;
-        homes.push(home.unwrap());
     }
     Ok(homes)
 }
@@ -327,6 +358,76 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
         .iter()
         .map(|(owner, path)| future(path).map(|path| (*owner, path)))
         .collect::<IvyResult<Vec<_>>>()?;
+    let data = instances
+        .iter()
+        .map(|instance| {
+            config::path_value(layout::service_paths(&config, instance)?.required("data")?)
+        })
+        .collect::<IvyResult<Vec<_>>>()?;
+    let mut backend_data = Vec::new();
+    for (owner, instance) in instances
+        .iter()
+        .enumerate()
+        .filter(|(_, instance)| instance.get("componentId") == Some(&"agent-manager".into()))
+    {
+        for backend in
+            crate::agent_backends::configured_backends(instance.required("settings")?, None)?
+        {
+            if let Some(root) = backend.data_root {
+                backend_data.push((owner, config::path_value(root)?));
+            }
+        }
+    }
+    require(
+        backend_data_admitted(
+            &backend_data,
+            &data,
+            &service_groups,
+            &storage,
+            &roots,
+            &configuration_path,
+        ),
+        "target_conflict",
+        "Backend storage must retain separate absolute owned data roots.",
+    )?;
+    let actual_backend_data = backend_data
+        .iter()
+        .map(|(owner, path)| future(path).map(|path| (*owner, path)))
+        .collect::<IvyResult<Vec<_>>>()?;
+    let actual_data = data
+        .iter()
+        .map(|path| future(path))
+        .collect::<IvyResult<Vec<_>>>()?;
+    require(
+        backend_data_admitted(
+            &actual_backend_data,
+            &actual_data,
+            &actual_groups,
+            &actual_storage,
+            &actual_roots,
+            &future(&configuration_path)?,
+        ),
+        "target_conflict",
+        "Backend storage overlaps another owner through filesystem links.",
+    )?;
+    for instance in instances.iter().filter(|instance| {
+        instance.get("componentId") == Some(&"agent-manager".into())
+            && instance
+                .get("settings")
+                .and_then(|settings| settings.get("backends"))
+                .is_some()
+    }) {
+        let paths = layout::service_paths(&config, instance)?;
+        let backends = crate::agent_backends::configured_backends(
+            instance.required("settings")?,
+            paths.get("data"),
+        )?;
+        crate::agent_backends::validate_native_homes(
+            &backends,
+            &roots[1],
+            &context.home_context(),
+        )?;
+    }
     require(
         additional_storage_admitted(
             &actual_storage,
@@ -343,18 +444,22 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
         .iter()
         .filter(|v| v.get("componentId") == Some(&"agent-manager".into()))
     {
-        if let Some(root) = instance
-            .required("settings")?
-            .get("internalProjectRoot")
-            .and_then(IvyJson::as_js_string)
-            .filter(|v| seen.insert((*v).clone()))
+        for backend in
+            crate::agent_backends::configured_backends(instance.required("settings")?, None)?
         {
-            require(
-                native_path::to_native(root).is_absolute(),
-                "invalid_arguments",
-                "Internal project root must be absolute.",
-            )?;
-            internal.push(future(&native_path::to_native(root))?);
+            if let Some(root) = backend
+                .settings
+                .get("internalProjectRoot")
+                .and_then(IvyJson::as_js_string)
+                .filter(|v| seen.insert((*v).clone()))
+            {
+                require(
+                    native_path::to_native(root).is_absolute(),
+                    "invalid_arguments",
+                    "Internal project root must be absolute.",
+                )?;
+                internal.push(future(&native_path::to_native(root))?);
+            }
         }
     }
     let shared = shared_home_paths(&config, context)?
@@ -373,6 +478,7 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
                     .iter()
                     .chain(&actual_services)
                     .chain(actual_storage.iter().map(|(_, path)| path))
+                    .chain(actual_backend_data.iter().map(|(_, path)| path))
                     .chain(&shared)
                     .all(|r| separate(r, v))
                     && !inside(v, &configuration)
@@ -384,36 +490,46 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
         .iter()
         .filter(|v| v.get("componentId") == Some(&"agent-manager".into()))
     {
-        if let Some(root) = instance.required("settings")?.get("projectRoot") {
-            let root = root
-                .as_js_string()
-                .filter(|v| native_path::to_native(v).is_absolute());
-            require(
-                root.is_some(),
-                "invalid_arguments",
-                "Normal project root must be absolute.",
-            )?;
-            let normal = future(&native_path::to_native(root.unwrap()))?;
-            require(
-                actual_roots
-                    .iter()
-                    .chain(&actual_services)
-                    .chain(actual_storage.iter().map(|(_, path)| path))
-                    .chain(&shared)
-                    .chain(&internal)
-                    .all(|r| !inside(r, &normal)),
-                "target_conflict",
-                "New normal projects must not be allocated inside private service/internal/Codex storage or executable artifacts.",
-            )?;
+        for backend in
+            crate::agent_backends::configured_backends(instance.required("settings")?, None)?
+        {
+            if let Some(root) = backend.settings.get("projectRoot") {
+                let root = root
+                    .as_js_string()
+                    .filter(|v| native_path::to_native(v).is_absolute());
+                require(
+                    root.is_some(),
+                    "invalid_arguments",
+                    "Normal project root must be absolute.",
+                )?;
+                let normal = future(&native_path::to_native(root.unwrap()))?;
+                require(
+                    actual_roots
+                        .iter()
+                        .chain(&actual_services)
+                        .chain(actual_storage.iter().map(|(_, path)| path))
+                        .chain(actual_backend_data.iter().map(|(_, path)| path))
+                        .chain(&shared)
+                        .chain(&internal)
+                        .all(|r| !inside(r, &normal)),
+                    "target_conflict",
+                    "New normal projects must not be allocated inside private service/internal/Codex storage or executable artifacts.",
+                )?;
+            }
         }
     }
-    for directory in services.iter().chain(storage.iter().map(|(_, path)| path)) {
+    for directory in services
+        .iter()
+        .chain(storage.iter().map(|(_, path)| path))
+        .chain(backend_data.iter().map(|(_, path)| path))
+    {
         fs::create_dir_all(directory).map_err(|_| IvyError::internal())?;
     }
     for directory in roots
         .iter()
         .chain(&services)
         .chain(storage.iter().map(|(_, path)| path))
+        .chain(backend_data.iter().map(|(_, path)| path))
     {
         writable(directory).map_err(|_| IvyError::internal())?;
     }
@@ -424,6 +540,7 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
                 .iter()
                 .chain(&actual_services)
                 .chain(actual_storage.iter().map(|(_, path)| path))
+                .chain(actual_backend_data.iter().map(|(_, path)| path))
                 .all(|r| separate(r, &actual)),
             "target_conflict",
             "Shared Codex homes cannot overlap owned runtime, service, artifact or staging storage through filesystem links.",

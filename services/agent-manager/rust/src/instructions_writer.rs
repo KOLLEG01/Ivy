@@ -1,11 +1,11 @@
 //! Coalesced instruction output work; source retrieval/bootstrap belongs to its caller.
-use crate::instructions_files::{AppliedInstructions, InstructionsSource, apply_instructions};
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
+pub use crate::file_work::FileRun as InstructionsRun;
+use crate::{
+    file_work::FileWork,
+    instructions_files::{AppliedInstructions, InstructionsSource, apply_instructions},
 };
-use tokio::sync::watch;
+use ivy_contracts::{IvyJson, IvyResult, JsString};
+use std::{path::PathBuf, sync::Arc};
 
 #[derive(Clone, Debug)]
 pub struct InstructionsStatus {
@@ -45,33 +45,15 @@ impl InstructionsStatus {
         ])
     }
 }
-struct State {
-    status: InstructionsStatus,
-    running: Option<watch::Receiver<bool>>,
-}
 struct Inner {
     home: PathBuf,
     host_id: JsString,
     hive_url: JsString,
-    state: Mutex<State>,
+    work: FileWork<InstructionsStatus>,
 }
 #[derive(Clone)]
 pub struct InstructionsWriter {
     inner: Arc<Inner>,
-}
-pub struct InstructionsRun {
-    complete: Option<watch::Receiver<bool>>,
-}
-impl InstructionsRun {
-    pub async fn wait(mut self) {
-        if let Some(receiver) = self.complete.as_mut() {
-            while !*receiver.borrow_and_update() {
-                if receiver.changed().await.is_err() {
-                    break;
-                }
-            }
-        }
-    }
 }
 fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -110,27 +92,6 @@ fn update(status: &mut InstructionsStatus, result: IvyResult<AppliedInstructions
     }
     status.observed_at = now();
 }
-struct Completion {
-    inner: Arc<Inner>,
-    sender: Option<watch::Sender<bool>>,
-}
-impl Completion {
-    fn finish(&mut self, result: IvyResult<AppliedInstructions>) {
-        let mut state = self.inner.state.lock().unwrap();
-        update(&mut state.status, result);
-        state.running = None;
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.send(true);
-        }
-    }
-}
-impl Drop for Completion {
-    fn drop(&mut self) {
-        if self.sender.is_some() {
-            self.finish(Err(IvyError::internal()));
-        }
-    }
-}
 impl InstructionsWriter {
     pub fn new(home: PathBuf, host_id: JsString, hive_url: JsString) -> Self {
         let status = InstructionsStatus {
@@ -147,55 +108,37 @@ impl InstructionsWriter {
                 home,
                 host_id,
                 hive_url,
-                state: Mutex::new(State {
-                    status,
-                    running: None,
-                }),
+                work: FileWork::new(status),
             }),
         }
     }
     pub fn status(&self) -> InstructionsStatus {
-        self.inner.state.lock().unwrap().status.clone()
+        self.inner.work.status()
     }
     /// One writer-owned operation. A joining caller never replaces its source;
     /// dropping any wait handle leaves the locked operation running.
     pub fn synchronize(&self, source: Arc<dyn InstructionsSource>) -> InstructionsRun {
-        let mut state = self.inner.state.lock().unwrap();
-        if let Some(receiver) = &state.running {
-            return InstructionsRun {
-                complete: Some(receiver.clone()),
-            };
-        }
-        let (sender, receiver) = watch::channel(false);
-        state.running = Some(receiver.clone());
-        let inner = self.inner.clone();
-        tokio::spawn(async move {
-            let mut completion = Completion {
-                inner: inner.clone(),
-                sender: Some(sender),
-            };
-            let progress = |version: &str| {
-                let mut state = inner.state.lock().unwrap();
-                state.status.desired_version = Some(version.to_owned());
-                state.status.observed_at = now();
-            };
-            let result = apply_instructions(
-                inner.home.clone(),
-                &inner.host_id,
-                &inner.hive_url,
-                source.as_ref(),
-                &progress,
-            )
-            .await;
-            completion.finish(result);
-        });
-        InstructionsRun {
-            complete: Some(receiver),
-        }
+        self.inner.work.start(update, || {
+            let inner = self.inner.clone();
+            async move {
+                let progress = |version: &str| {
+                    inner.work.progress(|status| {
+                        status.desired_version = Some(version.to_owned());
+                        status.observed_at = now();
+                    });
+                };
+                apply_instructions(
+                    inner.home.clone(),
+                    &inner.host_id,
+                    &inner.hive_url,
+                    source.as_ref(),
+                    &progress,
+                )
+                .await
+            }
+        })
     }
     pub fn close(&self) -> InstructionsRun {
-        InstructionsRun {
-            complete: self.inner.state.lock().unwrap().running.clone(),
-        }
+        self.inner.work.close()
     }
 }

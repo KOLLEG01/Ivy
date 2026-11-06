@@ -66,6 +66,17 @@ pub struct IvyError {
 }
 
 impl IvyError {
+    /// Owned payload capacity, including lossless boundary strings and provider outcomes.
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(self.code.capacity())
+            .saturating_add(self.message.capacity())
+            .saturating_add(self.outcome.0.retained_bytes())
+            .saturating_add(self.details.as_ref().map_or(0, IvyJson::retained_bytes))
+            .saturating_add(self.wire_code.as_ref().map_or(0, |s| s.0.capacity() * 2))
+            .saturating_add(self.wire_message.as_ref().map_or(0, |s| s.0.capacity() * 2))
+    }
+
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),

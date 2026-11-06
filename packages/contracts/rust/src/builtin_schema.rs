@@ -60,6 +60,11 @@ impl SchemaBundle {
             selected = child;
         }
         let schema = crate::schema_lookup::schema(selected)?;
+        // AJV rejects the legacy id keyword when compiling a selected schema.
+        // A properties map containing id is not itself a usable schema.
+        if schema.get("id").is_some() {
+            return Err(IvyError::internal());
+        }
         self.evaluate(document, schema, value)
             .map(Some)
             .map_err(|_| IvyError::internal())

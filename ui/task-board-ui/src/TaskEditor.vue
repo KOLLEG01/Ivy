@@ -36,11 +36,14 @@ import ActionState from "./ActionState.vue";
 import TaskLocationPicker from "./TaskLocationPicker.vue";
 import WikiLinkPicker from "./WikiLinkPicker.vue";
 import { nativeRead } from "../../../packages/ui-client/src/native";
+import { nativeBackendKey, nativeBackendLabel, sameBackend } from "../../../packages/ui-client/src/native-backends";
+import type { Agent } from "../../../packages/sdk/src/client.js";
 import {
   executionEnvironments,
   executionHostOptions,
   executionModels,
   executionSpeedAvailable,
+  executionBackendChoices,
 } from "./execution-options";
 import { useExecutionDefaults } from "./execution-defaults";
 import { blockerCandidates } from "./blockers";
@@ -177,6 +180,8 @@ const executionDefaults = useExecutionDefaults(
   () => props.task?.value,
 );
 const configured = executionDefaults.defaults;
+const nativeBackend = ref<Agent.BackendIdentity | undefined>(form.value.nativeOptions?.backend);
+const effectiveBackend = computed(() => nativeBackend.value === undefined ? configured.value?.nativeOptions.backend : nativeBackend.value);
 watch(configured, (value) => {
   if (!value || props.task || restoredDraft) return;
   form.value.userContact = value.userContact ?? "ticket";
@@ -202,7 +207,7 @@ const hosts = computed(() => {
   }
   return result;
 });
-const agents = computed(() => environments.value.value?.agents ?? []);
+const agents = computed(() => (environments.value.value?.agents ?? []).filter(agent => effectiveBackend.value === undefined || sameBackend(agent.backend, effectiveBackend.value)));
 const defaultHost = computed(() =>
   configured.value?.executionRequirement?.kind === "host"
     ? configured.value.executionRequirement.hostId
@@ -306,13 +311,13 @@ const capabilityKey = (text: string) => {
 };
 const hostAgents = computed(
   () => (hosts.value.get(host.value)?.agents ?? []).filter((agent) =>
-    !props.task?.value.primaryResourceRef || agent.node.serviceNodeId === props.task.value.primaryResourceRef.serviceNodeId,
+    sameBackend(agent.backend, effectiveBackend.value) && (!props.task?.value.primaryResourceRef || agent.node.serviceNodeId === props.task.value.primaryResourceRef.serviceNodeId),
   ),
 );
 const hostAgent = computed(() => hostAgents.value[0]);
 const nativeCatalog = useRemote(async signal => {
   const hostId = host.value;
-  return { hostId, agents: await executionHostOptions(signal, hostId, props.task?.value.primaryResourceRef?.serviceNodeId) };
+  return { hostId, ...await executionHostOptions(signal, hostId, props.task?.value.primaryResourceRef?.serviceNodeId) };
 }, 30000, ["services/agent-manager"]);
 watch([host, () => props.task?.value.primaryResourceRef?.serviceNodeId], () => void nativeCatalog.refresh());
 // useRemote keeps the last successful choices during refresh; never use another host's catalog.
@@ -324,10 +329,25 @@ const modelAgents = computed(() => nativeCatalog.value.value?.hostId === host.va
 const nativeModel = ref(form.value.nativeOptions?.model ?? ""),
   reasoningEffort = ref(form.value.nativeOptions?.reasoningEffort ?? ""),
   serviceTier = ref(form.value.nativeOptions?.serviceTier ?? "");
-const nativeChoices = computed(() => executionModels(modelAgents.value));
+const backendChoices = computed(() => executionBackendChoices(nativeCatalog.value.value?.hostId === host.value ? nativeCatalog.value.value.backends : []));
+const shownBackend = computed(() => nativeBackendKey(effectiveBackend.value));
+const inheritedBackendLabel = computed(() => effectiveBackend.value ? nativeBackendLabel(effectiveBackend.value) : tr('Account auswählen', 'Choose account'));
+const nativeChoices = computed(() => executionModels(modelAgents.value).filter(choice => sameBackend(choice.backend, effectiveBackend.value)));
+const matchingDefaults = computed(() => sameBackend(effectiveBackend.value, configured.value?.nativeOptions.backend) ? configured.value?.nativeOptions : undefined);
+const chooseBackend = (key: string) => {
+  if (props.task?.value.primaryResourceRef) return;
+  if (!key) nativeBackend.value = undefined;
+  else {
+    const choice = backendChoices.value.find(value => value.key === key && !value.disabled);
+    if (!choice) return;
+    nativeBackend.value = { ...choice.backend };
+  }
+  nativeModel.value = reasoningEffort.value = serviceTier.value = '';
+  if (form.value.workspaceRequirement.kind === 'existing_project') form.value.workspaceRequirement = { kind: 'task_workspace' };
+};
 const defaultModel = computed(
   () =>
-    configured.value?.nativeOptions.model ??
+    matchingDefaults.value?.model ??
     nativeChoices.value.find((value) => value.isDefault)?.model ??
     nativeChoices.value[0]?.model ??
     "",
@@ -338,28 +358,35 @@ const modelChoice = computed(() =>
 );
 const nativeEfforts = computed(() => modelChoice.value?.efforts ?? []);
 const defaultEffort = computed(() => {
-  const configuredEffort = configured.value?.nativeOptions.reasoningEffort;
+  const configuredEffort = matchingDefaults.value?.reasoningEffort;
   return configuredEffort && nativeEfforts.value.includes(configuredEffort)
     ? configuredEffort
     : (modelChoice.value?.defaultEffort ?? "");
 });
 const shownEffort = computed(() => reasoningEffort.value || defaultEffort.value);
 const defaultSpeed = computed(
-  () => configured.value?.nativeOptions.serviceTier ?? "standard",
+  () => matchingDefaults.value?.serviceTier ?? "standard",
 );
 const shownSpeed = computed(() => serviceTier.value || defaultSpeed.value);
-const serviceTierAvailable = computed(() =>
-  executionSpeedAvailable(modelAgents.value, shownModel.value, shownEffort.value),
-);
+const serviceTierAvailable = (tier: 'fast' | 'flex') => executionSpeedAvailable(modelAgents.value, shownModel.value, shownEffort.value, effectiveBackend.value, tier);
+const pinBackend = () => {
+  if (nativeBackend.value === undefined && effectiveBackend.value) nativeBackend.value = { ...effectiveBackend.value };
+};
 const chooseModel = (value: string) => {
+  pinBackend();
   nativeModel.value = value;
 };
 const chooseEffort = (value: string) => {
+  pinBackend();
   reasoningEffort.value = value;
 };
 const chooseSpeed = (value: string) => {
+  pinBackend();
   serviceTier.value = value;
 };
+watch(() => JSON.stringify(form.value.workspaceRequirement), (value, previous) => {
+  if (value !== previous) pinBackend();
+});
 watch([shownModel, host, nativeChoices], () => {
   if (
     nativeChoices.value.length &&
@@ -367,7 +394,7 @@ watch([shownModel, host, nativeChoices], () => {
     !nativeEfforts.value.includes(reasoningEffort.value)
   )
     reasoningEffort.value = defaultEffort.value;
-  if (nativeChoices.value.length && !serviceTierAvailable.value && ['fast', 'flex'].includes(shownSpeed.value))
+  if (nativeChoices.value.length && (shownSpeed.value === 'fast' || shownSpeed.value === 'flex') && !serviceTierAvailable(shownSpeed.value))
     serviceTier.value = "standard";
 });
 const effortOptions = computed(() =>
@@ -378,21 +405,17 @@ const effortOptions = computed(() =>
 );
 const speedOptions = computed(() => [
   { value: "standard", label: "Standard" },
-  { value: "fast", label: "Fast", disabled: !serviceTierAvailable.value },
-  { value: "flex", label: "Flexible", disabled: !serviceTierAvailable.value },
+  { value: "fast", label: "Fast", disabled: !serviceTierAvailable('fast') },
+  { value: "flex", label: "Flexible", disabled: !serviceTierAvailable('flex') },
 ]);
-const nativeOptionsInvalid = computed(
-  () =>
-    modelAgents.value.length > 0 &&
-    ((!!nativeModel.value &&
-      !nativeChoices.value.some(
-        (value) => value.model === nativeModel.value,
-      )) ||
-      (!!reasoningEffort.value &&
-        !nativeEfforts.value.includes(reasoningEffort.value)) ||
-      (["fast", "flex"].includes(serviceTier.value) &&
-        !serviceTierAvailable.value)),
-);
+const nativeOptionsInvalid = computed(() => {
+  if (form.value.control !== 'agent') return false;
+  if (!props.task && effectiveBackend.value === undefined) return true;
+  if (!modelAgents.value.some(agent => sameBackend(agent.backend, effectiveBackend.value))) return false;
+  return (!!nativeModel.value && !nativeChoices.value.some(value => value.model === nativeModel.value)) ||
+    (!!reasoningEffort.value && !nativeEfforts.value.includes(reasoningEffort.value)) ||
+    ((serviceTier.value === 'fast' || serviceTier.value === 'flex') && !serviceTierAvailable(serviceTier.value));
+});
 
 const normalizedFields = (): TaskBoard.TaskFields => {
   const fields: TaskBoard.TaskFields = {
@@ -407,6 +430,7 @@ const normalizedFields = (): TaskBoard.TaskFields => {
           ? { kind: "host", hostId: host.value }
           : null,
     nativeOptions: {
+      ...(nativeBackend.value !== undefined ? { backend: { ...nativeBackend.value } } : {}),
       model: nativeModel.value || null,
       reasoningEffort: reasoningEffort.value || null,
       serviceTier:
@@ -422,7 +446,7 @@ const normalizedFields = (): TaskBoard.TaskFields => {
   else if (props.task?.value.fields.requiredCapabilities)
     fields.requiredCapabilities = [];
   else delete fields.requiredCapabilities;
-  if (props.task && !props.task.value.fields.nativeOptions &&
+  if (props.task && !props.task.value.fields.nativeOptions && nativeBackend.value === undefined &&
       Object.values(fields.nativeOptions!).every(value => value === null))
     delete fields.nativeOptions;
   return fields;
@@ -439,7 +463,7 @@ const clearDraft = () => {
   sessionStorage.removeItem(key);
 };
 watch(
-  [form, revision, baseFields, capabilities, host, category, nativeModel, reasoningEffort, serviceTier,
+  [form, revision, baseFields, capabilities, host, category, nativeBackend, nativeModel, reasoningEffort, serviceTier,
     initialState, wakeAt, dependencies, initialSummary],
   () => {
     if (!retainDraft) return;
@@ -837,6 +861,16 @@ const cancel = () => {
               agent's work lives.</FieldDescription
             ></Field
           >
+          <Field>
+            <Label for="task-backend">{{ tr('Provider und Account', 'Provider and account') }}</Label>
+            <OptionSelect id="task-backend" :model-value="nativeBackendKey(nativeBackend)" :disabled="locked || !!task?.value.primaryResourceRef || !backendChoices.length" @update:model-value="chooseBackend">
+              <option value="">{{ tr('Übernehmen', 'Inherit') }} · {{ inheritedBackendLabel }}</option>
+              <option v-if="nativeBackend !== undefined && !backendChoices.some(choice => choice.key === shownBackend)" :value="nativeBackendKey(nativeBackend)">{{ inheritedBackendLabel }} · {{ tr('nicht verfügbar', 'unavailable') }}</option>
+              <option v-for="choice in backendChoices" :key="choice.key" :value="choice.key" :disabled="choice.disabled">{{ choice.label }}{{ choice.missing.length ? ' · ' + tr('nicht verfügbar auf', 'unavailable on') + ' ' + choice.missing.join(', ') : '' }}</option>
+            </OptionSelect>
+            <FieldDescription>{{ task?.value.primaryResourceRef ? tr('Der Account dieser Unterhaltung bleibt erhalten.', 'This conversation retains its account.') : tr('Modelle und Projekte gehören zum gewählten Account.', 'Models and projects belong to the selected account.') }}</FieldDescription>
+            <FieldError v-if="!task && effectiveBackend === undefined">{{ tr('Wähle einen Account für diesen Task.', 'Choose an account for this task.') }}</FieldError>
+          </Field>
           <div class="grid gap-6 sm:grid-cols-2">
             <Field
               ><Label for="task-model">Model</Label
@@ -858,7 +892,7 @@ const cancel = () => {
                 </option>
                 <option
                   v-for="choice in nativeChoices.filter((value) => !value.hidden)"
-                  :key="choice.id"
+                  :key="choice.key"
                   :value="choice.model"
                 >
                   {{ choice.name }}
@@ -869,7 +903,7 @@ const cancel = () => {
                 >
                   <option
                     v-for="choice in nativeChoices.filter((value) => value.hidden)"
-                    :key="choice.id"
+                    :key="choice.key"
                     :value="choice.model"
                   >
                     {{ choice.name }}

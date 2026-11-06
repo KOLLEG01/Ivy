@@ -16,7 +16,7 @@ use ivy_task_board::{
 use std::{
     cell::{Cell, RefCell},
     future::Future,
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     sync::{Arc, OnceLock},
     task::{Context, Poll, Wake, Waker},
@@ -208,6 +208,8 @@ fn ready<F: Future>(future: F) -> F::Output {
 }
 fn identity(value: &Json) -> ReadIdentity {
     ReadIdentity {
+        backend: ivy_contracts::native_backend::BackendIdentity::optional(value.get("backend"))
+            .unwrap(),
         observation_id: s(value, "observationId"),
         caller_principal_id: s(value, "callerPrincipalId"),
         service_node_id: s(value, "serviceNodeId"),
@@ -215,6 +217,50 @@ fn identity(value: &Json) -> ReadIdentity {
         epoch: s(value, "epoch"),
         method: s(value, "method"),
         params: value.required("params").unwrap().clone(),
+    }
+}
+
+struct FrozenCatalog(PathBuf);
+impl FrozenCatalog {
+    fn new(root: &Path, observation: &Json) -> Self {
+        let version = s(observation, "nativeVersion");
+        let source = CheckedNativeContracts::new(root)
+            .checked_native_contract(
+                &version,
+                Some(&Json::object([
+                    (
+                        "nativeExecutableHash",
+                        observation
+                            .required("nativeExecutableHash")
+                            .unwrap()
+                            .clone(),
+                    ),
+                    (
+                        "catalogHash",
+                        observation.required("catalogHash").unwrap().clone(),
+                    ),
+                ])),
+            )
+            .unwrap();
+        // This oracle pins one exact catalog. Its default-selection row must
+        // use that same fixture catalog on either OS, not the host's executable.
+        let path =
+            std::env::temp_dir().join(format!("ivy-frozen-read-catalog-{}", uuid::Uuid::new_v4()));
+        let directory = path
+            .join("specs/native")
+            .join(format!("codex-{}", version.to_utf8().unwrap()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("catalog.json"),
+            ivy_contracts::json::stringify(source.catalog(), usize::MAX).unwrap(),
+        )
+        .unwrap();
+        Self(path)
+    }
+}
+impl Drop for FrozenCatalog {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -228,7 +274,8 @@ fn scoped_native_read_evidence_matches_original_typescript() {
     )
     .unwrap();
     let base = data.required("base").unwrap();
-    let catalogs = CheckedNativeContracts::new(root);
+    let fixture = FrozenCatalog::new(&root, base.required("observation").unwrap());
+    let catalogs = CheckedNativeContracts::new(&fixture.0);
     for row in data.required("rows").unwrap().as_array().unwrap() {
         let store = Memory {
             row,
@@ -329,5 +376,104 @@ fn scoped_native_read_evidence_matches_original_typescript() {
             row.required("name").unwrap().as_str().unwrap(),
             canonical(&actual, MANAGEMENT_FRAME_BYTES).unwrap()
         );
+    }
+}
+
+#[test]
+fn account_scoped_read_manifests_keep_the_pinned_run_and_body_identity() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let data = parse(
+        std::str::from_utf8(&reference_data::read(include_bytes!(
+            "task-board-read-evidence-cases.json.gz"
+        )))
+        .unwrap(),
+        MANAGEMENT_FRAME_BYTES,
+    )
+    .unwrap();
+    let base = data.required("base").unwrap();
+    let catalogs = CheckedNativeContracts::new(root);
+    for provider in ["codex", "claude"] {
+        let backend = Json::object([
+            ("backendId", "worker".into()),
+            ("provider", provider.into()),
+            ("accountId", "primary".into()),
+        ]);
+        let mut foreign = backend.clone();
+        foreign.insert("accountId", "foreign".into());
+        let mut run = base.required("run").unwrap().clone();
+        for key in ["target", "plan"] {
+            let mut value = run.required(key).unwrap().clone();
+            value.insert("backend", backend.clone());
+            run.insert(key, value);
+        }
+        let row = Json::Object(vec![]);
+        let store = Memory {
+            row: &row,
+            run: &run,
+            active: Cell::new(false),
+            trace: RefCell::default(),
+            document: RefCell::default(),
+            blobs: RefCell::default(),
+        };
+        let subject = ReadEvidence {
+            store: &store,
+            catalogs: &catalogs,
+        };
+        let mut expected = base.required("expected").unwrap().clone();
+        expected.insert("backend", backend.clone());
+        let mut observed = base.required("observation").unwrap().clone();
+        observed.insert("backend", backend);
+        let parent = base.required("parent").unwrap();
+        ready(async {
+            let mut artifact = subject
+                .save(parent, &observed, &identity(&expected))
+                .await
+                .unwrap();
+            assert_eq!(
+                hash_json(
+                    &subject
+                        .read(parent, &artifact, &identity(&expected))
+                        .await
+                        .unwrap()
+                )
+                .unwrap(),
+                hash_json(&observed).unwrap()
+            );
+            assert_eq!(
+                store
+                    .document
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .value
+                    .get("backend"),
+                observed.get("backend")
+            );
+            let mut wrong = expected.clone();
+            wrong.insert("backend", foreign.clone());
+            assert_eq!(
+                subject
+                    .read(parent, &artifact, &identity(&wrong))
+                    .await
+                    .unwrap_err()
+                    .code,
+                "task_board_evidence_mismatch"
+            );
+            {
+                let mut saved = store.document.borrow_mut();
+                let doc = saved.as_mut().unwrap();
+                doc.value.insert("backend", foreign);
+                doc.content_hash = hash_json(&doc.value).unwrap();
+                artifact.insert("contentHash", doc.content_hash.clone().into());
+            }
+            assert_eq!(
+                subject
+                    .read(parent, &artifact, &identity(&expected))
+                    .await
+                    .unwrap_err()
+                    .code,
+                "task_board_evidence_mismatch"
+            );
+        });
     }
 }

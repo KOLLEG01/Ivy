@@ -19,6 +19,7 @@ import {
   LoadingIndicator,
   SearchDialog,
   SearchResult,
+  RemoteState,
   SidebarGroup,
   SidebarGroupAction,
   SidebarGroupContent,
@@ -62,7 +63,7 @@ import { base, client, notifications } from "./runtime";
 import HostUsage from "../../../packages/ui-client/src/HostUsage.vue";
 import TaskRow from "./TaskRow.vue";
 import AgentHosts from "./AgentHosts.vue";
-import AgentHost from "./AgentHost.vue";
+import AgentHostAccounts from "./AgentHostAccounts.vue";
 import AgentHostSettings from "./AgentHostSettings.vue";
 import AgentSettings from "./AgentSettings.vue";
 import AgentTask from "./AgentTask.vue";
@@ -77,6 +78,10 @@ import {
   taskKey,
 } from "./task-activity";
 import type { LiveTaskState, SeenTasks } from "./task-activity";
+import { nativeHosts, nativeServiceNodes } from '../../../packages/ui-client/src/native-hosts';
+import { nativeBackendScopes, nativeBackendLabel } from '../../../packages/ui-client/src/native-backends';
+import { nativeOwnerKey, nativeRouteOwner, nativeRouteQuery } from '../../../packages/ui-client/src/native-route';
+import type { NativeRouteOwner } from '../../../packages/ui-client/src/native-route';
 
 const hash = useHashRoute();
 const mobile = useMediaQuery('(max-width: 767px)');
@@ -85,6 +90,11 @@ const query = computed(
   () => new URLSearchParams(hash.value.split("?")[1] ?? ""),
 );
 const node = computed(() => query.value.get("node") ?? "");
+const parsedOwner = computed(() => {
+  try { return { owner: nativeRouteOwner(query.value), error: '' }; }
+  catch (cause) { return { owner: null, error: cause instanceof Error ? cause.message : String(cause) }; }
+});
+const selectedOwner = computed(() => parsedOwner.value.owner);
 // The task tree always spans every host; a host filter only narrows it and never follows navigation.
 const filterKey = "ivy.agent.host-filter:" + base.href,
   internalKey = "ivy.agent.show-internal:" + base.href;
@@ -134,57 +144,61 @@ watch(searchOpen, (open) => {
   if (!open) search.value = "";
 });
 
-const nodes = usePage((signal, cursor) =>
-    client.request(
-      "serviceNodes.list",
-      {
-        serviceName: "agent-manager",
-        limit: 50,
-        ...(cursor ? { cursor } : {}),
-      },
-      { signal },
-    ), 30000, undefined, ["services/agent-manager"]);
-// Every unarchived task stays listed; archiving or deleting is how a user tidies the list.
-const recent = useRemote(async (signal) => {
-  const items: Operation.InventoryItem[] = [];
-  let cursor: string | undefined;
-  do {
+const nodes = useRemote(async signal => ({ items: await nativeServiceNodes(client, signal) }), 30000, ['services/agent-manager']);
+const hosts = computed(() => nativeHosts(nodes.value.value?.items ?? []));
+watch(hosts, values => {
+  const previous = values.find(host => host.nodes.some(node => node.serviceNodeId === hostFilter.value));
+  if (previous && !values.some(host => host.hostId === hostFilter.value)) filterHost(previous.hostId);
+});
+const accounts = useRemote(async signal => (await Promise.all((nodes.value.value?.items ?? []).filter(node => node.connected).map(async node => {
+  try { return await nativeBackendScopes(client, node, signal); }
+  catch { signal.throwIfAborted(); return []; }
+}))).flat(), 30000, ['services/agent-manager']);
+watch(() => nodes.value.value, () => void accounts.refresh());
+const ownerFor = (ref: Operation.InventoryItem['resourceRef']): NativeRouteOwner => {
+  const scope = accounts.value.value?.find(value => value.serviceNodeId === ref.serviceNodeId && (value.backend?.backendId ?? 'codex') === ref.namespace);
+  return { serviceNodeId: ref.serviceNodeId, namespace: ref.namespace, ...(scope?.backend ? { backend: scope.backend } : {}) };
+};
+const accountAvailable = (ref: Pick<Operation.InventoryItem['resourceRef'], 'serviceNodeId' | 'namespace'>) => accounts.value.value?.some(scope =>
+  scope.serviceNodeId === ref.serviceNodeId && (scope.backend?.backendId ?? 'codex') === ref.namespace && scope.status.state === 'ready') === true;
+const itemKey = (item: Operation.InventoryItem) => taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId, item.resourceRef.namespace, ownerFor(item.resourceRef).backend);
+// Read only the visible page. Healthy live subscriptions replace periodic full snapshots.
+const recent = usePage(async (signal, cursor) => {
     const page = await client.request(
       "inventory.list",
       {
         ...(hostFilter.value
-          ? { serviceNodeId: hostFilter.value }
+          ? { hostId: hostFilter.value }
           : { serviceName: "agent-manager" }),
-        namespace: "codex",
         kind: "thread",
         archived: false,
         sort: "recency-desc",
         ...(search.value ? { searchTerm: search.value } : {}),
-        limit: 200,
+        limit: 100,
         ...(cursor ? { cursor } : {}),
       },
       { signal },
     );
-    items.push(...page.items.filter(isVisibleTask));
-    cursor = page.nextCursor ?? undefined;
-  } while (cursor);
-  return { items };
-}, 30000, () => ["inventory/codex/thread" + (hostFilter.value ? "/" + hostFilter.value : "")]);
+    return { items: page.items.filter(isVisibleTask), nextCursor: page.nextCursor };
+}, 30000, undefined, () => (accounts.value.value ?? []).map(scope => 'inventory/' + (scope.backend?.backendId ?? 'codex') + '/thread'));
 const allProjects = useRemote(async (signal) => {
   const result: ScopedProject[] = [];
+  const cursors = new Set<string>();
   let cursor: string | undefined;
   do {
-    const page = await client.request("inventory.list", { serviceName: "agent-manager", namespace: "codex", kind: "project", limit: 200,
+    const page = await client.request("inventory.list", { serviceName: "agent-manager", kind: "project", limit: 200,
       ...(cursor ? { cursor } : {}) }, { signal });
     for (const item of page.items) {
       const project = record(item.summary);
       if (project.source === "native" && typeof project.nativeId === "string" && typeof project.name === "string" && Array.isArray(project.paths))
-        result.push({ serviceNodeId: item.resourceRef.serviceNodeId, project: project as Agent.ProjectSummary });
+        result.push({ serviceNodeId: item.resourceRef.serviceNodeId, namespace: item.resourceRef.namespace, project: project as Agent.ProjectSummary });
     }
     cursor = page.nextCursor ?? undefined;
+    if (result.length > 1000 || cursor && cursors.has(cursor) || cursors.size >= 20) throw new Error('Project navigation exceeded its bounded snapshot.');
+    if (cursor) cursors.add(cursor);
   } while (cursor);
   return result;
-}, 30000, ["inventory/codex/project"]);
+}, 30000, () => (accounts.value.value ?? []).map(scope => 'inventory/' + (scope.backend?.backendId ?? 'codex') + '/project'));
 
 const lastNode = ref("");
 try {
@@ -195,7 +209,7 @@ try {
 }
 watch(hostFilter, () => {
   recent.value.value = null;
-  void recent.refresh();
+  recent.reset();
 });
 watch(node, (value) => {
   if (value) {
@@ -235,29 +249,34 @@ const managementNode = computed(() => {
     ""
   );
 });
+const newTaskQuery = computed(() => {
+  const chosen = hosts.value.find(host => host.hostId === hostFilter.value)?.serviceNodeId || node.value || fallbackNode.value;
+  return selectedOwner.value?.serviceNodeId === chosen ? nativeRouteQuery(selectedOwner.value) : { node: chosen };
+});
 const hostName = (serviceNodeId: string) =>
-  serviceNodeLabel(nodes.value.value?.items ?? [], serviceNodeId);
+  hosts.value.find(host => host.hostId === serviceNodeId || host.nodes.some(node => node.serviceNodeId === serviceNodeId))?.hostId ?? serviceNodeLabel(nodes.value.value?.items ?? [], serviceNodeId);
 const taskName = (summary: unknown, id: string) =>
   text(record(summary).name) ||
   text(record(summary).preview).slice(0, 100) ||
   id;
 const hostItem = (serviceNodeId: string) =>
-  nodes.value.value?.items.find((item) => item.serviceNodeId === serviceNodeId);
+  hosts.value.find(host => host.hostId === serviceNodeId || host.nodes.some(node => node.serviceNodeId === serviceNodeId));
 const hostReady = (serviceNodeId: string) => {
   const item = hostItem(serviceNodeId);
   return !!item?.ready && !!item.connected;
 };
 const scopedProjects = computed(() =>
-  (allProjects.value.value ?? []).filter(value => !hostFilter.value || value.serviceNodeId === hostFilter.value));
-const projectOf = (serviceNodeId: string, id: string) =>
-  scopedProjects.value.find(value => value.serviceNodeId === serviceNodeId && value.project.nativeId === id)?.project;
+  (allProjects.value.value ?? []).filter(value => !hostFilter.value || hostName(value.serviceNodeId) === hostFilter.value).map(value => ({ ...value,
+    backend: ownerFor({ serviceNodeId: value.serviceNodeId, namespace: value.namespace ?? 'codex', kind: 'project', nativeId: value.project.nativeId }).backend })));
+const projectOf = (owner: NativeRouteOwner, id: string) =>
+  scopedProjects.value.find(value => nativeOwnerKey({ serviceNodeId: value.serviceNodeId, namespace: value.namespace ?? 'codex', backend: value.backend }) === nativeOwnerKey(owner) && value.project.nativeId === id)?.project;
 // Tasks wait for the project catalog so internal work never flashes into a user project.
 const tasks = computed(() => allProjects.value.value === null ? [] : recent.value.value?.items ?? []);
 const taskLists = computed(() => partitionInternalTasks(scopedProjects.value, tasks.value));
 const visibleRecent = computed(() => taskLists.value.recent);
 const sections = computed(() =>
   hostSections(
-    hostFilter.value ? [hostFilter.value] : (nodes.value.value?.items ?? []).map(item => item.serviceNodeId),
+    hosts.value.filter(host => !hostFilter.value || host.hostId === hostFilter.value),
     scopedProjects.value,
     tasks.value,
   ).map(value => ({ ...value, groups: value.groups.filter(group => !search.value || group.tasks.length) }))
@@ -275,7 +294,7 @@ watch(search, () => {
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     recent.value.value = null;
-    void recent.refresh();
+    recent.reset();
   }, 250);
 });
 // Lifecycle events mark tasks working or finished immediately; the inventory reread that follows
@@ -291,14 +310,14 @@ const seen = ref<SeenTasks>(readSeen(storedSeen));
 const live = ref(new Map<string, LiveTaskState>());
 const clock = ref(Date.now());
 const trackedTasks = computed(() => new Map(visibleRecent.value.map(item => [
-  taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId), item,
+  itemKey(item), item,
 ])));
 // Remove old internal badge state too, including tasks moved into IvyInternal.
 watch(() => taskLists.value.internal, (items) => {
   const tasks = { ...seen.value.tasks }, working = new Map(live.value);
   let changed = false;
   for (const item of items) {
-    const key = taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId);
+    const key = itemKey(item);
     working.delete(key);
     if (key in tasks) { delete tasks[key]; changed = true; }
   }
@@ -309,8 +328,8 @@ watch(() => taskLists.value.internal, (items) => {
   }
 }, { immediate: true });
 const openKey = computed(() =>
-  section.value === "task" && node.value && query.value.get("id")
-    ? taskKey(node.value, query.value.get("id")!)
+  section.value === "task" && selectedOwner.value && node.value && query.value.get("id")
+    ? taskKey(node.value, query.value.get("id")!, selectedOwner.value.namespace, selectedOwner.value.backend)
     : "",
 );
 const seeTask = (key: string) => {
@@ -337,11 +356,11 @@ watch(
   },
 );
 const activityOf = (item: Operation.InventoryItem) =>
-  taskActivity(item, live.value, seen.value, openKey.value, clock.value);
+  taskActivity(item, live.value, seen.value, openKey.value, clock.value, ownerFor(item.resourceRef).backend);
 // A live lifecycle event counts as an update before the inventory reports it.
 const updatedAt = (item: Operation.InventoryItem) => Math.max(
   (Number(record(item.summary).updatedAt) || 0) * 1000,
-  live.value.get(taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId))?.at ?? 0,
+  live.value.get(itemKey(item))?.at ?? 0,
 );
 const activityTasks = computed(() =>
   [...(showInternal.value ? tasks.value : visibleRecent.value)].sort((a, b) => updatedAt(b) - updatedAt(a)));
@@ -361,7 +380,8 @@ const taskChanged = (value: Transport.ProviderNotification) => {
     threadId = text(record(payload.params).threadId);
   const working = liveWorking(method, payload.params);
   if (threadId && working !== undefined) {
-    const key = taskKey(value.params.serviceNodeId, threadId);
+    const backend = payload.backend as Agent.BackendIdentity | undefined;
+    const key = taskKey(value.params.serviceNodeId, threadId, backend?.backendId ?? 'codex', backend);
     if (!trackedTasks.value.has(key)) return;
     live.value = new Map(live.value).set(key, { working, at: Date.now() });
     clock.value = Date.now();
@@ -410,19 +430,20 @@ const toggleGroup = (id: string) => {
   <UiFrame
     ui-name="Agents"
     layout="conversation"
-    :settings-href="node ? route('host-settings', { node }) : route('settings')"
+    :settings-href="node && selectedOwner ? route('host-settings', nativeRouteQuery(selectedOwner)) : route('settings')"
     :base="base"
     :client="client"
     :navigation="[]"
     show-usage
-    :usage-node="section === 'task' ? node : undefined"
+    :usage-node="section === 'task' || selectedOwner?.backend ? node : undefined"
+    :usage-backend="selectedOwner?.backend"
   >
     <template #sidebar-actions>
       <SidebarGroup class="pb-0">
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton v-if="fallbackNode" as-child
-              ><a :href="route('host', { node: hostFilter || node || fallbackNode })"
+              ><a :href="route('host', newTaskQuery)"
                 ><SquarePen aria-hidden="true" /><span>New task</span></a
               ></SidebarMenuButton
             >
@@ -459,9 +480,9 @@ const toggleGroup = (id: string) => {
                   <DropdownMenuRadioGroup :model-value="hostFilter || 'all'" @update:model-value="filterHost">
                     <DropdownMenuRadioItem value="all">All hosts</DropdownMenuRadioItem>
                     <DropdownMenuRadioItem
-                      v-for="item in nodes.value.value?.items"
-                      :key="item.serviceNodeId"
-                      :value="item.serviceNodeId"
+                      v-for="item in hosts"
+                      :key="item.hostId"
+                      :value="item.hostId"
                     >
                       <HostMark :label="hostName(item.serviceNodeId)" :seed="item.serviceNodeId" />
                       <span class="truncate">{{ hostName(item.serviceNodeId) }}</span>
@@ -505,10 +526,12 @@ const toggleGroup = (id: string) => {
             <SidebarMenu>
               <TaskRow
                 v-for="item in activityTasks"
-                :key="taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId)"
+                :key="itemKey(item)"
                 :item="item"
+                :available="accountAvailable(item.resourceRef)"
+                :backend="ownerFor(item.resourceRef).backend"
                 :name="taskName(item.summary, item.resourceRef.nativeId)"
-                :active="openKey === taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId)"
+                :active="openKey === itemKey(item)"
                 :activity="activityOf(item)"
                 :host="hostName(item.resourceRef.serviceNodeId)"
                 :age="age(item)"
@@ -520,10 +543,10 @@ const toggleGroup = (id: string) => {
         <template v-else>
           <Collapsible
             v-for="host in sections"
-            :key="host.serviceNodeId"
+            :key="host.hostId"
             as-child
-            :open="!collapsed.has('host:' + host.serviceNodeId)"
-            @update:open="toggleGroup('host:' + host.serviceNodeId)"
+            :open="!collapsed.has('host:' + host.hostId)"
+            @update:open="toggleGroup('host:' + host.hostId)"
           >
             <SidebarGroup>
               <SidebarGroupLabel class="gap-1.5 pr-8">
@@ -531,6 +554,7 @@ const toggleGroup = (id: string) => {
                   :client="client"
                   passive
                   :node="host.serviceNodeId"
+                  :accounts="(accounts.value.value ?? []).filter(scope => scope.hostId === host.hostId)"
                   :label="hostName(host.serviceNodeId)"
                   :ready="hostReady(host.serviceNodeId)"
                 >
@@ -587,23 +611,22 @@ const toggleGroup = (id: string) => {
                             /><FolderOpen v-else aria-hidden="true" /><span
                               class="truncate"
                               >{{ group.name }}</span
-                            ></SidebarMenuButton
+                            ><span v-if="group.owner.backend" class="truncate text-xs text-muted-foreground">{{ nativeBackendLabel(group.owner.backend) }}</span></SidebarMenuButton
                           >
                         </CollapsibleTrigger>
                         <SidebarMenuAction v-if="group.path" as-child show-on-hover class="right-7"
                           ><a
                             :href="
-                              route('host', {
-                                node: host.serviceNodeId,
+                              route('host', nativeRouteQuery(group.owner, {
                                 project: group.path,
-                                projectId: group.id,
-                              })
+                                projectId: group.projectId,
+                              }))
                             "
                             :aria-label="'New task in ' + group.name"
                             ><Plus aria-hidden="true" /></a
                         ></SidebarMenuAction>
-                        <ProjectActions v-if="group.path && projectOf(host.serviceNodeId, group.id)" :client="client" :node="host.serviceNodeId"
-                          :project="projectOf(host.serviceNodeId, group.id)!"
+                        <ProjectActions v-if="group.path && accountAvailable(group.owner) && (group.owner.backend || group.owner.namespace === 'codex') && projectOf(group.owner, group.projectId)" :client="client" :node="group.owner.serviceNodeId" :backend="group.owner.backend"
+                          :project="projectOf(group.owner, group.projectId)!"
                           @changed="allProjects.refresh(); recent.refresh()">
                           <SidebarMenuAction :aria-label="'Manage project ' + group.name" show-on-hover><MoreHorizontal aria-hidden="true" /></SidebarMenuAction>
                         </ProjectActions>
@@ -611,11 +634,13 @@ const toggleGroup = (id: string) => {
                           <SidebarMenuSub>
                             <TaskRow
                               v-for="item in group.tasks"
-                              :key="item.resourceRef.nativeId"
+                              :key="itemKey(item)"
                               nested
                               :item="item"
+                              :available="accountAvailable(item.resourceRef)"
+                              :backend="ownerFor(item.resourceRef).backend"
                               :name="taskName(item.summary, item.resourceRef.nativeId)"
-                              :active="openKey === taskKey(host.serviceNodeId, item.resourceRef.nativeId)"
+                              :active="openKey === itemKey(item)"
                               :activity="activityOf(item)"
                               @changed="recent.refresh()"
                             />
@@ -642,11 +667,13 @@ const toggleGroup = (id: string) => {
                           <SidebarMenuSub>
                             <TaskRow
                               v-for="item in host.internal"
-                              :key="item.resourceRef.nativeId"
+                              :key="itemKey(item)"
                               nested
                               :item="item"
+                              :available="accountAvailable(item.resourceRef)"
+                              :backend="ownerFor(item.resourceRef).backend"
                               :name="taskName(item.summary, item.resourceRef.nativeId)"
-                              :active="openKey === taskKey(host.serviceNodeId, item.resourceRef.nativeId)"
+                              :active="openKey === itemKey(item)"
                               :activity="activityOf(item)"
                               @changed="recent.refresh()"
                             />
@@ -691,38 +718,50 @@ const toggleGroup = (id: string) => {
             Retry
           </Button>
         </p>
+        <div v-if="recent.page.value > 1 || recent.value.value?.nextCursor" class="flex items-center justify-between gap-2 px-3 py-2">
+          <Button variant="ghost" size="sm" :disabled="recent.page.value <= 1 || recent.loading.value" @click="recent.previous">Previous tasks</Button>
+          <span class="text-xs text-muted-foreground">{{ recent.page.value }}</span>
+          <Button variant="ghost" size="sm" :disabled="!recent.value.value?.nextCursor || recent.loading.value" @click="recent.next">Next tasks</Button>
+        </div>
       </nav>
     </template>
+    <RemoteState v-if="parsedOwner.error" :loading="false" :error="parsedOwner.error" :has-data="false" />
     <AgentTask
-      v-if="section === 'task' && node && query.get('id')"
-      :key="node + ':' + query.get('id')"
+      v-else-if="section === 'task' && node && query.get('id') && selectedOwner"
+      :key="nativeOwnerKey(selectedOwner) + ':' + query.get('id')"
       :node="node"
+      :backend="selectedOwner.backend"
       :thread-id="query.get('id')!"
       :turn-id="query.get('turn') ?? ''"
     />
     <AgentHostSettings
       v-else-if="section === 'host-settings' && node"
-      :key="node"
+      :key="selectedOwner ? nativeOwnerKey(selectedOwner) : node"
       :node="node"
+      :backend="selectedOwner?.backend"
     />
     <AgentSettings v-else-if="section === 'settings'" :node="managementNode" />
-    <AgentHost
+    <AgentHostAccounts
       v-else-if="section === 'host' && node"
       :key="hash"
       :node="node"
+      :nodes="nodes.value.value?.items ?? []"
+      :backend="selectedOwner?.backend"
       :project="query.get('project') ?? ''"
       :project-id="query.get('projectId') ?? ''"
     />
-    <AgentHost
+    <AgentHostAccounts
       v-else-if="section === 'home' && fallbackNode && !mobile"
       :key="fallbackNode"
       :node="fallbackNode"
+      :nodes="nodes.value.value?.items ?? []"
       project=""
       project-id=""
     />
     <AgentHosts
       v-else
       :nodes="nodes.value.value?.items ?? []"
+      :accounts="accounts.value.value ?? []"
       :tasks="visibleRecent"
       :loading="nodes.loading.value || recent.loading.value"
       :error="nodes.error.value || recent.error.value"
@@ -744,15 +783,14 @@ const toggleGroup = (id: string) => {
   >
     <SearchResult
       v-for="item in recent.value.value?.items"
-      :key="item.resourceRef.serviceNodeId + ':' + item.resourceRef.nativeId"
+      :key="itemKey(item)"
       :href="
-        route('task', {
-          node: item.resourceRef.serviceNodeId,
+        route('task', nativeRouteQuery(ownerFor(item.resourceRef), {
           id: item.resourceRef.nativeId,
-        })
+        }))
       "
       :title="taskName(item.summary, item.resourceRef.nativeId)"
-      :detail="hostName(item.resourceRef.serviceNodeId)"
+      :detail="hostName(item.resourceRef.serviceNodeId) + (ownerFor(item.resourceRef).backend ? ' · ' + nativeBackendLabel(ownerFor(item.resourceRef).backend!) : '')"
     />
   </SearchDialog>
 </template>

@@ -36,7 +36,7 @@ pub struct NativeConnectionSettings {
 }
 type Stopped = IvyResult<Arc<ProcessResult>>;
 #[derive(Clone)]
-pub struct NativeCompletion(watch::Receiver<Option<Stopped>>);
+pub struct NativeCompletion(pub(crate) watch::Receiver<Option<Stopped>>);
 impl NativeCompletion {
     pub async fn wait(&self) -> Stopped {
         let mut receiver = self.0.clone();
@@ -64,7 +64,7 @@ pub struct AgentNativeConnection {
     pub daemon: Option<IvyJson>,
     pub launcher_pid: u32,
     pub completion: NativeCompletion,
-    stop: watch::Sender<bool>,
+    pub(crate) stop: watch::Sender<bool>,
 }
 impl AgentNativeConnection {
     /// Retain one completion even if a close waiter is abandoned. Losing the

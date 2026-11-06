@@ -3,22 +3,29 @@ import { useRemote } from "@ivy/ui";
 import { nativeRead } from "../../../packages/ui-client/src/native";
 import { client, readDocument, tr } from "./runtime";
 import type { TaskBoard } from "./runtime";
+import { canonical } from '../../../packages/sdk/src/client.js';
+import type { NativeRouteOwner } from '../../../packages/ui-client/src/native-route';
 
 export function useExecutionDefaults(
   workspace: () => TaskBoard.WorkspaceInfo,
   task: () => TaskBoard.Task | undefined,
 ) {
+  const selection = () => JSON.stringify([task()?.lastRun, task()?.primaryResourceRef]);
   const current = useRemote(
     async (signal) => {
       const value = task(),
-        scope = workspace();
+        scope = workspace(), selected = selection();
       if (value?.lastRun && value.primaryResourceRef) {
         const run = (
           await readDocument("run", value.lastRun, scope.rootObjectId, signal)
         ).value;
-        return {
+        if (canonical(run.primaryResourceRef) !== canonical(value.primaryResourceRef) || run.target.serviceNodeId !== value.primaryResourceRef.serviceNodeId ||
+            (run.target.backend?.backendId ?? 'codex') !== value.primaryResourceRef.namespace)
+          throw new Error('The retained execution belongs to another conversation or account.');
+        const defaults: TaskBoard.ExecutionDefaults = {
           executionRequirement: { kind: "host", hostId: run.target.hostId },
           nativeOptions: {
+            ...(run.target.backend ? { backend: run.target.backend } : {}),
             model:
               typeof run.plan.turnStart.model === "string"
                 ? run.plan.turnStart.model
@@ -34,8 +41,9 @@ export function useExecutionDefaults(
                 : "standard",
           },
         } satisfies TaskBoard.ExecutionDefaults;
+        return { defaults, selection: selected, owner: { ...value.primaryResourceRef, ...(run.target.backend ? { backend: run.target.backend } : {}) } as NativeRouteOwner };
       }
-      return (
+      const defaults = (
         (await nativeRead(
           client,
           scope.serviceNodeId,
@@ -44,6 +52,7 @@ export function useExecutionDefaults(
           signal,
         )) as TaskBoard.ConfigurationView
       ).configuration.defaults;
+      return { defaults, selection: selected, owner: null };
     },
     15000,
     ["objects/task-board/configuration", "objects/task-board/run"],
@@ -57,5 +66,7 @@ export function useExecutionDefaults(
       ? tr("Letzte Ausführung", "Previous execution")
       : tr("TaskBoard-Standard", "TaskBoard default"),
   );
-  return { current, defaults: current.value, label };
+  const defaults = computed(() => current.value.value?.selection === selection() ? current.value.value.defaults : null);
+  const owner = computed(() => current.value.value?.selection === selection() ? current.value.value.owner : null);
+  return { current, defaults, owner, label };
 }

@@ -18,7 +18,7 @@ use crate::{
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical,
-    limits::MANAGEMENT_FRAME_BYTES,
+    limits::MANAGEMENT_FRAME_BYTES, native_backend::BackendIdentity,
 };
 use ivy_sdk::native_observations::NativeObservations;
 use std::{cell::RefCell, collections::HashSet, future::Future};
@@ -211,8 +211,16 @@ pub struct NativeOrchestrator<'a, S, E, V> {
     pub services: &'a V,
     pub catalogs: &'a CheckedNativeContracts,
     progress: NativeProgress,
-    threads: RefCell<Vec<(JsString, JsString, JsString)>>,
+    threads: RefCell<Vec<NotificationThread>>,
     retries: RefCell<Vec<(JsString, f64)>>,
+}
+struct NotificationThread {
+    run: JsString,
+    node: JsString,
+    backend: Option<BackendIdentity>,
+    epoch: JsString,
+    thread: JsString,
+    turn: JsString,
 }
 fn field<'a>(v: &'a Json, k: &str) -> &'a Json {
     static NULL: Json = Json::Null;
@@ -282,16 +290,30 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
         if !relevant && !activity {
             return false;
         }
+        let thread_wide = equal(event, "method", "thread/status/changed")
+            || equal(event, "method", "serverRequest/resolved");
+        let turns = [field(body, "turnId"), field(field(body, "turn"), "id")];
         let mut matched = false;
-        for (run, node, thread) in self.threads.borrow().iter() {
-            if params.get("serviceNodeId").and_then(Json::as_js_string) == Some(node)
-                && body.get("threadId").and_then(Json::as_js_string) == Some(thread)
+        for selected in self.threads.borrow().iter() {
+            if params.get("serviceNodeId").and_then(Json::as_js_string) == Some(&selected.node)
+                && event.get("serviceNodeId") == params.get("serviceNodeId")
+                && event.get("epoch").and_then(Json::as_js_string) == Some(&selected.epoch)
+                && body.get("threadId").and_then(Json::as_js_string) == Some(&selected.thread)
+                && (thread_wide
+                    || turns
+                        .iter()
+                        .any(|turn| turn.as_js_string() == Some(&selected.turn)))
+                && turns
+                    .iter()
+                    .all(|turn| turn.is_null() || turn.as_js_string() == Some(&selected.turn))
+                && BackendIdentity::matches(event, selected.backend.as_ref())
             {
                 if activity {
-                    self.progress.activity(run, self.engine.now_millis());
+                    self.progress
+                        .activity(&selected.run, self.engine.now_millis());
                 }
                 if relevant {
-                    self.retries.borrow_mut().retain(|r| &r.0 != run);
+                    self.retries.borrow_mut().retain(|r| r.0 != selected.run);
                     matched = true;
                 }
             }
@@ -346,20 +368,8 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
                 .await?;
             let value = &after.value;
             if finished_run(value) {
-                self.threads.borrow_mut().retain(|v| &v.0 != run);
+                self.threads.borrow_mut().retain(|v| &v.run != run);
                 self.retries.borrow_mut().retain(|v| &v.0 != run);
-            } else if field(value, "primaryResourceRef").as_object().is_some() {
-                let node = s(value.required("target")?, "serviceNodeId")?.clone();
-                let thread = s(value.required("primaryResourceRef")?, "nativeId")?.clone();
-                let mut threads = self.threads.borrow_mut();
-                if threads.len() >= 1024 {
-                    threads.remove(0);
-                }
-                if let Some(entry) = threads.iter_mut().find(|v| &v.0 == run) {
-                    *entry = (run.clone(), node, thread);
-                } else {
-                    threads.push((run.clone(), node, thread));
-                }
             }
             let waiting = if equal(value, "phase", "starting") {
                 self.store
@@ -390,6 +400,46 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             {
                 break;
             }
+        }
+        Ok(())
+    }
+    fn observed_thread(
+        &self,
+        id: &JsString,
+        run: &Json,
+        task: &Json,
+        turns: &Json,
+    ) -> IvyResult<()> {
+        let target = crate::native_plan::routed_target(task, run.required("target")?)?;
+        let backend = BackendIdentity::optional(target.get("backend"))?;
+        let matches = turns.get("serviceNodeId") == target.get("serviceNodeId")
+            && BackendIdentity::matches(turns, backend.as_ref());
+        if !matches {
+            self.threads.borrow_mut().retain(|thread| &thread.run != id);
+        }
+        require(
+            matches,
+            "task_board_native_epoch_changed",
+            "The selected notification owner changed during native inspection.",
+        )?;
+        // The inspector already checked this current read. Keep only its small
+        // advisory identity; notices cannot publish or complete a native Run.
+        let selected = NotificationThread {
+            run: id.clone(),
+            node: s(turns, "serviceNodeId")?.clone(),
+            backend,
+            epoch: s(turns, "epoch")?.clone(),
+            thread: s(run.required("primaryResourceRef")?, "nativeId")?.clone(),
+            turn: s(run, "turnId")?.clone(),
+        };
+        let mut threads = self.threads.borrow_mut();
+        if let Some(entry) = threads.iter_mut().find(|v| &v.run == id) {
+            *entry = selected;
+        } else {
+            if threads.len() >= 1024 {
+                threads.remove(0);
+            }
+            threads.push(selected);
         }
         Ok(())
     }
@@ -501,6 +551,8 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             .await?;
         if finished_run(&run.value) {
             self.progress.forget(run_id);
+            self.threads.borrow_mut().retain(|v| &v.run != run_id);
+            self.retries.borrow_mut().retain(|v| &v.0 != run_id);
             return Ok(());
         }
         // A partially published native update owns its original Task/Run pins.
@@ -516,6 +568,19 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             .store
             .read("task-board/task", run.value.required("taskId")?, true)
             .await?;
+        let selected =
+            crate::native_plan::routed_target(&task.value, run.value.required("target")?)?;
+        let backend = BackendIdentity::optional(selected.get("backend"))?;
+        self.threads.borrow_mut().retain(|thread| {
+            &thread.run != run_id
+                || selected.get("serviceNodeId").and_then(Json::as_js_string) == Some(&thread.node)
+                    && backend == thread.backend
+                    && field(&run.value, "primaryResourceRef")
+                        .get("nativeId")
+                        .and_then(Json::as_js_string)
+                        == Some(&thread.thread)
+                    && run.value.get("turnId").and_then(Json::as_js_string) == Some(&thread.turn)
+        });
         let active = field(field(&task.value, "claim"), "run")
             .get("objectId")
             .and_then(Json::as_js_string)
@@ -721,10 +786,15 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
         let in_progress = status == JsString::from("inProgress");
         if !in_progress {
             self.progress.forget(id);
+            self.threads.borrow_mut().retain(|v| &v.run != id);
         }
         let same_epoch = turns.get("epoch") == value.get("nativeEpoch");
         if in_progress && !same_epoch && self.services.owner_stopped(value).await? {
+            self.threads.borrow_mut().retain(|thread| &thread.run != id);
             return self.update(run, task, Json::object([("kind", "unavailable".into()), ("reason", "external_outcome".into()), ("code", "native_process_lost".into()), ("detail", "The original native process tree stopped; the saved unfinished turn cannot continue in the replacement owner.".into())])).await;
+        }
+        if in_progress {
+            self.observed_thread(id, value, &task.value, &turns)?;
         }
         // History is not an attachment to the live thread. Reuse the retained
         // resume path before adopting an epoch or controlling its saved turn.

@@ -41,11 +41,14 @@ impl<S: MaintenanceStore> Retention<'_, S> {
         attachments: bool,
     ) -> IvyResult<()> {
         let version = self.store.contracts().version("task-board/task")?;
-        require(
-            ["2.2.0", "2.3.0", "3.0.0", "3.1.0"].contains(&version.as_str()),
-            "task_board_contract_mismatch",
-            "Maintenance requires an indexed conversation.",
-        )?;
+        let node_version =
+            crate::journal_store::persistent_reads::task_comments::comment_node_version(&version)
+                .ok_or_else(|| {
+                IvyError::new(
+                    "task_board_contract_mismatch",
+                    "Maintenance requires an indexed conversation.",
+                )
+            })?;
         self.store
             .contracts()
             .validate_record("task-board/task", &version.clone().into(), task)?;
@@ -76,11 +79,7 @@ impl<S: MaintenanceStore> Retention<'_, S> {
                 .map_err(WriteFailure::<IvyError>::from)
         };
         let owner = Json::from(id);
-        let node_version = Json::from(if version.starts_with('3') {
-            "2.0.0"
-        } else {
-            "1.0.0"
-        });
+        let node_version = Json::from(node_version);
         let mut receipts = HashMap::new();
         for receipt in items(task, "commentDeliveries")? {
             receipts.insert(hash_json(receipt.required("commentId")?)?, receipt);

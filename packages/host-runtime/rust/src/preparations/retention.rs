@@ -1,6 +1,5 @@
 use super::*;
 use crate::storage_space::RetentionProgress;
-use ivy_contracts::JsString;
 use std::{collections::BTreeSet, sync::Arc, time::UNIX_EPOCH};
 
 pub struct PreparationStorageCollection {
@@ -26,6 +25,7 @@ async fn remove_retired(
     area: &'static str,
     progress: &Option<Arc<dyn RetentionProgress>>,
 ) -> usize {
+    if progress.as_ref().is_some_and(|p| !p.permit_removal(area)) { return 0; }
     let checked = path.clone();
     let result = async {
         blocking(move || {
@@ -74,7 +74,7 @@ async fn retired_directories(
             Err(_) => return Err(IvyError::internal()),
         };
         let mut names = Vec::new();
-        for entry in entries {
+        for entry in entries.take(10001) {
             let entry = internal(entry)?;
             let name = entry.file_name();
             if let Some(name) = name.to_str() {
@@ -90,6 +90,7 @@ async fn retired_directories(
             }
         }
         names.sort();
+        require(names.len() <= 10000, "limit_exceeded", "Retired staging inventory exceeds its bound.")?;
         Ok(names)
     })
     .await?;
@@ -113,6 +114,7 @@ async fn retire_directory(
     area: &'static str,
     progress: &Option<Arc<dyn RetentionProgress>>,
 ) -> IvyResult<usize> {
+    if progress.as_ref().is_some_and(|p| !p.permit_removal(area)) { return Ok(0); }
     let name = path
         .file_name()
         .and_then(|v| v.to_str())
@@ -151,13 +153,8 @@ fn at_or_before(record: &IvyJson, cutoff: f64) -> bool {
         .and_then(IvyJson::as_js_string)
         .is_some_and(|at| ivy_sdk::clock::parse_date(at) <= cutoff)
 }
-fn superseded(record: &IvyJson, newest: &std::collections::BTreeMap<JsString, JsString>) -> bool {
-    record.get("componentId").and_then(IvyJson::as_js_string).and_then(|id| newest.get(id))
-        .zip(record.get("candidate").and_then(|c| c.get("createdAt")).and_then(IvyJson::as_js_string))
-        .is_some_and(|(latest, created)| created < latest)
-}
-fn collectible(record: &IvyJson, cutoff: f64, newest: &std::collections::BTreeMap<JsString, JsString>) -> bool {
-    record.get("phase") == Some(&"compacted".into()) && (at_or_before(record, cutoff) || superseded(record, newest))
+fn collectible(record: &IvyJson, cutoff: f64) -> bool {
+    record.get("phase") == Some(&"compacted".into()) && at_or_before(record, cutoff)
 }
 fn milliseconds(at: std::time::SystemTime) -> f64 {
     let (positive, d) = match at.duration_since(UNIX_EPOCH) {
@@ -184,20 +181,29 @@ async fn collect(
     progress: Option<Arc<dyn RetentionProgress>>,
 ) -> IvyResult<PreparationStorageCollection> {
     let staging = path_field(&host, "stagingRoot")?;
+    // Writers hold shared ownership from capture/build admission to completion.
+    // A busy writer pauses source/preparation deletion, not the other GC areas.
+    let source_lease = match ExecutorLock::acquire(staging.join("source-storage-lock"), false).await {
+        Ok(lease) => Some(lease),
+        Err(error) if error.code == "executor_already_running" => {
+            skipped(&progress, "snapshots", "active_source_work", false);
+            None
+        },
+        Err(error) => return Err(error),
+    };
     let source_root = staging.join("sources");
+    let checked = source_root.clone(); let parent = staging.clone();
+    blocking(move || {
+        let info = match fs::symlink_metadata(&checked) { Ok(v) => v, Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()), Err(_) => return Err(IvyError::internal()) };
+        let actual = internal(realpath(&checked))?;
+        require(info.is_dir() && !info.file_type().is_symlink() && actual.parent() == Some(internal(realpath(&parent))?.as_path()) && actual.file_name() == checked.file_name(), "target_conflict", "Source storage must remain a directly owned directory.")
+    }).await?;
     let mut result = PreparationStorageCollection {
-        preparations: retired_directories(staging.clone(), true, &progress).await?,
-        snapshots: retired_directories(source_root.clone(), false, &progress).await?,
+        preparations: if source_lease.is_some() { retired_directories(staging.clone(), true, &progress).await? } else { 0 },
+        snapshots: if source_lease.is_some() { retired_directories(source_root.clone(), false, &progress).await? } else { 0 },
         protected_candidates: BTreeSet::new(),
     };
     let mut protected_snapshots = BTreeSet::new();
-    let mut superseded_snapshots = BTreeSet::new();
-    let mut newest = std::collections::BTreeMap::<JsString, JsString>::new();
-    for (candidate, _) in journal.storage_retention_candidates().await? {
-        let component = candidate.required("componentId")?.as_js_string().ok_or_else(IvyError::internal)?;
-        let created = candidate.required("createdAt")?.as_js_string().ok_or_else(IvyError::internal)?;
-        if newest.get(component).is_none_or(|at| created > at) { newest.insert(component.clone(), created.clone()); }
-    }
     let mut unknown = false;
     for entry in journal.unfinished_preparation_operations().await? {
         if let Some(snapshot) = entry.get("sourceSnapshot").filter(|v| !v.is_null()) {
@@ -217,7 +223,7 @@ async fn collect(
         };
         let original = record.clone();
         let mut current_missing = false;
-        if collectible(&record, cutoff, &newest) {
+        if source_lease.is_some() && collectible(&record, cutoff) {
             let mut lock = None;
             let removal: IvyResult<bool>=async{
                 let build=record.required("buildId")?.as_str()?;
@@ -225,7 +231,7 @@ async fn collect(
                 let current=record_at(staging.clone(),root.clone()).await?;
                 current_missing=current.is_none();
                 record=current.ok_or_else(||IvyError::new("preparation_unrecognized","Preparation changed while collecting its history."))?;
-                if collectible(&record,cutoff,&newest){
+                if collectible(&record,cutoff){
                     if let Some(candidate)=record.get("candidate").filter(|v|!v.is_null()){
                         if hash_json(&journal.candidate(&candidate.required("candidateId")?.as_str()?).await?)?==hash_json(candidate)?{
                             let check=root.clone();let parent=staging.clone();
@@ -237,7 +243,6 @@ async fn collect(
                                 owned_root(&parent,&check)?;Ok(())
                             }).await?;
                             result.preparations+=retire_directory(root.clone(),"preparations",&progress).await?;
-                            if superseded(&record,&newest) { superseded_snapshots.insert(record.required("snapshot")?.required("snapshotId")?.as_str()?); }
                             return Ok(true);
                         }
                     }
@@ -293,12 +298,12 @@ async fn collect(
             }
         }
     }
-    if unknown {
+    if unknown || source_lease.is_none() {
         skipped(
             &progress,
             "snapshots",
-            "unknown_preparation_ownership",
-            true,
+            if unknown { "unknown_preparation_ownership" } else { "active_source_work" },
+            unknown,
         );
         return Ok(result);
     }
@@ -309,7 +314,8 @@ async fn collect(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(_) => return Err(IvyError::internal()),
         };
-        let mut values = internal(entries.collect::<Result<Vec<_>, _>>())?;
+        let mut values = internal(entries.take(10001).collect::<Result<Vec<_>, _>>())?;
+        require(values.len() <= 10000, "limit_exceeded", "Source snapshot inventory exceeds its bound.")?;
         values.sort_by_key(|v| v.file_name());
         Ok(values)
     })
@@ -341,7 +347,7 @@ async fn collect(
             ))
         })
         .await?;
-        if milliseconds(internal(metadata.modified())?) > cutoff && !superseded_snapshots.contains(&name) {
+        if milliseconds(internal(metadata.modified())?) > cutoff {
             skipped(&progress, "snapshots", "grace_period", false);
             continue;
         }
@@ -352,7 +358,7 @@ async fn collect(
             continue;
         }
         let manifest =
-            match crate::config::json_file(path.join("snapshot.json"), 8 * 1024 * 1024).await {
+            match crate::config::json_file(path.join("snapshot.json"), 32768).await {
                 Ok(v) => v,
                 Err(_) => {
                     skipped(&progress, "snapshots", "unrecognized_manifest", true);

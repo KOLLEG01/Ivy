@@ -2,6 +2,7 @@ import definition from "../ui.json";
 import { uiRuntime } from "../../../packages/ui-client/src/runtime";
 import { nativeOutputCache } from "../../../packages/ui-client/src/native-output-cache";
 import { record, text } from "../../../packages/ui-client/src/native";
+import type { Agent } from '../../../packages/sdk/src/client.js';
 export const { base, client, uiUrl, notifications, live } = uiRuntime(
   definition.metadata,
 );
@@ -14,7 +15,7 @@ notifications.subscribe(
     const event = record(value.params.payload),
       params = record(event.params);
     if (text(event.epoch))
-      outputCache.observeEpoch(value.params.serviceNodeId, text(event.epoch));
+      outputCache.observeEpoch(value.params.serviceNodeId, text(event.epoch), event.backend as Agent.BackendIdentity | undefined);
     if (
       [
         "thread/deleted",
@@ -27,6 +28,7 @@ notifications.subscribe(
       outputCache.invalidate(
         value.params.serviceNodeId,
         text(params.threadId) || undefined,
+        (event.backend as Agent.BackendIdentity | undefined) ?? null,
       );
   },
 );

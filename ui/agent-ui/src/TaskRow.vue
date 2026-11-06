@@ -10,9 +10,11 @@ import {
   SidebarMenuSubButton,
   SidebarMenuSubItem,
 } from "@ivy/ui";
-import type { Operation } from "../../../packages/sdk/src/client.js";
+import type { Agent, Operation } from "../../../packages/sdk/src/client.js";
 import { record, text } from "../../../packages/ui-client/src/native";
 import { route } from "../../../packages/ui-client/src/runtime";
+import { nativeRouteQuery } from '../../../packages/ui-client/src/native-route';
+import { nativeBackendLabel } from '../../../packages/ui-client/src/native-backends';
 import type { TaskActivity } from "./task-activity";
 import TaskActions from "./TaskActions.vue";
 
@@ -20,6 +22,8 @@ import TaskActions from "./TaskActions.vue";
 // `nested` rows sit inside a project; their hover state must not follow the project row.
 const props = defineProps<{
   item: Operation.InventoryItem;
+  available: boolean;
+  backend?: Agent.BackendIdentity | undefined;
   name: string;
   active: boolean;
   activity: TaskActivity;
@@ -46,16 +50,19 @@ const menu = computed(() => props.nested
       :class="activity || age ? 'pr-7 max-md:pr-14' : 'pr-7'"
     >
       <a
-        :href="route('task', { node, id })"
+        :href="route('task', nativeRouteQuery({ ...item.resourceRef, backend }, { id }))"
         :aria-current="active ? 'page' : undefined"
-        :title="host ? host + ' · ' + name : name"
+        :title="[host, backend ? nativeBackendLabel(backend) : '', name].filter(Boolean).join(' · ')"
         ><HostMark v-if="host" :label="host" :seed="node" /><span>{{ name }}</span></a
       >
     </component>
     <ActivityIndicator v-if="activity" :state="activity" :class="status" />
     <span v-else-if="age" :class="status" class="h-4 text-xs leading-4 text-muted-foreground tabular-nums">{{ age }}</span>
     <TaskActions
+      v-if="available && !item.stale && (backend || item.resourceRef.namespace === 'codex')"
       :node="node"
+      :available="available"
+      :backend="backend"
       :thread-id="id"
       :name="name"
       :project-id="text(record(item.summary).projectId)"

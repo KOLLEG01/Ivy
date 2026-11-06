@@ -16,6 +16,14 @@ use std::{
 };
 use tokio::runtime::Handle;
 
+pub(crate) fn comment_node_version(task_version: &str) -> Option<&'static str> {
+    match task_version {
+        "2.2.0" | "2.3.0" => Some("1.0.0"),
+        "3.0.0" | "3.1.0" | "3.2.0" | "3.3.0" | "3.4.0" | "3.5.0" => Some("2.0.0"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 #[path = "../../../../tests/fixtures/task-board-cache.rs"]
 mod memory_tests;

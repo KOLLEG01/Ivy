@@ -48,6 +48,20 @@ export function dependencies(root, file, cache = new Map()) {
   return result;
 }
 
+/** Node emits TS tests and explicit dist inputs. Vite and in-memory SFC loaders compile their own source assets. */
+export function typescriptEntries(root, tests, inputs) {
+  const result = new Set(tests.filter(file => file.endsWith('.ts')));
+  for (const file of inputs) {
+    if (!/\.(?:mjs|ts)$/.test(file) || !existsSync(join(root, file))) continue;
+    const source = readFileSync(join(root, file), 'utf8');
+    for (const match of source.matchAll(/['"`]((?:(?:\.\.?\/)+)?dist\/[^'"`\n$]+)['"`]/g)) {
+      const ref = match[1], path = (ref.startsWith('.') ? slash(relative(root, resolve(root, dirname(file), ref))) : ref).replace(/^dist\//, '').replace(/\.js$/, '.ts');
+      if (!path.startsWith('../') && path.endsWith('.ts') && existsSync(join(root, path))) result.add(path);
+    }
+  }
+  return [...result].sort();
+}
+
 export function selectTests(root, config, { changed = [], scopes = [], files = [], all = false, kinds = [] } = {}) {
   const tests = inventory(root, config);
   for (const scope of scopes) if (!config.scopes.includes(scope)) throw Error('Unknown test scope: ' + scope);

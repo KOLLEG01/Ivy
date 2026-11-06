@@ -248,7 +248,7 @@ async fn native_runtime_registers_the_full_catalog_and_serves_an_sdk_workspace_c
             .as_array()
             .unwrap()
             .len(),
-        51
+        54
     );
     let health = json(&std::fs::read_to_string(data.join("health.json")).unwrap());
     assert_eq!(health.get("ready"), Some(&Json::Bool(false)));

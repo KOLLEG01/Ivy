@@ -139,19 +139,25 @@ impl<R: RpcClient + 'static, P: NativePublicationPolicies> NativePublicationEngi
         &self.principal_id
     }
     async fn workspace(&self, t: &Json, r: &Json) -> IvyResult<Json> {
+        let target = crate::native_plan::routed_target(t, r.required("target")?)?;
+        let backend =
+            ivy_contracts::native_backend::BackendIdentity::optional(target.get("backend"))?;
         crate::native_inspector::management_read(
             &self.tools,
-            s(f(r, "target"), "serviceNodeId")?,
+            s(&target, "serviceNodeId")?,
             "resolveWorkspace",
-            Json::object([
-                ("taskKey", f(t, "taskKey").clone()),
-                (
-                    "requirement",
-                    f(f(t, "fields"), "workspaceRequirement").clone(),
-                ),
-                ("prepare", false.into()),
-                ("verifyOrigin", true.into()),
-            ]),
+            ivy_contracts::native_backend::BackendIdentity::select_arguments(
+                backend.as_ref(),
+                Json::object([
+                    ("taskKey", f(t, "taskKey").clone()),
+                    (
+                        "requirement",
+                        f(f(t, "fields"), "workspaceRequirement").clone(),
+                    ),
+                    ("prepare", false.into()),
+                    ("verifyOrigin", true.into()),
+                ]),
+            )?,
         )
         .await
     }
@@ -182,7 +188,7 @@ pub trait NativePublicationEvidence {
         artifact: &Json,
         identity: &EvidenceIdentity,
     ) -> IvyResult<Json>;
-    async fn intended(&self, run: &Json, origin: &Json) -> IvyResult<Json>;
+    async fn intended(&self, task: &Json, run: &Json, origin: &Json) -> IvyResult<Json>;
     fn resolve(&self, request: &Json) -> IvyResult<Json>;
 }
 pub struct PublicationEvidence<'a, S, P> {
@@ -283,12 +289,12 @@ impl<S: Store + ReadEvidenceStore + TurnEvidenceStore, P: TaskPrompts> NativePub
         .read(p, a, i)
         .await
     }
-    async fn intended(&self, r: &Json, o: &Json) -> IvyResult<Json> {
+    async fn intended(&self, task: &Json, r: &Json, o: &Json) -> IvyResult<Json> {
         NativeIntent {
             store: self.store,
             catalogs: self.catalogs,
         }
-        .intended_call(r, NativeSlot::Steer, Some(o), self.prompts)
+        .intended_call_for_task(r, NativeSlot::Steer, Some(o), self.prompts, Some(task))
         .await
     }
     fn resolve(&self, r: &Json) -> IvyResult<Json> {
@@ -304,6 +310,44 @@ pub struct NativePublisher<'a, S, E, V> {
     pub store: &'a S,
     pub engine: &'a E,
     pub evidence: &'a V,
+}
+fn prepared_owner_matches(task: &Json, run: &Json, call: &Json) -> IvyResult<()> {
+    use ivy_contracts::native_backend::BackendIdentity;
+    let request = call.required("request")?;
+    let target = crate::native_plan::routed_target(task, run.required("target")?)?;
+    if request.get("backend").is_some() || target.get("backend").is_some() {
+        let selection = crate::native_plan::routed_selection(task, run)?;
+        let owner =
+            ivy_sdk::native_evidence::NativeOwnerIdentity::from_json(call.required("owner")?)?;
+        require(
+            BackendIdentity::matches(request, owner.backend.as_ref())
+                && BackendIdentity::matches(&target, owner.backend.as_ref())
+                && BackendIdentity::matches(
+                    run.required("target")?,
+                    BackendIdentity::optional(run.required("plan")?.get("backend"))?.as_ref(),
+                )
+                && request.get("catalogSourceHash") == selection.get("catalogSourceHash")
+                && target.get("serviceNodeId").and_then(Json::as_js_string)
+                    == Some(&owner.service_node_id)
+                && target.get("hostId").and_then(Json::as_js_string) == owner.host_id.as_ref()
+                && request.get("nativeVersion") == selection.get("nativeVersion")
+                && request.get("nativeVersion").and_then(Json::as_js_string)
+                    == Some(&owner.native_version)
+                && request
+                    .required("params")?
+                    .get("nativeExecutableHash")
+                    .and_then(Json::as_js_string)
+                    == Some(&owner.native_executable_hash)
+                && request
+                    .required("params")?
+                    .get("catalogHash")
+                    .and_then(Json::as_js_string)
+                    == Some(&owner.catalog_hash),
+            "task_board_native_intent_mismatch",
+            "A new call must retain the selected route, backend and account before attachment.",
+        )?;
+    }
+    Ok(())
 }
 fn f<'a>(v: &'a Json, k: &str) -> &'a Json {
     static NULL: Json = Json::Null;
@@ -697,6 +741,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                     .read("task-board/native-call", f(change, "call"), false)
                     .await?;
                 let origin = f(&call.value, "origin");
+                prepared_owner_matches(task_value, run, &call.value)?;
                 let previous_pin = f(f(run, "calls"), "thread");
                 require(
                     eq(&call.value, "state", "prepared")
@@ -763,6 +808,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                     .read("task-board/native-call", f(change, "call"), false)
                     .await?;
                 let origin = f(&call.value, "origin");
+                prepared_owner_matches(task_value, run, &call.value)?;
                 if slot_text == "steer" {
                     require(
                         active
@@ -792,7 +838,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                         "task_board_native_intent_mismatch",
                         "Steering must identify current queued input.",
                     )?;
-                    let intended = self.evidence.intended(run, origin).await?;
+                    let intended = self.evidence.intended(task_value, run, origin).await?;
                     require(
                         same(
                             &self.evidence.resolve(f(&call.value, "request"))?,
@@ -890,6 +936,9 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                     f(&call.value, "operationId") == f(&original.value, "operationId")
                         && f(&call.value, "preparedAt") == f(&original.value, "preparedAt")
                         && same(f(&call.value, "request"), f(&original.value, "request"))?
+                        && same(f(&call.value, "owner"), f(&original.value, "owner"))?
+                        && f(&call.value, "expectedDefinitionHash")
+                            == f(&original.value, "expectedDefinitionHash")
                         && same(&origin(&call.value), &origin(&original.value))?,
                     "task_board_native_intent_mismatch",
                     "Call observation cannot rewrite its original identity, origin or preparation.",
@@ -1097,7 +1146,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                                             "serviceNodeId",
                                             f(f(run, "target"), "serviceNodeId").clone(),
                                         ),
-                                        ("namespace", "codex".into()),
+                                        ("namespace", ivy_contracts::native_backend::BackendIdentity::optional(run.required("target")?.get("backend"))?.as_ref().map_or("codex", |v| v.id()).into()),
                                         ("kind", "thread".into()),
                                         ("nativeId", Json::String(id)),
                                     ]),
@@ -1185,6 +1234,9 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                         run_pin,
                         f(change, "evidence"),
                         &EvidenceIdentity {
+                            backend: ivy_contracts::native_backend::BackendIdentity::optional(
+                                run.required("plan")?.get("backend"),
+                            )?,
                             caller_principal_id: self.engine.principal_id().clone(),
                             service_node_id: s(f(run, "target"), "serviceNodeId")?.clone(),
                             native_version: s(&plan.value, "nativeVersion")?.clone(),
@@ -1590,21 +1642,43 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
             .await?;
         let mut out = outcome(f(request, "operationId"));
         if !done.is_null() {
+            let mut result_workspace = f(&next, "workspace").clone();
             if eq(&declared_handoff, "workflowState", "review") {
+                let target =
+                    crate::native_plan::routed_target(task_value, next.required("target")?)?;
+                let expected = crate::native_plan::routed_workspace(
+                    task_value,
+                    next.required("target")?,
+                    &result_workspace,
+                )?;
+                let backend = ivy_contracts::native_backend::BackendIdentity::optional(
+                    target.get("backend"),
+                )?;
                 if let Ok(observed) = self.engine.workspace(task_value, &next).await {
                     let workspace = Json::object(
                         observed
                             .as_object()
                             .unwrap_or(&[])
                             .iter()
-                            .filter(|(k, _)| k != &JsString::from("nativeProjectId"))
+                            .filter(|(k, _)| !k.eq_str("nativeProjectId") && !k.eq_str("backend"))
                             .cloned(),
                     );
-                    if f(&workspace, "hostId") == f(f(&next, "target"), "hostId")
-                        && f(&workspace, "serviceNodeId") == f(f(&next, "target"), "serviceNodeId")
-                        && f(&workspace, "intendedPath") == f(f(&next, "workspace"), "intendedPath")
+                    if f(&workspace, "hostId") == f(&target, "hostId")
+                        && f(&workspace, "serviceNodeId") == f(&target, "serviceNodeId")
+                        && f(&workspace, "intendedPath") == f(&expected, "intendedPath")
+                        && (f(&expected, "project").is_null()
+                            || f(&workspace, "project") == f(&expected, "project"))
+                        && ivy_contracts::native_backend::BackendIdentity::matches(
+                            &observed,
+                            backend.as_ref(),
+                        )
                     {
-                        next.insert("workspace", workspace);
+                        // A fresh observation belongs to the current route. The
+                        // migrated Run keeps its original workspace provenance.
+                        if target == *next.required("target")? {
+                            next.insert("workspace", workspace.clone());
+                        }
+                        result_workspace = workspace;
                     }
                 }
             }
@@ -1619,15 +1693,12 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
             } else {
                 vec![]
             };
-            let workspace = f(&next, "workspace");
+            let workspace = &result_workspace;
             let repo = f(workspace, "repository");
             let repository = if !f(workspace, "project").is_null() && !repo.is_null() {
                 Json::object([
-                    ("hostId", f(f(&next, "target"), "hostId").clone()),
-                    (
-                        "serviceNodeId",
-                        f(f(&next, "target"), "serviceNodeId").clone(),
-                    ),
+                    ("hostId", f(workspace, "hostId").clone()),
+                    ("serviceNodeId", f(workspace, "serviceNodeId").clone()),
                     ("project", f(workspace, "project").clone()),
                     ("repositoryName", f(repo, "name").clone()),
                     ("branch", f(repo, "branch").clone()),
@@ -1876,6 +1947,13 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                         ("commentDeliveries", delivered),
                     ],
                 );
+            }
+            if !f(&next, "primaryResourceRef").is_null() {
+                if let Some(backend) = next.required("target")?.get("backend") {
+                    final_task.insert("primaryBackend", backend.clone());
+                } else {
+                    final_task.remove("primaryBackend");
+                }
             }
         } else if f(f(task_value, "lastRun"), "objectId") == f(run_pin, "objectId") {
             final_task.insert("lastRun", f(&out, "run").clone());

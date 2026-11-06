@@ -48,16 +48,21 @@ fn data() -> &'static Json {
     static DATA: OnceLock<Json> = OnceLock::new();
     DATA.get_or_init(|| {
         let o = reference_data::read(include_bytes!("task-board-turn-evidence-cases.json.gz"));
-        parse(
-            std::str::from_utf8(&o).unwrap(),
-            MANAGEMENT_FRAME_BYTES,
-        )
-        .unwrap()
+        parse(std::str::from_utf8(&o).unwrap(), MANAGEMENT_FRAME_BYTES).unwrap()
     })
 }
 fn native_reopen_fixtures(catalogs: &CheckedNativeContracts) -> Json {
+    native_reopen_fixtures_for(catalogs, "0.159.2", None)
+}
+fn native_reopen_fixtures_for(
+    catalogs: &CheckedNativeContracts,
+    version: &str,
+    owner: Option<&Json>,
+) -> Json {
+    let identity = owner.and_then(|owner| owner.get("catalogSourceHash"))
+        .map(|hash| Json::object([("sourceHash", hash.clone())]));
     let source = catalogs
-        .checked_native_contract(&"0.159.2".into(), None)
+        .checked_native_contract(&version.into(), identity.as_ref())
         .unwrap();
     let run = Json::object([
         (
@@ -67,7 +72,7 @@ fn native_reopen_fixtures(catalogs: &CheckedNativeContracts) -> Json {
         (
             "plan",
             Json::object([
-                ("nativeVersion", "0.159.2".into()),
+                ("nativeVersion", version.into()),
                 (
                     "catalogSourceHash",
                     source.catalog().required("sourceHash").unwrap().clone(),
@@ -91,12 +96,18 @@ fn native_reopen_fixtures(catalogs: &CheckedNativeContracts) -> Json {
         ),
     ]);
     let observed = |n: u32, method: &str, params: Json, reply: Json| {
-        Json::object([
+        let mut value = Json::object([
             ("schemaVersion", Json::Number(1.0)),
             ("observationId", format!("read-{n}").into()),
             ("callerPrincipalId", "caller".into()),
-            ("serviceNodeId", "native-agent".into()),
-            ("nativeVersion", "0.159.2".into()),
+            (
+                "serviceNodeId",
+                owner
+                    .and_then(|v| v.get("serviceNodeId"))
+                    .cloned()
+                    .unwrap_or_else(|| "native-agent".into()),
+            ),
+            ("nativeVersion", version.into()),
             (
                 "nativeExecutableHash",
                 source
@@ -106,7 +117,13 @@ fn native_reopen_fixtures(catalogs: &CheckedNativeContracts) -> Json {
                     .clone(),
             ),
             ("catalogHash", source.catalog_hash().into()),
-            ("epoch", "epoch".into()),
+            (
+                "epoch",
+                owner
+                    .and_then(|v| v.get("epoch"))
+                    .cloned()
+                    .unwrap_or_else(|| "epoch".into()),
+            ),
             ("requestId", Json::Number(n as f64)),
             ("observedAt", format!("2026-01-02T03:04:05.{n:03}Z").into()),
             ("method", method.into()),
@@ -121,7 +138,11 @@ fn native_reopen_fixtures(catalogs: &CheckedNativeContracts) -> Json {
             ),
             ("params", params),
             ("reply", reply),
-        ])
+        ]);
+        if let Some(backend) = owner.and_then(|v| v.get("backend")) {
+            value.insert("backend", backend.clone());
+        }
+        value
     };
     let result = |value| Json::object([("result", value)]);
     let turn = || Json::object([("id", "turn".into()), ("status", "completed".into())]);
@@ -154,7 +175,6 @@ fn native_reopen_fixtures(catalogs: &CheckedNativeContracts) -> Json {
             ("text", text.into()),
         ])
     };
-    // This retained catalog declares { turnId, item } result entries.
     let entry = |value| Json::object([("turnId", "turn".into()), ("item", value)]);
     let page_params = |cursor| {
         Json::object([
@@ -213,7 +233,7 @@ fn native_reopen_fixtures(catalogs: &CheckedNativeContracts) -> Json {
                 "observationId",
                 observation.required("observationId").unwrap().clone(),
             ),
-            ("epoch", "epoch".into()),
+            ("epoch", observation.required("epoch").unwrap().clone()),
         ])
     };
     let transcript = Json::object([
@@ -402,7 +422,7 @@ impl Contracts for Policy {
         Ok(v == &JsString::from("1.0.0"))
     }
     fn validate_record(&self, k: &str, _: &JsString, v: &Json) -> IvyResult<()> {
-        if k == "task-board/run" {
+        if k == "task-board/run" || k == "task-board/task" {
             if self.allowed.contains(&hash_json(v)?) {
                 Ok(())
             } else {
@@ -518,7 +538,7 @@ fn hex(s: &str) -> Vec<u8> {
         .collect()
 }
 fn documents(db: &Connection) -> Json {
-    let mut stmt=db.prepare("SELECT d.id,d.key,d.name,d.parent_id,d.current_revision,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key<>'task-board/run' ORDER BY d.id").unwrap();
+    let mut stmt=db.prepare("SELECT d.id,d.key,d.name,d.parent_id,d.current_revision,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key NOT IN ('task-board/run','task-board/task') ORDER BY d.id").unwrap();
     Json::Array(
         stmt.query_map([], |r| {
             let body: String = r.get(5)?;
@@ -710,6 +730,7 @@ async fn terminal_snapshots_outputs_and_transcripts_match_original_over_actual_j
                             &a[0],
                             o,
                             &ReadIdentity {
+                                backend: None,
                                 observation_id: s(o, "observationId").clone(),
                                 caller_principal_id: principal.clone(),
                                 service_node_id: s(o, "serviceNodeId").clone(),
@@ -848,392 +869,682 @@ async fn actual_snapshot_and_transcript_reopen_without_io_or_writes_and_refuse_c
             let _ = std::fs::remove_file(&self.0);
         }
     }
-    let temp =
-        Temp(std::env::temp_dir().join(format!("task-board-turn-{}.sqlite", uuid::Uuid::new_v4())));
-    let catalogs =
-        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-    let fixtures = native_reopen_fixtures(&catalogs);
-    let actions = fixtures.required("actions").unwrap().as_array().unwrap();
-    let initial = actions[0].required("args").unwrap().as_array().unwrap();
-    let run = fixtures.required("run").unwrap();
-    let invalid_runs = invalid_native_runs(run);
-    let principal = JsString::from("caller");
-    let mut saved_snapshot = None;
-    let mut saved_transcript = None;
-    let mut saved_full = None;
-    for round in 0..2 {
-        let db = Connection::open(&temp.0).unwrap();
-        local_journal::initialize(&db).unwrap();
-        let store = JournalStore {
-            journal: LocalJournal {
-                connection: &db,
-                root_object_id: Some("root".into()),
-            },
-            client: Arc::new(NoRpc),
-            contracts: Policy {
-                allowed: std::iter::once(run)
-                    .chain(invalid_runs.iter())
-                    .map(|run| hash_json(run).unwrap())
-                    .collect(),
-            },
-            limits: HistoryLimits::default(),
-            now: || "2026-01-02T03:04:05.006Z".to_owned(),
-            new_id: || uuid::Uuid::new_v4().to_string().into(),
-            cache: None,
+    for (version, provider, scoped_original, upgrade) in [
+        ("0.159.2", None, false, false),
+        ("0.163.0", Some("codex"), false, false),
+        ("0.163.0", Some("codex"), true, false),
+        ("0.142.3", Some("claude"), false, false),
+        ("0.142.3", Some("claude"), true, false),
+        ("0.163.0", Some("codex"), false, true),
+        ("0.163.0", Some("codex"), true, true),
+        ("0.142.3", Some("claude"), false, true),
+        ("0.142.3", Some("claude"), true, true),
+    ] {
+        let temp = Temp(
+            std::env::temp_dir().join(format!("task-board-turn-{}.sqlite", uuid::Uuid::new_v4())),
+        );
+        let catalogs =
+            CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+        let backend = provider.map(|provider| {
+            Json::object([
+                ("backendId", "worker".into()),
+                ("provider", provider.into()),
+                ("accountId", "primary".into()),
+            ])
+        });
+        let mut destination = Json::object([
+            ("hostId", "host".into()),
+            ("serviceNodeId", "joint-agent".into()),
+        ]);
+        if let Some(backend) = &backend {
+            destination.insert("backend", backend.clone());
+        }
+        let mut observing = destination.clone();
+        observing.insert("epoch", "routed-epoch".into());
+        let fixtures = if provider.is_some() {
+            native_reopen_fixtures_for(&catalogs, version, Some(&observing))
+        } else {
+            native_reopen_fixtures(&catalogs)
         };
-        let turns = TurnEvidence {
-            store: &store,
-            catalogs: &catalogs,
-            principal_id: &principal,
+        let actions = fixtures.required("actions").unwrap().as_array().unwrap();
+        let initial = actions[0].required("args").unwrap().as_array().unwrap();
+        let mut run = fixtures.required("run").unwrap().clone();
+        let mut original_owner = Json::object([("serviceNodeId", "native-agent".into())]);
+        let original_version = if upgrade && provider == Some("codex") { "0.159.2" } else { version };
+        if upgrade {
+            let identity = (provider == Some("claude")).then(|| Json::object([(
+                "nativeExecutableHash", "sha256:d13d3e2a03135e08f7db3bd2509c086dab0968549834c0c46df03af3002e65a3".into(),
+            )]));
+            let previous = catalogs.checked_native_contract(&original_version.into(), identity.as_ref()).unwrap();
+            let mut plan = run.required("plan").unwrap().clone();
+            plan.insert("nativeVersion", original_version.into());
+            plan.insert("catalogSourceHash", previous.catalog().required("sourceHash").unwrap().clone());
+            original_owner.insert("catalogSourceHash", plan.required("catalogSourceHash").unwrap().clone());
+            run.insert("plan", plan);
+        }
+        if provider.is_some() {
+            run.insert("taskId", Json::String(id(100)));
+            let mut target = run.required("target").unwrap().clone();
+            target.insert("hostId", "host".into());
+            if scoped_original {
+                let mut original_backend = backend.as_ref().unwrap().clone();
+                original_backend.insert("backendId", "old-worker".into());
+                target.insert("backend", original_backend.clone());
+                original_owner.insert("backend", original_backend.clone());
+                let mut plan = run.required("plan").unwrap().clone();
+                plan.insert("backend", original_backend);
+                run.insert("plan", plan);
+                let mut primary = run.required("primaryResourceRef").unwrap().clone();
+                primary.insert("namespace", "old-worker".into());
+                run.insert("primaryResourceRef", primary);
+            }
+            run.insert("target", target);
+        }
+        let mut later = destination.clone();
+        later.insert("serviceNodeId", "later-agent".into());
+        let selection = |plan: &Json| Json::object([
+            ("nativeVersion", plan.required("nativeVersion").unwrap().clone()),
+            ("catalogSourceHash", plan.required("catalogSourceHash").unwrap().clone()),
+        ]);
+        let route = |source: Json, target: Json, catalog: &Json| {
+            let mut route = Json::object([("source", source), ("target", target)]);
+            if upgrade { route.insert("catalog", selection(catalog)); }
+            route
         };
-        if round == 0 {
-            store
-                .journal
-                .create(
-                    "task-board/run",
-                    &id(200),
-                    Some(&"root".into()),
-                    run,
-                    &"2026-01-02T03:04:05.006Z".into(),
-                    &id(200),
-                )
-                .unwrap();
-            store
-                .journal
-                .update(
-                    "task-board/run",
-                    &id(200),
-                    1.0,
-                    run,
-                    &"2026-01-02T03:04:05.006Z".into(),
-                )
-                .unwrap();
-            let artifact = turns
-                .save_snapshot(&initial[0], &initial[1], &initial[2])
-                .await
-                .unwrap();
-            let snapshot = turns.snapshot(&pin(200, 2.0), &artifact).await.unwrap();
-            let before = db.total_changes();
-            for absent in [None, Some(&Json::Null)] {
-                assert_eq!(
-                    turns
-                        .completion(&pin(200, 2.0), &artifact, absent)
-                        .await
-                        .unwrap()
-                        .summary,
-                    JsString::from("The agent run ended, but no response could be retrieved. Task completion is not confirmed.")
-                );
-            }
-            for invalid in [Json::Bool(false), Json::Number(0.0), "".into()] {
-                assert_eq!(
-                    turns
-                        .completion(&pin(200, 2.0), &artifact, Some(&invalid))
-                        .await
-                        .err()
-                        .unwrap()
-                        .code,
-                    "task_board_native_epoch_changed"
-                );
-            }
-            assert_eq!(db.total_changes(), before);
-            let output = turns
-                .save_output(
-                    &pin(200, 1.0),
-                    &artifact,
-                    None,
-                    fixtures.required("output").unwrap(),
-                )
-                .await
-                .unwrap();
-            let before = db.total_changes();
-            assert_eq!(
-                turns
-                    .completion(&pin(200, 2.0), &artifact, Some(&output))
-                    .await
-                    .unwrap()
-                    .summary,
-                JsString::from("answer")
-            );
-            assert_eq!(db.total_changes(), before);
-            for (index, invalid) in invalid_runs.iter().enumerate() {
-                let identity = id(700 + index as u64);
+        let task = |routes| {
+            Json::object([
+                ("fields", Json::Object(vec![])),
+                ("comments", Json::Array(vec![])),
+                ("nativeRoutes", Json::Array(routes)),
+            ])
+        };
+        let tasks = if provider.is_some() {
+            vec![
+                task(vec![]),
+                task(vec![route(
+                    run.required("target").unwrap().clone(),
+                    destination.clone(),
+                    fixtures.required("run").unwrap().required("plan").unwrap(),
+                )]),
+                task(vec![
+                    route(run.required("target").unwrap().clone(), later.clone(), run.required("plan").unwrap()),
+                    route(destination.clone(), later, run.required("plan").unwrap()),
+                ]),
+            ]
+        } else {
+            vec![]
+        };
+        let run = &run;
+        let invalid_runs = invalid_native_runs(run);
+        let principal = JsString::from("caller");
+        let mut saved_snapshot = None;
+        let mut saved_transcript = None;
+        let mut saved_full = None;
+        let mut saved_original = None;
+        for round in 0..2 {
+            let db = Connection::open(&temp.0).unwrap();
+            local_journal::initialize(&db).unwrap();
+            let store = JournalStore {
+                journal: LocalJournal {
+                    connection: &db,
+                    root_object_id: Some("root".into()),
+                },
+                client: Arc::new(NoRpc),
+                contracts: Policy {
+                    allowed: std::iter::once(run)
+                        .chain(invalid_runs.iter())
+                        .chain(tasks.iter())
+                        .map(|run| hash_json(run).unwrap())
+                        .collect(),
+                },
+                limits: HistoryLimits::default(),
+                now: || "2026-01-02T03:04:05.006Z".to_owned(),
+                new_id: || uuid::Uuid::new_v4().to_string().into(),
+                cache: None,
+            };
+            let turns = TurnEvidence {
+                store: &store,
+                catalogs: &catalogs,
+                principal_id: &principal,
+            };
+            if round == 0 {
                 store
                     .journal
                     .create(
                         "task-board/run",
-                        &identity,
+                        &id(200),
                         Some(&"root".into()),
-                        invalid,
+                        run,
                         &"2026-01-02T03:04:05.006Z".into(),
-                        &identity,
+                        &id(200),
                     )
+                    .unwrap();
+                store
+                    .journal
+                    .update(
+                        "task-board/run",
+                        &id(200),
+                        1.0,
+                        run,
+                        &"2026-01-02T03:04:05.006Z".into(),
+                    )
+                    .unwrap();
+                if !tasks.is_empty() {
+                    store
+                        .journal
+                        .create(
+                            "task-board/task",
+                            &id(100),
+                            Some(&"root".into()),
+                            &tasks[0],
+                            &"2026-01-02T03:04:05.006Z".into(),
+                            &id(100),
+                        )
+                        .unwrap();
+                    let original =
+                        native_reopen_fixtures_for(&catalogs, original_version, Some(&original_owner));
+                    let args = original.required("actions").unwrap().as_array().unwrap()[0]
+                        .required("args")
+                        .unwrap()
+                        .as_array()
+                        .unwrap();
+                    saved_original = Some(
+                        turns
+                            .save_snapshot(&args[0], &args[1], &args[2])
+                            .await
+                            .unwrap(),
+                    );
+                    store
+                        .journal
+                        .update(
+                            "task-board/task",
+                            &id(100),
+                            1.0,
+                            &tasks[1],
+                            &"2026-01-02T03:04:05.006Z".into(),
+                        )
+                        .unwrap();
+                    if upgrade {
+                        let mut stale_owner = observing.clone();
+                        stale_owner.insert("catalogSourceHash", run.required("plan").unwrap().required("catalogSourceHash").unwrap().clone());
+                        let stale = native_reopen_fixtures_for(&catalogs, original_version, Some(&stale_owner));
+                        let args = stale.required("actions").unwrap().as_array().unwrap()[0].required("args").unwrap().as_array().unwrap();
+                        let before = db.total_changes();
+                        assert!(turns.save_snapshot(&args[0], &args[1], &args[2]).await.is_err(),
+                            "The current address cannot relabel reads from a retired catalog");
+                        assert_eq!(db.total_changes(), before);
+                    }
+                    for key in ["accountId", "provider"] {
+                        let mut metadata = initial[1].clone();
+                        let mut foreign = backend.as_ref().unwrap().clone();
+                        foreign.insert(
+                            key,
+                            if key == "accountId" {
+                                "foreign"
+                            } else if provider == Some("codex") {
+                                "claude"
+                            } else {
+                                "codex"
+                            }
+                            .into(),
+                        );
+                        metadata.insert("backend", foreign);
+                        let before = db.total_changes();
+                        assert!(
+                            turns
+                                .save_snapshot(&initial[0], &metadata, &initial[2])
+                                .await
+                                .is_err()
+                        );
+                        assert_eq!(db.total_changes(), before);
+                    }
+                }
+                let artifact = turns
+                    .save_snapshot(&initial[0], &initial[1], &initial[2])
+                    .await
+                    .unwrap();
+                let snapshot = turns.snapshot(&pin(200, 2.0), &artifact).await.unwrap();
+                let before = db.total_changes();
+                for absent in [None, Some(&Json::Null)] {
+                    assert_eq!(
+                        turns
+                            .completion(&pin(200, 2.0), &artifact, absent)
+                            .await
+                            .unwrap()
+                            .summary,
+                        JsString::from(
+                            "The agent run ended, but no response could be retrieved. Task completion is not confirmed."
+                        )
+                    );
+                }
+                for invalid in [Json::Bool(false), Json::Number(0.0), "".into()] {
+                    assert_eq!(
+                        turns
+                            .completion(&pin(200, 2.0), &artifact, Some(&invalid))
+                            .await
+                            .err()
+                            .unwrap()
+                            .code,
+                        "task_board_native_epoch_changed"
+                    );
+                }
+                assert_eq!(db.total_changes(), before);
+                let output = turns
+                    .save_output(
+                        &pin(200, 1.0),
+                        &artifact,
+                        None,
+                        fixtures.required("output").unwrap(),
+                    )
+                    .await
                     .unwrap();
                 let before = db.total_changes();
                 assert_eq!(
                     turns
-                        .save_snapshot(&pin(700 + index as u64, 1.0), &initial[1], &initial[2])
+                        .completion(&pin(200, 2.0), &artifact, Some(&output))
                         .await
-                        .err()
                         .unwrap()
-                        .code,
-                    "task_board_turn_mismatch",
-                    "invalid run {index}"
+                        .summary,
+                    JsString::from("answer")
                 );
                 assert_eq!(db.total_changes(), before);
-            }
-            assert_eq!(
-                s(&artifact, "label"),
-                &store
-                    .journal
-                    .name(s(artifact.required("object").unwrap(), "objectId"))
-                    .unwrap()
-            );
-            let mut head = Json::Null;
-            for action in actions
-                .iter()
-                .filter(|a| s(a, "method") == &JsString::from("savePage"))
-            {
-                let a = action.required("args").unwrap().as_array().unwrap();
-                head = turns
-                    .save_page(
-                        &a[0],
-                        &snapshot.document.value,
-                        a[2].as_js_string().unwrap(),
-                        &head,
-                        a[4].as_f64().unwrap(),
-                        a[5].as_js_string(),
-                        &a[6],
-                    )
-                    .await
-                    .unwrap();
-            }
-            let observed = &actions
-                .iter()
-                .find(|a| s(a, "method") == &JsString::from("saveRead"))
-                .unwrap()
-                .required("args")
-                .unwrap()
-                .as_array()
-                .unwrap()[1];
-            let read = ReadEvidence {
-                store: &store,
-                catalogs: &catalogs,
-            }
-            .save(
-                &pin(200, 1.0),
-                observed,
-                &ReadIdentity {
-                    observation_id: s(observed, "observationId").clone(),
-                    caller_principal_id: principal.clone(),
-                    service_node_id: s(observed, "serviceNodeId").clone(),
-                    native_version: s(observed, "nativeVersion").clone(),
-                    epoch: s(observed, "epoch").clone(),
-                    method: s(observed, "method").clone(),
-                    params: observed.required("params").unwrap().clone(),
-                },
-            )
-            .await
-            .unwrap();
-            let mut value = actions
-                .iter()
-                .find(|a| s(a, "method") == &JsString::from("verifyTranscript"))
-                .unwrap()
-                .required("args")
-                .unwrap()
-                .as_array()
-                .unwrap()[1]
-                .clone();
-            value.insert("snapshot", artifact.clone());
-            value.insert("head", head);
-            let mut verification = value.required("verification").unwrap().clone();
-            verification.insert("artifact", read);
-            value.insert("verification", verification);
-            assert_eq!(
-                turns
-                    .verify_transcript(&pin(200, 2.0), &value)
-                    .await
-                    .unwrap()
-                    .summary,
-                JsString::from("answer")
-            );
-            let before = db.total_changes();
-            for key in ["head", "verification"] {
-                for invalid in [
-                    Json::Null,
-                    Json::Bool(false),
-                    Json::Number(0.0),
-                    "".into(),
-                    Json::Array(vec![]),
-                    Json::Object(vec![]),
-                ] {
-                    let mut malformed = value.clone();
-                    malformed.insert(key, invalid);
-                    assert!(
+                for (index, invalid) in invalid_runs.iter().enumerate() {
+                    let identity = id(700 + index as u64);
+                    store
+                        .journal
+                        .create(
+                            "task-board/run",
+                            &identity,
+                            Some(&"root".into()),
+                            invalid,
+                            &"2026-01-02T03:04:05.006Z".into(),
+                            &identity,
+                        )
+                        .unwrap();
+                    let before = db.total_changes();
+                    assert_eq!(
                         turns
-                            .verify_transcript(&pin(200, 2.0), &malformed)
+                            .save_snapshot(&pin(700 + index as u64, 1.0), &initial[1], &initial[2])
                             .await
-                            .is_err(),
-                        "invalid transcript {key}"
+                            .err()
+                            .unwrap()
+                            .code,
+                        "task_board_turn_mismatch",
+                        "invalid run {index}"
                     );
                     assert_eq!(db.total_changes(), before);
                 }
-            }
-            let p = store
-                .write_document(
-                    "task-board/native-transcript",
-                    &value,
-                    "actual-transcript",
-                    &Json::object([(
-                        "create",
-                        Json::object([
-                            ("name", "Transcript".into()),
-                            ("parentId", Json::String(id(200))),
-                        ]),
-                    )]),
+                assert_eq!(
+                    s(&artifact, "label"),
+                    &store
+                        .journal
+                        .name(s(artifact.required("object").unwrap(), "objectId"))
+                        .unwrap()
+                );
+                let mut head = Json::Null;
+                for action in actions
+                    .iter()
+                    .filter(|a| s(a, "method") == &JsString::from("savePage"))
+                {
+                    let a = action.required("args").unwrap().as_array().unwrap();
+                    head = turns
+                        .save_page(
+                            &a[0],
+                            &snapshot.document.value,
+                            a[2].as_js_string().unwrap(),
+                            &head,
+                            a[4].as_f64().unwrap(),
+                            a[5].as_js_string(),
+                            &a[6],
+                        )
+                        .await
+                        .unwrap();
+                }
+                let observed = &actions
+                    .iter()
+                    .find(|a| s(a, "method") == &JsString::from("saveRead"))
+                    .unwrap()
+                    .required("args")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()[1];
+                let read = ReadEvidence {
+                    store: &store,
+                    catalogs: &catalogs,
+                }
+                .save(
+                    &pin(200, 1.0),
+                    observed,
+                    &ReadIdentity {
+                        backend: ivy_contracts::native_backend::BackendIdentity::optional(
+                            observed.get("backend"),
+                        )
+                        .unwrap(),
+                        observation_id: s(observed, "observationId").clone(),
+                        caller_principal_id: principal.clone(),
+                        service_node_id: s(observed, "serviceNodeId").clone(),
+                        native_version: s(observed, "nativeVersion").clone(),
+                        epoch: s(observed, "epoch").clone(),
+                        method: s(observed, "method").clone(),
+                        params: observed.required("params").unwrap().clone(),
+                    },
                 )
                 .await
                 .unwrap();
-            saved_snapshot = Some(artifact);
-            saved_transcript = Some(Json::object([
-                ("object", p),
-                ("label", "Transcript".into()),
-                ("contentHash", hash_json(&value).unwrap().into()),
-                ("mediaType", "application/json".into()),
-            ]));
-            let full_actions = fixtures
-                .required("fullActions")
-                .unwrap()
-                .as_array()
-                .unwrap();
-            let mut value = full_actions
-                .iter()
-                .find(|a| s(a, "method") == &JsString::from("verifyFull"))
-                .unwrap()
-                .required("args")
-                .unwrap()
-                .as_array()
-                .unwrap()[1]
-                .clone();
-            value.insert("snapshot", saved_snapshot.as_ref().unwrap().clone());
-            for (name, action) in ["unsupportedItems", "fullTurn", "verification"]
-                .into_iter()
-                .zip(
-                    full_actions
-                        .iter()
-                        .filter(|a| s(a, "method") == &JsString::from("saveRead")),
-                )
-            {
-                let observed = &action.required("args").unwrap().as_array().unwrap()[1];
-                let artifact = turns
-                    .reads()
-                    .save(
-                        &pin(200, 1.0),
-                        observed,
-                        &ReadIdentity {
+                let mut value = actions
+                    .iter()
+                    .find(|a| s(a, "method") == &JsString::from("verifyTranscript"))
+                    .unwrap()
+                    .required("args")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()[1]
+                    .clone();
+                value.insert("snapshot", artifact.clone());
+                value.insert("head", head);
+                let mut verification = value.required("verification").unwrap().clone();
+                verification.insert("artifact", read);
+                value.insert("verification", verification);
+                assert_eq!(
+                    turns
+                        .verify_transcript(&pin(200, 2.0), &value)
+                        .await
+                        .unwrap()
+                        .summary,
+                    JsString::from("answer")
+                );
+                let before = db.total_changes();
+                for key in ["head", "verification"] {
+                    for invalid in [
+                        Json::Null,
+                        Json::Bool(false),
+                        Json::Number(0.0),
+                        "".into(),
+                        Json::Array(vec![]),
+                        Json::Object(vec![]),
+                    ] {
+                        let mut malformed = value.clone();
+                        malformed.insert(key, invalid);
+                        assert!(
+                            turns
+                                .verify_transcript(&pin(200, 2.0), &malformed)
+                                .await
+                                .is_err(),
+                            "invalid transcript {key}"
+                        );
+                        assert_eq!(db.total_changes(), before);
+                    }
+                }
+                let p = store
+                    .write_document(
+                        "task-board/native-transcript",
+                        &value,
+                        "actual-transcript",
+                        &Json::object([(
+                            "create",
+                            Json::object([
+                                ("name", "Transcript".into()),
+                                ("parentId", Json::String(id(200))),
+                            ]),
+                        )]),
+                    )
+                    .await
+                    .unwrap();
+                saved_snapshot = Some(artifact);
+                saved_transcript = Some(Json::object([
+                    ("object", p),
+                    ("label", "Transcript".into()),
+                    ("contentHash", hash_json(&value).unwrap().into()),
+                    ("mediaType", "application/json".into()),
+                ]));
+                let full_actions = fixtures
+                    .required("fullActions")
+                    .unwrap()
+                    .as_array()
+                    .unwrap();
+                let mut value = full_actions
+                    .iter()
+                    .find(|a| s(a, "method") == &JsString::from("verifyFull"))
+                    .unwrap()
+                    .required("args")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()[1]
+                    .clone();
+                value.insert("snapshot", saved_snapshot.as_ref().unwrap().clone());
+                for (name, action) in ["unsupportedItems", "fullTurn", "verification"]
+                    .into_iter()
+                    .zip(
+                        full_actions
+                            .iter()
+                            .filter(|a| s(a, "method") == &JsString::from("saveRead")),
+                    )
+                {
+                    let observed = &action.required("args").unwrap().as_array().unwrap()[1];
+                    let artifact = turns
+                        .reads()
+                        .save(
+                            &pin(200, 1.0),
+                            observed,
+                            &ReadIdentity {
+                                backend: ivy_contracts::native_backend::BackendIdentity::optional(
+                                    observed.get("backend"),
+                                )
+                                .unwrap(),
+                                observation_id: s(observed, "observationId").clone(),
+                                caller_principal_id: principal.clone(),
+                                service_node_id: s(observed, "serviceNodeId").clone(),
+                                native_version: s(observed, "nativeVersion").clone(),
+                                epoch: s(observed, "epoch").clone(),
+                                method: s(observed, "method").clone(),
+                                params: observed.required("params").unwrap().clone(),
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    let mut reference = value.required(name).unwrap().clone();
+                    reference.insert("artifact", artifact);
+                    value.insert(name, reference);
+                }
+                let p = store
+                    .write_document(
+                        "task-board/native-full-turn-transcript",
+                        &value,
+                        "actual-full-transcript",
+                        &Json::object([(
+                            "create",
+                            Json::object([
+                                ("name", "Full transcript".into()),
+                                ("parentId", Json::String(id(200))),
+                            ]),
+                        )]),
+                    )
+                    .await
+                    .unwrap();
+                saved_full = Some(Json::object([
+                    ("object", p),
+                    ("label", "Full transcript".into()),
+                    ("contentHash", hash_json(&value).unwrap().into()),
+                    ("mediaType", "application/json".into()),
+                ]));
+            } else {
+                if !tasks.is_empty() {
+                    store
+                        .journal
+                        .update(
+                            "task-board/task",
+                            &id(100),
+                            2.0,
+                            &tasks[2],
+                            &"2026-01-02T03:04:05.006Z".into(),
+                        )
+                        .unwrap();
+                    let before = db.total_changes();
+                    assert!(
+                        turns
+                            .save_snapshot(&initial[0], &initial[1], &initial[2])
+                            .await
+                            .is_err()
+                    );
+                    assert_eq!(db.total_changes(), before);
+                    let original =
+                        native_reopen_fixtures_for(&catalogs, original_version, Some(&original_owner));
+                    let args = original.required("actions").unwrap().as_array().unwrap()[0]
+                        .required("args")
+                        .unwrap()
+                        .as_array()
+                        .unwrap();
+                    assert!(
+                        turns
+                            .save_snapshot(&args[0], &args[1], &args[2])
+                            .await
+                            .is_err()
+                    );
+                    for observed in [&initial[1], &args[1]] {
+                        let expected = ReadIdentity {
+                            backend: ivy_contracts::native_backend::BackendIdentity::optional(
+                                observed.get("backend"),
+                            )
+                            .unwrap(),
                             observation_id: s(observed, "observationId").clone(),
                             caller_principal_id: principal.clone(),
                             service_node_id: s(observed, "serviceNodeId").clone(),
                             native_version: s(observed, "nativeVersion").clone(),
                             epoch: s(observed, "epoch").clone(),
-                            method: s(observed, "method").clone(),
+                            method: "thread/read".into(),
                             params: observed.required("params").unwrap().clone(),
+                        };
+                        assert_eq!(
+                            turns
+                                .reads()
+                                .save(&pin(200, 1.0), observed, &expected)
+                                .await
+                                .unwrap_err()
+                                .code,
+                            "task_board_evidence_mismatch"
+                        );
+                    }
+                    assert_eq!(db.total_changes(), before);
+                    assert_eq!(
+                        hash_json(
+                            &turns
+                                .snapshot(&pin(200, 2.0), saved_original.as_ref().unwrap())
+                                .await
+                                .unwrap()
+                                .source
+                                .run
+                                .value
+                        )
+                        .unwrap(),
+                        hash_json(run).unwrap()
+                    );
+                    for revision in [1.0, 2.0] {
+                        assert_eq!(
+                            db.query_row(
+                                "SELECT value_json FROM revisions WHERE id=? AND revision=?",
+                                params![id(200).to_utf8().unwrap(), revision],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .unwrap(),
+                            canonical(run, MANAGEMENT_FRAME_BYTES).unwrap()
+                        );
+                    }
+                    assert_eq!(db.total_changes(), before);
+                }
+                let before = db.total_changes();
+                let snapshot = turns
+                    .snapshot(&pin(200, 2.0), saved_snapshot.as_ref().unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    s(&snapshot.document.value, "status"),
+                    &JsString::from("completed")
+                );
+                assert_eq!(
+                    turns
+                        .transcript(&pin(200, 2.0), saved_transcript.as_ref().unwrap())
+                        .await
+                        .unwrap()
+                        .completion
+                        .summary,
+                    JsString::from("answer")
+                );
+                for artifact in [
+                    saved_transcript.as_ref().unwrap(),
+                    saved_full.as_ref().unwrap(),
+                ] {
+                    let result = verify_native_transcript(
+                        TurnEvidence {
+                            store: &store,
+                            catalogs: &catalogs,
+                            principal_id: &principal,
                         },
+                        &pin(200, 2.0),
+                        artifact,
                     )
                     .await
                     .unwrap();
-                let mut reference = value.required(name).unwrap().clone();
-                reference.insert("artifact", artifact);
-                value.insert(name, reference);
-            }
-            let p = store
-                .write_document(
-                    "task-board/native-full-turn-transcript",
-                    &value,
-                    "actual-full-transcript",
-                    &Json::object([(
-                        "create",
-                        Json::object([
-                            ("name", "Full transcript".into()),
-                            ("parentId", Json::String(id(200))),
-                        ]),
-                    )]),
-                )
-                .await
-                .unwrap();
-            saved_full = Some(Json::object([
-                ("object", p),
-                ("label", "Full transcript".into()),
-                ("contentHash", hash_json(&value).unwrap().into()),
-                ("mediaType", "application/json".into()),
-            ]));
-        } else {
-            let before = db.total_changes();
-            let snapshot = turns
-                .snapshot(&pin(200, 2.0), saved_snapshot.as_ref().unwrap())
-                .await
-                .unwrap();
-            assert_eq!(
-                s(&snapshot.document.value, "status"),
-                &JsString::from("completed")
-            );
-            assert_eq!(
-                turns
-                    .transcript(&pin(200, 2.0), saved_transcript.as_ref().unwrap())
+                    assert_eq!(result.completion.summary, JsString::from("answer"));
+                    assert_eq!(result.completion.status, JsString::from("completed"));
+                }
+                assert_eq!(db.total_changes(), before);
+                let metadata = store
+                    .read_document(
+                        "task-board/native-read-evidence",
+                        snapshot
+                            .document
+                            .value
+                            .required("metadata")
+                            .unwrap()
+                            .required("artifact")
+                            .unwrap()
+                            .required("object")
+                            .unwrap(),
+                        false,
+                    )
                     .await
+                    .unwrap();
+                let chunk = metadata
+                    .value
+                    .required("chunks")
                     .unwrap()
-                    .completion
-                    .summary,
-                JsString::from("answer")
-            );
-            for artifact in [
-                saved_transcript.as_ref().unwrap(),
-                saved_full.as_ref().unwrap(),
-            ] {
-                let result = verify_native_transcript(
+                    .as_array()
+                    .unwrap()[0]
+                    .required("object")
+                    .unwrap()
+                    .required("objectId")
+                    .unwrap()
+                    .as_str()
+                    .unwrap();
+                let (blob, mut bytes): (String, Vec<u8>) = db
+                    .query_row("SELECT id,bytes FROM blobs WHERE id=?", [&chunk], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
+                    .unwrap();
+                bytes[0] ^= 1;
+                db.execute("UPDATE blobs SET bytes=? WHERE id=?", params![bytes, blob])
+                    .unwrap();
+                let error = turns
+                    .snapshot(&pin(200, 2.0), saved_snapshot.as_ref().unwrap())
+                    .await
+                    .err()
+                    .unwrap();
+                assert_eq!(error.code, "task_board_evidence_mismatch");
+                let error = verify_native_transcript(
                     TurnEvidence {
                         store: &store,
                         catalogs: &catalogs,
                         principal_id: &principal,
                     },
                     &pin(200, 2.0),
-                    artifact,
+                    saved_full.as_ref().unwrap(),
                 )
-                .await
-                .unwrap();
-                assert_eq!(result.completion.summary, JsString::from("answer"));
-                assert_eq!(result.completion.status, JsString::from("completed"));
-            }
-            assert_eq!(db.total_changes(), before);
-            let (blob, mut bytes): (String, Vec<u8>) = db
-                .query_row(
-                    "SELECT id,bytes FROM blobs ORDER BY rowid LIMIT 1",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .unwrap();
-            bytes[0] ^= 1;
-            db.execute("UPDATE blobs SET bytes=? WHERE id=?", params![bytes, blob])
-                .unwrap();
-            let error = turns
-                .snapshot(&pin(200, 2.0), saved_snapshot.as_ref().unwrap())
                 .await
                 .err()
                 .unwrap();
-            assert_eq!(error.code, "task_board_evidence_mismatch");
-            let error = verify_native_transcript(
-                TurnEvidence {
-                    store: &store,
-                    catalogs: &catalogs,
-                    principal_id: &principal,
-                },
-                &pin(200, 2.0),
-                saved_full.as_ref().unwrap(),
-            )
-            .await
-            .err()
-            .unwrap();
-            assert_eq!(error.code, "task_board_evidence_mismatch");
+                assert_eq!(error.code, "task_board_evidence_mismatch");
+            }
+            assert!(db.is_autocommit());
         }
-        assert!(db.is_autocommit());
     }
 }

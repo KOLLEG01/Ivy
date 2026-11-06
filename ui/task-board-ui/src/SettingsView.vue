@@ -16,6 +16,7 @@ import {
   useRemote,
 } from "@ivy/ui";
 import { nativeRead } from "../../../packages/ui-client/src/native";
+import { nativeBackendKey, nativeBackendLabel, sameBackend } from "../../../packages/ui-client/src/native-backends";
 import { route } from "../../../packages/ui-client/src/runtime";
 import { base, client, tr } from "./runtime";
 import type { TaskBoard } from "./runtime";
@@ -24,6 +25,7 @@ import {
   executionModels,
   modelAvailability,
   executionSpeedAvailable,
+  executionBackendChoices,
 } from "./execution-options";
 import { useAction } from "./action";
 import ActionState from "./ActionState.vue";
@@ -120,13 +122,27 @@ const agents = computed(() =>
     (agent) => !host.value || agent.node.hostId === host.value,
   ),
 );
-const models = computed(() => executionModels(agents.value));
+const backendChoices = computed(() => executionBackendChoices((environments.value.value?.backends ?? []).filter(owner => !host.value || owner.node.hostId === host.value)));
+const backendKey = computed(() => nativeBackendKey(draft.value?.defaults.nativeOptions.backend));
+const backendLabel = computed(() => draft.value?.defaults.nativeOptions.backend ? nativeBackendLabel(draft.value.defaults.nativeOptions.backend) : tr('Account auswählen', 'Choose account'));
+const chooseBackend = (key: string) => {
+  if (!draft.value) return;
+  const options = draft.value.defaults.nativeOptions;
+  if (!key) delete options.backend;
+  else {
+    const choice = backendChoices.value.find(value => value.key === key && !value.disabled);
+    if (!choice) return;
+    options.backend = { ...choice.backend };
+  }
+  options.model = options.reasoningEffort = null; options.serviceTier = 'standard';
+};
+const models = computed(() => executionModels(agents.value).filter(model => sameBackend(model.backend, draft.value?.defaults.nativeOptions.backend)));
 // Models that only some eligible hosts offer stay visible but cannot be the default.
 const offered = computed(() =>
-  modelAvailability(agents.value).map((entry) => ({
+  modelAvailability(agents.value).filter(entry => sameBackend(entry.backend, draft.value?.defaults.nativeOptions.backend)).map((entry) => ({
     ...entry,
     name:
-      models.value.find((model) => model.model === entry.model)?.name ??
+      models.value.find((model) => model.key === entry.key)?.name ??
       entry.name,
   })),
 );
@@ -136,12 +152,12 @@ const efforts = computed(
       (model) => model.model === draft.value?.defaults.nativeOptions.model,
     )?.efforts ?? [],
 );
-const speedAvailable = computed(() => executionSpeedAvailable(agents.value, draft.value?.defaults.nativeOptions.model ?? undefined, draft.value?.defaults.nativeOptions.reasoningEffort ?? undefined));
+const speedAvailable = (tier: 'fast' | 'flex') => executionSpeedAvailable(agents.value, draft.value?.defaults.nativeOptions.model ?? undefined, draft.value?.defaults.nativeOptions.reasoningEffort ?? undefined, draft.value?.defaults.nativeOptions.backend, tier);
 const invalid = computed(
   () =>
     !!draft.value &&
-    agents.value.length > 0 &&
-    ((!!draft.value.defaults.nativeOptions.model &&
+    (draft.value.defaults.nativeOptions.backend === undefined || (agents.value.some(agent => sameBackend(agent.backend, draft.value?.defaults.nativeOptions.backend)) && (
+      (!!draft.value.defaults.nativeOptions.model &&
       !models.value.some(
         (model) => model.model === draft.value!.defaults.nativeOptions.model,
       )) ||
@@ -149,10 +165,8 @@ const invalid = computed(
         !efforts.value.includes(
           draft.value.defaults.nativeOptions.reasoningEffort,
         )) ||
-      (["fast", "flex"].includes(
-        draft.value.defaults.nativeOptions.serviceTier ?? "",
-      ) &&
-        !speedAvailable.value)),
+      ((draft.value.defaults.nativeOptions.serviceTier === 'fast' || draft.value.defaults.nativeOptions.serviceTier === 'flex') &&
+        !speedAvailable(draft.value.defaults.nativeOptions.serviceTier))))),
 );
 watch(
   () => draft.value?.defaults.nativeOptions.model,
@@ -341,6 +355,14 @@ const save = async () => {
               )
             }}</FieldDescription></Field
           >
+          <Field>
+            <Label for="default-backend">{{ tr('Provider und Account', 'Provider and account') }}</Label>
+            <OptionSelect id="default-backend" :model-value="backendKey" :disabled="action.locked.value || !backendChoices.length" @update:model-value="chooseBackend">
+              <option value="">{{ tr('Account auswählen', 'Choose account') }}</option>
+              <option v-if="backendKey && !backendChoices.some(choice => choice.key === backendKey)" :value="backendKey">{{ backendLabel }} · {{ tr('nicht verfügbar', 'unavailable') }}</option>
+              <option v-for="choice in backendChoices" :key="choice.key" :value="choice.key" :disabled="choice.disabled">{{ choice.label }}{{ choice.missing.length ? ' · ' + tr('nicht verfügbar auf', 'unavailable on') + ' ' + choice.missing.join(', ') : '' }}</option>
+            </OptionSelect>
+          </Field>
           <Field
             ><Label for="default-model">{{
               tr("Standardmodell", "Default model")
@@ -372,7 +394,7 @@ const save = async () => {
               </option>
               <option
                 v-for="model in offered.filter((value) => !value.hidden)"
-                :key="model.model"
+                :key="model.key"
                 :value="model.model"
                 :disabled="model.missing.length > 0"
               >
@@ -389,7 +411,7 @@ const save = async () => {
               >
                 <option
                 v-for="model in offered.filter((value) => value.hidden)"
-                :key="model.model"
+                :key="model.key"
                 :value="model.model"
                 :disabled="model.missing.length > 0"
               >
@@ -454,8 +476,8 @@ const save = async () => {
               class="w-full"
             >
               <option value="standard">Standard</option>
-              <option value="fast" :disabled="!speedAvailable">Fast</option>
-              <option value="flex" :disabled="!speedAvailable">Flex</option>
+              <option value="fast" :disabled="!speedAvailable('fast')">Fast</option>
+              <option value="flex" :disabled="!speedAvailable('flex')">Flex</option>
             </OptionSelect></Field
           >
         </div>

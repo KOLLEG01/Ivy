@@ -6,7 +6,7 @@ use crate::{
     local_state::LocalAgentState,
     native_journal::{JournalClock, NativeJournal},
 };
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, Outcome, hash::hash_json};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_host_runtime::codex_rpc::NativeRpc;
 use ivy_sdk::{
     rpc::{RequestOptions, RpcClient},
@@ -41,70 +41,30 @@ impl EnvironmentSynchronizers {
     }
 }
 
-/// The pre-ready call must fail at Hive's readiness fence, before any provider
-/// invocation. Success and every other error prove no compatible transport.
-pub struct NativeTransportProbe {
-    arguments: IvyJson,
-}
-impl NativeTransportProbe {
-    pub fn new(service_node_id: JsString, registry: &IvyJson) -> IvyResult<Self> {
-        let probe = registry
-            .get("namespaces")
-            .and_then(IvyJson::as_array)
-            .and_then(|namespaces| namespaces.first())
-            .and_then(|namespace| namespace.get("tools"))
-            .and_then(IvyJson::as_array)
-            .and_then(|tools| {
-                tools
-                    .iter()
-                    .find(|tool| tool.get("name") == Some(&"account/rateLimits/read".into()))
-            })
-            .ok_or_else(|| {
-                IvyError::new(
-                    "native_catalog_mismatch",
-                    "Pinned native catalog lacks the null-argument transport probe.",
-                )
-            })?;
-        let mut qualified = JsString::from("codex.");
-        qualified.0.extend(
-            probe
-                .required("name")?
-                .as_js_string()
-                .ok_or_else(IvyError::internal)?
-                .0
-                .iter()
-                .copied(),
-        );
-        Ok(Self {
-            arguments: IvyJson::object([
-                ("qualifiedName", IvyJson::String(qualified)),
-                ("serviceNodeId", IvyJson::String(service_node_id)),
-                ("expectedDefinitionHash", hash_json(probe)?.into()),
-                ("arguments", IvyJson::Null),
-            ]),
-        })
+/// Positive protocol admission, once per Hive generation. No native action is
+/// dispatched to discover how an unready service would reject it.
+pub async fn native_transport_epoch(connection: &dyn RpcClient) -> IvyResult<JsString> {
+    let status = connection
+        .request(
+            "system.status",
+            IvyJson::object::<&str>([]),
+            RequestOptions::default(),
+        )
+        .await?;
+    let supported = status.get("nativeToolTransport");
+    if supported.and_then(|v| v.get("parameters")) != Some(&"json".into())
+        || supported.and_then(|v| v.get("preReadyOutcome")) != Some(&"not_executed".into())
+    {
+        return Err(IvyError::new(
+            "hive_native_json_unsupported",
+            "Hive must advertise native JSON parameters and pre-ready admission before dispatch.",
+        ));
     }
-    pub async fn verify(&self, connection: &dyn RpcClient) -> IvyResult<()> {
-        match connection
-            .request(
-                "tools.call",
-                self.arguments.clone(),
-                RequestOptions::default(),
-            )
-            .await
-        {
-            Err(error)
-                if error.code_js() == "service_not_ready".into()
-                    && error.outcome == Outcome::NotExecuted =>
-            {
-                Ok(())
-            }
-            _ => Err(IvyError::new(
-                "hive_native_json_unsupported",
-                "Hive did not verify unchanged native JSON transport before readiness.",
-            )),
-        }
-    }
+    status
+        .required("runtimeEpoch")?
+        .as_js_string()
+        .cloned()
+        .ok_or_else(IvyError::internal)
 }
 
 pub struct ReconciliationOwner {
@@ -130,7 +90,6 @@ struct State {
 }
 struct Inner {
     settings: ReconciliationSettings,
-    probe: NativeTransportProbe,
     state: Mutex<State>,
     now: Arc<InventoryClock>,
     iso_now: Arc<JournalClock>,
@@ -138,10 +97,9 @@ struct Inner {
 #[derive(Clone)]
 pub struct AgentReconciliation(Arc<Inner>);
 impl AgentReconciliation {
-    pub fn new(settings: ReconciliationSettings, registry: &IvyJson) -> IvyResult<Self> {
+    pub fn new(settings: ReconciliationSettings) -> IvyResult<Self> {
         Self::with_clock(
             settings,
-            registry,
             Arc::new(|| chrono::Utc::now().timestamp_millis() as f64),
             Arc::new(|| {
                 chrono::Utc::now()
@@ -152,18 +110,15 @@ impl AgentReconciliation {
     }
     pub fn with_clock(
         settings: ReconciliationSettings,
-        registry: &IvyJson,
         now: Arc<InventoryClock>,
         iso_now: Arc<JournalClock>,
     ) -> IvyResult<Self> {
-        let probe = NativeTransportProbe::new(settings.service_node_id.clone(), registry)?;
         let state = State {
             connection: None,
             environment_at: settings.environment_at,
         };
         Ok(Self(Arc::new(Inner {
             settings,
-            probe,
             state: Mutex::new(state),
             now,
             iso_now,
@@ -200,34 +155,27 @@ impl AgentReconciliation {
         }
     }
     pub async fn reconcile(&self, connection: InventoryConnection) -> IvyResult<()> {
+        let epoch = native_transport_epoch(connection.client.as_ref()).await?;
+        self.reconcile_epoch(connection, epoch).await
+    }
+    pub(crate) async fn reconcile_epoch(
+        &self,
+        connection: InventoryConnection,
+        epoch: JsString,
+    ) -> IvyResult<()> {
         self.0
             .state
             .lock()
             .map_err(|_| IvyError::internal())?
             .connection = Some(connection.clone());
-        let status = connection
-            .client
-            .request(
-                "system.status",
-                IvyJson::object::<&str>([]),
-                RequestOptions::default(),
-            )
-            .await?;
         self.0
             .settings
             .state
             .lock()
             .map_err(|_| IvyError::internal())?
-            .set_runtime_epoch(
-                status
-                    .required("runtimeEpoch")?
-                    .as_js_string()
-                    .ok_or_else(IvyError::internal)?
-                    .clone(),
-            )?;
+            .set_runtime_epoch(epoch)?;
         self.0.settings.inventory.bind(connection.clone())?;
         self.available()?;
-        self.0.probe.verify(connection.client.as_ref()).await?;
         if let Some(environment) = &self.0.settings.environment {
             environment.synchronize(connection.client.clone()).await;
             self.0
@@ -243,7 +191,7 @@ impl AgentReconciliation {
             .settings
             .inventory
             .refresh_threads(connection.clone());
-        let _ = self.0.settings.inventory.refresh_projects(connection, true);
+        let _ = self.0.settings.inventory.refresh_projects(connection);
         Ok(())
     }
     pub async fn readiness(
@@ -251,6 +199,26 @@ impl AgentReconciliation {
         connection: InventoryConnection,
         generation: u64,
     ) -> IvyResult<IvyJson> {
+        let observation = self.observe(connection)?;
+        let ready = observation.get("ready") == Some(&true.into());
+        self.0
+            .settings
+            .health
+            .write(
+                ready,
+                Some(generation),
+                if ready {
+                    "Native owner available; inventory refresh runs independently."
+                } else {
+                    "Native owner is unavailable."
+                }
+                .into(),
+            )?
+            .wait()
+            .await?;
+        Ok(observation)
+    }
+    pub(crate) fn observe(&self, connection: InventoryConnection) -> IvyResult<IvyJson> {
         if let Some(environment) = &self.0.settings.environment {
             let refresh = {
                 let mut state = self.0.state.lock().map_err(|_| IvyError::internal())?;
@@ -270,21 +238,6 @@ impl AgentReconciliation {
             && self.0.settings.owner.rpc.connected();
         let code = self.0.settings.inventory.code()?;
         let now = (self.0.iso_now)();
-        self.0
-            .settings
-            .health
-            .write(
-                ready,
-                Some(generation),
-                if ready {
-                    "Native owner available; inventory refresh runs independently."
-                } else {
-                    "Native owner is unavailable."
-                }
-                .into(),
-            )?
-            .wait()
-            .await?;
         Ok(readiness_snapshot(
             &self.0.settings.service_node_id,
             ready,

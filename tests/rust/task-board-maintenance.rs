@@ -25,6 +25,9 @@ use std::{
     },
 };
 
+#[path = "../fixtures/task-board-revision-protection.rs"]
+mod revision_protection;
+
 fn json(text: &str) -> Json {
     parse(text, usize::MAX).unwrap()
 }
@@ -258,6 +261,10 @@ impl RpcClient for Client {
                         );
                         field_mut(&mut saved, "object")
                             .insert("name", create.required("name")?.clone());
+                        field_mut(&mut saved, "revision").insert(
+                            "contractVersion",
+                            params.required("contractVersion")?.clone(),
+                        );
                         state.writes += 1;
                         state.records.insert(id, saved.clone());
                         Ok(saved)
@@ -285,6 +292,10 @@ impl RpcClient for Client {
                         );
                         field_mut(&mut saved, "revision")
                             .insert("revision", Json::Number(revision));
+                        field_mut(&mut saved, "revision").insert(
+                            "contractVersion",
+                            params.required("contractVersion")?.clone(),
+                        );
                         field_mut(&mut saved, "object")
                             .insert("currentRevision", Json::Number(revision));
                         state.history.push(previous);
@@ -540,14 +551,8 @@ async fn interrupted_retirement_resumes_without_pruning_a_live_native_source() {
         .unwrap();
     let maintenance = Maintenance::new(&store, f.context());
     f.client.lose_task_reply.store(true, Ordering::SeqCst);
-    assert_eq!(
-        maintenance
-            .admit_artifacts(f.plan())
-            .await
-            .unwrap_err()
-            .outcome,
-        Outcome::Unknown
-    );
+    let error = maintenance.admit_artifacts(f.plan()).await.unwrap_err();
+    assert_eq!(error.outcome, Outcome::Unknown, "{error:?}");
     maintenance.retention.settled().await;
     drop(maintenance);
     let resumed = Maintenance::new(&store, f.context());
@@ -707,10 +712,8 @@ async fn comment_job_recovers_a_failed_progress_save_and_the_operator_refuses_a_
     let maintenance = Maintenance::new(&store, f.context());
     let path = f.root.join("comment-cleanup.json");
     *f.client.block_progress_save.lock().unwrap() = Some(path.clone());
-    assert_eq!(
-        maintenance.pass().await.unwrap_err().code,
-        "storage_unavailable"
-    );
+    let error = maintenance.pass().await.unwrap_err();
+    assert_eq!(error.code, "storage_unavailable", "{error:?}");
     fs::remove_dir(&path).unwrap();
     fs::rename(path.with_extension("saved"), &path).unwrap();
     maintenance.pass().await.unwrap();

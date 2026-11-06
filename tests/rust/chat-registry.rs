@@ -1,5 +1,7 @@
 #[path = "../fixtures/reference-data.rs"]
 mod reference_data;
+#[path = "../fixtures/chat-backend-schema.rs"]
+mod backend_schema;
 use ivy_chat_bridge::registry::chat_registry;
 use ivy_contracts::{hash::digest, json::stringify, wire_schema::validate_shared};
 use std::process::Command;
@@ -7,13 +9,20 @@ use std::process::Command;
 #[test]
 fn complete_registry_matches_original_typescript_bytes_and_wire_contract() {
     let output = reference_data::read(include_bytes!("fixtures/chat-registry-cases.json.gz"));
+    let output = output
+        .strip_suffix(b"\n")
+        .expect("the original runner terminates its JSON output with one newline");
     let registry = chat_registry().unwrap();
     validate_shared("RegistrySync", &registry).unwrap();
-    let actual = stringify(&registry, usize::MAX).unwrap();
+    let actual = stringify(
+        &backend_schema::registry_without_checked_backends(&registry),
+        usize::MAX,
+    )
+    .unwrap();
     assert_eq!(actual.len(), output.len(), "registry byte length");
     assert_eq!(
         digest(actual.as_bytes()),
-        digest(&output),
+        digest(output),
         "full registry: schemas, descriptions, MCP discovery, retention, versions and ordering"
     );
     assert_eq!(

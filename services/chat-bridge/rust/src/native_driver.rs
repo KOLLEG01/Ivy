@@ -179,6 +179,7 @@ impl<'a> ChatNativeDriver<'a> {
             )])),
         )?;
         let target = NativeOwnerIdentity {
+            backend: None,
             service_node_id: text(definition.required("project")?, "serviceNodeId")?.clone(),
             host_id: None,
             native_version: text(source.catalog(), "version")?.clone(),
@@ -241,7 +242,7 @@ impl<'a> ChatNativeDriver<'a> {
                     && binding.value().get("definitionHash")
                         == plan.required("definitions")?.get(key)
                     && binding.value().get("definitionHash")
-                        == Some(&hash_json(source.definition(&method)?)?.into()),
+                        == Some(&source.definition_hash(&method)?.into()),
                 "chat_native_definition_changed",
                 "Main needs the exact configured native method definitions.",
             )?;

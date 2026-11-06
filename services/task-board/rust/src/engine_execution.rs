@@ -432,8 +432,10 @@ impl<S: ExecutionStore, C: Fn() -> String, P: ExecutionServices> ExecutionProgra
     for CachedExecution<'_, S, C, P>
 {
     async fn run(&self, operation: Document) -> IvyResult<Json> {
+        // The action state stays on the heap as it crosses the nested read scopes.
+        // Passing it inline copies its full async state through every wrapper.
         self.services
-            .with_read_cache(self.execute_cached(operation))
+            .with_read_cache(Box::pin(self.execute_cached(operation)))
             .await
     }
 }

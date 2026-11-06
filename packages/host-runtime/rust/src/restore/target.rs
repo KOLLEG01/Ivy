@@ -223,20 +223,26 @@ pub async fn target_configuration(
     )?;
     for instance in array(input.required("instances")?)? {
         let data = field(&layout::service_paths(&input, instance)?, "data")?;
-        if instance.get("componentId") == Some(&"agent-manager".into())
-            && !manifest
-                .get("sharedNativeHomes")
-                .map(array)
-                .transpose()?
-                .unwrap_or(&[])
-                .iter()
-                .any(|h| h.get("instanceId") == instance.get("instanceId"))
-        {
-            require(
-                owned_home(&input, instance, b)?,
-                "target_conflict",
-                "Restored owned native home must be explicitly bound inside its new instance data.",
-            )?;
+        if instance.get("componentId") == Some(&"agent-manager".into()) {
+            for backend in configured_backends(instance.required("settings")?, None)? {
+                if !manifest
+                    .get("sharedNativeHomes")
+                    .map(array)
+                    .transpose()?
+                    .unwrap_or(&[])
+                    .iter()
+                    .any(|h| {
+                        h.get("instanceId") == instance.get("instanceId")
+                            && BackendIdentity::matches(h, backend.identity.as_ref())
+                    })
+                {
+                    require(
+                        owned_home(&input, instance, &backend, b)?,
+                        "target_conflict",
+                        "Restored owned native home must be explicitly bound inside its new instance data.",
+                    )?;
+                }
+            }
         }
         if ["host-executor", "service-manager"]
             .iter()

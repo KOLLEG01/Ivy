@@ -284,7 +284,21 @@ async fn uncertain_resume_matches_original_with_real_owner_transport_and_journal
             let mut outcomes = vec![];
             for _ in 0..input.get("passes").and_then(Json::as_f64).unwrap_or(1.0) as usize {
                 let result = if input.get("action") == Some(&Json::from("status")) {
-                    driver.status(&run, &call).await
+                    let first = state.log.lock().unwrap().len();
+                    let result = driver.status(&run, &call).await;
+                    // Standalone status now resolves the published Task route.
+                    // Check that one new read separately; retain the frozen
+                    // oracle for every original owner/status RPC and outcome.
+                    assert_eq!(
+                        state.log.lock().unwrap().remove(first),
+                        Json::Array(vec![
+                            "read".into(),
+                            "task-board/task".into(),
+                            run.required("taskId").unwrap().clone(),
+                            true.into(),
+                        ])
+                    );
+                    result
                 } else {
                     driver
                         .recover_uncertain_resume(&id(200))

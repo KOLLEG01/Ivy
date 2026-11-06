@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import {
   Button,
   ComposerAddMenu,
@@ -19,7 +19,6 @@ import { ArrowUp } from "@lucide/vue";
 import type { Agent } from "../../../packages/sdk/src/client.js";
 import { route } from "../../../packages/ui-client/src/runtime";
 import {
-  nativeRead,
   optionalTool,
   permissionProfileLabel,
   permissionProfilesFrom,
@@ -27,9 +26,13 @@ import {
   supportsFields,
   text,
 } from "../../../packages/ui-client/src/native";
-import { useNativeAction } from "../../../packages/ui-client/src/native-action";
+import { useNativeAction, nativeActionParams } from "../../../packages/ui-client/src/native-action";
+import { backendRead, nativeMethod, sameBackend, nativeBackendLabel } from '../../../packages/ui-client/src/native-backends';
+import { nativeRouteQuery, nativeStorageOwner } from '../../../packages/ui-client/src/native-route';
+import { backendArguments } from '../../../packages/contracts/src/native-backend';
 import { readNativeThreadControl } from "../../../packages/ui-client/src/native-thread-control";
 import { useNativeSettings, effectiveNativeSettings, nativeConfiguredHome } from '../../../packages/ui-client/src/native-settings';
+import { nativeModelSpeedAvailable, nativeServiceTier, nativeSpeedAvailable } from '../../../packages/ui-client/src/execution-models';
 import { nativeModesFrom, nativeModePayload } from '../../../packages/ui-client/src/native-modes';
 import NativeActionState from "../../../packages/ui-client/src/NativeActionState.vue";
 import { base, client, tr } from "./runtime";
@@ -44,14 +47,19 @@ import {
 import type { StagedAttachment } from "../../../packages/ui-client/src/message-attachments";
 const props = defineProps<{
   node: string;
+  backend?: Agent.BackendIdentity | undefined;
   project: string;
   projectId: string;
 }>();
+const owner = { serviceNodeId: props.node, namespace: props.backend?.backendId ?? 'codex', backend: props.backend };
+const storageOwner = nativeStorageOwner(props.node, props.backend);
+let active = true;
+onBeforeUnmount(() => { active = false; });
 const status = useRemote(
   async (signal) =>
-    (await nativeRead(
+    (await backendRead(
       client,
-      props.node,
+      owner,
       "agent.status",
       {},
       signal,
@@ -60,37 +68,42 @@ const status = useRemote(
 );
 const projects = useRemote(
   async (signal) =>
-    (await nativeRead(
+    (await backendRead(
       client,
-      props.node,
+      owner,
       "agent.projects",
       {},
       signal,
     )) as Agent.ProjectsResult,
 );
 const startTool = useRemote(() =>
-  optionalTool(client, props.node, "codex.thread/start"),
+  optionalTool(client, props.node, nativeMethod(props.backend, "thread/start")),
   0, ['services/agent-manager/' + props.node]);
-const sendTool = useRemote(() => optionalTool(client, props.node, 'codex.turn/start'), 0, ['services/agent-manager/' + props.node]);
+const sendTool = useRemote(() => optionalTool(client, props.node, nativeMethod(props.backend, 'turn/start')), 0, ['services/agent-manager/' + props.node]);
 const model = ref(''),
   mode = ref(''),
   effort = ref(""),
   permission = ref(""),
+  serviceTier = ref(''),
   cwd = ref(props.project),
   selectedProjectId = ref(props.projectId),
   projectlessKey = ref(""),
   creating = ref(false),
   continuing = ref(false),
   message = ref("");
-const settings = useNativeSettings(client, () => props.node, () => cwd.value || nativeConfiguredHome(status.value.value));
+const settings = useNativeSettings(client, () => props.node, () => cwd.value || nativeConfiguredHome(status.value.value), () => props.backend);
 const { models, permissions, modes, choices } = settings;
-const profile = computed(() => settings.defaults.value.value?.document[status.value.value?.serverType ?? 'codex']);
+const profile = settings.profile;
 const defaults = computed(() => effectiveNativeSettings(models.value.value, settings.config.value.value, null, profile.value));
 const selectedModel = computed(() => model.value || defaults.value.model);
 const modelChoice = computed(() => choices.value.find(value => value.model === selectedModel.value));
 const efforts = computed(() => modelChoice.value?.efforts ?? []);
 const selectedEffort = computed(() => effort.value || (model.value && model.value !== defaults.value.model ? modelChoice.value?.defaultEffort ?? '' : defaults.value.effort));
 const selectedPermission = computed(() => permission.value || defaults.value.permission);
+const selectedTier = computed(() => serviceTier.value || defaults.value.serviceTier);
+const speedAvailable = (tier: string) => !!nativeServiceTier(tier) && nativeModelSpeedAvailable(choices.value, selectedModel.value, tier) && nativeSpeedAvailable([startTool.value.value, sendTool.value.value], nativeServiceTier(tier)!, props.backend?.provider);
+const tierValid = computed(() => selectedTier.value === 'standard' && !serviceTier.value && !profile.value?.serviceTier ||
+  (selectedTier.value === 'standard' || selectedTier.value === 'fast' || selectedTier.value === 'flex') && speedAvailable(selectedTier.value));
 const modeChoices = computed(() => nativeModesFrom(sendTool.value.value, modes.value.value));
 const selectedMode = computed(() => mode.value || defaults.value.mode);
 const modePayload = computed(() => nativeModePayload(sendTool.value.value, modeChoices.value.find(value => value.mode === selectedMode.value), modelChoice.value, selectedEffort.value));
@@ -101,19 +114,22 @@ const permissionChoices = computed(() =>
 );
 const action = useNativeAction(
   client,
-  "ivy:agent-create:" + base.href + props.node,
+  "ivy:agent-create:" + base.href + storageOwner,
+  () => props.backend,
 );
 const firstMessage = useNativeAction(
   client,
-  "ivy:agent-first-message:" + base.href + props.node,
+  "ivy:agent-first-message:" + base.href + storageOwner,
+  () => props.backend,
 );
 const sending = computed(() => creating.value || continuing.value || action.pending.value || firstMessage.pending.value);
-const attachments = useMessageAttachments(client, () => props.node);
-const launchKey = "ivy:agent-launch:" + base.href + props.node;
+const attachments = useMessageAttachments(client, () => props.node, () => props.backend);
+const launchKey = "ivy:agent-launch:" + base.href + storageOwner;
 const launch = ref<{
   message: string;
   effort: string;
   collaborationMode?: import('../../../packages/sdk/src/client.js').Wire.Json;
+  serviceTier?: string;
   attachments: StagedAttachment[];
   operationId: string;
 } | null>(null);
@@ -128,6 +144,7 @@ try {
       message: saved.message,
       effort: text(saved.effort),
       ...(saved.collaborationMode ? { collaborationMode: saved.collaborationMode } : {}),
+      ...(typeof saved.serviceTier === 'string' ? { serviceTier: saved.serviceTier } : {}),
       attachments: Array.isArray(saved.attachments) ? saved.attachments : [],
       operationId: saved.operationId,
     };
@@ -154,13 +171,14 @@ watch(
   },
   { flush: "sync" },
 );
-const draftKey = "ivy:agent-create-draft:" + base.href + props.node;
+const draftKey = "ivy:agent-create-draft:" + base.href + storageOwner;
 try {
   const draft = JSON.parse(sessionStorage.getItem(draftKey) ?? "{}");
   model.value = text(draft.model);
   mode.value = text(draft.mode);
   effort.value = text(draft.effort);
   permission.value = text(draft.permission);
+  serviceTier.value = text(draft.serviceTier);
   projectlessKey.value = text(draft.projectlessKey);
   message.value = text(draft.message);
   if (Array.isArray(draft.attachments)) attachments.restore(draft.attachments);
@@ -183,6 +201,7 @@ const persistDraft = () => {
         mode: mode.value,
         effort: effort.value,
         permission: permission.value,
+        serviceTier: serviceTier.value,
         cwd: cwd.value,
         projectId: selectedProjectId.value,
         projectlessKey: projectlessKey.value,
@@ -200,6 +219,7 @@ watch(
     mode,
     effort,
     permission,
+    serviceTier,
     cwd,
     selectedProjectId,
     projectlessKey,
@@ -241,6 +261,7 @@ const syncProjectId = (path = cwd.value) => {
 };
 const canCreate = computed(
   () =>
+    !!props.backend &&
     !status.error.value &&
     status.value.value?.state === "ready" &&
     !action.locked.value &&
@@ -257,6 +278,7 @@ const canCreate = computed(
       )) &&
     !settings.defaults.loading.value && !settings.defaults.error.value &&
     !settings.config.loading.value && !settings.config.error.value &&
+    tierValid.value &&
     (!selectedModel.value || choices.value.some((m) => m.model === selectedModel.value)) &&
     (!selectedEffort.value || efforts.value.includes(selectedEffort.value)) &&
     (!(mode.value || profile.value?.mode) || !!modePayload.value) &&
@@ -269,6 +291,7 @@ const canCreate = computed(
       "projectId",
       ...(selectedModel.value ? ["model"] : []),
       ...(selectedPermission.value ? ["permissions"] : []),
+      ...(speedAvailable(selectedTier.value) ? ['serviceTier'] : []),
     ]),
 );
 const create = async () => {
@@ -283,18 +306,21 @@ const create = async () => {
     }
     const location = (await serviceTools(client, props.node, [
       { namespace: "agent", interfaceVersion: "1.0.0" },
-    ]).call("agent.resolveProject", {
+    ]).call("agent.resolveProject", backendArguments({
       ...(!cwd.value
         ? { selection: { kind: "projectless", key: projectlessKey.value } }
         : {
             selection: { kind: "existing", cwd: cwd.value },
             expectedProjectId: selectedProjectId.value,
           }),
-    })) as Agent.ProjectLocation;
+    }, props.backend))) as Agent.ProjectLocation;
+    if (!sameBackend(location.backend, props.backend)) throw new Error('The project belongs to another account.');
+    if (!active) return;
     launch.value = {
       message: message.value,
       effort: selectedEffort.value,
       ...(modePayload.value ? { collaborationMode: modePayload.value } : {}),
+      ...(speedAvailable(selectedTier.value) ? { serviceTier: selectedTier.value } : {}),
       attachments: attachments.staged.value,
       operationId: "",
     };
@@ -306,6 +332,7 @@ const create = async () => {
       ...(selectedModel.value ? { model: selectedModel.value } : {}),
       ...(selectedEffort.value ? { config: { model_reasoning_effort: selectedEffort.value } } : {}),
       ...(selectedPermission.value ? { permissions: selectedPermission.value } : {}),
+      ...(speedAvailable(selectedTier.value) ? { serviceTier: selectedTier.value === 'standard' ? null : selectedTier.value } : {}),
     });
     if (!launch.value?.operationId || action.saved.value?.phase === "failed") {
       launch.value = null;
@@ -338,7 +365,7 @@ const createdId = computed(() =>
 );
 const continueLaunch = async () => {
   if (
-    continuing.value ||
+    !active || continuing.value ||
     !launch.value ||
     launch.value.operationId !== action.saved.value?.operationId ||
     !createdId.value
@@ -352,7 +379,7 @@ const continueLaunch = async () => {
       const previous = firstMessage.saved.value;
       if (
         previous &&
-        record(previous.call.arguments).threadId === id &&
+        nativeActionParams(previous).threadId === id &&
         previous.phase !== "failed"
       ) {
         if (previous.phase !== "succeeded") return;
@@ -363,7 +390,9 @@ const continueLaunch = async () => {
           props.node,
           id,
           AbortSignal.timeout(35000),
+          props.backend,
         );
+        if (!active) return;
         if (
           !control.attached ||
           text(record(control.thread.status).type) !== "idle"
@@ -374,8 +403,9 @@ const continueLaunch = async () => {
         const binding = await optionalTool(
           client,
           props.node,
-          "codex.turn/start",
+          nativeMethod(props.backend, "turn/start"),
         );
+        if (!active) return;
         if (!binding || !supportsFields(binding, ["threadId", "input"]))
           throw new Error("This provider cannot send the first message yet.");
         if (
@@ -392,10 +422,15 @@ const continueLaunch = async () => {
           throw new Error(
             "This provider cannot apply the selected reasoning effort to the first message.",
           );
+        if (pending.serviceTier && (!nativeServiceTier(pending.serviceTier) ||
+          !nativeModelSpeedAvailable(choices.value, text(nativeActionParams(action.saved.value).model), pending.serviceTier) ||
+          !nativeSpeedAvailable([binding], nativeServiceTier(pending.serviceTier)!, props.backend?.provider)))
+          throw new Error('The selected speed is no longer available. The retained first message was not sent.');
         await firstMessage.start("Send first message", binding, {
           threadId: id,
           input: messageInput(pending.message, pending.attachments),
           ...(pending.collaborationMode ? { collaborationMode: pending.collaborationMode } : pending.effort ? { effort: pending.effort } : {}),
+          ...(pending.serviceTier ? { serviceTier: pending.serviceTier === 'standard' ? null : pending.serviceTier } : {}),
         });
         if (firstMessage.saved.value?.phase !== "succeeded") return;
       }
@@ -412,7 +447,7 @@ const continueLaunch = async () => {
     launch.value = null;
     projectlessKey.value = "";
     persistLaunch();
-    window.location.hash = route("task", { node: props.node, id });
+    if (active) window.location.hash = route("task", nativeRouteQuery(owner, { id }));
   } catch (cause) {
     firstMessage.error.value =
       cause instanceof Error
@@ -431,7 +466,7 @@ const recoverCreate = async () => {
 };
 watch([createdId, () => firstMessage.saved.value?.phase], () => {
   const previous = firstMessage.saved.value;
-  if (createdId.value && launch.value && (!previous || record(previous.call.arguments).threadId !== createdId.value || previous.phase === 'succeeded'))
+  if (createdId.value && launch.value && (!previous || nativeActionParams(previous).threadId !== createdId.value || previous.phase === 'succeeded'))
     void continueLaunch();
 }, { immediate: true });
 watch(() => action.saved.value?.phase, (phase) => {
@@ -453,6 +488,7 @@ watch(() => action.saved.value?.phase, (phase) => {
       <h2 class="mb-6 text-center text-xl font-medium tracking-tight">
         What should we work on?
       </h2>
+      <p v-if="backend" class="mb-4 text-center text-sm text-muted-foreground">{{ nativeBackendLabel(backend) }}</p>
       <p
         v-if="status.value.value && status.value.value.state !== 'ready'"
         class="mb-4 flex items-center justify-center gap-2 text-sm text-muted-foreground"
@@ -469,6 +505,7 @@ watch(() => action.saved.value?.phase, (phase) => {
         <h3 id="create-heading" class="sr-only">Create a new task</h3>
         <ComposerAttachments
           :items="attachments.items.value"
+          :error="attachments.error.value"
           :disabled="!!launch"
           @remove="attachments.remove"
         />
@@ -510,6 +547,7 @@ watch(() => action.saved.value?.phase, (phase) => {
               v-model:open="projectPickerOpen"
               :client="client"
               :node="node"
+              :backend="backend"
               :host="status.value.value?.hostId"
               :scope="'agent:' + base.href"
               :defaults="projects.value.value?.defaults"
@@ -558,6 +596,11 @@ watch(() => action.saved.value?.phase, (phase) => {
               </option>
             </OptionSelect>
             <Label for="permission" class="sr-only">Safety</Label>
+            <Label for="speed" class="sr-only">Speed</Label>
+            <OptionSelect id="speed" v-model="serviceTier" :disabled="action.locked.value || !!launch">
+              <option value="">{{ selectedTier === 'flex' ? 'Flexible' : selectedTier === 'fast' ? 'Fast' : selectedTier === 'standard' ? 'Standard' : selectedTier }} · {{ tr('Vorgabe', 'Default') }}</option>
+              <option v-for="tier in ['standard', 'fast', 'flex'] as const" :key="tier" :value="tier" :disabled="!speedAvailable(tier)">{{ tier === 'flex' ? 'Flexible' : tier === 'fast' ? 'Fast' : 'Standard' }}</option>
+            </OptionSelect>
             <OptionSelect
               id="permission"
               v-model="permission"
@@ -604,6 +647,7 @@ watch(() => action.saved.value?.phase, (phase) => {
         >
           Model capabilities unavailable. {{ models.error.value }}
         </p>
+        <p v-if="!tierValid" role="alert" class="mt-3 px-2 text-sm text-destructive">{{ tr('Die gewählte Geschwindigkeit ist für diesen Account und dieses Modell nicht verfügbar.', 'The selected speed is unavailable for this account and model.') }}</p>
         <p v-if="modes.error.value || permissions.error.value || settings.config.error.value || settings.defaults.error.value" role="alert" class="mt-3 px-2 text-sm text-destructive">{{ modes.error.value || permissions.error.value || settings.config.error.value || settings.defaults.error.value }}</p>
         <Button v-if="models.error.value || modes.error.value || permissions.error.value || settings.config.error.value || settings.defaults.error.value" variant="ghost" size="sm" @click="settings.refresh">Reload settings</Button>
         <NativeActionState
@@ -648,7 +692,7 @@ watch(() => action.saved.value?.phase, (phase) => {
             !sending &&
             !firstMessage.busy.value &&
             (!firstMessage.saved.value ||
-              record(firstMessage.saved.value.call.arguments).threadId !==
+              nativeActionParams(firstMessage.saved.value).threadId !==
                 createdId ||
               ['failed', 'succeeded'].includes(
                 firstMessage.saved.value.phase,

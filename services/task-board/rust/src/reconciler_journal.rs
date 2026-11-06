@@ -17,6 +17,9 @@ impl<
     Q: SchedulerJournalBindings,
 > ReconcileStore for LifecycleJournal<'_, '_, R, P, C, I, Q>
 {
+    async fn protect_sources(&self) -> IvyResult<usize> {
+        crate::revision_protection::protect_run_sources(self.journal).await
+    }
     fn pending_coordination_page(
         &self,
         after: Option<&JsString>,

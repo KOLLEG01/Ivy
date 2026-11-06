@@ -6,7 +6,7 @@ use std::{collections::HashSet, sync::LazyLock};
 
 const SCHEMAS: &str = include_str!("../assets/schemas.json");
 const REGISTRY: &str = include_str!("../assets/registry.json");
-pub const DEFINITION_VERSION: &str = "1.1.0";
+pub const DEFINITION_VERSION: &str = "1.3.0";
 static DOCUMENT: LazyLock<IvyJson> =
     LazyLock::new(|| parse(SCHEMAS, usize::MAX).expect("static collector schemas"));
 static BUNDLE: LazyLock<SchemaBundle> =

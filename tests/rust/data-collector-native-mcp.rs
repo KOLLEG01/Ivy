@@ -12,6 +12,49 @@ fn json(source: &str) -> IvyJson {
 fn digest(c: char) -> IvyJson {
     format!("sha256:{}", c.to_string().repeat(64)).into()
 }
+fn catalog() -> &'static IvyJson {
+    static VALUE: std::sync::OnceLock<IvyJson> = std::sync::OnceLock::new();
+    VALUE.get_or_init(|| {
+        let mut value = json(include_str!(
+            "../../specs/native/codex-0.159.2/catalog.json"
+        ));
+        let methods = value
+            .required("clientRequests")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|method| {
+                [
+                    "config/read",
+                    "thread/start",
+                    "thread/unsubscribe",
+                    "thread/loaded/list",
+                    "mcpServer/tool/call",
+                ]
+                .iter()
+                .any(|name| method.get("method") == Some(&(*name).into()))
+            })
+            .map(|method| {
+                let mut method = method.clone();
+                method.insert("inputSchema", true.into());
+                method.insert("outputSchema", true.into());
+                method
+            })
+            .collect();
+        value.insert("clientRequests", IvyJson::Array(methods));
+        for name in [
+            "serverRequests",
+            "serverNotifications",
+            "clientNotifications",
+            "derivedLegacyTypes",
+        ] {
+            value.insert(name, IvyJson::Array(vec![]));
+        }
+        value.insert("nativeExecutableHash", digest('d'));
+        value
+    })
+}
 #[derive(Clone, Copy, Default)]
 enum Mode {
     #[default]
@@ -29,6 +72,12 @@ enum Mode {
 }
 #[derive(Default)]
 struct Client {
+    backend: Mutex<Option<BackendIdentity>>,
+    status_backend: Mutex<Option<BackendIdentity>>,
+    management_calls: Mutex<Vec<IvyJson>>,
+    bindings: Mutex<Vec<(String, String)>>,
+    replace_backend_on_config: Mutex<Option<BackendIdentity>>,
+    mcp_unavailable: AtomicBool,
     store: Mutex<Option<StoreOwner>>,
     operations: Mutex<HashMap<String, IvyJson>>,
     invokes: Mutex<Vec<IvyJson>>,
@@ -37,17 +86,34 @@ struct Client {
     configuration_reads: Mutex<Vec<IvyJson>>,
     mode: Mutex<Mode>,
     epoch: Mutex<Option<String>>,
+    stopped_epochs: Mutex<Vec<IvyJson>>,
+    loaded: Mutex<Option<IvyJson>>,
     entered: Notify,
     release: Notify,
 }
 impl Client {
+    fn catalog(&self) -> IvyJson {
+        let mut value = catalog().clone();
+        if self.mcp_unavailable.load(Ordering::SeqCst) {
+            let methods = value
+                .remove("clientRequests")
+                .unwrap()
+                .into_array()
+                .unwrap()
+                .into_iter()
+                .filter(|method| method.get("method") != Some(&"mcpServer/tool/call".into()))
+                .collect();
+            value.insert("clientRequests", IvyJson::Array(methods));
+        }
+        value
+    }
     fn status(&self) -> IvyJson {
-        IvyJson::object([
+        let mut value = IvyJson::object([
             ("serviceNodeId", "native-agent".into()),
             ("hostId", "fixture".into()),
             ("nativeVersion", "0.159.2".into()),
             ("nativeExecutableHash", digest('d')),
-            ("catalogHash", digest('c')),
+            ("catalogHash", hash_json(&self.catalog()).unwrap().into()),
             (
                 "epoch",
                 self.epoch
@@ -68,7 +134,27 @@ impl Client {
                 json(r#"{"retained":0,"maximum":100,"bytes":0,"maximumBytes":1048576}"#),
             ),
             ("observedMethods", IvyJson::Array(vec![])),
-        ])
+            (
+                "processStops",
+                IvyJson::Array(self.stopped_epochs.lock().unwrap().clone()),
+            ),
+            (
+                "connection",
+                json(
+                    r#"{"mode":"owned-stdio","ownsServer":true,"ownsHome":false,"actualHome":"/fixture","actualVersion":"0.159.2","socketPath":null,"serverPid":null,"lifecycle":"owned-stdio","mcpIdentity":"instance-environment"}"#,
+                ),
+            ),
+        ]);
+        let selected = self
+            .status_backend
+            .lock()
+            .unwrap()
+            .clone()
+            .or_else(|| self.backend.lock().unwrap().clone());
+        if let Some(backend) = selected {
+            value.insert("backend", backend.json());
+        }
+        value
     }
     fn observation(&self, args: &IvyJson, phase: &str) -> IvyJson {
         let method = args.required("method").unwrap().clone();
@@ -91,11 +177,22 @@ impl Client {
             ("createdAt", TIME.into()),
             ("updatedAt", TIME.into()),
             ("phase", phase.into()),
-            ("epoch", "epoch".into()),
+            (
+                "epoch",
+                self.epoch
+                    .lock()
+                    .unwrap()
+                    .as_deref()
+                    .unwrap_or("epoch")
+                    .into(),
+            ),
             ("requestId", 1.0.into()),
             ("reply", IvyJson::Null),
             ("code", IvyJson::Null),
         ]);
+        if let Some(backend) = self.backend.lock().unwrap().as_ref() {
+            value.insert("backend", backend.json());
+        }
         if phase == "succeeded" {
             value.insert("reply", IvyJson::object([("result", Self::reply(args))]));
         }
@@ -168,6 +265,16 @@ impl RpcClient for Client {
             if method == "tools.list" {
                 let namespace = model::text(&params, "namespace")?;
                 let name = model::text(&params, "namePrefix")?;
+                self.bindings
+                    .lock()
+                    .unwrap()
+                    .push((namespace.clone(), name.clone()));
+                if name == "config/read" {
+                    if let Some(replacement) = self.replace_backend_on_config.lock().unwrap().take()
+                    {
+                        *self.backend.lock().unwrap() = Some(replacement);
+                    }
+                }
                 if namespace == "fixture"
                     && matches!(*self.mode.lock().unwrap(), Mode::HoldDirectBinding)
                 {
@@ -181,6 +288,18 @@ impl RpcClient for Client {
                     self.entered.notify_one();
                     self.release.notified().await;
                 }
+                let native = if namespace != "agent" && namespace != "fixture" {
+                    let contract = ivy_contracts::native_contract::NativeContract::for_backend(
+                        &self.catalog(),
+                        self.backend.lock().unwrap().clone(),
+                    )?;
+                    Some((
+                        contract.definition(&name.clone().into())?,
+                        contract.definition_hash(&name.clone().into())?.to_owned(),
+                    ))
+                } else {
+                    None
+                };
                 return Ok(IvyJson::object([
                     (
                         "provider",
@@ -192,36 +311,47 @@ impl RpcClient for Client {
                             ("qualifiedName", format!("{namespace}.{name}").into()),
                             (
                                 "definition",
-                                IvyJson::object([
-                                    ("namespace", namespace.clone().into()),
-                                    (
-                                        "annotations",
-                                        IvyJson::object([(
-                                            "readOnlyHint",
-                                            (name == "read"
-                                                || namespace == "codex" && name == "config/read")
+                                native
+                                    .as_ref()
+                                    .map(|(definition, _)| definition.clone())
+                                    .unwrap_or_else(|| {
+                                        IvyJson::object([
+                                            ("namespace", namespace.clone().into()),
+                                            (
+                                                "annotations",
+                                                IvyJson::object([(
+                                                    "readOnlyHint",
+                                                    (name == "read"
+                                                        || namespace == "codex"
+                                                            && name == "config/read")
+                                                        .into(),
+                                                )]),
+                                            ),
+                                            ("name", name.into()),
+                                            (
+                                                "interfaceVersion",
+                                                if namespace == "agent" {
+                                                    "1.0.0"
+                                                } else {
+                                                    "0.159.2"
+                                                }
                                                 .into(),
-                                        )]),
-                                    ),
-                                    ("name", name.into()),
-                                    (
-                                        "interfaceVersion",
-                                        if namespace == "agent" {
-                                            "1.0.0"
-                                        } else {
-                                            "0.159.2"
-                                        }
-                                        .into(),
-                                    ),
-                                    ("inputSchema", object()),
-                                    ("outputSchema", object()),
-                                ]),
+                                            ),
+                                            ("inputSchema", object()),
+                                            ("outputSchema", object()),
+                                        ])
+                                    }),
                             ),
                             (
                                 "definitionHash",
-                                digest(if namespace == "agent" { 'a' } else { 'b' }),
+                                native
+                                    .as_ref()
+                                    .map(|(_, hash)| hash.clone().into())
+                                    .unwrap_or_else(|| {
+                                        digest(if namespace == "agent" { 'a' } else { 'b' })
+                                    }),
                             ),
-                            ("catalogHash", digest('c')),
+                            ("catalogHash", hash_json(&self.catalog()).unwrap().into()),
                         ])]),
                     ),
                     ("nextCursor", IvyJson::Null),
@@ -229,6 +359,15 @@ impl RpcClient for Client {
             }
             assert_eq!(method, "tools.call");
             let args = params.required("arguments")?;
+            if model::text(&params, "qualifiedName")?.starts_with("agent.") {
+                self.management_calls.lock().unwrap().push(params.clone());
+                if !BackendIdentity::matches(args, self.backend.lock().unwrap().as_ref()) {
+                    return Err(IvyError::new(
+                        "native_backend_mismatch",
+                        "The selected account is not configured.",
+                    ));
+                }
+            }
             match model::text(&params, "qualifiedName")?.as_str() {
                 "codex.config/read" => {
                     self.configuration_reads.lock().unwrap().push(args.clone());
@@ -246,6 +385,43 @@ impl RpcClient for Client {
                         .with_outcome(Outcome::Unknown))
                 }
                 "agent.status" => Ok(self.status()),
+                "agent.catalog" => Ok(self.catalog()),
+                "agent.interact" => {
+                    let method = model::text(args, "method")?;
+                    let config = if method == "thread/loaded/list" {
+                        self.loaded
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .unwrap_or_else(|| json(r#"{"data":["own-thread"],"nextCursor":null}"#))
+                    } else {
+                        assert_eq!(method, "config/read");
+                        self.configuration_reads
+                            .lock()
+                            .unwrap()
+                            .push(args.required("params")?.clone());
+                        self.native_configuration.lock().unwrap().clone().unwrap_or_else(|| {
+                        json(r#"{"config":{"mcp_servers":{"node_repl":{"command":"node"},"cua_repl":{"command":"node"}}}}"#)
+                        })
+                    };
+                    let mut value = IvyJson::object([
+                        ("operationId", args.required("operationId")?.clone()),
+                        (
+                            "epoch",
+                            self.epoch
+                                .lock()
+                                .unwrap()
+                                .as_deref()
+                                .unwrap_or("epoch")
+                                .into(),
+                        ),
+                        ("reply", IvyJson::object([("result", config)])),
+                    ]);
+                    if let Some(backend) = self.backend.lock().unwrap().as_ref() {
+                        value.insert("backend", backend.json());
+                    }
+                    Ok(value)
+                }
                 "agent.operation" => {
                     let id = model::text(args, "operationId")?;
                     self.operations
@@ -261,6 +437,13 @@ impl RpcClient for Client {
                                 ("serviceNodeId", "native-agent".into()),
                                 ("epoch", "epoch".into()),
                             ]));
+                            if let Some(backend) = self.backend.lock().unwrap().as_ref() {
+                                error
+                                    .details
+                                    .as_mut()
+                                    .unwrap()
+                                    .insert("backend", backend.json());
+                            }
                             error
                         })
                 }
@@ -286,6 +469,8 @@ impl RpcClient for Client {
                                     }) {
                                         assert_eq!(call.get("method"), request.get("method"));
                                         assert_eq!(call.get("params"), request.get("params"));
+                                        let backend = BackendIdentity::optional(request.get("backend"))?;
+                                        assert!(BackendIdentity::matches(value.required("owner")?,backend.as_ref()), "The complete account owner must be persisted before dispatch");
                                         found = true;
                                     }
                                 }
@@ -430,20 +615,38 @@ async fn headless_overrides_only_disable_existing_local_servers() {
         call(&session).await.unwrap();
         call(&session).await.unwrap();
         let reads = client.configuration_reads.lock().unwrap().clone();
-        assert_eq!(reads.len(), 1, "Read effective configuration only on context creation");
+        assert_eq!(
+            reads.len(),
+            1,
+            "Read effective configuration only on context creation"
+        );
         assert_eq!(reads[0].get("includeLayers"), Some(&false.into()));
         assert_eq!(reads[0].get("cwd"), session.0.configuration.get("cwd"));
         let start = client.invokes.lock().unwrap()[0].clone();
-        let overrides = start.required("params").unwrap().required("config").unwrap();
-        let servers = configuration.required("config").unwrap().required("mcp_servers").unwrap();
+        let overrides = start
+            .required("params")
+            .unwrap()
+            .required("config")
+            .unwrap();
+        let servers = configuration
+            .required("config")
+            .unwrap()
+            .required("mcp_servers")
+            .unwrap();
         let disabled = IvyJson::Bool(false);
         assert_eq!(
             overrides.get("mcp_servers.node_repl.enabled"),
             servers.get("node_repl").map(|_| &disabled)
         );
         assert_eq!(overrides.get("mcp_servers.cua_repl.enabled"), None);
-        assert_eq!(overrides.as_object().unwrap().len(), usize::from(servers.get("node_repl").is_some()));
-        assert_eq!(*client.native_configuration.lock().unwrap(), Some(configuration));
+        assert_eq!(
+            overrides.as_object().unwrap().len(),
+            usize::from(servers.get("node_repl").is_some())
+        );
+        assert_eq!(
+            *client.native_configuration.lock().unwrap(),
+            Some(configuration)
+        );
         session.close().await.unwrap();
     }
 }
@@ -926,6 +1129,150 @@ async fn normal_context_is_durably_owned_before_dispatch_and_retires_once() {
         "Original receipts stay with the native owner"
     );
 }
+
+fn scoped(session: &mut NativeMcpSession, client: &Client, account: &str) -> BackendIdentity {
+    let backend = BackendIdentity::new(
+        "worker".into(),
+        ivy_contracts::native_backend::NativeProvider::Codex,
+        account.into(),
+    )
+    .unwrap();
+    let mut configuration = session.0.configuration.clone();
+    configuration.insert("backend", backend.json());
+    *session = NativeMcpSession::new(
+        session.0.client.clone(),
+        session.0.tools.clone(),
+        configuration,
+        session.0.signal.clone(),
+        session.0.contexts.clone(),
+    )
+    .unwrap();
+    *client.backend.lock().unwrap() = Some(backend.clone());
+    backend
+}
+
+#[tokio::test]
+async fn scoped_owner_survives_database_reopen_and_fences_foreign_account_cleanup() {
+    let (root, client, factory, mut session) = fixture(Mode::UnknownStart);
+    let backend = scoped(&mut session, &client, "work");
+    call(&session).await.unwrap_err();
+    let context = retained(&factory, &client).await.unwrap();
+    assert_eq!(context.owner.backend, Some(backend.clone()));
+    let key = context.key().unwrap();
+    let original = context.start.operation_id;
+    session.close().await.unwrap();
+    let store = factory.contexts.store.clone();
+    drop(session);
+    drop(factory);
+    store.close().await.unwrap();
+    let reopened = root.store();
+    *client.store.lock().unwrap() = Some(reopened.clone());
+    let current = client.clone();
+    let factory = NativeMcpFactory::new(Arc::new(move || Ok(current.clone())), reopened);
+    factory.recover().await.unwrap_err();
+    let retained = factory.contexts.read(key.clone()).await.unwrap().unwrap();
+    assert_eq!(retained.owner.backend, Some(backend.clone()));
+    assert_eq!(retained.start.operation_id, original);
+    assert_eq!(client.count("thread/unsubscribe"), 0);
+    client.finish("thread/start");
+    *client.status_backend.lock().unwrap() = Some(
+        BackendIdentity::new(
+            "worker".into(),
+            ivy_contracts::native_backend::NativeProvider::Codex,
+            "other".into(),
+        )
+        .unwrap(),
+    );
+    factory.recover().await.unwrap_err();
+    assert_eq!(client.count("thread/unsubscribe"), 0);
+    assert!(factory.contexts.read(key.clone()).await.unwrap().is_some());
+    *client.status_backend.lock().unwrap() = None;
+    factory.recover().await.unwrap();
+    assert!(factory.contexts.read(key).await.unwrap().is_none());
+    assert_eq!(client.count("thread/start"), 1);
+    assert_eq!(client.count("thread/unsubscribe"), 1);
+    for call in client.management_calls.lock().unwrap().iter() {
+        assert!(BackendIdentity::matches(
+            call.required("arguments").unwrap(),
+            Some(&backend)
+        ));
+    }
+    assert!(
+        client
+            .bindings
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(namespace, _)| namespace != "agent")
+            .all(|(namespace, _)| namespace == "worker")
+    );
+    factory.contexts.store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn foreign_status_and_account_changes_before_configuration_read_never_start_a_context() {
+    for replace_during_discovery in [false, true] {
+        let (_root, client, factory, mut session) = fixture(Mode::Normal);
+        let selected = scoped(&mut session, &client, "work");
+        let other = BackendIdentity::new(
+            "worker".into(),
+            ivy_contracts::native_backend::NativeProvider::Codex,
+            "other".into(),
+        )
+        .unwrap();
+        if replace_during_discovery {
+            *client.replace_backend_on_config.lock().unwrap() = Some(other);
+        } else {
+            *client.status_backend.lock().unwrap() = Some(other);
+        }
+        let error = call(&session).await.unwrap_err();
+        assert_eq!(
+            error.code,
+            if replace_during_discovery {
+                "tool_definition_changed"
+            } else {
+                "native_owner_mismatch"
+            }
+        );
+        assert_eq!(client.count("thread/start"), 0);
+        assert!(client.configuration_reads.lock().unwrap().is_empty());
+        assert!(
+            factory
+                .contexts
+                .next(String::new())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        for call in client.management_calls.lock().unwrap().iter() {
+            assert!(BackendIdentity::matches(
+                call.required("arguments").unwrap(),
+                Some(&selected)
+            ));
+        }
+        session.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn missing_backend_mcp_capability_is_rejected_before_reads_or_context_creation() {
+    let (_root, client, factory, mut session) = fixture(Mode::Normal);
+    scoped(&mut session, &client, "work");
+    client.mcp_unavailable.store(true, Ordering::SeqCst);
+    let error = call(&session).await.unwrap_err();
+    assert_eq!(error.code, "native_method_unsupported");
+    assert!(client.configuration_reads.lock().unwrap().is_empty());
+    assert_eq!(client.count("thread/start"), 0);
+    assert!(
+        factory
+            .contexts
+            .next(String::new())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    session.close().await.unwrap();
+}
 #[tokio::test]
 async fn close_during_start_keeps_the_original_and_retires_its_delayed_thread() {
     let (_root, client, factory, session) = fixture(Mode::HoldStart);
@@ -1298,6 +1645,147 @@ async fn unresolved_tool_work_keeps_its_context_and_original_call() {
     assert_eq!(client.count("mcpServer/tool/call"), 1);
     assert_eq!(client.count("thread/unsubscribe"), 1);
     assert!(retained(&factory, &client).await.is_none());
+}
+#[tokio::test]
+async fn epoch_recovery_requires_actual_absence_and_preserves_uncertain_reads() {
+    for scenario in [
+        "stopped_read",
+        "absent_read",
+        "same_epoch_read",
+        "write",
+        "live",
+        "partial",
+        "missing",
+        "wrong_tool",
+        "wrong_server",
+    ] {
+        let (_root, client, factory, session) = fixture(Mode::HoldTool);
+        let task = saved_task(&factory, "source", 60).await;
+        let session = session.for_run(CancellationToken::new(), "source".into());
+        let pending = session.clone();
+        let work = tokio::spawn(async move { call(&pending).await });
+        entered(&client).await;
+        session.close().await.unwrap();
+        work.await.unwrap().unwrap_err();
+        let call_id = client.original("mcpServer/tool/call");
+        client
+            .operations
+            .lock()
+            .unwrap()
+            .get_mut(&call_id)
+            .unwrap()
+            .insert("phase", "outcome_unknown".into());
+        client
+            .operations
+            .lock()
+            .unwrap()
+            .get_mut(&call_id)
+            .unwrap()
+            .insert("code", "native_deadline_exceeded".into());
+        let original = client
+            .operations
+            .lock()
+            .unwrap()
+            .get(&call_id)
+            .unwrap()
+            .clone();
+        let mut task = task;
+        if scenario != "write" {
+            task.get_mut("mcp").unwrap().insert("readOnly", true.into());
+        }
+        if scenario == "wrong_tool" {
+            task.get_mut("mcp")
+                .unwrap()
+                .insert("tools", IvyJson::Array(vec!["other".into()]));
+        }
+        if scenario == "wrong_server" {
+            task.get_mut("mcp")
+                .unwrap()
+                .insert("server", "other".into());
+        }
+        let saved = task.clone();
+        factory
+            .contexts
+            .store
+            .call(move |store| {
+                store.save(&IvyJson::object([
+                    ("task", saved),
+                    ("revision", 2.0.into()),
+                    ("deleted", false.into()),
+                ]))
+            })
+            .await
+            .unwrap();
+        if scenario != "same_epoch_read" {
+            *client.epoch.lock().unwrap() = Some("new-epoch".into());
+        }
+        if scenario == "stopped_read" {
+            client.stopped_epochs.lock().unwrap().push(json(
+                r#"{"epoch":"epoch","observedAt":"2026-01-02T03:04:05.006Z"}"#,
+            ));
+        }
+        if scenario == "absent_read"
+            || scenario == "missing"
+            || scenario == "wrong_tool"
+            || scenario == "wrong_server"
+        {
+            *client.loaded.lock().unwrap() = Some(json(r#"{"data":[],"nextCursor":null}"#));
+        }
+        if scenario == "partial" {
+            *client.loaded.lock().unwrap() =
+                Some(json(r#"{"data":[],"nextCursor":"another-page"}"#));
+        }
+        if scenario == "missing" {
+            client.operations.lock().unwrap().remove(&call_id);
+        }
+        let recovered = factory.recover().await;
+        let allowed = matches!(scenario, "stopped_read" | "absent_read" | "same_epoch_read");
+        assert_eq!(recovered.is_ok(), allowed, "{scenario}: {recovered:?}");
+        assert_eq!(
+            factory
+                .contexts
+                .task_pending("source".into())
+                .await
+                .unwrap(),
+            !allowed,
+            "{scenario}"
+        );
+        assert_eq!(
+            client.count("thread/unsubscribe"),
+            usize::from(scenario == "same_epoch_read"),
+            "{scenario}"
+        );
+        assert_eq!(client.count("mcpServer/tool/call"), 1, "{scenario}");
+        let context = retained(&factory, &client).await.unwrap();
+        assert_eq!(
+            context.pending.unwrap().operation_id,
+            JsString::from(call_id.clone())
+        );
+        if scenario != "missing" {
+            assert_eq!(
+                client.operations.lock().unwrap().get(&call_id),
+                Some(&original)
+            );
+        }
+        if allowed {
+            factory.recover().await.unwrap();
+            // A new accepted read gets its own context; the old receipt remains.
+            *client.mode.lock().unwrap() = Mode::Normal;
+            let next = factory.open(task, CancellationToken::new()).await.unwrap();
+            assert!(bridge_call(next.as_ref()).await.contains("200"));
+            next.close().await.unwrap();
+        }
+    }
+}
+#[tokio::test]
+async fn an_empty_context_can_retire_after_a_fresh_complete_absence_read() {
+    let (_root, client, factory, session) = fixture(Mode::Normal);
+    call(&session).await.unwrap();
+    *client.epoch.lock().unwrap() = Some("new-epoch".into());
+    *client.loaded.lock().unwrap() = Some(json(r#"{"data":[],"nextCursor":null}"#));
+    session.close().await.unwrap();
+    assert!(retained(&factory, &client).await.is_none());
+    assert_eq!(client.count("thread/unsubscribe"), 0);
 }
 #[tokio::test]
 async fn a_lost_unsubscribe_is_reconciled_without_another_send() {

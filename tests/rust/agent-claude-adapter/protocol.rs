@@ -10,8 +10,11 @@ fn original(root: &Path, spec: &J) -> J {
     let mut spec = spec.clone();
     spec.insert("root", J::String(node_path::from_native(root)));
     let mut child = Command::new("node")
-        .arg("tests/fixtures/agent-claude-protocol-oracle.mjs")
-        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+        .arg(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../tests/fixtures/agent-claude-protocol-oracle.mjs"),
+        )
+        .current_dir(root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -63,7 +66,7 @@ fn table(path: &Path, name: &str) -> J {
         .iter()
         .map(|s| s.to_string())
         .collect::<Vec<_>>();
-    let rows = statement
+    let mut rows: Vec<J> = statement
         .query_map([], |row| {
             Ok(J::object(names.iter().enumerate().map(|(i, n)| {
                 let v = match row.get_ref(i).unwrap() {
@@ -79,6 +82,22 @@ fn table(path: &Path, name: &str) -> J {
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
+    drop(statement);
+    drop(db);
+    if name == "turns" {
+        // Compare logical persisted content with the old server, independently
+        // of the normalized body/chunk layout used by the native store.
+        let store =
+            SessionStore::with_clock(path.parent().unwrap(), path, Arc::new(|| 0.0)).unwrap();
+        for row in &mut rows {
+            let turn = store.get_turn(s(f(row, "id"))).unwrap().unwrap();
+            row.insert(
+                "items_json",
+                stringify(f(&turn, "items"), usize::MAX).unwrap().into(),
+            );
+        }
+        store.close().unwrap();
+    }
     J::Array(rows)
 }
 struct Driver {
@@ -224,11 +243,9 @@ fn native(home: &Path, spec: &J) -> J {
         *i += 1;
         value
     });
-    let compare = Arc::new(|a: &JsString, b: &JsString| {
-        ivy_agent_manager::runtime::compare_names(a, b, false)
-    });
+    let compare = project_comparator().unwrap();
     let projects =
-        ProjectStore::open(home, Style::Windows, compare, clock.clone(), ids.clone()).unwrap();
+        ProjectStore::open(home, Style::native(), compare, clock.clone(), ids.clone()).unwrap();
     let db = home.join("state.sqlite");
     let store = SessionStore::with_clock(home, &db, clock.clone()).unwrap();
     let mut process_environment = v(
@@ -240,10 +257,10 @@ fn native(home: &Path, spec: &J) -> J {
     let env = Environment {
         environment: process_environment,
         discovered_router_models: vec![],
-        cwd: "C:/fixture".into(),
+        cwd: node_path::from_native(home),
         codex_home: node_path::from_native(home),
-        platform_os: "windows".into(),
-        cpu: "x86_64".into(),
+        platform_os: std::env::consts::OS.into(),
+        cpu: std::env::consts::ARCH.into(),
         compat_version: "0.142.3".into(),
         version_suffix: "claude-codex".into(),
         default_model: "sonnet".into(),
@@ -253,7 +270,7 @@ fn native(home: &Path, spec: &J) -> J {
         config_overrides: J::object([] as [(&str, J); 0]),
         config_path: home.join("config.json"),
         prepare_worktree: Arc::new(|_, cwd| Ok(cwd.clone())),
-        read_base64: Arc::new(|path| {
+        read_base64: Arc::new(|path, _| {
             Ok(STANDARD
                 .encode(fs::read(node_path::to_native(path))?)
                 .into())
@@ -413,8 +430,10 @@ fn paired(label: &str, spec: J) {
         f(&expected, "environment").clone(),
         "actual Node environment admission: {label}"
     );
-    let actual = native(&new, &spec);
-    let expected = f(&expected, "records").clone();
+    // Decode the existing persisted-JSON projection before replacing the two
+    // fixture homes, so escaped Windows paths receive the same normalization.
+    let actual = public_projection(&native(&new, &spec));
+    let expected = public_projection(f(&expected, "records"));
     compare(label, normalize(&actual, &new), normalize(&expected, &old));
     if spec.get("config").is_some()
         || f(&spec, "files").as_array().is_some_and(|files| {
@@ -429,6 +448,53 @@ fn paired(label: &str, spec: J) {
             "persisted config bytes: {label}"
         );
     }
+}
+
+#[test]
+fn native_fixture_keeps_positive_projects_and_default_workspaces_covered() {
+    let root = Root::new();
+    let old = root.0.join("original");
+    let new = root.0.join("native");
+    fs::create_dir(&old).unwrap();
+    fs::create_dir(&new).unwrap();
+    let spec = v(r#"{"ids":["p1","t1","t2"],"steps":[
+      {"action":"request","message":{"id":1,"method":"project/create","params":{"idempotencyKey":"create","name":"One","roots":[{"path":"__ROOT__/work"}]}}},
+      {"action":"request","message":{"id":2,"method":"thread/start","params":{"projectId":"p1"}}},
+      {"action":"request","message":{"id":3,"method":"thread/start","params":{}}}
+    ]}"#);
+    let expected = original(&old, &spec);
+    let actual = native(&new, &spec);
+    let records = f(&expected, "records").as_array().unwrap();
+    let messages = f(f(records.last().unwrap(), "state"), "messages")
+        .as_array()
+        .unwrap();
+    let reply = |id: f64| {
+        let message = messages
+            .iter()
+            .map(|v| f(v, "message"))
+            .find(|v| f(v, "id") == &J::Number(id))
+            .unwrap();
+        assert!(
+            message.get("error").is_none(),
+            "Native fixture skipped positive project coverage: {message:?}"
+        );
+        f(message, "result")
+    };
+    let project = f(reply(1.0), "project");
+    assert_eq!(f(project, "id"), &J::from("p1"));
+    let path = f(&f(project, "roots").as_array().unwrap()[0], "path");
+    assert!(node_path::is_absolute(Style::native(), s(path)));
+    assert_eq!(f(f(reply(2.0), "thread"), "projectId"), &J::from("p1"));
+    assert_eq!(f(f(reply(2.0), "thread"), "cwd"), path);
+    assert_eq!(
+        f(f(reply(3.0), "thread"), "cwd"),
+        &J::String(node_path::from_native(&old))
+    );
+    compare(
+        "native project fixture coverage",
+        normalize(&actual, &new),
+        normalize(f(&expected, "records"), &old),
+    );
 }
 
 #[test]
@@ -448,7 +514,7 @@ fn corrupt_store_refuses_reads_without_rewriting_original_bytes() {
         );
         let mut steps = vec![
             v(
-                r#"{"action":"request","message":{"id":"start","method":"thread/start","params":{"cwd":"C:/fixture"}}}"#,
+                r#"{"action":"request","message":{"id":"start","method":"thread/start","params":{"cwd":"__ROOT__/work"}}}"#,
             ),
             J::object([("action", "sql".into()), ("sql", sql.into())]),
         ];
@@ -574,7 +640,7 @@ fn managed_provider_selection_routes_sdk_and_blocks_codex_before_dispatch() {
     {
         let mut steps = v(r#"[
           {"action":"request","message":{"id":1,"method":"config/read"}},
-          {"action":"request","message":{"id":2,"method":"thread/start","params":{"cwd":"C:/fixture"}}},
+          {"action":"request","message":{"id":2,"method":"thread/start","params":{"cwd":"__ROOT__/work"}}},
           {"action":"request","message":{"id":3,"method":"turn/start","params":{"threadId":"id0","input":[{"type":"text","text":"fixture"}]}}}
         ]"#).as_array().unwrap().to_vec();
         if index == 2 {
@@ -602,7 +668,7 @@ fn native_protocol_history_and_turn_order_match_frozen_server() {
         v(
             r#"{"ids":["t1","turn1","user1","a1","r1","a2","turn2","user2","plan1"],"models":[{"value":"sonnet","displayName":"Sonnet","description":"fixture"}],"steps":[
       {"action":"request","message":{"id":1,"method":"initialize","params":{"clientInfo":{"name":"fixture","version":"1"}}}},
-      {"action":"request","message":{"id":2,"method":"thread/start","params":{"cwd":"C:/fixture"}}},
+      {"action":"request","message":{"id":2,"method":"thread/start","params":{"cwd":"__ROOT__/work"}}},
       {"action":"request","message":{"id":3,"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"hello"}]}}},
       {"action":"event","turnId":"turn1","event":{"type":"text_delta","delta":"Hello\ud800"}},
       {"action":"event","turnId":"turn1","event":{"type":"reasoning_delta","delta":"Think"}},
@@ -632,24 +698,149 @@ fn native_protocol_history_and_turn_order_match_frozen_server() {
     );
 }
 #[test]
+fn native_history_handlers_honor_turn_views_limits_and_loaded_cursors() {
+    let root = Root::new();
+    let mut steps = vec![v(
+        r#"{"action":"request","message":{"id":"start","method":"thread/start","params":{"cwd":"__ROOT__/work"}}}"#,
+    )];
+    let mut ids = vec!["thread".into()];
+    for index in 0..3 {
+        ids.extend([
+            format!("turn{index}").into(),
+            format!("user{index}").into(),
+            format!("answer{index}").into(),
+        ]);
+        steps.push(v(r#"{"action":"request","message":{"id":"turn","method":"turn/start","params":{"threadId":"thread","input":[{"type":"text","text":"hello"}]}}}"#));
+        steps.push(J::object([
+            ("action", "event".into()),
+            ("turnId", format!("turn{index}").into()),
+            ("event", v(r#"{"type":"text_delta","delta":"answer 😀"}"#)),
+        ]));
+        steps.push(J::object([
+            ("action", "finish".into()),
+            ("turnId", format!("turn{index}").into()),
+        ]));
+    }
+    for id in ["second", "third"] {
+        ids.push(id.into());
+        steps.push(v(r#"{"action":"request","message":{"id":"start","method":"thread/start","params":{"cwd":"__ROOT__/work"}}}"#));
+    }
+    for (id, method, params) in [
+        (
+            "latest",
+            "thread/turns/list",
+            v(r#"{"threadId":"thread","limit":1,"itemsView":"notLoaded"}"#),
+        ),
+        (
+            "first",
+            "thread/turns/list",
+            v(r#"{"threadId":"thread","limit":1,"sortDirection":"asc","itemsView":"full"}"#),
+        ),
+        (
+            "items",
+            "thread/items/list",
+            v(r#"{"threadId":"thread","turnId":"turn1","cursor":"1","limit":1}"#),
+        ),
+        (
+            "loaded",
+            "thread/loaded/list",
+            v(r#"{"limit":1,"cursor":"1"}"#),
+        ),
+        (
+            "loadedEnd",
+            "thread/loaded/list",
+            v(r#"{"limit":1,"cursor":"2"}"#),
+        ),
+        (
+            "badCursor",
+            "thread/turns/list",
+            v(r#"{"threadId":"thread","cursor":"invalid"}"#),
+        ),
+        (
+            "badLimit",
+            "thread/items/list",
+            v(r#"{"threadId":"thread","limit":0}"#),
+        ),
+    ] {
+        steps.push(J::object([
+            ("action", "request".into()),
+            (
+                "message",
+                J::object([
+                    ("id", id.into()),
+                    ("method", method.into()),
+                    ("params", params),
+                ]),
+            ),
+        ]));
+    }
+    let records = native(
+        &root.0,
+        &J::object([("ids", J::Array(ids)), ("steps", J::Array(steps))]),
+    );
+    let messages = f(
+        f(records.as_array().unwrap().last().unwrap(), "state"),
+        "messages",
+    )
+    .as_array()
+    .unwrap();
+    let reply = |id: &str| {
+        f(
+            messages
+                .iter()
+                .find(|m| f(f(m, "message"), "id") == &J::from(id))
+                .unwrap(),
+            "message",
+        )
+    };
+    let latest = f(reply("latest"), "result");
+    assert_eq!(
+        f(&f(latest, "data").as_array().unwrap()[0], "id"),
+        &"turn2".into()
+    );
+    assert_eq!(
+        f(&f(latest, "data").as_array().unwrap()[0], "items"),
+        &v("[]")
+    );
+    assert!(f(latest, "nextCursor").as_js_string().is_some());
+    assert!(f(latest, "backwardsCursor").as_js_string().is_some());
+    let first = &f(f(reply("first"), "result"), "data").as_array().unwrap()[0];
+    assert_eq!(f(first, "id"), &"turn0".into());
+    assert_eq!(f(first, "items").as_array().unwrap().len(), 2);
+    let item = &f(f(reply("items"), "result"), "data").as_array().unwrap()[0];
+    assert_eq!(f(item, "turnId"), &"turn1".into());
+    assert_eq!(f(f(item, "item"), "id"), &"answer1".into());
+    assert_eq!(f(f(item, "item"), "text"), &"answer 😀".into());
+    assert_eq!(f(f(reply("loaded"), "result"), "data"), &v(r#"["second"]"#));
+    assert_eq!(f(f(reply("loaded"), "result"), "nextCursor"), &"2".into());
+    assert_eq!(
+        f(f(reply("loadedEnd"), "result"), "data"),
+        &v(r#"["third"]"#)
+    );
+    assert_eq!(f(f(reply("loadedEnd"), "result"), "nextCursor"), &J::Null);
+    for id in ["badCursor", "badLimit"] {
+        assert_eq!(f(f(reply(id), "error"), "code"), &(-32000.0).into());
+    }
+}
+#[test]
 fn native_approvals_steering_tools_and_reconnect_match_frozen_server() {
     paired(
         "native reverse requests and tools",
         v(
             r#"{"ids":["t1","turn1","user1","command1","approval1","steer1","command2","edit1","approval2","ask1","question1","hookRun","hook1","read1","web1","spare"],"steps":[
-      {"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"C:/fixture","permissions":":workspace"}}},
+      {"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"__ROOT__/work","permissions":":workspace"}}},
       {"action":"request","message":{"id":2,"method":"turn/start","params":{"threadId":"t1","input":[{"type":"text","text":"work"}]}}},
-      {"action":"permission","turnId":"turn1","callback":"cb1","event":{"toolUseId":"bash1","toolName":"Bash","input":{"command":"echo fixture","cwd":"C:/fixture"}}},
+      {"action":"permission","turnId":"turn1","callback":"cb1","event":{"toolUseId":"bash1","toolName":"Bash","input":{"command":"echo fixture","cwd":"__ROOT__/work"}}},
       {"action":"request","message":{"id":3,"method":"turn/steer","params":{"threadId":"t1","expectedTurnId":"wrong","input":[]}}},
       {"action":"request","message":{"id":4,"method":"turn/steer","params":{"threadId":"t1","expectedTurnId":"turn1","input":[{"type":"text","text":"also this"}]}}},
       {"action":"request","peer":"p2","message":{"id":5,"method":"thread/resume","params":{"threadId":"t1"}}},
       {"action":"reply","peer":"p2","message":{"id":"approval1","result":{"decision":"acceptForSession"}}},
-      {"action":"event","turnId":"turn1","event":{"type":"tool_use","toolUseId":"bash1","toolName":"Bash","input":{"command":"echo fixture","cwd":"C:/fixture"}}},
+      {"action":"event","turnId":"turn1","event":{"type":"tool_use","toolUseId":"bash1","toolName":"Bash","input":{"command":"echo fixture","cwd":"__ROOT__/work"}}},
       {"action":"event","turnId":"turn1","event":{"type":"tool_result","toolUseId":"bash1","content":"ok\nExit code: 7"}},
-      {"action":"permission","turnId":"turn1","callback":"cb2","event":{"toolUseId":"bash2","toolName":"Bash","input":{"command":"echo fixture","cwd":"C:/fixture"}}},
+      {"action":"permission","turnId":"turn1","callback":"cb2","event":{"toolUseId":"bash2","toolName":"Bash","input":{"command":"echo fixture","cwd":"__ROOT__/work"}}},
       {"action":"event","turnId":"turn1","event":{"type":"tool_output_delta","toolUseId":"bash2","delta":"partial"}},
       {"action":"event","turnId":"turn1","event":{"type":"tool_result","toolUseId":"bash2","content":"complete","isError":true}},
-      {"action":"permission","turnId":"turn1","callback":"cb3","event":{"toolUseId":"edit","toolName":"Edit","input":{"file_path":"C:/fixture/a","old_string":"old","new_string":"new"}}},
+      {"action":"permission","turnId":"turn1","callback":"cb3","event":{"toolUseId":"edit","toolName":"Edit","input":{"file_path":"__ROOT__/work/a","old_string":"old","new_string":"new"}}},
       {"action":"reply","peer":"p1","message":{"id":"approval2","result":{"decision":"accept"}}},
       {"action":"event","turnId":"turn1","event":{"type":"tool_result","toolUseId":"edit","content":"changed"}},
       {"action":"input","turnId":"turn1","callback":"cb4","event":{"toolUseId":"ask","questions":[{"id":"q0","header":"Pick","question":"Which?","isOther":false,"isSecret":false,"options":[{"label":"A","description":"first"}]}]}},
@@ -659,7 +850,7 @@ fn native_approvals_steering_tools_and_reconnect_match_frozen_server() {
       {"action":"event","turnId":"turn1","event":{"type":"usage","usage":{"input_tokens":10,"cache_creation_input_tokens":3,"cache_read_input_tokens":7,"output_tokens":5}}},
       {"action":"event","turnId":"turn1","event":{"type":"usage","usage":{"input_tokens":2,"output_tokens":1}}},
       {"action":"event","turnId":"turn1","event":{"type":"hook","hookName":"PreToolUse","status":"ok","decision":"allow","message":"fixture hook"}},
-      {"action":"event","turnId":"turn1","event":{"type":"tool_use","toolUseId":"read","toolName":"Read","input":{"file_path":"C:/fixture/file.txt"}}},
+      {"action":"event","turnId":"turn1","event":{"type":"tool_use","toolUseId":"read","toolName":"Read","input":{"file_path":"__ROOT__/work/file.txt"}}},
       {"action":"event","turnId":"turn1","event":{"type":"tool_result","toolUseId":"read","content":{"data":"value"}}},
       {"action":"event","turnId":"turn1","event":{"type":"tool_use","toolUseId":"web","toolName":"WebSearch","input":{"query":"fixture"}}},
       {"action":"event","turnId":"turn1","event":{"type":"tool_result","toolUseId":"web","content":"https://example.invalid/a"}},
@@ -702,7 +893,7 @@ fn subagent_completion_capabilities_and_terminal_cleanup_match_frozen_server() {
                     r#"{{"action":"request","message":{{"id":0,"method":"initialize","params":{{"capabilities":{{"subAgentActivityCompleted":{modern}}}}}}}}}"#
                 )),
                 v(
-                    r#"{"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"C:/fixture","permissions":":workspace"}}}"#,
+                    r#"{"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"__ROOT__/work","permissions":":workspace"}}}"#,
                 ),
                 v(
                     r#"{"action":"request","message":{"id":2,"method":"turn/start","params":{"threadId":"id0","input":[{"type":"text","text":"delegate"}]}}}"#,
@@ -749,8 +940,8 @@ fn native_project_replay_config_and_binary_file_reads_match_frozen_server() {
         v(
             r#"{"ids":["p1","p2","t1","temporary"],"files":[{"path":"sample.bin","base64":"AAECA/8="}],"steps":[
       {"action":"request","message":{"id":null,"method":"config/read"}},
-      {"action":"request","message":{"id":1,"method":"project/create","params":{"idempotencyKey":"create1","name":"One","roots":[{"path":"C:/fixture"}],"metadata":{"z":"last","a":"first"}}}},
-      {"action":"request","message":{"id":2,"method":"project/create","params":{"idempotencyKey":"create1","name":"One","roots":[{"path":"C:/fixture"}],"metadata":{"a":"first","z":"last"}}}},
+      {"action":"request","message":{"id":1,"method":"project/create","params":{"idempotencyKey":"create1","name":"One","roots":[{"path":"__ROOT__/work"}],"metadata":{"z":"last","a":"first"}}}},
+      {"action":"request","message":{"id":2,"method":"project/create","params":{"idempotencyKey":"create1","name":"One","roots":[{"path":"__ROOT__/work"}],"metadata":{"a":"first","z":"last"}}}},
       {"action":"request","message":{"id":3,"method":"project/create","params":{"idempotencyKey":"create1","name":"different","roots":[]}}},
       {"action":"request","message":{"id":4,"method":"project/create","params":{"idempotencyKey":"create2","name":"Two","roots":[]}}},
       {"action":"request","message":{"id":5,"method":"project/list"}},
@@ -761,7 +952,7 @@ fn native_project_replay_config_and_binary_file_reads_match_frozen_server() {
       {"action":"request","message":{"id":10,"method":"project/update","params":{"projectId":"p1","name":"Updated","position":2}}},
       {"action":"request","message":{"id":11,"method":"fs/readFile","params":{"filePath":"__ROOT__/sample.bin"}}},
       {"action":"request","message":{"id":12,"method":"project/delete","params":{"projectId":"p1"}}},
-      {"action":"request","message":{"id":13,"method":"project/create","params":{"idempotencyKey":"create1","name":"One","roots":[{"path":"C:/fixture"}],"metadata":{"a":"first","z":"last"}}}},
+      {"action":"request","message":{"id":13,"method":"project/create","params":{"idempotencyKey":"create1","name":"One","roots":[{"path":"__ROOT__/work"}],"metadata":{"a":"first","z":"last"}}}},
       {"action":"request","message":{"id":14,"method":"thread/read","params":{"threadId":"t1"}}},
       {"action":"request","message":{"id":15,"method":"thread/items/list","params":{"threadId":"t1","cursor":"0"}}},
       {"action":"request","message":{"id":16,"method":"permissionProfile/list","params":{"cursor":"bad"}}}
@@ -793,7 +984,7 @@ fn workflow_local_listing_empty_summary_and_metrics_match_frozen_server() {
     paired(
         "bare workflows local listing",
         v(r#"{"ids":["id0","id1","id2","id3"],"steps":[
-        {"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"C:/fixture"}}},
+        {"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"__ROOT__/work"}}},
         {"action":"request","message":{"id":2,"method":"turn/start","params":{"threadId":"id0","input":[{"type":"text","text":"\u2003/workflows\r\n"}]}}},
         {"action":"request","message":{"id":3,"method":"thread/read","params":{"threadId":"id0","includeTurns":true}}}
     ]}"#),
@@ -802,7 +993,7 @@ fn workflow_local_listing_empty_summary_and_metrics_match_frozen_server() {
         "workflow history child status and local listing",
         v(
             r#"{"ids":["id0","id1","id2","id3","id4","id5","id6","id7","id8","id9","id10","id11"],"steps":[
-        {"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"C:/fixture"}}},
+        {"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"__ROOT__/work"}}},
         {"action":"request","message":{"id":2,"method":"turn/start","params":{"threadId":"id0","input":[{"type":"text","text":"/workflows First\r\n  task \ud800"}]}}},
         {"action":"event","turnId":"id1","event":{"type":"tool_use","toolUseId":"child","toolName":"Agent","input":{"prompt":"work","subagent_type":"workflow"}}},
         {"action":"event","turnId":"id1","event":{"type":"tool_result","toolUseId":"child","content":"individual\nagentId: abcd1234"}},
@@ -830,7 +1021,7 @@ fn workflow_local_listing_empty_summary_and_metrics_match_frozen_server() {
         let spec=J::object([
             ("ids",J::Array((0..15).map(|i|format!("id{i}").into()).collect())),
             ("steps",J::Array(vec![
-                v(r#"{"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"C:/fixture"}}}"#),
+                v(r#"{"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"__ROOT__/work"}}}"#),
                 J::object([("action","request".into()),("message",J::object([("id",J::Number(2.0)),("method","turn/start".into()),("params",params)]))]),
                 v(r#"{"action":"event","turnId":"id1","event":{"type":"metrics","apiDurationMs":7,"numTurns":3,"costUsd":0.25}}"#),
                 v(r#"{"action":"event","turnId":"id1","event":{"type":"metrics","apiDurationMs":null,"numTurns":1,"costUsd":0.125}}"#),
@@ -887,7 +1078,7 @@ fn effective_turn_model_effort_and_sdk_configuration_match_frozen_server() {
                     "steps",
                     J::Array(vec![
                         v(
-                            r#"{"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"C:/fixture"}}}"#,
+                            r#"{"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"__ROOT__/work"}}}"#,
                         ),
                         J::object([
                             ("action", "request".into()),
@@ -916,7 +1107,7 @@ fn workflow_watchdog_pending_launch_and_child_gaps_match_frozen_server() {
     for stage in ["launch", "between-children", "launch-returned"] {
         let mut steps = vec![
             v(
-                r#"{"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"C:/fixture"}}}"#,
+                r#"{"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"__ROOT__/work"}}}"#,
             ),
             v(
                 r#"{"action":"request","message":{"id":2,"method":"turn/start","params":{"threadId":"id0","input":[{"type":"text","text":"workflow"}]}}}"#,

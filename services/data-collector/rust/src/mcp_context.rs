@@ -56,40 +56,41 @@ impl Context {
         Ok(format!("{PREFIX}{}", self.start.operation_id.to_utf8()?))
     }
     fn encode(&self, revision: i64) -> IvyResult<String> {
+        let mut owner = IvyJson::object([
+            (
+                "serviceNodeId",
+                IvyJson::String(self.owner.service_node_id.clone()),
+            ),
+            (
+                "hostId",
+                self.owner
+                    .host_id
+                    .clone()
+                    .map(IvyJson::String)
+                    .unwrap_or(IvyJson::Null),
+            ),
+            (
+                "nativeVersion",
+                IvyJson::String(self.owner.native_version.clone()),
+            ),
+            (
+                "nativeExecutableHash",
+                IvyJson::String(self.owner.native_executable_hash.clone()),
+            ),
+            (
+                "catalogHash",
+                IvyJson::String(self.owner.catalog_hash.clone()),
+            ),
+        ]);
+        if let Some(backend) = &self.owner.backend {
+            owner.insert("backend", backend.json());
+        }
         stringify(
             &IvyJson::object([
                 ("revision", IvyJson::Number(revision as f64)),
                 ("sessionId", self.session_id.clone().into()),
                 ("caller", IvyJson::String(self.caller.clone())),
-                (
-                    "owner",
-                    IvyJson::object([
-                        (
-                            "serviceNodeId",
-                            IvyJson::String(self.owner.service_node_id.clone()),
-                        ),
-                        (
-                            "hostId",
-                            self.owner
-                                .host_id
-                                .clone()
-                                .map(IvyJson::String)
-                                .unwrap_or(IvyJson::Null),
-                        ),
-                        (
-                            "nativeVersion",
-                            IvyJson::String(self.owner.native_version.clone()),
-                        ),
-                        (
-                            "nativeExecutableHash",
-                            IvyJson::String(self.owner.native_executable_hash.clone()),
-                        ),
-                        (
-                            "catalogHash",
-                            IvyJson::String(self.owner.catalog_hash.clone()),
-                        ),
-                    ]),
-                ),
+                ("owner", owner),
                 ("epoch", IvyJson::String(self.epoch.clone())),
                 ("start", call_value(&self.start)),
                 (
@@ -133,6 +134,9 @@ impl Context {
             session_id: model::text(&value, "sessionId")?,
             caller: text(&value, "caller")?,
             owner: NativeOwnerIdentity {
+                backend: ivy_contracts::native_backend::BackendIdentity::optional(
+                    owner.get("backend"),
+                )?,
                 service_node_id: text(owner, "serviceNodeId")?,
                 host_id: owner
                     .get("hostId")
@@ -179,7 +183,7 @@ impl Contexts {
     pub async fn task_pending(&self, task_id: String) -> IvyResult<bool> {
         self.store.call(move |store| {
             let count: i64 = store.connection().query_row(
-                "SELECT COUNT(*) FROM metadata WHERE key GLOB 'native-mcp:*' AND (json_extract(value,'$.taskId')=? OR json_extract(value,'$.taskId') IS NULL)",
+                "SELECT COUNT(*) FROM metadata WHERE key GLOB 'native-mcp:*' AND json_extract(value,'$.retirement') IS NULL AND (json_extract(value,'$.taskId')=? OR json_extract(value,'$.taskId') IS NULL)",
                 [task_id], |r| r.get(0)).map_err(|_| IvyError::internal())?;
             Ok(count > 0)
         }).await
@@ -204,7 +208,7 @@ impl Contexts {
                     let count: i64 = store
                         .connection()
                         .query_row(
-                            "SELECT COUNT(*) FROM metadata WHERE key GLOB 'native-mcp:*'",
+                            "SELECT COUNT(*) FROM metadata WHERE key GLOB 'native-mcp:*' AND json_extract(value,'$.retirement') IS NULL",
                             [],
                             |r| r.get(0),
                         )
@@ -276,7 +280,7 @@ impl Contexts {
         self.store.call(move |store| {
             use ivy_store::rusqlite::{OptionalExtension, params};
             store.connection().query_row(
-                "SELECT key FROM metadata WHERE key GLOB 'native-mcp:*' AND (json_extract(value,'$.closing')=1 OR json_extract(value,'$.sessionId')<>?) ORDER BY key<=?,key LIMIT 1",
+                "SELECT key FROM metadata WHERE key GLOB 'native-mcp:*' AND json_extract(value,'$.retirement') IS NULL AND (json_extract(value,'$.closing')=1 OR json_extract(value,'$.sessionId')<>?) ORDER BY key<=?,key LIMIT 1",
                 params![session,after], |r| r.get(0)
             ).optional().map_err(|_| IvyError::internal())
         }).await
@@ -292,5 +296,24 @@ impl Contexts {
                 Ok(())
             })
             .await
+    }
+    /// Preserve uncertain original calls, separately from live context ownership.
+    pub async fn quarantine(&self, context: &Context, proof: IvyJson) -> IvyResult<()> {
+        let key = context.key()?;
+        let revision = context.revision;
+        let proof = stringify(&proof, usize::MAX)?;
+        self.store.call(move |store| store.transaction(|store| {
+            use ivy_store::rusqlite::params;
+            let count: i64 = store.connection().query_row(
+                "SELECT COUNT(*) FROM metadata WHERE key GLOB 'native-mcp:*' AND json_extract(value,'$.retirement') IS NOT NULL",
+                [], |r| r.get(0)).map_err(|_| IvyError::internal())?;
+            if count >= MAX_CONTEXTS as i64 {
+                return Err(IvyError::new("provider_unavailable", "Retired uncertain MCP calls require review before further recovery."));
+            }
+            let changed = store.connection().execute(
+                "UPDATE metadata SET value=json_set(value,'$.retirement',json(?),'$.revision',json_extract(value,'$.revision')+1) WHERE key=? AND json_extract(value,'$.revision')=? AND json_extract(value,'$.retirement') IS NULL",
+                params![proof,key,revision]).map_err(|_| IvyError::internal())?;
+            if changed == 1 { Ok(()) } else { Err(IvyError::internal()) }
+        })).await
     }
 }

@@ -93,6 +93,8 @@ import WikiLinkPicker from "./WikiLinkPicker.vue";
 import { useObjectArchive } from "../../../packages/ui-client/src/object-archive";
 import ObjectDeleteDialog from "../../../packages/ui-client/src/ObjectDeleteDialog.vue";
 import { nativeRead } from "../../../packages/ui-client/src/native";
+import { nativeBackendKey, nativeBackendLabel, sameBackend } from "../../../packages/ui-client/src/native-backends";
+import { nativeRouteQuery } from '../../../packages/ui-client/src/native-route';
 import {
   callBound,
   discover,
@@ -190,6 +192,10 @@ const executionDefaults = useExecutionDefaults(
   () => props.workspace,
   () => task.value.value?.value,
 );
+const selectedBackend = computed(() => task.value.value?.value.primaryResourceRef ? executionDefaults.owner.value?.backend :
+  task.value.value?.value.claim?.target.backend ?? task.value.value?.value.fields.nativeOptions?.backend ?? executionDefaults.defaults.value?.nativeOptions.backend);
+const matchingNativeDefaults = computed(() => sameBackend(selectedBackend.value, executionDefaults.defaults.value?.nativeOptions.backend)
+  ? executionDefaults.defaults.value?.nativeOptions : undefined);
 const projectHost = computed(() => {
   const current = task.value.value?.value;
   if (current?.claim) return current.claim.target.hostId;
@@ -200,6 +206,8 @@ const projectHost = computed(() => {
 });
 watch(projectHost, value => emit('host', value ?? null), { immediate: true });
 watch(() => task.value.value?.value.primaryResourceRef?.serviceNodeId, value => emit('agentNode', value), { immediate: true });
+const projectSelection = computed(() => JSON.stringify([projectHost.value, nativeBackendKey(selectedBackend.value),
+  task.value.value?.value.primaryResourceRef?.serviceNodeId, task.value.value?.value.fields.workspaceRequirement]));
 const project = useRemote(
   async (signal) => {
     const requirement = task.value.value?.value.fields.workspaceRequirement;
@@ -207,23 +215,19 @@ const project = useRemote(
     return requirement?.kind === "existing_project"
       ? {
           hostId,
+          selection: projectSelection.value,
           project: await hostProject(client, hostId, requirement.projectId, {
             signal,
-          }),
+          }, { ...(selectedBackend.value ? { backend: selectedBackend.value } : {}),
+            ...(task.value.value?.value.primaryResourceRef ? { serviceNodeId: task.value.value.value.primaryResourceRef.serviceNodeId } : {}),
+            ...(requirement.path ? { path: requirement.path } : {}) }),
         }
       : null;
   },
   30000,
   ["inventory"],
 );
-watch(
-  () =>
-    JSON.stringify([
-      projectHost.value,
-      task.value.value?.value.fields.workspaceRequirement,
-    ]),
-  () => void project.refresh(),
-);
+watch(projectSelection, () => void project.refresh());
 const inherited = (
   value: string | null | undefined,
   fallback: string | null | undefined,
@@ -278,7 +282,8 @@ const canDelete = computed(() =>
 // The agent task that carries this ticket's native conversation, when one exists.
 const agentTaskQuery = computed(() => {
   const ref = task.value.value?.value.primaryResourceRef;
-  return ref ? new URLSearchParams({ node: ref.serviceNodeId, id: ref.nativeId }).toString() : null;
+  const owner = executionDefaults.owner.value;
+  return ref && owner ? new URLSearchParams(nativeRouteQuery(owner, { id: ref.nativeId })).toString() : null;
 });
 const agentTaskLink = computed(() =>
   agentTaskQuery.value ? new URL("agents/#/task?" + agentTaskQuery.value, base).href : null);
@@ -611,7 +616,7 @@ const hostPill = computed(() => {
 });
 const modelPill = computed(() => {
   const options = task.value.value?.value.fields.nativeOptions,
-    defaults = executionDefaults.defaults.value?.nativeOptions;
+    defaults = matchingNativeDefaults.value;
   const model = options?.model ?? defaults?.model ?? tr("Host-Standard", "Host default"),
     effort = options?.reasoningEffort ?? defaults?.reasoningEffort;
   return effort ? model + " · " + effort : model;
@@ -620,7 +625,7 @@ const projectLabel = (value: TaskBoard.WorkspaceRequirement) =>
   value.kind === "task_workspace"
     ? "No project"
     : value.kind === "existing_project"
-      ? project.value.value?.hostId === projectHost.value &&
+      ? project.value.value?.selection === projectSelection.value &&
         project.value.value?.project?.nativeId === value.projectId
         ? project.value.value.project.name
         : projectHost.value
@@ -1061,25 +1066,25 @@ const showArrived = () => {
                     task.value.value.value.claim.workspace.canonicalCwd
                   }}</span></PropertyItem
                 >
+                <PropertyItem v-if="selectedBackend" :label="tr('Provider und Account', 'Provider and account')">{{ nativeBackendLabel(selectedBackend) }}</PropertyItem>
                 <PropertyItem label="Model">{{
                   inherited(
                     task.value.value.value.fields.nativeOptions?.model,
-                    executionDefaults.defaults.value?.nativeOptions.model,
+                    matchingNativeDefaults?.model,
                     tr("Host-Standard", "Host default"),
                   )
                 }}</PropertyItem>
                 <PropertyItem label="Reasoning">{{
                   inherited(
                     task.value.value.value.fields.nativeOptions?.reasoningEffort,
-                    executionDefaults.defaults.value?.nativeOptions
-                      .reasoningEffort,
+                    matchingNativeDefaults?.reasoningEffort,
                     tr("Modell-Standard", "Model default"),
                   )
                 }}</PropertyItem>
                 <PropertyItem label="Speed">{{
                   inherited(
                     task.value.value.value.fields.nativeOptions?.serviceTier,
-                    executionDefaults.defaults.value?.nativeOptions.serviceTier,
+                    matchingNativeDefaults?.serviceTier,
                     "standard",
                   )
                 }}</PropertyItem>
@@ -1400,6 +1405,8 @@ const showArrived = () => {
             class="min-h-0 w-full flex-1 border-0 bg-background"
           />
         </template>
+        <RemoteState v-else-if="task.value.value.value.primaryResourceRef" :loading="executionDefaults.current.loading.value"
+          :error="executionDefaults.current.error.value" :has-data="false" @retry="executionDefaults.current.refresh" />
         <p v-else class="rounded-lg bg-muted px-3 py-6 text-center text-sm text-muted-foreground">
           {{ tr("Noch kein Agent-Task. Er erscheint hier, sobald ein Agent an diesem Ticket arbeitet.", "No agent task yet. It appears here once an agent works on this ticket.") }}
         </p>

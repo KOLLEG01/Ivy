@@ -88,6 +88,9 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
     async fn read_document(&self, key: &str, address: &Json, primary: bool) -> IvyResult<Document> {
         ReadEvidenceStore::read_document(self.journal, key, address, primary).await
     }
+    async fn read_task_routing(&self, address: &Json) -> IvyResult<Json> {
+        ReadEvidenceStore::read_task_routing(self.journal, address).await
+    }
     async fn write_document(
         &self,
         key: &str,

@@ -6,7 +6,6 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(import.meta.dirname, '../..');
 const source = join(root, 'services/agent-manager/claude');
-const lock = JSON.parse(readFileSync(join(source, 'adapter.lock.json'), 'utf8'));
 export function claudeAdapterBundleHash(directory) {
   const files = ['package-lock.json', ...readdirSync(join(directory, 'bridge'))
     .filter(name => name.endsWith('.mjs')).map(name => 'bridge/' + name)].sort();
@@ -18,12 +17,17 @@ export function claudeAdapterBundleHash(directory) {
   }
   return 'sha256:' + hash.digest('hex');
 }
-export function buildClaudeSdkBridge(target) {
-  if (!isAbsolute(target) || existsSync(target)) throw new Error('Use a new absolute output directory');
-  const packageLock = JSON.parse(readFileSync(join(source, 'package-lock.json'), 'utf8'));
+export function validateClaudeSdkBridge(directory) {
+  const lock = JSON.parse(readFileSync(join(directory, 'adapter.lock.json'), 'utf8'));
+  const packageLock = JSON.parse(readFileSync(join(directory, 'package-lock.json'), 'utf8'));
   if (packageLock.packages['node_modules/@anthropic-ai/claude-agent-sdk']?.version !== lock.agentSdkVersion)
     throw new Error('Agent SDK lock differs');
-  if (claudeAdapterBundleHash(source) !== lock.bundleHash) throw new Error('Pinned SDK bridge differs');
+  if (claudeAdapterBundleHash(directory) !== lock.bundleHash) throw new Error('Pinned SDK bridge differs');
+  return lock;
+}
+export function buildClaudeSdkBridge(target) {
+  if (!isAbsolute(target) || existsSync(target)) throw new Error('Use a new absolute output directory');
+  const lock = validateClaudeSdkBridge(source);
   mkdirSync(join(target, 'bridge'), { recursive: true });
   for (const name of ['package.json', 'package-lock.json', 'bridge/main.mjs', 'bridge/session.mjs'])
     copyFileSync(join(source, name), join(target, name));

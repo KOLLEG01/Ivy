@@ -63,10 +63,10 @@ pub fn result_items(turn: &IvyJson, items: &[IvyJson]) -> IvyResult<IvyJson> {
         if !ids.insert(id) {
             return Err(invalid());
         }
-        let kind = crate::json_text::text(item.get("type"))?;
+        let kind = item.get("type");
         if !["userMessage", "agentMessage", "reasoning"]
             .iter()
-            .any(|allowed| kind == JsString::from(*allowed))
+            .any(|allowed| kind.is_some_and(|kind| kind.is_str(allowed)))
         {
             return Err(failure("secretary_triage_unexpected_action"));
         }

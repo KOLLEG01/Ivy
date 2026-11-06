@@ -76,6 +76,9 @@ Sources: [Objects](../services/hive/rust/src/objects.rs), [contract admission](.
   `ready` is the service's reported readiness; `stale` separately marks an old heartbeat
   observation. Observation age alone does not revoke a connected, ready route.
 - Complete inventory snapshots replace prior state atomically; incomplete reads cannot erase it.
+  Every snapshot/delta carries its original source batch `observedAt`, even when empty or only
+  removing entries. Replaying a snapshot revision preserves that timestamp and the original
+  entries. Batch acknowledgements never refresh the individual entries' observation times.
   Conflicting selectors or multiple eligible owners fail rather than selecting a substitute.
 - Errors distinguish refusal, completion and unknown external outcome. A dispatched timeout or
   disconnect ends waiting, not execution; it never authorizes automatic mutation replay.

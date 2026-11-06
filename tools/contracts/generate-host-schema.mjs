@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { nativeVersions } from "./checked-native-versions.mjs";
+import { nativeBackendIdentity } from "./native-backend-identity.mjs";
 const wire = "https://ivy.invalid/schemas/hive-wire.schema.json";
 const component = JSON.parse(
   readFileSync("specs/schemas/component.schema.json", "utf8"),
@@ -51,6 +52,7 @@ const releaseProperties = {
   buildId: hash,
 };
 const defs = {
+  BackendIdentity: nativeBackendIdentity,
   BuildPlan: {
     ...component,
     $schema: undefined,
@@ -424,13 +426,14 @@ const defs = {
       excluded: list(str(256), 64),
       ephemeralNativePaths: list(
         obj({
+          backend: ref("BackendIdentity"),
           instanceId: id,
           path,
           kind: { const: "codex-arg0-helper-cache" },
-        }),
+        }, ["instanceId", "path", "kind"]),
       ),
       sharedNativeHomes: list(
-        obj({ instanceId: id, path, kind: { const: "external-user-state" } }),
+        obj({ backend: ref("BackendIdentity"), instanceId: id, path, kind: { const: "external-user-state" } }, ["instanceId", "path", "kind"]),
       ),
       storageAreas: list(obj({ key: str(512), path }), 512),
     },
@@ -506,6 +509,7 @@ const defs = {
     completedAt: str(64),
     instances: list(
       obj({
+        backend: ref("BackendIdentity"),
         instanceId: id,
         nativeVersion: str(64),
         layoutHash: hash,
@@ -517,7 +521,7 @@ const defs = {
           obj({ table: str(256), column: str(256), rows: uint(0, 1000000) }),
           8,
         ),
-      }),
+      }, ["instanceId", "nativeVersion", "layoutHash", "database", "originalFiles", "workingHash", "logicalDataHash", "changes"]),
     ),
   }),
   RestoreResult: obj({
@@ -815,6 +819,11 @@ const defs = {
     code: nullable(str(128)),
     message: { type: "string", maxLength: 512 },
   }),
+  HostStorageSpace: obj({
+    observedAt: str(64),
+    availableBytes: obj({ runtime: uint(0, Number.MAX_SAFE_INTEGER), artifacts: uint(0, Number.MAX_SAFE_INTEGER), staging: uint(0, Number.MAX_SAFE_INTEGER) }),
+    lowSpace: bool,
+  }),
   StorageRetentionStatus: obj({
     schemaVersion: { const: 1 }, hostId: id,
     state: { enum: ["running", "succeeded", "partial", "failed"] },
@@ -834,6 +843,7 @@ const defs = {
     instances: list(ref("ManagedInstance")),
     unfinished: list(shared("DeploymentRecord"), 200),
     storageRetention: ref("StorageRetentionStatus"),
+    storageSpace: ref("HostStorageSpace"),
   }, ["schemaVersion", "hostId", "observedAt", "executor", "instances", "unfinished"]),
   ManagementSnapshot: obj({
     sequence: uint(1, Number.MAX_SAFE_INTEGER),

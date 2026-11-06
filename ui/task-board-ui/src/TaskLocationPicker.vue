@@ -162,6 +162,7 @@ const nameFromRepository = () => {
     v-model:open="browsing"
     :client="client"
     :node="agent.node.serviceNodeId"
+    :backend="agent.backend"
     :host="host"
     :start="model.kind === 'directory_path' ? model.path : projectRoot"
     @select="model = { kind: 'directory_path', path: $event }"

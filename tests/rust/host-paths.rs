@@ -5,6 +5,8 @@ use std::{fs, path::PathBuf};
 mod service_fixture;
 use service_fixture::{ServiceFixture, fixture_node, host_configuration};
 
+#[path = "../fixtures/host-agent-backends.rs"]
+mod agent_backend_cases;
 #[path = "host-bootstrap-automatic-launch-cases.rs"]
 mod automatic_launch_cases;
 #[path = "host-backup-files-cases.rs"]
@@ -750,3 +752,5 @@ async fn cancelled_health_waiter_cannot_release_the_active_file_writer() {
 
 #[path = "host-artifact-inventory-cases.rs"]
 mod artifact_inventory_cases;
+#[path = "host-health-details.rs"]
+mod health_detail_cases;

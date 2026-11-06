@@ -113,7 +113,7 @@ fn adapter(root: &Root, environment: IvyJson) -> Adapter {
         config_overrides: IvyJson::object([] as [(&str, IvyJson); 0]),
         config_path: root.0.join("config.json"),
         prepare_worktree: Arc::new(|_, cwd| Ok(cwd.clone())),
-        read_base64: Arc::new(|_| panic!("fixture does not read images")),
+        read_base64: Arc::new(|_, _| panic!("fixture does not read images")),
         subagent_completed: None,
         subagent_watchdog_ms: None,
     };

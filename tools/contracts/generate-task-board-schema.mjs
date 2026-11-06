@@ -19,14 +19,14 @@ const defs = {};
 const workflowStates = ['backlog', 'todo', 'in_progress', 'waiting', 'review', 'done', 'cancelled'];
 Object.assign(defs, {
   NativePlan: agent('Plan'), NativePlanDraft: agent('PlanDraft'),
-  NativeRequest: obj({ nativeVersion: id, catalogSourceHash: hash,
-    method: { enum: ['thread/start', 'thread/resume', 'turn/start', 'turn/steer', 'turn/interrupt'] }, params: agent('ParametersRef') }),
+  NativeRequest: obj({ backend: agent('BackendIdentity'), nativeVersion: id, catalogSourceHash: hash,
+    method: { enum: ['thread/start', 'thread/resume', 'turn/start', 'turn/steer', 'turn/interrupt'] }, params: agent('ParametersRef') }, ['nativeVersion', 'catalogSourceHash', 'method', 'params']),
   ObjectPin: obj({ objectId: id, revision: integer(1) }),
-  Target: obj({ hostId: id, serviceNodeId: id }),
+  Target: obj({ hostId: id, serviceNodeId: id, backend: agent('BackendIdentity') }, ['hostId', 'serviceNodeId']),
   Capability: obj({ key: { ...str(64, 1), pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }, label: str(128, 1) }),
   ExecutionRequirement: { description: 'Select one exact AgentManager host, or automatic for any ready host. Use null in task fields to inherit the TaskBoard default.',
     oneOf: [obj({ kind: { const: 'host' }, hostId: id }), obj({ kind: { const: 'automatic' } })] },
-  NativeOptions: obj({ model: nullable(str(256, 1)), reasoningEffort: nullable(str(64, 1)), serviceTier: nullable({ type: 'string', enum: ['standard', 'fast', 'flex'] }) }),
+  NativeOptions: obj({ backend: agent('BackendIdentity'), model: nullable(str(256, 1)), reasoningEffort: nullable(str(64, 1)), serviceTier: nullable({ type: 'string', enum: ['standard', 'fast', 'flex'] }) }, ['model', 'reasoningEffort', 'serviceTier']),
   ExecutionDefaults: obj({ executionRequirement: nullable(ref('ExecutionRequirement')), nativeOptions: ref('NativeOptions'),
     userContact: { enum: ['ticket', 'chat', 'phone'] }, useWorktree: bool, allowParallel: bool }, ['executionRequirement', 'nativeOptions']),
   Configuration: obj({ schemaVersion: { const: 1 }, defaults: ref('ExecutionDefaults') }),
@@ -118,6 +118,8 @@ Object.assign(defs, {
   ReassignRequest: action('reassign', { executionRequirement: nullable(ref('ExecutionRequirement')), workspaceRequirement: ref('WorkspaceRequirement'),
     reason: str(16384, 1), previousRun: nullable(ref('ObjectPin')), acknowledgeUnresolved: bool }),
   NewThreadRequest: action('newThread', { reason: str(16384, 1) }),
+  MigrateNativeRouteRequest: action('migrateNativeRoute', { run: ref('ObjectPin'), target: ref('Target'),
+    intent: ref('ObjectPin'), workspace: ref('WorkspaceResolution'), reason: str(16384, 1) }),
   RecoverThreadRequest: action('recoverThread', { run: ref('ObjectPin') }),
   CancelRequest: action('cancel', { reason: str(16384, 1) }),
   ReviewRequest: action('review', { result: ref('ObjectPin'), acceptance: str(65536, 1) }),
@@ -188,7 +190,7 @@ Object.assign(defs.CreateRequest.properties, {
   initialResult: { ...ref('ResultContent'), description: 'Manual final material for a user-controlled review or done task. Required for review; does not claim native execution.' },
 });
 defs.ExecutionRequest = { oneOf: [ref('StartRequest'), ref('ContinueRequest')] };
-defs.ActionRequest = { oneOf: ['Configure', 'SavePlan', 'Create', 'Edit', 'RetargetQuestion', 'Transition', 'Defer', 'Reassign', 'NewThread', 'Cancel', 'Review', 'SaveResult', 'CommentAction', 'UploadAttachment'].map(name => ref(name + 'Request')) };
+defs.ActionRequest = { oneOf: ['Configure', 'SavePlan', 'Create', 'Edit', 'RetargetQuestion', 'Transition', 'Defer', 'Reassign', 'NewThread', 'MigrateNativeRoute', 'Cancel', 'Review', 'SaveResult', 'CommentAction', 'UploadAttachment'].map(name => ref(name + 'Request')) };
 defs.ActionInput = { oneOf: defs.ActionRequest.oneOf.map(value => value.$ref.endsWith('/SavePlanRequest') ? ref('SavePlanInput') : value) };
 Object.assign(defs, {
   Claim: obj({ operationId: id, callerPrincipalId: id, attempt: integer(1), owner: ref('Actor'),
@@ -205,7 +207,7 @@ Object.assign(defs, {
   NativeCallOrigin: { oneOf: [obj({ kind: { const: 'initial' } }), obj({ kind: { const: 'reattach' }, predecessor: ref('ObjectPin'), preparedEpoch: id }),
     obj({ kind: { const: 'steer' }, commentIds: array(id, 512), workRevision: integer(), peersHash: hash, predecessor: nullable(ref('ObjectPin')),
       observedDependencies: { type: 'object', additionalProperties: hash, maxProperties: 128 }, wakeAt: nullable(timestamp), executionChangeRequested: bool }, ['kind', 'commentIds', 'workRevision', 'peersHash', 'predecessor'])] },
-  NativeCall: obj({ operationId: id, request: ref('NativeRequest'), expectedDefinitionHash: hash, origin: ref('NativeCallOrigin'),
+  NativeCall: obj({ owner: agent('NativeOwnerIdentity'), operationId: id, request: ref('NativeRequest'), expectedDefinitionHash: hash, origin: ref('NativeCallOrigin'),
     state: { enum: ['prepared', 'observed', 'outcome_unknown'] }, preparedAt: timestamp, observedAt: nullable(timestamp),
     ownerPhase: nullable({ enum: ['accepted', 'dispatched', 'succeeded', 'failed', 'outcome_unknown'] }),
     epoch: nullable(id), evidence: nullable(ref('Artifact')), code: nullable(id) }, ['operationId', 'request', 'expectedDefinitionHash', 'state', 'preparedAt', 'observedAt', 'ownerPhase', 'epoch', 'evidence', 'code']),
@@ -266,7 +268,14 @@ defs.RetainedTaskFieldsInput = { ...defs.TaskFieldsInput,
 for (const name of ['CreateRequest', 'EditRequest']) defs['Retained' + name] = { ...defs[name],
   properties: { ...defs[name].properties, fields: ref('RetainedTaskFieldsInput') },
 };
-defs.RetainedDurableRequest = { anyOf: [ref('DurableRequest'), ref('RetainedCreateRequest'), ref('RetainedEditRequest')] };
+// Earlier admitted questions did not carry a recipient. Read their original
+// receipts without admitting such a request through the current action API.
+defs.RetainedQuestionRequest = { ...defs.CommentActionRequest,
+  properties: { ...defs.CommentActionRequest.properties, purpose: { const: 'question' } },
+  required: [...defs.CommentActionRequest.required, 'purpose'],
+  allOf: [{ not: { anyOf: [{ required: ['recipient'] }, { required: ['nativeInput'] }] } }],
+};
+defs.RetainedDurableRequest = { anyOf: [ref('DurableRequest'), ref('RetainedCreateRequest'), ref('RetainedEditRequest'), ref('RetainedQuestionRequest')] };
 
 defs.NativeLifecycleCall = obj({ key: id,
   owner: obj({ serviceNodeId: id, hostId: id, nativeVersion: id, nativeExecutableHash: hash, catalogHash: hash }),
@@ -275,7 +284,7 @@ defs.NativeLifecycleCall = obj({ key: id,
 defs.PreparedWrite = obj({
   mutationId: id, contractKey: { enum: Object.keys(contracts).map(key => 'task-board/' + key) }, contractVersion: { enum: ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0', '2.2.0'] }, payload: ref('Artifact'),
   destination: { oneOf: [obj({ create: obj({ parentId: nullable(id), name: str(256, 1) }) }),
-    obj({ objectId: id, expectedRevision: integer(1) })] }, outcome: nullable(ref('ObjectPin')) });
+    obj({ objectId: id, expectedRevision: integer(1), expectedArchived: bool }, ['objectId', 'expectedRevision'])] }, outcome: nullable(ref('ObjectPin')) });
 defs.HandoffWork = obj({ claimOperationId: id, workRevision: integer(0), contentHash: hash, primaryResourceRef: nullable(resource) });
 defs.Operation = obj({ schemaVersion: { const: 1 }, operationId: id, callerPrincipalId: id, request: ref('RetainedDurableRequest'),
   requestHash: hash, actor: ref('Actor'), createdAt: timestamp, updatedAt: timestamp,
@@ -338,6 +347,19 @@ defs.ReadEvidenceRef = obj({ artifact: ref('Artifact'), observationId: id, epoch
 defs.NativeTurnSnapshot = obj({ schemaVersion: { const: 1 }, run: ref('ObjectPin'), nativeVersion: id, serviceNodeId: id, epoch: id,
   threadId: id, turnId: id, turnCursor: nativeCursor, metadata: ref('ReadEvidenceRef'), turn: ref('ReadEvidenceRef'),
   status: { enum: ['inProgress', 'completed', 'failed', 'interrupted'] }, createdAt: timestamp });
+
+for (const name of ['NativeEvidence', 'NativeReadEvidence', 'NativeTurnSearch', 'NativeTurnSnapshot', 'NativeSignals'])
+  defs[name].properties.backend = agent('BackendIdentity');
+
+defs.Task.properties.primaryBackend = agent('BackendIdentity');
+defs.NativeRoute = obj({ source: ref('Target'), target: obj({ ...defs.Target.properties }),
+  catalog: obj({ nativeVersion: id, catalogSourceHash: hash }) }, ['source', 'target']);
+defs.Task.properties.nativeRoutes = array(ref('NativeRoute'), 64);
+defs.MigrateNativeRouteRequest.properties.target = obj({ ...defs.Target.properties });
+defs.MigrateNativeRouteRequest.properties.originalThreadOperationId = {
+  ...id, description: 'Original successful thread operation retained by the selected storage. Used only after the exact local call was collected; never dispatches or recreates it.',
+};
+defs.NativeLifecycleCall.properties.owner = agent('NativeOwnerIdentity');
 defs.NativeResultPage = obj({ schemaVersion: { const: 1 }, runId: id, collectionId: id, previous: nullable(ref('ObjectPin')), index: integer(1, 1024),
   cursor: nativeCursor, nextCursor: nativeCursor, evidence: ref('ReadEvidenceRef'), itemCount: integer(0, 100), nativeBytes: integer(1, 16777216) });
 defs.NativeTranscript = obj({ schemaVersion: { const: 1 }, collectionId: id, run: ref('ObjectPin'), snapshot: ref('Artifact'),
@@ -382,11 +404,13 @@ defs.StoredContinueRequest.properties.recoveryFor = ref('ObjectPin');
 defs.StoredExecutionRequest = { oneOf: [ref('StoredStartRequest'), ref('StoredContinueRequest')] };
 defs.Run.properties.originalRequest = ref('StoredExecutionRequest');
 defs.Claim.properties.request = ref('StoredExecutionRequest');
-contractVersions.task = '3.1.0';
-defs.PreparedWrite.properties.contractVersion.enum.push('2.3.0', '3.0.0', '3.1.0');
+contractVersions.task = '3.5.0';
+contractVersions.history = '1.1.0';
+contractVersions.configuration = '1.3.0';
+defs.PreparedWrite.properties.contractVersion.enum.push('2.3.0', '3.0.0', '3.1.0', '3.2.0', '3.3.0', '3.4.0', '3.5.0');
 // Exact evidence pins are already paged; the ticket metadata byte budget is the storage bound.
 delete defs.Task.properties.attachments.maxItems;
-contractVersions.run = '3.0.0';
+contractVersions.run = '3.1.0';
 contractVersions.result = '2.2.0';
 defs.TaskView.properties.commentPage = obj({ total: integer(), offset: integer(), nextOffset: nullable(integer()),
   nextBefore: nullable(integer(1)), order: { enum: ['asc', 'desc'] } }, ['total', 'offset', 'nextOffset']);
@@ -409,7 +433,8 @@ defs.Operation.allOf = [when('phase', 'succeeded', { outcome: { not: nil }, erro
   when('phase', 'needs_attention', { error: { not: nil } }),
   { if: { properties: { request: { properties: { action: { const: 'nativeUpdate' } } } } }, then: { properties: { actor: { properties: { source: { const: 'native' } } } } } }];
 defs.NativeCall.allOf = [when('state', 'prepared', { observedAt: nil, ownerPhase: nil, epoch: nil, evidence: nil, code: nil }),
-  when('state', 'observed', { observedAt: timestamp, ownerPhase: defs.NativeCall.properties.ownerPhase.anyOf[0], evidence: ref('Artifact') })];
+  when('state', 'observed', { observedAt: timestamp, ownerPhase: defs.NativeCall.properties.ownerPhase.anyOf[0], evidence: ref('Artifact') }),
+  { if: { properties: { request: { required: ['backend'] } } }, then: { required: ['owner'] } }];
 
 const document = { $schema: 'https://json-schema.org/draft/2020-12/schema', $id: 'https://ivy.invalid/schemas/task-board.schema.json',
   title: 'TaskBoard durable workflow, action and native-intent contracts', $defs: defs };

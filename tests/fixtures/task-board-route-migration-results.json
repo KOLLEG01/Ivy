@@ -1,0 +1,56 @@
+{
+  "0.142.3": {
+    "approvalPolicy": "untrusted",
+    "approvalsReviewer": "user",
+    "cwd": "fixture",
+    "model": "fixture",
+    "modelProvider": "fixture",
+    "sandbox": {
+      "type": "dangerFullAccess"
+    },
+    "thread": {
+      "cliVersion": "fixture",
+      "createdAt": 0,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "id": "thread",
+      "modelProvider": "fixture",
+      "preview": "fixture",
+      "projectId": null,
+      "sessionId": "fixture",
+      "source": "cli",
+      "status": {
+        "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 0
+    }
+  },
+  "0.163.0": {
+    "approvalPolicy": "untrusted",
+    "approvalsReviewer": "user",
+    "cwd": "fixture",
+    "model": "fixture",
+    "modelProvider": "fixture",
+    "sandbox": {
+      "type": "dangerFullAccess"
+    },
+    "thread": {
+      "cliVersion": "fixture",
+      "createdAt": 0,
+      "cwd": "/workspace",
+      "ephemeral": false,
+      "id": "thread",
+      "modelProvider": "fixture",
+      "preview": "fixture",
+      "projectId": null,
+      "sessionId": "fixture",
+      "source": "cli",
+      "status": {
+        "type": "idle"
+      },
+      "turns": [],
+      "updatedAt": 0
+    }
+  }
+}

@@ -79,8 +79,7 @@ impl<'a> NativeObservations<'a> {
         let direct = if let Some(value) = self.direct_input_flag.get() {
             *value
         } else {
-            let definition = self.contract.definition(&"thread/read".into())?;
-            let schema = record(definition.get("outputSchema"))?;
+            let schema = record(Some(self.contract.output_schema(&"thread/read".into())?))?;
             let thread = properties(schema, properties(schema, Some(schema))?.get("thread"))?;
             let flag = thread.get("canAcceptDirectInput").is_some();
             let _ = self.direct_input_flag.set(flag);
@@ -108,8 +107,9 @@ impl<'a> NativeObservations<'a> {
         if let Some(value) = self.items.get() {
             return Ok(*value);
         }
-        let definition = self.contract.definition(&"thread/items/list".into())?;
-        let schema = record(definition.get("outputSchema"))?;
+        let schema = record(Some(
+            self.contract.output_schema(&"thread/items/list".into())?,
+        ))?;
         let data = resolve(schema, properties(schema, Some(schema))?.get("data"))?;
         if !text_is(data.get("type"), "array") {
             return Err(shape("Native item pages require the selected data array."));

@@ -6,6 +6,7 @@ import {
 } from "../packages/ui-client/src/native-output-cache.js";
 import type { NativeOutputPage } from "../packages/ui-client/src/native-output-page.js";
 import type { RpcClient } from "../packages/sdk/src/client.js";
+import { nativeBackendKey } from '../packages/ui-client/src/native-backends.js';
 
 const page = (text = "Saved message"): NativeOutputPage => ({
   mode: "items",
@@ -15,6 +16,18 @@ const page = (text = "Saved message"): NativeOutputPage => ({
   nextCursor: null,
   detail: "",
   download: null,
+});
+
+test('output previews and epochs isolate equal thread IDs across full accounts', () => {
+  const cache = new NativeOutputCache(), first = { backendId: 'primary', provider: 'codex' as const, accountId: 'work' }, second = { ...first, accountId: 'personal' };
+  const one = ['owner', 'same-thread', '', nativeBackendKey(first)] as const, two = ['owner', 'same-thread', '', nativeBackendKey(second)] as const;
+  cache.write(one, page('one')); cache.write(two, page('two'));
+  cache.observeEpoch('owner', 'epoch-one', first); cache.observeEpoch('owner', 'epoch-two', second);
+  assert.equal(cache.read(one)?.items.length, 1);
+  assert.equal(cache.observeEpoch('owner', 'new-epoch', first), true);
+  assert.equal(cache.read(one), undefined); assert.ok(cache.read(two));
+  cache.invalidate('owner', 'same-thread', first); assert.ok(cache.read(two));
+  cache.invalidate('owner'); assert.equal(cache.read(two), undefined);
 });
 
 test("output previews isolate native owners, threads, turns and clients and expire without extending freshness on read", () => {

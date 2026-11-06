@@ -1,11 +1,12 @@
 //! Advisory native attention only. Saved input identities and notifications do
 //! not confer answer authority; exact requests remain owned by AgentManager.
 use crate::{
-    native_inspector::{InspectionStore, NativeInspector},
-    operations::mutation,
+    native_inspector::{InspectionContext, InspectionStore, NativeInspector},
+    operations::{Document, mutation},
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, agent_schema::validate_agent, hash::hash_json,
+    native_backend::BackendIdentity,
 };
 use std::cell::RefCell;
 
@@ -45,6 +46,28 @@ fn set_activity(values: &mut Vec<(String, Json)>, key: String, value: Json) {
     }
 }
 
+fn checkpoint_matches(
+    saved: &Document,
+    run_id: &JsString,
+    pin: &Json,
+    context: &InspectionContext,
+) -> bool {
+    saved.parent_id.as_ref() == Some(run_id)
+        && field(field(&saved.value, "run"), "objectId").as_js_string() == Some(run_id)
+        && field(field(&saved.value, "run"), "revision")
+            .as_f64()
+            .is_some_and(|revision| {
+                pin.get("revision")
+                    .and_then(Json::as_f64)
+                    .is_some_and(|current| revision <= current)
+            })
+        && field(&saved.value, "serviceNodeId").as_js_string() == Some(&context.service_node_id)
+        && field(&saved.value, "nativeVersion").as_js_string() == Some(&context.native_version)
+        && BackendIdentity::matches(&saved.value, context.backend.as_ref())
+        && field(&saved.value, "threadId").as_js_string() == Some(&context.thread_id)
+        && field(&saved.value, "turnId").as_js_string() == Some(&context.turn_id)
+}
+
 impl<'a, S: InspectionStore> NativeSignals<'a, S> {
     pub fn new(inspector: NativeInspector<'a, S>) -> Self {
         Self {
@@ -52,17 +75,17 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
             cursors: RefCell::default(),
         }
     }
-    fn advance(&self, run: &JsString, epoch: &JsString, sequence: f64) {
+    fn advance(&self, run: &JsString, scope: &JsString, sequence: f64) {
         let mut cursors = self.cursors.borrow_mut();
         if let Some(entry) = cursors.iter_mut().find(|entry| &entry.0 == run) {
-            entry.1 = epoch.clone();
+            entry.1 = scope.clone();
             entry.2 = sequence;
             return;
         }
         if cursors.len() >= 1024 {
             cursors.remove(0);
         }
-        cursors.push((run.clone(), epoch.clone(), sequence));
+        cursors.push((run.clone(), scope.clone(), sequence));
     }
     fn forget(&self, run: &JsString) {
         self.cursors.borrow_mut().retain(|entry| &entry.0 != run);
@@ -86,28 +109,24 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
             return Ok(None);
         }
         let context = self.inspector.context(&run.pin).await?;
+        let original_owner = field(run.value.required("target")?, "serviceNodeId").as_js_string()
+            == Some(&context.service_node_id)
+            && BackendIdentity::matches(run.value.required("target")?, context.backend.as_ref());
+        let mut owner_scope = context.value();
+        owner_scope.remove("run");
+        owner_scope.remove("epoch");
+        let name = if context.backend.is_some() {
+            format!("Native signals {}", &hash_json(&owner_scope)?[7..])
+        } else {
+            "Native signals".to_owned()
+        };
         let saved = store
-            .named_document("task-board/native-signals", "Native signals", run_id)
+            .named_document("task-board/native-signals", &name, run_id)
             .await?;
         require(
-            saved.as_ref().is_none_or(|saved| {
-                saved.parent_id.as_ref() == Some(run_id)
-                    && field(field(&saved.value, "run"), "objectId").as_js_string() == Some(run_id)
-                    && field(field(&saved.value, "run"), "revision")
-                        .as_f64()
-                        .is_some_and(|revision| {
-                            run.pin
-                                .get("revision")
-                                .and_then(Json::as_f64)
-                                .is_some_and(|current| revision <= current)
-                        })
-                    && field(&saved.value, "serviceNodeId").as_js_string()
-                        == Some(&context.service_node_id)
-                    && field(&saved.value, "nativeVersion").as_js_string()
-                        == Some(&context.native_version)
-                    && field(&saved.value, "threadId").as_js_string() == Some(&context.thread_id)
-                    && field(&saved.value, "turnId").as_js_string() == Some(&context.turn_id)
-            }),
+            saved
+                .as_ref()
+                .is_none_or(|saved| checkpoint_matches(saved, run_id, &run.pin, &context)),
             "task_board_identity_conflict",
             "A native signals checkpoint must retain its original Run, owner and native context.",
         )?;
@@ -123,11 +142,14 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
                 .transpose()?
                 .unwrap_or(0.0)
         };
+        let mut scope = context.value();
+        scope.remove("run");
+        let scope: JsString = hash_json(&scope)?.into();
         let volatile = self
             .cursors
             .borrow()
             .iter()
-            .find(|entry| &entry.0 == run_id && entry.1 == context.epoch)
+            .find(|entry| &entry.0 == run_id && entry.1 == scope)
             .map(|entry| entry.2)
             .unwrap_or(0.0);
         let after = retained.max(volatile);
@@ -136,7 +158,10 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
             .management(
                 &context.service_node_id,
                 "inputs",
-                Json::object([("limit", Json::Number(128.0))]),
+                BackendIdentity::select_arguments(
+                    context.backend.as_ref(),
+                    Json::object([("limit", Json::Number(128.0))]),
+                )?,
             )
             .await?;
         validate_agent("PendingInputPage", &pending)?;
@@ -145,13 +170,22 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
             .management(
                 &context.service_node_id,
                 "notifications",
-                Json::object([
-                    ("afterSequence", Json::Number(after)),
-                    ("limit", Json::Number(100.0)),
-                ]),
+                BackendIdentity::select_arguments(
+                    context.backend.as_ref(),
+                    Json::object([
+                        ("afterSequence", Json::Number(after)),
+                        ("limit", Json::Number(100.0)),
+                    ]),
+                )?,
             )
             .await?;
         validate_agent("NotificationPage", &page)?;
+        require(
+            BackendIdentity::matches(&pending, context.backend.as_ref())
+                && BackendIdentity::matches(&page, context.backend.as_ref()),
+            "task_board_target_mismatch",
+            "Native signal pages must retain the selected backend and account.",
+        )?;
         require(
             field(&pending, "epoch").as_js_string() == Some(&context.epoch)
                 && field(&page, "epoch").as_js_string() == Some(&context.epoch),
@@ -166,11 +200,13 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
         {
             let identity = input.required("identity")?;
             require(
-                field(identity, "serviceNodeId").as_js_string() == Some(&context.service_node_id),
+                field(identity, "serviceNodeId").as_js_string() == Some(&context.service_node_id)
+                    && BackendIdentity::matches(identity, context.backend.as_ref()),
                 "task_board_target_mismatch",
                 "A pending native request must identify its queried owner.",
             )?;
-            if field(&run.value, "nativeEpoch").as_js_string() != Some(&context.epoch)
+            if original_owner
+                && field(&run.value, "nativeEpoch").as_js_string() != Some(&context.epoch)
                 || field(identity, "epoch").as_js_string() != Some(&context.epoch)
                 || field(input, "threadId").as_js_string() != Some(&context.thread_id)
                 || field(input, "turnId") != &Json::Null
@@ -213,6 +249,7 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
             require(
                 field(item, "serviceNodeId").as_js_string() == Some(&context.service_node_id)
                     && field(item, "nativeVersion").as_js_string() == Some(&context.native_version)
+                    && BackendIdentity::matches(item, context.backend.as_ref())
                     && observed > sequence,
                 "task_board_native_notification_conflict",
                 "Native notification pages must retain the selected owner/version and increasing original sequence.",
@@ -253,11 +290,11 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
             "A pending notification page must advance its cursor.",
         )?;
         require(
-            self.inspector.context(&run.pin).await?.epoch == context.epoch,
+            self.inspector.context(&run.pin).await? == context,
             "task_board_native_epoch_changed",
             "The selected owner changed before saving native signals.",
         )?;
-        let material = Json::object([
+        let mut material = Json::object([
             ("schemaVersion", Json::Number(1.0)),
             ("run", run.pin.clone()),
             (
@@ -301,6 +338,9 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
                 ),
             ),
         ]);
+        if let Some(backend) = &context.backend {
+            material.insert("backend", backend.json());
+        }
         if let Some(saved) = &saved {
             let mut previous = saved.value.clone();
             if let Json::Object(values) = &mut previous {
@@ -311,7 +351,7 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
                 comparable.insert(key, saved.value.required(key)?.clone());
             }
             if hash_json(&previous)? == hash_json(&comparable)? {
-                self.advance(run_id, &context.epoch, through);
+                self.advance(run_id, &scope, through);
                 return Ok(Some(saved.pin.clone()));
             }
         }
@@ -341,7 +381,7 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
                 "create",
                 Json::object([
                     ("parentId", Json::String(run_id.clone())),
-                    ("name", "Native signals".into()),
+                    ("name", name.clone().into()),
                 ]),
             )])
         };
@@ -355,7 +395,7 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
             .await
         {
             Ok(pin) => {
-                self.advance(run_id, &context.epoch, through);
+                self.advance(run_id, &scope, through);
                 Ok(Some(pin))
             }
             Err(failure)
@@ -363,10 +403,17 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
             {
                 self.forget(run_id);
                 match store
-                    .named_document("task-board/native-signals", "Native signals", run_id)
+                    .named_document("task-board/native-signals", &name, run_id)
                     .await?
                 {
-                    Some(winner) => Ok(Some(winner.pin)),
+                    Some(winner) => {
+                        require(
+                            checkpoint_matches(&winner, run_id, &run.pin, &context),
+                            "task_board_identity_conflict",
+                            "A competing native signals checkpoint must retain its original Run, owner and native context.",
+                        )?;
+                        Ok(Some(winner.pin))
+                    }
                     None => Err(failure),
                 }
             }

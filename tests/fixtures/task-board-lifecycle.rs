@@ -27,6 +27,8 @@ use std::{
 };
 #[path = "task-board-lifecycle-journal.rs"]
 mod journal;
+#[path = "task-board-route-migration.rs"]
+mod route_migration;
 type Trace = Arc<Mutex<Vec<Json>>>;
 fn event(t: &Trace, parts: impl IntoIterator<Item = Json>) {
     t.lock()
@@ -181,6 +183,41 @@ impl World<'_> {
             ],
         );
         self.fail(&format!("read:{k}"))?;
+        if k == "task-board/native-call" {
+            if let Some(code) = self.input().get("migrationCallError") {
+                return Err(IvyError::new_js(
+                    code.as_js_string().unwrap().clone(),
+                    "The exact local call is unavailable.".into(),
+                ).with_outcome(if flag(self.input(), "migrationCallUncertain") {
+                    ivy_contracts::Outcome::Unknown
+                } else {
+                    ivy_contracts::Outcome::NotExecuted
+                }));
+            }
+        }
+        let migration_key =
+            if k == "task-board/run" && a.get("objectId") == Some(&Json::String(id(500))) {
+                "migrationOtherRun"
+            } else {
+                match k {
+                    "task-board/run" => "migrationRun",
+                    "task-board/native-call" => "migrationCall",
+                    _ => "",
+                }
+            };
+        if let Some(source) = self.input().get(migration_key) {
+            let mut document = doc(source);
+            if k == "task-board/run"
+                && a.as_js_string().is_some()
+                && flag(self.input(), "migrationRunChanged")
+            {
+                document.pin.insert("revision", Json::Number(2.0));
+            }
+            return Ok(LifecycleDocument {
+                document,
+                metadata: Json::Null,
+            });
+        }
         let value = match k {
             "task-board/operation" => self.live.borrow().clone(),
             "task-board/native-plan" => Json::object([
@@ -310,6 +347,23 @@ impl Store for World<'_> {
     }
 }
 impl LifecycleStore for World<'_> {
+    async fn migration_evidence(
+        &self,
+        catalogs: &CheckedNativeContracts,
+        call: &Document,
+        expected: &ivy_task_board::native_intent::EvidenceIdentity,
+    ) -> IvyResult<Json> {
+        route_migration::retained_operation(self, catalogs, call, expected).await
+    }
+    fn migration_quiescent(&self, _: &JsString, _: &JsString) -> IvyResult<()> {
+        if flag(self.input(), "migrationPending") {
+            return Err(IvyError::new(
+                "task_board_execution_unresolved",
+                "Fixture original lifecycle outcome is unresolved.",
+            ));
+        }
+        Ok(())
+    }
     async fn lifecycle_read(
         &self,
         k: &str,
@@ -321,6 +375,18 @@ impl LifecycleStore for World<'_> {
     }
     async fn page(&self, k: &str, o: &Json) -> IvyResult<Json> {
         event(&self.trace, ["page".into(), k.into(), o.clone()]);
+        if k == "task-board/run" {
+            if let Some(run) = self.input().get("migrationRun") {
+                let mut items = vec![run.required("pin")?.clone()];
+                if let Some(other) = self.input().get("migrationOtherRun") {
+                    items.push(other.required("pin")?.clone());
+                }
+                return Ok(Json::object([
+                    ("items", Json::Array(items)),
+                    ("nextCursor", Json::Null),
+                ]));
+            }
+        }
         let offset = o
             .get("cursor")
             .and_then(Json::as_js_string)
@@ -423,14 +489,21 @@ impl LifecycleEngine for World<'_> {
     async fn cleanup_task_outputs(
         &self,
         node: &JsString,
+        backend: Option<&ivy_contracts::native_backend::BackendIdentity>,
         task_key: &JsString,
         operation_id: &JsString,
     ) -> IvyResult<()> {
-        self.cleanups.borrow_mut().push(Json::object([
-            ("serviceNodeId", Json::String(node.clone())),
-            ("taskKey", Json::String(task_key.clone())),
-            ("operationId", Json::String(operation_id.clone())),
-        ]));
+        self.cleanups.borrow_mut().push(
+            ivy_contracts::native_backend::BackendIdentity::select_arguments(
+                backend,
+                Json::object([
+                    ("serviceNodeId", Json::String(node.clone())),
+                    ("taskKey", Json::String(task_key.clone())),
+                    ("operationId", Json::String(operation_id.clone())),
+                ]),
+            )
+            .unwrap(),
+        );
         self.fail("cleanup")
     }
     fn client(&self) -> &dyn RpcClient {
@@ -671,6 +744,331 @@ async fn native_lifecycle_matches_original_retained_operations_archive_context_a
     }
     assert_eq!(rows, expected_rows);
     assert_eq!(frames, expected_frames);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn scoped_archive_and_output_cleanup_retain_accounts_and_reject_a_foreign_status() {
+    use ivy_contracts::native_backend::{BackendIdentity, NativeProvider};
+    let group = &data().as_array().unwrap()[0];
+    let original = group
+        .required("rows")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| s(row, "name") == &JsString::from("archive already archived"))
+        .unwrap();
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    for provider in [NativeProvider::Codex, NativeProvider::Claude] {
+        let selected = BackendIdentity::new("primary".into(), provider, "one".into()).unwrap();
+        let foreign = BackendIdentity::new("primary".into(), provider, "two".into()).unwrap();
+        for wrong in [false, true] {
+            let mut row = original.clone();
+            let mut initial = row.required("initial").unwrap().clone();
+            let mut task = initial.required("task").unwrap().clone();
+            let mut value = task.required("value").unwrap().clone();
+            let mut primary = value.required("primaryResourceRef").unwrap().clone();
+            primary.insert("namespace", selected.id().into());
+            value.insert("primaryResourceRef", primary);
+            value.insert("primaryBackend", selected.json());
+            task.insert("value", value);
+            initial.insert("task", task);
+            row.insert("initial", initial);
+            let mut replies = Vec::new();
+            for reply in original.required("rpcReplies").unwrap().as_array().unwrap() {
+                let mut reply = reply.clone();
+                if f(&reply, "method").is_str("serviceNodes.get") {
+                    let mut value = reply.required("value").unwrap().clone();
+                    value.remove("nativeVersion");
+                    reply.insert("value", value);
+                }
+                if f(&reply, "method").is_str("tools.call") {
+                    let mut args = reply.required("args").unwrap().clone();
+                    args.insert(
+                        "arguments",
+                        selected
+                            .arguments(args.required("arguments").unwrap().clone())
+                            .unwrap(),
+                    );
+                    reply.insert("args", args.clone());
+                    let mut value = selected
+                        .arguments(reply.required("value").unwrap().clone())
+                        .unwrap();
+                    if wrong && f(&args, "qualifiedName").is_str("agent.status") {
+                        value.insert("backend", foreign.json());
+                    }
+                    reply.insert("value", value);
+                }
+                replies.push(reply);
+                if wrong
+                    && f(
+                        replies.last().unwrap().required("args").unwrap(),
+                        "qualifiedName",
+                    )
+                    .is_str("agent.status")
+                {
+                    break;
+                }
+            }
+            let trace: Trace = Arc::default();
+            let client = Arc::new(Client {
+                case_name: "scoped archive".into(),
+                replies: Mutex::new(replies.into()),
+                trace: trace.clone(),
+            });
+            let world = World {
+                base: group.required("base").unwrap(),
+                row: &row,
+                live: RefCell::new(
+                    row.required("initial")
+                        .unwrap()
+                        .required("liveOperation")
+                        .unwrap()
+                        .clone(),
+                ),
+                trace,
+                tools: Arc::new(ToolClients::new(client.clone())),
+                client,
+                consumed: Cell::new(false),
+                cleanups: RefCell::default(),
+            };
+            let subject = NativeLifecycle {
+                store: &world,
+                engine: &world,
+                operations: &world,
+                catalogs: &catalogs,
+            };
+            let mut steps = Steps {
+                world: &world,
+                count: 0,
+            };
+            let result = subject
+                .publish(
+                    &doc(world.initial("operation")),
+                    &mut steps,
+                    Json::object([
+                        ("task", Json::Null),
+                        ("history", Json::Null),
+                        ("archive", Json::Null),
+                    ]),
+                )
+                .await;
+            if wrong {
+                assert_eq!(result.unwrap_err().code, "task_board_native_unavailable");
+                assert!(world.cleanups.borrow().is_empty());
+            } else {
+                result.unwrap();
+                assert_eq!(world.cleanups.borrow().len(), 1);
+                assert!(BackendIdentity::matches(
+                    &world.cleanups.borrow()[0],
+                    Some(&selected)
+                ));
+            }
+            assert!(world.client.replies.lock().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn explicit_new_context_retains_account_even_when_two_accounts_return_the_same_thread_id() {
+    use ivy_contracts::native_backend::{BackendIdentity, NativeProvider};
+    let group = &data().as_array().unwrap()[0];
+    let original = group
+        .required("rows")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| s(row, "name") == &JsString::from("explicit new native context"))
+        .unwrap();
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    for provider in [NativeProvider::Codex, NativeProvider::Claude] {
+        let selected = BackendIdentity::new("primary".into(), provider, "new".into()).unwrap();
+        for same_account in [false, true] {
+            let old = if same_account {
+                selected.clone()
+            } else {
+                BackendIdentity::new("primary".into(), provider, "old".into()).unwrap()
+            };
+            let mut base = group.required("base").unwrap().clone();
+            let mut plan = base.required("plan").unwrap().clone();
+            let source = catalogs
+                .checked_native_contract(
+                    s(&plan, "nativeVersion"),
+                    Some(&Json::object([(
+                        "sourceHash",
+                        plan.required("catalogSourceHash").unwrap().clone(),
+                    )])),
+                )
+                .unwrap()
+                .with_backend(Some(selected.clone()));
+            plan.insert("backend", selected.json());
+            plan.insert(
+                "definitions",
+                Json::object(
+                    [
+                        ("threadStart", "thread/start"),
+                        ("threadResume", "thread/resume"),
+                        ("turnStart", "turn/start"),
+                        ("turnInterrupt", "turn/interrupt"),
+                    ]
+                    .into_iter()
+                    .map(|(slot, method)| {
+                        (
+                            slot,
+                            Json::from(source.definition_hash(&method.into()).unwrap()),
+                        )
+                    }),
+                ),
+            );
+            base.insert("plan", plan);
+            let mut allocation = base.required("allocation").unwrap().clone();
+            allocation.insert(
+                "target",
+                selected
+                    .arguments(allocation.required("target").unwrap().clone())
+                    .unwrap(),
+            );
+            base.insert("allocation", allocation);
+            let mut row = original.clone();
+            let mut initial = row.required("initial").unwrap().clone();
+            let mut task = initial.required("task").unwrap().clone();
+            let mut value = task.required("value").unwrap().clone();
+            let mut primary = value.required("primaryResourceRef").unwrap().clone();
+            primary.insert("namespace", old.id().into());
+            let thread_id = primary.required("nativeId").unwrap().clone();
+            value.insert("primaryResourceRef", primary);
+            value.insert("primaryBackend", old.json());
+            task.insert("value", value);
+            initial.insert("task", task);
+            row.insert("initial", initial);
+            let mut replies = Vec::new();
+            for reply in original.required("rpcReplies").unwrap().as_array().unwrap() {
+                let mut reply = reply.clone();
+                if f(&reply, "method").is_str("tools.list")
+                    && f(reply.required("args").unwrap(), "namespace").is_str("codex")
+                {
+                    let mut args = reply.required("args").unwrap().clone();
+                    args.insert("namespace", selected.id().into());
+                    reply.insert("args", args);
+                    let mut value = reply.required("value").unwrap().clone();
+                    let mut item = value.required("items").unwrap().as_array().unwrap()[0].clone();
+                    item.insert(
+                        "qualifiedName",
+                        format!("{}.thread/start", selected.id()).into(),
+                    );
+                    item.insert(
+                        "definition",
+                        source.definition(&"thread/start".into()).unwrap(),
+                    );
+                    item.insert(
+                        "definitionHash",
+                        source
+                            .definition_hash(&"thread/start".into())
+                            .unwrap()
+                            .into(),
+                    );
+                    value.insert("items", Json::Array(vec![item]));
+                    reply.insert("value", value);
+                }
+                if f(&reply, "method").is_str("tools.call") {
+                    let mut args = reply.required("args").unwrap().clone();
+                    args.insert(
+                        "arguments",
+                        selected
+                            .arguments(args.required("arguments").unwrap().clone())
+                            .unwrap(),
+                    );
+                    reply.insert("args", args.clone());
+                    let mut value = selected
+                        .arguments(reply.required("value").unwrap().clone())
+                        .unwrap();
+                    if f(&args, "qualifiedName").is_str("agent.operation") {
+                        let mut response = value.required("reply").unwrap().clone();
+                        let mut result = response.required("result").unwrap().clone();
+                        let mut thread = result.required("thread").unwrap().clone();
+                        thread.insert("id", thread_id.clone());
+                        result.insert("thread", thread);
+                        response.insert("result", result);
+                        value.insert("reply", response);
+                    }
+                    reply.insert("value", value);
+                }
+                replies.push(reply);
+            }
+            let trace: Trace = Arc::default();
+            let client = Arc::new(Client {
+                case_name: "scoped new context".into(),
+                replies: Mutex::new(replies.into()),
+                trace: trace.clone(),
+            });
+            let world = World {
+                base: &base,
+                row: &row,
+                live: RefCell::new(
+                    row.required("initial")
+                        .unwrap()
+                        .required("liveOperation")
+                        .unwrap()
+                        .clone(),
+                ),
+                trace: trace.clone(),
+                tools: Arc::new(ToolClients::new(client.clone())),
+                client,
+                consumed: Cell::new(false),
+                cleanups: RefCell::default(),
+            };
+            let subject = NativeLifecycle {
+                store: &world,
+                engine: &world,
+                operations: &world,
+                catalogs: &catalogs,
+            };
+            let mut steps = Steps {
+                world: &world,
+                count: 0,
+            };
+            let result = subject
+                .publish(
+                    &doc(world.initial("operation")),
+                    &mut steps,
+                    Json::object([
+                        ("task", Json::Null),
+                        ("history", Json::Null),
+                        ("archive", Json::Null),
+                    ]),
+                )
+                .await;
+            if same_account {
+                assert_eq!(result.unwrap_err().code, "task_board_primary_mismatch");
+            } else {
+                result.unwrap();
+                let trace = trace.lock().unwrap();
+                let saved = trace
+                    .iter()
+                    .filter_map(Json::as_array)
+                    .rev()
+                    .find(|row| row[0].is_str("step-write") && row[1].is_str("task-board/task"))
+                    .unwrap();
+                assert_eq!(
+                    saved[2].required("primaryBackend").unwrap(),
+                    &selected.json()
+                );
+                assert_eq!(
+                    saved[2]
+                        .required("primaryResourceRef")
+                        .unwrap()
+                        .required("nativeId")
+                        .unwrap(),
+                    &thread_id
+                );
+            }
+            assert!(world.client.replies.lock().unwrap().is_empty());
+            assert!(world.cleanups.borrow().is_empty());
+        }
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

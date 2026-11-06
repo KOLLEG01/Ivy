@@ -1,4 +1,8 @@
 use ivy_agent_manager::instructions::compose_instructions;
+#[path = "agent-file-work.rs"]
+mod file_work_cases;
+#[path = "agent-run-results.rs"]
+mod run_result_cases;
 #[path = "agent-environment.rs"]
 mod environment_cases;
 #[path = "agent-environment-conflicts.rs"]

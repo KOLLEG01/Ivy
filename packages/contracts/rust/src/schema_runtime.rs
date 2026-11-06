@@ -3,7 +3,7 @@
 use super::{admit_schema, compiler_plan, entries};
 use crate::{
     IvyError, IvyJson, IvyResult, JsString, builtin_schema::json_equal, hash::hash_json,
-    json::canonical, re2::Re2Pattern,
+    json::{canonical, canonical_size}, re2::Re2Pattern,
 };
 use std::{
     collections::HashMap,
@@ -86,7 +86,7 @@ impl SchemaValidators {
         value: &IvyJson,
         maximum_bytes: usize,
     ) -> IvyResult<()> {
-        canonical(value, maximum_bytes)?;
+        canonical_size(value, maximum_bytes)?;
         if self.compile(schema)?.matches(value)? {
             Ok(())
         } else {
