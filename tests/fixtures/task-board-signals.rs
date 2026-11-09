@@ -32,7 +32,8 @@ fn record(trace: &Trace, values: impl IntoIterator<Item = Json>) {
 }
 fn checkpoint(value: Option<&Json>) -> Option<Document> {
     value.map(|d| Document {
-        pin: d.required("pin").unwrap().clone(),
+        pin: ivy_task_board::operations::ObjectPin::from_json(d.required("pin").unwrap().clone())
+            .unwrap(),
         value: d.required("value").unwrap().clone(),
         parent_id: d
             .required("metadata")
@@ -179,7 +180,13 @@ impl ReadEvidenceStore for Store {
                 })
                 .unwrap_or_else(|| Json::Object(vec![]));
             return Ok(Document {
-                pin: address.clone(),
+                pin: match address.as_js_string() {
+                    Some(object_id) => ivy_task_board::operations::ObjectPin {
+                        object_id: object_id.clone(),
+                        revision: 1.0,
+                    },
+                    None => ivy_task_board::operations::ObjectPin::from_json(address.clone())?,
+                },
                 value,
                 parent_id: None,
                 content_hash: String::new(),
@@ -193,7 +200,7 @@ impl ReadEvidenceStore for Store {
             .unwrap_or(self.input.required("run")?)
             .clone();
         Ok(Document {
-            pin: self.pin.clone(),
+            pin: ivy_task_board::operations::ObjectPin::from_json(self.pin.clone()).unwrap(),
             value,
             parent_id: None,
             content_hash: String::new(),
@@ -238,7 +245,9 @@ impl ReadEvidenceStore for Store {
                     self.retained
                         .borrow()
                         .iter()
-                        .find(|(_, d)| d.pin.get("objectId") == destination.get("objectId"))
+                        .find(|(_, d)| {
+                            d.pin.to_json().get("objectId") == destination.get("objectId")
+                        })
                         .map(|(name, _)| name.clone())
                 })
         } else {
@@ -253,13 +262,21 @@ impl ReadEvidenceStore for Store {
         };
         let revision = previous
             .as_ref()
-            .map(|saved| saved.pin.get("revision").unwrap().as_f64().unwrap())
+            .map(|saved| {
+                saved
+                    .pin
+                    .to_json()
+                    .get("revision")
+                    .unwrap()
+                    .as_f64()
+                    .unwrap()
+            })
             .unwrap_or(0.0)
             + 1.0;
         let object_id = if by_name {
             previous
                 .as_ref()
-                .map(|d| d.pin.required("objectId").unwrap().clone())
+                .map(|d| d.pin.to_json().required("objectId").unwrap().clone())
                 .unwrap_or_else(|| format!("signal-{}", self.retained.borrow().len() + 1).into())
         } else {
             "00000000-0000-4000-8000-000000000900".into()
@@ -269,7 +286,7 @@ impl ReadEvidenceStore for Store {
             ("revision", Json::Number(revision)),
         ]);
         let document = Document {
-            pin: pin.clone(),
+            pin: ivy_task_board::operations::ObjectPin::from_json(pin.clone()).unwrap(),
             value: value.clone(),
             parent_id: Some(text(&self.pin, "objectId")),
             content_hash: String::new(),

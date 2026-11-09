@@ -27,8 +27,11 @@ impl Contracts for Catalog {
     fn version(&self, _: &str) -> IvyResult<String> {
         Ok("1.0.0".into())
     }
-    fn local(&self, _: &str) -> IvyResult<bool> {
-        Ok(true)
+    fn local(&self, key: &str) -> IvyResult<bool> {
+        Ok(!matches!(
+            key,
+            "task-board/task" | "task-board/run" | "task-board/delivery"
+        ))
     }
     fn readable_version(&self, _: &str, v: &JsString) -> IvyResult<bool> {
         Ok(v == &"1.0.0".into())
@@ -738,6 +741,15 @@ async fn current_history_does_not_retain_comment_bodies_as_reference_ids() {
             &body,
         );
     }
+    row(
+        &db,
+        "unused",
+        "task-board/coordination",
+        "root",
+        &Json::object([("activeOperation", Json::Null)]),
+    );
+    db.execute("INSERT INTO cleanup_roots VALUES('unused',?)", [AT])
+        .unwrap();
     let local = local(&db);
     let source = Source::ready();
     let collections = HistoryCollections::default();
@@ -756,5 +768,367 @@ async fn current_history_does_not_retain_comment_bodies_as_reference_ids() {
         "before={before}, after={after}"
     );
     assert_eq!(count(&db, "documents"), 32);
+    assert_released(&db);
+}
+
+struct CollectionClient {
+    queries: std::sync::atomic::AtomicUsize,
+    reads: std::sync::Mutex<Vec<Json>>,
+    hold_first: bool,
+    release: Notify,
+    task: Json,
+    failure: Option<IvyError>,
+}
+impl CollectionClient {
+    fn new(task: Json) -> Self {
+        Self {
+            queries: std::sync::atomic::AtomicUsize::new(0),
+            reads: std::sync::Mutex::new(vec![]),
+            hold_first: false,
+            release: Notify::new(),
+            task,
+            failure: None,
+        }
+    }
+}
+impl ivy_sdk::rpc::RpcClient for CollectionClient {
+    fn request<'a>(
+        &'a self,
+        method: &'a str,
+        params: Json,
+        _: ivy_sdk::rpc::RequestOptions,
+    ) -> ivy_sdk::rpc::RequestFuture<'a> {
+        Box::pin(async move {
+            match method {
+                "objects.query" => {
+                    assert_eq!(params.get("contractKey"), Some(&"task-board/task".into()));
+                    assert_eq!(params.get("includeArchived"), Some(&true.into()));
+                    let previous = self
+                        .queries
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if previous == 0 && self.hold_first {
+                        self.release.notified().await;
+                    }
+                    Ok(Json::object([
+                        ("items", Json::Array(vec![])),
+                        ("nextCursor", Json::Null),
+                    ]))
+                }
+                "objects.read" => {
+                    assert_eq!(
+                        params,
+                        Json::object([("objectId", "task".into())]),
+                        "Collection must never hydrate conversation nodes"
+                    );
+                    self.reads.lock().unwrap().push(params);
+                    if let Some(error) = &self.failure {
+                        return Err(error.clone());
+                    }
+                    Ok(Json::object([
+                        (
+                            "object",
+                            Json::object([
+                                ("id", "task".into()),
+                                ("contractKey", "task-board/task".into()),
+                                ("parentId", "root".into()),
+                                ("effectivelyArchived", false.into()),
+                            ]),
+                        ),
+                        (
+                            "revision",
+                            Json::object([
+                                ("revision", Json::Number(1.0)),
+                                ("contractVersion", "1.0.0".into()),
+                                ("mediaType", "application/json".into()),
+                                ("contentHash", hash_json(&self.task)?.into()),
+                                ("byteLength", Json::Number(1000.0)),
+                            ]),
+                        ),
+                        (
+                            "content",
+                            Json::object([
+                                ("encoding", "json".into()),
+                                ("value", self.task.clone()),
+                            ]),
+                        ),
+                    ]))
+                }
+                _ => panic!("Collection cannot perform {method}"),
+            }
+        })
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn journal_collection_preserves_live_handoffs_unknown_reads_and_original_receipts_without_hydration()
+ {
+    use ivy_task_board::journal_store::{JournalStore, ReadCache};
+    for state in ["claim", "completionIssue", "closed", "unavailable"] {
+        let db = Connection::open_in_memory().unwrap();
+        let mut operation = seed(&db);
+        operation.insert("phase", "succeeded".into());
+        operation.insert("error", Json::Null);
+        let run = Json::object([("objectId", "run".into()), ("revision", Json::Number(1.0))]);
+        operation.insert("handoffRun", run.clone());
+        db.execute(
+            "UPDATE revisions SET value_json=? WHERE id='closed'",
+            [canonical(&operation, usize::MAX).unwrap()],
+        )
+        .unwrap();
+        let mut task = Json::object([
+            ("claim", Json::Null),
+            ("completionIssue", Json::Null),
+            ("comments", Json::Array(vec![])),
+            ("commentDeliveries", Json::Array(vec![])),
+            (
+                "commentStore",
+                Json::object([
+                    ("kind", "tree".into()),
+                    ("length", Json::Number(1_000_000.0)),
+                    (
+                        "root",
+                        Json::object([
+                            ("length", Json::Number(1_000_000.0)),
+                            (
+                                "object",
+                                Json::object([
+                                    ("objectId", "unread-conversation".into()),
+                                    ("revision", Json::Number(1.0)),
+                                ]),
+                            ),
+                        ]),
+                    ),
+                ]),
+            ),
+        ]);
+        if state == "claim" {
+            task.insert("claim", Json::object([("run", run.clone())]));
+        }
+        if state == "completionIssue" {
+            task.insert("completionIssue", Json::object([("run", run)]));
+        }
+        let mut client = CollectionClient::new(task);
+        if state == "unavailable" {
+            client.failure = Some(
+                IvyError::new("service_unavailable", "Original remote read.")
+                    .with_outcome(ivy_contracts::Outcome::Unknown),
+            );
+        }
+        let client = std::sync::Arc::new(client);
+        let cache = ReadCache::default();
+        let store = JournalStore {
+            journal: LocalJournal {
+                connection: &db,
+                root_object_id: Some("root".into()),
+            },
+            client: client.clone(),
+            contracts: Catalog,
+            limits: HistoryLimits { count: 0, bytes: 0 },
+            now: || AT.to_owned(),
+            new_id: || panic!("Collection never allocates a new identity"),
+            cache: Some(&cache),
+        };
+        let result = store.collect_local().await;
+        if state == "unavailable" {
+            let failure = result.unwrap_err();
+            assert_eq!(failure.code, "service_unavailable");
+            assert_eq!(failure.message, "Original remote read.");
+            assert_eq!(failure.outcome, ivy_contracts::Outcome::Unknown);
+        } else {
+            result.unwrap();
+        }
+        assert_eq!(client.queries.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(client.reads.lock().unwrap().len(), 1);
+        assert_eq!(
+            count(&db, "documents"),
+            if state == "closed" { 0 } else { 2 }
+        );
+        assert_eq!(
+            count(&db, "retired_operation_receipts"),
+            if state == "closed" { 1 } else { 0 }
+        );
+        if state == "closed" {
+            let encoded: String = db.query_row(
+                "SELECT receipt_json FROM retired_operation_receipts WHERE caller_id='caller' AND operation_id='original-id'",
+                [], |row| row.get(0)).unwrap();
+            assert_eq!(
+                encoded,
+                canonical(
+                    &operation_receipt::<IvyError>(&operation).unwrap(),
+                    usize::MAX
+                )
+                .unwrap()
+            );
+        }
+        assert_released(&db);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn journal_collection_serializes_on_the_shared_owner_while_local_writes_remain_independent() {
+    use futures_util::FutureExt;
+    use ivy_task_board::{
+        journal_store::{JournalStore, ReadCache},
+        operations::Store,
+    };
+    let db = Connection::open_in_memory().unwrap();
+    seed(&db);
+    let mut client = CollectionClient::new(Json::Null);
+    client.hold_first = true;
+    let client = std::sync::Arc::new(client);
+    let cache = ReadCache::default();
+    let store = JournalStore {
+        journal: LocalJournal {
+            connection: &db,
+            root_object_id: Some("root".into()),
+        },
+        client: client.clone(),
+        contracts: Catalog,
+        limits: HistoryLimits { count: 0, bytes: 0 },
+        now: || AT.to_owned(),
+        new_id: || "created".into(),
+        cache: Some(&cache),
+    };
+    let first = store.collect_local();
+    let second = store.collect_local();
+    tokio::pin!(first, second);
+    assert!(first.as_mut().now_or_never().is_none());
+    assert!(second.as_mut().now_or_never().is_none());
+    assert_eq!(client.queries.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(db.is_autocommit());
+    let created = store
+        .write(
+            "task-board/coordination",
+            &Json::object([("activeOperation", Json::Null)]),
+            "independent-write",
+            &Json::object([(
+                "create",
+                Json::object([("name", "new".into()), ("parentId", "root".into())]),
+            )]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.get("objectId"), Some(&"created".into()));
+    assert_eq!(client.queries.load(std::sync::atomic::Ordering::SeqCst), 1);
+    client.release.notify_one();
+    let (first, second) = tokio::join!(first, second);
+    first.unwrap();
+    second.unwrap();
+    assert_eq!(
+        client.queries.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "The queued collection has no eligible graph left and performs no second recovery query"
+    );
+    assert_eq!(count(&db, "documents"), 1);
+    assert_eq!(count(&db, "retired_operation_receipts"), 1);
+    assert!(store.journal.key(&"closed".into()).unwrap().is_none());
+    assert!(store.journal.key(&"created".into()).unwrap().is_some());
+    assert_released(&db);
+}
+
+impl ivy_sdk::rpc::OptionalRpcClient for CollectionClient {
+    fn request_optional<'a>(
+        &'a self,
+        method: &'a str,
+        params: Option<Json>,
+        options: ivy_sdk::rpc::RequestOptions,
+    ) -> ivy_sdk::rpc::RequestFuture<'a> {
+        match params {
+            Some(params) => ivy_sdk::rpc::RpcClient::request(self, method, params, options),
+            None => Box::pin(async { Err(ivy_contracts::IvyError::internal()) }),
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn journal_collection_retains_uncertain_prepared_public_records_until_their_original_outcome_settles()
+ {
+    use ivy_task_board::journal_store::{JournalStore, ReadCache};
+    for key in ["task-board/task", "task-board/run", "task-board/delivery"] {
+        let db = Connection::open_in_memory().unwrap();
+        seed(&db);
+        let uncertain = Json::object([(
+            "externalOutcome",
+            Json::object([("state", "unknown".into())]),
+        )]);
+        row(&db, "prepared-public", key, "closed", &uncertain);
+        let original = canonical(&uncertain, usize::MAX).unwrap();
+        let client = std::sync::Arc::new(CollectionClient::new(Json::Null));
+        let cache = ReadCache::default();
+        let store = JournalStore {
+            journal: LocalJournal {
+                connection: &db,
+                root_object_id: Some("root".into()),
+            },
+            client: client.clone(),
+            contracts: Catalog,
+            limits: HistoryLimits { count: 0, bytes: 0 },
+            now: || AT.to_owned(),
+            new_id: || panic!("Collection does not allocate an identity"),
+            cache: Some(&cache),
+        };
+        store.collect_local().await.unwrap();
+        assert_eq!(count(&db, "documents"), 3, "{key}");
+        assert_eq!(count(&db, "retired_operation_receipts"), 0);
+        assert_eq!(
+            db.query_row(
+                "SELECT value_json FROM revisions WHERE id='prepared-public'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            original
+        );
+        assert!(client.reads.lock().unwrap().is_empty());
+        let settled = Json::object([(
+            "externalOutcome",
+            Json::object([("state", "succeeded".into())]),
+        )]);
+        store
+            .journal
+            .update(key, &"prepared-public".into(), 1.0, &settled, &AT.into())
+            .unwrap();
+        store.collect_local().await.unwrap();
+        assert_eq!(count(&db, "documents"), 0);
+        assert_eq!(count(&db, "retired_operations"), 1);
+        assert_eq!(count(&db, "retired_operation_receipts"), 1);
+        assert_eq!(client.queries.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_released(&db);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn current_history_without_eligible_roots_never_reads_bodies_or_remote_owners() {
+    let db = Connection::open_in_memory().unwrap();
+    seed(&db);
+    db.execute("DELETE FROM cleanup_roots", []).unwrap();
+    let local = SqliteReads {
+        journal: LocalJournal {
+            connection: &db,
+            root_object_id: Some("root".into()),
+        },
+        contracts: &Catalog,
+        parse: |_: &str| -> Result<Json, Failure> {
+            panic!("There is no eligible body to inspect")
+        },
+        sqlite_failure: sql_failure,
+    };
+    let source = Source::ready();
+    let collections = HistoryCollections::default();
+    let changes = db.total_changes();
+    LocalHistory::new(
+        &local,
+        &NoDocuments,
+        &source,
+        &collections,
+        HistoryLimits { count: 0, bytes: 0 },
+    )
+    .collect::<IvyError>(0, 0, None, None)
+    .await
+    .unwrap();
+    assert_eq!(source.queries.get(), 0);
+    assert_eq!(source.reads.get(), 0);
+    assert_eq!(count(&db, "documents"), 2);
+    assert_eq!(db.total_changes(), changes);
     assert_released(&db);
 }

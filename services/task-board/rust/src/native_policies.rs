@@ -74,10 +74,7 @@ impl<C: Fn() -> String, I: Fn() -> JsString, K, P: TaskPrompts>
 }
 impl<C, I, K, P> CheckPolicy for NativePolicies<'_, C, I, K, P> {
     async fn aggregate(&self, task: &Json, _: &JsString) -> IvyResult<()> {
-        self.context
-            .journal
-            .contracts
-            .validate_definition("Task", task)
+        self.context.journal.contracts.validate_task(task)
     }
     async fn fields(&self, fields: &Json, _: Option<&JsString>) -> IvyResult<()> {
         self.context

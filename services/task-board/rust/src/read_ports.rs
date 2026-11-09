@@ -68,13 +68,14 @@ impl<R, M: CommentReads + ?Sized, E: From<IvyError>> ReadPortsWithComments<'_, R
             return Ok(None);
         };
         let full = match mode {
-            TreeReadMode::Remote(_) => super::record_upgrades::upgrade_stored_with(
-                "task-board/task",
-                &full,
-                verification_read,
-            )
-            .await?
-            .into_owned(),
+            TreeReadMode::Remote(_) => {
+                super::record_upgrades::upgrade_stored_owned_with(
+                    "task-board/task",
+                    full,
+                    verification_read,
+                )
+                .await?
+            }
             TreeReadMode::Prepared(_) => full,
             TreeReadMode::Retained => unreachable!(),
         };

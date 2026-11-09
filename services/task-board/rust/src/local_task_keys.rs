@@ -17,7 +17,7 @@ pub(crate) struct Calls<'a, S, C, I, R> {
     pub(crate) increment: I,
     pub(crate) retained: R,
 }
-fn f(value: &Value, key: &str) -> Result<Value, IvyError> {
+fn f<'a>(value: &'a Value, key: &str) -> &'a Value {
     v::field(value, key)
 }
 fn text(value: &str) -> Value {
@@ -48,10 +48,10 @@ pub(crate) fn retained<E>(
     id: Value,
     message: &'static str,
 ) -> Result<Value, WriteFailure<E>> {
-    if !f(&value, "operationId")?.eq(&id) {
+    if !f(&value, "operationId").eq(&id) {
         return Err(IvyError::new("task_board_identity_conflict", message).into());
     }
-    Ok(f(&value, "taskKey")?)
+    Ok(v::take(value, "taskKey"))
 }
 fn create<E, S: LocalMutationStore<E>>(store: &S, name: Value) -> Value {
     object([(
@@ -79,7 +79,7 @@ where
         .await?
     {
         return (calls.retained)(
-            f(&saved, "value")?,
+            saved.value,
             id.clone(),
             "The retained Task key allocation belongs to another operation.",
         );
@@ -120,7 +120,7 @@ where
                 }
             }
         };
-        let next = (calls.increment)(f(&sequence, "value")?)?;
+        let next = (calls.increment)(sequence.value)?;
         let value = object([
             ("schemaVersion", Value::Number(1.0)),
             ("nextValue", next.clone()),
@@ -136,8 +136,8 @@ where
                 &value,
                 &mutation(id, Value::String(step))?,
                 &object([
-                    ("objectId", f(&f(&sequence, "pin")?, "objectId")?),
-                    ("expectedRevision", f(&f(&sequence, "pin")?, "revision")?),
+                    ("objectId", Value::String(sequence.pin.object_id.clone())),
+                    ("expectedRevision", Value::Number(sequence.pin.revision)),
                 ]),
             )
             .await;
@@ -169,7 +169,7 @@ where
             )
             .await
         {
-            Ok(_) => return Ok(f(&value, "taskKey")?),
+            Ok(_) => return Ok(v::take(value, "taskKey")),
             Err(error) if conflict(&error) => {}
             Err(error) => return Err(error),
         }
@@ -180,6 +180,6 @@ where
             .named_graph(ALLOCATION, &allocation_name, None)
             .await?
             .ok_or_else(|| IvyError::new("task_board_identity_conflict", message))?;
-        return (calls.retained)(f(&winner, "value")?, id.clone(), message);
+        return (calls.retained)(winner.value, id.clone(), message);
     }
 }

@@ -3,7 +3,6 @@
 use crate::{
     category_projection::{CategoryLocale, CategoryProjection, CategoryStore},
     engine_admission::{AdmissionExecution, EngineAdmission},
-    engine_invocations::EngineInvocations,
     engine_read::{
         EngineReadRuntime, EngineReads, ReadContext,
         read_failure::{ReadFailure, provider_read_error},
@@ -36,7 +35,9 @@ pub struct ReadService<'a, H, E> {
 }
 impl<H: LocalHandler, E> LocalHandler for ReadService<'_, H, E> {
     async fn handle(&self, tool: &str, args: Json, context: InvocationContext) -> IvyResult<Json> {
-        if tool == "read" {
+        if tool == "read"
+            || (tool == "list" && args.get("view").is_some_and(|view| view.is_str("cards")))
+        {
             (self.read)(args, context)
                 .await
                 .map_err(provider_read_error)
@@ -57,23 +58,6 @@ pub struct EngineService<'a, S, C, P, E, R, T, K> {
     pub reads: EngineReads<'a, S, C, R>,
     pub runtime: &'a T,
     pub categories: &'a K,
-}
-/// Also retain the complete call in the engine's existing invocation drain when
-/// this facade is shared with internal callers or generation reconciliation.
-pub struct RetainedService<'a, 'i, 'x, H, X> {
-    pub handler: &'a H,
-    pub invocations: &'i EngineInvocations<'a, 'x, X>,
-}
-impl<'a, H: LocalHandler + 'a, X: ReconcileExecutor<'a>> LocalHandler
-    for RetainedService<'a, '_, '_, H, X>
-{
-    async fn handle(&self, tool: &str, args: Json, context: InvocationContext) -> IvyResult<Json> {
-        let handler = self.handler;
-        let tool = tool.to_owned();
-        self.invocations
-            .run(async move { handler.handle(&tool, args, context).await })?
-            .await
-    }
 }
 fn f<'a>(v: &'a Json, k: &str) -> &'a Json {
     static NULL: Json = Json::Null;

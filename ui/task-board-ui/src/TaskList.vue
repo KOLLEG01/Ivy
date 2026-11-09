@@ -22,6 +22,7 @@ import {
 } from "@ivy/ui";
 import { ChevronRight, ListFilter, Plus, Search, SlidersHorizontal, X } from "@lucide/vue";
 import { route } from "../../../packages/ui-client/src/runtime";
+import { objectParentScope } from "../../../packages/ui-client/src/live";
 import { newOperationId } from "../../../packages/sdk/src/client.js";
 import {
   and,
@@ -140,26 +141,26 @@ const link = (values: Record<string, string> = {}) => {
   });
 };
 const counts = useRemote(async (signal) => {
-  const seen = new Map<string, string>(),
+  const states = new Map<string, number>(),
     lanes = new Set<string>(),
     cursors = new Set<string>();
   let cursor: string | null = null;
   do {
-    const page: Operation.ObjectsQueryResult = await client.request(
-      "objects.query",
+    const page: Operation.ObjectsCountResult = await client.request(
+      "objects.count",
       {
         contractKey: "task-board/task",
         contractVersions: taskContractVersions,
         where: taskFilter(props.workspace.rootObjectId, props.query),
-        select: ["data:/workflowState", "data:/fields/category"],
-        orderBy: [{ field: "object.id", direction: "asc" }],
+        groupBy: ["data:/workflowState", "data:/fields/category"],
         limit: 200,
         ...(cursor ? { cursor } : {}),
       },
       { signal },
     );
     for (const item of page.items) {
-      seen.set(item.objectId, String(item.values["data:/workflowState"]));
+      const state = String(item.values["data:/workflowState"]);
+      states.set(state, (states.get(state) ?? 0) + item.count);
       if (item.values['data:/workflowState'] !== 'backlog') lanes.add(String(item.values['data:/fields/category'] || 'Uncategorized'));
     }
     cursor = page.nextCursor;
@@ -171,11 +172,10 @@ const counts = useRemote(async (signal) => {
   return Object.fromEntries(
     [...boardColumns, backlogColumn].map((column) => [
       column.id,
-      [...seen.values()].filter((status) => column.states.includes(status))
-        .length,
+      [...states].reduce((total, [state, count]) => total + (column.states.includes(state) ? count : 0), 0),
     ]),
   );
-}, 30000, ["objects/task-board/task"]);
+}, 30000, () => [objectParentScope('task-board/task', props.workspace.rootObjectId)], () => props.available);
 watch(filterKey, () => {
   counts.value.value = null;
   void counts.refresh();
@@ -226,7 +226,7 @@ const retryArchive = async () => {
   refresh();
 };
 const refresh = () => {
-  void counts.refresh();
+  counts.invalidate();
   for (const column of columnRefs.value) void column.refresh();
   void backlogRef.value?.refresh();
   void archiveRef.value?.refresh();
@@ -235,7 +235,6 @@ const recovered = () => {
   if (action.saved.value?.phase === "succeeded") error.value = "";
   refresh();
 };
-watch([swimlane, backlogSwimlane], refresh);
 const submit = () => {
   filtersOpen.value = false;
   location.hash = link({
@@ -618,6 +617,7 @@ const drop = (column: string) => {
         "
         :href="(id) => link({ id, panel: 'sheet' })"
         :disabled="disabled"
+        :active="available"
         :pending-task-id="pendingArchiveTaskId"
         :archive-disabled="archivePending || archive.busy.value || action.busy.value"
         :swimlane="swimlane"
@@ -664,6 +664,7 @@ const drop = (column: string) => {
       :workspace="workspace"
       :query="query"
       :column="backlogColumn"
+      :active="available && backlogOpen"
       :count="counts.error.value ? null : (counts.value.value?.backlog ?? null)"
       :href="(id) => link({ id, panel: 'sheet' })"
       :disabled="disabled"
@@ -687,6 +688,7 @@ const drop = (column: string) => {
       :workspace="workspace"
       :query="query"
       :column="archiveColumn"
+      :active="available && archiveOpen"
       :count="null"
       :href="(id) => link({ id, panel: 'sheet' })"
       :disabled="disabled"

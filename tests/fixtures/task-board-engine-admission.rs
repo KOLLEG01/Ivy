@@ -120,7 +120,8 @@ struct World {
 }
 fn document(v: &Json) -> Document {
     Document {
-        pin: v.required("pin").unwrap().clone(),
+        pin: ivy_task_board::operations::ObjectPin::from_json(v.required("pin").unwrap().clone())
+            .unwrap(),
         value: v.required("value").unwrap().clone(),
         parent_id: f(f(v, "metadata"), "parentId").as_js_string().cloned(),
         content_hash: hash_json(v.required("value").unwrap()).unwrap(),
@@ -176,7 +177,15 @@ impl Store for World {
     async fn prepared_mutation_id(&self, _: &str) -> IvyResult<JsString> {
         unreachable!()
     }
-    async fn write_prepared(&self, _: &str, _: &Json, _: &JsString, _: &Json) -> IvyResult<Json> {
+    async fn write_prepared(
+        &self,
+        _: &str,
+        _: &Json,
+        _: &JsString,
+        _: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
+    ) -> IvyResult<Json> {
         unreachable!()
     }
 }
@@ -221,7 +230,8 @@ impl CoordinationStore for World {
 }
 impl AdmissionExecution for Bindings {
     async fn execute(&self, operation: Document) -> IvyResult<Json> {
-        self.0.call("execute", [operation.pin, operation.value])
+        self.0
+            .call("execute", [operation.pin.to_json(), operation.value])
     }
 }
 #[tokio::test(flavor = "current_thread")]

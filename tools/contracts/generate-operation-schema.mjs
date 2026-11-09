@@ -691,6 +691,11 @@ op(
   obj({ items: array(ref("ObjectMetadata"), 500), truncated: bool }),
 );
 op("objects.query", shared("ObjectQuery"), paged(ref("QueryItem")));
+// Numeric grouping is a direct client read primitive.
+op("objects.count", shared("ObjectCountQuery"), paged(obj({
+  values: { type: "object", maxProperties: 2, additionalProperties: { type: ["null", "boolean", "number", "string"] } },
+  count: uint(1),
+})), "client", false, false);
 op(
   "objects.search",
   obj(

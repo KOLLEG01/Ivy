@@ -5,11 +5,12 @@ use crate::{
     coordination::recovery_retry_delay_ms,
     inspection_journal::verify_owner,
     native_intent::TaskPrompts,
+    native_lifecycle::LifecycleStore,
     operations::{Document, Operations, Store, mutation},
-    wake::{WakeStore, comments_pending, next_execution_mode, queued_input, should_wake},
+    wake::{WakeStore, next_execution_mode_with_inputs, queued_input, should_wake_with_inputs},
 };
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::canonical,
+    IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::canonical_equal,
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::{
@@ -56,6 +57,19 @@ impl<S: Store, C: Fn() -> String> SchedulerOperations for Operations<S, C> {
 #[allow(async_fn_in_trait)]
 pub trait SchedulerPolicies: TaskPrompts {
     async fn read_task(&self, id: &JsString) -> IvyResult<Document>;
+    async fn pending_comment_ids(&self, task: &Document) -> IvyResult<Vec<Json>> {
+        Ok(arr(f(&task.value, "commentDeliveries"))
+            .iter()
+            .filter(|delivery| {
+                eq(delivery, "state", "queued")
+                    && arr(f(&task.value, "comments")).iter().any(|comment| {
+                        f(comment, "commentId") == f(delivery, "commentId") && queued_input(comment)
+                    })
+            })
+            .take(256)
+            .map(|delivery| delivery.required("commentId").cloned())
+            .collect::<IvyResult<Vec<_>>>()?)
+    }
     fn enabled(&self) -> bool;
     fn interval_ms(&self) -> f64;
     fn now(&self) -> JsString;
@@ -122,6 +136,9 @@ impl<R: RpcClient + 'static, P: SchedulerPolicies> AllocationRuntime for Schedul
 impl<R: RpcClient + 'static, P: SchedulerPolicies> SchedulerPolicies for SchedulerRuntime<R, P> {
     async fn read_task(&self, id: &JsString) -> IvyResult<Document> {
         self.policies.read_task(id).await
+    }
+    async fn pending_comment_ids(&self, task: &Document) -> IvyResult<Vec<Json>> {
+        self.policies.pending_comment_ids(task).await
     }
     fn enabled(&self) -> bool {
         self.policies.enabled()
@@ -199,7 +216,7 @@ fn require(ok: bool, c: &str, m: &str) -> IvyResult<()> {
     if ok { Ok(()) } else { Err(IvyError::new(c, m)) }
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)
 }
 fn delay(interval: f64, code: Option<&str>) -> IvyResult<i64> {
     require(
@@ -222,6 +239,46 @@ pub fn rate_limit_waiting_detail(at: &JsString) -> JsString {
         ".",
     )
 }
+/// Select only actual queued inputs, in original receipt order. The existing
+/// exact-root projection must be complete before it can establish absence.
+pub async fn queued_input_ids<S: LifecycleStore>(
+    store: &S,
+    task: &Document,
+) -> IvyResult<Vec<Json>> {
+    let id = &task.pin.object_id;
+    queued_inputs(store, &task.value, id, 256).await
+}
+pub(crate) async fn has_queued_input<S: LifecycleStore>(
+    store: &S,
+    task: &Json,
+    id: &JsString,
+) -> IvyResult<bool> {
+    Ok(!queued_inputs(store, task, id, 1).await?.is_empty())
+}
+async fn queued_inputs<S: LifecycleStore>(
+    store: &S,
+    task: &Json,
+    id: &JsString,
+    maximum: usize,
+) -> IvyResult<Vec<Json>> {
+    let queued = store.queued_comment_ids(task, id).await?;
+    let mut selected = vec![];
+    for ids in queued.chunks(16) {
+        let comments = store.read_task_comments(task, id, ids).await?;
+        for id in ids {
+            if comments
+                .iter()
+                .any(|comment| f(comment, "commentId") == id && queued_input(comment))
+            {
+                selected.push(id.clone());
+                if selected.len() == maximum {
+                    return Ok(selected);
+                }
+            }
+        }
+    }
+    Ok(selected)
+}
 impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: SchedulerOperations>
     Scheduler<'_, S, E, A, O>
 {
@@ -231,6 +288,7 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
         sequence: f64,
         recover: bool,
         retry: Option<&JsString>,
+        comments: &[Json],
     ) -> IvyResult<Option<Json>> {
         let value = &task.value;
         let at = self.engine.now();
@@ -238,17 +296,17 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
             .engine
             .scoped_operation_id(&Json::Array(vec![
                 "task-board-scheduler".into(),
-                task.pin.required("objectId")?.clone(),
-                task.pin.required("revision")?.clone(),
+                Json::String(task.pin.object_id.clone()),
+                Json::Number(task.pin.revision),
                 Json::Number(sequence),
             ]))
             .await?;
         let base = Json::object([
             ("operationId", Json::String(operation)),
-            ("taskId", task.pin.required("objectId")?.clone()),
-            ("expectedRevision", task.pin.required("revision")?.clone()),
+            ("taskId", Json::String(task.pin.object_id.clone())),
+            ("expectedRevision", Json::Number(task.pin.revision)),
         ]);
-        if !next_execution_mode(value, &at) {
+        if !next_execution_mode_with_inputs(value, &at, !comments.is_empty()) {
             return Ok(None);
         }
         if recover {
@@ -257,20 +315,9 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
             r.insert("run", value.required("lastRun")?.clone());
             return Ok(Some(r));
         }
-        if !should_wake(self.store, value, &at).await? {
+        if !should_wake_with_inputs(self.store, value, &at, !comments.is_empty()).await? {
             return Ok(None);
         }
-        let comments = arr(f(value, "commentDeliveries"))
-            .iter()
-            .filter(|delivery| {
-                eq(delivery, "state", "queued")
-                    && arr(f(value, "comments")).iter().any(|comment| {
-                        f(comment, "commentId") == f(delivery, "commentId") && queued_input(comment)
-                    })
-            })
-            .take(256)
-            .map(|delivery| delivery.required("commentId").cloned())
-            .collect::<IvyResult<Vec<_>>>()?;
         let feedback = self
             .engine
             .task_prompt(value, self.engine.service_node_id(), None)?;
@@ -280,7 +327,7 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
                 task,
                 s(&base, "operationId")?,
                 Some(&feedback),
-                comments_pending(value)
+                !comments.is_empty()
                     || f(value, "executionChangeRequested").as_bool() == Some(true),
             )
             .await;
@@ -346,19 +393,20 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
         for (key, value) in allocation.as_object().ok_or_else(IvyError::internal)? {
             request.insert(key.clone(), value.clone());
         }
-        request.insert("commentIds", Json::Array(comments));
+        request.insert("commentIds", Json::Array(comments.to_vec()));
         Ok(Some(request))
     }
     async fn verify_attempt(&self, document: &Document, task: &Document) -> IvyResult<()> {
         let value = &document.value;
         let request = value.required("request")?;
         require(
-            document.parent_id.as_ref() == Some(s(&task.pin, "objectId")?)
-                && same(f(value, "task"), &task.pin)?
+            document.parent_id.as_ref() == Some(&task.pin.object_id)
+                && same(f(value, "task"), &task.pin.to_json())?
                 && value.get("principalId").and_then(Json::as_js_string)
                     == Some(self.engine.principal_id())
-                && request.get("taskId") == task.pin.get("objectId")
-                && request.get("expectedRevision") == task.pin.get("revision")
+                && request.get("taskId").and_then(Json::as_js_string) == Some(&task.pin.object_id)
+                && request.get("expectedRevision").and_then(Json::as_f64)
+                    == Some(task.pin.revision)
                 && value.get("requestHash") == Some(&Json::from(hash_json(request)?)),
             "task_board_identity_conflict",
             "Automatic attempt must retain its exact pinned task, principal and original request.",
@@ -386,8 +434,8 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
                 )
                 .await?;
             require(
-                previous.pin.get("objectId") == document.pin.get("objectId")
-                    && n(&previous.pin, "revision")? < n(&document.pin, "revision")?
+                previous.pin.object_id == document.pin.object_id
+                    && previous.pin.revision < document.pin.revision
                     && n(&previous.value, "sequence")? + 1.0 == n(value, "sequence")?
                     && same(f(&previous.value, "task"), f(value, "task"))?
                     && previous.value.get("requestHash")
@@ -434,11 +482,11 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
         if !self.engine.enabled() {
             return Ok(Json::Null);
         }
-        let task = self.engine.read_task(task_id).await?;
-        let value = &task.value;
         if let Some(pending) = self.store.pending_operation(task_id)? {
             return self.engine.recover_operation(&pending).await;
         }
+        let task = self.engine.read_task(task_id).await?;
+        let value = &task.value;
         self.engine.forward_delegated_review(&task).await?;
         if present(f(f(value, "claim"), "run")) && !present(f(value, "publication")) {
             let run = self
@@ -469,7 +517,7 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
                             .any(|phase| eq(&original.value, "phase", phase))
                         {
                             self.engine
-                                .recover_operation(s(&original.pin, "objectId")?)
+                                .recover_operation(&original.pin.object_id)
                                 .await?;
                             return Ok(Json::Null);
                         }
@@ -482,7 +530,13 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
             }
         }
         let at = self.engine.now();
-        if !next_execution_mode(value, &at) || !should_wake(self.store, value, &at).await? {
+        if present(f(value, "claim")) || present(f(value, "publication")) {
+            return Ok(Json::Null);
+        }
+        let comments = self.engine.pending_comment_ids(&task).await?;
+        if !next_execution_mode_with_inputs(value, &at, !comments.is_empty())
+            || !should_wake_with_inputs(self.store, value, &at, !comments.is_empty()).await?
+        {
             return Ok(Json::Null);
         }
         let recover = self.engine.unstarted_missing_context(&task).await?;
@@ -517,7 +571,7 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
         let name = format!(
             "Scheduled task {} revision {}",
             task_id.to_utf8()?,
-            n(&task.pin, "revision")?
+            task.pin.revision
         );
         let mut attempt = self
             .store
@@ -547,7 +601,7 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
             if !eq(&operation.value, "phase", "failed") {
                 return self
                     .engine
-                    .recover_operation(s(&operation.pin, "objectId")?)
+                    .recover_operation(&operation.pin.object_id)
                     .await;
             }
             self.retryable(&operation)?;
@@ -573,7 +627,7 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
             .unwrap_or(0.0)
             + 1.0;
         let Some(request) = self
-            .proposed(&task, sequence, recover, retry.as_ref())
+            .proposed(&task, sequence, recover, retry.as_ref(), &comments)
             .await?
         else {
             return Ok(Json::Null);
@@ -584,7 +638,7 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
                 "principalId",
                 Json::String(self.engine.principal_id().clone()),
             ),
-            ("task", task.pin.clone()),
+            ("task", task.pin.to_json()),
             ("sequence", Json::Number(sequence)),
             ("request", request.clone()),
             ("requestHash", hash_json(&request)?.into()),
@@ -592,12 +646,14 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
                 "previous",
                 attempt
                     .as_ref()
-                    .map(|d| d.pin.clone())
+                    .map(|d| d.pin.to_json())
                     .unwrap_or(Json::Null),
             ),
             (
                 "previousOperation",
-                previous_operation.map(|d| d.pin).unwrap_or(Json::Null),
+                previous_operation
+                    .map(|d| d.pin.to_json())
+                    .unwrap_or(Json::Null),
             ),
             ("preparedAt", Json::String(self.engine.now())),
         ]);
@@ -612,18 +668,18 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
                     &match &attempt {
                         Some(d) => format!(
                             "successor:{}",
-                            hash_json(&Json::object([
-                                ("pin", d.pin.clone()),
-                                ("next", next.clone())
-                            ]))?
+                            ivy_contracts::hash::hash_object([
+                                (&"pin".into(), &d.pin.to_json()),
+                                (&"next".into(), &next)
+                            ])?
                         ),
                         None => "prepare".into(),
                     },
                 )?,
                 &match &attempt {
                     Some(d) => Json::object([
-                        ("objectId", d.pin.required("objectId")?.clone()),
-                        ("expectedRevision", d.pin.required("revision")?.clone()),
+                        ("objectId", Json::String(d.pin.object_id.clone())),
+                        ("expectedRevision", Json::Number(d.pin.revision)),
                     ]),
                     None => Json::object([(
                         "create",
@@ -660,10 +716,8 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
         }
         let attempt = attempt.unwrap();
         self.verify_attempt(&attempt, &task).await?;
-        self.store.complete_local_workflow(
-            s(&attempt.pin, "objectId")?,
-            s(&attempt.value, "preparedAt")?,
-        )?;
+        self.store
+            .complete_local_workflow(&attempt.pin.object_id, s(&attempt.value, "preparedAt")?)?;
         self.engine
             .schedule(attempt.value.required("request")?)
             .await

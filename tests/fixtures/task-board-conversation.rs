@@ -49,6 +49,156 @@ fn ids(values: Vec<JsString>) -> Json {
 }
 
 #[test]
+fn full_question_views_keep_original_sequences_and_resolve_once() {
+    use ivy_task_board::engine_read::comment_reads::{task_card, task_view_page};
+    let mut comments = Vec::new();
+    for (i, resolution) in [
+        "user", "task", "explicit", "coverage", "answered", "expired",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let id = format!("q{i}");
+        let question = |sequence| {
+            Json::object([
+                ("commentId", id.clone().into()),
+                ("sequence", Json::Number(sequence as f64)),
+                ("purpose", "question".into()),
+                ("authorKind", "agent".into()),
+                ("body", format!("Original {sequence}").into()),
+                (
+                    "recipient",
+                    if *resolution == "task" {
+                        Json::object([("kind", "task".into()), ("taskId", "peer".into())])
+                    } else {
+                        Json::object([("kind", "user".into())])
+                    },
+                ),
+                (
+                    "requests",
+                    if *resolution == "coverage" {
+                        Json::Array(vec![Json::object([("requestId", format!("r{i}").into())])])
+                    } else {
+                        Json::Array(vec![])
+                    },
+                ),
+                (
+                    "nativeInput",
+                    if ["answered", "expired"].contains(resolution) {
+                        Json::object([("state", "pending".into())])
+                    } else {
+                        Json::Null
+                    },
+                ),
+            ])
+        };
+        comments.push(question(i * 4 + 1));
+        let mut reply = Json::object([
+            ("commentId", format!("reply{i}").into()),
+            ("sequence", Json::Number((i * 4 + 2) as f64)),
+            ("purpose", "comment".into()),
+            ("authorKind", "agent".into()),
+            ("replyTo", id.clone().into()),
+        ]);
+        match *resolution {
+            "user" => {
+                reply.insert("authorKind", "user".into());
+            }
+            "task" => {
+                reply.insert("sourceTaskId", "peer".into());
+            }
+            "explicit" => {
+                reply.insert("resolvesQuestions", Json::Array(vec![id.clone().into()]));
+            }
+            "coverage" => {
+                reply.insert(
+                    "responses",
+                    Json::Array(vec![Json::object([("requestId", format!("r{i}").into())])]),
+                );
+            }
+            state => {
+                reply.insert("nativeInput", Json::object([("state", state.into())]));
+            }
+        }
+        comments.push(reply);
+        comments.push(question(i * 4 + 3));
+        let mut non_question = question(i * 4 + 4);
+        non_question.insert("purpose", "comment".into());
+        comments.push(non_question);
+    }
+    let task = Json::object([
+        ("comments", Json::Array(comments)),
+        ("commentDeliveries", Json::Array(vec![])),
+        ("fields", Json::object([] as [(&str, Json); 0])),
+    ]);
+    let before = task.clone();
+    let expected = ivy_sdk::open_task_questions(&task, None).unwrap();
+    assert_eq!(expected.len(), 6);
+    let calls = Cell::new(0);
+    let resolver = |t: &Json, run: Option<&JsString>| {
+        assert!(run.is_none());
+        calls.set(calls.get() + 1);
+        ivy_sdk::open_task_questions(t, run)
+    };
+    let condition = |_: &Json, _: Option<&Json>| -> IvyResult<Json> { unreachable!() };
+    let policies = ConversationPolicies {
+        questions: &resolver,
+        condition: &condition,
+    };
+    let summary = comment_summary(&policies, &task, &"self".into()).unwrap();
+    assert_eq!(calls.replace(0), 1);
+    let projected = summary.required("questions").unwrap().as_array().unwrap();
+    assert_eq!(projected.len(), expected.len());
+    for (q, original) in projected.iter().zip(&expected) {
+        for key in ["commentId", "sequence", "recipient"] {
+            assert_eq!(q.get(key), original.get(key));
+        }
+        assert_eq!(q.get("open"), Some(&true.into()));
+    }
+    let view = Json::object([
+        (
+            "object",
+            Json::object([("objectId", "self".into()), ("revision", 1.0.into())]),
+        ),
+        ("task", task.clone()),
+        ("executionCondition", Json::Null),
+    ]);
+    let card = task_card(&policies, &view, None, None).unwrap();
+    assert_eq!(calls.replace(0), 1);
+    assert_eq!(
+        card.required("task").unwrap().get("openQuestionCount"),
+        Some(&5.0.into())
+    );
+    let page = task_view_page(
+        &policies,
+        &view,
+        &Json::object([(
+            "comments",
+            Json::object([("questionsOnly", true.into()), ("limit", 100.0.into())]),
+        )]),
+    )
+    .unwrap();
+    assert_eq!(calls.replace(0), 1);
+    assert_eq!(
+        page.required("task").unwrap().get("comments"),
+        Some(&Json::Array(expected.clone()))
+    );
+    assert_eq!(
+        page.required("commentPage").unwrap().get("total"),
+        Some(&6.0.into())
+    );
+    assert_eq!(
+        page.required("openQuestions")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+    assert_eq!(task, before);
+}
+
+#[test]
 fn current_conversation_projections_match_original() {
     let fixture = fixture();
     let mut count = 0;
@@ -142,7 +292,17 @@ fn current_shared_resolver_drives_owned_question_projections() {
             &format!("{name} native run view"),
         );
         let actual = Json::object([
-            ("openIds", ids(policies.open_questions(task).unwrap())),
+            (
+                "openIds",
+                Json::Array(
+                    policies
+                        .open_questions(task)
+                        .unwrap()
+                        .iter()
+                        .map(|question| field(question, "commentId").clone())
+                        .collect(),
+                ),
+            ),
             (
                 "unanswered",
                 unanswered_question(policies.questions, task, run)

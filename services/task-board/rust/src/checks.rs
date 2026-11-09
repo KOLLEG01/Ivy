@@ -11,13 +11,17 @@ use crate::{
     native_lifecycle::LifecycleStore,
     native_plan::{matches_task_primary, owner, read_plan},
     native_recovery::fresh_context_recovery,
-    wake::{WakeStore, should_wake, validate_dependencies},
+    wake::{WakeStore, should_wake_with_inputs, validate_dependencies, wake_blocked},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
-    checked_native_contract::CheckedNativeContracts, hash::digest, json::canonical,
-    limits::JSON_OBJECT_CONTENT_BYTES, native_backend::BackendIdentity, whatwg_url::parse_url,
+    checked_native_contract::CheckedNativeContracts,
+    hash::digest,
+    json::{canonical, canonical_equal},
+    limits::JSON_OBJECT_CONTENT_BYTES,
+    native_backend::BackendIdentity,
+    whatwg_url::parse_url,
 };
 use ivy_sdk::{
     native_evidence::native_instant,
@@ -166,9 +170,7 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
 fn same(a: Option<&Json>, b: Option<&Json>) -> IvyResult<bool> {
     Ok(match (a, b) {
         (None, None) => true,
-        (Some(a), Some(b)) => {
-            canonical(a, JSON_OBJECT_CONTENT_BYTES)? == canonical(b, JSON_OBJECT_CONTENT_BYTES)?
-        }
+        (Some(a), Some(b)) => canonical_equal(a, b, JSON_OBJECT_CONTENT_BYTES)?,
         _ => false,
     })
 }
@@ -422,7 +424,7 @@ impl<S: CheckStore> TaskChecks<'_, S> {
         &self,
         task: &Json,
         intent: &Json,
-        _id: &JsString,
+        id: &JsString,
         now: &JsString,
         target: Option<&Json>,
         workspace: Option<&Json>,
@@ -448,7 +450,14 @@ impl<S: CheckStore> TaskChecks<'_, S> {
             )?;
         }
         require(
-            should_wake(self.store, task, now).await?,
+            should_wake_with_inputs(
+                self.store,
+                task,
+                now,
+                !wake_blocked(task, now)
+                    && crate::scheduler::has_queued_input(self.store, task, id).await?,
+            )
+            .await?,
             "task_board_input_required",
             "No work or new input is pending.",
         )?;

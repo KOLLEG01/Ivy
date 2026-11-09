@@ -172,7 +172,7 @@ impl<'a, S: MaintenanceStore> Retention<'a, S> {
             .await?
             .unwrap_or_else(|| content.required("value").unwrap().clone()),
         };
-        let task = ivy_sdk::upgrade_task_record(&task)?;
+        let task = ivy_sdk::upgrade_task_record_owned(task)?;
         require(
             task.get("publication").is_none_or(Json::is_null)
                 && !self.store.publication_busy(id)?,

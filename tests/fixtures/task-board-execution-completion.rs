@@ -5,9 +5,10 @@ use crate::{
     },
     engine_read::read_failure::ReadCause,
     journal_store::{
-        CachedRecord, ReadScopes,
+        CachedValue, ReadScopes,
         mutation_ports::{LocalMutationProgram, WriteFailure},
         persistent_reads::json_values::{self as v, Value},
+        remember_record,
     },
     local_executor::LocalExecutor,
     reconciler::ReconcileExecutor,
@@ -124,6 +125,64 @@ fn value(label: &str) -> Value {
     v::object([("label".into(), Value::String(label.into()))])
 }
 
+#[test]
+fn confirmed_write_invalidates_all_policy_keys_without_retaining_unused_records() {
+    let cache = crate::journal_store::ReadCache::default();
+    let entries = cache.entries().unwrap();
+    for (key, id) in [
+        ("task-board/task:changed:7:true:false:true", "changed"),
+        ("task-board/task:changed:7:true:true:false", "changed"),
+        ("task-board/task:other:7:true:false:true", "other"),
+    ] {
+        let record = crate::operations::StoredRecord {
+            key: "task-board/task".into(),
+            pin: crate::operations::ObjectPin {
+                object_id: id.into(),
+                revision: 7.0,
+            },
+            value: Value::Null,
+            metadata: Value::Null,
+            revision: Value::Null,
+        };
+        let value = if key.contains("true:true:false") {
+            CachedValue::Workflow(crate::journal_store::ReadRecord {
+                document: crate::operations::Document {
+                    pin: record.pin,
+                    value: record.value,
+                    parent_id: None,
+                    content_hash: "original".into(),
+                },
+                archived: false,
+                metadata: None,
+                references: None,
+            })
+        } else {
+            CachedValue::Materialized(record)
+        };
+        let bytes = match &value {
+            CachedValue::Workflow(record) => record.retained_bytes(),
+            CachedValue::Materialized(record) => record.retained_bytes(),
+        };
+        let _ = remember_record(&mut entries.borrow_mut(), key.into(), bytes, || value);
+    }
+    let result = Value::object([
+        ("object", Value::object([("id", "changed".into())])),
+        ("revision", Value::object([("revision", 8.0.into())])),
+    ]);
+    let pin =
+        crate::journal_store::write_completion::complete_write(Some(&cache), &result).unwrap();
+    assert_eq!(
+        pin,
+        Value::object([("objectId", "changed".into()), ("revision", 8.0.into())])
+    );
+    let entries = entries.borrow();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].1.object_id(),
+        &ivy_contracts::JsString::from("other")
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn completions_coalesce_json_requests_and_readmit_after_settlement() {
     let gate = Gate::default();
@@ -152,11 +211,7 @@ async fn completions_coalesce_json_requests_and_readmit_after_settlement() {
         .drive(async { (duplicate.await.unwrap(), other.await.unwrap()) })
         .await;
     assert!(result.eq(&original));
-    assert!(
-        v::field(&result, "label")
-            .unwrap()
-            .eq(&Value::String("before".into()))
-    );
+    assert!(v::field(&result, "label").eq(&Value::String("before".into())));
     assert!(other_result.eq(&other_value));
     queue.settled().await;
     let later_value = value("later");
@@ -305,15 +360,22 @@ async fn execution_inherits_each_action_scope_and_drains_on_the_existing_local_o
     let original = value("first");
     let first = scopes
         .with_read_cache(async {
-            scopes.cache().entries().unwrap().borrow_mut().push((
-                "first".into(),
-                CachedRecord {
-                    object_id: original.clone(),
-                    document: None,
-                    materialized: Some(original.clone()),
-                    retained_bytes: 0,
+            let record = crate::operations::StoredRecord {
+                key: "task-board/operation".into(),
+                pin: crate::operations::ObjectPin {
+                    object_id: "first".into(),
+                    revision: 1.0,
                 },
-            ));
+                value: original.clone(),
+                metadata: Value::Null,
+                revision: Value::Null,
+            };
+            remember_record(
+                &mut scopes.cache().entries().unwrap().borrow_mut(),
+                "first".into(),
+                record.retained_bytes(),
+                || CachedValue::Materialized(record),
+            );
             queue.execute_graph(&"one".into(), original.clone())
         })
         .await;

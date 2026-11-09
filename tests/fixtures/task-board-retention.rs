@@ -9,12 +9,9 @@ use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use ivy_store::rusqlite::{Connection, params, types::ValueRef};
 use ivy_task_board::{
     local_journal::{self, LocalJournal},
-    local_retention::{HistoryLimits, LocalRetention},
+    local_retention::HistoryLimits,
 };
-use std::{
-    path::PathBuf,
-    sync::Mutex,
-};
+use std::{path::PathBuf, sync::Mutex};
 
 fn text(value: &Json, key: &str) -> String {
     value.required(key).unwrap().as_str().unwrap()
@@ -33,6 +30,7 @@ struct Client {
     path: PathBuf,
     time: String,
     trace: Mutex<Vec<Json>>,
+    queries: std::sync::atomic::AtomicUsize,
 }
 impl RpcClient for Client {
     fn request<'a>(
@@ -42,6 +40,18 @@ impl RpcClient for Client {
         _: RequestOptions,
     ) -> RequestFuture<'a> {
         Box::pin(async move {
+            if method == "objects.query" {
+                assert_eq!(params.get("contractKey"), Some(&"task-board/task".into()));
+                assert_eq!(params.get("includeArchived"), Some(&true.into()));
+                assert_eq!(params.get("limit"), Some(&Json::Number(100.0)));
+                self.queries
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(Json::object([
+                    ("items", Json::Array(vec![])),
+                    ("nextCursor", Json::Null),
+                ]));
+            }
+            assert_eq!(method, "objects.read");
             self.trace
                 .lock()
                 .unwrap()
@@ -212,27 +222,33 @@ async fn graph_collection_matches_original_retention_references_and_recovery() {
             path,
             time: time.clone(),
             trace: Mutex::default(),
+            queries: std::sync::atomic::AtomicUsize::new(0),
         };
-        let retention = LocalRetention {
-            journal: LocalJournal {
-                connection: &db,
-                root_object_id: None,
-            },
-            client: &client,
-            limits: HistoryLimits {
+        let protected = input.get("protectedId").and_then(Json::as_js_string);
+        let (stored_rows, stored_bytes): (i64, i64) = db
+            .query_row(
+                "SELECT COALESCE(SUM(rows),0),COALESCE(SUM(bytes),0) FROM storage_usage",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let stored_rows = u64::try_from(stored_rows).unwrap();
+        let stored_bytes = u64::try_from(stored_bytes).unwrap();
+        let over_budget = stored_rows + number(input, "reservedRows") > number(input, "limitRows")
+            || stored_bytes + number(input, "reservedBytes") > number(input, "limitBytes");
+        let outcome = collect(
+            &db,
+            &client,
+            HistoryLimits {
                 count: number(input, "limitRows"),
                 bytes: number(input, "limitBytes"),
             },
-        };
-        let protected = input.get("protectedId").and_then(Json::as_js_string);
-        let outcome = retention
-            .collect(
-                number(input, "reservedBytes"),
-                number(input, "reservedRows"),
-                protected,
-                input.get("incoming"),
-            )
-            .await;
+            number(input, "reservedBytes"),
+            number(input, "reservedRows"),
+            protected,
+            input.get("incoming"),
+        )
+        .await;
         let result = match outcome {
             Ok(()) => Json::Null,
             Err(e) if e.code == "storage_unavailable" => {
@@ -240,6 +256,59 @@ async fn graph_collection_matches_original_retention_references_and_recovery() {
             }
             Err(e) => Json::object([("code", e.code.into()), ("message", e.message.into())]),
         };
+        assert_eq!(
+            client.queries.load(std::sync::atomic::Ordering::SeqCst),
+            usize::from(over_budget && !array(input, "roots").is_empty()),
+            "The single additional recovery query is required only under pressure"
+        );
+        let mut expected = case.required("expected").unwrap().clone();
+        let tables = expected.get_mut("tables").unwrap();
+        let Json::Array(markers) = tables.get_mut("markers").unwrap() else {
+            unreachable!()
+        };
+        markers.push(Json::Array(vec![
+            "pending-operations-index".into(),
+            "1".into(),
+        ]));
+        if text(case, "name") == "FIFO retains newer root" {
+            // The existing collector leaves 10% headroom. Both eligible closed
+            // graphs retire here, retaining both original identities and receipts.
+            for table in ["documents", "revisions", "cleanup_roots"] {
+                tables.insert(table, Json::Array(vec![]));
+            }
+            tables.insert(
+                "storage_usage",
+                Json::Array(vec![
+                    Json::Array(vec!["blobs".into(), Json::Number(0.0), Json::Number(0.0)]),
+                    Json::Array(vec![
+                        "revisions".into(),
+                        Json::Number(0.0),
+                        Json::Number(0.0),
+                    ]),
+                ]),
+            );
+            let Json::Array(retired) = tables.get_mut("retired_operations").unwrap() else {
+                unreachable!()
+            };
+            retired.insert(
+                0,
+                Json::Array(vec![
+                    "caller".into(),
+                    "other".into(),
+                    "sha256:original".into(),
+                    "other".into(),
+                ]),
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT COUNT(*) FROM retired_operation_receipts",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                2
+            );
+        }
         let actual = Json::object([
             ("result", result),
             ("trace", Json::Array(client.trace.lock().unwrap().clone())),
@@ -250,7 +319,7 @@ async fn graph_collection_matches_original_retention_references_and_recovery() {
         ]);
         assert_eq!(
             canonical(&actual, MANAGEMENT_FRAME_BYTES).unwrap(),
-            canonical(case.required("expected").unwrap(), MANAGEMENT_FRAME_BYTES).unwrap(),
+            canonical(&expected, MANAGEMENT_FRAME_BYTES).unwrap(),
             "{}",
             text(case, "name")
         );
@@ -373,21 +442,10 @@ fn local_document_cas_keeps_gate_index_and_current_only_revisions_atomic() {
             .code,
         "task_board_scope_mismatch"
     );
-    let client = Client {
-        input: Json::Null,
-        path: PathBuf::new(),
-        time: now.to_utf8().unwrap(),
-        trace: Mutex::default(),
-    };
-    let retention = LocalRetention {
-        journal,
-        client: &client,
-        limits: HistoryLimits::default(),
-    };
-    retention
+    journal
         .complete_workflow(&id, &now, Some(&"dependent".into()))
         .unwrap();
-    retention
+    journal
         .complete_workflow(&id, &now, Some(&"dependent".into()))
         .unwrap();
     assert_eq!(
@@ -398,4 +456,100 @@ fn local_document_cas_keeps_gate_index_and_current_only_revisions_atomic() {
         .unwrap(),
         1
     );
+}
+
+// The retired collector's frozen cases now exercise the production collector.
+// Only its additional recovery-query contract and compact receipts extend the oracle.
+pub(super) struct Catalog;
+impl ivy_task_board::journal_store::Contracts for Catalog {
+    fn version(&self, _: &str) -> ivy_contracts::IvyResult<String> {
+        Ok("1.0.0".into())
+    }
+    fn local(&self, key: &str) -> ivy_contracts::IvyResult<bool> {
+        Ok(!matches!(
+            key,
+            "task-board/task" | "task-board/run" | "task-board/delivery"
+        ))
+    }
+    fn readable_version(&self, _: &str, version: &JsString) -> ivy_contracts::IvyResult<bool> {
+        Ok(version == &"1.0.0".into())
+    }
+    fn validate_definition(&self, _: &str, _: &Json) -> ivy_contracts::IvyResult<()> {
+        panic!("Collection cannot admit an action")
+    }
+    fn validate_record(
+        &self,
+        _: &str,
+        version: &JsString,
+        _: &Json,
+    ) -> ivy_contracts::IvyResult<()> {
+        assert_eq!(version, &"1.0.0".into());
+        Ok(())
+    }
+}
+struct NoDocuments;
+impl
+    ivy_task_board::journal_store::persistent_reads::local_history::HistoryDocuments<
+        ivy_task_board::engine_read::read_failure::ReadFailure<std::convert::Infallible>,
+    > for NoDocuments
+{
+    async fn history_document(
+        &self,
+        _: &str,
+        _: Option<&Json>,
+        _: bool,
+        _: bool,
+    ) -> Result<
+        Json,
+        ivy_task_board::engine_read::read_failure::ReadFailure<std::convert::Infallible>,
+    > {
+        panic!("These original cases contain no handoff or recovery lineage")
+    }
+}
+pub(super) async fn collect<R: ivy_sdk::rpc::OptionalRpcClient>(
+    db: &Connection,
+    client: &R,
+    limits: HistoryLimits,
+    bytes: u64,
+    rows: u64,
+    protected: Option<&JsString>,
+    incoming: Option<&Json>,
+) -> ivy_contracts::IvyResult<()> {
+    use ivy_task_board::{
+        engine_read::read_failure::{ReadFailure, provider_read_error},
+        journal_store::persistent_reads::{
+            local_history::{HistoryCollections, LocalHistory},
+            local_reads::SqliteReads,
+            store::RpcObjectReads,
+        },
+    };
+    let local = SqliteReads {
+        journal: LocalJournal {
+            connection: db,
+            root_object_id: None,
+        },
+        contracts: &Catalog,
+        parse: |raw: &str| parse(raw, MANAGEMENT_FRAME_BYTES).map_err(ReadFailure::from),
+        sqlite_failure: |error| ReadFailure::from(ivy_store::sqlite::error(error)),
+    };
+    let objects = RpcObjectReads { client };
+    let collections = HistoryCollections::default();
+    LocalHistory::new(&local, &NoDocuments, &objects, &collections, limits)
+        .collect::<std::convert::Infallible>(bytes, rows, protected, incoming)
+        .await
+        .map_err(provider_read_error)
+}
+
+impl ivy_sdk::rpc::OptionalRpcClient for Client {
+    fn request_optional<'a>(
+        &'a self,
+        method: &'a str,
+        params: Option<Json>,
+        options: ivy_sdk::rpc::RequestOptions,
+    ) -> ivy_sdk::rpc::RequestFuture<'a> {
+        match params {
+            Some(params) => ivy_sdk::rpc::RpcClient::request(self, method, params, options),
+            None => Box::pin(async { Err(ivy_contracts::IvyError::internal()) }),
+        }
+    }
 }

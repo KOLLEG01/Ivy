@@ -349,7 +349,11 @@ fn options(backend: &BackendIdentity) -> Json {
 }
 fn task(backend: &BackendIdentity) -> Document {
     Document {
-        pin: Json::object([("objectId", "task".into()), ("revision", 1.0.into())]),
+        pin: ivy_task_board::operations::ObjectPin::from_json(Json::object([
+            ("objectId", "task".into()),
+            ("revision", 1.0.into()),
+        ]))
+        .unwrap(),
         parent_id: None,
         content_hash: String::new(),
         value: Json::object([
@@ -781,7 +785,11 @@ async fn discovery_rejects_foreign_owner_unavailable_account_and_changed_continu
         key: "task-board/run".into(),
         name: "Previous".into(),
         document: Document {
-            pin: Json::object([("objectId", "previous".into()), ("revision", 1.0.into())]),
+            pin: ivy_task_board::operations::ObjectPin::from_json(Json::object([
+                ("objectId", "previous".into()),
+                ("revision", 1.0.into()),
+            ]))
+            .unwrap(),
             value: previous,
             parent_id: None,
             content_hash: String::new(),

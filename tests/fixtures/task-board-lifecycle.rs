@@ -66,7 +66,8 @@ fn pin(n: u64, r: f64) -> Json {
 }
 fn doc(v: &Json) -> Document {
     Document {
-        pin: v.required("pin").unwrap().clone(),
+        pin: ivy_task_board::operations::ObjectPin::from_json(v.required("pin").unwrap().clone())
+            .unwrap(),
         value: v.required("value").unwrap().clone(),
         parent_id: Some("root".into()),
         content_hash: hash_json(v.required("value").unwrap()).unwrap(),
@@ -188,7 +189,8 @@ impl World<'_> {
                 return Err(IvyError::new_js(
                     code.as_js_string().unwrap().clone(),
                     "The exact local call is unavailable.".into(),
-                ).with_outcome(if flag(self.input(), "migrationCallUncertain") {
+                )
+                .with_outcome(if flag(self.input(), "migrationCallUncertain") {
                     ivy_contracts::Outcome::Unknown
                 } else {
                     ivy_contracts::Outcome::NotExecuted
@@ -211,7 +213,7 @@ impl World<'_> {
                 && a.as_js_string().is_some()
                 && flag(self.input(), "migrationRunChanged")
             {
-                document.pin.insert("revision", Json::Number(2.0));
+                document.pin.revision = 2.0;
             }
             return Ok(LifecycleDocument {
                 document,
@@ -342,11 +344,44 @@ impl Store for World<'_> {
     async fn prepared_mutation_id(&self, _: &str) -> IvyResult<JsString> {
         panic!("Unexpected identity")
     }
-    async fn write_prepared(&self, _: &str, _: &Json, _: &JsString, _: &Json) -> IvyResult<Json> {
+    async fn write_prepared(
+        &self,
+        _: &str,
+        _: &Json,
+        _: &JsString,
+        _: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
+    ) -> IvyResult<Json> {
         panic!("Unexpected prepared write")
     }
 }
 impl LifecycleStore for World<'_> {
+    async fn task_header(
+        &self,
+        address: &Json,
+        primary: bool,
+        archived: bool,
+    ) -> IvyResult<LifecycleDocument> {
+        let mut result = World::read(self, "task-board/task", address, primary, archived).await?;
+        if flag(self.input(), "compactHeader") {
+            assert!(
+                primary && archived,
+                "Retained lifecycle reads keep both original policies."
+            );
+            result
+                .document
+                .value
+                .insert("comments", Json::Array(vec![]));
+            result
+                .document
+                .value
+                .insert("commentDeliveries", Json::Array(vec![]));
+            result.document.value.insert("commentStore", compact_tree());
+        }
+        Ok(result)
+    }
+
     async fn migration_evidence(
         &self,
         catalogs: &CheckedNativeContracts,
@@ -371,6 +406,10 @@ impl LifecycleStore for World<'_> {
         p: bool,
         r: bool,
     ) -> IvyResult<LifecycleDocument> {
+        assert!(
+            k != "task-board/task" || !flag(self.input(), "compactHeader"),
+            "A compact lifecycle must not request the whole conversation."
+        );
         World::read(self, k, a, p, r).await
     }
     async fn page(&self, k: &str, o: &Json) -> IvyResult<Json> {
@@ -472,7 +511,7 @@ impl LifecyclePolicies for World<'_> {
                 Json::String(id.clone()),
             ],
         );
-        assert_eq!(t.pin, self.task().pin);
+        assert_eq!(t.pin.to_json(), self.task().pin.to_json());
         self.fail("allocate")?;
         Ok(merge(
             self.base.required("allocation")?,
@@ -481,7 +520,7 @@ impl LifecyclePolicies for World<'_> {
     }
     async fn unstarted_missing_context(&self, t: &Document) -> IvyResult<bool> {
         event(&self.trace, ["proof".into(), self.initial("task").clone()]);
-        assert_eq!(t.pin, self.task().pin);
+        assert_eq!(t.pin.to_json(), self.task().pin.to_json());
         Ok(flag(self.input(), "proof"))
     }
 }
@@ -584,6 +623,28 @@ struct Steps<'a, 'b> {
     count: usize,
 }
 impl LifecyclePublication for Steps<'_, '_> {
+    async fn write_task_change(
+        &mut self,
+        value: &Json,
+        destination: &Json,
+        change: ivy_task_board::operations::TaskChange,
+    ) -> IvyResult<Json> {
+        assert!(matches!(
+            change,
+            ivy_task_board::operations::TaskChange::Header
+        ));
+        assert_eq!(value.get("commentStore"), Some(&compact_tree()));
+        assert!(value.required("comments")?.as_array().unwrap().is_empty());
+        assert!(
+            value
+                .required("commentDeliveries")?
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        self.write("task-board/task", value, destination).await
+    }
+
     fn pin(&self) -> IvyResult<Json> {
         Ok(pin(300, 1.0))
     }
@@ -1164,4 +1225,142 @@ async fn archive_cleanup_failure_keeps_original_request_pending_until_retry() {
     assert_eq!(cleanups.len(), 2);
     assert_eq!(cleanups[0], cleanups[1]);
     assert!(world.client.replies.lock().unwrap().is_empty());
+}
+
+fn compact_tree() -> Json {
+    Json::object([
+        ("kind", "tree".into()),
+        (
+            "root",
+            Json::object([("object", pin(999, 1.0)), ("length", Json::Number(4096.0))]),
+        ),
+        ("length", Json::Number(4096.0)),
+        (
+            "summary",
+            Json::object([
+                ("directCount", Json::Number(4096.0)),
+                ("questions", Json::Array(vec![])),
+            ]),
+        ),
+    ])
+}
+#[tokio::test(flavor = "current_thread")]
+async fn retained_lifecycle_compact_headers_preserve_original_outcomes_and_native_effects() {
+    async fn probe(
+        group: &Json,
+        source: &Json,
+        compact: bool,
+        catalogs: &CheckedNativeContracts,
+    ) -> Json {
+        let mut row = source.clone();
+        row.get_mut("input")
+            .unwrap()
+            .insert("compactHeader", compact.into());
+        let trace: Trace = Arc::default();
+        let client = Arc::new(Client {
+            case_name: s(&row, "name").clone(),
+            replies: Mutex::new(
+                row.required("rpcReplies")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .to_vec()
+                    .into(),
+            ),
+            trace: trace.clone(),
+        });
+        let world = World {
+            base: group.required("base").unwrap(),
+            row: &row,
+            live: RefCell::new(
+                row.required("initial")
+                    .unwrap()
+                    .required("liveOperation")
+                    .unwrap()
+                    .clone(),
+            ),
+            trace,
+            tools: Arc::new(ToolClients::new(client.clone())),
+            client,
+            consumed: Cell::new(false),
+            cleanups: RefCell::default(),
+        };
+        let subject = NativeLifecycle {
+            store: &world,
+            engine: &world,
+            operations: &world,
+            catalogs,
+        };
+        let operation = doc(world.initial("operation"));
+        let task = world.task();
+        let mut steps = Steps {
+            world: &world,
+            count: 0,
+        };
+        let mut results = vec![];
+        for _ in 0..world
+            .input()
+            .get("passes")
+            .and_then(Json::as_f64)
+            .unwrap_or(1.0) as usize
+        {
+            let result = if f(world.input(), "entry").is_str("restore") {
+                subject
+                    .restore_for_execution(&operation, &task)
+                    .await
+                    .map(|_| Json::Null)
+            } else {
+                subject
+                    .publish(
+                        &operation,
+                        &mut steps,
+                        merge(
+                            &Json::object([
+                                ("task", Json::Null),
+                                ("history", Json::Null),
+                                ("archive", Json::Null),
+                            ]),
+                            f(world.input(), "outcome"),
+                        ),
+                    )
+                    .await
+            };
+            results.push(outcome(result));
+        }
+        assert!(world.client.replies.lock().unwrap().is_empty());
+        Json::object([
+            ("outcomes", Json::Array(results)),
+            (
+                "nativeCalls",
+                world
+                    .live
+                    .borrow()
+                    .required("value")
+                    .unwrap()
+                    .required("nativeCalls")
+                    .unwrap()
+                    .clone(),
+            ),
+            ("cleanup", Json::Array(world.cleanups.borrow().clone())),
+        ])
+    }
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let mut cases = 0;
+    for group in data().as_array().unwrap() {
+        for row in group.required("rows").unwrap().as_array().unwrap() {
+            let original = probe(group, row, false, &catalogs).await;
+            let compact = probe(group, row, true, &catalogs).await;
+            assert_eq!(
+                hash_json(&compact).unwrap(),
+                hash_json(&original).unwrap(),
+                "{:?}",
+                s(row, "name")
+            );
+            cases += 1;
+        }
+    }
+    println!(
+        "Compact lifecycle preserves {cases} original retained scenarios without full Task reads."
+    );
 }

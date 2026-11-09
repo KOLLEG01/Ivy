@@ -217,7 +217,7 @@ impl<S: ExecutionStore, C: Fn() -> String, P: ExecutionServices> CachedExecution
     }
     pub async fn execute_cached(&self, mut operation: Document) -> IvyResult<Json> {
         let gates = self.coordination();
-        let id = s(&operation.pin, "objectId")?.clone();
+        let id = operation.pin.object_id.clone();
         if is(&operation.value, "phase", "succeeded") {
             gates.release(&id, false).await?;
             return Ok(operation.value.required("outcome")?.clone());
@@ -463,7 +463,7 @@ impl<'a, 'x, P: ExecutionProgram + 'a, X: ReconcileExecutor<'a>> ExecutionQueue<
     }
     /// Coalescing is eager and dropping any caller never cancels admitted work.
     pub fn execute(&self, operation: Document) -> IvyResult<ExecutionRequest> {
-        let id = s(&operation.pin, "objectId")?.clone();
+        let id = operation.pin.object_id.clone();
         let (request, active) = completion::admit(&self.state, id);
         if let Some(active) = active {
             let program = self.program;

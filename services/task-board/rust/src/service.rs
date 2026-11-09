@@ -4,7 +4,7 @@ use crate::{
     engine_admission::AdmissionExecution,
     engine_invocations::{EngineInvocations, InternalOwner},
     engine_read::EngineReadRuntime,
-    engine_service::{EngineService, RetainedService, ServiceCategories, ServiceRuntime},
+    engine_service::{EngineService, ServiceCategories, ServiceRuntime},
     generation::{Generation, GenerationClock, GenerationControl, GenerationRuntime, generation},
     journal_store::Contracts,
     native_lifecycle::LifecycleStore,
@@ -59,6 +59,7 @@ struct Current {
 struct Pending {
     identity: Arc<()>,
     generation: u64,
+    attach: Option<Attach>,
 }
 #[derive(Default)]
 struct State {
@@ -87,19 +88,15 @@ struct Attach {
     identity: Arc<()>,
     reply: Arc<Reply>,
 }
-enum Command {
-    Attach(Attach),
-    Close,
-}
 #[derive(Clone)]
 pub struct ServiceControl {
     state: Arc<Mutex<State>>,
-    sender: mpsc::UnboundedSender<Command>,
+    sender: mpsc::Sender<()>,
     finished: watch::Receiver<Option<IvyResult<()>>>,
 }
 pub struct ServiceOwner {
     state: Arc<Mutex<State>>,
-    receiver: mpsc::UnboundedReceiver<Command>,
+    receiver: mpsc::Receiver<()>,
     finished: watch::Sender<Option<IvyResult<()>>>,
     settings: Arc<Json>,
     interval_ms: f64,
@@ -158,19 +155,25 @@ impl ServiceControl {
         }
         retire(&mut state);
         let identity = Arc::new(());
+        let (sender, receiver) = oneshot::channel();
+        let reply = Arc::new(Reply(Mutex::new(Some(sender))));
+        if let Some(previous) = state.pending.take().and_then(|pending| pending.attach) {
+            previous.reply.finish(Err(not_ready()));
+        }
         state.pending = Some(Pending {
             identity: identity.clone(),
             generation: connection.generation(),
+            attach: Some(Attach {
+                connection,
+                identity,
+                reply,
+            }),
         });
-        let (sender, receiver) = oneshot::channel();
-        let reply = Arc::new(Reply(Mutex::new(Some(sender))));
-        let sent = self.sender.send(Command::Attach(Attach {
-            connection,
-            identity,
-            reply,
-        }));
+        let sent = self.sender.try_send(());
         Box::pin(async move {
-            sent.map_err(|_| interrupted())?;
+            if matches!(sent, Err(mpsc::error::TrySendError::Closed(_))) {
+                return Err(interrupted());
+            }
             receiver.await.map_err(|_| interrupted())?
         })
     }
@@ -236,7 +239,7 @@ impl ServiceControl {
             state.closed = true;
             state.pending = None;
             retire(&mut state);
-            let _ = self.sender.send(Command::Close);
+            let _ = self.sender.try_send(());
         }
         let mut finished = self.finished.clone();
         Box::pin(async move {
@@ -304,7 +307,7 @@ impl Activation {
         C: Fn() -> String + 'a,
         P: Contracts + 'a,
         E: AdmissionExecution + 'a,
-        H: LocalHandler + 'a,
+        H: LocalHandler,
         X: ReconcileExecutor<'a>,
         G: GenerationRuntime,
         D: GenerationClock,
@@ -312,7 +315,7 @@ impl Activation {
         &self,
         control: &GenerationControl,
         owner: Generation,
-        handler: &'a H,
+        handler: &H,
         admission: &'a crate::engine_admission::EngineAdmission<'a, S, C, P, E>,
         invocations: &EngineInvocations<'a, '_, X>,
         internal: InternalOwner<'s, '_, X>,
@@ -320,14 +323,12 @@ impl Activation {
         clock: &D,
         drain: impl Future<Output = IvyResult<()>>,
     ) -> IvyResult<()> {
-        let retained = RetainedService {
-            handler,
-            invocations,
-        };
+        // ServiceOwner already retains every complete public handler through
+        // its FIFO retirement barrier. Only internal calls need this drain.
         internal
             .run(
                 admission,
-                self.run(control, owner, &retained, runtime, clock, async {
+                self.run(control, owner, handler, runtime, clock, async {
                     invocations.stop().await;
                     drain.await
                 }),
@@ -360,6 +361,7 @@ impl Activation {
                 .await?;
         }
         self.connection.check_open()?;
+        control.owner_readiness(Ok(runtime.diagnostics()?));
         {
             let mut state = self.state.lock().unwrap();
             if state.closed
@@ -380,6 +382,11 @@ impl Activation {
         }
         self.reply.finish(Ok(()));
         let result = owner.run(handler, runtime, clock, drain).await;
+        if control.notification_overflowed() {
+            self.connection.close_with(IvyError::new(
+                "limit_exceeded", "Native notification hints exceeded their bounded queue; reconcile the original durable work on a fresh connection.",
+            ).with_outcome(Outcome::Unknown));
+        }
         let mut state = self.state.lock().unwrap();
         if state
             .current
@@ -406,10 +413,22 @@ impl ServiceOwner {
     /// Drive this from the journal owner's local root future. The factory's
     /// borrowed graph cannot escape into the SDK's Send callback tasks.
     pub async fn run<F: GenerationFactory>(mut self, factory: &F) -> IvyResult<()> {
-        while let Some(command) = self.receiver.recv().await {
-            let attach = match command {
-                Command::Close => break,
-                Command::Attach(attach) => attach,
+        loop {
+            let attach = {
+                let mut state = self.state.lock().unwrap();
+                if state.closed {
+                    break;
+                }
+                state
+                    .pending
+                    .as_mut()
+                    .and_then(|pending| pending.attach.take())
+            };
+            let Some(attach) = attach else {
+                if self.receiver.recv().await.is_none() {
+                    break;
+                }
+                continue;
             };
             let allowed = {
                 let state = self.state.lock().unwrap();
@@ -522,7 +541,7 @@ pub(crate) fn admitted_service(setup: ServiceSetup) -> IvyResult<(TaskBoardServi
         .ok_or_else(IvyError::internal)?;
     let settings = Arc::new(setup.settings);
     let state = Arc::new(Mutex::new(State::default()));
-    let (sender, receiver) = mpsc::unbounded_channel();
+    let (sender, receiver) = mpsc::channel(1);
     let (finished, observer) = watch::channel(None);
     let control = ServiceControl {
         state: state.clone(),

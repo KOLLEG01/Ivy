@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { ChevronLeft, ChevronRight } from "@lucide/vue";
 import { Button } from "../components/button";
-defineProps<{
+withDefaults(defineProps<{
   count: number;
   page: number;
   hasNext: boolean;
-  hasPrevious?: boolean;
+  hasPrevious?: boolean | undefined;
   loading?: boolean;
-}>();
+}>(), { hasPrevious: undefined });
 defineEmits<{ next: []; previous: [] }>();
 </script>
 <template>

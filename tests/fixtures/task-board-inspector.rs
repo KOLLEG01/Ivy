@@ -187,7 +187,13 @@ impl ReadEvidenceStore for Memory {
         );
         if key == "task-board/task" {
             return Ok(Document {
-                pin: address.clone(),
+                pin: match address.as_js_string() {
+                    Some(object_id) => ivy_task_board::operations::ObjectPin {
+                        object_id: object_id.clone(),
+                        revision: 1.0,
+                    },
+                    None => ivy_task_board::operations::ObjectPin::from_json(address.clone())?,
+                },
                 value: self
                     .input
                     .get("currentTask")
@@ -205,7 +211,13 @@ impl ReadEvidenceStore for Memory {
             run
         };
         Ok(Document {
-            pin: address.clone(),
+            pin: match address.as_js_string() {
+                Some(object_id) => ivy_task_board::operations::ObjectPin {
+                    object_id: object_id.clone(),
+                    revision: 1.0,
+                },
+                None => ivy_task_board::operations::ObjectPin::from_json(address.clone())?,
+            },
             value: value.clone(),
             parent_id: None,
             content_hash: String::new(),
@@ -235,12 +247,12 @@ impl ReadEvidenceStore for Memory {
             .saved
             .borrow()
             .as_ref()
-            .map(|d| d.pin.get("revision").unwrap().as_f64().unwrap())
+            .map(|d| d.pin.to_json().get("revision").unwrap().as_f64().unwrap())
             .unwrap_or(0.0)
             + 1.0;
         let pin = pin(revision);
         let doc = Document {
-            pin: pin.clone(),
+            pin: ivy_task_board::operations::ObjectPin::from_json(pin.clone()).unwrap(),
             value: value.clone(),
             parent_id: None,
             content_hash: hash_json(value)?,
@@ -1039,11 +1051,20 @@ async fn native_inspection_preserves_original_identity_and_search_checkpoints() 
             ),
             Err("task_board_native_unavailable"),
         );
-        let version = if provider == "codex" { "0.163.0" } else { "0.142.3" };
-        let current = catalogs.checked_native_contract(&version.into(), None).unwrap();
+        let version = if provider == "codex" {
+            "0.163.0"
+        } else {
+            "0.142.3"
+        };
+        let current = catalogs
+            .checked_native_contract(&version.into(), None)
+            .unwrap();
         let selection = Json::object([
             ("nativeVersion", version.into()),
-            ("catalogSourceHash", current.catalog().required("sourceHash").unwrap().clone()),
+            (
+                "catalogSourceHash",
+                current.catalog().required("sourceHash").unwrap().clone(),
+            ),
         ]);
         let mut upgraded = routed.clone();
         let mut ticket = upgraded.required("currentTask").unwrap().clone();
@@ -1053,11 +1074,14 @@ async fn native_inspection_preserves_original_identity_and_search_checkpoints() 
         upgraded.insert("currentTask", ticket);
         let mut upgraded_status = moved_status.clone();
         for key in ["nativeVersion", "nativeExecutableHash", "catalogHash"] {
-            upgraded_status.insert(key, match key {
-                "nativeVersion" => version.into(),
-                "catalogHash" => current.catalog_hash().into(),
-                _ => current.catalog().required(key).unwrap().clone(),
-            });
+            upgraded_status.insert(
+                key,
+                match key {
+                    "nativeVersion" => version.into(),
+                    "catalogHash" => current.catalog_hash().into(),
+                    _ => current.catalog().required(key).unwrap().clone(),
+                },
+            );
         }
         let mut upgraded_context = upgraded.required("context").unwrap().clone();
         for key in ["nativeVersion", "catalogSourceHash"] {
@@ -1065,9 +1089,21 @@ async fn native_inspection_preserves_original_identity_and_search_checkpoints() 
         }
         upgraded.insert("status", upgraded_status.clone());
         upgraded.insert("context", upgraded_context);
-        add(&format!("{provider} explicitly selected current catalog"), upgraded.clone(), Ok(vec!["context"]));
-        add(&format!("{provider} current catalog rejects stale status"), changed(&upgraded, "status", moved_status), Err("task_board_native_unavailable"));
-        add(&format!("{provider} new status cannot implicitly replace retained catalog"), changed(&routed, "status", upgraded_status), Err("task_board_native_unavailable"));
+        add(
+            &format!("{provider} explicitly selected current catalog"),
+            upgraded.clone(),
+            Ok(vec!["context"]),
+        );
+        add(
+            &format!("{provider} current catalog rejects stale status"),
+            changed(&upgraded, "status", moved_status),
+            Err("task_board_native_unavailable"),
+        );
+        add(
+            &format!("{provider} new status cannot implicitly replace retained catalog"),
+            changed(&routed, "status", upgraded_status),
+            Err("task_board_native_unavailable"),
+        );
     }
     let mut retry_adapter_passes = 0;
     for (name, input, expected) in &rows {
@@ -1080,7 +1116,10 @@ async fn native_inspection_preserves_original_identity_and_search_checkpoints() 
             reads: Mutex::new(0),
         });
         let saved = i.get("saved").map(|d| Document {
-            pin: d.required("pin").unwrap().clone(),
+            pin: ivy_task_board::operations::ObjectPin::from_json(
+                d.required("pin").unwrap().clone(),
+            )
+            .unwrap(),
             value: d.required("value").unwrap().clone(),
             parent_id: None,
             content_hash: String::new(),

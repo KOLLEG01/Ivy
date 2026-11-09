@@ -11,8 +11,9 @@ use ivy_task_board::{
     native_driver::NativeDriverRuntime,
     native_inspector::{Inspection, InspectionContext},
     native_intent::NativeSlot,
+    native_lifecycle::{LifecycleDocument, LifecycleStore},
     native_orchestrator::{NativeOrchestrator, OrchestrationEngine, OrchestrationServices},
-    native_state::{finished_run, project_native_state},
+    native_state::{OutcomeState, RunPhase, finished_run, project_native_state, read_outcome},
     operations::{Document, Store},
 };
 use std::{
@@ -58,7 +59,8 @@ fn pin(n: u64, r: f64) -> Json {
 }
 fn doc(v: &Json) -> Document {
     Document {
-        pin: v.required("pin").unwrap().clone(),
+        pin: ivy_task_board::operations::ObjectPin::from_json(v.required("pin").unwrap().clone())
+            .unwrap(),
         value: v.required("value").unwrap().clone(),
         content_hash: hash_json(v.required("value").unwrap()).unwrap(),
         parent_id: None,
@@ -148,17 +150,12 @@ fn current_native_state_projection_preserves_terminal_outcomes_and_native_attent
             &status.into(),
             &epoch.map(Json::from).unwrap_or(Json::Null),
             &thread,
-            &"2026-01-02T00:00:00.000Z".into(),
-            &Json::Null,
         )
         .unwrap();
-        assert_eq!(f(&projected, "phase"), &Json::from(phase));
-        assert_eq!(
-            f(f(&projected, "externalOutcome"), "state"),
-            &Json::from(state)
-        );
+        assert_eq!(projected.phase.as_str(), phase);
+        assert_eq!(projected.outcome.state.as_str(), state);
         if phase == "waiting_input" {
-            assert!(f(&projected, "waiting").is_null());
+            assert!(projected.waiting.is_none());
         }
     }
     for state in ["succeeded", "failed", "cancelled"] {
@@ -168,16 +165,9 @@ fn current_native_state_projection_preserves_terminal_outcomes_and_native_attent
             Json::object([("state", state.into()), ("code", Json::Null)]),
         );
         assert_eq!(
-            project_native_state(
-                &run,
-                &"inProgress".into(),
-                &"original".into(),
-                &Json::Null,
-                &"2026-01-02T00:00:00.000Z".into(),
-                &Json::Null
-            )
-            .unwrap_err()
-            .code,
+            project_native_state(&run, &"inProgress".into(), &"original".into(), &Json::Null,)
+                .unwrap_err()
+                .code,
             "task_board_native_state_changed"
         );
         run.insert(
@@ -192,6 +182,248 @@ fn current_native_state_projection_preserves_terminal_outcomes_and_native_attent
     }
 }
 
+#[test]
+fn native_run_projection_retains_boundary_values_without_json_state() {
+    let at = JsString(vec![b't' as u16, 0xd800]);
+    let evidence = Json::Object(vec![
+        ("object".into(), "original evidence".into()),
+        ("object".into(), Json::String(JsString(vec![0xdfff; 16384]))),
+    ]);
+    let thread = Json::object([(
+        "status",
+        Json::object([
+            ("type", "active".into()),
+            ("activeFlags", Json::Array(vec!["running".into()])),
+        ]),
+    )]);
+    let mut run = Json::Object(vec![
+        ("phase".into(), "running".into()),
+        ("phase".into(), "completed".into()),
+        ("cancellation".into(), Json::Null),
+        ("cancellation".into(), true.into()),
+        (
+            "externalOutcome".into(),
+            Json::object([("state", "active".into()), ("code", Json::Null)]),
+        ),
+        (
+            "externalOutcome".into(),
+            Json::object([("state", "succeeded".into())]),
+        ),
+    ]);
+    let original = run.clone();
+    for (status, phase, state, code) in [
+        ("inProgress", RunPhase::Running, OutcomeState::Active, None),
+        (
+            "completed",
+            RunPhase::PublishingResult,
+            OutcomeState::Succeeded,
+            None,
+        ),
+        (
+            "failed",
+            RunPhase::PublishingResult,
+            OutcomeState::Failed,
+            Some("native_failed"),
+        ),
+        (
+            "interrupted",
+            RunPhase::PublishingResult,
+            OutcomeState::Failed,
+            Some("native_interrupted"),
+        ),
+    ] {
+        let projected =
+            project_native_state(&run, &status.into(), &"epoch".into(), &thread).unwrap();
+        assert_eq!(projected.phase, phase);
+        assert_eq!(projected.outcome.state, state);
+        assert_eq!(projected.outcome.code, code.map(JsString::from));
+        assert!(projected.outcome.matches(f(
+            &Json::object([(
+                "outcome",
+                Json::object([
+                    ("state", state.as_str().into()),
+                    ("code", code.map(Json::from).unwrap_or(Json::Null)),
+                ])
+            ),]),
+            "outcome"
+        )));
+        let (serialized_phase, outcome, waiting) = projected.into_parts(&at, &evidence);
+        assert_eq!(serialized_phase, Json::from(phase.as_str()));
+        assert_eq!(
+            outcome
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(key, _)| key.to_utf8().unwrap())
+                .collect::<Vec<_>>(),
+            ["state", "code", "observedAt", "evidence"]
+        );
+        assert_eq!(outcome.get("observedAt"), Some(&Json::String(at.clone())));
+        assert_eq!(outcome.get("evidence"), Some(&evidence));
+        if status == "inProgress" {
+            assert!(waiting.is_null());
+        } else {
+            assert_eq!(f(&waiting, "reason"), &Json::from("publication"));
+            assert_eq!(waiting.get("since"), Some(&Json::String(at.clone())));
+        }
+        assert_eq!(run, original);
+    }
+    for epoch in [Json::Null, "".into(), Json::Number(1.0)] {
+        let projected = project_native_state(&run, &"inProgress".into(), &epoch, &thread).unwrap();
+        assert_eq!(projected.phase, RunPhase::OutcomeUnknown);
+        assert_eq!(projected.outcome.state, OutcomeState::Unknown);
+        let (_, outcome, waiting) = projected.into_parts(&at, &evidence);
+        assert_eq!(
+            outcome
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(key, _)| key.to_utf8().unwrap())
+                .collect::<Vec<_>>(),
+            ["state", "observedAt", "evidence", "code"]
+        );
+        assert_eq!(
+            f(&outcome, "code"),
+            &Json::from("native_active_owner_unconfirmed")
+        );
+        assert_eq!(outcome.get("evidence"), Some(&evidence));
+        assert_eq!(f(&waiting, "reason"), &Json::from("external_outcome"));
+    }
+    let status = JsString(vec![0xd800, b'x' as u16, 0xdfff]);
+    let outcome = read_outcome(&run, &status).unwrap();
+    let mut code = JsString::from("native_");
+    code.0.extend_from_slice(&status.0);
+    assert_eq!(outcome.state, OutcomeState::Active);
+    assert_eq!(outcome.code, Some(code));
+    run.insert("cancellation", false.into());
+    assert_eq!(
+        project_native_state(&run, &"inProgress".into(), &"epoch".into(), &thread)
+            .unwrap()
+            .phase,
+        RunPhase::CancelRequested
+    );
+    assert_eq!(
+        read_outcome(&run, &"interrupted".into()).unwrap().state,
+        OutcomeState::Cancelled
+    );
+}
+
+#[test]
+fn native_outcome_preserves_terminal_guards_and_missing_code_distinction() {
+    let base = |state: &str, code: Option<Json>| {
+        let mut prior = Json::Object(vec![
+            ("state".into(), state.into()),
+            ("state".into(), "active".into()),
+        ]);
+        if let Some(code) = code {
+            prior.insert("code", code);
+        }
+        Json::object([("externalOutcome", prior), ("cancellation", Json::Null)])
+    };
+    let invalid_thread = Json::object([(
+        "status",
+        Json::object([
+            ("type", "active".into()),
+            ("activeFlags", Json::Array(vec![Json::Number(1.0)])),
+        ]),
+    )]);
+    for (prior, status) in [
+        (base("succeeded", None), "completed"),
+        (base("succeeded", Some("".into())), "completed"),
+        (base("failed", Some("native_failed".into())), "inProgress"),
+        (
+            base("cancelled", Some("native_interrupted".into())),
+            "completed",
+        ),
+    ] {
+        assert_eq!(
+            project_native_state(&prior, &status.into(), &"epoch".into(), &invalid_thread)
+                .unwrap_err()
+                .code,
+            "task_board_native_state_changed"
+        );
+    }
+    let succeeded = base("succeeded", Some(Json::Null));
+    assert!(
+        read_outcome(&succeeded, &"completed".into())
+            .unwrap()
+            .matches(f(&succeeded, "externalOutcome"))
+    );
+    let interrupted = base("failed", Some("native_interrupted".into()));
+    assert_eq!(
+        read_outcome(&interrupted, &"failed".into()).unwrap().code,
+        Some("native_failed".into())
+    );
+    let mut cancelling = interrupted;
+    cancelling.insert("cancellation", true.into());
+    assert_eq!(
+        read_outcome(&cancelling, &"failed".into())
+            .unwrap_err()
+            .code,
+        "task_board_native_state_changed"
+    );
+    assert_eq!(
+        read_outcome(&cancelling, &"interrupted".into())
+            .unwrap()
+            .state,
+        OutcomeState::Failed
+    );
+    let active = base("active", Some(Json::Null));
+    assert_eq!(
+        project_native_state(
+            &active,
+            &"inProgress".into(),
+            &"epoch".into(),
+            &invalid_thread
+        )
+        .unwrap_err()
+        .code,
+        "task_board_native_state_invalid"
+    );
+    let early_input = Json::object([(
+        "status",
+        Json::object([
+            ("type", "active".into()),
+            (
+                "activeFlags",
+                Json::Array(vec!["waitingOnApproval".into(), Json::Number(1.0)]),
+            ),
+        ]),
+    )]);
+    assert_eq!(
+        project_native_state(&active, &"inProgress".into(), &"epoch".into(), &early_input)
+            .unwrap()
+            .phase,
+        RunPhase::WaitingInput
+    );
+    for (phase, terminal) in [
+        (RunPhase::Starting, false),
+        (RunPhase::Running, false),
+        (RunPhase::WaitingInput, false),
+        (RunPhase::PublishingResult, false),
+        (RunPhase::Completed, true),
+        (RunPhase::Failed, true),
+        (RunPhase::CancelRequested, false),
+        (RunPhase::Cancelled, true),
+        (RunPhase::OutcomeUnknown, false),
+    ] {
+        assert_eq!(
+            RunPhase::read(Some(&Json::from(phase.as_str()))),
+            Some(phase)
+        );
+        assert_eq!(
+            finished_run(&Json::object([("phase", phase.as_str().into())])),
+            terminal
+        );
+    }
+    assert_eq!(RunPhase::read(None), None);
+    assert_eq!(RunPhase::read(Some(&Json::Number(1.0))), None);
+    assert!(!finished_run(&Json::object([(
+        "phase",
+        "COMPLETED".into()
+    )])));
+}
+
 struct World<'a> {
     row: &'a Json,
     runs: RefCell<HashMap<JsString, Document>>,
@@ -204,6 +436,9 @@ struct World<'a> {
     outputs: Cell<usize>,
     fault: RefCell<Json>,
     find_observations: RefCell<Option<(Json, Json)>>,
+    compact: Cell<bool>,
+    headers: Cell<usize>,
+    queues: Cell<usize>,
 }
 impl World<'_> {
     fn new(row: &Json) -> World<'_> {
@@ -228,6 +463,9 @@ impl World<'_> {
             outputs: Cell::new(0),
             fault: RefCell::new(f(row.required("input").unwrap(), "fault").clone()),
             find_observations: RefCell::default(),
+            compact: Cell::new(false),
+            headers: Cell::new(0),
+            queues: Cell::new(0),
         }
     }
     fn input(&self) -> &Json {
@@ -256,7 +494,7 @@ impl World<'_> {
         let mut d = doc(self.row.required("run").unwrap());
         let text = object.to_utf8().unwrap();
         let number: u64 = text[24..].parse().unwrap();
-        d.pin.insert("objectId", Json::String(object.clone()));
+        d.pin.object_id = object.clone();
         d.value.insert("taskId", Json::String(id(10000 + number)));
         let mut primary = d.value.required("primaryResourceRef").unwrap().clone();
         primary.insert("nativeId", format!("thread-{text}").into());
@@ -282,13 +520,13 @@ impl World<'_> {
         let number: u64 = text[24..].parse().unwrap();
         let run = self.run(&id(number - 10000));
         let mut initial = doc(self.row.required("initial").unwrap());
-        initial.pin.insert("objectId", Json::String(object.clone()));
+        initial.pin.object_id = object.clone();
         initial.value.insert(
             "claim",
-            Json::object([("run", run.pin.clone()), ("phase", "running".into())]),
+            Json::object([("run", run.pin.to_json()), ("phase", "running".into())]),
         );
         let mut d = initial.clone();
-        d.pin.insert("revision", Json::Number(2.0));
+        d.pin.revision = 2.0;
         for (k, v) in f(self.input(), "task").as_object().unwrap_or(&[]) {
             d.value.insert(k.clone(), v.clone());
         }
@@ -297,7 +535,7 @@ impl World<'_> {
                 "comments",
                 Json::Array(vec![Json::object([
                     ("purpose", "handoff".into()),
-                    ("run", run.pin),
+                    ("run", run.pin.to_json()),
                 ])]),
             );
         }
@@ -314,8 +552,8 @@ impl World<'_> {
         let count = self.progress.get() + 1;
         self.progress.set(count);
         let mut r = self.run(run);
-        let revision = n(&r.pin, "revision") + 1.0;
-        r.pin.insert("revision", Json::Number(revision));
+        let revision = n(&r.pin.to_json(), "revision") + 1.0;
+        r.pin.revision = revision;
         r.value.insert(
             "phase",
             if self.input().get("finishAt").and_then(Json::as_f64) == Some(count as f64) {
@@ -329,10 +567,10 @@ impl World<'_> {
         self.runs.borrow_mut().insert(run.clone(), r.clone());
         let key = s(&r.value, "taskId").clone();
         let mut task = self.task(&key);
-        let revision = n(&task.pin, "revision") + 1.0;
-        task.pin.insert("revision", Json::Number(revision));
+        let revision = n(&task.pin.to_json(), "revision") + 1.0;
+        task.pin.revision = revision;
         let mut claim = task.value.required("claim").unwrap().clone();
-        claim.insert("run", r.pin);
+        claim.insert("run", r.pin.to_json());
         task.value.insert("claim", claim);
         task.content_hash = hash_json(&task.value).unwrap();
         self.tasks.borrow_mut().insert(key, task);
@@ -409,8 +647,75 @@ impl Store for World<'_> {
     async fn prepared_mutation_id(&self, _: &str) -> IvyResult<JsString> {
         panic!("Unexpected mutation")
     }
-    async fn write_prepared(&self, _: &str, _: &Json, _: &JsString, _: &Json) -> IvyResult<Json> {
+    async fn write_prepared(
+        &self,
+        _: &str,
+        _: &Json,
+        _: &JsString,
+        _: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
+    ) -> IvyResult<Json> {
         panic!("Unexpected prepared write")
+    }
+}
+impl LifecycleStore for World<'_> {
+    async fn task_header(
+        &self,
+        address: &Json,
+        primary: bool,
+        archived: bool,
+    ) -> IvyResult<LifecycleDocument> {
+        self.headers.set(self.headers.get() + 1);
+        let mut result = self
+            .lifecycle_read("task-board/task", address, primary, archived)
+            .await?;
+        if self.compact.get() {
+            result
+                .document
+                .value
+                .insert("comments", Json::Array(vec![]));
+            result
+                .document
+                .value
+                .insert("commentDeliveries", Json::Array(vec![]));
+        }
+        Ok(result)
+    }
+    async fn queued_comment_ids(&self, _: &Json, task: &JsString) -> IvyResult<Vec<Json>> {
+        self.queues.set(self.queues.get() + 1);
+        self.fail("queued")?;
+        Ok(f(&self.task(task).value, "commentDeliveries")
+            .as_array()
+            .unwrap_or(&[])
+            .iter()
+            .filter(|receipt| f(receipt, "state").is_str("queued"))
+            .map(|receipt| f(receipt, "commentId").clone())
+            .collect())
+    }
+    async fn lifecycle_read(
+        &self,
+        key: &str,
+        address: &Json,
+        primary: bool,
+        _: bool,
+    ) -> IvyResult<LifecycleDocument> {
+        Ok(LifecycleDocument {
+            document: Store::read(self, key, address, primary).await?,
+            metadata: Json::Null,
+        })
+    }
+    async fn page(&self, _: &str, _: &Json) -> IvyResult<Json> {
+        panic!("Unexpected page")
+    }
+    async fn archive(&self, _: &Json) -> IvyResult<Json> {
+        panic!("Unexpected archive")
+    }
+    async fn stat(&self, _: &JsString) -> IvyResult<Json> {
+        panic!("Unexpected stat")
+    }
+    fn release_workspace(&self, _: &JsString) -> IvyResult<()> {
+        panic!("Unexpected workspace release")
     }
 }
 impl NativeDriverRuntime for World<'_> {
@@ -498,12 +803,12 @@ impl OrchestrationEngine for World<'_> {
             let r = self.run(id);
             let key = s(&r.value, "taskId");
             let mut task = self.task(key);
-            let revision = n(&task.pin, "revision") + 1.0;
-            task.pin.insert("revision", Json::Number(revision));
+            let revision = n(&task.pin.to_json(), "revision") + 1.0;
+            task.pin.revision = revision;
             let mut comments = f(&task.value, "comments").as_array().unwrap().to_vec();
             comments.push(Json::object([
                 ("purpose", "handoff".into()),
-                ("run", r.pin),
+                ("run", r.pin.to_json()),
             ]));
             task.value.insert("comments", Json::Array(comments));
             task.content_hash = hash_json(&task.value).unwrap();

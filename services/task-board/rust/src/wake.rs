@@ -3,6 +3,7 @@
 use futures_util::future::try_join_all;
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json};
 use ivy_sdk::native_evidence::native_instant;
+use std::borrow::Cow;
 
 #[allow(async_fn_in_trait)]
 pub trait WakeStore<E = IvyError> {
@@ -65,6 +66,43 @@ pub fn comments_pending(task: &Json) -> bool {
                         f(comment, "commentId") == f(delivery, "commentId") && queued_input(comment)
                     })
         })
+}
+/// A compact Task's question metadata is authoritative only for its retained
+/// tree. Materialized and legacy Tasks keep the ordinary question resolver.
+pub(crate) fn open_question_metadata(task: &Json) -> IvyResult<Cow<'_, [Json]>> {
+    if f(task, "comments")
+        .as_array()
+        .is_some_and(|comments| comments.is_empty())
+    {
+        if let Some(summary) = task
+            .get("commentStore")
+            .filter(|tree| is(tree, "kind", "tree"))
+            .and_then(|tree| tree.get("summary"))
+            .filter(|summary| !summary.is_null())
+        {
+            let questions = summary
+                .required("questions")?
+                .as_array()
+                .ok_or_else(IvyError::internal)?;
+            return Ok(
+                if questions
+                    .iter()
+                    .all(|question| f(question, "open").as_bool() == Some(true))
+                {
+                    Cow::Borrowed(questions)
+                } else {
+                    Cow::Owned(
+                        questions
+                            .iter()
+                            .filter(|question| f(question, "open").as_bool() == Some(true))
+                            .cloned()
+                            .collect(),
+                    )
+                },
+            );
+        }
+    }
+    ivy_sdk::open_task_questions(task, None).map(Cow::Owned)
 }
 pub fn missing_wake_trigger(task: &Json, has_question: bool) -> bool {
     is(f(task, "fields"), "control", "agent")
@@ -151,10 +189,13 @@ fn due(value: &Json, at: &JsString) -> bool {
     value.as_js_string().is_some_and(|value| value <= at)
 }
 pub fn next_execution_mode(task: &Json, at: &JsString) -> bool {
+    next_execution_mode_with_inputs(task, at, comments_pending(task))
+}
+pub(crate) fn next_execution_mode_with_inputs(task: &Json, at: &JsString, pending: bool) -> bool {
     if present(f(task, "claim")) || present(f(task, "publication")) {
         return false;
     }
-    if comments_pending(task) {
+    if pending {
         return true;
     }
     let issue = f(task, "completionIssue");
@@ -173,15 +214,18 @@ pub async fn should_wake<E: From<IvyError>, S: WakeStore<E>>(
     task: &Json,
     at: &JsString,
 ) -> Result<bool, E> {
-    if present(f(task, "claim"))
-        || present(f(task, "publication"))
-        || f(f(task, "runtimeWait"), "retryAt")
-            .as_js_string()
-            .is_some_and(|retry| retry > at)
-    {
+    should_wake_with_inputs(store, task, at, comments_pending(task)).await
+}
+pub(crate) async fn should_wake_with_inputs<E: From<IvyError>, S: WakeStore<E>>(
+    store: &S,
+    task: &Json,
+    at: &JsString,
+    pending: bool,
+) -> Result<bool, E> {
+    if wake_blocked(task, at) {
         return Ok(false);
     }
-    if comments_pending(task) {
+    if pending {
         return Ok(true);
     }
     let issue = f(task, "completionIssue");
@@ -198,7 +242,7 @@ pub async fn should_wake<E: From<IvyError>, S: WakeStore<E>>(
     if present(issue) {
         return Ok(due(f(issue, "retryAt"), at));
     }
-    if missing_wake_trigger(task, !ivy_sdk::open_task_questions(task, None)?.is_empty()) {
+    if missing_wake_trigger(task, !open_question_metadata(task)?.is_empty()) {
         let updated = f(task, "updatedAt")
             .as_js_string()
             .ok_or_else(IvyError::internal)?;
@@ -211,6 +255,13 @@ pub async fn should_wake<E: From<IvyError>, S: WakeStore<E>>(
         return Ok(true);
     }
     dependencies_changed(task, &dependency_snapshot(store, task).await?).map_err(E::from)
+}
+pub(crate) fn wake_blocked(task: &Json, at: &JsString) -> bool {
+    present(f(task, "claim"))
+        || present(f(task, "publication"))
+        || f(f(task, "runtimeWait"), "retryAt")
+            .as_js_string()
+            .is_some_and(|retry| retry > at)
 }
 pub fn wake_condition(task: &Json, questions: &[Json]) -> Json {
     let condition = |state: &str, detail: &str| {

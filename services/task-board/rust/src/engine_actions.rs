@@ -4,14 +4,16 @@ use crate::{
     deliveries::initial_delivery,
     engine_publication::{ExistingTaskPublication, history},
     journal_store::Contracts,
-    journal_store::persistent_reads::task_comments::validate_task_content,
+    journal_store::persistent_reads::task_comments::{
+        validate_task_content, validate_task_content_with_comments,
+    },
     lifecycle_journal::{LifecycleJournal, LifecyclePages},
     native_lifecycle::{
         LifecycleDocument, LifecycleEngine, LifecycleOperations, LifecyclePublication,
         LifecycleStore, NativeLifecycle,
     },
     native_plan::read_plan,
-    operations::Document,
+    operations::{Document, TaskChange},
     wake::{WakeStore, dependency_snapshot, peer_comment},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -19,7 +21,7 @@ use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     checked_native_contract::CheckedNativeContracts,
     hash::{digest, hash_json},
-    json::canonical,
+    json::canonical_equal,
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::rpc::RpcClient;
@@ -115,9 +117,7 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
 fn same(left: Option<&Json>, right: Option<&Json>) -> IvyResult<bool> {
     Ok(match (left, right) {
         (None, None) => true,
-        (Some(a), Some(b)) => {
-            canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?
-        }
+        (Some(a), Some(b)) => canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)?,
         _ => false,
     })
 }
@@ -197,13 +197,14 @@ fn queued(comment: &Json, at: &JsString, operation: &Json) -> Json {
         ("code", Json::Null),
     ])
 }
+fn comment_length(task: &Json) -> f64 {
+    f(f(task, "commentStore"), "length").as_f64().unwrap_or(0.0)
+        + f(task, "comments").as_array().map_or(0, |v| v.len()) as f64
+}
 fn comment(request: &Json, previous: &Json, actor: &Json, at: &JsString, kind: &str) -> Json {
     let mut c = Json::object([
         ("commentId", f(request, "commentId").clone()),
-        (
-            "sequence",
-            Json::Number(f(previous, "comments").as_array().map_or(0, |v| v.len()) as f64 + 1.0),
-        ),
+        ("sequence", Json::Number(comment_length(previous) + 1.0)),
         ("author", actor.clone()),
         ("authorKind", kind.into()),
         ("body", f(request, "body").clone()),
@@ -242,10 +243,7 @@ fn system_comment(
 ) -> Json {
     Json::object([
         ("commentId", id.clone()),
-        (
-            "sequence",
-            Json::Number(f(previous, "comments").as_array().map_or(0, |v| v.len()) as f64 + 1.0),
-        ),
+        ("sequence", Json::Number(comment_length(previous) + 1.0)),
         ("author", actor.clone()),
         ("authorKind", "system".into()),
         ("body", Json::String(body)),
@@ -266,9 +264,6 @@ pub fn result_comment_fits(
     publication: &Json,
     task_id: &JsString,
 ) -> IvyResult<bool> {
-    let mut projected = task.clone();
-    projected.insert("publication", Json::Null);
-    projected.insert("lastHistory", publication.clone());
     let mut c = comment.clone();
     c.insert(
         "delivery",
@@ -278,9 +273,21 @@ pub fn result_comment_fits(
             publication.clone()
         },
     );
-    projected.insert("comments", append(f(task, "comments"), c)?);
-    increment(&mut projected, "agentCommentCount")?;
-    match validate_task_content(&projected, task_id) {
+    let comments = a(f(task, "comments"))?;
+    let count = Json::Number(
+        task.required("agentCommentCount")?
+            .as_f64()
+            .ok_or_else(IvyError::internal)?
+            + 1.0,
+    );
+    let header_changes = [
+        ("publication".into(), &Json::Null),
+        ("lastHistory".into(), publication),
+        ("agentCommentCount".into(), &count),
+    ];
+    match validate_task_content_with_comments(task, task_id, &header_changes, || {
+        Ok(comments.iter().chain(std::iter::once(&c)))
+    }) {
         Ok(_) => Ok(true),
         Err(e) if e.code == "content_too_large" => Ok(false),
         Err(e) => Err(e),
@@ -306,6 +313,67 @@ fn attachment(request: &Json, object: Json, bytes: &[u8], actor: &Json, at: &JsS
     ])
 }
 impl<S: ActionStore, P: ActionPolicies, L: ActionRestore> TaskActions<'_, S, P, L> {
+    pub async fn admit_handoff(
+        &self,
+        request: &Json,
+        actor: &Json,
+        at: &JsString,
+    ) -> IvyResult<Json> {
+        let task = self
+            .store
+            .task_header(
+                &Json::object([
+                    ("objectId", request.required("taskId")?.clone()),
+                    ("revision", request.required("expectedRevision")?.clone()),
+                ]),
+                true,
+                false,
+            )
+            .await?;
+        let value = &task.document.value;
+        self.policies
+            .validate_action(request, value, actor, at, s(request, "operationId")?)
+            .await?;
+        Ok(Json::object([
+            ("run", value.required("claim")?.required("run")?.clone()),
+            ("work", handoff_work(value)?),
+        ]))
+    }
+    async fn read_task(
+        &self,
+        address: Json,
+        primary: bool,
+        header: bool,
+    ) -> IvyResult<LifecycleDocument> {
+        if header {
+            self.store.task_header(&address, primary, false).await
+        } else {
+            (self.task_read)(address, primary).await
+        }
+    }
+    async fn write_task<Q: LifecyclePublication>(
+        &self,
+        steps: &mut Q,
+        task: &Json,
+        destination: &Json,
+        header: bool,
+        action: &Json,
+    ) -> IvyResult<Json> {
+        if header && f(f(task, "commentStore"), "kind").is_str("tree") {
+            let change = if a(f(task, "comments"))?.is_empty() {
+                TaskChange::Header
+            } else if action.is_str("retargetQuestion") {
+                TaskChange::QuestionRecipient
+            } else if action.is_str("comment") || action.is_str("defer") {
+                TaskChange::AppendComment
+            } else {
+                TaskChange::AppendSystem
+            };
+            steps.write_task_change(task, destination, change).await
+        } else {
+            steps.write("task-board/task", task, destination).await
+        }
+    }
     async fn schedule_fields(&self, next: &mut Json, request: &Json) -> IvyResult<()> {
         if let Some(wake) = request.get("wakeAt") {
             next.insert("wakeAt", wake.clone());
@@ -349,6 +417,22 @@ impl<S: ActionStore, P: ActionPolicies, L: ActionRestore> TaskActions<'_, S, P, 
     ) -> IvyResult<Json> {
         let op = &operation.value;
         let request = op.required("request")?;
+        let header = [
+            "edit",
+            "transition",
+            "uploadAttachment",
+            "comment",
+            "saveResult",
+            "review",
+            "cancel",
+            "reassign",
+            "start",
+            "continue",
+            "defer",
+            "retargetQuestion",
+        ]
+        .iter()
+        .any(|action| eq(request, "action", action));
         let actor = op.required("actor")?;
         let at = s(op, "createdAt")?;
         let id = s(request, "taskId")?;
@@ -374,7 +458,7 @@ impl<S: ActionStore, P: ActionPolicies, L: ActionRestore> TaskActions<'_, S, P, 
                 ),
             ])
         };
-        let mut base = (self.task_read)(address, true).await?;
+        let mut base = self.read_task(address, true, header).await?;
         if first && present(f(op, "handoffRun")) {
             let expected = if present(f(op, "handoffWork")) {
                 f(op, "handoffWork").clone()
@@ -384,20 +468,23 @@ impl<S: ActionStore, P: ActionPolicies, L: ActionRestore> TaskActions<'_, S, P, 
             let current = if present(f(op, "handoffWork")) {
                 base
             } else {
-                (self.task_read)(Json::String(id.clone()), true).await?
+                self.read_task(Json::String(id.clone()), true, header)
+                    .await?
             };
             let mut observed = handoff_work(&current.document.value)?;
             if observed.get("contentHash") != expected.get("contentHash")
                 && f(&current.document.value, "executionChangeRequested").as_bool() == Some(true)
             {
-                let original = (self.task_read)(
-                    Json::object([
-                        ("objectId", Json::String(id.clone())),
-                        ("revision", f(request, "expectedRevision").clone()),
-                    ]),
-                    true,
-                )
-                .await?;
+                let original = self
+                    .read_task(
+                        Json::object([
+                            ("objectId", Json::String(id.clone())),
+                            ("revision", f(request, "expectedRevision").clone()),
+                        ]),
+                        true,
+                        header,
+                    )
+                    .await?;
                 let mut adjusted = current.document.value.clone();
                 let mut fields = f(&adjusted, "fields").clone();
                 if let Some(options) = f(&original.document.value, "fields")
@@ -428,18 +515,21 @@ impl<S: ActionStore, P: ActionPolicies, L: ActionRestore> TaskActions<'_, S, P, 
         }
         if first
             && admission
-            && base.document.pin.get("revision") != request.get("expectedRevision")
+            && Some(base.document.pin.revision)
+                != request.get("expectedRevision").and_then(Json::as_f64)
         {
-            let original = (self.task_read)(
-                Json::object([
-                    ("objectId", Json::String(id.clone())),
-                    ("revision", f(request, "expectedRevision").clone()),
-                ]),
-                true,
-            )
-            .await?
-            .document
-            .value;
+            let original = self
+                .read_task(
+                    Json::object([
+                        ("objectId", Json::String(id.clone())),
+                        ("revision", f(request, "expectedRevision").clone()),
+                    ]),
+                    true,
+                    header,
+                )
+                .await?
+                .document
+                .value;
             let value = &base.document.value;
             require(
                 !present(f(value, "claim"))
@@ -462,14 +552,14 @@ impl<S: ActionStore, P: ActionPolicies, L: ActionRestore> TaskActions<'_, S, P, 
         let previous = &base.document.value;
         if first {
             require(
-                f(&base.metadata, "currentRevision") == f(&base.document.pin, "revision")
+                f(&base.metadata, "currentRevision") == &Json::Number(base.document.pin.revision)
                     && !present(f(previous, "publication")),
                 "revision_conflict",
                 "The task changed or has an unfinished publication. Reload its current revision.",
             )?;
             self.policies.aggregate(previous, id).await?;
             self.policies
-                .validate_action(request, previous, actor, at, s(&operation.pin, "objectId")?)
+                .validate_action(request, previous, actor, at, &operation.pin.object_id)
                 .await?;
             if eq(request, "action", "continue") {
                 self.lifecycle
@@ -483,9 +573,10 @@ impl<S: ActionStore, P: ActionPolicies, L: ActionRestore> TaskActions<'_, S, P, 
             v.insert("publication", steps.pin()?);
             v
         } else {
-            (self.task_read)(
+            self.read_task(
                 f(f(&a(op.required("writes")?)?[0], "payload"), "object").clone(),
                 false,
+                header,
             )
             .await?
             .document
@@ -632,32 +723,57 @@ impl<S: ActionStore, P: ActionPolicies, L: ActionRestore> TaskActions<'_, S, P, 
             projected.insert("lastHistory", steps.pin()?);
             validate_task_content(&projected, id)?;
         }
-        let reserved = steps
-            .write(
-                "task-board/task",
+        let reserved = self
+            .write_task(
+                steps,
                 &next,
                 &Json::object([
                     ("objectId", Json::String(id.clone())),
-                    (
-                        "expectedRevision",
-                        f(&base.document.pin, "revision").clone(),
-                    ),
+                    ("expectedRevision", Json::Number(base.document.pin.revision)),
                 ]),
+                header,
+                request.required("action")?,
             )
             .await?;
         match s(request, "action")?.to_utf8()?.as_str() {
             "retargetQuestion" => {
-                let comments = a(f(previous, "comments"))?
-                    .iter()
-                    .map(|comment| {
-                        let mut comment = comment.clone();
-                        if f(&comment, "commentId") == f(request, "questionId") {
-                            comment.insert("recipient", f(request, "recipient").clone());
+                if header
+                    && f(f(previous, "commentStore"), "kind").is_str("tree")
+                    && writes.len() >= 3
+                {
+                    // The final prepared payload is authoritative on replay.
+                    // Restaging below still checks its original contract/destination.
+                    next = self
+                        .read_task(f(f(&writes[2], "payload"), "object").clone(), false, true)
+                        .await?
+                        .document
+                        .value;
+                } else {
+                    let selected = self
+                        .store
+                        .read_task_comments(
+                            previous,
+                            id,
+                            &[request.required("questionId")?.clone()],
+                        )
+                        .await?;
+                    let comments =
+                        if header && f(f(previous, "commentStore"), "kind").is_str("tree") {
+                            &selected
+                        } else {
+                            a(f(previous, "comments"))?
                         }
-                        comment
-                    })
-                    .collect();
-                next.insert("comments", Json::Array(comments));
+                        .iter()
+                        .map(|comment| {
+                            let mut comment = comment.clone();
+                            if f(&comment, "commentId") == f(request, "questionId") {
+                                comment.insert("recipient", f(request, "recipient").clone());
+                            }
+                            comment
+                        })
+                        .collect();
+                    next.insert("comments", Json::Array(comments));
+                }
                 detail = JsString::from("Question ");
                 detail.0.extend(&s(request, "questionId")?.0);
                 detail.0.extend(" addressed to ".encode_utf16());
@@ -912,8 +1028,8 @@ impl<S: ActionStore, P: ActionPolicies, L: ActionRestore> TaskActions<'_, S, P, 
                             "task-board/run",
                             &value,
                             &Json::object([
-                                ("objectId", f(&run.pin, "objectId").clone()),
-                                ("expectedRevision", f(&run.pin, "revision").clone()),
+                                ("objectId", Json::String(run.pin.object_id.clone())),
+                                ("expectedRevision", Json::Number(run.pin.revision)),
                             ]),
                         )
                         .await?;
@@ -1097,16 +1213,17 @@ impl<S: ActionStore, P: ActionPolicies, L: ActionRestore> TaskActions<'_, S, P, 
         final_task.insert("publication", Json::Null);
         outcome.insert(
             "task",
-            steps
-                .write(
-                    "task-board/task",
-                    &final_task,
-                    &Json::object([
-                        ("objectId", Json::String(id.clone())),
-                        ("expectedRevision", f(&reserved, "revision").clone()),
-                    ]),
-                )
-                .await?,
+            self.write_task(
+                steps,
+                &final_task,
+                &Json::object([
+                    ("objectId", Json::String(id.clone())),
+                    ("expectedRevision", f(&reserved, "revision").clone()),
+                ]),
+                header,
+                request.required("action")?,
+            )
+            .await?,
         );
         let workspace_changed = eq(request, "action", "edit")
             && (!same(

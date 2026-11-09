@@ -383,7 +383,11 @@ async fn current_admission_binds_local_journal_and_retained_replay() {
             let saved =
                 complete(ops.begin(field(value, "request"), field(value, "actor"))).unwrap();
             same(&saved.value, value, "original accepted Operation");
-            same(&saved.pin, field(row, "pin"), "original operation pin");
+            same(
+                &saved.pin.to_json(),
+                field(row, "pin"),
+                "original operation pin",
+            );
             snapshots.push(saved.value);
         }
         let value = field(pending, "accepted");
@@ -472,6 +476,8 @@ async fn current_admission_binds_local_journal_and_retained_replay() {
             field(pending, "payload"),
             string(&entry, "mutationId"),
             field(&entry, "destination"),
+            None,
+            None,
         ))
         .unwrap();
         same(

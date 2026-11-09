@@ -1,28 +1,20 @@
 //! Native storage errors retained by the generation's read owner.
 use crate::engine_read::read_failure::ReadFailure;
-use crate::{native_lifecycle::LifecycleDocument, operations::Document};
-use ivy_contracts::{IvyError, IvyJson as Json, IvyResult};
+use crate::{native_lifecycle::LifecycleDocument, operations::StoredRecord};
+#[cfg(test)]
+use ivy_contracts::IvyJson as Json;
+use ivy_contracts::{IvyError, IvyResult};
 pub(super) enum NativeReadFailure {
     Parse(IvyError),
     Sqlite(ivy_store::rusqlite::Error),
 }
 pub(super) type Failure = ReadFailure<NativeReadFailure>;
 
-pub(super) fn lifecycle_document(envelope: Json) -> IvyResult<LifecycleDocument> {
-    Ok(LifecycleDocument {
-        document: Document {
-            pin: envelope.required("pin")?.clone(),
-            value: envelope.required("value")?.clone(),
-            parent_id: envelope
-                .required("metadata")?
-                .get("parentId")
-                .and_then(Json::as_js_string)
-                .cloned(),
-            content_hash: envelope
-                .required("revision")?
-                .required("contentHash")?
-                .as_str()?,
-        },
-        metadata: envelope.required("metadata")?.clone(),
-    })
+pub(super) fn lifecycle_document(record: StoredRecord) -> IvyResult<LifecycleDocument> {
+    let (document, metadata) = record.into_document_with_metadata()?;
+    Ok(LifecycleDocument { document, metadata })
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/fixtures/task-board-record-ownership.rs"]
+mod tests;

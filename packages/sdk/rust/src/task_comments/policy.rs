@@ -45,11 +45,7 @@ pub(super) fn node_owner(node: &Json, task_id: &JsString) -> IvyResult<()> {
     }
     Ok(())
 }
-pub(super) fn snapshot<'a>(
-    saved: &'a Json,
-    pin: &NodePin,
-    task_id: &JsString,
-) -> IvyResult<&'a Json> {
+pub(super) fn snapshot(mut saved: Json, pin: &NodePin, task_id: &JsString) -> IvyResult<Json> {
     let object = saved.get("object");
     let revision = saved.get("revision");
     let content = saved.get("content");
@@ -74,7 +70,10 @@ pub(super) fn snapshot<'a>(
         .and_then(|v| v.get("value"))
         .ok_or_else(|| invalid(SNAPSHOT))?;
     node_owner(node, task_id)?;
-    Ok(node)
+    saved
+        .remove("content")
+        .and_then(|mut content| content.remove("value"))
+        .ok_or_else(|| invalid(SNAPSHOT))
 }
 
 pub(super) struct Cache<N> {

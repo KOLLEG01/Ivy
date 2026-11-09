@@ -88,7 +88,7 @@ async fn native_registry_keeps_management_private_and_preserves_schema_and_reade
         .unwrap()[0];
     validate_shared("RegistrySync", registry.value()).unwrap();
     validate_shared("NamespaceDefinition", namespace).unwrap();
-    let guarded = registry
+    let guarded: Vec<_> = registry
         .value()
         .required("contracts")
         .unwrap()
@@ -102,14 +102,29 @@ async fn native_registry_keeps_management_private_and_preserves_schema_and_reade
                 .and_then(Json::as_bool)
                 == Some(true)
         })
-        .count();
-    assert_eq!(guarded, 9);
+        .map(|contract| {
+            (
+                contract.required("key").unwrap().as_str().unwrap(),
+                contract.required("version").unwrap().as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        guarded,
+        [
+            "3.5.0", "3.4.0", "3.3.0", "3.2.0", "3.1.0", "3.0.0", "2.3.0", "2.2.0", "2.1.0",
+            "2.0.0", "1.12.0", "1.11.0",
+        ]
+        .into_iter()
+        .map(|version| ("task-board/task".to_owned(), version.to_owned()))
+        .collect::<Vec<_>>()
+    );
     assert_eq!(
         namespace.required("guideMarkdown").unwrap(),
         &Json::String(text(&catalog()).guide_markdown)
     );
     let tools = namespace.required("tools").unwrap().as_array().unwrap();
-    assert_eq!(tools.len(), 21);
+    assert_eq!(tools.len(), 22);
     let expected = [
         ("configuration", Some("task_configuration"), "ivy", true),
         ("configure", Some("task_configure"), "ivy", false),
@@ -121,6 +136,7 @@ async fn native_registry_keeps_management_private_and_preserves_schema_and_reade
         ("defer", Some("task_update"), "ivy", false),
         ("reassign", Some("task_update"), "ivy", false),
         ("newThread", Some("task_update"), "ivy", false),
+        ("migrateNativeRoute", Some("task_update"), "ivy", false),
         ("cancel", Some("task_update"), "ivy", false),
         ("comment", Some("task_comment"), "ivy", false),
         (
@@ -290,7 +306,7 @@ async fn native_registry_keeps_management_private_and_preserves_schema_and_reade
         .unwrap();
     assert_eq!(
         task.required("writeVersions").unwrap(),
-        &json(r#"["3.2.0"]"#)
+        &json(r#"["3.5.0"]"#)
     );
     assert!(
         task.required("readVersions")

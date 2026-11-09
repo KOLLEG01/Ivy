@@ -475,10 +475,11 @@ async fn configuration_and_discovery_match_original_defaults_guards_and_rpc_trac
                 key: r.required("key").unwrap().as_str().unwrap(),
                 name: r.required("name").unwrap().as_str().unwrap(),
                 document: Document {
-                    pin: Json::object([
+                    pin: ivy_task_board::operations::ObjectPin::from_json(Json::object([
                         ("objectId", r.required("id").unwrap().clone()),
                         ("revision", Json::Number(1.0)),
-                    ]),
+                    ]))
+                    .unwrap(),
                     value: value.clone(),
                     parent_id: Some(text(r, "parentId")),
                     content_hash: hash_json(value).unwrap(),

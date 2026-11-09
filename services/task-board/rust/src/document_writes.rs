@@ -4,7 +4,7 @@
 use super::{
     document_reads::{DocumentReads, TreeReads, sql_argument},
     json_values::{self as v, Value},
-    record_upgrades::upgrade_stored_with,
+    record_upgrades::upgrade_stored_owned_with,
     store::ObjectReads,
 };
 use crate::journal_store::{
@@ -14,6 +14,7 @@ use crate::journal_store::{
     reference_writes::{task_attachment_pins, task_references},
     write_completion::complete_write,
 };
+use crate::operations::Document;
 use ivy_contracts::{IvyError, IvyJson as Json, JsString, limits::MANAGEMENT_FRAME_BYTES};
 use std::future::Future;
 
@@ -60,7 +61,7 @@ pub(crate) async fn named_graph<R, C, Parse, SqlFailure, M, S, E>(
     key: &str,
     name: &Value,
     parent: Option<&Value>,
-) -> Result<Option<Value>, E>
+) -> Result<Option<Document>, E>
 where
     R: ObjectReads<WriteFailure<E>>,
     C: Contracts,
@@ -95,12 +96,12 @@ where
         return row
             .map(|row| {
                 local
-                    .document::<WriteFailure<E>>(
+                    .record::<WriteFailure<E>>(
                         key,
                         &row[0].string()?.into(),
                         parent.eq(&root(reads)),
                     )
-                    .map(|value| (&value).clone())
+                    .and_then(|value| Ok(value.into_document()?))
             })
             .transpose();
     }
@@ -142,16 +143,16 @@ where
         )
         .await?;
     require(
-        number(&v::length(&f(&page, "items")?)?)? <= 1.0 && !v::present(&(f(&page, "nextCursor")?)),
+        number(&v::length(f(&page, "items"))?)? <= 1.0 && !v::present(&(f(&page, "nextCursor"))),
         "task_board_identity_conflict",
         "A durable workflow identity must select exactly one record.",
     )?;
-    let first = at(&f(&page, "items")?, 0)?;
+    let first = at(f(&page, "items"), 0)?;
     if v::present(&(first)) {
         reads
             .read_graph(
                 key,
-                &f(&first, "objectId")?,
+                f(&first, "objectId"),
                 parent.eq(&root(reads)),
                 false,
                 false,
@@ -178,11 +179,11 @@ where
         match reads.read_graph("task-board/run", pin, true, false, false).await {
             Ok(document) => Ok(document),
             Err(error) if code(&error, &["not_found", "revision_pruned"]) => {
-                let current = reads.read_graph("task-board/run", &f(pin, "objectId")?, true, false, false).await?;
-                let agrees = if gte(&f(&f(&current, "pin")?, "revision")?, &f(pin, "revision")?)? {
-                    let phase = f(&f(&current, "value")?, "phase")?;
+                let current = reads.read_graph("task-board/run", f(pin, "objectId"), true, false, false).await?;
+                let agrees = if gte(&Json::Number(current.pin.revision), f(pin, "revision"))? {
+                    let phase = f(&current.value, "phase");
                     if ["completed", "failed"].iter().any(|item| phase.eq(&text(*item))) {
-                        let state = f(&f(&f(&current, "value")?, "externalOutcome")?, "state")?;
+                        let state = f(f(&current.value, "externalOutcome"), "state");
                         ["succeeded", "failed"].iter().any(|item| state.eq(&text(*item)))
                     } else { false }
                 } else { false };
@@ -194,7 +195,7 @@ where
         }
     }.await;
     match retained {
-        Ok(document) => Ok(Some(f(&document, "pin")?)),
+        Ok(document) => Ok(Some(document.pin.to_json())),
         Err(error)
             if code(
                 &error,
@@ -221,6 +222,7 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
         destination: &Value,
         retained: bool,
         selected_version: &Value,
+        selected_references: Option<&Value>,
     ) -> Result<Value, E>
     where
         R: ObjectReads<WriteFailure<E>>,
@@ -246,30 +248,25 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
         };
         let mut value = value.clone();
         if key == "task-board/task"
-            && !v::has(destination, "create")?
-            && v::has(&value, "commentStore")?
+            && selected_references.is_none()
+            && !v::has(destination, "create")
+            && v::has(&value, "commentStore")
         {
-            value = (self.hydrate)(value, f(destination, "objectId")?).await?;
+            value = (self.hydrate)(value, f(destination, "objectId").clone()).await?;
         }
         if !retained {
-            let decoded = v::decoded_comment::<WriteFailure<E>>(&value)?;
-            value = (&upgrade_stored_with(key, &decoded, |params| {
-                let future = self
-                    .source
-                    .request_owned("objects.read", params.as_ref().cloned());
-                async move { v::decoded_comment::<WriteFailure<E>>(&future.await?) }
+            value = upgrade_stored_owned_with(key, value, |params| {
+                self.source.request_owned("objects.read", params)
             })
-            .await?
-            .into_owned())
-                .clone();
+            .await?;
         }
         let local = reads.local;
         if local.contracts.local(key)?
-            || (v::has(destination, "create")?
-                && !matches!(f(&f(destination, "create")?, "parentId")?, Value::Null)
+            || (v::has(destination, "create")
+                && !matches!(f(f(destination, "create"), "parentId"), Value::Null)
                 && local
                     .key::<WriteFailure<E>>(
-                        sql_argument(&f(&f(destination, "create")?, "parentId")?)?.as_ref(),
+                        sql_argument(f(f(destination, "create"), "parentId"))?.as_ref(),
                     )?
                     .as_deref()
                     == Some("task-board/operation"))
@@ -284,22 +281,22 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
                     .execute_batch(sql)
                     .map_err(&local.sqlite_failure)
             };
-            if v::has(destination, "create")? {
+            if v::has(destination, "create") {
                 if let Some(existing) = named_graph(
                     reads,
                     self.source,
                     key,
-                    &f(&f(destination, "create")?, "name")?,
+                    f(f(destination, "create"), "name"),
                     destination.get("create").and_then(|v| v.get("parentId")),
                 )
                 .await?
                 {
                     require(
-                        hash(&f(&existing, "value")?)? == hash(&value)?,
+                        hash(&existing.value)? == hash(&value)?,
                         "revision_conflict",
                         "The local TaskBoard identity differs.",
                     )?;
-                    return Ok(f(&existing, "pin")?);
+                    return Ok(existing.pin.to_json());
                 }
                 let id = text((self.new_id)());
                 exec("BEGIN IMMEDIATE")?;
@@ -309,8 +306,8 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
                         &[
                             sql_argument(&id)?.as_ref(),
                             Some(&key.into()),
-                            sql_argument(&f(&f(destination, "create")?, "name")?)?.as_ref(),
-                            sql_argument(&f(&f(destination, "create")?, "parentId")?)?.as_ref(),
+                            sql_argument(f(f(destination, "create"), "name"))?.as_ref(),
+                            sql_argument(f(f(destination, "create"), "parentId"))?.as_ref(),
                             Some(&Json::Number(1.0)),
                             Some(&now),
                             Some(&now),
@@ -326,14 +323,13 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
                         ],
                     )?;
                     if key == "task-board/coordination"
-                        && v::present(&(f(&value, "activeOperation")?))
+                        && v::present(&(f(&value, "activeOperation")))
                     {
                         local.run::<WriteFailure<E>>(
                             "INSERT INTO active_gates VALUES(?,?)",
                             &[
                                 sql_argument(&id)?.as_ref(),
-                                sql_argument(&f(&f(&value, "activeOperation")?, "objectId")?)?
-                                    .as_ref(),
+                                sql_argument(f(f(&value, "activeOperation"), "objectId"))?.as_ref(),
                             ],
                         )?;
                     }
@@ -346,27 +342,30 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
                         reads,
                         self.source,
                         key,
-                        &f(&f(destination, "create")?, "name")?,
+                        f(f(destination, "create"), "name"),
                         destination.get("create").and_then(|v| v.get("parentId")),
                     )
                     .await?
                     {
                         require(
-                            hash(&f(&winner, "value")?)? == hash(&value)?,
+                            hash(&winner.value)? == hash(&value)?,
                             "revision_conflict",
                             "The local TaskBoard identity already exists.",
                         )?;
-                        return Ok(f(&winner, "pin")?);
+                        return Ok(winner.pin.to_json());
                     }
                     return Err(error);
                 }
                 return Ok(obj([("objectId", id), ("revision", Value::Number(1.0))]));
             }
-            let next = add(f(destination, "expectedRevision")?, Value::Number(1.0))?;
+            let next = add(
+                f(destination, "expectedRevision").clone(),
+                Value::Number(1.0),
+            )?;
             exec("BEGIN IMMEDIATE")?;
             let written = (|| -> Result<(), E> {
                 let changed = local.run::<WriteFailure<E>>("UPDATE documents SET current_revision=?,updated_at=? WHERE id=? AND key=? AND current_revision=?", &[
-                    sql_argument(&next)?.as_ref(), Some(&now), sql_argument(&f(destination, "objectId")?)?.as_ref(), Some(&key.into()), sql_argument(&f(destination, "expectedRevision")?)?.as_ref(),
+                    sql_argument(&next)?.as_ref(), Some(&now), sql_argument(f(destination, "objectId"))?.as_ref(), Some(&key.into()), sql_argument(f(destination, "expectedRevision"))?.as_ref(),
                 ])?;
                 require(
                     changed == 1,
@@ -376,20 +375,20 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
                 local.run::<WriteFailure<E>>(
                     "INSERT INTO revisions VALUES(?,?,?,?)",
                     &[
-                        sql_argument(&f(destination, "objectId")?)?.as_ref(),
+                        sql_argument(f(destination, "objectId"))?.as_ref(),
                         sql_argument(&next)?.as_ref(),
                         Some(&encoded),
                         Some(&now),
                     ],
                 )?;
                 if key == "task-board/coordination" {
-                    let active = f(&value, "activeOperation")?;
+                    let active = f(&value, "activeOperation");
                     if v::present(&(active)) {
-                        local.run::<WriteFailure<E>>("INSERT INTO active_gates VALUES(?,?) ON CONFLICT(gate_id) DO UPDATE SET operation_id=excluded.operation_id", &[sql_argument(&f(destination, "objectId")?)?.as_ref(), sql_argument(&f(&active, "objectId")?)?.as_ref()])?;
+                        local.run::<WriteFailure<E>>("INSERT INTO active_gates VALUES(?,?) ON CONFLICT(gate_id) DO UPDATE SET operation_id=excluded.operation_id", &[sql_argument(f(destination, "objectId"))?.as_ref(), sql_argument(f(&active, "objectId"))?.as_ref()])?;
                     } else {
                         local.run::<WriteFailure<E>>(
                             "DELETE FROM active_gates WHERE gate_id=?",
-                            &[sql_argument(&f(destination, "objectId")?)?.as_ref()],
+                            &[sql_argument(f(destination, "objectId"))?.as_ref()],
                         )?;
                     }
                 }
@@ -403,7 +402,7 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
                     local.run::<WriteFailure<E>>(
                         "DELETE FROM revisions WHERE id=? AND revision<?",
                         &[
-                            sql_argument(&f(destination, "objectId")?)?.as_ref(),
+                            sql_argument(f(destination, "objectId"))?.as_ref(),
                             sql_argument(&next)?.as_ref(),
                         ],
                     )?;
@@ -416,7 +415,7 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
                 return Err(error);
             }
             return Ok(obj([
-                ("objectId", f(destination, "objectId")?),
+                ("objectId", f(destination, "objectId").clone()),
                 ("revision", next),
             ]));
         }
@@ -424,10 +423,13 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
             ("encoding", text("json")),
             (
                 "value",
-                if key == "task-board/task" && !v::has(destination, "create")? {
+                if selected_references.is_none()
+                    && key == "task-board/task"
+                    && !v::has(destination, "create")
+                {
                     (self.comments)(
                         value.clone(),
-                        f(destination, "objectId")?,
+                        f(destination, "objectId").clone(),
                         mutation.clone(),
                         version.clone(),
                     )
@@ -438,26 +440,28 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
             ),
         ]);
         let mut references = Vec::new();
-        if key == "task-board/task" {
-            let stored = f(&content, "value")?;
-            let tree = f(&stored, "commentStore")?;
+        if let Some(selected) = selected_references {
+            references = v::fields(selected).to_vec();
+        } else if key == "task-board/task" {
+            let stored = f(&content, "value");
+            let tree = f(&stored, "commentStore");
             if !v::nullish(&tree)
-                && f(&tree, "kind")?.eq(&text("tree"))
-                && v::present(&(f(&tree, "root")?))
+                && f(&tree, "kind").eq(&text("tree"))
+                && v::present(&(f(&tree, "root")))
             {
-                references.push(("conversation".into(), f(&f(&tree, "root")?, "object")?));
+                references.push(("conversation".into(), f(f(&tree, "root"), "object").clone()));
             }
-            let result = f(&value, "latestResult")?;
+            let result = f(&value, "latestResult");
             if v::present(&(result)) {
-                references.push(("result".into(), result));
+                references.push(("result".into(), result.clone()));
             }
-            let run = f(&value, "lastRun")?;
+            let run = f(&value, "lastRun");
             if v::present(&(run)) {
-                references.push(("run".into(), run));
+                references.push(("run".into(), run.clone()));
             }
-            if v::present(&(f(&value, "completionIssue")?)) {
+            if v::present(&(f(&value, "completionIssue"))) {
                 if let Some(pin) =
-                    recovery_reference(reads, &f(&f(&value, "completionIssue")?, "run")?).await?
+                    recovery_reference(reads, f(f(&value, "completionIssue"), "run")).await?
                 {
                     if v::present(&(pin)) {
                         references.push(("recovery-run".into(), pin));
@@ -465,7 +469,7 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
                 }
             }
             let attachments = task_attachment_pins::<E>(&value)?;
-            if v::has(destination, "create")? {
+            if v::has(destination, "create") {
                 let pins = iterated(&attachments, "attachments")?;
                 require(
                     pins.len() + references.len() <= 256,
@@ -473,7 +477,8 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
                     "An initial Task exceeds its exact reference capacity.",
                 )?;
                 references.extend(
-                    pins.into_iter()
+                    pins.iter()
+                        .cloned()
                         .enumerate()
                         .map(|(index, pin)| (format!("attachment-{index}").into(), pin)),
                 );
@@ -482,12 +487,14 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
                     &task_references(
                         self.source,
                         self.identity,
-                        &f(destination, "objectId")?,
+                        f(destination, "objectId"),
                         &v::object(references),
                         &attachments,
+                        crate::journal_store::reference_writes::ReferencePages::Retained,
                     )
                     .await?,
-                );
+                )
+                .to_vec();
             }
         } else if key == "task-board/run" {
             if let Some(pin) = crate::journal_store::reference_writes::run_source_for_write(
@@ -507,31 +514,32 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
                 references.push(("source-task".into(), pin));
             }
         } else if key == "task-board/delivery" {
-            let request = f(&value, "chatRequest")?;
+            let request = f(&value, "chatRequest");
             if v::present(&(request)) {
-                references.push(("source".into(), f(&request, "source")?));
+                references.push(("source".into(), f(&request, "source").clone()));
             }
         } else if key == "task-board/result" {
             let mut artifacts = iterated(
-                &f(&f(&value, "content")?, "artifacts")?,
+                f(f(&value, "content"), "artifacts"),
                 "value.content.artifacts",
-            )?;
-            let checks = f(&f(&value, "content")?, "checks")?;
+            )?
+            .to_vec();
+            let checks = f(f(&value, "content"), "checks");
             let checks = if v::nullish(&checks) {
-                array([])
+                &[][..]
             } else {
-                checks
+                v::items(checks)?
             };
-            for finding in v::items(&checks)? {
+            for finding in checks {
                 if let Some(evidence) = finding.get("evidence") {
-                    artifacts.extend(v::items(evidence)?);
+                    artifacts.extend(v::items(evidence)?.iter().cloned());
                 }
             }
             let mut remote = Vec::new();
             for artifact in artifacts {
                 if local
                     .key::<WriteFailure<E>>(
-                        sql_argument(&f(&f(&artifact, "object")?, "objectId")?)?.as_ref(),
+                        sql_argument(f(f(&artifact, "object"), "objectId"))?.as_ref(),
                     )?
                     .is_none()
                 {
@@ -539,7 +547,10 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
                 }
             }
             for (index, artifact) in remote.into_iter().take(256).enumerate() {
-                references.push((format!("artifact-{index}").into(), f(&artifact, "object")?));
+                references.push((
+                    format!("artifact-{index}").into(),
+                    f(&artifact, "object").clone(),
+                ));
             }
         }
         let references = v::object(references);
@@ -554,8 +565,8 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
             ("content".into(), content),
             ("references".into(), references),
         ];
-        if v::has(destination, "create")? {
-            let mut create = v::fields(&f(destination, "create")?);
+        if v::has(destination, "create") {
+            let mut create = v::fields(f(destination, "create")).to_vec();
             create.extend([
                 ("ownerObjectId".into(), Value::Null),
                 ("contractKey".into(), text(key)),
@@ -563,10 +574,10 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
             params.push(("create".into(), v::object(create)));
         } else {
             params.extend([
-                ("objectId".into(), f(destination, "objectId")?),
+                ("objectId".into(), f(destination, "objectId").clone()),
                 (
                     "expectedRevision".into(),
-                    f(destination, "expectedRevision")?,
+                    f(destination, "expectedRevision").clone(),
                 ),
             ]);
             if key == "task-board/task" {
@@ -587,20 +598,19 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
         {
             Ok(result) => result,
             Err(error) => {
-                if !v::has(destination, "create")? || !code(&error, &["revision_conflict"]) {
+                if !v::has(destination, "create") || !code(&error, &["revision_conflict"]) {
                     return Err(error);
                 }
                 let existing = named_graph(
                     reads,
                     self.source,
                     key,
-                    &f(&f(destination, "create")?, "name")?,
+                    f(f(destination, "create"), "name"),
                     destination.get("create").and_then(|v| v.get("parentId")),
                 )
                 .await?;
                 let agrees = if let Some(existing) = &existing {
-                    f(&f(existing, "pin")?, "revision")?.eq(&Value::Number(1.0))
-                        && hash(&f(existing, "value")?)? == hash(&value)?
+                    existing.pin.revision == 1.0 && hash(&existing.value)? == hash(&value)?
                 } else {
                     false
                 };
@@ -609,16 +619,10 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
                     "revision_conflict",
                     "The durable TaskBoard identity already contains different content.",
                 )?;
-                return Ok(f(&existing.unwrap(), "pin")?);
+                return Ok(existing.unwrap().pin.to_json());
             }
         };
-        let pin = complete_write(
-            reads.cache,
-            &v::decoded_comment::<WriteFailure<E>>(&root(reads))?,
-            key,
-            &v::decoded_comment::<WriteFailure<E>>(&value)?,
-            &v::decoded_comment::<WriteFailure<E>>(&result)?,
-        )?;
-        Ok((&pin).clone())
+        let pin = complete_write(reads.cache, &result)?;
+        Ok(pin)
     }
 }

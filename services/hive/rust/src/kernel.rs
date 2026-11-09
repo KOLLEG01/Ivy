@@ -161,6 +161,7 @@ impl Kernel {
             "objects.tree",
             "objects.search",
             "objects.query",
+            "objects.count",
             "discovery.list",
             "discovery.instructions",
             "system.instructions",
@@ -275,7 +276,12 @@ impl Call<'_> {
         let params = field(value, "params")?;
         self.execute_call(context, &method, params)
     }
-    fn execute_call(&mut self, context: &IvyJson, method: &str, params: &IvyJson) -> IvyResult<IvyJson> {
+    fn execute_call(
+        &mut self,
+        context: &IvyJson,
+        method: &str,
+        params: &IvyJson,
+    ) -> IvyResult<IvyJson> {
         if let Some(reset) = self
             .options
             .reset_bootstrap_credential_digest
@@ -379,7 +385,7 @@ impl Call<'_> {
         }
         let duration = Duration::from_millis(match method {
             "registry.sync" => 25_000,
-            "objects.query" | "objects.delete" => 15_000,
+            "objects.query" | "objects.count" | "objects.delete" => 15_000,
             _ => 1000,
         });
         let Call {
@@ -451,10 +457,13 @@ fn domain(
             ("hiveProtocol", IvyJson::Number(1.0)),
             ("runtimeEpoch", IvyJson::String(call.store.runtime_epoch()?)),
             ("ready", true.into()),
-            ("nativeToolTransport", IvyJson::object([
-                ("parameters", "json".into()),
-                ("preReadyOutcome", "not_executed".into()),
-            ])),
+            (
+                "nativeToolTransport",
+                IvyJson::object([
+                    ("parameters", "json".into()),
+                    ("preReadyOutcome", "not_executed".into()),
+                ]),
+            ),
             (
                 "serverTime",
                 IvyJson::String(call.runtime.iso_date((call.clock)())?),
@@ -544,7 +553,14 @@ fn domain(
                     now as u64,
                     &at,
                 ),
-                _ => objects::delete_with_service(call.store, &principal, Some(context), params, now as u64, &at),
+                _ => objects::delete_with_service(
+                    call.store,
+                    &principal,
+                    Some(context),
+                    params,
+                    now as u64,
+                    &at,
+                ),
             }
         }
         "objects.pruneRevisions" => objects::prune_revisions(
@@ -571,7 +587,7 @@ fn domain(
                 call.runtime.word_character(point)
             })
         }
-        "objects.query" => {
+        "objects.query" | "objects.count" => {
             require(
                 context
                     .get("sessionDigest")
@@ -581,7 +597,11 @@ fn domain(
                 "forbidden",
                 "Browser sessions cannot query host configuration fields.",
             )?;
-            crate::query::query_objects(call.store, params)
+            if method == "objects.count" {
+                crate::query::count_objects(call.store, params)
+            } else {
+                crate::query::query_objects(call.store, params)
+            }
         }
         "discovery.list" => call.discovery.list(
             call.store,

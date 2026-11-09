@@ -286,7 +286,7 @@ fn pin(id: &str, revision: f64) -> Json {
 }
 fn document(id: &str, revision: f64, value: Json) -> Document {
     Document {
-        pin: pin(id, revision),
+        pin: ivy_task_board::operations::ObjectPin::from_json(pin(id, revision)).unwrap(),
         content_hash: hash_json(&value).unwrap(),
         value,
         parent_id: None,
@@ -350,7 +350,7 @@ impl World {
 }
 impl RetryInspection for World {
     async fn find(&self, run: &Json) -> IvyResult<Inspection> {
-        assert_eq!(run, &self.run.pin);
+        assert_eq!(run, &self.run.pin.to_json());
         self.inspections.set(self.inspections.get() + 1);
         if let Some(error) = self.failure.borrow().as_ref() {
             return Err(error.clone());
@@ -389,7 +389,7 @@ impl Store for World {
             "task-board/result" => &self.result,
             _ => panic!("Unexpected read {key}"),
         };
-        assert_eq!(address, &document.pin);
+        assert_eq!(address, &document.pin.to_json());
         Ok(document.clone())
     }
     async fn write(&self, _: &str, _: &Json, _: &str, _: &Json) -> IvyResult<Json> {
@@ -398,7 +398,15 @@ impl Store for World {
     async fn prepared_mutation_id(&self, _: &str) -> IvyResult<JsString> {
         unreachable!()
     }
-    async fn write_prepared(&self, _: &str, _: &Json, _: &JsString, _: &Json) -> IvyResult<Json> {
+    async fn write_prepared(
+        &self,
+        _: &str,
+        _: &Json,
+        _: &JsString,
+        _: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
+    ) -> IvyResult<Json> {
         unreachable!()
     }
 }

@@ -90,6 +90,65 @@ async fn actions(world: &World<'_>, catalogs: &CheckedNativeContracts) -> Vec<Js
     results
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn active_steering_uses_compact_headers_and_actual_queued_receipts() {
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let source = data()
+        .required("rows")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| f(row, "name").is_str("unchanged active poll writes no evidence"))
+        .unwrap();
+    let mut row = attached(source);
+    row.get_mut("run")
+        .unwrap()
+        .get_mut("value")
+        .unwrap()
+        .get_mut("originalRequest")
+        .unwrap()
+        .insert("commentIds", Json::Array(vec!["original".into()]));
+    row.get_mut("task")
+        .unwrap()
+        .get_mut("value")
+        .unwrap()
+        .insert(
+            "commentDeliveries",
+            Json::Array(
+                [
+                    ("original", "queued"),
+                    ("new", "queued"),
+                    ("done", "delivered"),
+                    ("new", "queued"),
+                ]
+                .into_iter()
+                .map(|(id, state)| {
+                    Json::object([("commentId", id.into()), ("state", state.into())])
+                })
+                .collect(),
+            ),
+        );
+    let inline = World::new(&row);
+    let compact = World::new(&row);
+    compact.compact.set(true);
+    for world in [&inline, &compact] {
+        NativeOrchestrator::new(world, world, world, &catalogs, progress_tracker())
+            .step(&id(200))
+            .await
+            .unwrap();
+        let prepared = event(world, "prepare");
+        assert_eq!(
+            f(&prepared.as_array().unwrap()[3], "commentIds"),
+            &Json::Array(vec!["new".into(), "new".into()])
+        );
+        assert_eq!(world.headers.get(), 2);
+        assert_eq!(world.queues.get(), 1);
+    }
+    same(&event(&inline, "prepare"), &event(&compact, "prepare"));
+}
+
 fn same(actual: &Json, expected: &Json) {
     assert_eq!(
         canonical(actual, MANAGEMENT_FRAME_BYTES).unwrap(),

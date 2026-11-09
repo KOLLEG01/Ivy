@@ -238,8 +238,6 @@ async fn collect(
     );
     assert_eq!(count(fixture, "SELECT count(*) FROM active_gates"), 0);
     if let Some(control) = control {
-        let ready = bounded(control.readiness(connection)).await.unwrap();
-        assert_eq!(f(&ready, "ready"), &true.into());
         let diagnostics = if let Some(error) = &error {
             assert_eq!(error, f(reference(), "cleanupFailure"));
             assert_eq!(before, after);
@@ -247,6 +245,18 @@ async fn collect(
         } else {
             "cleanDiagnostics"
         };
+        let expected_diagnostics = hash_json(f(reference(), diagnostics)).unwrap();
+        let ready = bounded(async {
+            loop {
+                let ready = control.readiness(connection).await.unwrap();
+                if hash_json(f(&ready, "diagnostics")).unwrap() == expected_diagnostics {
+                    break ready;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await;
+        assert_eq!(f(&ready, "ready"), &true.into());
         assert_eq!(
             hash_json(f(&ready, "diagnostics")).unwrap(),
             hash_json(f(reference(), diagnostics)).unwrap()

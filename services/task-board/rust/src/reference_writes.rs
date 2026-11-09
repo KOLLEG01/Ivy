@@ -13,7 +13,7 @@ use std::{
 use ivy_contracts::IvyError;
 
 pub(crate) fn run_source_task(value: &Value) -> std::result::Result<Option<Value>, IvyError> {
-    let phase = f(value, "phase")?;
+    let phase = f(value, "phase");
     if ["completed", "failed", "cancelled"]
         .iter()
         .any(|state| phase.eq(&text(*state)))
@@ -21,10 +21,10 @@ pub(crate) fn run_source_task(value: &Value) -> std::result::Result<Option<Value
         return Ok(None);
     }
     Ok(Some(obj([
-        ("objectId", f(value, "taskId")?),
+        ("objectId", f(value, "taskId").clone()),
         (
             "revision",
-            f(&f(value, "originalRequest")?, "expectedRevision")?,
+            f(f(value, "originalRequest"), "expectedRevision").clone(),
         ),
     ])))
 }
@@ -147,11 +147,19 @@ pub(crate) fn task_attachment_pins<E>(task: &Value) -> Result<Value, E> {
 }
 fn pin(result: &Value) -> std::result::Result<Value, IvyError> {
     Ok(obj([
-        ("objectId", f(&f(result, "object")?, "id")?),
-        ("revision", f(&f(result, "revision")?, "revision")?),
+        ("objectId", f(f(result, "object"), "id").clone()),
+        ("revision", f(f(result, "revision"), "revision").clone()),
     ]))
 }
-/// Sequential page publications preserve exact prior revisions. There is no
+#[derive(Clone, Copy)]
+pub(crate) enum ReferencePages {
+    /// Preserve the request construction of existing inline prepared records.
+    Retained,
+    /// Compact snapshots capture immutable page pins before Task publication.
+    Immutable,
+}
+
+/// Immutable pages keep compact snapshots independent of later writes. There is no
 /// catch or private retry around query/read/identity/write or postwrite pins.
 pub(crate) async fn task_references<E, S: LocalMutationSource<E>, I, Fut>(
     source: &S,
@@ -159,12 +167,13 @@ pub(crate) async fn task_references<E, S: LocalMutationSource<E>, I, Fut>(
     task_id: &Value,
     named: &Value,
     attachments: &Value,
+    pages: ReferencePages,
 ) -> Result<Value, E>
 where
     I: Fn(Value) -> Fut,
     Fut: Future<Output = Result<Value, E>>,
 {
-    let mut references = v::fields(named);
+    let mut references = v::fields(named).to_vec();
     let mut seen = HashSet::new();
     for (_, value) in v::fields(named) {
         seen.insert(hash(&value)?);
@@ -173,7 +182,7 @@ where
     for pin in v::items(attachments)? {
         let h = hash(&pin)?;
         if seen.insert(h) {
-            pins.push(pin);
+            pins.push(pin.clone());
         }
     }
     if references.len() + pins.len() <= 256 {
@@ -190,7 +199,28 @@ where
         "Task evidence exceeds its reference page capacity.",
     )?;
     for (index, selected) in pins.chunks(256).enumerate() {
-        let name = text(format!("Task references {}", index + 1));
+        let content = obj([
+            ("encoding", text("json")),
+            (
+                "value",
+                obj([
+                    ("schemaVersion", Value::Number(1.0)),
+                    ("taskId", task_id.clone()),
+                    ("pins", array(selected.iter().cloned())),
+                ]),
+            ),
+        ]);
+        let exact = v::object(
+            selected
+                .iter()
+                .enumerate()
+                .map(|(i, pin)| (format!("pin-{i}").into(), pin.clone())),
+        );
+        let content_hash = hash(&content)?;
+        let name = text(match pages {
+            ReferencePages::Retained => format!("Task references {}", index + 1),
+            ReferencePages::Immutable => format!("Task references {}", &content_hash[7..]),
+        });
         let page = source
             .request_owned(
                 "objects.query",
@@ -223,17 +253,17 @@ where
             )
             .await?;
         require(
-            number(&v::length(&f(&page, "items")?)?)? <= 1.0
-                && !v::present(&(f(&page, "nextCursor")?)),
+            number(&v::length(f(&page, "items"))?)? <= 1.0
+                && !v::present(&(f(&page, "nextCursor"))),
             "task_board_identity_conflict",
             "A task reference page must have one identity.",
         )?;
-        let first = at(&f(&page, "items")?, 0)?;
+        let first = at(f(&page, "items"), 0)?;
         let previous = if v::present(&(first)) {
             source
                 .request_owned(
                     "objects.read",
-                    Some(obj([("objectId", f(&first, "objectId")?)])),
+                    Some(obj([("objectId", f(&first, "objectId").clone())])),
                 )
                 .await?
         } else {
@@ -241,54 +271,43 @@ where
         };
         require(
             !v::present(&(previous))
-                || (f(&f(&previous, "object")?, "ownerObjectId")?.eq(task_id)
-                    && f(&f(&previous, "object")?, "parentId")?.eq(task_id)),
+                || (f(f(&previous, "object"), "ownerObjectId").eq(task_id)
+                    && f(f(&previous, "object"), "parentId").eq(task_id)),
             "task_board_scope_mismatch",
             "The reference page belongs to another ticket.",
         )?;
-        let content = obj([
-            ("encoding", text("json")),
-            (
-                "value",
-                obj([
-                    ("schemaVersion", Value::Number(1.0)),
-                    ("taskId", task_id.clone()),
-                    ("pins", array(selected.iter().cloned())),
-                ]),
-            ),
-        ]);
-        let exact = v::object(
-            selected
-                .iter()
-                .enumerate()
-                .map(|(i, pin)| (format!("pin-{i}").into(), pin.clone())),
-        );
         if v::present(&(previous))
-            && hash(&f(&previous, "content")?)? == hash(&content)?
-            && hash(&f(&f(&previous, "revision")?, "references")?)? == hash(&exact)?
+            && hash(f(&previous, "content"))? == content_hash
+            && hash(f(f(&previous, "revision"), "references"))? == hash(&exact)?
         {
             references.push((format!("reference-page-{index}").into(), pin(&previous)?));
             continue;
         }
-        let prior = if v::nullish(&previous) {
-            Value::Number(0.0)
-        } else {
-            let revision = f(&f(&previous, "revision")?, "revision")?;
-            if v::nullish(&revision) {
-                Value::Number(0.0)
-            } else {
-                revision
+        let scope = match pages {
+            ReferencePages::Immutable => {
+                require(
+                    !v::present(&previous),
+                    "task_board_evidence_mismatch",
+                    "An immutable task reference page differs from its identity.",
+                )?;
+                obj([("taskId", task_id.clone()), ("content", content.clone())])
+            }
+            ReferencePages::Retained => {
+                let revision = previous
+                    .get("revision")
+                    .and_then(|revision| revision.get("revision"))
+                    .filter(|revision| !v::nullish(revision))
+                    .cloned()
+                    .unwrap_or(Value::Number(0.0));
+                obj([
+                    ("taskId", task_id.clone()),
+                    ("index", Value::Number(index as f64)),
+                    ("content", content.clone()),
+                    ("previous", revision),
+                ])
             }
         };
-        let scope = text(format!(
-            "reference-page:{}",
-            hash(&obj([
-                ("taskId", task_id.clone()),
-                ("index", Value::Number(index as f64)),
-                ("content", content.clone()),
-                ("previous", prior)
-            ]))?
-        ));
+        let scope = text(format!("reference-page:{}", hash(&scope)?));
         let mutation = identity(scope).await?;
         let mut request = vec![
             ("contractVersion".into(), text("1.0.0")),
@@ -296,16 +315,16 @@ where
             ("references".into(), exact),
             ("mutationId".into(), mutation),
         ];
-        if v::present(&(previous)) {
+        if v::present(&previous) {
             request.extend([
-                ("objectId".into(), f(&f(&previous, "object")?, "id")?),
+                ("objectId".into(), f(f(&previous, "object"), "id").clone()),
                 (
                     "expectedRevision".into(),
-                    f(&f(&previous, "revision")?, "revision")?,
+                    f(f(&previous, "revision"), "revision").clone(),
                 ),
                 (
                     "expectedArchived".into(),
-                    f(&f(&previous, "object")?, "effectivelyArchived")?,
+                    f(f(&previous, "object"), "effectivelyArchived").clone(),
                 ),
             ]);
         } else {

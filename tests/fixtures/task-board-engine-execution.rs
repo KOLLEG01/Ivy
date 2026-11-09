@@ -43,11 +43,7 @@ fn data() -> &'static Json {
             .unwrap();
         }
         let p = reference_data::read(include_bytes!("task-board-engine-execution-cases.json.gz"));
-        parse(
-            std::str::from_utf8(&p).unwrap(),
-            MANAGEMENT_FRAME_BYTES,
-        )
-        .unwrap()
+        parse(std::str::from_utf8(&p).unwrap(), MANAGEMENT_FRAME_BYTES).unwrap()
     })
 }
 fn error(v: &Json) -> IvyError {
@@ -108,7 +104,8 @@ struct World {
 }
 fn doc(v: &Json) -> Document {
     Document {
-        pin: v.required("pin").unwrap().clone(),
+        pin: ivy_task_board::operations::ObjectPin::from_json(v.required("pin").unwrap().clone())
+            .unwrap(),
         value: v.required("value").unwrap().clone(),
         parent_id: f(f(v, "metadata"), "parentId").as_js_string().cloned(),
         content_hash: hash_json(v.required("value").unwrap()).unwrap(),
@@ -160,7 +157,15 @@ impl Store for World {
     async fn prepared_mutation_id(&self, _: &str) -> IvyResult<JsString> {
         unreachable!()
     }
-    async fn write_prepared(&self, _: &str, _: &Json, _: &JsString, _: &Json) -> IvyResult<Json> {
+    async fn write_prepared(
+        &self,
+        _: &str,
+        _: &Json,
+        _: &JsString,
+        _: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
+    ) -> IvyResult<Json> {
         unreachable!()
     }
 }
@@ -245,7 +250,7 @@ impl ExecutionPublication<Json> for Bindings {
         self.0.call(
             "publish",
             [
-                op.pin.clone(),
+                op.pin.to_json(),
                 op.value.clone(),
                 t.cloned().unwrap_or(Json::Null),
                 n.cloned().map(Json::String).unwrap_or(Json::Null),
@@ -350,7 +355,7 @@ async fn assert_execution_rows(rows: &[Json]) -> Vec<Json> {
                 "current" => gates
                     .current(&"TaskBoard publication gate".into())
                     .await
-                    .map(|d| Json::object([("pin", d.pin), ("value", d.value)])),
+                    .map(|d| Json::object([("pin", d.pin.to_json()), ("value", d.value)])),
                 "acquire" => gates
                     .acquire(&doc(f(step, "operation")))
                     .await
@@ -375,7 +380,7 @@ async fn assert_execution_rows(rows: &[Json]) -> Vec<Json> {
                     .failure(&"op".into(), &supplied_cause(f(step, "cause")), false)
                     .await
                     .map(|document| {
-                        Json::object([("pin", document.pin), ("value", document.value)])
+                        Json::object([("pin", document.pin.to_json()), ("value", document.value)])
                     }),
                 "cached" => cached.execute_cached(doc(f(step, "operation"))).await,
                 "queue" => {
@@ -491,7 +496,11 @@ async fn pending_owner_work_coalesces_survives_caller_loss_and_drains() {
     let operation = |id: &str, value: &str| {
         let value = Json::String(value.into());
         Document {
-            pin: Json::object([("objectId", id.into()), ("revision", Json::Number(1.0))]),
+            pin: ivy_task_board::operations::ObjectPin::from_json(Json::object([
+                ("objectId", id.into()),
+                ("revision", Json::Number(1.0)),
+            ]))
+            .unwrap(),
             content_hash: hash_json(&value).unwrap(),
             value,
             parent_id: None,
@@ -574,10 +583,11 @@ async fn interrupted_execution_releases_identity_and_wakes_reply_and_drain_obser
         let executor = Executor::default();
         let queue = ExecutionQueue::new(&program, &executor);
         let operation = || Document {
-            pin: Json::object([
+            pin: ivy_task_board::operations::ObjectPin::from_json(Json::object([
                 ("objectId", "same-operation".into()),
                 ("revision", Json::Number(1.0)),
-            ]),
+            ]))
+            .unwrap(),
             value: "original operation".into(),
             content_hash: hash_json(&Json::from("original operation")).unwrap(),
             parent_id: None,

@@ -11,7 +11,7 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, agent_schema::validate_agent,
-    checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical,
+    checked_native_contract::CheckedNativeContracts, json::canonical_equal,
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::{
@@ -61,9 +61,11 @@ pub(crate) fn current_target(task: &Json, previous: &Json) -> IvyResult<Option<J
     }
     let (current, _) = routed_primary(task, primary, backend)?;
     let target = routed_target(task, original)?;
-    Ok((canonical(&current, MANAGEMENT_FRAME_BYTES)?
-        == canonical(f(task, "primaryResourceRef"), MANAGEMENT_FRAME_BYTES)?
-        && matches_task_primary(&target, task)?)
+    Ok((canonical_equal(
+        &current,
+        f(task, "primaryResourceRef"),
+        MANAGEMENT_FRAME_BYTES,
+    )? && matches_task_primary(&target, task)?)
     .then_some(target))
 }
 pub fn turns_params(thread: &Json) -> Json {
@@ -408,21 +410,21 @@ impl<S: LifecycleStore, D: NativeDriverConnection, C: Fn() -> f64> NativeAdoptio
         let Some(turn) = candidate(value, &previous.value, &metadata, &turns)? else {
             return Ok(None);
         };
-        let task_id = s(&task.pin, "objectId")?;
-        let hash = hash_json(&Json::object([
-            ("primary", primary.clone()),
-            ("turnId", f(turn, "id").clone()),
-            ("task", task.pin.clone()),
-            ("observation", f(&turns, "observationId").clone()),
-        ]))?;
+        let task_id = &task.pin.object_id;
+        let hash = ivy_contracts::hash::hash_object([
+            (&"primary".into(), primary),
+            (&"turnId".into(), f(turn, "id")),
+            (&"task".into(), &task.pin.to_json()),
+            (&"observation".into(), f(&turns, "observationId")),
+        ])?;
         let operation = mutation(task_id, &format!("adopt:{hash}"))?;
         self.driver
             .native_update(&Json::object([
                 ("action", "nativeUpdate".into()),
                 ("operationId", operation.into()),
                 ("taskId", Json::String(task_id.clone())),
-                ("expectedRevision", f(&task.pin, "revision").clone()),
-                ("run", previous.pin),
+                ("expectedRevision", Json::Number(task.pin.revision)),
+                ("run", previous.pin.to_json()),
                 (
                     "change",
                     Json::object([
@@ -442,7 +444,7 @@ impl<S: LifecycleStore, D: NativeDriverConnection, C: Fn() -> f64> DirectTurnAdo
     async fn adopt(&self, id: &JsString) -> IvyResult<Option<JsString>> {
         let task = self
             .store
-            .lifecycle_read("task-board/task", &Json::String(id.clone()), true, true)
+            .task_header(&Json::String(id.clone()), true, true)
             .await?;
         let value = &task.document.value;
         let primary = f(value, "primaryResourceRef");
@@ -455,21 +457,19 @@ impl<S: LifecycleStore, D: NativeDriverConnection, C: Fn() -> f64> DirectTurnAdo
         }
         let now = (self.now_millis)();
         let run = f(f(value, "lastRun"), "objectId");
-        let force = eq(value, "workflowState", "todo")
-            || f(value, "commentDeliveries")
-                .as_array()
-                .unwrap_or(&[])
-                .iter()
-                .any(|v| eq(v, "state", "queued"));
         if !f(value, "claim").is_null() {
             return Ok(None);
         }
-        if self
-            .checked
-            .borrow()
-            .iter()
-            .any(|v| &v.task == id && &v.primary == primary && &v.run == run && v.after > now)
-            && !force
+        let cached = |at| {
+            self.checked
+                .borrow()
+                .iter()
+                .any(|v| &v.task == id && &v.primary == primary && &v.run == run && v.after > at)
+        };
+        if cached(now)
+            && !eq(value, "workflowState", "todo")
+            && self.store.queued_comment_ids(value, id).await?.is_empty()
+            && cached((self.now_millis)())
         {
             return Ok(None);
         }

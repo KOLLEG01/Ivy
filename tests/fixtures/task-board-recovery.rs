@@ -30,10 +30,11 @@ fn recovery_lineage_and_missing_thread_checks_match_original_reads_and_refusals(
                 key: r.required("key").unwrap().as_str().unwrap(),
                 name: "record".into(),
                 document: Document {
-                    pin: Json::object([
+                    pin: ivy_task_board::operations::ObjectPin::from_json(Json::object([
                         ("objectId", r.required("id").unwrap().clone()),
                         ("revision", Json::Number(1.0)),
-                    ]),
+                    ]))
+                    .unwrap(),
                     value: value.clone(),
                     parent_id: Some("root".into()),
                     content_hash: hash_json(value).unwrap(),

@@ -51,3 +51,27 @@ path = "../../../tests/rust/task-board-output.rs"
 [[test]]
 name = "task-board-host-runtime"
 path = "../../../tests/rust/task-board-host-runtime.rs"
+
+[[test]]
+name = "task-board-large-writes"
+path = "../../../tests/rust/task-board-large-writes.rs"
+
+[[test]]
+name = "task-board-document-json"
+path = "../../../tests/rust/task-board-document-json.rs"
+
+[[test]]
+name = "task-board-actions"
+path = "../../../tests/rust/task-board-actions.rs"
+
+[[test]]
+name = "task-board-reads"
+path = "../../../tests/rust/task-board-reads.rs"
+
+[[test]]
+name = "task-board-checks"
+path = "../../../tests/rust/task-board-checks.rs"
+
+[[test]]
+name = "task-board-read-handler"
+path = "../../../tests/rust/task-board-read-handler.rs"

@@ -151,7 +151,10 @@ impl Memory {
 }
 fn document(value: &Json) -> Document {
     Document {
-        pin: value.required("pin").unwrap().clone(),
+        pin: ivy_task_board::operations::ObjectPin::from_json(
+            value.required("pin").unwrap().clone(),
+        )
+        .unwrap(),
         value: value.required("value").unwrap().clone(),
         parent_id: value.required("parentId").unwrap().as_js_string().cloned(),
         content_hash: value.required("contentHash").unwrap().as_str().unwrap(),
@@ -176,7 +179,15 @@ impl Store for Memory {
     async fn prepared_mutation_id(&self, _: &str) -> IvyResult<JsString> {
         unreachable!()
     }
-    async fn write_prepared(&self, _: &str, _: &Json, _: &JsString, _: &Json) -> IvyResult<Json> {
+    async fn write_prepared(
+        &self,
+        _: &str,
+        _: &Json,
+        _: &JsString,
+        _: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
+    ) -> IvyResult<Json> {
         unreachable!()
     }
     async fn named(

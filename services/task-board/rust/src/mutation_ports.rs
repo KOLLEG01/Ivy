@@ -2,6 +2,7 @@
 #![cfg_attr(not(test), allow(dead_code))]
 use super::persistent_reads::json_values::Value;
 use crate::engine_read::read_failure::{ReadCause, ReadFailure};
+use crate::operations::Document;
 use ivy_contracts::{IvyError, JsString};
 use ivy_sdk::rpc::{OptionalRpcClient, RequestOptions};
 
@@ -44,7 +45,7 @@ pub(crate) trait LocalMutationStore<E> {
         key: &str,
         name: &Value,
         parent: Option<&Value>,
-    ) -> Result<Option<Value>, WriteFailure<E>>;
+    ) -> Result<Option<Document>, WriteFailure<E>>;
     async fn read_graph(
         &self,
         key: &str,
@@ -52,7 +53,7 @@ pub(crate) trait LocalMutationStore<E> {
         primary: bool,
         include_archived: bool,
         retained: bool,
-    ) -> Result<Value, WriteFailure<E>>;
+    ) -> Result<Document, WriteFailure<E>>;
     async fn write_graph(
         &self,
         key: &str,
@@ -60,6 +61,18 @@ pub(crate) trait LocalMutationStore<E> {
         mutation: &Value,
         destination: &Value,
     ) -> Result<Value, WriteFailure<E>>;
+    async fn prepare_payload_graph(
+        &self,
+        key: &str,
+        value: Value,
+        _destination: &Value,
+    ) -> Result<crate::operations::PreparedPayload, WriteFailure<E>> {
+        Ok(crate::operations::PreparedPayload {
+            key: key.into(),
+            value,
+            version: None,
+        })
+    }
     async fn prepared_mutation_id_graph(&self, mutation: &Value) -> Result<Value, WriteFailure<E>>;
     async fn write_prepared_graph(
         &self,
@@ -68,6 +81,7 @@ pub(crate) trait LocalMutationStore<E> {
         mutation: &Value,
         destination: &Value,
         selected_version: &Value,
+        references: Option<&Value>,
     ) -> Result<Value, WriteFailure<E>>;
 }
 

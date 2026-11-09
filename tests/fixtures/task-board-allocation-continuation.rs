@@ -1,7 +1,10 @@
 use super::*;
 fn task() -> Document {
     Document {
-        pin: Json::object([("objectId", "task".into())]),
+        pin: crate::operations::ObjectPin {
+            object_id: "task".into(),
+            revision: 1.0,
+        },
         value: Json::object([(
             "primaryResourceRef",
             Json::object([

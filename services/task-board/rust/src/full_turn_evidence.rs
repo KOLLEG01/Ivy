@@ -10,7 +10,9 @@ use crate::{
     turn_output::missing_output_summary,
 };
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
+    IvyError, IvyJson as Json, IvyResult, JsString,
+    json::{canonical, canonical_size},
+    limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::clock::parse_date;
 use std::collections::HashSet;
@@ -184,7 +186,7 @@ impl<S: TurnEvidenceStore> FullTurnEvidence<'_, S> {
             "Only an explicitly complete native item view can publish a full transcript.",
         )?;
         require(
-            Some(canonical(&full, MAXIMUM_BYTES)?.len() as f64)
+            Some(canonical_size(&full, MAXIMUM_BYTES)? as f64)
                 == value.get("fullTurnBytes").and_then(Json::as_f64),
             "task_board_evidence_mismatch",
             "Full native observation bytes must match their retained length.",

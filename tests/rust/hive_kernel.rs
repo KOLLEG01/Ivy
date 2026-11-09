@@ -41,6 +41,72 @@ fn options() -> Options {
         reset_bootstrap_credential_digest: None,
     }
 }
+
+#[test]
+fn kernel_count_dispatch_admits_bounded_reads_and_preserves_browser_configuration_privacy() {
+    // Reuse recorded startup primitives; grouped reads add no locale/date behavior.
+    let fixtures: Value = serde_json::from_slice(&reference_data::read(include_bytes!(
+        "../fixtures/hive-store-reference.json.gz"
+    )))
+    .unwrap();
+    let profile = fixtures["traces"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find_map(|trace| trace.get("registryRuntime"))
+        .unwrap();
+    let root = Root::new();
+    let clock = Rc::new(Cell::new(100000.0));
+    let mut kernel = compose(&root.0.join("count.sqlite"), profile, clock);
+    kernel
+        .parts
+        .store
+        .connection()
+        .execute_batch(&super::query::seed(false))
+        .unwrap();
+    let mut input = request(
+        "objects.count",
+        json!({"contractKey":"fixture/value","groupBy":["object.contractVersion"],"limit":2}),
+    )["request"]
+        .clone();
+    let caller = IvyJson::from_serde(&context("http")).unwrap();
+    let page = kernel
+        .execute(&caller, &IvyJson::from_serde(&input).unwrap())
+        .unwrap();
+    let page = page.get("value").unwrap();
+    ivy_contracts::core_schema::validate_output("objects.count", &page).unwrap();
+    assert_eq!(page.get("items").unwrap().as_array().unwrap().len(), 2);
+    input["params"]["limit"] = 201.into();
+    assert_eq!(
+        kernel
+            .execute(&caller, &IvyJson::from_serde(&input).unwrap())
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+    let mut browser = context("http");
+    browser["sessionDigest"] = "browser".into();
+    for method in ["objects.count", "objects.query"] {
+        let input = request(
+            method,
+            if method == "objects.count" {
+                json!({"contractKey":ivy_hive::configurations::CONTRACT_KEY,"groupBy":["object.name"]})
+            } else {
+                json!({"contractKey":ivy_hive::configurations::CONTRACT_KEY,"select":["object.name"]})
+            },
+        );
+        assert_eq!(
+            kernel
+                .execute(
+                    &IvyJson::from_serde(&browser).unwrap(),
+                    &IvyJson::from_serde(&input["request"]).unwrap()
+                )
+                .unwrap_err()
+                .code,
+            "forbidden"
+        );
+    }
+}
 fn compose(path: &Path, profile: &Value, clock: Rc<Cell<f64>>) -> Kernel {
     let mut store = Store::open(path).unwrap();
     let cursor_secret = "0123456789abcdef".repeat(4);
@@ -168,10 +234,12 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
                         worker = Some(actions);
                         Ok(IvyJson::Null)
                     }
-                    "dispatch" => worker
-                        .as_ref()
-                        .unwrap()
-                        .handle(kernel, &crate::payload_fixture::native(IvyJson::from_serde(&step["payload"]).unwrap())),
+                    "dispatch" => worker.as_ref().unwrap().handle(
+                        kernel,
+                        &crate::payload_fixture::native(
+                            IvyJson::from_serde(&step["payload"]).unwrap(),
+                        ),
+                    ),
                     _ => panic!("Unexpected worker fixture method"),
                 },
                 "kernel" => match step["method"].as_str().unwrap() {
@@ -278,11 +346,25 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
                 .publish(
                     kernel,
                     &crate::payload_fixture::native(IvyJson::from_serde(&step["payload"]).unwrap()),
-                    |value| notifications.push(wire(match value {
-                        ivy_hive::storage::Notification::Routing(value) => IvyJson::object([("routing", catalog_fixture::routing_to_wire(&value))]),
-                        ivy_hive::storage::Notification::EventsAvailable(value) => IvyJson::object([("eventsAvailable", value)]),
-                        ivy_hive::storage::Notification::Changes(values) => IvyJson::object([("changes", IvyJson::Array(values.into_iter().map(IvyJson::String).collect()))]),
-                    })),
+                    |value| {
+                        notifications.push(wire(match value {
+                            ivy_hive::storage::Notification::Routing(value) => IvyJson::object([(
+                                "routing",
+                                catalog_fixture::routing_to_wire(&value),
+                            )]),
+                            ivy_hive::storage::Notification::EventsAvailable(value) => {
+                                IvyJson::object([("eventsAvailable", value)])
+                            }
+                            ivy_hive::storage::Notification::Changes(values) => {
+                                IvyJson::object([(
+                                    "changes",
+                                    IvyJson::Array(
+                                        values.into_iter().map(IvyJson::String).collect(),
+                                    ),
+                                )])
+                            }
+                        }))
+                    },
                 )
                 .unwrap();
         }
@@ -418,11 +500,7 @@ fn compare_with_error_codes(steps: &[Value], changed: &[(usize, &str)]) -> Value
     }
     let mut profile = expected["registryRuntime"].clone();
     catalog_fixture::legacy_inventory_source_times(&mut expanded, &mut profile);
-    let actual = native(
-        &root.0.join("native.sqlite"),
-        &expanded,
-        &profile,
-    );
+    let actual = native(&root.0.join("native.sqlite"), &expanded, &profile);
     let actual_rows = actual["rows"].as_array().unwrap();
     let original_rows = expected["rows"].as_array().unwrap();
     assert_eq!(actual_rows.len(), steps.len());
@@ -553,15 +631,20 @@ fn compare_with_error_codes(steps: &[Value], changed: &[(usize, &str)]) -> Value
     for (index, (a, b)) in actual_rows.iter().zip(original_rows).enumerate() {
         let mut native = normalized(a, &aliases, &requests, false);
         let mut original = normalized(b, &no_aliases, &requests, true);
-        if steps[index]["request"]["method"] == "system.status" && native["value"]["kind"] == "result" {
+        if steps[index]["request"]["method"] == "system.status"
+            && native["value"]["kind"] == "result"
+        {
             let capability = json!({"parameters":"json","preReadyOutcome":"not_executed"});
             assert_eq!(native["value"]["value"]["nativeToolTransport"], capability);
             // The retained implementation predates the positive admission field.
             original["value"]["value"]["nativeToolTransport"] = capability;
         }
         for row in [&mut native, &mut original] {
-            if let Some(notifications) = row.get_mut("notifications").and_then(Value::as_array_mut) {
-                for notification in notifications { catalog_fixture::project_routing_notification(notification); }
+            if let Some(notifications) = row.get_mut("notifications").and_then(Value::as_array_mut)
+            {
+                for notification in notifications {
+                    catalog_fixture::project_routing_notification(notification);
+                }
             }
         }
         if let Some((_, code)) = changed.iter().find(|(step, _)| *step == index) {
@@ -569,12 +652,7 @@ fn compare_with_error_codes(steps: &[Value], changed: &[(usize, &str)]) -> Value
             native["error"] = Value::Null;
             original["error"] = Value::Null;
         }
-        assert_eq!(
-            native,
-            original,
-            "Kernel step {index}: {}",
-            steps[index]
-        );
+        assert_eq!(native, original, "Kernel step {index}: {}", steps[index]);
         if matches!(
             steps[index]["op"].as_str(),
             Some("configure" | "sql" | "register")

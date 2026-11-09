@@ -5,6 +5,41 @@ PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAG
         WHERE json_extract(value_json,'$.phase') IN ('accepted','preparing','publishing','needs_attention');
       CREATE TABLE IF NOT EXISTS blobs(id TEXT PRIMARY KEY,key TEXT NOT NULL,name TEXT NOT NULL,parent_id TEXT,bytes BLOB NOT NULL,UNIQUE(key,name,parent_id));
       CREATE TABLE IF NOT EXISTS markers(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS pending_operations(id TEXT PRIMARY KEY,revision INTEGER NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS pending_operation_revision_insert AFTER INSERT ON revisions
+        WHEN EXISTS(SELECT 1 FROM documents WHERE id=NEW.id AND key='task-board/operation' AND current_revision=NEW.revision)
+        BEGIN
+          DELETE FROM pending_operations WHERE id=NEW.id;
+          INSERT INTO pending_operations SELECT NEW.id,NEW.revision
+            WHERE json_extract(NEW.value_json,'$.phase') IN ('accepted','preparing','publishing','needs_attention');
+        END;
+      CREATE TRIGGER IF NOT EXISTS pending_operation_document_insert AFTER INSERT ON documents
+        WHEN NEW.key='task-board/operation'
+        BEGIN
+          INSERT OR REPLACE INTO pending_operations SELECT id,revision FROM revisions
+            WHERE id=NEW.id AND revision=NEW.current_revision
+              AND json_extract(value_json,'$.phase') IN ('accepted','preparing','publishing','needs_attention');
+        END;
+      CREATE TRIGGER IF NOT EXISTS pending_operation_document_update AFTER UPDATE OF current_revision,key ON documents
+        WHEN OLD.key='task-board/operation' OR NEW.key='task-board/operation'
+        BEGIN
+          DELETE FROM pending_operations WHERE id=NEW.id;
+          INSERT INTO pending_operations SELECT id,revision FROM revisions
+            WHERE id=NEW.id AND revision=NEW.current_revision AND NEW.key='task-board/operation'
+              AND json_extract(value_json,'$.phase') IN ('accepted','preparing','publishing','needs_attention');
+        END;
+      CREATE TRIGGER IF NOT EXISTS pending_operation_document_delete AFTER DELETE ON documents BEGIN
+        DELETE FROM pending_operations WHERE id=OLD.id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS pending_operation_revision_delete AFTER DELETE ON revisions BEGIN
+        DELETE FROM pending_operations WHERE id=OLD.id AND revision=OLD.revision;
+      END;
+      INSERT OR IGNORE INTO pending_operations SELECT d.id,r.revision FROM documents d
+        JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision
+        WHERE d.key='task-board/operation'
+          AND NOT EXISTS(SELECT 1 FROM markers WHERE key='pending-operations-index')
+          AND json_extract(r.value_json,'$.phase') IN ('accepted','preparing','publishing','needs_attention');
+      INSERT OR IGNORE INTO markers VALUES('pending-operations-index','1');
       CREATE TABLE IF NOT EXISTS cleanup_roots(root_id TEXT PRIMARY KEY,delete_after TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cleanup_dependencies(root_id TEXT NOT NULL,operation_id TEXT NOT NULL,PRIMARY KEY(root_id,operation_id));
       CREATE TABLE IF NOT EXISTS active_gates(gate_id TEXT PRIMARY KEY,operation_id TEXT NOT NULL);
@@ -13,6 +48,15 @@ PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAG
       CREATE TABLE IF NOT EXISTS storage_usage(kind TEXT PRIMARY KEY,rows INTEGER NOT NULL,bytes INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS retired_operations(caller_id TEXT NOT NULL,operation_id TEXT NOT NULL,request_hash TEXT NOT NULL,name TEXT NOT NULL,PRIMARY KEY(caller_id,operation_id));
       CREATE TABLE IF NOT EXISTS retired_operation_receipts(caller_id TEXT NOT NULL,operation_id TEXT NOT NULL,receipt_json TEXT NOT NULL,PRIMARY KEY(caller_id,operation_id));
+      CREATE TABLE IF NOT EXISTS comment_index_roots(task_id TEXT PRIMARY KEY,root_key TEXT NOT NULL,generation INTEGER NOT NULL,complete INTEGER NOT NULL,bytes INTEGER NOT NULL,last_used INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS comment_index_ids(task_id TEXT NOT NULL,kind INTEGER NOT NULL,identity TEXT NOT NULL,sequence INTEGER NOT NULL,PRIMARY KEY(task_id,kind,identity));
+      CREATE TABLE IF NOT EXISTS comment_index_native_questions(task_id TEXT NOT NULL,run_id TEXT NOT NULL,sequence INTEGER NOT NULL,comment_id TEXT NOT NULL,PRIMARY KEY(task_id,run_id,comment_id,sequence));
+      CREATE TRIGGER IF NOT EXISTS comment_index_root_delete AFTER DELETE ON comment_index_roots BEGIN
+        DELETE FROM comment_index_ids WHERE task_id=OLD.task_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS comment_index_native_root_delete AFTER DELETE ON comment_index_roots BEGIN
+        DELETE FROM comment_index_native_questions WHERE task_id=OLD.task_id;
+      END;
       CREATE TRIGGER IF NOT EXISTS retired_operation_insert BEFORE INSERT ON documents
         WHEN NEW.key='task-board/operation' AND EXISTS(SELECT 1 FROM retired_operations WHERE name=NEW.name)
         BEGIN SELECT RAISE(ABORT,'operation_expired'); END;

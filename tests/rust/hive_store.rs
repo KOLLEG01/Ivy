@@ -2,10 +2,6 @@ use ivy_contracts::{IvyError, IvyJson, JsString, json::stringify};
 use ivy_hive::store::{
     AuthContext, AuthenticatedContext, Credential, LedgerResult, Principal, ReceiptKind, Store,
 };
-#[path = "../fixtures/hive-startup-profile.rs"]
-mod startup_profile;
-#[path = "../fixtures/reference-data.rs"]
-mod reference_data;
 #[path = "hive_contracts.rs"]
 mod contracts;
 #[path = "hive_events.rs"]
@@ -18,10 +14,10 @@ mod identity;
 mod kernel;
 #[path = "hive_ledger.rs"]
 mod ledger;
-#[path = "hive_object_delete.rs"]
-mod object_delete;
 #[path = "hive_object_create.rs"]
 mod object_create;
+#[path = "hive_object_delete.rs"]
+mod object_delete;
 #[path = "hive_object_move.rs"]
 mod object_move;
 #[path = "hive_object_mutations.rs"]
@@ -38,12 +34,16 @@ mod package_kernel;
 mod packages;
 #[path = "hive_query.rs"]
 mod query;
+#[path = "../fixtures/reference-data.rs"]
+mod reference_data;
 #[path = "hive_registry.rs"]
 mod registry;
 #[path = "hive_retention.rs"]
 mod retention;
 #[path = "hive_search.rs"]
 mod search;
+#[path = "../fixtures/hive-startup-profile.rs"]
+mod startup_profile;
 #[path = "hive_ui_files.rs"]
 mod ui_files;
 #[path = "hive_wiki.rs"]
@@ -95,12 +95,29 @@ fn rows(store: &Store, sql: &str) -> Value {
 }
 fn snapshot(store: &Store, step: &Value) -> Value {
     let compact_events = step["compactEvents"] == true;
+    // Frozen traces predate parent-scoped write hints. Compare their family
+    // projection here; direct write tests assert the precise new scopes.
+    let mut legacy_changes = Vec::new();
+    for scope in store.changes() {
+        let parts: Vec<_> = scope.0.split(|c| *c == u16::from(b'/')).collect();
+        let scope = if parts.len() >= 4
+            && parts[0] == "objects".encode_utf16().collect::<Vec<_>>()
+            && (parts[3] == "root".encode_utf16().collect::<Vec<_>>() && parts.len() == 4
+                || parts[3] == "parent".encode_utf16().collect::<Vec<_>>() && parts.len() == 5)
+        {
+            JsString(scope.0[..parts[0].len() + parts[1].len() + parts[2].len() + 2].to_vec())
+        } else {
+            scope.clone()
+        };
+        if !legacy_changes.contains(&scope) {
+            legacy_changes.push(scope);
+        }
+    }
     let changes = if step["lossless"] == true {
-        json!({"encoded":stringify(&IvyJson::Array(store.changes().iter().cloned().map(IvyJson::String).collect()),usize::MAX).unwrap()})
+        json!({"encoded":stringify(&IvyJson::Array(legacy_changes.into_iter().map(IvyJson::String).collect()),usize::MAX).unwrap()})
     } else {
         json!(
-            store
-                .changes()
+            legacy_changes
                 .iter()
                 .map(|s| s.to_utf8().unwrap())
                 .collect::<Vec<_>>()
@@ -110,7 +127,9 @@ fn snapshot(store: &Store, step: &Value) -> Value {
     let table_hash = |table: &str, columns: &str| {
         let encoded:String=store.connection().query_row(&format!("SELECT json_group_array(json_array({columns})) FROM (SELECT rowid AS record_id,* FROM {table} ORDER BY rowid)"),[],|r|r.get(0)).unwrap();
         if step["identityTables"] == true && ["revisions", "mutations", "events"].contains(&table) {
-            identity_tables.borrow_mut().insert(table.to_owned(), json!(encoded));
+            identity_tables
+                .borrow_mut()
+                .insert(table.to_owned(), json!(encoded));
         }
         ivy_contracts::hash::digest(encoded)
     };

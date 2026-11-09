@@ -70,9 +70,12 @@ impl<P: TaskPrompts> NativeRuntime<P> {
         })
     }
 
-    /// Keep every native owner alive until SDK work, the generation, SQLite and
-    /// final health publication have drained on this thread.
-    pub async fn run(self, shutdown: impl Future<Output = ()>) -> IvyResult<()> {
+    /// Keep SDK I/O and host health responsive while one dedicated thread owns
+    /// all journal generations and their non-Send graphs until final drain.
+    pub async fn run(self, shutdown: impl Future<Output = ()>) -> IvyResult<()>
+    where
+        P: Send + 'static,
+    {
         let Self {
             host,
             contracts,
@@ -87,18 +90,26 @@ impl<P: TaskPrompts> NativeRuntime<P> {
             .cloned()
             .ok_or_else(IvyError::internal)?;
         let maintenance = crate::maintenance::MaintenanceContext::from_config(&host.config)?;
-        let factory = EngineFactory {
-            maintenance: Some(&maintenance),
-            contracts: &contracts,
-            catalogs: &catalogs,
-            policies: &policies,
-            open_journal: |_: &Json| policies.journal.open(),
-            now: now as fn() -> String,
-            new_id: new_id as fn() -> JsString,
-            clock: SystemClock,
-            service_node_id,
-        };
-        host.run(&factory, shutdown).await
+        host.run_owner(
+            move |owner| {
+                crate::journal_thread::run(move || async move {
+                    let factory = EngineFactory {
+                        maintenance: Some(&maintenance),
+                        contracts: &contracts,
+                        catalogs: &catalogs,
+                        policies: &policies,
+                        open_journal: |_: &Json| policies.journal.open(),
+                        now: now as fn() -> String,
+                        new_id: new_id as fn() -> JsString,
+                        clock: SystemClock,
+                        service_node_id,
+                    };
+                    owner.run(&factory).await
+                })
+            },
+            shutdown,
+        )
+        .await
     }
 }
 

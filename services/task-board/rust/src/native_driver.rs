@@ -12,7 +12,7 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, agent_schema::validate_agent,
-    checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical,
+    checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical_equal,
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::{
@@ -143,8 +143,10 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
         ))
     }
     pub async fn status(&self, run: &Json, call: &Json) -> IvyResult<Json> {
-        let task =
-            Store::read(self.store, "task-board/task", run.required("taskId")?, true).await?;
+        let task = self
+            .store
+            .read_task_header(run.required("taskId")?, true)
+            .await?;
         self.status_for_task(&task.value, run, call).await
     }
     async fn status_for_task(&self, task: &Json, run: &Json, call: &Json) -> IvyResult<Json> {
@@ -198,7 +200,7 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
                 true,
             )
             .await?;
-            if turn.pin.get("revision") != turn_pin.get("revision")
+            if Some(turn.pin.revision) != turn_pin.get("revision").and_then(Json::as_f64)
                 || field(&turn.value, "state") != &Json::from("prepared")
                 || field(&turn.value, "ownerPhase") != &Json::Null
                 || field(&turn.value, "evidence") != &Json::Null
@@ -211,7 +213,7 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
             || field(&call.value, "ownerPhase") != &Json::from("outcome_unknown")
             || field(&call.value, "evidence").is_null()
             || field(&call.value, "epoch").is_null()
-            || call.pin.get("revision") != pin.get("revision")
+            || Some(call.pin.revision) != pin.get("revision").and_then(Json::as_f64)
         {
             return Ok(false);
         }
@@ -300,11 +302,7 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
         let native_request = intent.resolve_native_request(request)?;
         // Publish the exact committed observation after a lost response before
         // making any owner/evidence query, even when that observation concluded.
-        if call
-            .pin
-            .required("revision")?
-            .as_f64()
-            .ok_or_else(IvyError::internal)?
+        if call.pin.revision
             > pin
                 .required("revision")?
                 .as_f64()
@@ -316,7 +314,7 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
                     Json::object([
                         ("kind", "observeCall".into()),
                         ("slot", slot.as_str().into()),
-                        ("call", call.pin.clone()),
+                        ("call", call.pin.to_json()),
                     ]),
                 )
                 .await;
@@ -339,7 +337,11 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
         let previous = if !field(&call.value, "evidence").is_null() {
             Some(
                 evidence
-                    .read(&call.pin, call.value.required("evidence")?, &expected)
+                    .read(
+                        &call.pin.to_json(),
+                        call.value.required("evidence")?,
+                        &expected,
+                    )
                     .await?,
             )
         } else {
@@ -366,7 +368,7 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
                 was_observed: field(&call.value, "state") != &Json::from("prepared")
                     || field(&call.value, "ownerPhase") != &Json::Null,
                 retain: |observed: Json| async move {
-                    let artifact = evidence_ref.save(&call_ref.pin, &observed, expected_ref).await?;
+                    let artifact = evidence_ref.save(&call_ref.pin.to_json(), &observed, expected_ref).await?;
                     let mut next = call_ref.value.clone();
                     next.insert("state", if field(&observed,"phase")==&Json::from("outcome_unknown") {
                         "outcome_unknown".into()
@@ -376,10 +378,10 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
                     }
                     next.insert("evidence", artifact);
                     let saved = Store::write(self.store,"task-board/native-call",&next,
-                        &mutation(string(&call_ref.pin,"objectId")?, &format!("observe:{}",hash_json(&observed)?))?,
+                        &mutation(&call_ref.pin.object_id, &format!("observe:{}",hash_json(&observed)?))?,
                         &Json::object([
-                            ("objectId",call_ref.pin.required("objectId")?.clone()),
-                            ("expectedRevision",call_ref.pin.required("revision")?.clone()),
+                            ("objectId",Json::String(call_ref.pin.object_id.clone())),
+                            ("expectedRevision",Json::Number(call_ref.pin.revision)),
                         ]),
                     ).await?;
                     self.update(current_ref,Json::object([
@@ -456,8 +458,8 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
                 }
                 owner.dispatch_local(&original,|| async {
                     let fresh = self.current(run_id).await?;
-                    require(canonical(&fresh.run.pin,MANAGEMENT_FRAME_BYTES)?==canonical(&current.run.pin,MANAGEMENT_FRAME_BYTES)?
-                        && canonical(&fresh.task.pin,MANAGEMENT_FRAME_BYTES)?==canonical(&current.task.pin,MANAGEMENT_FRAME_BYTES)?,
+                    require(fresh.run.pin == current.run.pin
+                        && fresh.task.pin == current.task.pin,
                         "revision_conflict","Task or Run changed before native dispatch; reconcile it before sending.")?;
                     self.runtime.verify_owner().await
                 }).await
@@ -504,13 +506,10 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
             true,
         )
         .await?;
-        let task = Store::read(
-            self.store,
-            "task-board/task",
-            run.value.required("taskId")?,
-            true,
-        )
-        .await?;
+        let task = self
+            .store
+            .read_task_header(run.value.required("taskId")?, true)
+            .await?;
         require(
             !["completed", "failed", "cancelled"]
                 .iter()
@@ -526,9 +525,7 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
         let claim_run = field(field(&task.value, "claim"), "run");
         let active = claim_run.get("objectId").and_then(Json::as_js_string) == Some(run_id);
         require(
-            !active
-                || canonical(claim_run, MANAGEMENT_FRAME_BYTES)?
-                    == canonical(&run.pin, MANAGEMENT_FRAME_BYTES)?,
+            !active || canonical_equal(claim_run, &run.pin.to_json(), MANAGEMENT_FRAME_BYTES)?,
             "revision_conflict",
             "Native execution requires the exact current claimed Run revision.",
         )?;
@@ -536,24 +533,21 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
     }
     async fn update(&self, current: &Current, change: Json) -> IvyResult<Json> {
         let scope = Json::object([
-            ("task", current.task.pin.clone()),
-            ("run", current.run.pin.clone()),
+            ("task", current.task.pin.to_json()),
+            ("run", current.run.pin.to_json()),
             ("change", change.clone()),
         ]);
         let id = mutation(
-            string(&current.run.pin, "objectId")?,
+            &current.run.pin.object_id,
             &format!("native-update:{}", hash_json(&scope)?),
         )?;
         self.runtime
             .native_update(&Json::object([
                 ("action", "nativeUpdate".into()),
                 ("operationId", id.into()),
-                ("taskId", current.task.pin.required("objectId")?.clone()),
-                (
-                    "expectedRevision",
-                    current.task.pin.required("revision")?.clone(),
-                ),
-                ("run", current.run.pin.clone()),
+                ("taskId", Json::String(current.task.pin.object_id.clone())),
+                ("expectedRevision", Json::Number(current.task.pin.revision)),
+                ("run", current.run.pin.to_json()),
                 ("change", change),
             ]))
             .await
@@ -586,13 +580,9 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
             slot.as_str().into(),
             origin.clone(),
         ];
-        let target = routed_target(&current.task.value, current.run.value.required("target")?)?;
-        if canonical(&target, MANAGEMENT_FRAME_BYTES)?
-            != canonical(
-                current.run.value.required("target")?,
-                MANAGEMENT_FRAME_BYTES,
-            )?
-        {
+        let original_target = current.run.value.required("target")?;
+        let target = routed_target(&current.task.value, original_target)?;
+        if !canonical_equal(&target, original_target, MANAGEMENT_FRAME_BYTES)? {
             // A prepared, unattached call at the old address cannot become a
             // new call at another owner merely because preparation is retried.
             scope.push(target);
@@ -674,10 +664,12 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
             });
         }
         let call = call.unwrap();
-        if field(field(&current.run.value, "calls"), slot.as_str()).get("objectId")
-            == call.pin.get("objectId")
+        if field(field(&current.run.value, "calls"), slot.as_str())
+            .get("objectId")
+            .and_then(Json::as_js_string)
+            == Some(&call.pin.object_id)
         {
-            return Ok(call.pin);
+            return Ok(call.pin.to_json());
         }
         let mut change = Json::object([
             (
@@ -688,12 +680,12 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
                     "attachCall".into()
                 },
             ),
-            ("call", call.pin.clone()),
+            ("call", call.pin.to_json()),
         ]);
         if field(origin, "kind") != &Json::from("reattach") {
             change.insert("slot", slot.as_str().into());
         }
         self.update(&current, change).await?;
-        Ok(call.pin)
+        Ok(call.pin.to_json())
     }
 }

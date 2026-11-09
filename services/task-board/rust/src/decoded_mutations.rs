@@ -4,7 +4,7 @@ use crate::{
     engine_read::read_failure::ReadCause,
     journal_store::{
         mutation_ports::{LocalMutationStore, WriteFailure},
-        persistent_reads::json_values::{self as v, Value},
+        persistent_reads::json_values::Value,
     },
 };
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString};
@@ -16,9 +16,6 @@ pub(crate) fn failure(error: WriteFailure<()>) -> IvyError {
         ReadCause::Source(()) => IvyError::internal(),
     }
 }
-fn json(value: &Value) -> Result<Json, WriteFailure<()>> {
-    v::decoded_comment(value)
-}
 fn string(value: &Value) -> Result<JsString, WriteFailure<()>> {
     match value {
         Value::String(value) => Ok(value.clone()),
@@ -26,46 +23,7 @@ fn string(value: &Value) -> Result<JsString, WriteFailure<()>> {
     }
 }
 pub(crate) fn json_result(result: Result<Value, WriteFailure<()>>) -> IvyResult<Json> {
-    result.and_then(|value| json(&value)).map_err(failure)
-}
-pub(crate) fn record(document: Document) -> Value {
-    v::object([
-        ("pin".into(), (&document.pin).clone()),
-        ("value".into(), (&document.value).clone()),
-        (
-            "metadata".into(),
-            v::object([(
-                "parentId".into(),
-                document.parent_id.map(Value::String).unwrap_or(Value::Null),
-            )]),
-        ),
-        (
-            "revision".into(),
-            v::object([(
-                "contentHash".into(),
-                Value::String(document.content_hash.into()),
-            )]),
-        ),
-    ])
-}
-pub(crate) fn document(value: Value) -> IvyResult<Document> {
-    let value = json_result(Ok(value))?;
-    Ok(Document {
-        pin: value.required("pin")?.clone(),
-        value: value.required("value")?.clone(),
-        parent_id: value
-            .required("metadata")?
-            .get("parentId")
-            .and_then(Json::as_js_string)
-            .cloned(),
-        content_hash: value
-            .required("revision")?
-            .required("contentHash")?
-            .as_str()?,
-    })
-}
-pub(super) fn document_result(result: Result<Value, WriteFailure<()>>) -> IvyResult<Document> {
-    document(result.map_err(failure)?)
+    result.map_err(failure)
 }
 pub(super) fn string_result(result: Result<Value, WriteFailure<()>>) -> IvyResult<JsString> {
     result.and_then(|value| string(&value)).map_err(failure)
@@ -102,7 +60,7 @@ impl<S: Store> LocalMutationStore<()> for DecodedStore<'_, S> {
         key: &str,
         name: &Value,
         parent: Option<&Value>,
-    ) -> Result<Option<Value>, WriteFailure<()>> {
+    ) -> Result<Option<Document>, WriteFailure<()>> {
         let parent = parent
             .filter(|value| !matches!(value, Value::Null))
             .map(string)
@@ -110,8 +68,7 @@ impl<S: Store> LocalMutationStore<()> for DecodedStore<'_, S> {
         Ok(self
             .0
             .named(key, &string(name)?.to_utf8()?, parent.as_ref())
-            .await?
-            .map(record))
+            .await?)
     }
     async fn read_graph(
         &self,
@@ -119,9 +76,13 @@ impl<S: Store> LocalMutationStore<()> for DecodedStore<'_, S> {
         address: &Value,
         primary: bool,
         _: bool,
-        _: bool,
-    ) -> Result<Value, WriteFailure<()>> {
-        Ok(record(self.0.read(key, &json(address)?, primary).await?))
+        retained: bool,
+    ) -> Result<Document, WriteFailure<()>> {
+        Ok(if retained {
+            self.0.read_prepared(key, address).await?
+        } else {
+            self.0.read(key, address, primary).await?
+        })
     }
     async fn write_graph(
         &self,
@@ -130,16 +91,10 @@ impl<S: Store> LocalMutationStore<()> for DecodedStore<'_, S> {
         mutation: &Value,
         destination: &Value,
     ) -> Result<Value, WriteFailure<()>> {
-        Ok((&self
+        Ok(self
             .0
-            .write(
-                key,
-                &json(value)?,
-                &string(mutation)?.to_utf8()?,
-                &json(destination)?,
-            )
+            .write(key, value, &string(mutation)?.to_utf8()?, destination)
             .await?)
-            .clone())
     }
     async fn prepared_mutation_id_graph(
         &self,
@@ -151,20 +106,38 @@ impl<S: Store> LocalMutationStore<()> for DecodedStore<'_, S> {
                 .await?,
         ))
     }
+    async fn prepare_payload_graph(
+        &self,
+        key: &str,
+        value: Value,
+        destination: &Value,
+    ) -> Result<super::PreparedPayload, WriteFailure<()>> {
+        Ok(self.0.prepare_payload(key, value, destination).await?)
+    }
     async fn write_prepared_graph(
         &self,
         key: &str,
         value: &Value,
         mutation: &Value,
         destination: &Value,
-        _: &Value,
+        version: &Value,
+        references: Option<&Value>,
     ) -> Result<Value, WriteFailure<()>> {
-        // This legacy interface has no retained-version parameter. The actual
-        // raw factory store implements the explicit version slot directly.
-        Ok((&self
+        let version = if version.is_null() {
+            None
+        } else {
+            Some(string(version)?)
+        };
+        Ok(self
             .0
-            .write_prepared(key, &json(value)?, &string(mutation)?, &json(destination)?)
+            .write_prepared(
+                key,
+                value,
+                &string(mutation)?,
+                destination,
+                version.as_ref(),
+                references,
+            )
             .await?)
-            .clone())
     }
 }

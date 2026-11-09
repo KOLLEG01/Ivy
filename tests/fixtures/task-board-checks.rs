@@ -34,11 +34,7 @@ fn data() -> &'static Json {
     static D: OnceLock<Json> = OnceLock::new();
     D.get_or_init(|| {
         let p = reference_data::read(include_bytes!("task-board-checks-cases.json.gz"));
-        parse(
-            std::str::from_utf8(&p).unwrap(),
-            MANAGEMENT_FRAME_BYTES,
-        )
-        .unwrap()
+        parse(std::str::from_utf8(&p).unwrap(), MANAGEMENT_FRAME_BYTES).unwrap()
     })
 }
 fn error(v: &Json) -> IvyError {
@@ -99,7 +95,8 @@ struct World {
 }
 fn document(v: &Json) -> Document {
     Document {
-        pin: v.required("pin").unwrap().clone(),
+        pin: ivy_task_board::operations::ObjectPin::from_json(v.required("pin").unwrap().clone())
+            .unwrap(),
         value: v.required("value").unwrap().clone(),
         parent_id: f(f(v, "metadata"), "parentId").as_js_string().cloned(),
         content_hash: hash_json(v.required("value").unwrap()).unwrap(),
@@ -168,7 +165,15 @@ impl Store for World {
             .unwrap()
             .clone())
     }
-    async fn write_prepared(&self, k: &str, v: &Json, m: &JsString, d: &Json) -> IvyResult<Json> {
+    async fn write_prepared(
+        &self,
+        k: &str,
+        v: &Json,
+        m: &JsString,
+        d: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
+    ) -> IvyResult<Json> {
         self.replay.call(
             "apply",
             [k.into(), v.clone(), Json::String(m.clone()), d.clone()],

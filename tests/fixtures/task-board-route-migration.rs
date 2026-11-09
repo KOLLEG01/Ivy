@@ -23,7 +23,11 @@ pub(super) async fn retained_operation(
         store: world,
         catalogs,
     }
-    .read(&call.pin, call.value.required("evidence")?, expected)
+    .read(
+        &call.pin.to_json(),
+        call.value.required("evidence")?,
+        expected,
+    )
     .await
 }
 
@@ -1026,6 +1030,20 @@ struct RetainedSteps<'a, 'b> {
     lose: usize,
 }
 impl LifecyclePublication for RetainedSteps<'_, '_> {
+    async fn write_task_change(
+        &mut self,
+        value: &Json,
+        destination: &Json,
+        change: ivy_task_board::operations::TaskChange,
+    ) -> IvyResult<Json> {
+        assert!(matches!(
+            change,
+            ivy_task_board::operations::TaskChange::Header
+        ));
+        assert_eq!(value.get("commentStore"), Some(&compact_tree()));
+        self.write("task-board/task", value, destination).await
+    }
+
     fn pin(&self) -> IvyResult<Json> {
         Ok(pin(300, 1.0))
     }
@@ -1260,7 +1278,16 @@ async fn migration_preserves_originals_and_resumes_each_committed_publication_wi
             .any(|v| f(f(g, "base").required("plan").unwrap(), "nativeVersion").is_str(v))
     }) {
         for scoped in [false, true] {
-            for lose in 0..=3 {
+            for (lose, compact) in [
+                (0, false),
+                (0, true),
+                (1, false),
+                (1, true),
+                (2, false),
+                (2, true),
+                (3, false),
+                (3, true),
+            ] {
                 for archived in [false, true] {
                     let mode = if archived {
                         "archived"
@@ -1269,7 +1296,10 @@ async fn migration_preserves_originals_and_resumes_each_committed_publication_wi
                     } else {
                         ""
                     };
-                    let (base, row, replies) = scenario(&catalogs, group, scoped, mode);
+                    let (base, mut row, replies) = scenario(&catalogs, group, scoped, mode);
+                    row.get_mut("input")
+                        .unwrap()
+                        .insert("compactHeader", compact.into());
                     let trace: Trace = Arc::default();
                     let client = Arc::new(Client {
                         case_name: "native route migration".into(),
@@ -1341,6 +1371,10 @@ async fn migration_preserves_originals_and_resumes_each_committed_publication_wi
                     let saved = rows.borrow();
                     assert_eq!(saved.len(), 3);
                     let task = &saved[2].1;
+                    if compact {
+                        assert_eq!(saved[0].1.get("commentStore"), Some(&compact_tree()));
+                        assert_eq!(task.get("commentStore"), Some(&compact_tree()));
+                    }
                     for write in [&saved[0], &saved[2]] {
                         assert_eq!(write.2.get("expectedArchived"), Some(&archived.into()));
                     }
@@ -1523,10 +1557,7 @@ async fn collected_calls_use_authenticated_storage_provenance_and_replay_publica
                 ("origin-active-thread", Some("task_board_primary_mismatch")),
                 ("origin-thread-cwd", Some("task_board_primary_mismatch")),
                 ("origin-thread-project", Some("task_board_primary_mismatch")),
-                (
-                    "origin-claim",
-                    Some("task_board_execution_unresolved"),
-                ),
+                ("origin-claim", Some("task_board_execution_unresolved")),
                 (
                     "origin-unknown-run",
                     Some("task_board_route_migration_unresolved"),

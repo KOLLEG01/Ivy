@@ -3,7 +3,8 @@ use ivy_contracts::{
 };
 use ivy_sdk::{
     upgrade_comment_record, upgrade_configuration_record, upgrade_result_content,
-    upgrade_result_record, upgrade_run_record, upgrade_task_record,
+    upgrade_result_content_owned, upgrade_result_record, upgrade_result_record_owned,
+    upgrade_run_record, upgrade_run_record_owned, upgrade_task_record, upgrade_task_record_owned,
 };
 use std::borrow::Cow;
 
@@ -19,6 +20,15 @@ fn upgrade(helper: &str, input: &Json) -> IvyResult<Json> {
         "upgradeResultContent" => upgrade_result_content(input),
         "upgradeResultRecord" => upgrade_result_record(input),
         _ => panic!("Unknown record helper"),
+    }
+}
+
+fn upgrade_owned(helper: &str, input: Json) -> IvyResult<Json> {
+    match helper {
+        "upgradeTaskRecord" => upgrade_task_record_owned(input),
+        "upgradeResultContent" => upgrade_result_content_owned(input),
+        "upgradeResultRecord" => upgrade_result_record_owned(input),
+        _ => upgrade(helper, &input),
     }
 }
 
@@ -39,6 +49,8 @@ fn stored_json_migrations_preserve_records_findings_questions_and_artifacts() {
         let input = case.get("input").unwrap();
         let before = json::stringify(input, usize::MAX).unwrap();
         let actual = upgrade(&helper, input);
+        let owned = upgrade_owned(&helper, input.clone());
+        assert_eq!(actual, owned, "owned and borrowed migration: {name}");
         let malformed = case.get("expected").unwrap().get("error").is_some();
         if malformed {
             let error = actual.expect_err(&name);
@@ -61,6 +73,67 @@ fn stored_json_migrations_preserve_records_findings_questions_and_artifacts() {
         );
     }
     assert!(migrated > 45 && rejected > 10);
+}
+
+#[test]
+fn owned_migrations_preserve_raw_numbers_duplicate_fields_and_utf16() {
+    let raw = Json::object([
+        ("text", Json::String(JsString(vec![0xd800, 0, 0xdfff]))),
+        ("number", Json::Number(-0.0)),
+    ]);
+    let mut input = task().into_object().unwrap();
+    input.extend([
+        ("opaque".into(), raw.clone()),
+        ("fields".into(), Json::Null),
+    ]);
+    let current = upgrade_task_record_owned(Json::Object(input)).unwrap();
+    assert_eq!(current.get("opaque"), Some(&raw));
+    let mut expected = task().into_object().unwrap();
+    expected.extend([
+        ("opaque".into(), raw.clone()),
+        ("fields".into(), Json::Null),
+        ("wakeAt".into(), Json::Null),
+        ("dependencies".into(), Json::Array(vec![])),
+        ("runtimeWait".into(), Json::Null),
+    ]);
+    let expected = Json::Object(expected);
+    assert_eq!(
+        json::stringify(&current, usize::MAX),
+        json::stringify(&expected, usize::MAX)
+    );
+    assert_eq!(
+        ivy_contracts::hash::hash_json(&current),
+        ivy_contracts::hash::hash_json(&expected)
+    );
+    let run = Json::Object(vec![
+        (
+            "executionContext".into(),
+            Json::Object(vec![
+                ("latestResult".into(), raw.clone()),
+                ("latestResult".into(), Json::Null),
+                ("workflowState".into(), "todo".into()),
+            ]),
+        ),
+        ("opaque".into(), Json::Number(f64::NAN)),
+    ]);
+    let run = upgrade_run_record_owned(run).unwrap();
+    assert!(run.get("opaque").unwrap().as_f64().unwrap().is_nan());
+    assert_eq!(
+        run.get("executionContext"),
+        Some(&Json::object([
+            ("workflowState", "todo".into()),
+            ("latestResult", raw.clone()),
+        ]))
+    );
+    let content = Json::Object(vec![
+        ("checks".into(), Json::Array(vec![])),
+        ("checks".into(), raw.clone()),
+        ("opaque".into(), raw.clone()),
+    ]);
+    assert_eq!(
+        upgrade_result_content_owned(content).unwrap(),
+        Json::Object(vec![("checks".into(), raw.clone()), ("opaque".into(), raw),])
+    );
 }
 
 #[test]

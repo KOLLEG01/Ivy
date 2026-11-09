@@ -1,9 +1,8 @@
 //! Publish saved original-owner observations through the retained write program.
 //! Completion restores the saved execution context after confirmed native closure.
 use crate::{
-    journal_store::Contracts,
+    journal_store::{Contracts, persistent_reads::json_values::copy_with},
     lifecycle_journal::{LifecycleJournal, LifecyclePages},
-    local_retention::LocalRetention,
     native_evidence::NativeEvidence,
     native_intent::{EvidenceIdentity, NativeIntent, NativeSlot, TaskPrompts},
     native_lifecycle::{LifecyclePublication, LifecycleStore},
@@ -11,13 +10,13 @@ use crate::{
     native_turn_evidence::{
         Completion as TurnCompletion, Snapshot, Transcript, TurnEvidence, TurnEvidenceStore,
     },
-    operations::{Document, Store},
+    operations::{Document, Store, TaskChange},
     read_evidence::ReadEvidenceStore,
     turn_output::{bounded_output_summary, missing_output_summary},
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
-    checked_native_contract::CheckedNativeContracts, json::canonical,
+    checked_native_contract::CheckedNativeContracts, json::canonical_equal,
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::{rpc::RpcClient, tools::ToolClients};
@@ -71,18 +70,9 @@ impl<
         at: &JsString,
         operation: &JsString,
     ) -> IvyResult<()> {
-        LocalRetention {
-            journal: crate::local_journal::LocalJournal {
-                connection: self.journal.journal.connection,
-                root_object_id: self.journal.journal.root_object_id.clone(),
-            },
-            client: self.journal.client.as_ref(),
-            limits: crate::local_retention::HistoryLimits {
-                count: self.journal.limits.count,
-                bytes: self.journal.limits.bytes,
-            },
-        }
-        .complete_workflow(root, at, Some(operation))
+        self.journal
+            .journal
+            .complete_workflow(root, at, Some(operation))
     }
 }
 
@@ -199,7 +189,7 @@ pub struct PublicationEvidence<'a, S, P> {
 }
 fn document(v: &Document) -> Json {
     Json::object([
-        ("pin", v.pin.clone()),
+        ("pin", v.pin.to_json()),
         ("value", v.value.clone()),
         (
             "revision",
@@ -365,6 +355,20 @@ fn has(v: &Json, k: &str) -> bool {
 fn array(v: &Json) -> &[Json] {
     v.as_array().unwrap_or(&[])
 }
+fn receipt_entries(task: &mut Json, entries: &[Json]) -> IvyResult<()> {
+    for (field, entry) in [("comments", "comment"), ("commentDeliveries", "receipt")] {
+        task.insert(
+            field,
+            Json::Array(
+                entries
+                    .iter()
+                    .map(|value| value.required(entry).cloned())
+                    .collect::<IvyResult<_>>()?,
+            ),
+        );
+    }
+    Ok(())
+}
 fn text(v: &Json) -> JsString {
     v.as_js_string().cloned().unwrap_or_default()
 }
@@ -379,7 +383,7 @@ fn patch(v: &Json, fields: impl IntoIterator<Item = (&'static str, Json)>) -> Js
     v
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)
 }
 fn require(b: bool, c: &str, m: &str) -> IvyResult<()> {
     if b { Ok(()) } else { Err(IvyError::new(c, m)) }
@@ -456,7 +460,7 @@ fn completion(
 }
 fn run_artifact(d: &Document) -> Json {
     Json::object([
-        ("object", d.pin.clone()),
+        ("object", d.pin.to_json()),
         ("label", "Saved native attempt before closure".into()),
         ("mediaType", "application/json".into()),
         ("contentHash", d.content_hash.clone().into()),
@@ -478,6 +482,27 @@ fn outcome(id: &Json) -> Json {
 impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublicationEvidence>
     NativePublisher<'_, S, E, V>
 {
+    async fn write_task<P: LifecyclePublication>(
+        &self,
+        steps: &mut P,
+        value: &Json,
+        destination: &Json,
+        compact: bool,
+        completion: bool,
+    ) -> IvyResult<Json> {
+        if compact {
+            let change = if completion {
+                TaskChange::NativeCompletion
+            } else if array(f(value, "comments")).is_empty() {
+                TaskChange::Header
+            } else {
+                TaskChange::Receipts
+            };
+            steps.write_task_change(value, destination, change).await
+        } else {
+            steps.write("task-board/task", value, destination).await
+        }
+    }
     fn retry_at(&self, run: &Json, turn: &Json, epoch: &Json, at: &JsString) -> IvyResult<Json> {
         if !f(run, "cancellation").is_null() {
             return Ok(Json::Null);
@@ -555,15 +580,15 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                     ("revision", f(request, "expectedRevision").clone()),
                 ])
             };
-        let task = self
-            .store
-            .lifecycle_read("task-board/task", &task_address, false, false)
-            .await?;
+        let task = self.store.task_header(&task_address, false, false).await?;
         let original = self
             .store
             .lifecycle_read("task-board/run", f(request, "run"), false, false)
             .await?;
         let task_value = &task.document.value;
+        let compact = eq(f(task_value, "commentStore"), "kind", "tree")
+            && array(f(task_value, "comments")).is_empty()
+            && array(f(task_value, "commentDeliveries")).is_empty();
         let run = &original.document.value;
         let run_pin = f(request, "run");
         let run_id = s(run_pin, "objectId")?;
@@ -577,7 +602,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                 )?;
             }
             require(
-                f(&task.metadata, "currentRevision") == f(&task.document.pin, "revision")
+                f(&task.metadata, "currentRevision") == &Json::Number(task.document.pin.revision)
                     && f(task_value, "publication").is_null()
                     && f(&original.metadata, "currentRevision") == f(run_pin, "revision"),
                 "revision_conflict",
@@ -600,7 +625,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                 )?;
             }
         }
-        let mut next = patch(
+        let mut next = copy_with(
             run,
             [
                 ("calls", f(run, "calls").clone()),
@@ -613,6 +638,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
         let mut kind = "recovered";
         let mut steered: Vec<Json> = vec![];
         let mut acknowledged_wake = Json::Null;
+        let mut completion_comments = None;
         match s(change, "kind")?
             .to_utf8()
             .map_err(|_| IvyError::internal())?
@@ -628,26 +654,27 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                     "task_board_cursor_regression",
                     "Native notification progress cannot move backwards.",
                 )?;
+                let status = s(f(f(&snapshot, "document"), "value"), "status")?;
+                let observed_at = s(op, "createdAt")?;
                 let projected = project_native_state(
                     run,
-                    s(f(f(&snapshot, "document"), "value"), "status")?,
+                    status,
                     f(f(f(&snapshot, "document"), "value"), "epoch"),
                     f(&snapshot, "thread"),
-                    s(op, "createdAt")?,
-                    f(change, "snapshot"),
                 )?;
-                next = patch(
-                    &next,
-                    [
-                        (
-                            "notificationCursor",
-                            f(change, "notificationCursor").clone(),
-                        ),
-                        ("phase", f(&projected, "phase").clone()),
-                        ("externalOutcome", f(&projected, "externalOutcome").clone()),
-                    ],
-                );
-                waiting = f(&projected, "waiting").clone();
+                let (phase, outcome, projected_waiting) =
+                    projected.into_parts(observed_at, f(change, "snapshot"));
+                for (key, value) in [
+                    (
+                        "notificationCursor",
+                        f(change, "notificationCursor").clone(),
+                    ),
+                    ("phase", phase),
+                    ("externalOutcome", outcome),
+                ] {
+                    next.insert(key, value);
+                }
+                waiting = projected_waiting;
                 detail = "Saved the exact native turn state with separate read evidence.".into();
             }
             "completion" | "transcript" => {
@@ -681,7 +708,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                 );
                 let state = read_outcome(run, s(&verified, "status")?)?;
                 require(
-                    one(&state, "state", &["succeeded", "failed", "cancelled"]),
+                    state.state.terminal(),
                     "task_board_native_state_changed",
                     if transcript {
                         "A transcript must identify a terminal native outcome."
@@ -692,8 +719,18 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                 let handoff = if transcript {
                     Json::Null
                 } else {
-                    crate::engine_read::conversation::run_handoff(task_value, run_id)
-                        .unwrap_or(Json::Null)
+                    let comments = self
+                        .store
+                        .read_completion_comments(
+                            task_value,
+                            task_id,
+                            run_id,
+                            array(f(f(run, "originalRequest"), "commentIds")),
+                        )
+                        .await?;
+                    let handoff = comments.handoff.clone().unwrap_or(Json::Null);
+                    completion_comments = Some(comments);
+                    handoff
                 };
                 let turn = f(f(&verified, "snapshot"), "turn");
                 let body = if eq(&verified, "status", "failed")
@@ -710,10 +747,10 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                     }
                 };
                 done = completion(
-                    &f(&state, "state").as_str()?,
+                    state.state.as_str(),
                     body,
                     f(change, if transcript { "evidence" } else { "snapshot" }),
-                    f(&state, "code").clone(),
+                    state.code.map(Json::String).unwrap_or(Json::Null),
                     Some(
                         self.retry_at(
                             run,
@@ -781,7 +818,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                         .read("task-board/native-call", f(pin, "objectId"), false)
                         .await?;
                     require(
-                        same(&turn.pin, pin)?
+                        same(&turn.pin.to_json(), pin)?
                             && eq(&turn.value, "state", "prepared")
                             && f(&turn.value, "ownerPhase") == &Json::Null
                             && f(&turn.value, "evidence") == &Json::Null,
@@ -828,12 +865,22 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                             "Resolve the original steering receipt before preparing another.",
                         )?;
                     }
+                    let queued = if compact {
+                        self.store
+                            .comment_entries(task_value, task_id, array(f(origin, "commentIds")))
+                            .await?
+                            .iter()
+                            .map(|entry| entry.required("receipt").cloned())
+                            .collect::<IvyResult<Vec<_>>>()?
+                    } else {
+                        array(f(task_value, "commentDeliveries")).to_vec()
+                    };
                     require(
                         n(origin, "workRevision") <= n(task_value, "workRevision")
                             && array(f(origin, "commentIds")).iter().all(|id| {
-                                array(f(task_value, "commentDeliveries"))
-                                    .iter()
-                                    .any(|d| f(d, "commentId") == id && eq(d, "state", "queued"))
+                                queued.iter().any(|receipt| {
+                                    f(receipt, "commentId") == id && eq(receipt, "state", "queued")
+                                })
                             }),
                         "task_board_native_intent_mismatch",
                         "Steering must identify current queued input.",
@@ -977,64 +1024,62 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                     "phase",
                     &["accepted", "dispatched", "outcome_unknown"],
                 ) {
-                    next = patch(
-                        &next,
-                        [
-                            ("phase", "outcome_unknown".into()),
-                            (
-                                "externalOutcome",
-                                Json::object([
-                                    ("state", "unknown".into()),
-                                    ("observedAt", at.clone()),
-                                    ("evidence", artifact.clone()),
-                                    (
-                                        "code",
-                                        if f(&observation, "code") == &Json::Null {
-                                            "native_operation_pending".into()
-                                        } else {
-                                            f(&observation, "code").clone()
-                                        },
-                                    ),
-                                ]),
-                            ),
-                        ],
-                    );
+                    for (key, value) in [
+                        ("phase", "outcome_unknown".into()),
+                        (
+                            "externalOutcome",
+                            Json::object([
+                                ("state", "unknown".into()),
+                                ("observedAt", at.clone()),
+                                ("evidence", artifact.clone()),
+                                (
+                                    "code",
+                                    if f(&observation, "code") == &Json::Null {
+                                        "native_operation_pending".into()
+                                    } else {
+                                        f(&observation, "code").clone()
+                                    },
+                                ),
+                            ]),
+                        ),
+                    ] {
+                        next.insert(key, value);
+                    }
                     waiting = wait(at, "external_outcome", detail.clone());
                     kind = "outcome_unknown";
                 } else if eq(&observation, "phase", "failed") {
                     if slot_text == "thread" && !f(run, "turnId").is_null() {
-                        next = patch(
-                            &next,
-                            [
-                                (
-                                    "phase",
-                                    if f(run, "cancellation").is_null() {
-                                        "outcome_unknown".into()
-                                    } else {
-                                        "cancel_requested".into()
-                                    },
+                        for (key, value) in [
+                            (
+                                "phase",
+                                if f(run, "cancellation").is_null() {
+                                    "outcome_unknown".into()
+                                } else {
+                                    "cancel_requested".into()
+                                },
+                            ),
+                            (
+                                "externalOutcome",
+                                patch(
+                                    f(run, "externalOutcome"),
+                                    [
+                                        ("state", "unknown".into()),
+                                        ("evidence", artifact.clone()),
+                                        ("observedAt", at.clone()),
+                                        (
+                                            "code",
+                                            if f(&observation, "code").is_null() {
+                                                "native_reattach_failed".into()
+                                            } else {
+                                                f(&observation, "code").clone()
+                                            },
+                                        ),
+                                    ],
                                 ),
-                                (
-                                    "externalOutcome",
-                                    patch(
-                                        f(run, "externalOutcome"),
-                                        [
-                                            ("state", "unknown".into()),
-                                            ("evidence", artifact.clone()),
-                                            ("observedAt", at.clone()),
-                                            (
-                                                "code",
-                                                if f(&observation, "code").is_null() {
-                                                    "native_reattach_failed".into()
-                                                } else {
-                                                    f(&observation, "code").clone()
-                                                },
-                                            ),
-                                        ],
-                                    ),
-                                ),
-                            ],
-                        );
+                            ),
+                        ] {
+                            next.insert(key, value);
+                        }
                         waiting = wait(
                             at,
                             "external_outcome",
@@ -1042,31 +1087,30 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                                 .into(),
                         );
                     } else if slot_text == "interrupt" {
-                        next = patch(
-                            &next,
-                            [
-                                ("phase", "cancel_requested".into()),
-                                (
-                                    "externalOutcome",
-                                    patch(
-                                        f(run, "externalOutcome"),
-                                        [
-                                            ("state", "unknown".into()),
-                                            ("evidence", artifact.clone()),
-                                            ("observedAt", at.clone()),
-                                            (
-                                                "code",
-                                                if f(&observation, "code") == &Json::Null {
-                                                    "native_interrupt_failed".into()
-                                                } else {
-                                                    f(&observation, "code").clone()
-                                                },
-                                            ),
-                                        ],
-                                    ),
+                        for (key, value) in [
+                            ("phase", "cancel_requested".into()),
+                            (
+                                "externalOutcome",
+                                patch(
+                                    f(run, "externalOutcome"),
+                                    [
+                                        ("state", "unknown".into()),
+                                        ("evidence", artifact.clone()),
+                                        ("observedAt", at.clone()),
+                                        (
+                                            "code",
+                                            if f(&observation, "code") == &Json::Null {
+                                                "native_interrupt_failed".into()
+                                            } else {
+                                                f(&observation, "code").clone()
+                                            },
+                                        ),
+                                    ],
                                 ),
-                            ],
-                        );
+                            ),
+                        ] {
+                            next.insert(key, value);
+                        }
                         waiting=wait(at,"external_outcome","Interruption failed; the native turn still requires terminal observation.".into());
                     } else {
                         let reply = f(&observation, "reply");
@@ -1136,41 +1180,48 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                         }
                         let prior_phase = f(&next, "phase").clone();
                         let prior_outcome = f(&next, "externalOutcome").clone();
-                        next = patch(
-                            &next,
-                            [
-                                (
-                                    "primaryResourceRef",
-                                    Json::object([
-                                        (
-                                            "serviceNodeId",
-                                            f(f(run, "target"), "serviceNodeId").clone(),
-                                        ),
-                                        ("namespace", ivy_contracts::native_backend::BackendIdentity::optional(run.required("target")?.get("backend"))?.as_ref().map_or("codex", |v| v.id()).into()),
-                                        ("kind", "thread".into()),
-                                        ("nativeId", Json::String(id)),
-                                    ]),
-                                ),
-                                ("nativeEpoch", f(&observation, "epoch").clone()),
-                                (
-                                    "phase",
-                                    if !f(run, "cancellation").is_null() {
-                                        "cancel_requested".into()
-                                    } else {
-                                        "starting".into()
-                                    },
-                                ),
-                                (
-                                    "externalOutcome",
-                                    Json::object([
-                                        ("state", "not_started".into()),
-                                        ("observedAt", at.clone()),
-                                        ("evidence", artifact.clone()),
-                                        ("code", Json::Null),
-                                    ]),
-                                ),
-                            ],
-                        );
+                        for (key, value) in [
+                            (
+                                "primaryResourceRef",
+                                Json::object([
+                                    (
+                                        "serviceNodeId",
+                                        f(f(run, "target"), "serviceNodeId").clone(),
+                                    ),
+                                    (
+                                        "namespace",
+                                        ivy_contracts::native_backend::BackendIdentity::optional(
+                                            run.required("target")?.get("backend"),
+                                        )?
+                                        .as_ref()
+                                        .map_or("codex", |v| v.id())
+                                        .into(),
+                                    ),
+                                    ("kind", "thread".into()),
+                                    ("nativeId", Json::String(id)),
+                                ]),
+                            ),
+                            ("nativeEpoch", f(&observation, "epoch").clone()),
+                            (
+                                "phase",
+                                if !f(run, "cancellation").is_null() {
+                                    "cancel_requested".into()
+                                } else {
+                                    "starting".into()
+                                },
+                            ),
+                            (
+                                "externalOutcome",
+                                Json::object([
+                                    ("state", "not_started".into()),
+                                    ("observedAt", at.clone()),
+                                    ("evidence", artifact.clone()),
+                                    ("code", Json::Null),
+                                ]),
+                            ),
+                        ] {
+                            next.insert(key, value);
+                        }
                         if !f(run, "turnId").is_null() {
                             next.insert("phase", prior_phase);
                             next.insert("externalOutcome", prior_outcome);
@@ -1183,30 +1234,29 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                             "task_board_turn_mismatch",
                             "Turn start must return its exact native identity.",
                         )?;
-                        next = patch(
-                            &next,
-                            [
-                                ("turnId", Json::String(id)),
-                                ("nativeEpoch", f(&observation, "epoch").clone()),
-                                (
-                                    "phase",
-                                    if !f(run, "cancellation").is_null() {
-                                        "cancel_requested".into()
-                                    } else {
-                                        "running".into()
-                                    },
-                                ),
-                                (
-                                    "externalOutcome",
-                                    Json::object([
-                                        ("state", "active".into()),
-                                        ("observedAt", at.clone()),
-                                        ("evidence", artifact.clone()),
-                                        ("code", Json::Null),
-                                    ]),
-                                ),
-                            ],
-                        );
+                        for (key, value) in [
+                            ("turnId", Json::String(id)),
+                            ("nativeEpoch", f(&observation, "epoch").clone()),
+                            (
+                                "phase",
+                                if !f(run, "cancellation").is_null() {
+                                    "cancel_requested".into()
+                                } else {
+                                    "running".into()
+                                },
+                            ),
+                            (
+                                "externalOutcome",
+                                Json::object([
+                                    ("state", "active".into()),
+                                    ("observedAt", at.clone()),
+                                    ("evidence", artifact.clone()),
+                                    ("code", Json::Null),
+                                ]),
+                            ),
+                        ] {
+                            next.insert(key, value);
+                        }
                     } else {
                         next.insert("phase", "cancel_requested".into());
                     }
@@ -1331,27 +1381,20 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                     done = patch(
                         &done,
                         [
-                            ("state", f(&state, "state").clone()),
-                            ("code", f(&state, "code").clone()),
+                            ("state", state.state.as_str().into()),
+                            ("code", state.code.map(Json::String).unwrap_or(Json::Null)),
                         ],
                     );
                 } else {
-                    let projected = project_native_state(
-                        run,
-                        &status,
-                        f(&observation, "epoch"),
-                        thread,
-                        s(op, "createdAt")?,
-                        f(change, "evidence"),
-                    )?;
-                    next = patch(
-                        &next,
-                        [
-                            ("phase", f(&projected, "phase").clone()),
-                            ("externalOutcome", f(&projected, "externalOutcome").clone()),
-                        ],
-                    );
-                    waiting = f(&projected, "waiting").clone();
+                    let observed_at = s(op, "createdAt")?;
+                    let projected =
+                        project_native_state(run, &status, f(&observation, "epoch"), thread)?;
+                    let (phase, outcome, projected_waiting) =
+                        projected.into_parts(observed_at, f(change, "evidence"));
+                    for (key, value) in [("phase", phase), ("externalOutcome", outcome)] {
+                        next.insert(key, value);
+                    }
+                    waiting = projected_waiting;
                 }
                 detail = "Observed the exact saved native turn.".into();
             }
@@ -1409,23 +1452,22 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                             },
                         );
                     } else {
-                        next = patch(
-                            &next,
-                            [
-                                ("phase", "outcome_unknown".into()),
-                                (
-                                    "externalOutcome",
-                                    patch(
-                                        f(run, "externalOutcome"),
-                                        [
-                                            ("state", "unknown".into()),
-                                            ("code", f(change, "code").clone()),
-                                            ("observedAt", at.clone()),
-                                        ],
-                                    ),
+                        for (key, value) in [
+                            ("phase", "outcome_unknown".into()),
+                            (
+                                "externalOutcome",
+                                patch(
+                                    f(run, "externalOutcome"),
+                                    [
+                                        ("state", "unknown".into()),
+                                        ("code", f(change, "code").clone()),
+                                        ("observedAt", at.clone()),
+                                    ],
                                 ),
-                            ],
-                        );
+                            ),
+                        ] {
+                            next.insert(key, value);
+                        }
                     }
                 }
             }
@@ -1492,28 +1534,27 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                     .read("task-board/native-call", f(change, "call"), false)
                     .await?;
                 done = Json::Null;
-                next = patch(
-                    &next,
-                    [
-                        (
-                            "phase",
-                            if !f(run, "cancellation").is_null() {
-                                "cancel_requested".into()
-                            } else {
-                                "outcome_unknown".into()
-                            },
-                        ),
-                        (
-                            "externalOutcome",
-                            Json::object([
-                                ("state", "unknown".into()),
-                                ("observedAt", at.clone()),
-                                ("evidence", f(&failed.value, "evidence").clone()),
-                                ("code", "native_turn_resolution_required".into()),
-                            ]),
-                        ),
-                    ],
-                );
+                for (key, value) in [
+                    (
+                        "phase",
+                        if !f(run, "cancellation").is_null() {
+                            "cancel_requested".into()
+                        } else {
+                            "outcome_unknown".into()
+                        },
+                    ),
+                    (
+                        "externalOutcome",
+                        Json::object([
+                            ("state", "unknown".into()),
+                            ("observedAt", at.clone()),
+                            ("evidence", f(&failed.value, "evidence").clone()),
+                            ("code", "native_turn_resolution_required".into()),
+                        ]),
+                    ),
+                ] {
+                    next.insert(key, value);
+                }
                 waiting=wait(at,"external_outcome","The primary operation failed; the original prepared turn still requires owner reconciliation or prevention.".into());
             }
         }
@@ -1558,21 +1599,20 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                     done=completion("cancelled","Cancelled with the original native request durably prevented before dispatch.".into(),&prevented,"cancelled_before_dispatch".into(),None);
                 } else {
                     done = Json::Null;
-                    next = patch(
-                        &next,
-                        [
-                            ("phase", "cancel_requested".into()),
-                            (
-                                "externalOutcome",
-                                Json::object([
-                                    ("state", "unknown".into()),
-                                    ("observedAt", at.clone()),
-                                    ("evidence", prevented),
-                                    ("code", "native_prevention_pending".into()),
-                                ]),
-                            ),
-                        ],
-                    );
+                    for (key, value) in [
+                        ("phase", "cancel_requested".into()),
+                        (
+                            "externalOutcome",
+                            Json::object([
+                                ("state", "unknown".into()),
+                                ("observedAt", at.clone()),
+                                ("evidence", prevented),
+                                ("code", "native_prevention_pending".into()),
+                            ]),
+                        ),
+                    ] {
+                        next.insert(key, value);
+                    }
                     waiting=wait(at,"external_outcome","A request was prevented; remaining original calls still require owner reconciliation.".into());
                 }
             }
@@ -1585,16 +1625,40 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                 "Resolve the original steering receipt before closing its turn.",
             )?;
         }
+        if !done.is_null() && completion_comments.is_none() {
+            completion_comments = Some(
+                self.store
+                    .read_completion_comments(
+                        task_value,
+                        task_id,
+                        run_id,
+                        array(f(f(run, "originalRequest"), "commentIds")),
+                    )
+                    .await?,
+            );
+        }
+        let mut receipt_task;
+        let receipts = if compact && !steered.is_empty() {
+            receipt_task = task_value.clone();
+            let entries = self
+                .store
+                .comment_entries(task_value, task_id, &steered)
+                .await?;
+            receipt_entries(&mut receipt_task, &entries)?;
+            &receipt_task
+        } else {
+            task_value
+        };
         let publication = steps.pin()?;
-        let mut final_task = patch(
-            task_value,
+        let mut final_task = copy_with(
+            receipts,
             [
                 ("updatedAt", at.clone()),
                 ("publication", publication.clone()),
                 (
                     "commentDeliveries",
                     Json::Array(
-                        array(f(task_value, "commentDeliveries"))
+                        array(f(receipts, "commentDeliveries"))
                             .iter()
                             .map(|v| {
                                 if steered.contains(f(v, "commentId")) {
@@ -1626,20 +1690,39 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
         {
             final_task.insert("wakeAt", Json::Null);
         }
-        let declared_handoff = completion_policy::intent(&final_task, run, run_id, active);
-        let reserved = steps
-            .write(
-                "task-board/task",
+        let declared_handoff = completion_policy::intent(
+            &final_task,
+            run,
+            completion_comments
+                .as_ref()
+                .and_then(|comments| comments.handoff.as_ref()),
+            active,
+        );
+        let reserved = self
+            .write_task(
+                steps,
                 &final_task,
                 &Json::object([
                     ("objectId", Json::String(task_id.clone())),
-                    (
-                        "expectedRevision",
-                        f(&task.document.pin, "revision").clone(),
-                    ),
+                    ("expectedRevision", Json::Number(task.document.pin.revision)),
                 ]),
+                compact,
+                false,
             )
             .await?;
+        let reserved_task = if compact {
+            // A receipt delta, or a retained write from an earlier publisher,
+            // may have changed the root. Continue from that exact saved pin.
+            let saved = self.store.task_header(&reserved, false, false).await?;
+            final_task.insert(
+                "commentStore",
+                f(&saved.document.value, "commentStore").clone(),
+            );
+            receipt_entries(&mut final_task, &[])?;
+            Some(saved)
+        } else {
+            None
+        };
         let mut out = outcome(f(request, "operationId"));
         if !done.is_null() {
             let mut result_workspace = f(&next, "workspace").clone();
@@ -1744,32 +1827,31 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                 )
                 .await?;
             out.insert("result", result.clone());
-            next = patch(
-                &next,
-                [
-                    ("result", result),
-                    (
-                        "phase",
-                        if eq(&done, "state", "succeeded") {
-                            "completed".into()
-                        } else if eq(&done, "state", "cancelled") {
-                            "cancelled".into()
-                        } else {
-                            "failed".into()
-                        },
-                    ),
-                    ("finishedAt", at.clone()),
-                    (
-                        "externalOutcome",
-                        Json::object([
-                            ("state", f(&done, "state").clone()),
-                            ("observedAt", at.clone()),
-                            ("evidence", proof.clone()),
-                            ("code", f(&done, "code").clone()),
-                        ]),
-                    ),
-                ],
-            );
+            for (key, value) in [
+                ("result", result),
+                (
+                    "phase",
+                    if eq(&done, "state", "succeeded") {
+                        "completed".into()
+                    } else if eq(&done, "state", "cancelled") {
+                        "cancelled".into()
+                    } else {
+                        "failed".into()
+                    },
+                ),
+                ("finishedAt", at.clone()),
+                (
+                    "externalOutcome",
+                    Json::object([
+                        ("state", f(&done, "state").clone()),
+                        ("observedAt", at.clone()),
+                        ("evidence", proof.clone()),
+                        ("code", f(&done, "code").clone()),
+                    ]),
+                ),
+            ] {
+                next.insert(key, value);
+            }
             kind = if eq(&done, "state", "cancelled") {
                 "cancelled"
             } else {
@@ -1837,23 +1919,22 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
             } else {
                 Json::Null
             };
-            next = patch(
-                &next,
-                [
-                    (
-                        "calls",
-                        Json::object([
-                            ("thread", Json::Null),
-                            ("turn", Json::Null),
-                            ("interrupt", Json::Null),
-                        ]),
-                    ),
-                    (
-                        "externalOutcome",
-                        patch(f(&next, "externalOutcome"), [("evidence", retained)]),
-                    ),
-                ],
-            );
+            for (key, value) in [
+                (
+                    "calls",
+                    Json::object([
+                        ("thread", Json::Null),
+                        ("turn", Json::Null),
+                        ("interrupt", Json::Null),
+                    ]),
+                ),
+                (
+                    "externalOutcome",
+                    patch(f(&next, "externalOutcome"), [("evidence", retained)]),
+                ),
+            ] {
+                next.insert(key, value);
+            }
         }
         out.insert(
             "run",
@@ -1870,6 +1951,21 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
         );
         if active {
             if !done.is_null() {
+                if compact && !one(&done, "state", &["succeeded", "cancelled"]) {
+                    let entries = self
+                        .store
+                        .comment_entries(
+                            &reserved_task
+                                .as_ref()
+                                .ok_or_else(IvyError::internal)?
+                                .document
+                                .value,
+                            task_id,
+                            array(f(f(run, "originalRequest"), "commentIds")),
+                        )
+                        .await?;
+                    receipt_entries(&mut final_task, &entries)?;
+                }
                 final_task = self
                     .finish_active(
                         operation,
@@ -1880,6 +1976,10 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                         &done,
                         &out,
                         &declared_handoff,
+                        completion_comments
+                            .as_ref()
+                            .ok_or_else(IvyError::internal)?,
+                        compact,
                         steps,
                     )
                     .await?;
@@ -1905,48 +2005,63 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                 } else {
                     "starting"
                 };
-                let delivered = if eq(&next, "phase", "running") {
-                    Json::Array(
-                        array(f(&final_task, "commentDeliveries"))
-                            .iter()
-                            .map(|v| {
-                                if array(f(f(&next, "originalRequest"), "commentIds"))
-                                    .contains(f(v, "commentId"))
-                                {
-                                    patch(
-                                        v,
-                                        [
-                                            ("state", "delivered".into()),
-                                            ("updatedAt", at.clone()),
-                                            ("code", Json::Null),
-                                        ],
-                                    )
-                                } else {
-                                    v.clone()
-                                }
-                            })
-                            .collect(),
-                    )
-                } else {
-                    f(&final_task, "commentDeliveries").clone()
-                };
-                final_task = patch(
-                    &final_task,
-                    [
-                        (
-                            "claim",
-                            patch(
-                                f(task_value, "claim"),
-                                [("phase", phase.into()), ("run", f(&out, "run").clone())],
-                            ),
+                let retained_final = array(f(op, "writes")).iter().any(|write| {
+                    eq(write, "contractKey", "task-board/task")
+                        && f(f(write, "destination"), "objectId") == f(request, "taskId")
+                        && f(f(write, "destination"), "expectedRevision")
+                            == f(&reserved, "revision")
+                });
+                if compact && eq(&next, "phase", "running") && !retained_final {
+                    let entries = self
+                        .store
+                        .comment_entries(
+                            &reserved_task
+                                .as_ref()
+                                .ok_or_else(IvyError::internal)?
+                                .document
+                                .value,
+                            task_id,
+                            array(f(f(run, "originalRequest"), "commentIds")),
+                        )
+                        .await?;
+                    receipt_entries(&mut final_task, &entries)?;
+                }
+                let mut delivered = final_task
+                    .get_mut("commentDeliveries")
+                    .map(|value| std::mem::replace(value, Json::Null))
+                    .unwrap_or(Json::Null);
+                if eq(&next, "phase", "running") {
+                    let mut receipts = match &mut delivered {
+                        Json::Array(values) => std::mem::take(values),
+                        _ => vec![],
+                    };
+                    for receipt in &mut receipts {
+                        if array(f(f(&next, "originalRequest"), "commentIds"))
+                            .contains(f(receipt, "commentId"))
+                        {
+                            receipt.insert("state", "delivered".into());
+                            receipt.insert("updatedAt", at.clone());
+                            receipt.insert("code", Json::Null);
+                        }
+                    }
+                    delivered = Json::Array(receipts);
+                }
+                for (key, value) in [
+                    (
+                        "claim",
+                        patch(
+                            f(task_value, "claim"),
+                            [("phase", phase.into()), ("run", f(&out, "run").clone())],
                         ),
-                        ("primaryResourceRef", f(&next, "primaryResourceRef").clone()),
-                        ("lastRun", f(&out, "run").clone()),
-                        ("workflowState", state.into()),
-                        ("runtimeWait", waiting.clone()),
-                        ("commentDeliveries", delivered),
-                    ],
-                );
+                    ),
+                    ("primaryResourceRef", f(&next, "primaryResourceRef").clone()),
+                    ("lastRun", f(&out, "run").clone()),
+                    ("workflowState", state.into()),
+                    ("runtimeWait", waiting.clone()),
+                    ("commentDeliveries", delivered),
+                ] {
+                    final_task.insert(key, value);
+                }
             }
             if !f(&next, "primaryResourceRef").is_null() {
                 if let Some(backend) = next.required("target")?.get("backend") {
@@ -1960,12 +2075,20 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
         }
         final_task.insert(
             "openQuestionCount",
-            Json::Number(
+            Json::Number(if compact {
+                array(f(f(task_value, "commentStore"), "summary").required("questions")?)
+                    .iter()
+                    .filter(|q| {
+                        f(q, "open").as_bool() == Some(true)
+                            && !eq(f(q, "recipient"), "kind", "task")
+                    })
+                    .count() as f64
+            } else {
                 ivy_sdk::open_task_questions(&final_task, None)?
                     .iter()
                     .filter(|question| !eq(f(question, "recipient"), "kind", "task"))
-                    .count() as f64,
-            ),
+                    .count() as f64
+            }),
         );
         if !done.is_null() || waiting.get("reason") != f(task_value, "runtimeWait").get("reason") {
             out.insert(
@@ -1981,7 +2104,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                             ("createdAt", at.clone()),
                             ("kind", kind.into()),
                             ("detail", detail),
-                            ("previousTask", task.document.pin.clone()),
+                            ("previousTask", task.document.pin.to_json()),
                             ("previousHistory", f(task_value, "lastHistory").clone()),
                             ("priorRun", run_pin.clone()),
                             ("fromTarget", Json::Null),
@@ -1994,32 +2117,32 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                     .await?,
             );
         }
-        final_task = patch(
-            &final_task,
-            [
-                ("publication", Json::Null),
-                (
-                    "lastHistory",
-                    if f(&out, "history") == &Json::Null {
-                        f(task_value, "lastHistory").clone()
-                    } else {
-                        f(&out, "history").clone()
-                    },
-                ),
-            ],
-        );
+        for (key, value) in [
+            ("publication", Json::Null),
+            (
+                "lastHistory",
+                if f(&out, "history") == &Json::Null {
+                    f(task_value, "lastHistory").clone()
+                } else {
+                    f(&out, "history").clone()
+                },
+            ),
+        ] {
+            final_task.insert(key, value);
+        }
         out.insert(
             "task",
-            steps
-                .write(
-                    "task-board/task",
-                    &final_task,
-                    &Json::object([
-                        ("objectId", Json::String(task_id.clone())),
-                        ("expectedRevision", f(&reserved, "revision").clone()),
-                    ]),
-                )
-                .await?,
+            self.write_task(
+                steps,
+                &final_task,
+                &Json::object([
+                    ("objectId", Json::String(task_id.clone())),
+                    ("expectedRevision", f(&reserved, "revision").clone()),
+                ]),
+                compact,
+                active && !done.is_null(),
+            )
+            .await?,
         );
         if active
             && !done.is_null()
@@ -2034,7 +2157,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
         }
         if finished_run(&next) && f(&final_task, "completionIssue").is_null() {
             let published = self.engine.now();
-            let operation_id = s(&operation.pin, "objectId")?;
+            let operation_id = &operation.pin.object_id;
             for root in std::iter::once(run_pin).chain(retired.iter()) {
                 self.store.complete_after_publication(
                     s(root, "objectId")?,

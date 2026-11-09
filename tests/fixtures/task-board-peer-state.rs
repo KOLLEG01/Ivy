@@ -166,6 +166,11 @@ impl LifecyclePages for Snapshot {
 }
 fn task(path: &str, state: &str) -> Json {
     Json::object([
+        ("fields", Json::object([] as [(&str, Json); 0])),
+        ("comments", Json::Array(vec![])),
+        ("wakeAt", Json::Null),
+        ("dependencies", Json::Array(vec![])),
+        ("runtimeWait", Json::Null),
         (
             "claim",
             Json::object([(
@@ -449,7 +454,7 @@ async fn orchestration_runtime_isolates_interleaved_journal_actions_and_keeps_cu
         let after = runtime
             .with_read_cache(store.read("task-board/task", &address, true))
             .await?;
-        Ok((before.pin, after.pin))
+        Ok((before.pin.to_json(), after.pin.to_json()))
     }));
     poll_fn(|cx| {
         assert!(first.as_mut().poll(cx).is_pending());
@@ -467,8 +472,8 @@ async fn orchestration_runtime_isolates_interleaved_journal_actions_and_keeps_cu
                 .await?;
             assert_eq!(journal.contracts.reads.get(), 2);
             let latest = store.read("task-board/task", &"peer".into(), true).await?;
-            assert_eq!(f(&latest.pin, "revision"), &Json::Number(2.0));
-            Ok((before.pin, after.pin))
+            assert_eq!(f(&latest.pin.to_json(), "revision"), &Json::Number(2.0));
+            Ok((before.pin.to_json(), after.pin.to_json()))
         })
         .await
         .unwrap();

@@ -255,10 +255,10 @@ impl LocalJournal<'_> {
         )?;
         let value = parse(&encoded.unwrap(), MANAGEMENT_FRAME_BYTES)?;
         Ok(Document {
-            pin: Json::object([
-                ("objectId", Json::String(id.clone())),
-                ("revision", Json::Number(revision)),
-            ]),
+            pin: crate::operations::ObjectPin {
+                object_id: id.clone(),
+                revision,
+            },
             content_hash: hash_json(&value)?,
             value,
             parent_id: parent.map(Into::into),
@@ -314,7 +314,7 @@ impl LocalJournal<'_> {
                 "revision_conflict",
                 "The local TaskBoard identity differs.",
             )?;
-            return Ok(existing.pin);
+            return Ok(existing.pin.to_json());
         }
         let id = new_id();
         let written = transaction(self.connection, || {
@@ -365,7 +365,7 @@ impl LocalJournal<'_> {
                     "revision_conflict",
                     "The local TaskBoard identity already exists.",
                 )?;
-                return Ok(winner.pin);
+                return Ok(winner.pin.to_json());
             }
             return Err(failure);
         }

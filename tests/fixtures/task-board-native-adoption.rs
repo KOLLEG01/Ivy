@@ -795,3 +795,115 @@ async fn idle_discovery_cooldown_notifications_and_transport_failures_never_auth
     assert_eq!(subject.adopt(&id(1)).await.unwrap_err().code, "owner_lost");
     assert_eq!(driver.updates.borrow().len(), 1);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn compact_discovery_queries_queue_only_for_a_live_cached_idle_task_and_preserves_missing_history()
+ {
+    let w = idle("waiting");
+    w.compact.set(true);
+    let client = client();
+    let driver = driver(client.clone());
+    *client.turns.lock().unwrap() = pair(vec![turn("turn", "inProgress", 1.0, Json::Null)]).1;
+    let subject = NativeAdoption::new(&w, &driver, client.as_ref(), || 0.0);
+    assert!(subject.adopt(&id(1)).await.unwrap().is_none());
+    assert_eq!(w.header_reads.get(), 1);
+    assert_eq!(
+        w.queue_reads.get(),
+        0,
+        "An uncached observation needs no queue projection."
+    );
+    let calls = client.calls.lock().unwrap().len();
+    assert!(subject.adopt(&id(1)).await.unwrap().is_none());
+    assert_eq!(w.queue_reads.get(), 1);
+    assert_eq!(client.calls.lock().unwrap().len(), calls);
+
+    w.queue_failure.set(true);
+    assert_eq!(
+        subject.adopt(&id(1)).await.unwrap_err().code,
+        "revision_pruned"
+    );
+    assert_eq!(client.calls.lock().unwrap().len(), calls);
+    assert!(driver.updates.borrow().is_empty());
+    w.queue_failure.set(false);
+    let mut task = w
+        .lookup("task-board/task", &Json::String(id(1)))
+        .unwrap()
+        .value;
+    task.insert(
+        "commentDeliveries",
+        Json::Array(vec![Json::object([
+            ("commentId", "input".into()),
+            ("state", "queued".into()),
+        ])]),
+    );
+    w.put("task-board/task", pin(1), task);
+    *client.turns.lock().unwrap() = current_pair().1;
+    assert_eq!(subject.adopt(&id(1)).await.unwrap(), Some(id(80)));
+    assert_eq!(w.queue_reads.get(), 3);
+    assert_eq!(driver.updates.borrow().len(), 1);
+    let request = driver.updates.borrow()[0].clone();
+    assert_eq!(f(&request, "expectedRevision"), &1.0.into());
+    assert_eq!(f(&request, "run"), &pin(2));
+
+    w.archived.set(true);
+    assert!(subject.adopt(&id(1)).await.unwrap().is_none());
+    w.archived.set(false);
+    let mut task = w
+        .lookup("task-board/task", &Json::String(id(1)))
+        .unwrap()
+        .value;
+    task.insert("claim", Json::object([("run", pin(2))]));
+    w.put("task-board/task", pin(1), task);
+    assert!(subject.adopt(&id(1)).await.unwrap().is_none());
+    assert_eq!(w.queue_reads.get(), 3);
+    let mut task = w
+        .lookup("task-board/task", &Json::String(id(1)))
+        .unwrap()
+        .value;
+    task.insert("claim", Json::Null);
+    task.insert("workflowState", "todo".into());
+    w.put("task-board/task", pin(1), task);
+    driver.valid.set(false);
+    assert_eq!(subject.adopt(&id(1)).await.unwrap_err().code, "owner_lost");
+    assert_eq!(
+        w.queue_reads.get(),
+        3,
+        "Todo and active/archived Tasks do not need queue discovery."
+    );
+    assert_eq!(driver.updates.borrow().len(), 1);
+    assert!(w.writes.borrow().is_empty());
+    assert!(w.creates.borrow().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_discovery_rechecks_notification_fence_after_await_without_borrowing_the_cache() {
+    let w = idle("waiting");
+    w.compact.set(true);
+    let client = client();
+    let driver = driver(client.clone());
+    *client.turns.lock().unwrap() = pair(vec![turn("turn", "inProgress", 1.0, Json::Null)]).1;
+    let subject = NativeAdoption::new(&w, &driver, client.as_ref(), || 0.0);
+    let task = id(1);
+    assert!(subject.adopt(&task).await.unwrap().is_none());
+    w.queue_yield.set(true);
+    let mut pending = Box::pin(subject.adopt(&task));
+    assert!(futures_util::poll!(&mut pending).is_pending());
+    let notification = Json::object([(
+        "params",
+        Json::object([
+            ("serviceNodeId", "agent".into()),
+            (
+                "payload",
+                Json::object([
+                    ("method", "turn/started".into()),
+                    ("params", Json::object([("threadId", "thread".into())])),
+                ]),
+            ),
+        ]),
+    )]);
+    assert!(subject.notification(&notification));
+    *client.turns.lock().unwrap() = current_pair().1;
+    assert_eq!(pending.await.unwrap(), Some(id(80)));
+    assert_eq!(driver.updates.borrow().len(), 1);
+    assert_eq!(w.queue_reads.get(), 1);
+}

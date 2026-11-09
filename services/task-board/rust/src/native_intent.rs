@@ -66,7 +66,8 @@ impl NativeSlot {
         }
     }
 }
-/// Current prompt policy. An omitted execution-change flag uses the normal prompt.
+/// Current prompt policy consumes Task headers and their question summary.
+/// An omitted execution-change flag uses the normal prompt.
 pub trait TaskPrompts {
     fn task_prompt(
         &self,
@@ -173,8 +174,10 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
                 "task_board_native_order",
                 "Steering requires the exact active native turn.",
             )?;
-            let task =
-                Store::read(self.store, "task-board/task", run.required("taskId")?, true).await?;
+            let task = self
+                .store
+                .read_task_header(run.required("taskId")?, true)
+                .await?;
             let text = prompts.task_prompt(
                 &task.value,
                 string(run.required("owner")?, "serviceNodeId")?,
@@ -300,21 +303,20 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
     }
 
     async fn initial_task(&self, run: &Json) -> IvyResult<crate::operations::Document> {
-        Store::read(
-            self.store,
-            "task-board/task",
-            &Json::object([
-                ("objectId", run.required("taskId")?.clone()),
-                (
-                    "revision",
-                    run.required("originalRequest")?
-                        .required("expectedRevision")?
-                        .clone(),
-                ),
-            ]),
-            true,
-        )
-        .await
+        self.store
+            .read_task_header(
+                &Json::object([
+                    ("objectId", run.required("taskId")?.clone()),
+                    (
+                        "revision",
+                        run.required("originalRequest")?
+                            .required("expectedRevision")?
+                            .clone(),
+                    ),
+                ]),
+                true,
+            )
+            .await
     }
 
     pub fn retain_native_request(

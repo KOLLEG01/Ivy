@@ -4,7 +4,10 @@ use crate::journal_store::{
     mutation_ports::{LocalMutationSource, WriteFailure},
     persistent_reads::json_values::{self as v, Value},
 };
-use ivy_contracts::{IvyError, JsString, hash::hash_json};
+use ivy_contracts::{
+    IvyError, JsString,
+    hash::{hash_json, hash_object},
+};
 use std::future::Future;
 #[path = "tree_comment_writes.rs"]
 pub(crate) mod tree;
@@ -16,10 +19,10 @@ pub(super) fn text(value: impl Into<JsString>) -> Value {
 pub(super) fn obj(fields: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
     Value::object(fields)
 }
-pub(super) fn f(value: &Value, key: &str) -> std::result::Result<Value, IvyError> {
+pub(super) fn f<'a>(value: &'a Value, key: &str) -> &'a Value {
     v::field(value, key)
 }
-pub(super) fn at(value: &Value, index: usize) -> std::result::Result<Value, IvyError> {
+pub(super) fn at(value: &Value, index: usize) -> std::result::Result<&Value, IvyError> {
     v::at(value, index)
 }
 pub(super) fn array(values: impl IntoIterator<Item = Value>) -> Value {
@@ -29,11 +32,11 @@ pub(super) fn spread(
     value: &Value,
     fields: impl IntoIterator<Item = (&'static str, Value)>,
 ) -> Value {
-    let mut value = value.clone();
-    for (k, v) in fields {
-        value.insert(k, v);
-    }
-    value
+    let mut fields = fields.into_iter();
+    let Some(first) = fields.next() else {
+        return value.clone();
+    };
+    v::copy_with(value, std::iter::once(first).chain(fields))
 }
 fn immutable(value: &Value) -> Value {
     let mut value = value.clone();
@@ -58,10 +61,10 @@ pub(super) fn require(ok: bool, code: &str, message: &str) -> std::result::Resul
         Err(IvyError::new(code, message))
     }
 }
-pub(super) fn iterated(
-    value: &Value,
+pub(super) fn iterated<'a>(
+    value: &'a Value,
     _expression: &str,
-) -> std::result::Result<Vec<Value>, IvyError> {
+) -> std::result::Result<&'a [Value], IvyError> {
     v::items(value)
 }
 fn header(task: &Value, object_id: Value) -> std::result::Result<Value, IvyError> {
@@ -179,15 +182,15 @@ where
         .map(|current| v::items(current.required("comments")?))
         .transpose()?
         .unwrap_or_default();
-    for (before, after) in previous.iter().zip(&proposed) {
+    for (before, after) in previous.iter().zip(proposed) {
         require(
             hash(&immutable(before))? == hash(&immutable(after))?,
             "task_board_comment_mismatch",
             "Published comment content is immutable; only conversation metadata can change.",
         )?;
     }
-    let mut comments = proposed.clone();
-    comments.extend(previous.into_iter().skip(proposed.len()));
+    let mut comments = proposed.to_vec();
+    comments.extend(previous.iter().skip(proposed.len()).cloned());
     let value = obj([
         ("schemaVersion", Value::Number(1.0)),
         ("taskId", task_id.clone()),
@@ -203,11 +206,11 @@ where
             .map(|saved| saved.required("revision")?.required("revision").cloned())
             .transpose()?
             .unwrap_or(Value::Number(0.0));
-        let mutation = identity(text(hash(&obj([
-            ("scope", scope.clone()),
-            ("comments", value.clone()),
-            ("previous", revision),
-        ]))?))
+        let mutation = identity(text(hash_object([
+            (&"scope".into(), scope),
+            (&"comments".into(), &value),
+            (&"previous".into(), &revision),
+        ])?))
         .await?;
         let mut params = obj([
             ("mutationId", mutation),

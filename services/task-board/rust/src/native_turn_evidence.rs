@@ -10,8 +10,11 @@ use crate::{
     },
 };
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, agent_schema::validate_agent,
-    checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical,
+    IvyError, IvyJson as Json, IvyResult, JsString,
+    agent_schema::validate_agent,
+    checked_native_contract::CheckedNativeContracts,
+    hash::hash_json,
+    json::{canonical_equal, canonical_size},
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::{clock::parse_date, native_observations::NativeObservations, rpc::RpcClient};
@@ -37,7 +40,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         primary: bool,
     ) -> IvyResult<(Document, JsString)> {
         let document = self.read_document(key, address, primary).await?;
-        let name = self.journal.name(s(&document.pin, "objectId")?)?;
+        let name = self.journal.name(&document.pin.object_id)?;
         Ok((document, name))
     }
 }
@@ -98,9 +101,7 @@ fn time(v: &Json) -> f64 {
 }
 fn same(a: Option<&Json>, b: Option<&Json>) -> IvyResult<bool> {
     match (a, b) {
-        (Some(a), Some(b)) => {
-            Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
-        }
+        (Some(a), Some(b)) => canonical_equal(a, b, MANAGEMENT_FRAME_BYTES),
         _ => Ok(a.is_none() && b.is_none()),
     }
 }
@@ -321,7 +322,7 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
             .read_named_document("task-board/native-turn-snapshot", &pin, false)
             .await?;
         let artifact = Json::object([
-            ("object", document.pin),
+            ("object", document.pin.to_json()),
             ("label", Json::String(name)),
             ("contentHash", document.content_hash.into()),
             ("mediaType", "application/json".into()),
@@ -375,7 +376,8 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
                 && field(v, "run").get("objectId") == run_pin.get("objectId")
                 && number(field(v, "run"), "revision") <= number(run_pin, "revision")
                 && (v.get("nativeVersion").and_then(Json::as_js_string)
-                    == Some(&source.native_version) || routed)
+                    == Some(&source.native_version)
+                    || routed)
                 && (same_service || routed)
                 && v.get("threadId").and_then(Json::as_js_string) == Some(&source.thread_id)
                 && v.get("turnId").and_then(Json::as_js_string) == Some(&source.turn_id)
@@ -624,7 +626,7 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
             ),
             (
                 "nativeBytes",
-                Json::Number(canonical(observation, MAXIMUM_BYTES)?.len() as f64),
+                Json::Number(canonical_size(observation, MAXIMUM_BYTES)? as f64),
             ),
         ]);
         self.store
@@ -664,8 +666,7 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
             "task_board_evidence_mismatch",
             "Native result page must belong to its exact Run and collection.",
         )?;
-        self
-            .store
+        self.store
             .read_document("task-board/run", run_pin, true)
             .await?;
         let evidence = value.required("evidence")?;
@@ -695,8 +696,7 @@ impl<S: TurnEvidenceStore> TurnEvidence<'_, S> {
         require(
             number(value, "itemCount") == array(field(result, "data")).len() as f64
                 && value.get("nextCursor") == Some(&next)
-                && number(value, "nativeBytes")
-                    == canonical(&observed, MAXIMUM_BYTES)?.len() as f64,
+                && number(value, "nativeBytes") == canonical_size(&observed, MAXIMUM_BYTES)? as f64,
             "task_board_evidence_mismatch",
             "Page cursor, item count and source bytes must match their exact native observation.",
         )?;

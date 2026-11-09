@@ -99,8 +99,142 @@ impl Reads {
     }
 }
 impl TaskReadStore for Reads {
-    async fn read(&self, _: &str, _: &Json, _: bool) -> IvyResult<Json> {
-        panic!("Indexed cards/pages must not read a foreign Task, Run or full conversation")
+    async fn read(&self, key: &str, address: &Json, header_only: bool) -> IvyResult<Json> {
+        assert_eq!(key, "task-board/task");
+        assert_eq!(address, &pin());
+        assert!(!header_only);
+        let mut task = self.header.required("value")?.clone();
+        assert!(
+            task.required("commentStore")?.get("summary").is_none(),
+            "Indexed cards/pages must not hydrate the conversation"
+        );
+        task.remove("commentStore");
+        task.insert(
+            "comments",
+            Json::Array(
+                self.entries
+                    .iter()
+                    .map(|entry| entry.required("comment").unwrap().clone())
+                    .collect(),
+            ),
+        );
+        Ok(task)
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn repeated_ids_keep_the_original_open_sequence_in_cached_and_fallback_pages() {
+    for indexed in [false, true] {
+        let mut store = Reads::new();
+        for entry in &mut store.entries {
+            let c = entry.get_mut("comment").unwrap();
+            c.insert("purpose", "comment".into());
+            c.insert("recipient", Json::Null);
+        }
+        for at in [1usize, 12] {
+            let c = store.entries[at - 1].get_mut("comment").unwrap();
+            c.insert("commentId", "same-id".into());
+            c.insert("purpose", "question".into());
+            c.insert("recipient", Json::object([("kind", "user".into())]));
+            c.insert("body", format!("Original question at {at}").into());
+        }
+        let reply = store.entries[1].get_mut("comment").unwrap();
+        reply.insert("replyTo", "same-id".into());
+        reply.insert("authorKind", "user".into());
+        // An unrelated non-question with the same ID must not be projected either.
+        store.entries[2]
+            .get_mut("comment")
+            .unwrap()
+            .insert("commentId", "same-id".into());
+        let task = store.header.get_mut("value").unwrap();
+        let tree = task.get_mut("commentStore").unwrap();
+        tree.remove("summary");
+        if indexed {
+            tree.insert(
+                "summary",
+                Json::object([
+                    ("directCount", 20.0.into()),
+                    (
+                        "questions",
+                        Json::Array(vec![Json::object([
+                            ("commentId", "same-id".into()),
+                            ("sequence", 12.0.into()),
+                            ("open", true.into()),
+                            ("recipient", Json::object([("kind", "user".into())])),
+                        ])]),
+                    ),
+                ]),
+            );
+        }
+        let condition = |_: &Json, _: Option<&Json>| Ok(Json::Null);
+        let policies = ConversationPolicies::with_current_questions(&condition);
+        for query in [
+            Json::object([(
+                "comments",
+                Json::object([("limit", 1.0.into()), ("before", 2.0.into())]),
+            )]),
+            Json::object([(
+                "comments",
+                Json::object([
+                    ("limit", 1.0.into()),
+                    ("offset", 0.0.into()),
+                    ("questionsOnly", true.into()),
+                ]),
+            )]),
+        ] {
+            let page = read_task(&store, &policies, &store.header, &query)
+                .await
+                .unwrap();
+            let open = page.required("openQuestions").unwrap().as_array().unwrap();
+            assert_eq!(
+                open,
+                &[store.entries[11].required("comment").unwrap().clone()]
+            );
+            if query
+                .required("comments")
+                .unwrap()
+                .get("questionsOnly")
+                .is_some()
+            {
+                assert_eq!(
+                    page.required("task")
+                        .unwrap()
+                        .required("comments")
+                        .unwrap()
+                        .as_array()
+                        .unwrap(),
+                    open
+                );
+                assert_eq!(
+                    page.required("commentPage").unwrap().get("total"),
+                    Some(&1.0.into())
+                );
+            } else {
+                assert_eq!(
+                    page.required("task")
+                        .unwrap()
+                        .required("comments")
+                        .unwrap()
+                        .as_array()
+                        .unwrap()[0]
+                        .get("sequence"),
+                    Some(&1.0.into())
+                );
+            }
+        }
+        let card = read_task(
+            &store,
+            &policies,
+            &store.header,
+            &Json::object([("view", "card".into())]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            card.required("task").unwrap().get("openQuestionCount"),
+            Some(&1.0.into())
+        );
+        assert!(store.maximum.get() <= 8);
     }
 }
 impl CommentReadStore for Reads {

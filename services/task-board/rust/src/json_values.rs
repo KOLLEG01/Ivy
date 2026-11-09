@@ -1,40 +1,61 @@
 //! Small JSON accessors shared by persistence and mutation code.
 pub(crate) use ivy_contracts::IvyJson as Value;
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString};
+static NULL: Json = Json::Null;
 pub(crate) fn invalid(message: impl Into<JsString>) -> IvyError {
     IvyError::new_js("invalid_arguments".into(), message.into())
 }
-pub(crate) fn field(value: &Json, key: &str) -> IvyResult<Json> {
-    Ok(value.get(key).cloned().unwrap_or(Json::Null))
+pub(crate) fn field<'a>(value: &'a Json, key: &str) -> &'a Json {
+    value.get(key).unwrap_or(&NULL)
 }
-pub(crate) fn has(value: &Json, key: &str) -> IvyResult<bool> {
-    Ok(value.get(key).is_some())
+pub(crate) fn take(mut value: Json, key: &str) -> Json {
+    value.remove(key).unwrap_or(Json::Null)
+}
+pub(crate) fn has(value: &Json, key: &str) -> bool {
+    value.get(key).is_some()
 }
 pub(crate) fn nullish(value: &Json) -> bool {
     value.is_null()
 }
-pub(crate) fn fields(value: &Json) -> Vec<(JsString, Json)> {
-    value.as_object().map(|v| v.to_vec()).unwrap_or_default()
+pub(crate) fn fields(value: &Json) -> &[(JsString, Json)] {
+    value.as_object().unwrap_or_default()
 }
 pub(crate) fn object(fields: impl IntoIterator<Item = (JsString, Json)>) -> Json {
     Json::object(fields)
 }
+/// Apply the same ordered updates as `insert`, copying only retained fields.
+pub(crate) fn copy_with(
+    value: &Json,
+    changes: impl IntoIterator<Item = (&'static str, Json)>,
+) -> Json {
+    let pairs = value.as_object().expect("insert requires an object");
+    let mut changes = Json::object(changes).into_object().unwrap();
+    let mut result = Vec::with_capacity(pairs.len() + changes.len());
+    for (key, value) in pairs {
+        let value = if let Some(at) = changes.iter().position(|(name, _)| name == key) {
+            changes.remove(at).1
+        } else {
+            value.clone()
+        };
+        result.push((key.clone(), value));
+    }
+    result.extend(changes);
+    Json::Object(result)
+}
 pub(crate) fn array(values: impl IntoIterator<Item = Json>) -> Json {
     Json::Array(values.into_iter().collect())
 }
-pub(crate) fn items(value: &Json) -> IvyResult<Vec<Json>> {
+pub(crate) fn items(value: &Json) -> IvyResult<&[Json]> {
     value
         .as_array()
-        .map(<[Json]>::to_vec)
         .ok_or_else(|| invalid("Expected an array."))
 }
-pub(crate) fn at(value: &Json, index: usize) -> IvyResult<Json> {
+pub(crate) fn at(value: &Json, index: usize) -> IvyResult<&Json> {
     Ok(value
         .as_array()
         .ok_or_else(|| invalid("Expected an array."))?
         .get(index)
-        .cloned()
-        .unwrap_or(Json::Null))
+        .unwrap_or(&NULL))
 }
 pub(crate) fn length(value: &Json) -> IvyResult<Json> {
     Ok(Json::Number(
@@ -58,9 +79,6 @@ pub(crate) fn number(value: &Json) -> IvyResult<f64> {
 }
 pub(crate) fn same_key(left: &Json, right: &Json) -> bool {
     left == right
-}
-pub(crate) fn decoded_comment<E: From<IvyError>>(value: &Json) -> Result<Json, E> {
-    Ok(value.clone())
 }
 pub(crate) fn present(value: &Json) -> bool {
     !value.is_null()

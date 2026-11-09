@@ -9,7 +9,9 @@ use ivy_task_board::{
     engine_read::condition_policy::{ConditionStore, task_condition},
     journal_store::{
         JournalStore,
-        persistent_reads::{fill_verification_sizes, read_legacy_conversation},
+        persistent_reads::{
+            fill_verification_sizes, read_legacy_conversation, read_legacy_conversation_owned,
+        },
     },
     local_journal::{LocalJournal, initialize},
     local_retention::HistoryLimits,
@@ -363,4 +365,315 @@ fn current_verification_size_backfill_matches_the_owned_boundary() {
         count += 1;
     }
     assert_eq!(count, 12);
+}
+
+#[test]
+fn prefix_boundaries_preserve_payloads_errors_and_original_read_order() {
+    // Keep boundary cases runnable without externally captured fixture data.
+    let first = Json::object([
+        ("commentId", "c1".into()),
+        ("body", Json::String(JsString(vec![0xd800, 65, 0, 0xdfff]))),
+        ("nativeInput", "stale".into()),
+        ("handoff", "stale".into()),
+        ("delivery", "stale".into()),
+    ]);
+    let second = Json::object([
+        ("commentId", "c2".into()),
+        ("body", "outside the selected prefix".into()),
+    ]);
+    let states = Json::Array(vec![
+        Json::object([("commentId", "c1".into()), ("delivery", "earlier".into())]),
+        Json::object([
+            ("commentId", "c1".into()),
+            ("delivery", "latest".into()),
+            ("handoff", Json::object([("workflowState", "todo".into())])),
+        ]),
+    ]);
+    let original = Json::object([
+        ("comments", Json::Array(vec![])),
+        ("commentDeliveries", Json::Array(vec![])),
+        (
+            "opaque",
+            Json::Object(vec![
+                ("same".into(), (-0.0).into()),
+                ("same".into(), "retained".into()),
+            ]),
+        ),
+        (
+            "commentStore",
+            Json::object([
+                ("objectId", "log".into()),
+                ("length", 1.0.into()),
+                ("nativeInputs", states),
+            ]),
+        ),
+    ]);
+    let saved = Json::object([
+        (
+            "object",
+            Json::object([
+                ("contractKey", "task-board/comments".into()),
+                ("ownerObjectId", Json::Null),
+                ("parentId", "task".into()),
+            ]),
+        ),
+        (
+            "content",
+            Json::object([
+                ("encoding", "json".into()),
+                (
+                    "value",
+                    Json::object([
+                        ("taskId", "task".into()),
+                        ("comments", Json::Array(vec![first.clone(), second.clone()])),
+                    ]),
+                ),
+            ]),
+        ),
+    ]);
+    let mut expected_comment = first;
+    for key in ["nativeInput", "handoff", "delivery"] {
+        expected_comment.remove(key);
+    }
+    expected_comment.insert("delivery", "latest".into());
+    expected_comment.insert("handoff", Json::object([("workflowState", "todo".into())]));
+    let missing = |key| {
+        IvyError::new(
+            "invalid_arguments",
+            format!("Missing required property: {key}"),
+        )
+    };
+    let mismatch = || {
+        IvyError::new(
+            "task_board_contract_mismatch",
+            "The ticket conversation is not a retained comment record.",
+        )
+    };
+    let unavailable = || {
+        IvyError::new(
+            "task_board_evidence_mismatch",
+            "The ticket conversation prefix is unavailable.",
+        )
+    };
+    let source_error = IvyError::new_js(JsString(vec![0xd800, 65]), JsString(vec![0xdfff, 66]))
+        .with_provider_outcome(Json::object([("opaque", "original".into())]))
+        .with_details(Json::object([("cause", "retained".into())]));
+    let names = [
+        "inline",
+        "null-store",
+        "tree-selector",
+        "retained-prefix",
+        "zero-length",
+        "full-prefix",
+        "reference-before-read",
+        "original-source-error",
+        "contract-before-length",
+        "missing-content-before-contract",
+        "wrong-task",
+        "wrong-parent",
+        "invalid-comments",
+        "missing-length",
+        "negative-length",
+        "fractional-length",
+        "nan-length",
+        "infinite-length",
+        "overflow-length",
+        "missing-native-inputs",
+        "length-before-native-inputs",
+        "invalid-native-inputs",
+        "malformed-selected-state",
+    ];
+    for (index, name) in names.into_iter().enumerate() {
+        let mut task = original.clone();
+        let mut reply = saved.clone();
+        let mut expected_task = original.clone();
+        expected_task.remove("commentStore");
+        expected_task.insert("comments", Json::Array(vec![expected_comment.clone()]));
+        let mut expected = Ok(expected_task);
+        let mut read_count = 1;
+        let mut source_failure = false;
+        match index {
+            0 => {
+                task.remove("commentStore");
+                expected = Ok(task.clone());
+                read_count = 0;
+            }
+            1 => {
+                task.insert("commentStore", Json::Null);
+                expected = Ok(task.clone());
+                read_count = 0;
+            }
+            2 => {
+                task.get_mut("commentStore")
+                    .unwrap()
+                    .insert("kind", "tree".into());
+                expected = Ok(Json::Null);
+                read_count = 0;
+            }
+            3 => {}
+            4 => {
+                task.get_mut("commentStore")
+                    .unwrap()
+                    .insert("length", (-0.0).into());
+                expected
+                    .as_mut()
+                    .unwrap()
+                    .insert("comments", Json::Array(vec![]));
+            }
+            5 => {
+                task.get_mut("commentStore")
+                    .unwrap()
+                    .insert("length", 2.0.into());
+                expected.as_mut().unwrap().insert(
+                    "comments",
+                    Json::Array(vec![expected_comment.clone(), second.clone()]),
+                );
+            }
+            6 => {
+                let reference = task.get_mut("commentStore").unwrap();
+                reference.remove("objectId");
+                reference.insert("length", (-1.0).into());
+                expected = Err(missing("objectId"));
+                read_count = 0;
+            }
+            7 => {
+                source_failure = true;
+                expected = Err(source_error.clone());
+            }
+            8 => {
+                reply
+                    .get_mut("object")
+                    .unwrap()
+                    .insert("contractKey", "wrong".into());
+                task.get_mut("commentStore").unwrap().remove("length");
+                expected = Err(mismatch());
+            }
+            9 => {
+                reply
+                    .get_mut("object")
+                    .unwrap()
+                    .insert("contractKey", "wrong".into());
+                reply.remove("content");
+                expected = Err(missing("content"));
+            }
+            10 => {
+                reply
+                    .get_mut("content")
+                    .unwrap()
+                    .get_mut("value")
+                    .unwrap()
+                    .insert("taskId", "other".into());
+                expected = Err(unavailable());
+            }
+            11 => {
+                reply
+                    .get_mut("object")
+                    .unwrap()
+                    .insert("parentId", "other".into());
+                expected = Err(unavailable());
+            }
+            12 => {
+                reply
+                    .get_mut("content")
+                    .unwrap()
+                    .get_mut("value")
+                    .unwrap()
+                    .insert("comments", Json::Null);
+                expected = Err(unavailable());
+            }
+            13 => {
+                task.get_mut("commentStore").unwrap().remove("length");
+                expected = Err(unavailable());
+            }
+            14..=18 => {
+                let lengths = [-1.0, 0.5, f64::NAN, f64::INFINITY, 3.0];
+                task.get_mut("commentStore")
+                    .unwrap()
+                    .insert("length", lengths[index - 14].into());
+                expected = Err(unavailable());
+            }
+            19 => {
+                task.get_mut("commentStore").unwrap().remove("nativeInputs");
+                expected = Err(missing("nativeInputs"));
+            }
+            20 => {
+                let reference = task.get_mut("commentStore").unwrap();
+                reference.remove("nativeInputs");
+                reference.insert("length", (-1.0).into());
+                expected = Err(unavailable());
+            }
+            21 => {
+                task.get_mut("commentStore")
+                    .unwrap()
+                    .insert("nativeInputs", Json::Null);
+                expected = Err(unavailable());
+            }
+            22 => {
+                task.get_mut("commentStore")
+                    .unwrap()
+                    .insert("nativeInputs", Json::Array(vec![Json::Null]));
+                let log = reply.get_mut("content").unwrap().get_mut("value").unwrap();
+                log.insert(
+                    "comments",
+                    Json::Array(vec![Json::object([
+                        ("nativeInput", "stale".into()),
+                        ("body", "retained".into()),
+                    ])]),
+                );
+                expected = Err(unavailable());
+            }
+            _ => unreachable!(),
+        }
+        let expected = observed(expected);
+        let row = if source_failure {
+            Json::object([(
+                "error",
+                Json::object([
+                    ("code", Json::String(source_error.code_js())),
+                    ("message", Json::String(source_error.message_js())),
+                    ("outcome", source_error.outcome.to_json()),
+                    ("details", source_error.details.clone().unwrap()),
+                ]),
+            )])
+        } else {
+            Json::object([("value", reply)])
+        };
+        let input = Json::object([("rpc", Json::Array(vec![row]))]);
+        let original_input = format!("{task:?}");
+        for owned in [false, true] {
+            let client = Client::new(&input);
+            let result = if owned {
+                complete(read_legacy_conversation_owned(
+                    &client,
+                    task.clone(),
+                    &"task".into(),
+                ))
+            } else {
+                complete(read_legacy_conversation(&client, &task, &"task".into()))
+            };
+            same(
+                &observed(result.map(|value| value.unwrap_or(Json::Null))),
+                &expected,
+                name,
+            );
+            let trace = client.trace.lock().unwrap();
+            assert_eq!(trace.len(), read_count, "{name}, owned={owned}");
+            if read_count == 1 {
+                assert_eq!(
+                    trace[0],
+                    Json::object([
+                        ("method", "objects.read".into()),
+                        ("params", Json::object([("objectId", "log".into())]))
+                    ]),
+                    "{name}"
+                );
+            }
+            assert_eq!(
+                client.remaining.lock().unwrap().len(),
+                1 - read_count,
+                "{name}"
+            );
+            assert_eq!(format!("{task:?}"), original_input, "{name}");
+        }
+    }
 }

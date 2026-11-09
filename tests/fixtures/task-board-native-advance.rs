@@ -688,7 +688,8 @@ async fn reconciliation_and_local_dispatch_match_original_with_actual_journal_ca
                             continue;
                         }
                         let old = store.journal.read(key, &Json::String(id(number)), true)?;
-                        let revision = old.pin.required("revision")?.as_f64().unwrap() + 1.0;
+                        let revision =
+                            old.pin.to_json().required("revision")?.as_f64().unwrap() + 1.0;
                         seed(&store.journal, &allowed, key, number, revision, &old.value);
                         if flag == "bumpRun" {
                             let task = store.journal.read(
@@ -708,7 +709,7 @@ async fn reconciliation_and_local_dispatch_match_original_with_actual_journal_ca
                                 &allowed,
                                 "task-board/task",
                                 100,
-                                task.pin.required("revision")?.as_f64().unwrap() + 1.0,
+                                task.pin.to_json().required("revision")?.as_f64().unwrap() + 1.0,
                                 &value,
                             );
                         }
@@ -853,7 +854,7 @@ async fn actual_receipt_blobs_and_call_cas_survive_file_reopen_without_redispatc
         )
         .await
         .unwrap();
-        assert_eq!(saved.pin, pin(300, 2.0));
+        assert_eq!(saved.pin.to_json(), pin(300, 2.0));
         assert_eq!(saved.value.get("ownerPhase"), Some(&Json::from("accepted")));
         let expected = NativeIntent {
             store: &store,
@@ -869,7 +870,7 @@ async fn actual_receipt_blobs_and_call_cas_survive_file_reopen_without_redispatc
             canonical(
                 &evidence
                     .read(
-                        &saved.pin,
+                        &saved.pin.to_json(),
                         saved.value.required("evidence").unwrap(),
                         &expected
                     )
@@ -904,7 +905,7 @@ async fn actual_receipt_blobs_and_call_cas_survive_file_reopen_without_redispatc
             assert_eq!(
                 evidence
                     .read(
-                        &saved.pin,
+                        &saved.pin.to_json(),
                         saved.value.required("evidence").unwrap(),
                         &expected
                     )
@@ -1213,7 +1214,7 @@ async fn selected_routes_read_original_owners_after_reopen_without_replay_author
                         catalogs: &catalogs,
                     }
                     .read(
-                        &saved.pin,
+                        &saved.pin.to_json(),
                         saved.value.required("evidence").unwrap(),
                         &expected,
                     )

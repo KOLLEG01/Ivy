@@ -147,11 +147,8 @@ impl<S: CommentSource + ?Sized> CommentReader<S> {
                 .read(pin.clone(), cancellation.cloned())
                 .await
                 .map_err(CommentError::Source)?;
-            let node = Arc::new(
-                policy::snapshot(&saved, &key, task_id)
-                    .map_err(CommentError::Invalid)?
-                    .clone(),
-            );
+            let node =
+                Arc::new(policy::snapshot(saved, &key, task_id).map_err(CommentError::Invalid)?);
             self.remember(pin, node.clone())?;
             node
         };

@@ -61,6 +61,28 @@ impl<S: ReadEvidenceStore, W> ReadEvidenceStore for NativeCommentJournal<'_, S, 
     }
 }
 impl<S: InspectionStore, W> InspectionStore for NativeCommentJournal<'_, S, W> {
+    async fn task_header(&self, address: &Json) -> IvyResult<Document> {
+        self.inspection.task_header(address).await
+    }
+    async fn task_has_comment(
+        &self,
+        task: &Json,
+        task_id: &JsString,
+        id: &JsString,
+    ) -> IvyResult<bool> {
+        self.inspection.task_has_comment(task, task_id, id).await
+    }
+    async fn task_native_questions(
+        &self,
+        task: &Json,
+        task_id: &JsString,
+        run_id: &JsString,
+        comment_id: Option<&JsString>,
+    ) -> IvyResult<Vec<Json>> {
+        self.inspection
+            .task_native_questions(task, task_id, run_id, comment_id)
+            .await
+    }
     async fn verify_owner(&self) -> IvyResult<()> {
         self.inspection.verify_owner().await
     }
@@ -214,21 +236,24 @@ mod text_tests {
         );
     }
 }
-fn contains_comment(task: &Json, id: &str) -> bool {
-    field(task, "comments").as_array().is_some_and(|comments| {
-        comments
-            .iter()
-            .any(|comment| field(comment, "commentId").as_js_string() == Some(&id.into()))
-    })
-}
-fn question_for_run(comment: &Json, run_id: &JsString) -> bool {
+pub(crate) fn question_for_run(comment: &Json, run_id: &JsString) -> bool {
     field(comment, "purpose").is_str("question")
         && field(field(comment, "author"), "source").is_str("native")
         && field(field(comment, "run"), "objectId").as_js_string() == Some(run_id)
 }
-fn recorded_question(task: &Json, id: &str, run_id: &JsString, input: &Json) -> bool {
-    field(task, "comments").as_array().is_some_and(|comments| {
-        comments.iter().any(|comment| {
+async fn recorded_question<S: NativeCommentStore>(
+    store: &S,
+    task: &Json,
+    task_id: &JsString,
+    id: &str,
+    run_id: &JsString,
+    input: &Json,
+) -> IvyResult<bool> {
+    Ok(store
+        .task_native_questions(task, task_id, run_id, Some(&id.into()))
+        .await?
+        .iter()
+        .any(|comment| {
             field(comment, "commentId").is_str(id)
                 && question_for_run(comment, run_id)
                 && [
@@ -241,8 +266,7 @@ fn recorded_question(task: &Json, id: &str, run_id: &JsString, input: &Json) -> 
                 ]
                 .iter()
                 .all(|key| field(field(comment, "nativeInput"), key) == field(input, key))
-        })
-    })
+        }))
 }
 fn request(
     task: &Json,
@@ -286,9 +310,7 @@ pub async fn sync_native_comments<S: NativeCommentStore>(
         return Ok(());
     }
     let task_id = text(&run.value, "taskId")?;
-    let current = store
-        .read_document("task-board/task", &Json::String(task_id.clone()), true)
-        .await?;
+    let current = store.task_header(&Json::String(task_id.clone())).await?;
     if field(field(field(&current.value, "claim"), "run"), "objectId").as_js_string()
         != Some(run_id)
     {
@@ -296,21 +318,28 @@ pub async fn sync_native_comments<S: NativeCommentStore>(
     }
     let original = run.value.required("target")?;
     let target = routed_target(&current.value, original)?;
-    let recorded: Vec<JsString> = field(&current.value, "comments")
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|comment| question_for_run(comment, run_id))
+    let select_initial = target == *original
+        && field(field(&current.value, "commentStore"), "kind").is_str("tree")
+        && field(&current.value, "comments")
+            .as_array()
+            .is_some_and(|v| v.is_empty())
+        && field(&current.value, "commentDeliveries")
+            .as_array()
+            .is_some_and(|v| v.is_empty());
+    let questions = if select_initial {
+        vec![]
+    } else {
+        store
+            .task_native_questions(&current.value, &task_id, run_id, None)
+            .await?
+    };
+    let recorded: Vec<JsString> = questions
+        .iter()
         .filter_map(|comment| field(comment, "commentId").as_js_string().cloned())
         .collect();
     let backend = BackendIdentity::optional(target.get("backend"))?;
     let mut retired = Vec::new();
-    for comment in field(&current.value, "comments")
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|_| target != *original)
-    {
+    for comment in questions.iter().filter(|_| target != *original) {
         if !question_for_run(comment, run_id) {
             continue;
         }
@@ -337,16 +366,23 @@ pub async fn sync_native_comments<S: NativeCommentStore>(
         }
         let hash = hash_json(identity)?;
         if field(comment, "commentId").is_str(&format!("native-question-{}", &hash[7..]))
-            && !contains_comment(&current.value, &format!("native-response-{}", &hash[7..]))
+            && !store
+                .task_has_comment(
+                    &current.value,
+                    &task_id,
+                    &format!("native-response-{}", &hash[7..]).into(),
+                )
+                .await?
             && !retired.contains(identity)
         {
             retired.push(identity.clone());
         }
     }
-    drop(current);
+    drop(questions);
+    let initial = select_initial.then_some(current.value);
     let inspector = NativeInspector { store, catalogs };
     let context = if target != *original {
-        Some(inspector.context(&run.pin).await?)
+        Some(inspector.context(&run.pin.to_json()).await?)
     } else {
         None
     };
@@ -375,7 +411,9 @@ pub async fn sync_native_comments<S: NativeCommentStore>(
         ));
     }
     if let Some(context) = context.as_ref() {
-        if page.get("epoch") != Some(&epoch) || inspector.context(&run.pin).await? != *context {
+        if page.get("epoch") != Some(&epoch)
+            || inspector.context(&run.pin.to_json()).await? != *context
+        {
             return Err(IvyError::new(
                 "task_board_native_epoch_changed",
                 "The selected owner changed while reading native inputs.",
@@ -402,15 +440,31 @@ pub async fn sync_native_comments<S: NativeCommentStore>(
         // A previous connection cannot introduce a new question. Only finish
         // mirroring a question already recorded by this Run's native owner.
         let historical_task = if historical {
-            if !recorded.contains(&JsString::from(question_id.as_str()))
-                || !["answered", "expired"]
-                    .iter()
-                    .any(|state| field(input, "state").is_str(state))
+            if !["answered", "expired"]
+                .iter()
+                .any(|state| field(input, "state").is_str(state))
             {
                 continue;
             }
+            let recorded = if let Some(initial) = initial.as_ref() {
+                !store
+                    .task_native_questions(
+                        initial,
+                        &task_id,
+                        run_id,
+                        Some(&question_id.clone().into()),
+                    )
+                    .await?
+                    .is_empty()
+            } else {
+                recorded.contains(&JsString::from(question_id.as_str()))
+            };
+            if !recorded {
+                continue;
+            }
             let task = input_task(store, &task_id, run_id, original, &target).await?;
-            if !recorded_question(&task.value, &question_id, run_id, input) {
+            if !recorded_question(store, &task.value, &task_id, &question_id, run_id, input).await?
+            {
                 continue;
             }
             Some(task)
@@ -430,7 +484,10 @@ pub async fn sync_native_comments<S: NativeCommentStore>(
             Some(task) => task,
             None => input_task(store, &task_id, run_id, original, &target).await?,
         };
-        if !contains_comment(&task.value, &question_id) {
+        if !store
+            .task_has_comment(&task.value, &task_id, &question_id.clone().into())
+            .await?
+        {
             let mut pending = retained.clone();
             for (key, value) in [
                 ("state", "pending".into()),
@@ -443,7 +500,7 @@ pub async fn sync_native_comments<S: NativeCommentStore>(
             }
             let mut request = request(
                 &Json::object([
-                    ("pin", task.pin.clone()),
+                    ("pin", task.pin.to_json()),
                     ("taskId", Json::String(task_id.clone())),
                 ]),
                 &question_id,
@@ -466,11 +523,16 @@ pub async fn sync_native_comments<S: NativeCommentStore>(
             continue;
         }
         let task = input_task(store, &task_id, run_id, original, &target).await?;
-        if historical && !recorded_question(&task.value, &question_id, run_id, input) {
+        if historical
+            && !recorded_question(store, &task.value, &task_id, &question_id, run_id, input).await?
+        {
             continue;
         }
         let response_id = format!("native-response-{}", &hash[7..]);
-        if contains_comment(&task.value, &response_id) {
+        if store
+            .task_has_comment(&task.value, &task_id, &response_id.clone().into())
+            .await?
+        {
             continue;
         }
         let body = if field(input, "state").as_js_string() == Some(&"expired".into()) {
@@ -481,7 +543,10 @@ pub async fn sync_native_comments<S: NativeCommentStore>(
             JsString(answer.0.into_iter().take(16_000).collect())
         };
         let request = request(
-            &Json::object([("pin", task.pin), ("taskId", Json::String(task_id.clone()))]),
+            &Json::object([
+                ("pin", task.pin.to_json()),
+                ("taskId", Json::String(task_id.clone())),
+            ]),
             &response_id,
             "update",
             body,
@@ -490,6 +555,7 @@ pub async fn sync_native_comments<S: NativeCommentStore>(
         )?;
         store.native_comment(&request).await?;
     }
+    drop(initial);
     // Historical requests remain with their original connection. Read only
     // unresolved, recorded identities from explicitly published former owners;
     // never reinterpret them as inputs of the selected destination.
@@ -498,7 +564,10 @@ pub async fn sync_native_comments<S: NativeCommentStore>(
         let question_id = format!("native-question-{}", &hash[7..]);
         let response_id = format!("native-response-{}", &hash[7..]);
         let task = input_task(store, &task_id, run_id, original, &target).await?;
-        if contains_comment(&task.value, &response_id) {
+        if store
+            .task_has_comment(&task.value, &task_id, &response_id.clone().into())
+            .await?
+        {
             continue;
         }
         drop(task);
@@ -540,8 +609,10 @@ pub async fn sync_native_comments<S: NativeCommentStore>(
                 continue;
             }
             let task = input_task(store, &task_id, run_id, original, &target).await?;
-            if !recorded_question(&task.value, &question_id, run_id, input)
-                || contains_comment(&task.value, &response_id)
+            if !recorded_question(store, &task.value, &task_id, &question_id, run_id, input).await?
+                || store
+                    .task_has_comment(&task.value, &task_id, &response_id.clone().into())
+                    .await?
             {
                 continue;
             }
@@ -565,7 +636,10 @@ pub async fn sync_native_comments<S: NativeCommentStore>(
                 )
             };
             let request = request(
-                &Json::object([("pin", task.pin), ("taskId", Json::String(task_id.clone()))]),
+                &Json::object([
+                    ("pin", task.pin.to_json()),
+                    ("taskId", Json::String(task_id.clone())),
+                ]),
                 &response_id,
                 "update",
                 body,
@@ -585,9 +659,7 @@ async fn input_task<S: NativeCommentStore>(
     original: &Json,
     target: &Json,
 ) -> IvyResult<Document> {
-    let task = store
-        .read_document("task-board/task", &Json::String(task_id.clone()), true)
-        .await?;
+    let task = store.task_header(&Json::String(task_id.clone())).await?;
     if field(field(field(&task.value, "claim"), "run"), "objectId").as_js_string() != Some(run_id)
         || routed_target(&task.value, original)? != *target
     {

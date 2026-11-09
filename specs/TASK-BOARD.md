@@ -4,6 +4,42 @@ Contracts: [schema](schemas/task-board.schema.json), [operations](schemas/task-b
 Implementation: [runtime](../services/task-board/rust/src).
 UI requirements: [UI](UI.md).
 
+## Native runtime
+
+The existing journal and borrowed generation graph live on one dedicated thread inside
+the service process. SDK I/O, host control and heartbeat publication stay on the host
+runtime. [Public admission](../services/task-board/rust/src/service_bridge.rs) bounds
+held calls and retained argument/reply capacity; losing an observer does not cancel
+accepted work. Retirement drains that work before releasing the journal.
+The generation uses one borrowed job queue for category, execution, reconciliation
+and internal invocation work. [Shared admission](../services/task-board/rust/src/work_budget.rs)
+covers retained public/internal arguments, unread replies and action record caches.
+Cache admission includes unused vector capacity and takes original records;
+readers copy only the fields their API returns. Independent read scopes retain
+separate immutable revision maps. Comment-node observers reuse unchanged write-pin
+hints. Shared JSON encoding writes control and unpaired UTF-16 escapes from fixed
+storage while preserving canonical bytes and size/error ordering.
+Internal replies transfer
+their original buffers to one observer instead of copying a completed value.
+[Generation control](../services/task-board/rust/src/generation.rs) coalesces readiness,
+wakeups and compact native identity hints. Hint overload retires the generation and
+reconciles original durable work after drain. Readiness reads a bounded owner-observed
+snapshot without waiting on SQLite; expired observations degrade until refreshed.
+Only the latest pending connection can replace a drained generation.
+
+Board card pages use `list` with `view:cards`, Hive predicates and stable ordering,
+at most 20 rows and the original opaque cursor. The owner first selects immutable
+Task pins, then projects bounded bulk header pages through the existing card reader.
+Changed or oversized headers use exact selected revision reads. The browser receives
+compact cards directly, without a separate card cache or per-card provider calls.
+Board counters consume Hive's bounded SQL counts grouped by workflow and category;
+the browser collects numeric groups rather than individual Tasks. Waiting and
+category cards use the same bounded pages and opaque continuations. Group counts
+and empty cells describe the current page; overall totals remain SQL counts.
+Cards and counts subscribe to their direct workspace parent, so writes in another
+workspace do not refresh them. Broader navigation hints and owner availability
+still invalidate the affected views; visibility and burst coalescing remain shared.
+
 ## Export maintenance
 
 Stop the owning TaskBoard instance, then run its packaged `ivy-task-board-maintenance`
@@ -59,11 +95,58 @@ Ordinary comments, delivery receipts, unexported files and live Run source pins 
   `task-board/comment-node` children store individual comments with delivery observations;
   64-way index pages preserve exact historical snapshots with bounded range reads. Unchanged
   records are reused; prepared publications retain the compact root rather than copying the
-  entire conversation into every journal stage. Existing conversation logs remain readable.
+  entire conversation into every journal stage. Local `prepared-payload` records capture the
+  target contract version, compact content and exact Hive references before application.
+  Replay uses those saved bytes; domain reads can materialize the original conversation.
+  Existing inline prepared records preserve their original reference construction on replay;
+  conversation logs remain readable.
+  Header edits retain the same root and evidence pins without reading conversation entries.
+  Generated edit notices append through the right index path and retain historical roots;
+  ordinary appends use the same path and update only affected open-question summaries.
+  A bounded disposable local identity index is valid only for its exact task/root;
+  a missing, incomplete or oversized index streams bounded ranges and proves no absence early.
+  Comment admission still owns identity, request and reply validation. Worker handoff
+  admission and publication read compact headers while retaining the original work/Run
+  binding and revalidating the current claim before reservation.
+  Native publications read compact headers and only their admitted input receipts.
+  Successive receipt changes use the root from the exact saved reservation, including recovery
+  from an older retained publication. Completion selects the latest handoff and addressed-reply
+  presence by Run from that same bounded index. Its explicit delta retains original input
+  receipts, appends at most one generated result or adds delivery to the selected handoff;
+  existing comment bodies and unrelated receipts remain immutable. Appends update affected
+  question summaries; an agent result does not implicitly resolve an ordinary user question.
+  Terminal reconciliation selects that bound handoff before reading final output and refreshes
+  the current header before admission, preserving the original primary and archive policy.
+  Receipt changes preserve the original comment, sequence and delivery operation, replacing
+  only affected immutable leaves and shared ancestor paths. Repeated historical IDs select
+  every matching leaf; question summaries and unrelated evidence references remain intact.
+  Active native reconciliation reads current and original headers plus queued receipt IDs
+  from that same bounded, exact-root index. Receipt updates maintain their sequence order
+  and repeated IDs; an incomplete projection still reads all bounded ranges before deciding.
+  Native call guards and request preparation use the same primary Task-header reader;
+  prompts obtain question presence from the bound conversation summary. Legacy records
+  keep their full reader and original prompt semantics when that summary is unavailable.
+  Scheduler input selection preserves receipt order and checks actual comment eligibility;
+  routing selects open questions and uses the same exact-root identity index for relay deduplication.
+  An unavailable question recipient does not prevent independent sender scheduling or other
+  relays in the bounded batch. The question remains open; a bounded routing diagnostic retains
+  its source, question and recipient identities without restoring or starting the recipient.
+  Contact delivery selects its original comment from its retained publication, including
+  comments without execution receipts. Selected records never replace a Task's full conversation.
+  Native-context recovery filters actual open-question records by their original Run;
+  a compact question count cannot authorize replacing or restoring a saved context.
+  Native input mirroring uses compact headers and the same bounded exact-root index
+  to select all native questions for its Run, including closed historical questions.
+  Fresh claim/route checks and exact original input records still govern responses.
   Public `read` defaults to the latest 50 comments, newest first. `comments.limit` selects
   1–100 entries; passing `commentPage.nextBefore` as `comments.before` loads older entries
   without shifting the page when comments arrive. A null cursor ends the history.
   `comments.questionsOnly` pages unresolved questions; explicit offset reads remain ascending.
+  Full summary construction and fallback question pages retain the resolver's exact ordered
+  question records and sequences; a repeated historical ID does not reopen a closed record.
+  Reusing a question from the selected page requires both its original ID and sequence.
+  Structured responses update every affected open question, including historical reuse
+  of a request ID; first and last request positions bound the candidate question range.
   Cards use a compact header summary and do not hydrate history or calculate unread totals.
   The UI loads older comments on scroll, preserves the visible position, and keeps unresolved
   user questions available outside the loaded page. It neither displays nor writes unread state.
@@ -82,7 +165,8 @@ Ordinary comments, delivery receipts, unexported files and live Run source pins 
   own retention policies.
 - Exact evidence references are deduplicated across attachments, Results and Runs. If a ticket
   exceeds one Hive revision's reference budget, ticket-owned reference pages preserve every
-  exact pin. Historical ticket revisions retain their exact page revisions; storage limits
+  exact pin. New reference pages use immutable content identities, including before the first
+  ticket publication. Historical ticket revisions retain their exact page revisions; storage limits
   must not block publication of an already admitted native completion.
 - Permanent deletion removes the Task, its comments child, attachments, all Hive revisions, and task-linked
   Run, Result, Review, History, Delivery and comment-read records. It is refused while a claim
@@ -95,7 +179,22 @@ Ordinary comments, delivery receipts, unexported files and live Run source pins 
   attachments before archiving. Restoring a ticket does not restore deleted working outputs.
   Restoration tries the current native task first; confirmed failure creates a new native task
   while retaining the ticket's workflow state. Pending or unknown native outcomes never create
-  replacements. Shared archive controls and MCP use the TaskBoard lifecycle action.
+  replacements. Lifecycle dispatch, archival history, membership and context changes read
+  compact headers with their original archive policy. Context and route publications preserve
+  the immutable conversation and evidence pins; archived route edits retain their archive CAS.
+  Shared archive controls and MCP use the TaskBoard lifecycle action.
+  Direct-turn discovery, parent validation, workspace peers and read markers use compact
+  headers. A cached discovery checks the bound queued-input projection only when needed;
+  canonical source questions are selected from that same immutable root. Manual results,
+  reviews, cancellations and reassignment preserve the conversation through explicit
+  header changes or generated-notice appends.
+  Start, continuation and deferral publish header changes. Comment-triggered admission
+  checks only selected original entries and queued receipts; wake checks reuse the
+  bounded exact-root input projection. A worker deferral appends its completion intent
+  without applying that intent before native completion or closing ordinary questions.
+    Question recipient corrections change only selected original entries and their tree paths.
+    The exact-root reply index updates open questions and direct counts, including earlier
+    replies and repeated historical IDs, while retaining original text, order and receipts.
   Done cards offer Archive task; the Done column offers Archive all tasks for the complete
   filtered column, including cancelled tickets and tasks beyond the current page.
 - Explicit `newThread` work creates a new Codex task and queues the existing ticket in Todo.

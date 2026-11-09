@@ -136,7 +136,7 @@ impl<S: ExecutionStore, C: Fn() -> String> ExecutionPublication<Json> for Publis
             principal_id: self.principal,
             now: &self.operations.now,
         };
-        let id = s(&operation.pin, "objectId").clone();
+        let id = s(&operation.pin.to_json(), "objectId").clone();
         let written = |_: Json, value: Json| -> Pin<Box<dyn Future<Output = IvyResult<()>> + '_>> {
             let gates = &gates;
             let id = &id;
@@ -303,7 +303,7 @@ async fn actual_gates_and_cached_execution_reopen_lost_final_callback_without_ne
                 ("source", "user".into()),
             ]);
             let operation = operations.begin(&request, &actor).await.unwrap();
-            operation_id = Some(s(&operation.pin, "objectId").clone());
+            operation_id = Some(s(&operation.pin.to_json(), "objectId").clone());
             let gates = PublicationCoordination {
                 store: &operations.store,
                 principal_id: &principal,
@@ -314,18 +314,18 @@ async fn actual_gates_and_cached_execution_reopen_lost_final_callback_without_ne
             assert_eq!(
                 operations
                     .store
-                    .operation_gates(s(&operation.pin, "objectId"))
+                    .operation_gates(s(&operation.pin.to_json(), "objectId"))
                     .unwrap()
                     .len(),
                 1
             );
             assert_eq!(
                 f(&gates.pending().unwrap().unwrap(), "objectId"),
-                f(&operation.pin, "objectId")
+                f(&operation.pin.to_json(), "objectId")
             );
             assert!(
                 gates
-                    .release_unstarted(s(&operation.pin, "objectId"))
+                    .release_unstarted(s(&operation.pin.to_json(), "objectId"))
                     .await
                     .unwrap()
             );
@@ -339,7 +339,7 @@ async fn actual_gates_and_cached_execution_reopen_lost_final_callback_without_ne
                 &"host".into(),
                 &"/fixture/task".into(),
                 s(&task_pin, "objectId"),
-                s(&operation.pin, "objectId"),
+                s(&operation.pin.to_json(), "objectId"),
             )
             .unwrap();
             operation
@@ -382,7 +382,7 @@ async fn actual_gates_and_cached_execution_reopen_lost_final_callback_without_ne
             .await
             .unwrap();
         assert_eq!(f(&current.value, "publication"), &Json::Null);
-        assert_eq!(f(&current.pin, "revision"), &Json::Number(3.0));
+        assert_eq!(f(&current.pin.to_json(), "revision"), &Json::Number(3.0));
         assert_eq!(count(&c, "active_gates"), 0);
         let stages = f(&saved.value, "writes")
             .as_array()
@@ -406,7 +406,7 @@ async fn actual_gates_and_cached_execution_reopen_lost_final_callback_without_ne
             prepared = stages;
         } else {
             let result = result.unwrap();
-            assert_eq!(f(&result, "task"), &current.pin);
+            assert_eq!(f(&result, "task"), &current.pin.to_json());
             assert_eq!(f(&saved.value, "phase"), &Json::from("succeeded"));
             assert_eq!(count(&c, "documents"), documents);
             assert_eq!(count(&c, "revisions"), revisions + 1);

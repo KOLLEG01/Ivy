@@ -129,6 +129,7 @@ async fn actual_journal_reopen_preserves_marker_identity_count_and_timestamp() {
         .required("task")
         .unwrap()
         .clone();
+    let task = ivy_sdk::upgrade_task_record(&task_fragment(&task)).unwrap();
     let client = Arc::new(Client);
     let principal = JsString::from("board");
     let node = JsString::from("task-node");

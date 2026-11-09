@@ -193,8 +193,11 @@ impl<S: Store, C: Fn() -> String, I: InspectionStore> ReconcileEngine for Engine
                     &value,
                     &mutation(id, "fixture-gate-release")?,
                     &Json::object([
-                        ("objectId", gate.pin.required("objectId")?.clone()),
-                        ("expectedRevision", gate.pin.required("revision")?.clone()),
+                        ("objectId", gate.pin.to_json().required("objectId")?.clone()),
+                        (
+                            "expectedRevision",
+                            gate.pin.to_json().required("revision")?.clone(),
+                        ),
                     ]),
                 )
                 .await?;
@@ -288,7 +291,7 @@ async fn actual_journal_gates_terminal_refusal_cleanup_reopen_and_owner_fences()
                 let value = Json::object([
                     ("schemaVersion", Json::Number(1.0)),
                     ("principalId", "caller".into()),
-                    ("activeOperation", operation.pin.clone()),
+                    ("activeOperation", operation.pin.to_json()),
                     ("updatedAt", clock().into()),
                 ]);
                 operations
@@ -318,8 +321,8 @@ async fn actual_journal_gates_terminal_refusal_cleanup_reopen_and_owner_fences()
                     .unwrap()
                     .unwrap();
                 gates.insert(
-                    s(&operation.pin, "objectId").clone(),
-                    s(&written.pin, "objectId").clone(),
+                    s(&operation.pin.to_json(), "objectId").clone(),
+                    s(&written.pin.to_json(), "objectId").clone(),
                 );
                 originals.push(operation);
             }
@@ -328,7 +331,7 @@ async fn actual_journal_gates_terminal_refusal_cleanup_reopen_and_owner_fences()
             operations: &operations,
             inspection: &inspection,
             gates: &gates,
-            first: s(&originals[0].pin, "objectId"),
+            first: &originals[0].pin.object_id,
             ready: &ready,
             seen: RefCell::default(),
             service: "task-board-node".into(),
@@ -354,7 +357,7 @@ async fn actual_journal_gates_terminal_refusal_cleanup_reopen_and_owner_fences()
                 engine
                     .seen
                     .borrow()
-                    .contains(s(&originals[1].pin, "objectId"))
+                    .contains(s(&originals[1].pin.to_json(), "objectId"))
             );
             assert_eq!(
                 operations
@@ -398,14 +401,14 @@ async fn actual_journal_gates_terminal_refusal_cleanup_reopen_and_owner_fences()
         }
         for original in &originals {
             let retained = store
-                .read("task-board/operation", &original.pin, true)
+                .read("task-board/operation", &original.pin.to_json(), true)
                 .await
                 .unwrap();
             assert_eq!(f(&retained.value, "phase"), &Json::from("accepted"));
             let latest = store
                 .read(
                     "task-board/operation",
-                    original.pin.required("objectId").unwrap(),
+                    original.pin.to_json().required("objectId").unwrap(),
                     true,
                 )
                 .await
@@ -419,4 +422,18 @@ async fn actual_journal_gates_terminal_refusal_cleanup_reopen_and_owner_fences()
         ["system.status", "serviceNodes.get"]
             .contains(&c.as_array().unwrap()[0].as_str().unwrap().as_str())
     }));
+}
+
+impl ivy_sdk::rpc::OptionalRpcClient for Client {
+    fn request_optional<'a>(
+        &'a self,
+        method: &'a str,
+        params: Option<Json>,
+        options: RequestOptions,
+    ) -> RequestFuture<'a> {
+        match params {
+            Some(params) => self.request(method, params, options),
+            None => Box::pin(async { Err(IvyError::internal()) }),
+        }
+    }
 }

@@ -243,7 +243,15 @@ impl<S: Store + ReadEvidenceStore> Store for Trace<'_, S> {
     async fn prepared_mutation_id(&self, _: &str) -> IvyResult<JsString> {
         panic!("Unexpected mutation lookup")
     }
-    async fn write_prepared(&self, _: &str, _: &Json, _: &JsString, _: &Json) -> IvyResult<Json> {
+    async fn write_prepared(
+        &self,
+        _: &str,
+        _: &Json,
+        _: &JsString,
+        _: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
+    ) -> IvyResult<Json> {
         panic!("Unexpected prepared write")
     }
 }
@@ -566,7 +574,14 @@ async fn durable_preparation_matches_original_replays_races_guards_and_uncertain
                             .journal
                             .read("task-board/task", &Json::String(id(100)), true)
                             .unwrap();
-                        let rev = r.pin.required("revision").unwrap().as_f64().unwrap() + 1.0;
+                        let rev = r
+                            .pin
+                            .to_json()
+                            .required("revision")
+                            .unwrap()
+                            .as_f64()
+                            .unwrap()
+                            + 1.0;
                         let mut v = r.value;
                         let mut cs = v.required("calls").unwrap().clone();
                         cs.insert("thread", pin(300, 1.0));
@@ -579,7 +594,13 @@ async fn durable_preparation_matches_original_replays_races_guards_and_uncertain
                             &allowed,
                             "task-board/task",
                             100,
-                            t.pin.required("revision").unwrap().as_f64().unwrap() + 1.0,
+                            t.pin
+                                .to_json()
+                                .required("revision")
+                                .unwrap()
+                                .as_f64()
+                                .unwrap()
+                                + 1.0,
                             &v,
                         );
                         event(&state.log, ["attach".into()]);
@@ -952,35 +973,85 @@ async fn durable_preparation_matches_original_owner_across_published_routes() {
             .await
             .unwrap();
         if let Some(version) = upgrade {
-            let replacement = catalogs.checked_native_contract(&version.into(), None).unwrap();
+            let replacement = catalogs
+                .checked_native_contract(&version.into(), None)
+                .unwrap();
             let previous_pin = routed_pin.clone();
-            let previous = Store::read(&store, "task-board/native-call", &previous_pin, true).await.unwrap();
+            let previous = Store::read(&store, "task-board/native-call", &previous_pin, true)
+                .await
+                .unwrap();
             let previous_hash = hash_json(&previous.value).unwrap();
             let selection = Json::object([
                 ("nativeVersion", version.into()),
-                ("catalogSourceHash", replacement.catalog().required("sourceHash").unwrap().clone()),
+                (
+                    "catalogSourceHash",
+                    replacement
+                        .catalog()
+                        .required("sourceHash")
+                        .unwrap()
+                        .clone(),
+                ),
             ]);
             let mut route = task.required("nativeRoutes").unwrap().as_array().unwrap()[0].clone();
             route.insert("catalog", selection.clone());
             task.insert("nativeRoutes", Json::Array(vec![route.clone()]));
             seed(&store.journal, &allowed, "task-board/task", 100, 4.0, &task);
-            routed_pin = driver.prepare(&id(200), NativeSlot::Thread, Some(&origin)).await.unwrap();
-            assert_ne!(previous_pin, routed_pin, "A new catalog at the same address cannot reuse a prepared old call");
-            assert_eq!(hash_json(&Store::read(&store, "task-board/native-call", &previous_pin, true).await.unwrap().value).unwrap(), previous_hash);
-            let prepared = Store::read(&store, "task-board/native-call", &routed_pin, true).await.unwrap();
+            routed_pin = driver
+                .prepare(&id(200), NativeSlot::Thread, Some(&origin))
+                .await
+                .unwrap();
+            assert_ne!(
+                previous_pin, routed_pin,
+                "A new catalog at the same address cannot reuse a prepared old call"
+            );
+            assert_eq!(
+                hash_json(
+                    &Store::read(&store, "task-board/native-call", &previous_pin, true)
+                        .await
+                        .unwrap()
+                        .value
+                )
+                .unwrap(),
+                previous_hash
+            );
+            let prepared = Store::read(&store, "task-board/native-call", &routed_pin, true)
+                .await
+                .unwrap();
             for key in ["nativeVersion", "catalogSourceHash"] {
-                assert_eq!(prepared.value.required("request").unwrap().get(key), selection.get(key));
+                assert_eq!(
+                    prepared.value.required("request").unwrap().get(key),
+                    selection.get(key)
+                );
             }
-            assert_eq!(prepared.value.required("owner").unwrap().get("nativeExecutableHash"), replacement.catalog().get("nativeExecutableHash"));
+            assert_eq!(
+                prepared
+                    .value
+                    .required("owner")
+                    .unwrap()
+                    .get("nativeExecutableHash"),
+                replacement.catalog().get("nativeExecutableHash")
+            );
             let mut invalid = selection;
-            invalid.insert("catalogSourceHash", format!("sha256:{}", "e".repeat(64)).into());
+            invalid.insert(
+                "catalogSourceHash",
+                format!("sha256:{}", "e".repeat(64)).into(),
+            );
             route.insert("catalog", invalid);
             let mut bad = task.clone();
             bad.insert("nativeRoutes", Json::Array(vec![route]));
             seed(&store.journal, &allowed, "task-board/task", 100, 5.0, &bad);
             let before = db.total_changes();
-            assert!(driver.prepare(&id(200), NativeSlot::Thread, Some(&origin)).await.is_err());
-            assert_eq!(db.total_changes(), before, "Unknown catalog cannot create a new call");
+            assert!(
+                driver
+                    .prepare(&id(200), NativeSlot::Thread, Some(&origin))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                db.total_changes(),
+                before,
+                "Unknown catalog cannot create a new call"
+            );
             seed(&store.journal, &allowed, "task-board/task", 100, 6.0, &task);
         }
         assert_ne!(

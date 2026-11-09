@@ -108,7 +108,7 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
             self.forget(run_id);
             return Ok(None);
         }
-        let context = self.inspector.context(&run.pin).await?;
+        let context = self.inspector.context(&run.pin.to_json()).await?;
         let original_owner = field(run.value.required("target")?, "serviceNodeId").as_js_string()
             == Some(&context.service_node_id)
             && BackendIdentity::matches(run.value.required("target")?, context.backend.as_ref());
@@ -124,9 +124,9 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
             .named_document("task-board/native-signals", &name, run_id)
             .await?;
         require(
-            saved
-                .as_ref()
-                .is_none_or(|saved| checkpoint_matches(saved, run_id, &run.pin, &context)),
+            saved.as_ref().is_none_or(|saved| {
+                checkpoint_matches(saved, run_id, &run.pin.to_json(), &context)
+            }),
             "task_board_identity_conflict",
             "A native signals checkpoint must retain its original Run, owner and native context.",
         )?;
@@ -290,13 +290,13 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
             "A pending notification page must advance its cursor.",
         )?;
         require(
-            self.inspector.context(&run.pin).await? == context,
+            self.inspector.context(&run.pin.to_json()).await? == context,
             "task_board_native_epoch_changed",
             "The selected owner changed before saving native signals.",
         )?;
         let mut material = Json::object([
             ("schemaVersion", Json::Number(1.0)),
-            ("run", run.pin.clone()),
+            ("run", run.pin.to_json()),
             (
                 "serviceNodeId",
                 Json::String(context.service_node_id.clone()),
@@ -352,7 +352,7 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
             }
             if hash_json(&previous)? == hash_json(&comparable)? {
                 self.advance(run_id, &scope, through);
-                return Ok(Some(saved.pin.clone()));
+                return Ok(Some(saved.pin.to_json()));
             }
         }
         store.verify_owner().await?;
@@ -365,7 +365,7 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
                     "previous",
                     saved
                         .as_ref()
-                        .map(|saved| saved.pin.clone())
+                        .map(|saved| saved.pin.to_json())
                         .unwrap_or(Json::Null)
                 ),
                 ("material", material)
@@ -373,8 +373,8 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
         );
         let destination = if let Some(saved) = &saved {
             Json::object([
-                ("objectId", saved.pin.required("objectId")?.clone()),
-                ("expectedRevision", saved.pin.required("revision")?.clone()),
+                ("objectId", Json::String(saved.pin.object_id.clone())),
+                ("expectedRevision", Json::Number(saved.pin.revision)),
             ])
         } else {
             Json::object([(
@@ -408,11 +408,11 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
                 {
                     Some(winner) => {
                         require(
-                            checkpoint_matches(&winner, run_id, &run.pin, &context),
+                            checkpoint_matches(&winner, run_id, &run.pin.to_json(), &context),
                             "task_board_identity_conflict",
                             "A competing native signals checkpoint must retain its original Run, owner and native context.",
                         )?;
-                        Ok(Some(winner.pin))
+                        Ok(Some(winner.pin.to_json()))
                     }
                     None => Err(failure),
                 }

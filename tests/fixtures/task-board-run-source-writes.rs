@@ -123,7 +123,7 @@ impl ObjectReads<WriteFailure<()>> for NoReads {
 impl TreeReads<WriteFailure<()>> for NoReads {
     async fn hydrate(
         &self,
-        _: &Value,
+        _: Value,
         _: &Value,
     ) -> std::result::Result<Option<Value>, WriteFailure<()>> {
         unreachable!()
@@ -220,6 +220,8 @@ async fn publish(
                 value,
                 &"original-mutation".into(),
                 destination,
+                None,
+                None,
             )
             .await;
     }
@@ -262,6 +264,7 @@ async fn publish(
         destination,
         true,
         &text("3.1.0"),
+        None,
     )
     .await
     .map_err(|e| typed_write_cause(&e).unwrap().clone())

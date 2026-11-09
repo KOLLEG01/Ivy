@@ -9,7 +9,7 @@ use crate::{
     native_intent::{NativeSlot, TaskPrompts},
     native_lifecycle::LifecycleStore,
     native_progress::NativeProgress,
-    native_state::{finished_run, project_native_state},
+    native_state::{OutcomeState, RunPhase, finished_run, project_native_state},
     native_turn_evidence::{TurnEvidence, TurnEvidenceStore},
     operations::{Document, Store, mutation},
     turn_output::{final_output_text, output_params, page_cursor},
@@ -17,7 +17,7 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
-    checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical,
+    checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical_equal,
     limits::MANAGEMENT_FRAME_BYTES, native_backend::BackendIdentity,
 };
 use ivy_sdk::native_observations::NativeObservations;
@@ -236,7 +236,7 @@ fn array(v: &Json) -> &[Json] {
     v.as_array().unwrap_or(&[])
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)
 }
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
@@ -336,6 +336,10 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             retries.push((run.clone(), after));
         }
     }
+}
+impl<S: LifecycleStore, E: OrchestrationEngine, V: OrchestrationServices>
+    NativeOrchestrator<'_, S, E, V>
+{
     pub async fn drain(&self, run: &JsString) -> IvyResult<bool> {
         if self
             .retries
@@ -373,8 +377,9 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             }
             let waiting = if equal(value, "phase", "starting") {
                 self.store
-                    .read("task-board/task", value.required("taskId")?, true)
+                    .task_header(value.required("taskId")?, true, false)
                     .await?
+                    .document
                     .value
                     .get("runtimeWait")
                     .cloned()
@@ -396,7 +401,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
                 .any(|v| equal(value, "phase", v))
                 && !self.unresolved(&after, NativeSlot::Steer).await?
                 && !self.unresolved(&after, NativeSlot::Thread).await?
-                || same(&before.pin, &after.pin)?
+                || before.pin == after.pin
             {
                 break;
             }
@@ -444,7 +449,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
         Ok(())
     }
     async fn final_output(&self, run: &Document, snapshot: &Json) -> IvyResult<Option<Json>> {
-        let context = self.services.context(&run.pin).await?;
+        let context = self.services.context(&run.pin.to_json()).await?;
         let mut visited = HashSet::new();
         let mut cursor: Option<JsString> = None;
         for _ in 0..3 {
@@ -489,7 +494,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             {
                 return Ok(Some(
                     self.services
-                        .save_output(&run.pin, snapshot, cursor.as_ref(), &observed)
+                        .save_output(&run.pin.to_json(), snapshot, cursor.as_ref(), &observed)
                         .await?,
                 ));
             }
@@ -502,23 +507,23 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
     }
     async fn update(&self, run: &Document, task: &Document, change: Json) -> IvyResult<()> {
         let operation = mutation(
-            s(&run.pin, "objectId")?,
+            &run.pin.object_id,
             &format!(
                 "reconcile:{}",
-                hash_json(&Json::object([
-                    ("run", run.pin.clone()),
-                    ("task", task.pin.clone()),
-                    ("change", change.clone())
-                ]))?
+                ivy_contracts::hash::hash_object([
+                    (&"run".into(), &run.pin.to_json()),
+                    (&"task".into(), &task.pin.to_json()),
+                    (&"change".into(), &change)
+                ])?
             ),
         )?;
         self.engine
             .native_update(&Json::object([
                 ("action", "nativeUpdate".into()),
                 ("operationId", operation.into()),
-                ("taskId", task.pin.required("objectId")?.clone()),
-                ("expectedRevision", task.pin.required("revision")?.clone()),
-                ("run", run.pin.clone()),
+                ("taskId", Json::String(task.pin.object_id.clone())),
+                ("expectedRevision", Json::Number(task.pin.revision)),
+                ("run", run.pin.to_json()),
                 ("change", change),
             ]))
             .await?;
@@ -538,7 +543,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
                 .as_f64()
                 .ok_or_else(IvyError::internal)
         };
-        Ok(revision(&latest.pin)? > revision(pin)?
+        Ok(latest.pin.revision > revision(pin)?
             || !["succeeded", "failed"]
                 .iter()
                 .any(|v| equal(&latest.value, "ownerPhase", v)))
@@ -566,8 +571,9 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
         }
         let task = self
             .store
-            .read("task-board/task", run.value.required("taskId")?, true)
-            .await?;
+            .task_header(run.value.required("taskId")?, true, false)
+            .await?
+            .document;
         let selected =
             crate::native_plan::routed_target(&task.value, run.value.required("target")?)?;
         let backend = BackendIdentity::optional(selected.get("backend"))?;
@@ -587,7 +593,11 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             == Some(run_id);
         require(
             field(&task.value, "publication").is_null()
-                && (!active || same(field(field(&task.value, "claim"), "run"), &run.pin)?),
+                && (!active
+                    || same(
+                        field(field(&task.value, "claim"), "run"),
+                        &run.pin.to_json(),
+                    )?),
             "revision_conflict",
             "Reconciliation requires current Task/Run publication state.",
         )?;
@@ -710,7 +720,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
                                 NativeSlot::Thread,
                                 Some(&Json::object([
                                     ("kind", "reattach".into()),
-                                    ("predecessor", predecessor.pin),
+                                    ("predecessor", predecessor.pin.to_json()),
                                     ("preparedEpoch", status.required("epoch")?.clone()),
                                 ])),
                             )
@@ -761,7 +771,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             }
             return Ok(());
         }
-        let (metadata, turns) = match self.services.find(&run.pin).await? {
+        let (metadata, turns) = match self.services.find(&run.pin.to_json()).await? {
             Inspection::Pending { .. } => return Ok(()),
             Inspection::Found { metadata, turns } => (metadata, turns),
             Inspection::Absent => {
@@ -819,7 +829,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
                     .map(|call| {
                         Json::object([
                             ("kind", "reattach".into()),
-                            ("predecessor", call.pin),
+                            ("predecessor", call.pin.to_json()),
                             ("preparedEpoch", field(&turns, "epoch").clone()),
                         ])
                     })
@@ -862,7 +872,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
                 .as_deref()
                 == Some("task-board/native-turn-snapshot")
         {
-            match self.services.snapshot(&run.pin, prior).await {
+            match self.services.snapshot(&run.pin.to_json(), prior).await {
                 Ok(saved) => {
                     if saved.get("status").and_then(Json::as_js_string) == Some(&status)
                         && saved.get("epoch") == turns.get("epoch")
@@ -893,8 +903,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
                 };
                 let initial = self
                     .store
-                    .read(
-                        "task-board/task",
+                    .task_header(
                         &Json::object([
                             ("objectId", value.required("taskId")?.clone()),
                             (
@@ -906,16 +915,17 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
                             ),
                         ]),
                         true,
+                        false,
                     )
-                    .await?;
+                    .await?
+                    .document;
                 let original_comments = array(field(field(value, "originalRequest"), "commentIds"));
-                let comments: Vec<Json> = array(field(&task.value, "commentDeliveries"))
-                    .iter()
-                    .filter(|v| {
-                        equal(v, "state", "queued")
-                            && !original_comments.contains(field(v, "commentId"))
-                    })
-                    .map(|v| field(v, "commentId").clone())
+                let comments: Vec<Json> = self
+                    .store
+                    .queued_comment_ids(&task.value, &task.pin.object_id)
+                    .await?
+                    .into_iter()
+                    .filter(|id| !original_comments.contains(id))
                     .collect();
                 let baseline = if equal(&previous, "kind", "steer") {
                     previous
@@ -965,32 +975,16 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
                     return Ok(());
                 }
             }
-            let evidence = if prior.as_object().is_some() {
-                prior.clone()
-            } else {
-                Json::object([
-                    ("object", run.pin.clone()),
-                    ("label", "Current Run".into()),
-                    ("contentHash", run.content_hash.clone().into()),
-                    ("mediaType", "application/json".into()),
-                ])
-            };
-            let projected = project_native_state(
-                value,
-                &status,
-                field(&turns, "epoch"),
-                thread,
-                s(&turns, "observedAt")?,
-                &evidence,
-            )?;
+            let observed_at = s(&turns, "observedAt")?;
+            let projected = project_native_state(value, &status, field(&turns, "epoch"), thread)?;
             self.progress.observe(
                 id,
                 s(value, "taskId")?,
-                equal(&projected, "phase", "running") && field(value, "cancellation").is_null(),
-                hash_json(&Json::object([
-                    ("turn", turn.clone()),
-                    ("status", field(thread, "status").clone()),
-                ]))?
+                projected.phase == RunPhase::Running && field(value, "cancellation").is_null(),
+                ivy_contracts::hash::hash_object([
+                    (&"turn".into(), turn),
+                    (&"status".into(), field(thread, "status")),
+                ])?
                 .into(),
                 self.engine.now_millis(),
             );
@@ -999,21 +993,18 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             } else {
                 &Json::Null
             };
-            let projected_waiting = projected.required("waiting")?;
-            let workflow_state = if equal(&projected, "phase", "waiting_input") {
+            let projected_waiting = projected.waiting_json(observed_at);
+            let workflow_state = if projected.phase == RunPhase::WaitingInput {
                 "waiting".into()
             } else {
-                self.engine.claimed_workflow_state(projected_waiting)?
+                self.engine.claimed_workflow_state(&projected_waiting)?
             };
-            if (!equal(field(&projected, "externalOutcome"), "state", "active") || same_epoch)
-                && projected.get("phase") == value.get("phase")
-                && field(&projected, "externalOutcome").get("state")
-                    == field(value, "externalOutcome").get("state")
-                && field(&projected, "externalOutcome").get("code")
-                    == field(value, "externalOutcome").get("code")
+            if (projected.outcome.state != OutcomeState::Active || same_epoch)
+                && Some(projected.phase) == RunPhase::read(value.get("phase"))
+                && projected.outcome.matches(field(value, "externalOutcome"))
                 && (!active
-                    || field(projected_waiting, "reason") == field(waiting, "reason")
-                        && field(projected_waiting, "detail") == field(waiting, "detail")
+                    || field(&projected_waiting, "reason") == field(waiting, "reason")
+                        && field(&projected_waiting, "detail") == field(waiting, "detail")
                         && task.value.get("workflowState").and_then(Json::as_js_string)
                             == Some(&workflow_state))
             {
@@ -1023,7 +1014,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
         let Some(snapshot) = snapshot else {
             let snapshot = self
                 .services
-                .save_snapshot(&run.pin, &metadata, &turns)
+                .save_snapshot(&run.pin.to_json(), &metadata, &turns)
                 .await?;
             return self
                 .update(
@@ -1045,16 +1036,24 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
         }
         let current_task = self
             .store
-            .read("task-board/task", task.pin.required("objectId")?, true)
+            .read_task_header(&Json::String(task.pin.object_id.clone()), true)
             .await?;
-        let output = if self.engine.run_handoff(&current_task.value, id)? {
+        let comments = self
+            .store
+            .read_completion_comments(&current_task.value, &task.pin.object_id, id, &[])
+            .await?;
+        let handoff = Json::object([(
+            "comments",
+            Json::Array(comments.handoff.into_iter().collect()),
+        )]);
+        let output = if self.engine.run_handoff(&handoff, id)? {
             None
         } else {
             self.final_output(run, &snapshot).await?
         };
         let fresh = self
             .store
-            .read("task-board/task", task.pin.required("objectId")?, true)
+            .read_task_header(&Json::String(task.pin.object_id.clone()), true)
             .await?;
         self.update(
             run,

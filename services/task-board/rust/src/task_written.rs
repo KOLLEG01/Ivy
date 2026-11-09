@@ -135,11 +135,7 @@ impl<P: TaskWriteProjection, G: TaskWriteGates, N: TaskNoticePolicy>
             ]);
             publish_browser_notice(self.client.clone(), &"task-board".into(), &notice).await?;
         }
-        let operation_id = operation
-            .pin
-            .required("objectId")?
-            .as_js_string()
-            .ok_or_else(IvyError::internal)?;
+        let operation_id = &operation.pin.object_id;
         if task
             .get("publication")
             .and_then(|p| p.get("objectId"))

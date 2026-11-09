@@ -57,7 +57,7 @@ export { default as RevisionDiff } from "./patterns/RevisionDiff.vue";
 export { default as CommentCard } from "./patterns/CommentCard.vue";
 export { default as ExpandableContent } from "./patterns/ExpandableContent.vue";
 export { default as ChangeHistory } from "./patterns/ChangeHistory.vue";
-export type { ChangeEntry, FieldChange } from "./patterns/ChangeHistory.vue";
+export type { ChangeEntry, FieldChange } from "./lib/change-history";
 export { useRemote, remoteUpdatesKey } from "./composables/remote";
 export type { RemoteUpdates, RemoteSource } from "./composables/remote";
 export { usePagePosition } from "./composables/page-position";

@@ -340,7 +340,7 @@ pub fn history(
         ("detail", Json::String(detail.clone())),
         (
             "previousTask",
-            previous.map(|d| d.pin.clone()).unwrap_or(Json::Null),
+            previous.map(|d| d.pin.to_json()).unwrap_or(Json::Null),
         ),
         (
             "previousHistory",
@@ -362,9 +362,7 @@ pub fn history(
 }
 async fn parent<S: LifecycleStore>(store: &S, id: &JsString) -> IvyResult<()> {
     validate_parent(id.clone(), None, |id| async move {
-        let document = store
-            .lifecycle_read("task-board/task", &Json::String(id), true, false)
-            .await?;
+        let document = store.task_header(&Json::String(id), true, false).await?;
         Ok::<_, IvyError>(Parent {
             archived: f(&document.metadata, "effectivelyArchived").as_bool() == Some(true),
             agent_controlled: eq(f(&document.document.value, "fields"), "control", "agent"),
@@ -534,7 +532,7 @@ impl<S: RootPublicationStore, C: Fn() -> String, P: RootPublicationChecks, H>
             let task_key = self
                 .operations
                 .store
-                .allocate_task_key(s(&operation.pin, "objectId")?)
+                .allocate_task_key(&operation.pin.object_id)
                 .await?;
             let mut initial = Json::object([
                 ("schemaVersion", Json::Number(1.0)),

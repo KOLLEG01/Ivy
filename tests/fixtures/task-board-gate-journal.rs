@@ -112,23 +112,32 @@ fn request(id: &str, action: &str, task: &str, directory: &str) -> Json {
 }
 fn operation(value: Json, id: &str) -> Document {
     Document {
-        pin: Json::object([("objectId", id.into()), ("revision", Json::Number(1.0))]),
+        pin: ivy_task_board::operations::ObjectPin::from_json(Json::object([
+            ("objectId", id.into()),
+            ("revision", Json::Number(1.0)),
+        ]))
+        .unwrap(),
         value: Json::object([("request", value), ("createdAt", AT.into())]),
         parent_id: Some("root".into()),
         content_hash: String::new(),
     }
 }
 fn task(db: &Connection, id: &str) {
-    let value = Json::object([(
-        "fields",
-        Json::object([
-            ("category", Json::Null),
-            (
-                "workspaceRequirement",
-                Json::object([("kind", "directory_path".into())]),
-            ),
-        ]),
-    )]);
+    let value = Json::object([
+        (
+            "fields",
+            Json::object([
+                ("category", Json::Null),
+                (
+                    "workspaceRequirement",
+                    Json::object([("kind", "directory_path".into())]),
+                ),
+            ]),
+        ),
+        ("comments", Json::Array(vec![])),
+    ]);
+    ivy_sdk::upgrade_task_record(&value)
+        .expect("Gate fixture must be readable stored Task content");
     db.execute(
         "INSERT INTO documents VALUES(?,'task-board/task',?,'root',1,?,?)",
         params![id, id, AT, AT],
@@ -253,6 +262,7 @@ async fn gate_clear_failure_preserves_partial_progress_and_original_refusal_afte
                 .unwrap();
             id = begun
                 .pin
+                .to_json()
                 .required("objectId")
                 .unwrap()
                 .as_js_string()
@@ -304,9 +314,12 @@ async fn gate_clear_failure_preserves_partial_progress_and_original_refusal_afte
             assert_eq!(count(&db, "active_gates"), 1);
             let root = gates.current(&ROOT.into()).await.unwrap();
             let ticket = gates.current(&TASK.into()).await.unwrap();
-            assert_eq!(root.pin.get("revision"), Some(&Json::Number(3.0)));
+            assert_eq!(root.pin.to_json().get("revision"), Some(&Json::Number(3.0)));
             assert_eq!(root.value.get("activeOperation"), Some(&Json::Null));
-            assert_eq!(ticket.pin.get("revision"), Some(&Json::Number(2.0)));
+            assert_eq!(
+                ticket.pin.to_json().get("revision"),
+                Some(&Json::Number(2.0))
+            );
             assert_eq!(
                 ticket
                     .value

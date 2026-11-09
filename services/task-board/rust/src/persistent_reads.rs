@@ -7,6 +7,8 @@ use ivy_contracts::{
 use ivy_sdk::rpc::{RequestOptions, RpcClient};
 use ivy_store::rusqlite::Connection;
 
+#[path = "card_pages.rs"]
+mod card_pages;
 #[path = "comment_port.rs"]
 pub(crate) mod comment_port;
 #[path = "comment_projections.rs"]
@@ -64,6 +66,24 @@ pub async fn read_legacy_conversation(
 ) -> IvyResult<Option<Json>> {
     let task_id = Json::String(task_id.clone());
     legacy_reads::read_legacy_with(value, Some(&task_id), |params| async move {
+        client
+            .request(
+                "objects.read",
+                params.ok_or_else(IvyError::internal)?,
+                RequestOptions::default(),
+            )
+            .await
+    })
+    .await
+}
+
+pub async fn read_legacy_conversation_owned(
+    client: &dyn RpcClient,
+    value: Json,
+    task_id: &JsString,
+) -> IvyResult<Option<Json>> {
+    let task_id = Json::String(task_id.clone());
+    legacy_reads::read_legacy_owned_with(value, Some(&task_id), |params| async move {
         client
             .request(
                 "objects.read",

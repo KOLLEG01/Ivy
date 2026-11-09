@@ -318,10 +318,13 @@ impl NativeDriverRuntime for Engine<'_, '_> {
         let run = Store::read(self.store, "task-board/run", q.required("run")?, true).await?;
         let task = Store::read(self.store, "task-board/task", q.required("taskId")?, true).await?;
         assert_eq!(
-            task.pin.required("revision")?,
+            task.pin.to_json().required("revision")?,
             q.required("expectedRevision")?
         );
-        assert_eq!(task.value.required("claim")?.required("run")?, &run.pin);
+        assert_eq!(
+            task.value.required("claim")?.required("run")?,
+            &run.pin.to_json()
+        );
         let change = q.required("change")?;
         let evidence = TurnEvidence {
             store: self.store,
@@ -332,23 +335,27 @@ impl NativeDriverRuntime for Engine<'_, '_> {
         match s(change, "kind").to_utf8().unwrap().as_str() {
             "readSnapshot" => {
                 let snapshot = evidence
-                    .snapshot(&run.pin, change.required("snapshot")?)
+                    .snapshot(&run.pin.to_json(), change.required("snapshot")?)
                     .await?;
                 let projected = project_native_state(
                     &run.value,
                     s(&snapshot.document.value, "status"),
                     snapshot.document.value.required("epoch")?,
                     &snapshot.thread,
-                    &self.now(),
-                    change.required("snapshot")?,
                 )?;
-                for k in ["phase", "externalOutcome"] {
-                    value.insert(k, projected.required(k)?.clone());
+                let (phase, outcome, _) =
+                    projected.into_parts(&self.now(), change.required("snapshot")?);
+                for (key, projected) in [("phase", phase), ("externalOutcome", outcome)] {
+                    value.insert(key, projected);
                 }
             }
             "completion" => {
                 let completion = evidence
-                    .completion(&run.pin, change.required("snapshot")?, change.get("output"))
+                    .completion(
+                        &run.pin.to_json(),
+                        change.required("snapshot")?,
+                        change.get("output"),
+                    )
                     .await?;
                 assert_eq!(completion.status, JsString::from("completed"));
                 *self.summary.borrow_mut() = Some(completion.summary);
@@ -363,8 +370,8 @@ impl NativeDriverRuntime for Engine<'_, '_> {
             .validate_record("task-board/run", &"1.0.0".into(), &value)?;
         let next = self.store.journal.update(
             "task-board/run",
-            s(&run.pin, "objectId"),
-            n(&run.pin, "revision"),
+            s(&run.pin.to_json(), "objectId"),
+            n(&run.pin.to_json(), "revision"),
             &value,
             &self.now(),
         )?;
@@ -383,8 +390,8 @@ impl NativeDriverRuntime for Engine<'_, '_> {
             .validate_record("task-board/task", &"1.0.0".into(), &task_value)?;
         self.store.journal.update(
             "task-board/task",
-            s(&task.pin, "objectId"),
-            n(&task.pin, "revision"),
+            s(&task.pin.to_json(), "objectId"),
+            n(&task.pin.to_json(), "revision"),
             &task_value,
             &self.now(),
         )?;
@@ -617,8 +624,13 @@ async fn concrete_orchestration_persists_verified_terminal_evidence_reopens_and_
                     principal_id: &"caller".into(),
                 },
             };
-            let coordinator =
-                NativeOrchestrator::new(&store, &runtime, &services, &catalogs, progress_tracker());
+            let coordinator = NativeOrchestrator::new(
+                &lifecycle,
+                &runtime,
+                &services,
+                &catalogs,
+                progress_tracker(),
+            );
             if round == 0 {
                 coordinator.drain(&id(200)).await.unwrap();
                 assert_eq!(
@@ -640,7 +652,7 @@ async fn concrete_orchestration_persists_verified_terminal_evidence_reopens_and_
                     .await
                     .unwrap();
                 assert!(finished_run(&final_run.value));
-                assert_eq!(n(&final_run.pin, "revision"), 4.0);
+                assert_eq!(n(&final_run.pin.to_json(), "revision"), 4.0);
                 let methods = client.methods.lock().unwrap();
                 let calls: Vec<_> = methods
                     .iter()

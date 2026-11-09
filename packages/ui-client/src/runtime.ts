@@ -28,9 +28,9 @@ export function route(section: string, values: Record<string, string> = {}) {
   const query = new URLSearchParams(Object.entries(values).filter(([, value]) => value));
   return '#/' + section + (query.size ? '?' + query.toString() : '');
 }
-export function usePage<R extends { items: unknown[]; nextCursor: string | null }>(load: (signal: AbortSignal, cursor: string | undefined) => Promise<R>, intervalMs = 0, storageKey?: () => string, live?: RemoteSource) {
+export function usePage<R extends { items: unknown[]; nextCursor: string | null }>(load: (signal: AbortSignal, cursor: string | undefined) => Promise<R>, intervalMs = 0, storageKey?: () => string, live?: RemoteSource, enabled?: () => boolean) {
   const { cursors, page, remember } = usePagePosition(storageKey);
-  const remote = useRemote(signal => load(signal, cursors.value[page.value - 1]), intervalMs, live);
+  const remote = useRemote(signal => load(signal, cursors.value[page.value - 1]), intervalMs, live, enabled);
   const next = () => { if (remote.loading.value || !remote.value.value?.nextCursor) return; cursors.value[page.value] = remote.value.value.nextCursor; page.value++; remember(); void remote.refresh(); };
   const previous = () => { if (remote.loading.value || page.value <= 1) return; page.value--; remember(); void remote.refresh(); };
   const reset = () => { cursors.value = [undefined]; page.value = 1; remember(); void remote.refresh(); };

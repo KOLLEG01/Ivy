@@ -50,7 +50,7 @@ fn primary() -> Json {
 }
 fn doc(pin: Json, value: Json) -> Document {
     Document {
-        pin,
+        pin: ivy_task_board::operations::ObjectPin::from_json(pin).unwrap(),
         content_hash: hash_json(&value).unwrap(),
         value,
         parent_id: Some("root".into()),
@@ -216,6 +216,13 @@ struct World {
     cleanup: Cell<usize>,
     released: Cell<usize>,
     snapshot: RefCell<Json>,
+    compact: Cell<bool>,
+    header_reads: Cell<usize>,
+    queue_reads: Cell<usize>,
+    queue_failure: Cell<bool>,
+    queue_yield: Cell<bool>,
+    archived: Cell<bool>,
+    retained_buffers: RefCell<Option<Vec<(usize, usize)>>>,
 }
 impl World {
     fn new(task: Json, run: Json) -> Self {
@@ -237,6 +244,13 @@ impl World {
             workspace_observation: RefCell::new(None),
             cleanup: Cell::new(0),
             released: Cell::new(0),
+            compact: Cell::new(false),
+            header_reads: Cell::new(0),
+            queue_reads: Cell::new(0),
+            queue_failure: Cell::new(false),
+            queue_yield: Cell::new(false),
+            archived: Cell::new(false),
+            retained_buffers: RefCell::new(None),
             snapshot: RefCell::new(Json::object([
                 (
                     "document",
@@ -278,9 +292,9 @@ impl World {
             .rev()
             .find(|(k, d)| {
                 *k == key
-                    && f(&d.pin, "objectId") == &object_id
+                    && f(&d.pin.to_json(), "objectId") == &object_id
                     && (address.as_js_string().is_some()
-                        || f(&d.pin, "revision") == f(address, "revision"))
+                        || f(&d.pin.to_json(), "revision") == f(address, "revision"))
             })
             .map(|(_, d)| d.clone())
             .ok_or_else(|| IvyError::new("not_found", "Finite retained document unavailable."))
@@ -399,11 +413,86 @@ impl Store for World {
     async fn prepared_mutation_id(&self, _: &str) -> IvyResult<JsString> {
         panic!("Use retained steps")
     }
-    async fn write_prepared(&self, _: &str, _: &Json, _: &JsString, _: &Json) -> IvyResult<Json> {
+    async fn write_prepared(
+        &self,
+        _: &str,
+        _: &Json,
+        _: &JsString,
+        _: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
+    ) -> IvyResult<Json> {
         panic!("Use retained steps")
     }
 }
 impl LifecycleStore for World {
+    async fn task_header(
+        &self,
+        address: &Json,
+        primary_read: bool,
+        archived: bool,
+    ) -> IvyResult<LifecycleDocument> {
+        let mut document = self.lookup("task-board/task", address)?;
+        let current = self.lookup("task-board/task", f(&document.pin.to_json(), "objectId"))?;
+        let mut metadata = Json::object([(
+            "currentRevision",
+            f(&current.pin.to_json(), "revision").clone(),
+        )]);
+        if self.compact.get() {
+            assert!(primary_read && archived);
+            self.header_reads.set(self.header_reads.get() + 1);
+            metadata.insert("effectivelyArchived", self.archived.get().into());
+            document.value.insert("comments", Json::Array(vec![]));
+            document
+                .value
+                .insert("commentDeliveries", Json::Array(vec![]));
+            document.value.insert(
+                "commentStore",
+                Json::object([
+                    ("kind", "tree".into()),
+                    ("length", 4096.0.into()),
+                    (
+                        "root",
+                        Json::object([("object", pin(99)), ("length", 4096.0.into())]),
+                    ),
+                    (
+                        "summary",
+                        Json::object([
+                            ("directCount", 4096.0.into()),
+                            ("questions", Json::Array(vec![])),
+                        ]),
+                    ),
+                ]),
+            );
+        }
+        Ok(LifecycleDocument { document, metadata })
+    }
+    async fn queued_comment_ids(&self, task: &Json, id: &JsString) -> IvyResult<Vec<Json>> {
+        self.queue_reads.set(self.queue_reads.get() + 1);
+        if self.queue_yield.get() {
+            tokio::task::yield_now().await;
+        }
+        if self.queue_failure.get() {
+            return Err(IvyError::new(
+                "revision_pruned",
+                "Original conversation is unavailable.",
+            ));
+        }
+        let raw = if self.compact.get() {
+            self.lookup("task-board/task", &Json::String(id.clone()))?
+                .value
+        } else {
+            task.clone()
+        };
+        Ok(f(&raw, "commentDeliveries")
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| f(r, "state").is_str("queued"))
+            .map(|r| f(r, "commentId").clone())
+            .collect())
+    }
+
     async fn lifecycle_read(
         &self,
         key: &str,
@@ -411,10 +500,17 @@ impl LifecycleStore for World {
         _: bool,
         _: bool,
     ) -> IvyResult<LifecycleDocument> {
+        assert!(
+            key != "task-board/task" || !self.compact.get(),
+            "Compact adoption must not hydrate the Task."
+        );
         let d = self.lookup(key, address)?;
-        let current = self.lookup(key, f(&d.pin, "objectId"))?;
+        let current = self.lookup(key, f(&d.pin.to_json(), "objectId"))?;
         Ok(LifecycleDocument {
-            metadata: Json::object([("currentRevision", f(&current.pin, "revision").clone())]),
+            metadata: Json::object([(
+                "currentRevision",
+                f(&current.pin.to_json(), "revision").clone(),
+            )]),
             document: d,
         })
     }
@@ -566,9 +662,25 @@ impl LifecyclePublication for Steps<'_> {
         Ok(pin(3))
     }
     async fn write(&mut self, key: &str, value: &Json, destination: &Json) -> IvyResult<Json> {
+        if key == "task-board/task" {
+            if let Some(probes) = self.0.retained_buffers.borrow_mut().as_mut() {
+                let retained = |field| {
+                    f(value, field)
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|v| f(v, "commentId").is_str("retained-buffer"))
+                        .unwrap()
+                };
+                probes.push((
+                    s(retained("comments"), "body").0.as_ptr() as usize,
+                    s(retained("commentDeliveries"), "opaque").0.as_ptr() as usize,
+                ));
+            }
+        }
         let current = self.0.lookup(key, f(destination, "objectId"))?;
         assert_eq!(
-            f(&current.pin, "revision"),
+            f(&current.pin.to_json(), "revision"),
             f(destination, "expectedRevision")
         );
         let p = Json::object([
@@ -687,6 +799,280 @@ async fn only_successful_review_handoffs_make_final_results_and_root_notificatio
                     .get("nativeProjectId")
                     .is_none()
             );
+        }
+    }
+}
+
+#[tokio::test]
+async fn completion_keeps_owned_retained_buffers_and_raw_duplicate_slots() {
+    for mode in ["append", "handoff", "retry"] {
+        let mut task = base_task();
+        let mut retained = comment("retained-buffer", pin(2), "update");
+        retained.insert("sequence", 2.0.into());
+        retained.insert("body", Json::String(JsString(vec![0xd800; 16_384])));
+        let mut comments = vec![retained.clone(), comment("captured", pin(2), "update")];
+        if mode == "handoff" {
+            let mut first = handoff("todo");
+            first.insert("body", "older intent".into());
+            let mut latest = handoff("todo");
+            latest.insert("sequence", 3.0.into());
+            latest.insert("body", "latest intent".into());
+            comments.extend([first, latest]);
+        }
+        task.insert("agentCommentCount", (comments.len() as f64).into());
+        task.insert("comments", Json::Array(comments));
+        let receipt = Json::object([
+            ("commentId", "retained-buffer".into()),
+            ("state", "delivered".into()),
+            ("code", Json::Null),
+            ("opaque", Json::String(JsString(vec![0xdfff; 16_384]))),
+        ]);
+        let captured = Json::Object(vec![
+            ("commentId".into(), "captured".into()),
+            ("state".into(), "delivered".into()),
+            ("state".into(), "later-state".into()),
+            ("updatedAt".into(), "old-time".into()),
+            ("code".into(), Json::Null),
+            ("code".into(), "later-code".into()),
+        ]);
+        task.insert(
+            "commentDeliveries",
+            Json::Array(vec![receipt.clone(), captured.clone()]),
+        );
+        let mut pairs = task.into_object().unwrap();
+        pairs.extend([
+            (
+                "comments".into(),
+                Json::Array(vec!["later-comments-slot".into()]),
+            ),
+            (
+                "commentDeliveries".into(),
+                Json::Array(vec!["later-receipts-slot".into()]),
+            ),
+            ("publication".into(), "later-publication-slot".into()),
+            ("lastHistory".into(), "later-history-slot".into()),
+        ]);
+        let task = Json::Object(pairs);
+        let before_keys: Vec<_> = task
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut run = base_run();
+        if mode == "retry" {
+            set(
+                &mut run,
+                "originalRequest",
+                "commentIds",
+                Json::Array(vec!["captured".into()]),
+            );
+            set(&mut run, "executionContext", "workflowState", "done".into());
+        }
+        let w = World::new(task, run);
+        w.retained_buffers.replace(Some(vec![]));
+        if mode == "retry" {
+            w.status(
+                "failed",
+                "epoch",
+                Json::object([
+                    ("message", "Capacity".into()),
+                    ("codexErrorInfo", "serverOverloaded".into()),
+                ]),
+            );
+        }
+        w.complete().await.unwrap();
+        let probes = w.retained_buffers.borrow();
+        let probes = probes.as_ref().unwrap();
+        assert_eq!(probes.len(), 2);
+        assert_eq!(
+            probes[0], probes[1],
+            "{mode} copied an unchanged owned buffer"
+        );
+        let result = w.final_task();
+        let after = result.as_object().unwrap();
+        let after_keys: Vec<_> = after
+            .iter()
+            .filter(|(k, _)| before_keys.contains(k))
+            .map(|(k, _)| k.clone())
+            .collect();
+        let remaining_keys: Vec<_> = before_keys
+            .iter()
+            .filter(|k| after.iter().any(|(name, _)| name == *k))
+            .cloned()
+            .collect();
+        assert_eq!(after_keys, remaining_keys);
+        for (key, marker) in [
+            ("comments", "later-comments-slot"),
+            ("commentDeliveries", "later-receipts-slot"),
+        ] {
+            let values: Vec<_> = after
+                .iter()
+                .filter(|(k, _)| k.eq_str(key))
+                .map(|(_, v)| v)
+                .collect();
+            assert_eq!(values.len(), 2);
+            assert_eq!(values[1], &Json::Array(vec![marker.into()]));
+        }
+        for (key, marker) in [
+            ("publication", "later-publication-slot"),
+            ("lastHistory", "later-history-slot"),
+        ] {
+            assert_eq!(
+                after
+                    .iter()
+                    .filter(|(k, _)| k.eq_str(key))
+                    .nth(1)
+                    .unwrap()
+                    .1,
+                Json::from(marker)
+            );
+        }
+        let comments = f(&result, "comments").as_array().unwrap();
+        assert_eq!(
+            comments
+                .iter()
+                .find(|c| f(c, "commentId").is_str("retained-buffer"))
+                .unwrap(),
+            &retained
+        );
+        if mode == "handoff" {
+            let selected: Vec<_> = comments
+                .iter()
+                .filter(|c| f(c, "commentId").is_str("handoff"))
+                .collect();
+            assert_eq!(selected.len(), 2);
+            assert!(
+                selected.iter().all(|c| f(c, "body").is_str("latest intent")
+                    && f(c, "sequence").as_f64() == Some(3.0))
+            );
+        } else {
+            assert_eq!(comments.len(), 3);
+        }
+        let receipts = f(&result, "commentDeliveries").as_array().unwrap();
+        assert_eq!(receipts[0], receipt);
+        let mut expected = captured;
+        if mode == "retry" {
+            expected.insert("state", "queued".into());
+            expected.insert("updatedAt", AT.into());
+            expected.insert("code", f(f(&result, "completionIssue"), "code").clone());
+        }
+        assert_eq!(receipts[1], expected);
+    }
+}
+
+#[tokio::test]
+async fn publication_preserves_raw_run_slots_across_live_and_finished_updates() {
+    for mode in ["snapshot", "unavailable", "completion"] {
+        let mut run = base_run();
+        run.insert("result", Json::Null);
+        run.insert("finishedAt", Json::Null);
+        let retained = Json::String(JsString(vec![0xd800; 16_384]));
+        run.insert("retained", retained.clone());
+        let outcome = Json::Object(vec![
+            ("state".into(), "active".into()),
+            ("state".into(), "later-state".into()),
+            ("code".into(), Json::Null),
+            ("code".into(), "later-code".into()),
+            ("evidence".into(), Json::Null),
+            ("evidence".into(), "later-proof".into()),
+            ("observedAt".into(), "old-time".into()),
+        ]);
+        run.insert("externalOutcome", outcome.clone());
+        let mut pairs = run.into_object().unwrap();
+        let updated = [
+            "calls",
+            "updatedAt",
+            "phase",
+            "notificationCursor",
+            "primaryResourceRef",
+            "nativeEpoch",
+            "turnId",
+            "externalOutcome",
+            "result",
+            "finishedAt",
+        ];
+        for key in updated {
+            pairs.push((key.into(), format!("later-{key}").into()));
+        }
+        let before_keys: Vec<_> = pairs.iter().map(|(key, _)| key.clone()).collect();
+        let w = World::new(base_task(), Json::Object(pairs));
+        match mode {
+            "snapshot" => {
+                w.status("inProgress", "epoch", Json::Null);
+                w.publish(Json::object([
+                    ("kind", "readSnapshot".into()),
+                    ("snapshot", proof(30)),
+                    ("notificationCursor", 7.0.into()),
+                ]))
+                .await
+                .unwrap();
+            }
+            "unavailable" => {
+                w.publish(Json::object([
+                    ("kind", "unavailable".into()),
+                    ("reason", "external_outcome".into()),
+                    ("code", "native_connection_lost".into()),
+                    ("detail", "Original outcome remains unresolved.".into()),
+                ]))
+                .await
+                .unwrap();
+            }
+            _ => {
+                w.complete().await.unwrap();
+            }
+        }
+        let saved = w.saved_run();
+        let pairs = saved.as_object().unwrap();
+        assert_eq!(
+            pairs.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(),
+            before_keys
+        );
+        for key in updated {
+            let entries: Vec<_> = pairs.iter().filter(|(name, _)| name.eq_str(key)).collect();
+            assert_eq!(entries.len(), 2, "{mode}: {key}");
+            assert_eq!(
+                entries[1].1,
+                Json::from(format!("later-{key}")),
+                "{mode}: {key}"
+            );
+        }
+        assert_eq!(f(&saved, "retained"), &retained);
+        assert_eq!(f(&saved, "updatedAt"), &Json::from(AT));
+        assert_eq!(f(&saved, "operationId"), &Json::from("start-original"));
+        assert_eq!(f(&saved, "primaryResourceRef"), &primary());
+        assert_eq!(f(&saved, "nativeEpoch"), &Json::from("epoch"));
+        assert_eq!(f(&saved, "turnId"), &Json::from("turn"));
+        let phase = match mode {
+            "snapshot" => "running",
+            "unavailable" => "outcome_unknown",
+            _ => "completed",
+        };
+        assert_eq!(f(&saved, "phase"), &Json::from(phase));
+        if mode == "unavailable" {
+            let mut expected = outcome;
+            expected.insert("state", "unknown".into());
+            expected.insert("code", "native_connection_lost".into());
+            expected.insert("observedAt", AT.into());
+            assert_eq!(f(&saved, "externalOutcome"), &expected);
+        } else if mode == "snapshot" {
+            assert_eq!(f(&saved, "notificationCursor"), &Json::Number(7.0));
+            assert!(
+                w.creates
+                    .borrow()
+                    .iter()
+                    .all(|(key, _)| key != "task-board/result")
+            );
+        } else {
+            assert_eq!(f(&saved, "finishedAt"), &Json::from(AT));
+            assert_eq!(
+                f(f(&saved, "externalOutcome"), "state"),
+                &Json::from("succeeded")
+            );
+            assert_eq!(f(&saved, "result"), f(&w.final_task(), "latestResult"));
+            for slot in ["thread", "turn", "interrupt"] {
+                assert!(f(f(&saved, "calls"), slot).is_null());
+            }
         }
     }
 }

@@ -12,6 +12,7 @@ const obj = (properties, required = Object.keys(properties)) => ({ type: 'object
 const array = (items, maxItems = 256) => ({ type: 'array', items, maxItems });
 const nil = { type: 'null' }, nullable = value => ({ anyOf: [value, nil] });
 const bool = { type: 'boolean' };
+const queryOrder = JSON.parse(readFileSync('specs/schemas/hive-wire.schema.json', 'utf8')).$defs.ObjectQuery.properties.orderBy;
 const timestamp = { ...str(24, 24), pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$' };
 const agent = name => ({ $ref: 'https://ivy.invalid/schemas/agent.schema.json#/$defs/' + name });
 const operation = name => ({ $ref: 'https://ivy.invalid/schemas/hive-operations.schema.json#/$defs/' + name });
@@ -138,7 +139,7 @@ Object.assign(defs, {
   TaskQuery: obj({ task: { anyOf: [id, obj({ taskKey: id })] }, view: { const: 'card' },
     comments: { ...obj({ offset: integer(), before: integer(1), limit: integer(1, 100), questionsOnly: bool }, ['limit']),
       description: 'Defaults to the latest 50 comments, newest first. Use before=commentPage.nextBefore to read older messages without gaps when new messages arrive. null nextBefore ends the history. questionsOnly selects unresolved questions; offset retains ascending positional reads.' } }, ['task']),
-  TaskListQuery: obj({
+  TaskSummaryQuery: obj({
     parentTaskId: { ...id, description: 'List unarchived tasks delegated by this parent task, including separate worktrees and hosts.' },
     relatedTo: { ...id, description: 'Find other allocated tasks sharing this task canonical working directory and host. Separate worktrees do not match. Read peer tickets before coordinating.' },
     status: { enum: ['backlog', 'todo', 'in_progress', 'waiting', 'review', 'done', 'cancelled'] },
@@ -148,6 +149,12 @@ Object.assign(defs, {
     workflowState: { enum: ['backlog', 'todo', 'in_progress', 'waiting', 'review', 'done', 'cancelled'] },
     category: nullable(str(128, 1)) }),
   TaskListResult: obj({ items: array(ref('TaskSummary'), 100), nextCursor: nullable(str(4096, 1)) }),
+  CardListQuery: obj({ view: { const: 'cards' }, where: wire('QueryPredicate'),
+    orderBy: queryOrder, includeArchived: bool,
+    limit: integer(1, 20), cursor: str(8192, 1) }, ['view']),
+  TaskListQuery: { oneOf: [ref('TaskSummaryQuery'), ref('CardListQuery')] },
+  CardListResult: obj({ view: { const: 'cards' }, items: array(ref('TaskCardView'), 20), nextCursor: nullable(str(8192, 1)) }),
+  ListResult: { oneOf: [ref('TaskListResult'), ref('CardListResult')] },
   MarkCommentsReadRequest: obj({ operationId: id, taskId: id, expectedTaskRevision: integer(1), includeCrossAgent: bool }, ['operationId', 'taskId', 'expectedTaskRevision']),
   MarkCommentsReadResult: obj({ task: ref('ObjectPin'), readState: ref('ObjectPin'), unreadAgentComments: integer(), unreadDirectAgentComments: integer() }),
   ExecutionCondition: obj({ state: { enum: ['idle', 'queued', 'allocating', 'starting', 'active', 'needs_user', 'deferred', 'blocked_dependency', 'blocked_environment', 'recovering', 'outcome_unknown', 'publishing', 'workflow_attention', 'failed'] }, detail: str(2048) }),
@@ -285,6 +292,9 @@ defs.PreparedWrite = obj({
   mutationId: id, contractKey: { enum: Object.keys(contracts).map(key => 'task-board/' + key) }, contractVersion: { enum: ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0', '2.2.0'] }, payload: ref('Artifact'),
   destination: { oneOf: [obj({ create: obj({ parentId: nullable(id), name: str(256, 1) }) }),
     obj({ objectId: id, expectedRevision: integer(1), expectedArchived: bool }, ['objectId', 'expectedRevision'])] }, outcome: nullable(ref('ObjectPin')) });
+defs.PreparedWrite.properties.payloadContract = { const: 'task-board/prepared-payload' };
+defs.PreparedPayload = obj({ schemaVersion: { const: 1 }, contractKey: { const: 'task-board/task' },
+  contractVersion: defs.PreparedWrite.properties.contractVersion, content: wire('Json'), references: wire('RevisionReferences') });
 defs.HandoffWork = obj({ claimOperationId: id, workRevision: integer(0), contentHash: hash, primaryResourceRef: nullable(resource) });
 defs.Operation = obj({ schemaVersion: { const: 1 }, operationId: id, callerPrincipalId: id, request: ref('RetainedDurableRequest'),
   requestHash: hash, actor: ref('Actor'), createdAt: timestamp, updatedAt: timestamp,
@@ -451,13 +461,13 @@ operations.workspace = { input: '#/$defs/WorkspaceQuery', output: '#/$defs/Works
 operations.configuration = { input: '#/$defs/ConfigurationQuery', output: '#/$defs/ConfigurationView', mutation: false };
 operations.categories = { input: '#/$defs/CategoriesQuery', output: '#/$defs/CategoriesResult', mutation: false };
 operations.read = { input: '#/$defs/TaskQuery', output: '#/$defs/ReadResult', mutation: false };
-operations.list = { input: '#/$defs/TaskListQuery', output: '#/$defs/TaskListResult', mutation: false };
+operations.list = { input: '#/$defs/TaskListQuery', output: '#/$defs/ListResult', mutation: false };
 operations.markCommentsRead = { input: '#/$defs/MarkCommentsReadRequest', output: '#/$defs/MarkCommentsReadResult', mutation: true };
 operations.archive = { input: '#/$defs/ArchiveRequest', output: '#/$defs/ArchiveResult', mutation: true };
 const catalogPath = 'specs/schemas/task-board.operations.json';
 const catalogContent = JSON.stringify({ schemaVersion: 1, namespace: 'task-board', schema: document.$id,
   contracts: Object.entries({ ...contracts, 'task-key-sequence': 'TaskKeySequence', 'task-key-allocation': 'TaskKeyAllocation', 'comment-read-state': 'CommentReadState', operation: 'Operation', coordination: 'Coordination', 'native-evidence': 'NativeEvidence', 'native-read-evidence': 'NativeReadEvidence',
-    'native-signals': 'NativeSignals', 'scan-cursor': 'ScanCursor', 'scheduler-attempt': 'SchedulerAttempt', 'native-turn-search': 'NativeTurnSearch', 'native-turn-snapshot': 'NativeTurnSnapshot', 'native-result-page': 'NativeResultPage', 'native-transcript': 'NativeTranscript', 'native-full-turn-transcript': 'NativeFullTurnTranscript' }).map(([key, name]) => ({ key: 'task-board/' + key, version: contractVersions[key] ?? '1.0.0', definition: '#/$defs/' + name })),
+    'prepared-payload': 'PreparedPayload', 'native-signals': 'NativeSignals', 'scan-cursor': 'ScanCursor', 'scheduler-attempt': 'SchedulerAttempt', 'native-turn-search': 'NativeTurnSearch', 'native-turn-snapshot': 'NativeTurnSnapshot', 'native-result-page': 'NativeResultPage', 'native-transcript': 'NativeTranscript', 'native-full-turn-transcript': 'NativeFullTurnTranscript' }).map(([key, name]) => ({ key: 'task-board/' + key, version: contractVersions[key] ?? '1.0.0', definition: '#/$defs/' + name })),
   binaryContracts: [{ key: 'task-board/attachment', version: '1.0.0', definitionFile: 'task-board.attachment.json' },
     { key: 'task-board/native-evidence-chunk', version: '1.0.0', definitionFile: 'task-board.evidence-chunk.json' },
     { key: 'task-board/native-read-evidence-chunk', version: '1.0.0', definitionFile: 'task-board.read-evidence-chunk.json' }],

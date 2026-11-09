@@ -40,6 +40,8 @@ fn s<'a>(v: &'a Json, key: &str) -> &'a JsString {
     f(v, key).as_js_string().unwrap()
 }
 fn data() -> &'static Json {
+    // Reference values and scope behavior are unchanged. The three write-volume
+    // cases omit obsolete write-only seeds and their identical duplicate reads.
     static DATA: OnceLock<Json> = OnceLock::new();
     DATA.get_or_init(|| {
         let result = reference_data::read(include_bytes!("task-board-read-scopes-cases.json.gz"));
@@ -51,7 +53,8 @@ fn data() -> &'static Json {
     })
 }
 fn failure(v: &Json) -> IvyError {
-    let mut error = IvyError::new_js(s(v, "code").clone(), s(v, "message").clone()).with_provider_outcome(v.required("outcome").unwrap().clone());
+    let mut error = IvyError::new_js(s(v, "code").clone(), s(v, "message").clone())
+        .with_provider_outcome(v.required("outcome").unwrap().clone());
     if !f(v, "details").is_null() {
         error = error.with_details(f(v, "details").clone());
     }
@@ -199,7 +202,7 @@ async fn read(store: &Journal<'_>, step: &Json) -> Json {
     match result {
         Ok(mut d) => {
             let result = outcome(Ok(Json::object([
-                ("pin", d.pin),
+                ("pin", d.pin.to_json()),
                 ("value", d.value.clone()),
                 (
                     "parentId",
@@ -297,6 +300,8 @@ fn run<'a, 's: 'a>(
                             f(step, "value"),
                             &"retained-cache-fixture".into(),
                             f(step, "destination"),
+                            None,
+                            None,
                         )
                         .await,
                 ),

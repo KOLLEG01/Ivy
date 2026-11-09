@@ -11,12 +11,11 @@ use ivy_task_board::{
     engine_execution::{
         CachedExecution, ExecutionCategories, ExecutionComponents, ExecutionProofs, ExecutionQueue,
     },
-    engine_invocations::EngineInvocations,
     engine_publication::{
         CreationChecks, EnginePublisher, PublicationRoutes, RootPublicationChecks,
     },
     engine_read::{EngineReads, ReadRuntime},
-    engine_service::{EngineService, RetainedService, ServiceRuntime},
+    engine_service::{EngineService, ServiceRuntime},
     engine_validation::ActionValidation,
     generation::{GenerationRuntime, generation},
     journal_store::{Contracts, JournalStore, ReadScopes},
@@ -535,7 +534,7 @@ async fn check_comment_recovery(question: bool) {
                 ("source", if question { "worker" } else { "user" }.into()),
             ]);
             let operation = operations.begin(&request, &actor).await.unwrap();
-            operation_id = Some(s(&operation.pin, "objectId").clone());
+            operation_id = Some(s(&operation.pin.to_json(), "objectId").clone());
             operation
         };
         let gates = PublicationCoordination {
@@ -606,7 +605,6 @@ async fn check_comment_recovery(question: bool) {
         let validation = ActionValidation {
             store: &operations.store,
             checks: &checks,
-            task_read: &read_task,
         };
         let unused = Unused;
         let settings = Json::object([
@@ -680,12 +678,6 @@ async fn check_comment_recovery(question: bool) {
             runtime: &dispatch_runtime,
             categories: &projection,
         };
-        let invocation_executor = LocalExecutor::default();
-        let invocations = EngineInvocations::new(&invocation_executor);
-        let handler = RetainedService {
-            handler: &facade,
-            invocations: &invocations,
-        };
         let context = ivy_sdk::service::InvocationContext::detached(
             "caller".into(),
             Some(s(&operation.value, "operationId").clone()),
@@ -696,24 +688,21 @@ async fn check_comment_recovery(question: bool) {
         );
         // The accepted Operation and all replayed effects live in the real
         // SQLite journal. Every public retry enters an actual Send SDK handler,
-        // local mailbox, public facade and both retained queues.
+        // local mailbox and public facade before retained execution.
         let (bridge, local) = generation(1, 1000.0);
         let reply = bridge.handler("comment")(f(&operation.value, "request").clone(), context);
         let retired = bridge.retire();
         executor
-            .drive(
-                invocation_executor.drive(execution_executor.drive(local.run(
-                    &handler,
-                    &dispatch_runtime,
-                    &ivy_sdk::clock::SystemClock,
-                    async {
-                        invocations.stop().await;
-                        execution.settled().await;
-                        projection.settled().await;
-                        Ok(())
-                    },
-                ))),
-            )
+            .drive(execution_executor.drive(local.run(
+                &facade,
+                &dispatch_runtime,
+                &ivy_sdk::clock::SystemClock,
+                async {
+                    execution.settled().await;
+                    projection.settled().await;
+                    Ok(())
+                },
+            )))
             .await
             .unwrap();
         retired.await.unwrap();
@@ -802,7 +791,7 @@ async fn check_comment_recovery(question: bool) {
         if round == 0 {
             assert_eq!(result.unwrap_err().outcome, Outcome::Unknown);
             assert_eq!(f(&saved.value, "phase"), &Json::from("needs_attention"));
-            assert_eq!(f(&task.pin, "revision"), &Json::Number(3.0));
+            assert_eq!(f(&task.pin.to_json(), "revision"), &Json::Number(3.0));
             assert_eq!(count(&connection, "cleanup_roots"), 0);
             let mut changed = task.value;
             let mut fields = f(&changed, "fields").clone();
@@ -817,7 +806,7 @@ async fn check_comment_recovery(question: bool) {
                     &changed,
                     "other-writer",
                     &Json::object([
-                        ("objectId", f(&task.pin, "objectId").clone()),
+                        ("objectId", f(&task.pin.to_json(), "objectId").clone()),
                         ("expectedRevision", Json::Number(3.0)),
                     ]),
                 )
@@ -832,7 +821,7 @@ async fn check_comment_recovery(question: bool) {
             let outcome = result.unwrap();
             assert_eq!(f(&outcome, "task"), f(&writes[2], "outcome"));
             assert_eq!(f(f(&outcome, "task"), "revision"), &Json::Number(3.0));
-            assert_eq!(f(&task.pin, "revision"), &Json::Number(4.0));
+            assert_eq!(f(&task.pin.to_json(), "revision"), &Json::Number(4.0));
             assert_eq!(stages, original_stages);
             assert_eq!(
                 hash_json(&task.value).unwrap(),

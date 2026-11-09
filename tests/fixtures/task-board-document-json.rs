@@ -7,7 +7,7 @@ use ivy_sdk::task_comments::{CancellationToken, CommentReadFuture, CommentSource
 use ivy_store::rusqlite::Connection;
 use ivy_task_board::{
     engine_read::read_failure::{ReadCause, ReadFailure},
-    engine_read::read_policy::QuestionPolicies,
+    engine_read::read_policy::{QuestionPolicies, TaskReadStore},
     journal_store::{
         Contracts, ReadScopes,
         persistent_reads::{
@@ -25,7 +25,10 @@ impl Contracts for Catalog {
         Ok("1.0.0".into())
     }
     fn local(&self, key: &str) -> IvyResult<bool> {
-        Ok(key == "task-board/operation")
+        Ok(matches!(
+            key,
+            "task-board/operation" | "task-board/prepared-payload"
+        ))
     }
     fn readable_version(&self, _: &str, v: &JsString) -> IvyResult<bool> {
         Ok(v == &JsString::from("1.0.0"))
@@ -40,7 +43,7 @@ impl Contracts for Catalog {
 type Failure = ReadFailure<()>;
 struct Policies;
 impl QuestionPolicies<Failure> for Policies {
-    fn open_questions(&self, _: &Json) -> Result<Vec<JsString>, Failure> {
+    fn open_questions(&self, _: &Json) -> Result<Vec<Json>, Failure> {
         Ok(vec![])
     }
 }
@@ -106,6 +109,117 @@ fn code(e: &Failure) -> String {
         _ => panic!("{e:?}"),
     }
 }
+struct MovingObjects(RefCell<Option<Json>>);
+impl ObjectReads<Failure> for MovingObjects {
+    async fn read(&self, _: Option<Json>) -> Result<Json, Failure> {
+        tokio::task::yield_now().await;
+        Ok(self
+            .0
+            .borrow_mut()
+            .take()
+            .expect("one original source read"))
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn remote_owned_payloads_reach_readers_without_an_identity_copy() {
+    let db = Connection::open_in_memory().unwrap();
+    initialize(&db).unwrap();
+    let local = SqliteReads {
+        journal: LocalJournal {
+            connection: &db,
+            root_object_id: Some("root".into()),
+        },
+        contracts: &Catalog,
+        parse: |raw: &str| parse(raw, MANAGEMENT_FRAME_BYTES).map_err(Failure::from),
+        sqlite_failure: |_: ivy_store::rusqlite::Error| Failure::from(IvyError::internal()),
+    };
+    let comments = TaskComments::new(Arc::new(NoComments), tokio::runtime::Handle::current());
+    let source_failure = Failure::from;
+    // Ordinary and retained documents, then the domain value reader. The source
+    // relinquishes ownership once; neither history mode needs an upgrade or tree.
+    for (mode, cached) in (0..3).flat_map(|mode| [false, true].map(|cached| (mode, cached))) {
+        let mut original = snapshot();
+        let payload = Json::Object(vec![
+            (
+                "opaque".into(),
+                Json::String(JsString(vec![0xd800, 0, 0xdfff, 65].repeat(65536))),
+            ),
+            ("duplicate".into(), "first".into()),
+            ("duplicate".into(), "last".into()),
+        ]);
+        let units = payload.required("opaque").unwrap().as_js_string().unwrap();
+        let original_pointer = units.0.as_ptr();
+        let original_length = units.0.len();
+        original
+            .get_mut("content")
+            .unwrap()
+            .insert("value", payload);
+        let metadata = Json::String(JsString(vec![0xd800, 66].repeat(32768)));
+        let metadata_pointer = metadata.as_js_string().unwrap().0.as_ptr();
+        original
+            .get_mut("object")
+            .unwrap()
+            .insert("opaqueMetadata", metadata);
+        let objects = MovingObjects(RefCell::new(Some(original)));
+        let scopes = ReadScopes::default();
+        let store: PersistentReadStore<'_, _, _, _, _, _, _, Failure> = PersistentReadStore {
+            local: &local,
+            objects: &objects,
+            policies: &Policies,
+            comments: &comments,
+            source_failure: &source_failure,
+            cache: cached.then_some(scopes.cache()),
+        };
+        // Oversized records must keep their original buffers when an active
+        // action cache declines admission, as well as when no cache is present.
+        let output = scopes
+            .with_read_cache(async {
+                if mode == 2 {
+                    TaskReadStore::read(&store, "task-board/history", &pin(), false)
+                        .await
+                        .unwrap()
+                } else {
+                    let mut document = store
+                        .read_document("task-board/history", &pin(), true, false, mode == 1)
+                        .await
+                        .unwrap();
+                    assert_eq!(document.get("pin"), Some(&pin()));
+                    assert_eq!(
+                        document
+                            .required("metadata")
+                            .unwrap()
+                            .required("opaqueMetadata")
+                            .unwrap()
+                            .as_js_string()
+                            .unwrap()
+                            .0
+                            .as_ptr(),
+                        metadata_pointer
+                    );
+                    document.remove("value").unwrap()
+                }
+            })
+            .await;
+        assert!(objects.0.borrow().is_none());
+        let units = output.required("opaque").unwrap().as_js_string().unwrap();
+        assert_eq!(
+            units.0.as_ptr(),
+            original_pointer,
+            "mode {mode} copied the original payload"
+        );
+        assert_eq!(units.0.len(), original_length);
+        assert!(
+            units
+                .0
+                .chunks_exact(4)
+                .all(|part| part == [0xd800, 0, 0xdfff, 65])
+        );
+        let fields = output.as_object().unwrap();
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[1], ("duplicate".into(), "first".into()));
+        assert_eq!(fields[2], ("duplicate".into(), "last".into()));
+    }
+}
 #[tokio::test(flavor = "current_thread")]
 async fn remote_documents_enforce_scope_version_and_pins_and_isolate_action_caches() {
     let db = Connection::open_in_memory().unwrap();
@@ -139,18 +253,27 @@ async fn remote_documents_enforce_scope_version_and_pins_and_isolate_action_cach
     scopes
         .with_read_cache(async {
             let mut first = store
-                .read_document("task-board/history", &pin(), true, false, false)
+                .read_document("task-board/history", &pin(), true, true, false)
                 .await
                 .unwrap();
             first.insert("value", "caller mutation".into());
             let second = store
-                .read_document("task-board/history", &pin(), true, false, false)
+                .read_document("task-board/history", &pin(), true, true, false)
                 .await
                 .unwrap();
             assert_eq!(
                 second.required("value").unwrap().get("event"),
                 Some(&"saved".into())
             );
+            assert_eq!(objects.calls.borrow().len(), 1);
+            let mut selected = TaskReadStore::read(&store, "task-board/history", &pin(), false)
+                .await
+                .unwrap();
+            selected.insert("event", "caller mutation".into());
+            let selected = TaskReadStore::read(&store, "task-board/history", &pin(), false)
+                .await
+                .unwrap();
+            assert_eq!(selected.get("event"), Some(&"saved".into()));
             assert_eq!(objects.calls.borrow().len(), 1);
             store
                 .read_document("task-board/history", &pin(), true, false, true)
@@ -336,6 +459,152 @@ fn local_documents_select_exact_revisions_and_preserve_native_database_errors() 
             .unwrap_err()
             .code,
         "native_sqlite"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compact_task_snapshot_resumes_through_the_current_reader_with_original_hash_and_scope() {
+    let db = Connection::open_in_memory().unwrap();
+    initialize(&db).unwrap();
+    let journal = LocalJournal {
+        connection: &db,
+        root_object_id: Some("root".into()),
+    };
+    let task = Json::object([
+        (
+            "publication",
+            Json::object([
+                ("objectId", "operation".into()),
+                ("revision", Json::Number(1.0)),
+            ]),
+        ),
+        ("comments", Json::Array(vec![])),
+        ("commentDeliveries", Json::Array(vec![])),
+    ]);
+    let mut header = task.clone();
+    header.insert(
+        "commentStore",
+        Json::object([
+            ("kind", "tree".into()),
+            ("root", Json::Null),
+            ("length", Json::Number(0.0)),
+            (
+                "summary",
+                Json::object([
+                    ("directCount", Json::Number(0.0)),
+                    ("questions", Json::Array(vec![])),
+                ]),
+            ),
+        ]),
+    );
+    let payload = Json::object([
+        ("schemaVersion", Json::Number(1.0)),
+        ("contractKey", "task-board/task".into()),
+        ("contractVersion", "1.0.0".into()),
+        ("content", header.clone()),
+        ("references", Json::Object(vec![])),
+    ]);
+    let address = journal
+        .create(
+            "task-board/prepared-payload",
+            &"Prepared".into(),
+            Some(&"operation".into()),
+            &payload,
+            &"2026-01-01T00:00:00.000Z".into(),
+            &"payload".into(),
+        )
+        .unwrap();
+    let hash = ivy_contracts::hash::hash_json(&payload).unwrap();
+    let operation = Json::object([
+        // A create operation does not know its Task ID at initial admission.
+        ("request", Json::object([("action", "create".into())])),
+        (
+            "writes",
+            Json::Array(vec![Json::object([
+                ("contractKey", "task-board/task".into()),
+                ("contractVersion", "1.0.0".into()),
+                ("payloadContract", "task-board/prepared-payload".into()),
+                (
+                    "destination",
+                    Json::object([
+                        ("objectId", "task".into()),
+                        ("expectedRevision", Json::Number(1.0)),
+                    ]),
+                ),
+                (
+                    "payload",
+                    Json::object([
+                        ("object", address.clone()),
+                        ("mediaType", "application/json".into()),
+                        ("contentHash", hash.clone().into()),
+                    ]),
+                ),
+            ])]),
+        ),
+    ]);
+    journal
+        .create(
+            "task-board/operation",
+            &"Operation".into(),
+            Some(&"root".into()),
+            &operation,
+            &"2026-01-01T00:00:00.000Z".into(),
+            &"operation".into(),
+        )
+        .unwrap();
+    let local = SqliteReads {
+        journal,
+        contracts: &Catalog,
+        parse: |raw: &str| parse(raw, MANAGEMENT_FRAME_BYTES).map_err(Failure::from),
+        sqlite_failure: |_: ivy_store::rusqlite::Error| {
+            Failure::from(IvyError::new("database_error", "sqlite"))
+        },
+    };
+    let objects = Objects {
+        value: RefCell::new(Json::Null),
+        calls: RefCell::default(),
+    };
+    let comments = TaskComments::new(Arc::new(NoComments), tokio::runtime::Handle::current());
+    let source_failure = |e: IvyError| Failure::from(e);
+    let store: PersistentReadStore<'_, _, _, _, _, _, _, Failure> = PersistentReadStore {
+        local: &local,
+        objects: &objects,
+        policies: &Policies,
+        comments: &comments,
+        source_failure: &source_failure,
+        cache: None,
+    };
+    for retained in [false, true] {
+        let read = store
+            .read_document("task-board/task", &address, false, false, retained)
+            .await
+            .unwrap();
+        assert_eq!(read.get("key"), Some(&"task-board/prepared-payload".into()));
+        assert_eq!(
+            canonical(read.required("value").unwrap(), MANAGEMENT_FRAME_BYTES).unwrap(),
+            canonical(
+                if retained { &header } else { &task },
+                MANAGEMENT_FRAME_BYTES
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            read.required("revision").unwrap().get("contentHash"),
+            Some(&Json::from(hash.clone()))
+        );
+    }
+    assert_eq!(
+        code(
+            &store
+                .read_document("task-board/task", &address, true, false, true)
+                .await
+                .unwrap_err()
+        ),
+        "task_board_scope_mismatch"
+    );
+    assert!(
+        objects.calls.borrow().is_empty(),
+        "A local prepared Task never falls through to a remote read."
     );
 }
 

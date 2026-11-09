@@ -11,7 +11,7 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
-    checked_native_contract::CheckedNativeContracts, json::canonical,
+    checked_native_contract::CheckedNativeContracts, json::canonical_equal,
     limits::MANAGEMENT_FRAME_BYTES, native_backend::BackendIdentity,
     native_contract::NativeContract,
 };
@@ -66,7 +66,7 @@ fn same(left: &Json, right: &Json) -> IvyResult<bool> {
     if left.is_null() || right.is_null() {
         return Ok(left == right);
     }
-    Ok(canonical(left, MANAGEMENT_FRAME_BYTES)? == canonical(right, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(left, right, MANAGEMENT_FRAME_BYTES)
 }
 fn arr(v: &Json) -> &[Json] {
     v.as_array().unwrap_or(&[])
@@ -174,7 +174,7 @@ pub async fn shared_project_owner<S: AllocationStore>(
                 continue;
             }
             let peer = store
-                .read("task-board/task", &Json::String(id.clone()), true)
+                .read_task_header(&Json::String(id.clone()), true)
                 .await?
                 .value;
             if (field(field(task, "fields"), "allowParallel").as_bool() == Some(true))
@@ -255,7 +255,7 @@ fn validate_continuation(task: &Document, run: &Json) -> IvyResult<()> {
         BackendIdentity::optional(field(run, "target").get("backend"))?,
     )?;
     require(
-        run.get("taskId") == task.pin.get("objectId")
+        run.get("taskId").and_then(Json::as_js_string) == Some(&task.pin.object_id)
             && same(&primary, field(&task.value, "primaryResourceRef"))?
             && backend == BackendIdentity::optional(task.value.get("primaryBackend"))?
             && ["completed", "failed", "cancelled"]
@@ -309,14 +309,14 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
                 .workspace_owner(
                     s(node, "hostId")?,
                     s(workspace, "intendedPath")?,
-                    s(&task.pin, "objectId")?,
+                    &task.pin.object_id,
                 )
                 .await
         } else {
             shared_project_owner(
                 self.store,
                 &task.value,
-                s(&task.pin, "objectId")?,
+                &task.pin.object_id,
                 node,
                 workspace,
             )
@@ -1107,18 +1107,13 @@ impl<S: AllocationStore, E: AllocationRuntime> Allocator<'_, S, E> {
             "Allocated plan ".into(),
             s(&task.value, "taskKey")?.clone(),
             " revision ".into(),
-            task.pin
-                .required("revision")?
-                .as_f64()
-                .ok_or_else(IvyError::internal)?
-                .to_string()
-                .into(),
+            task.pin.revision.to_string().into(),
             " operation ".into(),
             operation_id.clone(),
         ]);
         let existing = self.store.named_plan(&name).await?;
         let intent = match existing {
-            Some(d) => d.pin,
+            Some(d) => d.pin.to_json(),
             None => {
                 self.store
                     .write(

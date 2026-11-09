@@ -1,8 +1,7 @@
 #[path = "reference-data.rs"]
 mod reference_data;
 use ivy_contracts::{
-    Outcome,
-    IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::parse,
+    IvyError, IvyJson as Json, IvyResult, JsString, Outcome, hash::hash_json, json::parse,
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
@@ -28,7 +27,7 @@ fn s<'a>(v: &'a Json, k: &str) -> &'a JsString {
 }
 fn doc(v: &Json) -> Document {
     Document {
-        pin: f(v, "pin").clone(),
+        pin: ivy_task_board::operations::ObjectPin::from_json(f(v, "pin").clone()).unwrap(),
         value: f(v, "value").clone(),
         parent_id: f(f(v, "metadata"), "parentId").as_js_string().cloned(),
         content_hash: hash_json(f(v, "value")).unwrap(),
@@ -36,7 +35,7 @@ fn doc(v: &Json) -> Document {
 }
 fn json_doc(v: &Document) -> Json {
     Json::object([
-        ("pin", v.pin.clone()),
+        ("pin", v.pin.to_json()),
         ("value", v.value.clone()),
         (
             "metadata",
@@ -70,11 +69,7 @@ fn data() -> &'static Json {
     static D: OnceLock<Json> = OnceLock::new();
     D.get_or_init(|| {
         let o = reference_data::read(include_bytes!("task-board-deliveries-cases.json.gz"));
-        parse(
-            std::str::from_utf8(&o).unwrap(),
-            MANAGEMENT_FRAME_BYTES,
-        )
-        .unwrap()
+        parse(std::str::from_utf8(&o).unwrap(), MANAGEMENT_FRAME_BYTES).unwrap()
     })
 }
 struct Replay {
@@ -170,7 +165,7 @@ impl Store for World<'_> {
             .replay
             .call("write", [k.into(), v.clone(), m.into(), d.clone()])?;
         *self.current.borrow_mut() = Document {
-            pin: pin.clone(),
+            pin: ivy_task_board::operations::ObjectPin::from_json(pin.clone()).unwrap(),
             value: v.clone(),
             parent_id: Some("root".into()),
             content_hash: hash_json(v)?,
@@ -180,7 +175,15 @@ impl Store for World<'_> {
     async fn prepared_mutation_id(&self, _: &str) -> IvyResult<JsString> {
         panic!("Unexpected prepared write")
     }
-    async fn write_prepared(&self, _: &str, _: &Json, _: &JsString, _: &Json) -> IvyResult<Json> {
+    async fn write_prepared(
+        &self,
+        _: &str,
+        _: &Json,
+        _: &JsString,
+        _: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
+    ) -> IvyResult<Json> {
         panic!("Unexpected prepared write")
     }
 }
@@ -284,7 +287,7 @@ async fn retained_chat_and_phone_deliveries_match_original_exact_effects_and_rep
             engine: &world,
         };
         let mut outcomes = vec![];
-        let delivery_id = s(&world.current.borrow().pin, "objectId").clone();
+        let delivery_id = s(&world.current.borrow().pin.to_json(), "objectId").clone();
         for p in 0..f(row, "times").as_array().unwrap().len() {
             steps += 1;
             world.pass.set(p);

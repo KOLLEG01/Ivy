@@ -195,7 +195,7 @@ impl World {
             .update(
                 "task-board/task",
                 &"task".into(),
-                f(&doc.pin, "revision").as_f64().unwrap(),
+                f(&doc.pin.to_json(), "revision").as_f64().unwrap(),
                 value,
                 &AT.into(),
             )
@@ -205,7 +205,9 @@ impl World {
         self.reads.borrow_mut().push(address.clone());
         let doc = self.local().read("task-board/task", address, primary)?;
         Ok(LifecycleDocument {
-            metadata: self.local().metadata(s(&doc.pin, "objectId"), "3.1.0")?,
+            metadata: self
+                .local()
+                .metadata(s(&doc.pin.to_json(), "objectId"), "3.1.0")?,
             document: doc,
         })
     }
@@ -272,6 +274,8 @@ impl Store for &World {
         value: &Json,
         id: &JsString,
         destination: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
     ) -> IvyResult<Json> {
         self.write(key, value, &id.to_utf8()?, destination).await
     }

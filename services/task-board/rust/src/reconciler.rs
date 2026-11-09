@@ -5,9 +5,9 @@ use crate::{
     local_gates::PendingGate,
     native_adoption::DirectTurnAdoption,
     native_inspector::InspectionStore,
+    native_lifecycle::LifecycleStore,
     native_orchestrator::{NativeOrchestrator, OrchestrationEngine, OrchestrationServices},
     native_signals::NativeSignals,
-    operations::Store,
     scheduler::{
         Scheduler, SchedulerAllocation, SchedulerEngine, SchedulerOperations, SchedulerPolicies,
         SchedulerRuntime, SchedulerStore,
@@ -63,7 +63,7 @@ pub fn reconcile_cleanup_result<E>(result: Result<(), ReadFailure<E>>) -> IvyRes
         },
     }
 }
-type Cleanup<'a> = Box<dyn Fn() -> Pin<Box<dyn Future<Output = IvyResult<()>> + 'a>> + 'a>;
+type Cleanup<'a> = &'a dyn Fn() -> Pin<Box<dyn Future<Output = IvyResult<()>> + 'a>>;
 /// The binding starts work on the same local owner executor, retains it after
 /// tick returns, and never cancels it before settled/stop has drained it.
 pub trait ReconcileExecutor<'a> {
@@ -98,7 +98,7 @@ pub trait ReconcilePolicies: SchedulerPolicies {
 pub trait ReconcileNative {
     async fn drain(&self, id: &JsString) -> IvyResult<bool>;
 }
-impl<S: Store, E: OrchestrationEngine, V: OrchestrationServices> ReconcileNative
+impl<S: LifecycleStore, E: OrchestrationEngine, V: OrchestrationServices> ReconcileNative
     for NativeOrchestrator<'_, S, E, V>
 {
     async fn drain(&self, id: &JsString) -> IvyResult<bool> {
@@ -489,7 +489,8 @@ impl<S: ReconcileStore, E: ReconcileEngine> Shared<'_, S, E> {
                             "Complete startup recovery before new automatic claims.",
                         ));
                     }
-                    self.engine.route_task_questions(id).await?;
+                    let routing_error = self.engine.route_task_questions(id).await.err();
+                    self.record(&prefix("questions:", id), routing_error);
                     if let Some(run) = self.engine.adopt_direct_turn(id).await? {
                         self.process_native_run(&run).await?;
                     }
@@ -519,28 +520,16 @@ impl<'a, 'x, S: ReconcileStore + 'a, E: ReconcileEngine + 'a, X: ReconcileExecut
     pub fn new(store: &'a S, engine: &'a E, executor: &'x X) -> Self {
         Self::bind(store, engine, executor, None)
     }
-    /// Bind the owner's current collector without widening the existing Store
-    /// failure port. Retain its collection state for the generation and held tick.
+    /// Borrow the owner's current collector without widening the Store failure
+    /// port. The generation keeps its collection state alive through held ticks.
     /// Generation retirement must keep driving that tick through settlement.
-    pub fn new_with_cleanup<Raw: 'a, F, Fut>(
+    pub fn new_with_cleanup(
         store: &'a S,
         engine: &'a E,
         executor: &'x X,
-        collect: F,
-    ) -> Self
-    where
-        F: Fn() -> Fut + 'a,
-        Fut: Future<Output = Result<(), ReadFailure<Raw>>> + 'a,
-    {
-        Self::bind(
-            store,
-            engine,
-            executor,
-            Some(Box::new(move || {
-                let work = collect();
-                Box::pin(async move { reconcile_cleanup_result(work.await) })
-            })),
-        )
+        collect: Cleanup<'a>,
+    ) -> Self {
+        Self::bind(store, engine, executor, Some(collect))
     }
     fn bind(store: &'a S, engine: &'a E, executor: &'x X, cleanup: Option<Cleanup<'a>>) -> Self {
         Self {

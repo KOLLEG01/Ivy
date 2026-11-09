@@ -161,10 +161,11 @@ impl Store for ReadOnlyTask {
         assert!(upgrade);
         self.reads.set(self.reads.get() + 1);
         Ok(Document {
-            pin: Json::object([
+            pin: ivy_task_board::operations::ObjectPin::from_json(Json::object([
                 ("objectId", "fixture-task".into()),
                 ("revision", Json::Number(1.0)),
-            ]),
+            ]))
+            .unwrap(),
             value: self.task.clone(),
             parent_id: None,
             content_hash: hash_json(&self.task)?,
@@ -176,7 +177,15 @@ impl Store for ReadOnlyTask {
     async fn prepared_mutation_id(&self, _: &str) -> IvyResult<JsString> {
         unexpected()
     }
-    async fn write_prepared(&self, _: &str, _: &Json, _: &JsString, _: &Json) -> IvyResult<Json> {
+    async fn write_prepared(
+        &self,
+        _: &str,
+        _: &Json,
+        _: &JsString,
+        _: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
+    ) -> IvyResult<Json> {
         unexpected()
     }
 }

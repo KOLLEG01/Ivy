@@ -6,6 +6,28 @@ use rusqlite::{OptionalExtension, params};
 
 pub const EVENT_MAX_COUNT: i64 = 10_000;
 const SECRETARY_EVENT_RESERVE: i64 = 1_024;
+
+fn parent_scope(key: &JsString, parent: Option<&str>) -> JsString {
+    let family = format!("objects/{}", text(key));
+    let scope = match parent {
+        None => format!("{family}/root"),
+        Some(id)
+            if !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c)) =>
+        {
+            format!("{family}/parent/{id}")
+        }
+        Some(_) => return family.into(),
+    };
+    if scope.len() <= 512 {
+        scope.into()
+    } else {
+        family.into()
+    }
+}
+
 impl Store {
     pub fn durable_event_boundary(&self) -> IvyResult<Option<i64>> {
         self.db.query_row("SELECT MIN(s.acknowledged_sequence) FROM subscriptions s JOIN durable_subscriptions d ON d.node_id=s.node_id AND d.name=s.name",[],|r|r.get(0)).map_err(|e| self.query_error(e))
@@ -75,24 +97,27 @@ impl Store {
         now: &JsString,
         contract_key: Option<&JsString>,
     ) -> IvyResult<()> {
-        let key = match contract_key {
-            Some(key) => Some(key.clone()),
-            None => self
-                .db
+        let write = *operation == JsString::from("write");
+        let metadata = if contract_key.is_none() || write {
+            self.db
                 .query_row(
-                    "SELECT contract_key FROM objects WHERE id=?",
+                    "SELECT contract_key,parent_id FROM objects WHERE id=?",
                     [text(object_id)],
-                    |r| r.get::<_, String>(0),
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
                 )
                 .optional()
                 .map_err(sql_error)?
-                .map(JsString::from),
+        } else {
+            None
         };
-        let write = *operation == JsString::from("write");
+        let key = contract_key
+            .cloned()
+            .or_else(|| metadata.as_ref().map(|(key, _)| key.as_str().into()));
         let scope = if write && key.as_ref().is_some_and(|k| !k.0.is_empty()) {
-            let mut units = JsString::from("objects/").0;
-            units.extend_from_slice(&key.as_ref().unwrap().0);
-            JsString(units)
+            match metadata.as_ref() {
+                Some((_, parent)) => parent_scope(key.as_ref().unwrap(), parent.as_deref()),
+                None => format!("objects/{}", text(key.as_ref().unwrap())).into(),
+            }
         } else {
             "objects".into()
         };

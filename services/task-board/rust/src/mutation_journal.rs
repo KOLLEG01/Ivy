@@ -11,6 +11,7 @@ use crate::journal_store::{
     Contracts,
     mutation_ports::{LocalMutationSource, LocalMutationStore, WriteFailure},
 };
+use crate::operations::Document;
 use ivy_contracts::{IvyError, IvyJson as Json, JsString};
 use std::future::Future;
 
@@ -126,7 +127,7 @@ where
         key: &str,
         name: &Value,
         parent: Option<&Value>,
-    ) -> Result<Option<Value>, WriteFailure<E>> {
+    ) -> Result<Option<Document>, WriteFailure<E>> {
         named_graph(self.documents, self.writes.source, key, name, parent).await
     }
     async fn read_graph(
@@ -136,7 +137,7 @@ where
         primary: bool,
         include_archived: bool,
         retained: bool,
-    ) -> Result<Value, WriteFailure<E>> {
+    ) -> Result<Document, WriteFailure<E>> {
         self.documents
             .read_graph(key, address, primary, include_archived, retained)
             .await
@@ -157,6 +158,7 @@ where
                 destination,
                 false,
                 &Value::Null,
+                None,
             )
             .await
     }
@@ -170,6 +172,7 @@ where
         mutation: &Value,
         destination: &Value,
         selected_version: &Value,
+        references: Option<&Value>,
     ) -> Result<Value, WriteFailure<E>> {
         self.writes
             .write_graph(
@@ -180,6 +183,7 @@ where
                 destination,
                 true,
                 selected_version,
+                references,
             )
             .await
     }

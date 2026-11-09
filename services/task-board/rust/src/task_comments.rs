@@ -4,7 +4,7 @@ use crate::engine_read::read_policy::{IvyPolicies, QuestionPolicies};
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     hash::hash_json,
-    json::{canonical, stringify},
+    json::{canonical_object_size, canonical_size, stringify},
     limits::JSON_OBJECT_CONTENT_BYTES,
 };
 use ivy_sdk::task_comments::{
@@ -30,18 +30,53 @@ mod memory_tests;
 
 /// Bound each persisted header and conversation entry independently.
 pub fn validate_task_content(task: &Json, task_id: &JsString) -> IvyResult<()> {
-    let mut header = task.clone();
-    header.insert("comments", Json::Array(vec![]));
-    header.insert("commentDeliveries", Json::Array(vec![]));
-    header.insert(
-        "commentStore",
-        Json::object([
-            ("kind", "tree".into()),
-            ("root", Json::Null),
-            ("length", Json::Number(0.0)),
-        ]),
-    );
-    canonical(&header, JSON_OBJECT_CONTENT_BYTES - 1024)?;
+    validate_task_content_with_comments(task, task_id, &[], || {
+        Ok(task
+            .required("comments")?
+            .as_array()
+            .ok_or_else(IvyError::internal)?
+            .iter())
+    })
+}
+
+/// Project only header fields and defer selecting comments until the original
+/// header/receipt checks have completed. Updates replace the first raw key.
+pub(crate) fn validate_task_content_with_comments<'a, I: IntoIterator<Item = &'a Json>>(
+    task: &Json,
+    task_id: &JsString,
+    header_changes: &[(JsString, &Json)],
+    comments: impl FnOnce() -> IvyResult<I>,
+) -> IvyResult<()> {
+    let replacements: [(JsString, Json); 3] = [
+        ("comments".into(), Json::Array(vec![])),
+        ("commentDeliveries".into(), Json::Array(vec![])),
+        (
+            "commentStore".into(),
+            Json::object([
+                ("kind", "tree".into()),
+                ("root", Json::Null),
+                ("length", Json::Number(0.0)),
+            ]),
+        ),
+    ];
+    let mut header: Vec<_> = task
+        .as_object()
+        .expect("insert requires an object")
+        .iter()
+        .map(|(key, value)| (key, value))
+        .collect();
+    for (key, value) in header_changes
+        .iter()
+        .map(|(key, value)| (key, *value))
+        .chain(replacements.iter().map(|(key, value)| (key, value)))
+    {
+        if let Some(pair) = header.iter_mut().find(|(name, _)| *name == key) {
+            pair.1 = value;
+        } else {
+            header.push((key, value));
+        }
+    }
+    canonical_object_size(header, JSON_OBJECT_CONTENT_BYTES - 1024)?;
     let mut receipts = HashMap::new();
     for receipt in task
         .required("commentDeliveries")?
@@ -56,16 +91,12 @@ pub fn validate_task_content(task: &Json, task_id: &JsString) -> IvyResult<()> {
             receipt,
         );
     }
-    for comment in task
-        .required("comments")?
-        .as_array()
-        .ok_or_else(IvyError::internal)?
-    {
+    for comment in comments()? {
         let id = comment
             .required("commentId")?
             .as_js_string()
             .ok_or_else(IvyError::internal)?;
-        canonical(
+        canonical_size(
             &Json::object([
                 ("schemaVersion", Json::Number(1.0)),
                 ("taskId", Json::String(task_id.clone())),
@@ -184,11 +215,11 @@ impl<S: CommentSource + ?Sized> TaskComments<S> {
         let observed = pins.clone();
         let reader = CommentReader::new(Arc::new(ReadSource(source)), executor).with_node_observer(
             Arc::new(move |pin, node| {
-                observed.lock().unwrap_or_else(|p| p.into_inner()).remember(
-                    hash_json(node).map_err(CommentFailure::Ivy)?,
-                    pin.clone(),
-                    pin.retained_bytes(),
-                );
+                let hash = hash_json(node).map_err(CommentFailure::Ivy)?;
+                let mut observed = observed.lock().unwrap_or_else(|p| p.into_inner());
+                if observed.get(&hash) != Some(pin) {
+                    observed.remember(hash, pin.clone(), pin.retained_bytes());
+                }
                 Ok(())
             }),
         );
@@ -268,25 +299,29 @@ impl<S: CommentSource + ?Sized> TaskComments<S> {
         policies: &P,
         failure: &impl Fn(CommentFailure<S::Error>) -> E,
     ) -> Result<Option<Json>, E> {
+        if projection::tree(value).is_none() {
+            return Ok(None);
+        }
+        self.read_tree_owned_with(value.clone(), task_id, policies, failure)
+            .await
+    }
+    pub async fn read_tree_owned_with<E: From<IvyError>, P: QuestionPolicies<E>>(
+        &self,
+        value: Json,
+        task_id: &JsString,
+        policies: &P,
+        failure: &impl Fn(CommentFailure<S::Error>) -> E,
+    ) -> Result<Option<Json>, E> {
         let Some((tree, header)) = projection::prepare(value) else {
             return Ok(None);
         };
-        let entries = self
+        let mut entries = self
             .range(&tree, task_id, None, None, None)
             .await
             .map_err(failure)?;
-        let mut full = header;
-        full.insert(
-            "comments",
-            Json::Array(
-                entries
-                    .iter()
-                    .map(|e| e.required("comment").cloned())
-                    .collect::<IvyResult<_>>()?,
-            ),
-        );
+        let full = projection::with_comments(header, &mut entries)?;
         let open = policies.open_questions(&full)?;
-        let full = projection::finish(&self.summaries, full, &tree, task_id, &entries, &open)?;
+        let full = projection::finish(&self.summaries, full, &tree, task_id, entries, &open)?;
         self.remember_tree(&tree, task_id, &full)?;
         Ok(Some(full))
     }
@@ -295,30 +330,23 @@ impl<S: CommentSource + ?Sized> TaskComments<S> {
         value: &Json,
         owner: &JsString,
     ) -> Result<Option<Json>, CommentFailure<S::Error>> {
+        if projection::tree(value).is_none() {
+            return Ok(None);
+        }
+        self.hydrate_owned(value.clone(), owner).await
+    }
+    pub async fn hydrate_owned(
+        &self,
+        value: Json,
+        owner: &JsString,
+    ) -> Result<Option<Json>, CommentFailure<S::Error>> {
         let Some((tree, header)) = projection::prepare(value) else {
             return Ok(None);
         };
-        let entries = self.range(&tree, owner, None, None, None).await?;
-        let mut full = header;
-        full.insert(
-            "comments",
-            Json::Array(
-                entries
-                    .iter()
-                    .map(|e| e.required("comment").cloned())
-                    .collect::<IvyResult<_>>()?,
-            ),
-        );
-        let open = ivy_sdk::open_task_questions(&full, None)?
-            .iter()
-            .map(|q| {
-                q.required("commentId")?
-                    .as_js_string()
-                    .cloned()
-                    .ok_or_else(IvyError::internal)
-            })
-            .collect::<IvyResult<Vec<_>>>()?;
-        let full = projection::finish(&self.summaries, full, &tree, owner, &entries, &open)?;
+        let mut entries = self.range(&tree, owner, None, None, None).await?;
+        let full = projection::with_comments(header, &mut entries)?;
+        let open = ivy_sdk::open_task_questions(&full, None)?;
+        let full = projection::finish(&self.summaries, full, &tree, owner, entries, &open)?;
         self.remember_tree(&tree, owner, &full)?;
         Ok(Some(full))
     }
@@ -454,6 +482,13 @@ pub trait CommentReads {
         policies: &P,
         failure: &impl Fn(CommentFailure<Self::Error>) -> E,
     ) -> Result<Option<Json>, E>;
+    async fn read_tree_owned_with<E: From<IvyError>, P: QuestionPolicies<E>>(
+        &self,
+        value: Json,
+        owner: &JsString,
+        policies: &P,
+        failure: &impl Fn(CommentFailure<Self::Error>) -> E,
+    ) -> Result<Option<Json>, E>;
 }
 impl<S: CommentSource + ?Sized> CommentReads for TaskComments<S> {
     type Error = S::Error;
@@ -483,5 +518,14 @@ impl<S: CommentSource + ?Sized> CommentReads for TaskComments<S> {
         failure: &impl Fn(CommentFailure<Self::Error>) -> E,
     ) -> Result<Option<Json>, E> {
         TaskComments::read_tree_with(self, value, owner, policies, failure).await
+    }
+    async fn read_tree_owned_with<E: From<IvyError>, P: QuestionPolicies<E>>(
+        &self,
+        value: Json,
+        owner: &JsString,
+        policies: &P,
+        failure: &impl Fn(CommentFailure<Self::Error>) -> E,
+    ) -> Result<Option<Json>, E> {
+        TaskComments::read_tree_owned_with(self, value, owner, policies, failure).await
     }
 }

@@ -1,13 +1,7 @@
 //! Historical task scheduling becomes current record fields and ordinary context.
 use super::{configuration, findings, value};
 use ivy_contracts::{IvyJson as Json, IvyResult, JsString, json::stringify};
-
-fn object(value: &Json) -> IvyResult<Json> {
-    value
-        .as_object()
-        .map(|_| value.clone())
-        .ok_or_else(value::invalid)
-}
+use std::borrow::Cow;
 fn list(value: Option<&Json>) -> IvyResult<&[Json]> {
     match value {
         None | Some(Json::Null) => Ok(&[]),
@@ -81,9 +75,9 @@ fn schedule(
 }
 
 /// A single comment's handoff can be normalized without interpreting its body.
-pub(super) fn comment(comment: &Json) -> IvyResult<Json> {
-    let mut current = object(comment)?;
-    let Some(handoff) = comment.get("handoff").filter(|value| !value.is_null()) else {
+pub(super) fn comment(mut current: Json) -> IvyResult<Json> {
+    current.as_object().ok_or_else(value::invalid)?;
+    let Some(handoff) = current.get("handoff").filter(|value| !value.is_null()) else {
         return Ok(current);
     };
     if handoff.as_object().is_none() {
@@ -100,22 +94,16 @@ pub(super) fn comment(comment: &Json) -> IvyResult<Json> {
         handoff.get("nextReviewAt"),
         handoff.get("waiting"),
     )?;
-    let mut normalized = Json::object([
-        (
-            "wakeAt",
-            handoff.get("wakeAt").cloned().unwrap_or(imported.wake_at),
-        ),
-        (
-            "dependencies",
-            handoff
-                .get("dependencies")
-                .filter(|v| !v.is_null())
-                .cloned()
-                .unwrap_or(Json::Array(imported.dependencies)),
-        ),
-    ]);
-    if let Some(state) = handoff.get("workflowState") {
-        normalized.insert("workflowState", state.clone());
+    let mut handoff = std::mem::replace(current.get_mut("handoff").unwrap(), Json::Null);
+    let wake_at = handoff.remove("wakeAt").unwrap_or(imported.wake_at);
+    let dependencies = if handoff.get("dependencies").is_some_and(|v| !v.is_null()) {
+        handoff.remove("dependencies").unwrap()
+    } else {
+        Json::Array(imported.dependencies)
+    };
+    let mut normalized = Json::object([("wakeAt", wake_at), ("dependencies", dependencies)]);
+    if let Some(state) = handoff.remove("workflowState") {
+        normalized.insert("workflowState", state);
     }
     current.insert("handoff", normalized);
     Ok(current)
@@ -199,9 +187,60 @@ fn scheduling_context(task: &Json, comments: &mut Vec<Json>) -> IvyResult<()> {
     Ok(())
 }
 
-pub(super) fn json(task: &Json) -> IvyResult<Json> {
-    let prior = findings::preserve_task(value::borrow(task))?;
-    let mut current = object(&prior)?;
+pub(super) fn json(task: Json) -> IvyResult<Json> {
+    let mut current = findings::preserve_task(task)?;
+    let prior_fields = current.get("fields").ok_or_else(value::invalid)?;
+    prior_fields.as_object().ok_or_else(value::invalid)?;
+    let requirement = prior_fields.get("executionRequirement");
+    let requirement_change = match configuration::requirement_json(requirement) {
+        Some(Cow::Owned(requirement)) => Some(requirement),
+        _ => None,
+    };
+    let capabilities = if is_text(
+        requirement.and_then(|requirement| requirement.get("kind")),
+        "capability",
+    ) {
+        let capabilities = list(prior_fields.get("requiredCapabilities"))?
+            .iter()
+            .cloned()
+            .chain(std::iter::once(
+                requirement
+                    .and_then(|v| v.get("capabilityKey"))
+                    .cloned()
+                    .ok_or_else(value::invalid)?,
+            ));
+        Some(Json::Array(ids(capabilities)?))
+    } else {
+        None
+    };
+    let imported = schedule(
+        current.get("nextSteps"),
+        prior_fields.get("nextReviewAt"),
+        current.get("waiting"),
+    )?;
+    let dependencies = match current.get("dependencies").filter(|value| !value.is_null()) {
+        Some(dependencies) => {
+            list(Some(dependencies))?;
+            None
+        }
+        None => {
+            let mut dependencies = imported.dependencies;
+            dependencies.extend_from_slice(list(prior_fields.get("dependencies"))?);
+            if let Some(task_id) = current.get("blocker").and_then(|v| v.get("taskId")) {
+                dependencies.push(task_id.clone());
+            }
+            Some(Json::Array(ids(dependencies)?))
+        }
+    };
+    let agent_control = is_text(prior_fields.get("control"), "agent");
+    list(current.get("comments"))?;
+    let mut comments = std::mem::replace(current.get_mut("comments").unwrap(), Json::Null)
+        .into_array()
+        .unwrap();
+    for entry in &mut comments {
+        *entry = comment(std::mem::replace(entry, Json::Null))?;
+    }
+    scheduling_context(&current, &mut comments)?;
     if let Some(route) = current.remove("nativeRoute") {
         if current.get("nativeRoutes").is_none() {
             current.insert("nativeRoutes", Json::Array(vec![route]));
@@ -220,70 +259,30 @@ pub(super) fn json(task: &Json) -> IvyResult<Json> {
     ] {
         current.remove(key);
     }
-    let prior_fields = prior.get("fields").ok_or_else(value::invalid)?;
-    let mut fields = object(prior_fields)?;
+    let fields = current.get_mut("fields").unwrap();
     fields.remove("dependencies");
     fields.remove("nextReviewAt");
-    let requirement = prior_fields.get("executionRequirement");
-    if let Some(requirement) = configuration::requirement_json(requirement) {
-        fields.insert("executionRequirement", requirement.into_owned());
+    if let Some(requirement) = requirement_change {
+        fields.insert("executionRequirement", requirement);
     }
-    if is_text(
-        requirement.and_then(|requirement| requirement.get("kind")),
-        "capability",
-    ) {
-        let capabilities = list(prior_fields.get("requiredCapabilities"))?
-            .iter()
-            .cloned()
-            .chain(std::iter::once(
-                requirement
-                    .and_then(|v| v.get("capabilityKey"))
-                    .cloned()
-                    .ok_or_else(value::invalid)?,
-            ));
-        fields.insert("requiredCapabilities", Json::Array(ids(capabilities)?));
+    if let Some(capabilities) = capabilities {
+        fields.insert("requiredCapabilities", capabilities);
     }
-    let imported = schedule(
-        prior.get("nextSteps"),
-        prior_fields.get("nextReviewAt"),
-        prior.get("waiting"),
-    )?;
-    let dependencies = match prior.get("dependencies").filter(|value| !value.is_null()) {
-        Some(dependencies) => {
-            list(Some(dependencies))?;
-            dependencies.clone()
-        }
-        None => {
-            let mut dependencies = imported.dependencies;
-            dependencies.extend_from_slice(list(prior_fields.get("dependencies"))?);
-            if let Some(task_id) = prior.get("blocker").and_then(|v| v.get("taskId")) {
-                dependencies.push(task_id.clone());
-            }
-            Json::Array(ids(dependencies)?)
-        }
-    };
-    let mut comments = list(prior.get("comments"))?
-        .iter()
-        .map(comment)
-        .collect::<IvyResult<Vec<_>>>()?;
-    scheduling_context(&prior, &mut comments)?;
-    current.insert("fields", fields);
-    current.insert(
-        "wakeAt",
-        prior.get("wakeAt").cloned().unwrap_or(imported.wake_at),
-    );
-    current.insert("dependencies", dependencies);
-    current.insert(
-        "runtimeWait",
-        prior
-            .get("runtimeWait")
-            .filter(|wait| !wait.is_null() && !is_text(wait.get("reason"), "workflow"))
-            .cloned()
-            .unwrap_or(Json::Null),
-    );
+    if current.get("wakeAt").is_none() {
+        current.insert("wakeAt", imported.wake_at);
+    }
+    if let Some(dependencies) = dependencies {
+        current.insert("dependencies", dependencies);
+    }
+    if !current
+        .get("runtimeWait")
+        .is_some_and(|wait| !wait.is_null() && !is_text(wait.get("reason"), "workflow"))
+    {
+        current.insert("runtimeWait", Json::Null);
+    }
     current.insert("comments", Json::Array(comments));
-    let has_claim = prior.get("claim").is_some_and(|claim| !claim.is_null());
-    let obsolete = prior
+    let has_claim = current.get("claim").is_some_and(|claim| !claim.is_null());
+    let obsolete = current
         .get("completionIssue")
         .and_then(|issue| issue.get("code"))
         .and_then(Json::as_js_string)
@@ -298,27 +297,23 @@ pub(super) fn json(task: &Json) -> IvyResult<Json> {
         if !has_claim && is_text(current.get("workflowState"), "waiting") {
             current.insert("workflowState", "todo".into());
         }
-    } else if let Some(issue) = prior
-        .get("completionIssue")
+    } else if let Some(issue) = current
+        .get_mut("completionIssue")
         .filter(|issue| !issue.is_null())
     {
-        let mut issue = object(issue)?;
+        issue.as_object().ok_or_else(value::invalid)?;
         issue.remove("attempts");
-        current.insert("completionIssue", issue);
     }
-    if !has_claim
-        && is_text(current.get("workflowState"), "in_progress")
-        && is_text(prior_fields.get("control"), "agent")
-    {
+    if !has_claim && is_text(current.get("workflowState"), "in_progress") && agent_control {
         current.insert("workflowState", "todo".into());
     }
     Ok(current)
 }
 
-pub(super) fn run(run: &Json) -> IvyResult<Json> {
-    let mut current = object(run)?;
-    if let Some(context) = run
-        .get("executionContext")
+pub(super) fn run(mut current: Json) -> IvyResult<Json> {
+    current.as_object().ok_or_else(value::invalid)?;
+    if let Some(context) = current
+        .get_mut("executionContext")
         .filter(|context| !context.is_null())
     {
         if context.as_object().is_none() {
@@ -326,11 +321,11 @@ pub(super) fn run(run: &Json) -> IvyResult<Json> {
         }
         let mut normalized = Json::Object(Vec::new());
         for key in ["workflowState", "latestResult", "acceptedReview"] {
-            if let Some(value) = context.get(key) {
-                normalized.insert(key, value.clone());
+            if let Some(value) = context.get_mut(key) {
+                normalized.insert(key, std::mem::replace(value, Json::Null));
             }
         }
-        current.insert("executionContext", normalized);
+        *context = normalized;
     }
     Ok(current)
 }

@@ -1,12 +1,14 @@
 #[path = "reference-data.rs"]
 mod reference_data;
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, Outcome, hash::hash_json, json::parse,
+    IvyError, IvyJson as Json, IvyResult, JsString, Outcome,
+    hash::hash_json,
+    json::{canonical, parse},
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use ivy_task_board::{
-    engine_read::{EngineReads, ReadContext, ReadRuntime, execution_condition, workspace_identity},
+    engine_read::{EngineReads, ReadContext, ReadRuntime, workspace_identity},
     journal_store::Contracts,
     native_lifecycle::{LifecycleDocument, LifecycleStore},
     operations::{Document, Operations, Store},
@@ -32,11 +34,7 @@ fn data() -> &'static Json {
     static D: OnceLock<Json> = OnceLock::new();
     D.get_or_init(|| {
         let p = reference_data::read(include_bytes!("task-board-engine-read-cases.json.gz"));
-        parse(
-            std::str::from_utf8(&p).unwrap(),
-            MANAGEMENT_FRAME_BYTES,
-        )
-        .unwrap()
+        parse(std::str::from_utf8(&p).unwrap(), MANAGEMENT_FRAME_BYTES).unwrap()
     })
 }
 fn error(v: &Json) -> IvyError {
@@ -119,12 +117,28 @@ struct World {
     replay: Arc<Replay>,
     root: Option<JsString>,
 }
+// The retained query corpus predates mandatory conversation admission. Its
+// fragments represent empty conversations, not records with missing history.
+fn task_fragment(value: &Json) -> Json {
+    let mut task = value.clone();
+    if task.get("comments").is_none() {
+        task.insert("comments", Json::Array(vec![]));
+    }
+    task
+}
 fn document(v: &Json) -> Document {
+    let original = v.required("value").unwrap();
+    let value = if original.get("taskKey").is_some() {
+        task_fragment(original)
+    } else {
+        original.clone()
+    };
     Document {
-        pin: v.required("pin").unwrap().clone(),
-        value: v.required("value").unwrap().clone(),
+        pin: ivy_task_board::operations::ObjectPin::from_json(v.required("pin").unwrap().clone())
+            .unwrap(),
+        content_hash: hash_json(&value).unwrap(),
+        value,
         parent_id: f(f(v, "metadata"), "parentId").as_js_string().cloned(),
-        content_hash: hash_json(v.required("value").unwrap()).unwrap(),
     }
 }
 impl World {
@@ -179,7 +193,15 @@ impl Store for World {
     async fn prepared_mutation_id(&self, _: &str) -> IvyResult<JsString> {
         unreachable!()
     }
-    async fn write_prepared(&self, _: &str, _: &Json, _: &JsString, _: &Json) -> IvyResult<Json> {
+    async fn write_prepared(
+        &self,
+        _: &str,
+        _: &Json,
+        _: &JsString,
+        _: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
+    ) -> IvyResult<Json> {
         unreachable!()
     }
 }
@@ -211,8 +233,26 @@ impl LifecycleStore for World {
     }
 }
 #[tokio::test(flavor = "current_thread")]
-async fn engine_reads_match_original_queries_peer_paths_conditions_and_marker_retries() {
+async fn engine_reads_keep_original_queries_peer_paths_and_marker_retries() {
+    let mut queries = 0;
+    let mut former_conditions = 0;
     for row in data().as_array().unwrap() {
+        assert_eq!(
+            hash_json(f(row, "expected")).unwrap(),
+            s(row, "expectedHash").to_utf8().unwrap()
+        );
+        // Current condition precedence is exercised in task-board-condition.rs.
+        // These old waiting-model assertions predate that deliberate change.
+        if f(row, "steps")
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|step| f(step, "kind").is_str("condition"))
+        {
+            former_conditions += 1;
+            continue;
+        }
+        queries += 1;
         let replay = Arc::new(Replay {
             steps: Mutex::new(
                 f(row, "boundaries")
@@ -269,7 +309,6 @@ async fn engine_reads_match_original_queries_peer_paths_conditions_and_marker_re
                 check_cancelled: &cancelled,
             };
             let r = match s(step, "kind").to_utf8().unwrap().as_str() {
-                "condition" => execution_condition(f(step, "task")),
                 "workspace" => workspace_identity(&operations.store, f(step, "task"))
                     .await
                     .map(|v| v.map(Json::String).unwrap_or(Json::Null)),
@@ -295,12 +334,34 @@ async fn engine_reads_match_original_queries_peer_paths_conditions_and_marker_re
             outcomes.push(outcome(r));
         }
         let actual = Json::object([("outcomes", Json::Array(outcomes))]);
+        let mut expected = f(row, "expected").clone();
+        let Json::Array(expected_outcomes) = expected.get_mut("outcomes").unwrap() else {
+            unreachable!()
+        };
+        for value in expected_outcomes {
+            if let Some(ok) = value.get_mut("ok") {
+                if ok.get("executionCondition").is_none() {
+                    continue;
+                }
+                if let Some(task) = ok.get_mut("task") {
+                    *task = task_fragment(task);
+                    let condition = ok.get_mut("executionCondition").unwrap();
+                    assert_eq!(condition.get("state"), Some(&Json::from("queued")));
+                    assert_eq!(
+                        condition.get("detail"),
+                        Some(&Json::from("Waiting for the next available execution PC."))
+                    );
+                    condition.insert("detail", "Queued for the agent to continue.".into());
+                }
+            }
+        }
         assert_eq!(
             hash_json(&actual).unwrap(),
-            s(row, "expectedHash").to_utf8().unwrap(),
-            "{:?}: actual {actual:?}, expected {:?}",
-            replay.name,
-            f(row, "expected")
+            hash_json(&expected).unwrap(),
+            "{}: actual {}, expected {}",
+            String::from_utf16_lossy(&replay.name.0),
+            canonical(&actual, MANAGEMENT_FRAME_BYTES).unwrap(),
+            canonical(&expected, MANAGEMENT_FRAME_BYTES).unwrap(),
         );
         assert!(
             replay.steps.lock().unwrap().is_empty(),
@@ -308,4 +369,5 @@ async fn engine_reads_match_original_queries_peer_paths_conditions_and_marker_re
             replay.name
         );
     }
+    assert_eq!((queries, former_conditions), (81, 34));
 }

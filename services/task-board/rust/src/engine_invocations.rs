@@ -6,66 +6,67 @@ use crate::{
     journal_store::{CapturedReadScope, Contracts, ReadScopes},
     operations::Store,
     reconciler::ReconcileExecutor,
+    work_budget::{MAX_WORK_ITEMS, Reservation, WorkBudget},
 };
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, Outcome};
 use std::{
-    cell::RefCell,
-    future::{Future, poll_fn},
+    cell::Cell,
+    future::Future,
     pin::Pin,
     rc::Rc,
-    task::{Context, Poll, Waker},
+    sync::Arc,
+    task::{Context, Poll},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc, oneshot};
 
-#[derive(Default)]
-struct Completion {
-    result: Option<IvyResult<Json>>,
-    waiters: Vec<Waker>,
-}
+const CALL_OVERHEAD: usize = 4096;
 #[derive(Default)]
 struct State {
-    stopped: bool,
-    active: usize,
-    waiters: Vec<Waker>,
+    stopped: Cell<bool>,
+    active: Cell<usize>,
+    drained: Notify,
 }
 /// A reply observer. Dropping it never drops the owner's accepted future.
 pub struct InvocationRequest {
-    completion: Rc<RefCell<Completion>>,
+    received: oneshot::Receiver<IvyResult<Json>>,
+    _reservation: Arc<Reservation>,
 }
 impl Future for InvocationRequest {
     type Output = IvyResult<Json>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut completion = self.completion.borrow_mut();
-        if let Some(result) = &completion.result {
-            Poll::Ready(result.clone())
-        } else {
-            if !completion.waiters.iter().any(|w| w.will_wake(cx.waker())) {
-                completion.waiters.push(cx.waker().clone());
-            }
-            Poll::Pending
-        }
+        Pin::new(&mut self.get_mut().received)
+            .poll(cx)
+            .map(|result| result.unwrap_or_else(|_| Err(interrupted())))
     }
 }
 struct Accepted {
-    state: Rc<RefCell<State>>,
-    completion: Rc<RefCell<Completion>>,
+    state: Rc<State>,
+    reply: Option<oneshot::Sender<IvyResult<Json>>>,
+    reservation: Arc<Reservation>,
 }
-fn accept(state: &Rc<RefCell<State>>) -> IvyResult<(InvocationRequest, Accepted)> {
+fn accept(
+    state: &Rc<State>,
+    budget: &WorkBudget,
+    bytes: usize,
+) -> IvyResult<(InvocationRequest, Accepted)> {
     check_open(state)?;
-    let completion = Rc::new(RefCell::new(Completion::default()));
-    state.borrow_mut().active += 1;
+    let reservation = budget.call(CALL_OVERHEAD.saturating_add(bytes))?;
+    let (reply, received) = oneshot::channel();
+    state.active.set(state.active.get() + 1);
     Ok((
         InvocationRequest {
-            completion: completion.clone(),
+            received,
+            _reservation: reservation.clone(),
         },
         Accepted {
             state: state.clone(),
-            completion,
+            reply: Some(reply),
+            reservation,
         },
     ))
 }
-fn check_open(state: &RefCell<State>) -> IvyResult<()> {
-    if state.borrow().stopped {
+fn check_open(state: &State) -> IvyResult<()> {
+    if state.stopped.get() {
         Err(IvyError::new(
             "service_not_ready",
             "TaskBoard has no reconciled current connection generation.",
@@ -74,67 +75,57 @@ fn check_open(state: &RefCell<State>) -> IvyResult<()> {
         Ok(())
     }
 }
-async fn settled(state: &RefCell<State>) {
-    poll_fn(|cx| {
-        let mut state = state.borrow_mut();
-        if state.active == 0 {
-            Poll::Ready(())
-        } else {
-            if !state.waiters.iter().any(|w| w.will_wake(cx.waker())) {
-                state.waiters.push(cx.waker().clone());
-            }
-            Poll::Pending
-        }
-    })
-    .await
+fn interrupted() -> IvyError {
+    IvyError::new("internal_error", "Service invocation failed.").with_outcome(Outcome::Unknown)
 }
-async fn complete(accepted: Accepted, work: impl Future<Output = IvyResult<Json>>) {
+async fn settled(state: &State) {
+    loop {
+        let changed = state.drained.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        if state.active.get() == 0 {
+            return;
+        }
+        changed.await;
+    }
+}
+async fn complete(mut accepted: Accepted, work: impl Future<Output = IvyResult<Json>>) {
     let result = work.await;
-    accepted.completion.borrow_mut().result = Some(result);
-    drop(accepted);
+    if let Some(reply) = accepted.reply.take() {
+        if !reply.is_closed() {
+            let result = accepted.reservation.reply(result, CALL_OVERHEAD);
+            let _ = reply.send(result);
+        }
+    }
 }
 impl Drop for Accepted {
     fn drop(&mut self) {
-        let replies = {
-            let mut completion = self.completion.borrow_mut();
-            // Match the SDK's failed-handler outcome if the owner unwinds.
-            completion.result.get_or_insert_with(|| {
-                Err(
-                    IvyError::new("internal_error", "Service invocation failed.")
-                        .with_outcome(Outcome::Unknown),
-                )
-            });
-            std::mem::take(&mut completion.waiters)
-        };
-        let drained = {
-            let mut state = self.state.borrow_mut();
-            state.active -= 1;
-            if state.active == 0 {
-                std::mem::take(&mut state.waiters)
-            } else {
-                vec![]
-            }
-        };
-        for waiter in replies.into_iter().chain(drained) {
-            waiter.wake();
+        if let Some(reply) = self.reply.take() {
+            let _ = reply.send(Err(interrupted()));
+        }
+        self.state.active.set(self.state.active.get() - 1);
+        if self.state.active.get() == 0 {
+            self.state.drained.notify_waiters();
         }
     }
 }
 pub struct EngineInvocations<'a, 'x, X> {
     executor: &'x X,
-    state: Rc<RefCell<State>>,
+    state: Rc<State>,
+    budget: WorkBudget,
     lifetime: std::marker::PhantomData<&'a ()>,
 }
 impl<'a, 'x, X: ReconcileExecutor<'a>> EngineInvocations<'a, 'x, X> {
     pub fn new(executor: &'x X) -> Self {
+        Self::with_budget(executor, WorkBudget::default())
+    }
+    pub fn with_budget(executor: &'x X, budget: WorkBudget) -> Self {
         Self {
             executor,
-            state: Rc::new(RefCell::new(State::default())),
+            state: Rc::new(State::default()),
+            budget,
             lifetime: std::marker::PhantomData,
         }
-    }
-    fn check_open(&self) -> IvyResult<()> {
-        check_open(&self.state)
     }
     /// Retain the entire handler, including any pre-Operation RPC or write.
     /// Do not coalesce here: Operations must compare each original request.
@@ -142,8 +133,19 @@ impl<'a, 'x, X: ReconcileExecutor<'a>> EngineInvocations<'a, 'x, X> {
         &self,
         work: impl Future<Output = IvyResult<Json>> + 'a,
     ) -> IvyResult<InvocationRequest> {
-        let (observer, accepted) = accept(&self.state)?;
-        self.executor.spawn(Box::pin(complete(accepted, work)));
+        self.run_with(0, || work)
+    }
+    fn run_with<F: Future<Output = IvyResult<Json>> + 'a>(
+        &self,
+        bytes: usize,
+        build: impl FnOnce() -> F,
+    ) -> IvyResult<InvocationRequest> {
+        let (observer, accepted) = accept(
+            &self.state,
+            &self.budget,
+            bytes.saturating_add(std::mem::size_of::<F>()),
+        )?;
+        self.executor.spawn(Box::pin(complete(accepted, build())));
         Ok(observer)
     }
     /// Own the input and identity, so the caller's stack is not the lifetime of
@@ -154,25 +156,30 @@ impl<'a, 'x, X: ReconcileExecutor<'a>> EngineInvocations<'a, 'x, X> {
         input: &Json,
         context: &ReadContext<'_>,
     ) -> IvyResult<InvocationRequest> {
-        self.check_open()?;
-        let input = input.clone();
-        let cancelled = (context.check_cancelled)();
-        let caller = context.caller_principal_id.clone();
-        let operation = context.operation_id.clone();
-        let generation = context.generation;
-        self.run(async move {
-            let check_cancelled = || cancelled.clone();
-            engine
-                .invoke(
-                    &input,
-                    &ReadContext {
-                        caller_principal_id: &caller,
-                        operation_id: &operation,
-                        generation,
-                        check_cancelled: &check_cancelled,
-                    },
-                )
-                .await
+        let bytes = input
+            .retained_bytes()
+            .saturating_add(context.caller_principal_id.0.capacity().saturating_mul(2))
+            .saturating_add(context.operation_id.0.capacity().saturating_mul(2));
+        self.run_with(bytes, || {
+            let input = input.clone();
+            let cancelled = (context.check_cancelled)();
+            let caller = context.caller_principal_id.clone();
+            let operation = context.operation_id.clone();
+            let generation = context.generation;
+            async move {
+                let check_cancelled = || cancelled.clone();
+                engine
+                    .invoke(
+                        &input,
+                        &ReadContext {
+                            caller_principal_id: &caller,
+                            operation_id: &operation,
+                            generation,
+                            check_cancelled: &check_cancelled,
+                        },
+                    )
+                    .await
+            }
         })
     }
     /// Internal native/scheduler/recovery calls retain pre-Operation admission
@@ -183,36 +190,40 @@ impl<'a, 'x, X: ReconcileExecutor<'a>> EngineInvocations<'a, 'x, X> {
         engine: &'a EngineAdmission<'a, S, C, P, E>,
         request: &Json,
     ) -> IvyResult<InvocationRequest> {
-        self.check_open()?;
-        let request = request.clone();
-        self.run(async move { engine.native_update(&request).await })
+        self.run_with(request.retained_bytes(), || {
+            let request = request.clone();
+            async move { engine.native_update(&request).await }
+        })
     }
     pub fn native_comment<S: Store, C: Fn() -> String, P: Contracts, E: AdmissionExecution>(
         &self,
         engine: &'a EngineAdmission<'a, S, C, P, E>,
         request: &Json,
     ) -> IvyResult<InvocationRequest> {
-        self.check_open()?;
-        let request = request.clone();
-        self.run(async move { engine.native_comment(&request).await })
+        self.run_with(request.retained_bytes(), || {
+            let request = request.clone();
+            async move { engine.native_comment(&request).await }
+        })
     }
     pub fn schedule<S: Store, C: Fn() -> String, P: Contracts, E: AdmissionExecution>(
         &self,
         engine: &'a EngineAdmission<'a, S, C, P, E>,
         request: &Json,
     ) -> IvyResult<InvocationRequest> {
-        self.check_open()?;
-        let request = request.clone();
-        self.run(async move { engine.schedule(&request).await })
+        self.run_with(request.retained_bytes(), || {
+            let request = request.clone();
+            async move { engine.schedule(&request).await }
+        })
     }
     pub fn recover_operation<S: Store, C: Fn() -> String, P: Contracts, E: AdmissionExecution>(
         &self,
         engine: &'a EngineAdmission<'a, S, C, P, E>,
         object_id: &ivy_contracts::JsString,
     ) -> IvyResult<InvocationRequest> {
-        self.check_open()?;
-        let object_id = object_id.clone();
-        self.run(async move { engine.recover_operation(&object_id).await })
+        self.run_with(object_id.0.capacity().saturating_mul(2), || {
+            let object_id = object_id.clone();
+            async move { engine.recover_operation(&object_id).await }
+        })
     }
     pub fn recover_publication<
         S: crate::publication_coordination::CoordinationStore,
@@ -228,7 +239,7 @@ impl<'a, 'x, X: ReconcileExecutor<'a>> EngineInvocations<'a, 'x, X> {
     /// Call synchronously when retiring the generation, before waiting for any
     /// other owner work. Already accepted handlers can still enter execution.
     pub fn stop_admissions(&self) {
-        self.state.borrow_mut().stopped = true;
+        self.state.stopped.set(true);
     }
     pub async fn settled(&self) {
         settled(&self.state).await
@@ -244,10 +255,11 @@ impl<'a, 'x, X: ReconcileExecutor<'a>> EngineInvocations<'a, 'x, X> {
         &self,
         scopes: &'s ReadScopes,
     ) -> (InternalCalls<'s>, InternalOwner<'s, 'x, X>) {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(MAX_WORK_ITEMS);
         (
             InternalCalls {
                 state: self.state.clone(),
+                budget: self.budget.clone(),
                 sender,
                 scopes,
             },
@@ -276,51 +288,64 @@ struct InternalCall {
 /// A local callback handle containing no reference to the cyclic engine graph.
 #[derive(Clone)]
 pub struct InternalCalls<'s> {
-    state: Rc<RefCell<State>>,
-    sender: mpsc::UnboundedSender<InternalCall>,
+    state: Rc<State>,
+    budget: WorkBudget,
+    sender: mpsc::Sender<InternalCall>,
     scopes: &'s ReadScopes,
 }
 impl InternalCalls<'_> {
-    fn submit(&self, action: InternalAction) -> IvyResult<InvocationRequest> {
-        let (observer, accepted) = accept(&self.state)?;
+    fn submit(
+        &self,
+        bytes: usize,
+        build: impl FnOnce() -> InternalAction,
+    ) -> IvyResult<InvocationRequest> {
+        let (observer, accepted) = accept(&self.state, &self.budget, bytes)?;
         // A lost receiver drops Accepted, retaining the existing unknown reply.
-        let _ = self.sender.send(InternalCall {
-            action,
+        let _ = self.sender.try_send(InternalCall {
+            action: build(),
             context: self.scopes.capture(),
             accepted,
         });
         Ok(observer)
     }
     pub fn native_update(&self, request: &Json) -> IvyResult<InvocationRequest> {
-        self.submit(InternalAction::NativeUpdate(request.clone()))
+        self.submit(request.retained_bytes(), || {
+            InternalAction::NativeUpdate(request.clone())
+        })
     }
     pub fn native_comment(&self, request: &Json) -> IvyResult<InvocationRequest> {
-        self.submit(InternalAction::NativeComment(request.clone()))
+        self.submit(request.retained_bytes(), || {
+            InternalAction::NativeComment(request.clone())
+        })
     }
     pub fn schedule(&self, request: &Json) -> IvyResult<InvocationRequest> {
-        self.submit(InternalAction::Schedule(request.clone()))
+        self.submit(request.retained_bytes(), || {
+            InternalAction::Schedule(request.clone())
+        })
     }
     pub fn recover_operation(
         &self,
         object_id: &ivy_contracts::JsString,
     ) -> IvyResult<InvocationRequest> {
-        self.submit(InternalAction::RecoverOperation(object_id.clone()))
+        self.submit(object_id.0.capacity().saturating_mul(2), || {
+            InternalAction::RecoverOperation(object_id.clone())
+        })
     }
     pub fn recover_publication(&self) -> IvyResult<InvocationRequest> {
-        self.submit(InternalAction::RecoverPublication)
+        self.submit(0, || InternalAction::RecoverPublication)
     }
 }
 /// Drive alongside the generation root using the existing owner executor.
 /// Releasing this receiver closes all admission; queued calls report unknown.
 pub struct InternalOwner<'s, 'x, X> {
-    state: Rc<RefCell<State>>,
-    receiver: mpsc::UnboundedReceiver<InternalCall>,
+    state: Rc<State>,
+    receiver: mpsc::Receiver<InternalCall>,
     executor: &'x X,
     scopes: &'s ReadScopes,
 }
 impl<X> Drop for InternalOwner<'_, '_, X> {
     fn drop(&mut self) {
-        self.state.borrow_mut().stopped = true;
+        self.state.stopped.set(true);
     }
 }
 impl<'s, X> InternalOwner<'s, '_, X> {
@@ -354,7 +379,7 @@ impl<'s, X> InternalOwner<'s, '_, X> {
                 }
             }
         };
-        self.state.borrow_mut().stopped = true;
+        self.state.stopped.set(true);
         self.receiver.close();
         while let Some(call) = self.receiver.recv().await {
             self.dispatch(engine, call);

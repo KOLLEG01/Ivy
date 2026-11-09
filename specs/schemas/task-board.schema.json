@@ -3062,7 +3062,7 @@
       ],
       "additionalProperties": false
     },
-    "TaskListQuery": {
+    "TaskSummaryQuery": {
       "type": "object",
       "properties": {
         "parentTaskId": {
@@ -3184,6 +3184,113 @@
         "nextCursor"
       ],
       "additionalProperties": false
+    },
+    "CardListQuery": {
+      "type": "object",
+      "properties": {
+        "view": {
+          "const": "cards"
+        },
+        "where": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/QueryPredicate"
+        },
+        "orderBy": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "field": {
+                "type": "string",
+                "pattern": "^(object\\.(id|parentId|ownerObjectId|name|path|position|icon|contractKey|revision|contractVersion|archivedAt|effectivelyArchived|createdAt|updatedAt|hasContractChildren)|data:/.*)$",
+                "maxLength": 512
+              },
+              "direction": {
+                "enum": [
+                  "asc",
+                  "desc"
+                ]
+              }
+            },
+            "required": [
+              "field",
+              "direction"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 3
+        },
+        "includeArchived": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        }
+      },
+      "required": [
+        "view"
+      ],
+      "additionalProperties": false
+    },
+    "TaskListQuery": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TaskSummaryQuery"
+        },
+        {
+          "$ref": "#/$defs/CardListQuery"
+        }
+      ]
+    },
+    "CardListResult": {
+      "type": "object",
+      "properties": {
+        "view": {
+          "const": "cards"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TaskCardView"
+          },
+          "maxItems": 20
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "view",
+        "items",
+        "nextCursor"
+      ],
+      "additionalProperties": false
+    },
+    "ListResult": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TaskListResult"
+        },
+        {
+          "$ref": "#/$defs/CardListResult"
+        }
+      ]
     },
     "MarkCommentsReadRequest": {
       "type": "object",
@@ -5971,6 +6078,9 @@
               "type": "null"
             }
           ]
+        },
+        "payloadContract": {
+          "const": "task-board/prepared-payload"
         }
       },
       "required": [
@@ -5980,6 +6090,58 @@
         "payload",
         "destination",
         "outcome"
+      ],
+      "additionalProperties": false
+    },
+    "PreparedPayload": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "contractKey": {
+          "const": "task-board/task"
+        },
+        "contractVersion": {
+          "enum": [
+            "1.0.0",
+            "1.1.0",
+            "1.2.0",
+            "1.3.0",
+            "1.4.0",
+            "1.5.0",
+            "1.6.0",
+            "1.7.0",
+            "1.8.0",
+            "1.9.0",
+            "1.10.0",
+            "1.11.0",
+            "1.12.0",
+            "2.0.0",
+            "2.1.0",
+            "2.2.0",
+            "2.3.0",
+            "3.0.0",
+            "3.1.0",
+            "3.2.0",
+            "3.3.0",
+            "3.4.0",
+            "3.5.0"
+          ]
+        },
+        "content": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Json"
+        },
+        "references": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/RevisionReferences"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "contractKey",
+        "contractVersion",
+        "content",
+        "references"
       ],
       "additionalProperties": false
     },

@@ -1,4 +1,4 @@
-//! Query planning for admitted ObjectQuery input and immutable object reads.
+//! Bounded object pages and SQL group counts share query admission and cursors.
 use crate::{
     paging::{PAGE_BYTES, page},
     store::Store,
@@ -243,6 +243,15 @@ impl Builder {
 
 /// The caller admits ObjectQuery. Query projection does not admit object writes.
 pub fn query_objects(store: &Store, params: &IvyJson) -> IvyResult<IvyJson> {
+    query(store, params, false)
+}
+
+/// The caller admits ObjectCountQuery. Count only authoritative current revisions.
+pub fn count_objects(store: &Store, params: &IvyJson) -> IvyResult<IvyJson> {
+    query(store, params, true)
+}
+
+fn query(store: &Store, params: &IvyJson, counts: bool) -> IvyResult<IvyJson> {
     let key = argument(params.get("contractKey").and_then(IvyJson::as_js_string))?;
     let media: Option<String> = store
         .connection()
@@ -288,14 +297,36 @@ pub fn query_objects(store: &Store, params: &IvyJson) -> IvyResult<IvyJson> {
     }
     let defaults = vec![IvyJson::from("object.name"), IvyJson::from("object.path")];
     let projection = params
-        .get("select")
+        .get(if counts { "groupBy" } else { "select" })
         .and_then(IvyJson::as_array)
         .unwrap_or(&defaults);
-    let ordering = params
-        .get("orderBy")
-        .and_then(IvyJson::as_array)
-        .unwrap_or(&[]);
-    let mut identity = IvyJson::object([("method", IvyJson::from("objects.query"))]);
+    let ordering = if counts {
+        projection
+            .iter()
+            .map(|field| Ok((argument(field.as_js_string())?, false)))
+            .collect::<IvyResult<Vec<_>>>()?
+    } else {
+        params
+            .get("orderBy")
+            .and_then(IvyJson::as_array)
+            .unwrap_or(&[])
+            .iter()
+            .map(|order| {
+                Ok((
+                    argument(order.get("field").and_then(IvyJson::as_js_string))?,
+                    order.get("direction") == Some(&IvyJson::from("desc")),
+                ))
+            })
+            .collect::<IvyResult<Vec<_>>>()?
+    };
+    let mut identity = IvyJson::object([(
+        "method",
+        IvyJson::from(if counts {
+            "objects.count"
+        } else {
+            "objects.query"
+        }),
+    )]);
     for (k, v) in argument(params.as_object())? {
         if k != &JsString::from("cursor") {
             identity.insert(k.clone(), v.clone());
@@ -309,22 +340,26 @@ pub fn query_objects(store: &Store, params: &IvyJson) -> IvyResult<IvyJson> {
         .transpose()?
         .flatten();
     let boundary = boundary.as_ref();
-    let mut columns = vec![
-        "o.id".into(),
-        "r.revision".into(),
-        "r.contract_version".into(),
-    ];
-    for (prefix, fields) in [("s", projection), ("k", ordering)] {
-        for (index, field) in fields.iter().enumerate() {
-            let name = if prefix == "s" {
-                field
-            } else {
-                argument(field.get("field"))?
-            };
-            let expr = builder.field(argument(name.as_js_string())?, &[])?;
-            columns.push(format!("{} AS {prefix}{index}t", expr.kind));
-            columns.push(format!("{} AS {prefix}{index}v", expr.value));
+    let mut columns = if counts {
+        vec![]
+    } else {
+        vec![
+            "o.id".into(),
+            "r.revision".into(),
+            "r.contract_version".into(),
+        ]
+    };
+    if !counts {
+        for (index, field) in projection.iter().enumerate() {
+            let expr = builder.field(argument(field.as_js_string())?, &[])?;
+            columns.push(format!("{} AS s{index}t", expr.kind));
+            columns.push(format!("{} AS s{index}v", expr.value));
         }
+    }
+    for (index, (name, _)) in ordering.iter().enumerate() {
+        let expr = builder.field(name, &[])?;
+        columns.push(format!("{} AS k{index}t", expr.kind));
+        columns.push(format!("{} AS k{index}v", expr.value));
     }
     let mut conditions = vec![
         format!("o.contract_key={}", builder.bind(Value::Text(text(key)))),
@@ -349,7 +384,7 @@ pub fn query_objects(store: &Store, params: &IvyJson) -> IvyResult<IvyJson> {
                 .get("sort")
                 .and_then(IvyJson::as_array)
                 .is_some_and(|s| s.len() == ordering.len())
-                && boundary.get("id").and_then(IvyJson::as_js_string).is_some(),
+                && (counts || boundary.get("id").and_then(IvyJson::as_js_string).is_some()),
             "invalid_cursor",
             "Invalid query boundary.",
         )?;
@@ -357,8 +392,8 @@ pub fn query_objects(store: &Store, params: &IvyJson) -> IvyResult<IvyJson> {
     let mut sorting = vec![];
     let mut continuation = vec![];
     let mut prefix = vec![];
-    for (index, order) in ordering.iter().enumerate() {
-        let desc = order.get("direction") == Some(&IvyJson::from("desc"));
+    for (index, (_, desc)) in ordering.iter().enumerate() {
+        let desc = *desc;
         sorting.extend([
             format!("k{index}t ASC"),
             format!(
@@ -397,8 +432,10 @@ pub fn query_objects(store: &Store, params: &IvyJson) -> IvyResult<IvyJson> {
             prefix.push(format!("k{index}v IS {v}"));
         }
     }
-    sorting.push("id ASC".into());
-    if let Some(boundary) = boundary {
+    if !counts {
+        sorting.push("id ASC".into());
+    }
+    if let Some(boundary) = boundary.filter(|_| !counts) {
         prefix.push(format!(
             "id > {}",
             builder.bind(sql_value(boundary.get("id").unwrap())?)
@@ -410,10 +447,21 @@ pub fn query_objects(store: &Store, params: &IvyJson) -> IvyResult<IvyJson> {
         .and_then(IvyJson::as_f64)
         .unwrap_or(50.0) as usize;
     let count = builder.bind(Value::Integer((limit + 1) as i64));
+    let aggregate = if counts {
+        let groups = (0..ordering.len())
+            .flat_map(|i| [format!("k{i}t"), format!("k{i}v")])
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(", counted AS (SELECT {groups}, COUNT(*) AS n FROM matched GROUP BY {groups})")
+    } else {
+        String::new()
+    };
     let sql = format!(
-        "WITH matched AS (SELECT {} FROM objects o JOIN revisions r ON r.object_id=o.id AND r.revision=o.current_revision WHERE {}) SELECT * FROM matched {} ORDER BY {} LIMIT {count}",
+        "WITH matched AS (SELECT {} FROM objects o JOIN revisions r ON r.object_id=o.id AND r.revision=o.current_revision WHERE {}) {} SELECT * FROM {} {} ORDER BY {} LIMIT {count}",
         columns.join(","),
         conditions.join(" AND "),
+        aggregate,
+        if counts { "counted" } else { "matched" },
         if boundary.is_some() {
             format!("WHERE {}", continuation.join(" OR "))
         } else {
@@ -436,33 +484,53 @@ pub fn query_objects(store: &Store, params: &IvyJson) -> IvyResult<IvyJson> {
         }
     }
     let mut query = statement.raw_query();
-    let mut rows = vec![];
-    while let Some(row) = query.next().map_err(|e| store.query_error(e))? {
-        rows.push(
-            (0..columns.len())
-                .map(|i| row_value(row, i))
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(|e| store.query_error(e))?,
-        );
-    }
     let mut items = vec![];
     let mut bytes = 128;
-    for row in rows.iter().take(limit) {
+    let mut last = None;
+    let mut more = false;
+    // Materialize one row at a time. A byte-limited page must not first retain
+    // every selected scalar or complete document from up to 201 query rows.
+    while let Some(raw) = query.next().map_err(|e| store.query_error(e))? {
+        if items.len() == limit {
+            more = true;
+            break;
+        }
+        let row = (0..columns.len() + usize::from(counts))
+            .map(|i| row_value(raw, i))
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| store.query_error(e))?;
         let mut values = IvyJson::object([] as [(&str, IvyJson); 0]);
+        let offset = if counts { 0 } else { 3 };
         for (index, name) in projection.iter().enumerate() {
-            let value = if row[3 + 2 * index] == IvyJson::Number(1.0) {
-                IvyJson::Bool(row[4 + 2 * index].as_f64().is_some_and(|v| v != 0.0))
+            let value = if row[offset + 2 * index] == IvyJson::Number(1.0) {
+                IvyJson::Bool(
+                    row[offset + 1 + 2 * index]
+                        .as_f64()
+                        .is_some_and(|v| v != 0.0),
+                )
             } else {
-                row[4 + 2 * index].clone()
+                row[offset + 1 + 2 * index].clone()
             };
             values.insert(argument(name.as_js_string())?.clone(), value);
         }
-        let mut item = IvyJson::object([
-            ("objectId", row[0].clone()),
-            ("revision", row[1].clone()),
-            ("contractVersion", row[2].clone()),
-            ("values", values),
-        ]);
+        let mut item = if counts {
+            let count = &row[columns.len()];
+            require(
+                count
+                    .as_f64()
+                    .is_some_and(|v| v >= 1.0 && v <= 9_007_199_254_740_991.0),
+                "result_too_large",
+                "Object count exceeds the wire integer limit.",
+            )?;
+            IvyJson::object([("values", values), ("count", count.clone())])
+        } else {
+            IvyJson::object([
+                ("objectId", row[0].clone()),
+                ("revision", row[1].clone()),
+                ("contractVersion", row[2].clone()),
+                ("values", values),
+            ])
+        };
         if include_content {
             item.insert(
                 "document",
@@ -480,30 +548,40 @@ pub fn query_objects(store: &Store, params: &IvyJson) -> IvyResult<IvyJson> {
                 "result_too_large",
                 "A selected query row exceeds the response limit.",
             )?;
+            more = true;
             break;
         }
         bytes += size;
+        last = Some(row);
         items.push(item);
     }
-    let cursor = if !items.is_empty() && rows.len() > items.len() {
-        let row = &rows[items.len() - 1];
-        let start = 3 + projection.len() * 2;
-        let sort = ordering
-            .iter()
-            .enumerate()
-            .map(|(i, _)| {
-                IvyJson::object([
-                    ("type", row[start + 2 * i].clone()),
-                    ("value", row[start + 2 * i + 1].clone()),
-                ])
-            })
-            .collect();
-        Some(store.cursor(
-            &identity,
-            &IvyJson::object([("id", row[0].clone()), ("sort", IvyJson::Array(sort))]),
-        )?)
+    let cursor = if more {
+        last.map(|row| {
+            let start = if counts { 0 } else { 3 + projection.len() * 2 };
+            let sort = ordering
+                .iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    IvyJson::object([
+                        ("type", row[start + 2 * i].clone()),
+                        ("value", row[start + 2 * i + 1].clone()),
+                    ])
+                })
+                .collect();
+            let mut boundary = IvyJson::object([("sort", IvyJson::Array(sort))]);
+            if !counts {
+                boundary.insert("id", row[0].clone());
+            }
+            store.cursor(&identity, &boundary)
+        })
+        .transpose()?
     } else {
         None
     };
+    require(
+        !counts || cursor.as_ref().is_none_or(|c| c.len() <= 8192),
+        "result_too_large",
+        "A counted group key exceeds the cursor limit.",
+    )?;
     Ok(page(items, cursor))
 }

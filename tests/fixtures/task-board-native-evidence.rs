@@ -158,7 +158,13 @@ impl ReadEvidenceStore for Memory<'_> {
                 return Err(IvyError::new("not_found", "No NativeCall fixture."));
             }
             Ok(Document {
-                pin: address.clone(),
+                pin: match address.as_js_string() {
+                    Some(object_id) => ivy_task_board::operations::ObjectPin {
+                        object_id: object_id.clone(),
+                        revision: 1.0,
+                    },
+                    None => ivy_task_board::operations::ObjectPin::from_json(address.clone())?,
+                },
                 value: merge(
                     self.call,
                     if self.active.get() {
@@ -173,7 +179,13 @@ impl ReadEvidenceStore for Memory<'_> {
         } else if key == "task-board/run" {
             self.fail("scope")?;
             Ok(Document {
-                pin: address.clone(),
+                pin: match address.as_js_string() {
+                    Some(object_id) => ivy_task_board::operations::ObjectPin {
+                        object_id: object_id.clone(),
+                        revision: 1.0,
+                    },
+                    None => ivy_task_board::operations::ObjectPin::from_json(address.clone())?,
+                },
                 value: merge(
                     self.run,
                     if self.active.get() {
@@ -207,7 +219,7 @@ impl ReadEvidenceStore for Memory<'_> {
         self.fail("manifest-write")?;
         let pin = pin("00000000-0000-4000-8000-000000000900");
         *self.document.borrow_mut() = Some(Document {
-            pin: pin.clone(),
+            pin: ivy_task_board::operations::ObjectPin::from_json(pin.clone()).unwrap(),
             value: value.clone(),
             parent_id: Some(s(destination.required("create")?, "parentId")),
             content_hash: hash_json(value)?,
@@ -250,7 +262,15 @@ impl Store for Memory<'_> {
     async fn prepared_mutation_id(&self, _: &str) -> IvyResult<JsString> {
         Err(IvyError::internal())
     }
-    async fn write_prepared(&self, _: &str, _: &Json, _: &JsString, _: &Json) -> IvyResult<Json> {
+    async fn write_prepared(
+        &self,
+        _: &str,
+        _: &Json,
+        _: &JsString,
+        _: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
+    ) -> IvyResult<Json> {
         Err(IvyError::internal())
     }
 }

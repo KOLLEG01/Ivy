@@ -40,8 +40,14 @@ where
         include_archived: bool,
     ) -> Result<Json, E> {
         let address = address.ok_or_else(IvyError::internal)?;
-        self.read_document(key, address, primary, include_archived, false)
-            .await
+        self.read_document(
+            key,
+            address,
+            primary,
+            include_archived,
+            key == "task-board/task",
+        )
+        .await
     }
 }
 /// The transport classifies its typed RPC errors before entering Store policies.
@@ -93,10 +99,10 @@ impl<M: CommentReads + ?Sized, P, E: From<IvyError>> DecodedTrees<'_, M, P, E> {
 impl<M: CommentReads + ?Sized, P: QuestionPolicies<E>, E: From<IvyError>> TreeReads<E>
     for DecodedTrees<'_, M, P, E>
 {
-    async fn hydrate(&self, task: &Json, owner: &Json) -> Result<Option<Json>, E> {
+    async fn hydrate(&self, task: Json, owner: &Json) -> Result<Option<Json>, E> {
         let owner = owner.as_js_string().ok_or_else(IvyError::internal)?;
         self.comments
-            .read_tree_with(task, owner, self.policies, &|e| self.failure(e))
+            .read_tree_owned_with(task, owner, self.policies, &|e| self.failure(e))
             .await
     }
     fn summary(&self, task: &Json, tree: &Json, owner: &Json) -> Result<Option<Json>, E> {
@@ -148,6 +154,19 @@ where
         include_archived: bool,
         retained: bool,
     ) -> Result<Json, E> {
+        Ok(self
+            .read_record(key, address, primary, include_archived, retained)
+            .await?
+            .into_json())
+    }
+    pub(crate) async fn read_record(
+        &self,
+        key: &str,
+        address: &Json,
+        primary: bool,
+        include_archived: bool,
+        retained: bool,
+    ) -> Result<crate::operations::StoredRecord, E> {
         let comments = DecodedTrees {
             comments: self.comments,
             policies: self.policies,
@@ -159,7 +178,7 @@ where
             comments: &comments,
             cache: self.cache,
         }
-        .read_document(key, address, primary, include_archived, retained)
+        .read_record(key, address, primary, include_archived, retained)
         .await
     }
 }
@@ -175,11 +194,19 @@ where
     SqlFailure: Fn(ivy_store::rusqlite::Error) -> E,
 {
     async fn read(&self, key: &str, address: &Json, header_only: bool) -> Result<Json, E> {
-        self.read_document(key, address, true, true, header_only)
-            .await?
-            .get("value")
-            .cloned()
-            .ok_or_else(|| IvyError::internal().into())
+        let comments = DecodedTrees {
+            comments: self.comments,
+            policies: self.policies,
+            source_failure: self.source_failure,
+        };
+        DocumentReads {
+            local: self.local,
+            objects: self.objects,
+            comments: &comments,
+            cache: self.cache,
+        }
+        .read(key, address, header_only)
+        .await
     }
 }
 impl<R, C, Parse, SqlFailure, P, M, E> CommentReadStore<E>

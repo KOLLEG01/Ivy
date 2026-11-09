@@ -38,6 +38,7 @@ impl TaskPrompts for PromptBoundary {
 struct Probe {
     native: NativePolicyFactory<PromptBoundary>,
     bound: Cell<usize>,
+    first_error: RefCell<Option<IvyError>>,
     file: bool,
 }
 impl PolicyFactory<RuntimeContracts, fn() -> String, fn() -> JsString, SystemClock> for Probe {
@@ -47,150 +48,170 @@ impl PolicyFactory<RuntimeContracts, fn() -> String, fn() -> JsString, SystemClo
         &'a self,
         context: PolicyContext<'a, RuntimeContracts, fn() -> String, fn() -> JsString, SystemClock>,
     ) -> IvyResult<Self::Policies<'a>> {
-        let policy = self.native.bind(context)?;
-        assert!(!policy.scheduler_enabled());
-        assert_eq!(policy.scheduler_interval_ms(), 4321.0);
-        assert_eq!(policy.page_size(), 37.0);
-        assert_eq!(
-            SchedulerJournalBindings::free_bytes(&policy)?.is_some(),
-            self.file
-        );
-        if let Some(bytes) = SchedulerJournalBindings::free_bytes(&policy)? {
-            assert!(bytes > 0.0);
-        }
-        assert_eq!(
-            CategoryLocale::lowercase_default(&policy, &JsString(vec![0xd800, 65, 0]))?,
-            JsString(vec![0xd800, 97, 0])
-        );
-        assert_eq!(
-            CategoryLocale::compare_default(&policy, &"z".into(), &"a".into()),
-            Ordering::Greater
-        );
-        assert_eq!(NativePublicationPolicies::now(&policy), clock().into());
-        assert_eq!(DeliveryPolicies::now(&policy), clock().into());
-        assert_eq!(DeliveryPolicies::phone_target(&policy), &Json::Null);
-        assert!(policy.chat_readable_version(&"fixture-chat-reader".into()));
-        assert!(!policy.chat_readable_version(&"1.0.0".into()));
+        let result = (|| -> IvyResult<_> {
+            let policy = self.native.bind(context)?;
+            assert!(!policy.scheduler_enabled());
+            assert_eq!(policy.scheduler_interval_ms(), 4321.0);
+            assert_eq!(policy.page_size(), 37.0);
+            assert_eq!(
+                SchedulerJournalBindings::free_bytes(&policy)?.is_some(),
+                self.file
+            );
+            if let Some(bytes) = SchedulerJournalBindings::free_bytes(&policy)? {
+                assert!(bytes > 0.0);
+            }
+            assert_eq!(
+                CategoryLocale::lowercase_default(&policy, &JsString(vec![0xd800, 65, 0]))?,
+                JsString(vec![0xd800, 97, 0])
+            );
+            assert_eq!(
+                CategoryLocale::compare_default(&policy, &"z".into(), &"a".into()),
+                Ordering::Greater
+            );
+            assert_eq!(NativePublicationPolicies::now(&policy), clock().into());
+            assert_eq!(DeliveryPolicies::now(&policy), clock().into());
+            assert_eq!(DeliveryPolicies::phone_target(&policy), &Json::Null);
+            assert!(policy.chat_readable_version(&"fixture-chat-reader".into()));
+            assert!(!policy.chat_readable_version(&"1.0.0".into()));
 
-        // These schema and local-query methods are synchronous native work.
-        // A pending result would expose an accidental RPC or async fallback.
-        let fields = json(
-            r#"{"title":"Native policies","description":"","acceptanceCriteria":[],"category":null,"control":"user","priority":2,"executionRequirement":null,"workspaceRequirement":{"kind":"directory_path","path":"/fixture"},"userContact":"ticket","dueAt":null}"#,
-        );
-        CheckPolicy::fields(&policy, &fields, None)
-            .now_or_never()
-            .unwrap()?;
-        let request = Json::object([
-            ("action", "create".into()),
-            ("operationId", "native-policy-create".into()),
-            ("fields", fields.clone()),
-        ]);
-        CheckPolicy::creation(&policy, &request, &Json::Null, &Json::Null, &clock().into())
-            .now_or_never()
-            .unwrap()?;
-        assert_eq!(
-            CheckPolicy::fields(&policy, &Json::Null, None)
+            // These schema and local-query methods are synchronous native work.
+            // A pending result would expose an accidental RPC or async fallback.
+            let fields = json(
+                r#"{"title":"Native policies","description":"","acceptanceCriteria":[],"category":null,"control":"user","priority":2,"executionRequirement":null,"workspaceRequirement":{"kind":"directory_path","path":"/fixture"},"userContact":"ticket","dueAt":null}"#,
+            );
+            CheckPolicy::fields(&policy, &fields, None)
+                .now_or_never()
+                .unwrap()?;
+            let request = Json::object([
+                ("action", "create".into()),
+                ("operationId", "native-policy-create".into()),
+                ("fields", fields.clone()),
+            ]);
+            CheckPolicy::creation(&policy, &request, &Json::Null, &Json::Null, &clock().into())
+                .now_or_never()
+                .unwrap()?;
+            assert_eq!(
+                CheckPolicy::fields(&policy, &Json::Null, None)
+                    .now_or_never()
+                    .unwrap()
+                    .unwrap_err()
+                    .code,
+                "invalid_arguments"
+            );
+            assert_eq!(
+                CheckPolicy::creation(
+                    &policy,
+                    &Json::Null,
+                    &Json::Null,
+                    &Json::Null,
+                    &clock().into()
+                )
                 .now_or_never()
                 .unwrap()
                 .unwrap_err()
                 .code,
-            "invalid_arguments"
-        );
-        assert_eq!(
-            CheckPolicy::creation(
+                "invalid_arguments"
+            );
+            assert_eq!(
+                CheckPolicy::aggregate(&policy, &Json::Null, &"task".into())
+                    .now_or_never()
+                    .unwrap()
+                    .unwrap_err()
+                    .code,
+                "invalid_arguments"
+            );
+            assert_eq!(
+                NativePublicationPolicies::aggregate(&policy, &Json::Null, &"task".into())
+                    .now_or_never()
+                    .unwrap()
+                    .unwrap_err()
+                    .code,
+                "invalid_arguments"
+            );
+            let mut aggregate = json(
+                r#"{"schemaVersion":1,"taskKey":"TASK-0001","fields":{},"workflowState":"todo","publication":null,"primaryResourceRef":null,"claim":null,"attemptCount":0,"lastRun":null,"lastHistory":null,"latestResult":null,"acceptedReview":null,"comments":[],"commentDeliveries":[],"agentCommentCount":0,"workRevision":0,"attachments":[],"createdAt":"2026-01-02T03:04:05.006Z","updatedAt":"2026-01-02T03:04:05.006Z","wakeAt":null,"dependencies":[],"runtimeWait":null}"#,
+            );
+            aggregate.insert("fields", fields);
+            CheckPolicy::aggregate(&policy, &aggregate, &"task".into())
+                .now_or_never()
+                .unwrap()?;
+            NativePublicationPolicies::aggregate(&policy, &aggregate, &"task".into())
+                .now_or_never()
+                .unwrap()?;
+            let page = LifecyclePages::page(
                 &policy,
-                &Json::Null,
-                &Json::Null,
-                &Json::Null,
-                &clock().into()
+                "task-board/operation",
+                &json(r#"{"where":{"op":"in","field":"data:/phase","value":["accepted","preparing","publishing","needs_attention"]},"orderBy":[{"field":"object.id","direction":"asc"}],"limit":1}"#),
             )
             .now_or_never()
-            .unwrap()
-            .unwrap_err()
-            .code,
-            "invalid_arguments"
-        );
-        assert_eq!(
-            CheckPolicy::aggregate(&policy, &Json::Null, &"task".into())
+            .unwrap()?;
+            assert_eq!(page.required("items")?, &Json::Array(vec![]));
+            assert_eq!(
+                LifecyclePages::page(
+                    &policy,
+                    "task-board/native-call",
+                    &Json::object([("limit", 1.0.into())])
+                )
                 .now_or_never()
                 .unwrap()
                 .unwrap_err()
                 .code,
-            "invalid_arguments"
-        );
-        assert_eq!(
-            NativePublicationPolicies::aggregate(&policy, &Json::Null, &"task".into())
-                .now_or_never()
-                .unwrap()
-                .unwrap_err()
-                .code,
-            "invalid_arguments"
-        );
-        let mut aggregate = json(
-            r#"{"schemaVersion":1,"taskKey":"TASK-0001","fields":{},"workflowState":"todo","publication":null,"primaryResourceRef":null,"claim":null,"attemptCount":0,"lastRun":null,"lastHistory":null,"latestResult":null,"acceptedReview":null,"comments":[],"commentDeliveries":[],"agentCommentCount":0,"workRevision":0,"attachments":[],"createdAt":"2026-01-02T03:04:05.006Z","updatedAt":"2026-01-02T03:04:05.006Z","wakeAt":null,"dependencies":[],"runtimeWait":null}"#,
-        );
-        aggregate.insert("fields", fields);
-        CheckPolicy::aggregate(&policy, &aggregate, &"task".into())
-            .now_or_never()
-            .unwrap()?;
-        NativePublicationPolicies::aggregate(&policy, &aggregate, &"task".into())
-            .now_or_never()
-            .unwrap()?;
-        let page = LifecyclePages::page(
-            &policy,
-            "task-board/native-call",
-            &Json::object([("limit", Json::Number(1.0))]),
-        )
-        .now_or_never()
-        .unwrap()?;
-        assert_eq!(page.required("items")?, &Json::Array(vec![]));
+                "invalid_arguments"
+            );
 
-        let task =
-            json(r#"{"taskKey":"TASK-0001","fields":{"userContact":"ticket"},"comments":[]}"#);
-        assert!(TaskNoticePolicy::comment(&policy, &task, &"op".into())?.is_none());
-        let comment = json(
-            r#"{"purpose":"question","authorKind":"agent","body":"Exact retained text","requests":[]}"#,
-        );
-        let mut contact_task = task.clone();
-        contact_task.insert("fields", Json::object([("userContact", "chat".into())]));
-        let mut contact_comment = comment.clone();
-        contact_comment.insert("operationId", "op".into());
-        contact_task.insert("comments", Json::Array(vec![contact_comment.clone()]));
-        assert_eq!(
-            TaskNoticePolicy::comment(&policy, &contact_task, &"op".into())?,
-            Some(contact_comment)
-        );
-        assert_eq!(
-            DeliveryPolicies::handoff(&policy, &task, &comment)?,
-            ivy_task_board::prompts::handoff(&task, &comment)?
-        );
-        assert_eq!(
-            DeliveryPolicies::voice_prompt(&policy, &task, &comment)?,
-            ivy_task_board::prompts::voice_prompt(&task, &comment)?
-        );
-        for flag in [
-            None,
-            Some(Json::Null),
-            Some(Json::Bool(false)),
-            Some(Json::Bool(true)),
-        ] {
-            assert_eq!(
-                policy.task_prompt(&task, &"owner".into(), flag.as_ref())?,
-                self.native
-                    .prompts
-                    .task_prompt(&task, &"owner".into(), flag.as_ref())?
+            let task =
+                json(r#"{"taskKey":"TASK-0001","fields":{"userContact":"ticket"},"comments":[]}"#);
+            assert!(TaskNoticePolicy::comment(&policy, &task, &"op".into())?.is_none());
+            let comment = json(
+                r#"{"purpose":"question","authorKind":"agent","body":"Exact retained text","requests":[]}"#,
             );
-        }
-        for flag in [false, true] {
+            let mut contact_task = task.clone();
+            contact_task.insert("fields", Json::object([("userContact", "chat".into())]));
+            let mut contact_comment = comment.clone();
+            contact_comment.insert("operationId", "op".into());
+            contact_task.insert("comments", Json::Array(vec![contact_comment.clone()]));
             assert_eq!(
-                policy.task_update_prompt(&task, &"owner".into(), flag)?,
-                self.native
-                    .prompts
-                    .task_update_prompt(&task, &"owner".into(), flag)?
+                TaskNoticePolicy::comment(&policy, &contact_task, &"op".into())?,
+                Some(contact_comment)
             );
+            assert_eq!(
+                DeliveryPolicies::handoff(&policy, &task, &comment)?,
+                ivy_task_board::prompts::handoff(&task, &comment)?
+            );
+            assert_eq!(
+                DeliveryPolicies::voice_prompt(&policy, &task, &comment)?,
+                ivy_task_board::prompts::voice_prompt(&task, &comment)?
+            );
+            for flag in [
+                None,
+                Some(Json::Null),
+                Some(Json::Bool(false)),
+                Some(Json::Bool(true)),
+            ] {
+                assert_eq!(
+                    policy.task_prompt(&task, &"owner".into(), flag.as_ref())?,
+                    self.native
+                        .prompts
+                        .task_prompt(&task, &"owner".into(), flag.as_ref())?
+                );
+            }
+            for flag in [false, true] {
+                assert_eq!(
+                    policy.task_update_prompt(&task, &"owner".into(), flag)?,
+                    self.native
+                        .prompts
+                        .task_update_prompt(&task, &"owner".into(), flag)?
+                );
+            }
+            self.bound.set(self.bound.get() + 1);
+            Ok(policy)
+        })();
+        if let Err(error) = &result {
+            self.first_error
+                .borrow_mut()
+                .get_or_insert_with(|| error.clone());
         }
-        self.bound.set(self.bound.get() + 1);
-        Ok(policy)
+        result
     }
 }
 struct Root(PathBuf);
@@ -226,6 +247,7 @@ async fn native_policy_factory_runs_the_empty_graph_with_actual_journal_and_loca
                 chat_readable_versions: vec!["fixture-chat-reader".into()],
             },
             bound: Cell::new(0),
+            first_error: RefCell::default(),
             file,
         };
         let contracts = contracts();
@@ -252,11 +274,31 @@ async fn native_policy_factory_runs_the_empty_graph_with_actual_journal_and_loca
         let (service, owner) = make_service(setup, &contracts).unwrap();
         let script = async {
             service.start();
-            until(|| service.client.ready() && peer.methods(1).contains(&"objects.query".into()))
-                .await;
-            let workspace = service.control.handler("workspace")(Json::Null, context(1))
-                .await
-                .unwrap();
+            let ready = tokio::time::timeout(Duration::from_secs(8), async {
+                while !service.client.ready() && probe.first_error.borrow().is_none() {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .await;
+            assert!(
+                ready.is_ok() && probe.first_error.borrow().is_none(),
+                "Native policy graph was not ready; bound={}, first_error={:?}, methods={:?}",
+                probe.bound.get(),
+                probe.first_error.borrow(),
+                peer.methods(1)
+            );
+            let workspace = bounded(async {
+                loop {
+                    let workspace = service.control.handler("workspace")(Json::Null, context(1))
+                        .await
+                        .unwrap();
+                    if workspace.get("recovered") == Some(&Json::Bool(true)) {
+                        break workspace;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await;
             assert_eq!(
                 workspace
                     .required("scheduler")
@@ -267,7 +309,15 @@ async fn native_policy_factory_runs_the_empty_graph_with_actual_journal_and_loca
             );
             bounded(service.close()).await.unwrap();
         };
-        let (result, ()) = tokio::join!(owner.run(&factory), script);
+        let owning = async {
+            let result = owner.run(&factory).await;
+            assert!(
+                result.is_ok(),
+                "Original native policy owner result: {result:?}"
+            );
+            result
+        };
+        let (result, ()) = tokio::join!(owning, script);
         result.unwrap();
         let sync = peer
             .frames
@@ -289,20 +339,40 @@ async fn native_policy_factory_runs_the_empty_graph_with_actual_journal_and_loca
             .filter(|frame| frame.get("method") == Some(&"objects.query".into()))
             .map(|frame| frame.required("params").unwrap().clone())
             .collect::<Vec<_>>();
-        assert!(!queries.is_empty());
-        for query in queries {
-            let key = query.required("contractKey").unwrap().as_str().unwrap();
-            let expected = Json::Array(
+        // Empty local operation recovery does not fetch full records. Legacy
+        // Run source protection still scans both versionless authoritative
+        // families, followed by one current-bundle Run recovery page.
+        assert_eq!(queries.len(), 3, "Actual startup pages: {queries:?}");
+        assert_eq!(
+            queries
+                .iter()
+                .map(|query| query.get("contractKey").unwrap().clone())
+                .collect::<Vec<_>>(),
+            [
+                "task-board/run",
+                "task-board/revision-protection",
+                "task-board/run"
+            ]
+            .map(Json::from)
+        );
+        assert!(
+            queries[..2]
+                .iter()
+                .all(|query| query.get("contractVersions").is_none())
+        );
+        assert_eq!(
+            queries[2].get("contractVersions"),
+            Some(&Json::Array(
                 contracts
-                    .readable_versions(&key)
+                    .readable_versions("task-board/run")
                     .unwrap()
-                    .iter()
-                    .cloned()
+                    .to_vec()
+                    .into_iter()
                     .map(Json::String)
-                    .collect(),
-            );
-            assert_eq!(query.required("contractVersions").unwrap(), &expected);
-        }
+                    .collect()
+            ))
+        );
+        assert_eq!(queries[2].get("limit"), Some(&37.0.into()));
         assert_eq!(root.0.join("task-board.sqlite").exists(), file);
         if file {
             let db = Connection::open(root.0.join("task-board.sqlite")).unwrap();

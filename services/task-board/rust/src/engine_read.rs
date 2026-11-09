@@ -170,8 +170,7 @@ pub async fn peer_state<S: LifecycleStore>(
                 continue;
             }
             let peer = store
-                .read(
-                    "task-board/task",
+                .read_task_header(
                     &Json::object([
                         ("objectId", Json::String(id.clone())),
                         ("revision", item.required("revision")?.clone()),
@@ -317,7 +316,7 @@ impl<S: LifecycleStore, C: Fn() -> String, R: EngineReadRuntime> EngineReads<'_,
     pub async fn task(&self, query: &Json, principal: &JsString) -> IvyResult<Json> {
         let document = self.task_document(query).await?;
         let condition = execution_condition(&document.value)?;
-        let id = s(&document.pin, "objectId")?;
+        let id = &document.pin.object_id;
         let state = self
             .operations
             .store
@@ -340,7 +339,7 @@ impl<S: LifecycleStore, C: Fn() -> String, R: EngineReadRuntime> EngineReads<'_,
             - read)
             .max(0.0);
         Ok(Json::object([
-            ("object", document.pin),
+            ("object", document.pin.to_json()),
             ("task", document.value),
             ("executionCondition", condition),
             ("unreadAgentComments", Json::Number(unread)),
@@ -351,11 +350,7 @@ impl<S: LifecycleStore, C: Fn() -> String, R: EngineReadRuntime> EngineReads<'_,
         let store = &self.operations.store;
         let related = f(query, "relatedTo");
         let identity = if present(related) {
-            workspace_identity(
-                store,
-                &store.read("task-board/task", related, true).await?.value,
-            )
-            .await?
+            workspace_identity(store, &store.read_task_header(related, true).await?.value).await?
         } else {
             None
         };
@@ -428,11 +423,8 @@ impl<S: LifecycleStore, C: Fn() -> String, R: EngineReadRuntime> EngineReads<'_,
                         ("objectId", item.required("objectId")?.clone()),
                         ("revision", item.required("revision")?.clone()),
                     ]);
-                    if workspace_identity(
-                        store,
-                        &store.read("task-board/task", &pin, true).await?.value,
-                    )
-                    .await?
+                    if workspace_identity(store, &store.read_task_header(&pin, true).await?.value)
+                        .await?
                         == Some(identity.clone())
                     {
                         peers.insert(s(item, "objectId")?.clone());
@@ -486,8 +478,7 @@ impl<S: LifecycleStore, C: Fn() -> String, R: EngineReadRuntime> EngineReads<'_,
         )?;
         let store = &self.operations.store;
         let task = store
-            .lifecycle_read(
-                "task-board/task",
+            .task_header(
                 &Json::object([
                     ("objectId", request.required("taskId")?.clone()),
                     (
@@ -524,8 +515,8 @@ impl<S: LifecycleStore, C: Fn() -> String, R: EngineReadRuntime> EngineReads<'_,
                     .is_some_and(|n| n >= count)
                 {
                     return Ok(Json::object([
-                        ("task", task.document.pin),
-                        ("readState", current.pin.clone()),
+                        ("task", task.document.pin.to_json()),
+                        ("readState", current.pin.to_json()),
                         ("unreadAgentComments", Json::Number(0.0)),
                     ]));
                 }
@@ -542,23 +533,20 @@ impl<S: LifecycleStore, C: Fn() -> String, R: EngineReadRuntime> EngineReads<'_,
             ]);
             let previous = current
                 .as_ref()
-                .map(|d| d.pin.clone())
+                .map(|d| d.pin.to_json())
                 .unwrap_or(Json::Null);
             let step = format!(
                 "mark-comments-read:{}",
-                hash_json(&Json::object([
-                    ("request", request.clone()),
-                    ("previous", previous),
-                    ("value", value.clone())
-                ]))?
+                ivy_contracts::hash::hash_object([
+                    (&"request".into(), request),
+                    (&"previous".into(), &previous),
+                    (&"value".into(), &value)
+                ])?
             );
             let destination = if let Some(current) = current {
                 Json::object([
-                    ("objectId", current.pin.required("objectId")?.clone()),
-                    (
-                        "expectedRevision",
-                        current.pin.required("revision")?.clone(),
-                    ),
+                    ("objectId", Json::String(current.pin.object_id.clone())),
+                    ("expectedRevision", Json::Number(current.pin.revision)),
                 ])
             } else {
                 Json::object([(
@@ -586,7 +574,7 @@ impl<S: LifecycleStore, C: Fn() -> String, R: EngineReadRuntime> EngineReads<'_,
             {
                 Ok(pin) => {
                     return Ok(Json::object([
-                        ("task", task.document.pin),
+                        ("task", task.document.pin.to_json()),
                         ("readState", pin),
                         ("unreadAgentComments", Json::Number(0.0)),
                     ]));

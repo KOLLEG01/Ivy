@@ -14,6 +14,8 @@ use ivy_hive::{
 use rusqlite::types::{Value as SqlValue, ValueRef};
 use serde_json::{Value, json};
 use std::{fs, path::Path, time::Duration};
+#[path = "hive_query_counts.rs"]
+mod counts;
 #[path = "hive_object_pages.rs"]
 mod object_pages;
 

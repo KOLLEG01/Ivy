@@ -89,7 +89,7 @@ fn concat(parts: impl IntoIterator<Item = JsString>) -> JsString {
 }
 impl<S: CoordinationStore, C: Fn() -> String> PublicationCoordination<'_, S, C> {
     async fn gates(&self, operation: &Document) -> IvyResult<Vec<JsString>> {
-        let id = s(&operation.pin, "objectId")?;
+        let id = &operation.pin.object_id;
         let retained = self.store.operation_gates(id)?;
         if !retained.is_empty() {
             return Ok(retained);
@@ -146,16 +146,16 @@ impl<S: CoordinationStore, C: Fn() -> String> PublicationCoordination<'_, S, C> 
         self.store.retain_operation_gates(id, &names)?;
         Ok(names)
     }
-    async fn named_graph(&self, name: Value) -> Result<Option<Value>, WriteFailure<()>> {
+    async fn named_graph(&self, name: Value) -> Result<Option<Document>, WriteFailure<()>> {
         let name = decoded::json_result(Ok(name))?
             .as_js_string()
             .cloned()
             .ok_or_else(IvyError::internal)?;
-        Ok(self.store.named_gate(&name).await?.map(decoded::record))
+        Ok(self.store.named_gate(&name).await?)
     }
-    async fn gate_names_graph(&self, operation: Value) -> Result<Vec<Value>, WriteFailure<()>> {
+    async fn gate_names_graph(&self, operation: &Document) -> Result<Vec<Value>, WriteFailure<()>> {
         Ok(self
-            .gates(&decoded::document(operation)?)
+            .gates(operation)
             .await?
             .into_iter()
             .map(Value::String)
@@ -168,14 +168,13 @@ impl<S: CoordinationStore, C: Fn() -> String> PublicationCoordination<'_, S, C> 
             store: &store,
             principal: &principal,
             named: |name| self.named_graph(name),
-            gates: |operation| self.gate_names_graph(operation),
+            gates: async |operation: &Document| self.gate_names_graph(operation).await,
             now: || Value::String((self.now)().into()),
         };
         calls
             .current(&Value::String(name.clone()))
             .await
             .map_err(decoded::failure)
-            .and_then(decoded::document)
     }
     pub async fn acquire(&self, operation: &Document) -> IvyResult<()> {
         let store = decoded::DecodedStore(self.store);
@@ -184,13 +183,10 @@ impl<S: CoordinationStore, C: Fn() -> String> PublicationCoordination<'_, S, C> 
             store: &store,
             principal: &principal,
             named: |name| self.named_graph(name),
-            gates: |operation| self.gate_names_graph(operation),
+            gates: async |operation: &Document| self.gate_names_graph(operation).await,
             now: || Value::String((self.now)().into()),
         };
-        calls
-            .acquire(&decoded::record(operation.clone()))
-            .await
-            .map_err(decoded::failure)
+        calls.acquire(operation).await.map_err(decoded::failure)
     }
     pub async fn reserved(&self, operation: &Document) -> IvyResult<bool> {
         let store = decoded::DecodedStore(self.store);
@@ -199,13 +195,10 @@ impl<S: CoordinationStore, C: Fn() -> String> PublicationCoordination<'_, S, C> 
             store: &store,
             principal: &principal,
             named: |name| self.named_graph(name),
-            gates: |operation| self.gate_names_graph(operation),
+            gates: async |operation: &Document| self.gate_names_graph(operation).await,
             now: || Value::String((self.now)().into()),
         };
-        calls
-            .reserved(&decoded::record(operation.clone()))
-            .await
-            .map_err(decoded::failure)
+        calls.reserved(operation).await.map_err(decoded::failure)
     }
     pub async fn release(&self, id: &JsString, reserved: bool) -> IvyResult<()> {
         let store = decoded::DecodedStore(self.store);
@@ -214,7 +207,7 @@ impl<S: CoordinationStore, C: Fn() -> String> PublicationCoordination<'_, S, C> 
             store: &store,
             principal: &principal,
             named: |name| self.named_graph(name),
-            gates: |operation| self.gate_names_graph(operation),
+            gates: async |operation: &Document| self.gate_names_graph(operation).await,
             now: || Value::String((self.now)().into()),
         };
         calls
@@ -229,7 +222,7 @@ impl<S: CoordinationStore, C: Fn() -> String> PublicationCoordination<'_, S, C> 
             store: &store,
             principal: &principal,
             named: |name| self.named_graph(name),
-            gates: |operation| self.gate_names_graph(operation),
+            gates: async |operation: &Document| self.gate_names_graph(operation).await,
             now: || Value::String((self.now)().into()),
         };
         calls

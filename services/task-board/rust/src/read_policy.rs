@@ -1,5 +1,5 @@
 //! Shared interfaces for task values and the current question resolver.
-use ivy_contracts::{IvyError, IvyJson as Json, JsString};
+use ivy_contracts::{IvyError, IvyJson as Json};
 
 #[allow(async_fn_in_trait)]
 pub trait TaskReadStore<E = IvyError> {
@@ -8,11 +8,11 @@ pub trait TaskReadStore<E = IvyError> {
     async fn read(&self, key: &str, address: &Json, header_only: bool) -> Result<Json, E>;
 }
 pub trait QuestionPolicies<E = IvyError> {
-    fn open_questions(&self, task: &Json) -> Result<Vec<JsString>, E>;
+    fn open_questions(&self, task: &Json) -> Result<Vec<Json>, E>;
 }
 pub struct IvyPolicies<'a, P: ?Sized>(pub &'a P);
 impl<E: From<IvyError>, P: QuestionPolicies + ?Sized> QuestionPolicies<E> for IvyPolicies<'_, P> {
-    fn open_questions(&self, task: &Json) -> Result<Vec<JsString>, E> {
+    fn open_questions(&self, task: &Json) -> Result<Vec<Json>, E> {
         self.0.open_questions(task).map_err(E::from)
     }
 }

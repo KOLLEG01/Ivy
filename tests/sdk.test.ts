@@ -494,11 +494,24 @@ test("browser notifications correlate versioned subscription setup and can resta
   third.message({ jsonrpc: "2.0", method: "notifications.changed", params: { scopes: ["objects/wiki/page"] } });
   third.message({ jsonrpc: "2.0", method: "notifications.changed", params: { scopes: ["objects"] } });
   assert.deepEqual(changed, [["objects/wiki/page"], ["objects"]]);
+  const parentChanges: string[][] = [];
+  const stopParent = notifications.subscribeChanges(['objects/wiki/page/parent/alpha'], scopes => parentChanges.push(scopes));
+  cleanup.push(stopParent);
+  const parentSetup = JSON.parse(third.sent.at(-1)!);
+  third.message({ jsonrpc: '2.0', id: parentSetup.id, result: { subscribed: 0, changes: 3 } });
+  for (const scope of ['objects/wiki/page/parent/beta', 'objects/wiki/page/root', 'objects/wiki/page/parent/alpha', 'objects/wiki/page', 'objects'])
+    third.message({ jsonrpc: '2.0', method: 'notifications.changed', params: { scopes: [scope] } });
+  assert.deepEqual(parentChanges, [['objects/wiki/page/parent/alpha'], ['objects/wiki/page'], ['objects']],
+    'A direct-parent subscriber ignores other parents but retains broad navigation and fallback hints.');
+  stopParent();
+  const parentRemoval = JSON.parse(third.sent.at(-1)!);
+  third.message({ jsonrpc: '2.0', id: parentRemoval.id, result: { subscribed: 0, changes: 2 } });
+  const deliveredChanges = changed.length;
   t.mock.timers.tick(30_000);
   third.message({ jsonrpc: "2.0", method: "notifications.changed", params: { scopes: [] } });
   t.mock.timers.tick(30_000);
   assert.equal(notifications.connected, true, "empty heartbeats do not invalidate data");
-  assert.equal(changed.length, 2);
+  assert.equal(changed.length, deliveredChanges);
   t.mock.timers.tick(5_001);
   assert.equal(notifications.connected, false, "a silent broken connection enables fallback");
   t.mock.timers.tick(500);

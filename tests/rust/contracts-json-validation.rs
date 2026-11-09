@@ -1,7 +1,8 @@
 use ivy_contracts::{
     IvyJson, JsString,
     json::{
-        canonical, canonical_size, parse, stringify, stringify_into, stringify_size, validate_json,
+        canonical, canonical_equal, canonical_object_size, canonical_size, parse, stringify,
+        stringify_into, stringify_size, validate_json,
     },
 };
 use std::{
@@ -135,6 +136,13 @@ fn counted_canonical_bytes_preserve_exact_boundaries_and_error_order() {
                 canonical_size(&value, maximum).map_err(|e| e.to_wire()),
                 expected
             );
+            if let Some(pairs) = value.as_object() {
+                assert_eq!(
+                    canonical_object_size(pairs.iter().map(|(key, value)| (key, value)), maximum)
+                        .map_err(|e| e.to_wire()),
+                    expected
+                );
+            }
             assert_eq!(
                 validators
                     .validate(&schema, &value, maximum)
@@ -158,6 +166,148 @@ fn counted_canonical_bytes_preserve_exact_boundaries_and_error_order() {
             );
         }
     }
+}
+
+#[test]
+fn borrowed_object_size_keeps_shared_depth_node_and_byte_budgets() {
+    let compare = |value: &IvyJson| {
+        let pairs = value.as_object().unwrap();
+        let full = canonical(value, usize::MAX);
+        let mut limits = vec![0, 1, 2, 11, 32, 1024, usize::MAX];
+        if let Ok(text) = &full {
+            limits.extend([text.len() - 1, text.len(), text.len() + 1]);
+        }
+        for maximum in limits {
+            assert_eq!(
+                canonical_object_size(pairs.iter().map(|(key, value)| (key, value)), maximum)
+                    .map_err(|error| error.to_wire()),
+                canonical(value, maximum)
+                    .map(|text| text.len())
+                    .map_err(|error| error.to_wire())
+            );
+        }
+    };
+    for depth in [127, 128] {
+        let mut value = IvyJson::Null;
+        for _ in 0..depth {
+            value = IvyJson::Array(vec![value]);
+        }
+        compare(&IvyJson::object([("nested", value)]));
+    }
+    for second in [199_998, 199_999] {
+        compare(&IvyJson::object([
+            ("a", IvyJson::Array(vec![IvyJson::Null; 199_999])),
+            ("b", IvyJson::Array(vec![IvyJson::Null; second])),
+        ]));
+    }
+    compare(&IvyJson::Object(vec![
+        ("x".into(), IvyJson::Number(f64::NAN)),
+        ("x".into(), IvyJson::Null),
+        (
+            JsString(vec![0xd800, 0]),
+            IvyJson::String(JsString(vec![0xdfff, 10])),
+        ),
+    ]));
+}
+
+#[test]
+fn canonical_equality_matches_original_text_for_raw_keys_and_values() {
+    let mut values: Vec<_> = [
+        "null",
+        "true",
+        "false",
+        "0",
+        "-0",
+        "1",
+        "1e-7",
+        "1e-6",
+        "[]",
+        "{}",
+        r#"[1,{"b":false,"a":null}]"#,
+        r#"[1,{"a":null,"b":false}]"#,
+        r#"{"10":0,"2":1,"01":"é","text":"日本語😀"}"#,
+        r#"{"text":"日本語😀","2":1,"01":"é","10":-0}"#,
+    ]
+    .into_iter()
+    .map(|text| parse(text, 1024).unwrap())
+    .collect();
+    for entries in [
+        vec![("x", true), ("y", false), ("x", false)],
+        vec![("y", false), ("x", true), ("x", false)],
+        vec![("x", false), ("y", false), ("x", true)],
+        vec![("x", false), ("y", false)],
+    ] {
+        values.push(IvyJson::Object(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into()))
+                .collect(),
+        ));
+    }
+    let units = JsString(vec![0xd800, 0, 34, 92, 0xdfff, 0xd83d, 0xde00]);
+    values.push(IvyJson::object([(
+        units.clone(),
+        IvyJson::String(units.clone()),
+    )]));
+    values.push(IvyJson::Array(vec![IvyJson::String(units)]));
+    for number in [f64::NAN, f64::INFINITY, 9_007_199_254_740_992.0] {
+        values.push(IvyJson::Number(number));
+    }
+    for left in &values {
+        for right in &values {
+            let mut limits = vec![0, 1, 2, 11, usize::MAX];
+            for value in [left, right] {
+                if let Ok(text) = canonical(value, usize::MAX) {
+                    limits.extend([text.len().saturating_sub(1), text.len(), text.len() + 1]);
+                }
+            }
+            for maximum in limits {
+                let expected = canonical(left, maximum)
+                    .and_then(|a| canonical(right, maximum).map(|b| a == b))
+                    .map_err(|e| e.to_wire());
+                assert_eq!(
+                    canonical_equal(left, right, maximum).map_err(|e| e.to_wire()),
+                    expected
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn canonical_equality_validates_both_full_values_before_comparing() {
+    let different = IvyJson::Bool(false);
+    let compare = |left: &IvyJson, right: &IvyJson| {
+        let expected = canonical(left, usize::MAX)
+            .and_then(|a| canonical(right, usize::MAX).map(|b| a == b))
+            .map_err(|e| e.to_wire());
+        assert_eq!(
+            canonical_equal(left, right, usize::MAX).map_err(|e| e.to_wire()),
+            expected
+        );
+    };
+    for depth in [128, 129] {
+        let mut nested = IvyJson::Null;
+        for _ in 0..depth {
+            nested = IvyJson::Array(vec![nested]);
+        }
+        compare(&nested, &nested);
+        compare(&different, &nested);
+        compare(&nested, &different);
+    }
+    for count in [399_999, 400_000] {
+        let wide = IvyJson::Array(vec![IvyJson::Null; count]);
+        compare(&wide, &wide);
+        compare(&different, &wide);
+        compare(&wide, &different);
+    }
+    let invalid_number = IvyJson::Number(f64::NAN);
+    let invalid_late = IvyJson::object([
+        ("a", "x".repeat(1024).into()),
+        ("z", IvyJson::Number(9_007_199_254_740_992.0)),
+    ]);
+    compare(&invalid_late, &invalid_number);
+    compare(&invalid_number, &invalid_late);
 }
 
 fn peak(action: impl FnOnce()) -> isize {
@@ -201,11 +351,35 @@ fn large_validation_does_not_materialize_the_encoded_body() {
     let materialized = peak(|| {
         drop(canonical(&value, bytes).unwrap());
     });
+    let other = value.clone();
+    let original_equality = peak(|| {
+        assert_eq!(
+            canonical(&value, bytes).unwrap(),
+            canonical(&other, bytes).unwrap()
+        );
+    });
+    let borrowed_equality = peak(|| {
+        assert!(canonical_equal(&value, &other, bytes).unwrap());
+    });
     let json = peak(|| {
         validate_json(&value, bytes).unwrap();
     });
     let canonical = peak(|| {
         assert_eq!(canonical_size(&value, bytes).unwrap(), bytes);
+    });
+    let borrowed = peak(|| {
+        assert_eq!(
+            canonical_object_size(
+                value
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .map(|(key, value)| (key, value)),
+                bytes
+            )
+            .unwrap(),
+            bytes
+        );
     });
     let schema = peak(|| {
         validators.validate(&schema, &value, bytes).unwrap();
@@ -221,10 +395,18 @@ fn large_validation_does_not_materialize_the_encoded_body() {
         );
     });
     eprintln!(
-        "JSON validation allocation peaks beside owned payload: wire={bytes}, materialized={materialized}, JSON={json}, canonical={canonical}, schema={schema}, refused={refused}"
+        "JSON validation allocation peaks beside owned payload: wire={bytes}, materialized={materialized}, JSON={json}, canonical={canonical}, borrowed={borrowed}, schema={schema}, refused={refused}, original-equality={original_equality}, borrowed-equality={borrowed_equality}"
     );
     assert!(materialized >= bytes as isize);
-    for amount in [json, canonical, schema, refused] {
+    assert!(original_equality >= 2 * bytes as isize);
+    for amount in [
+        json,
+        canonical,
+        borrowed,
+        schema,
+        refused,
+        borrowed_equality,
+    ] {
         assert!(
             amount < 64 * 1024,
             "Validation retained a payload-sized temporary: {amount}"

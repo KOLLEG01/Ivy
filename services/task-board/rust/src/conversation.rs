@@ -24,8 +24,8 @@ impl<'a, E: From<IvyError>> ConversationPolicies<'a, E> {
     }
 }
 impl<E: From<IvyError>> QuestionPolicies<E> for ConversationPolicies<'_, E> {
-    fn open_questions(&self, task: &Json) -> Result<Vec<JsString>, E> {
-        open_question_ids(self.questions, task)
+    fn open_questions(&self, task: &Json) -> Result<Vec<Json>, E> {
+        (self.questions)(task, None)
     }
 }
 impl<E: From<IvyError>> CommentReadPolicies<E> for ConversationPolicies<'_, E> {

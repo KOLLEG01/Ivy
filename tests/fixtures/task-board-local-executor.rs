@@ -158,8 +158,10 @@ async fn abandoned_driver_and_invocation_observers_keep_accepted_jobs_for_the_ne
 async fn interrupted_owner_executor_releases_the_admitted_invocation_with_unknown_outcome() {
     let entered = Cell::new(false);
     let reply = {
+        let spawner;
         let jobs = LocalExecutor::default();
-        let invocations = EngineInvocations::new(&jobs);
+        spawner = jobs.spawner();
+        let invocations = EngineInvocations::new(&spawner);
         let reply = invocations
             .run(async {
                 entered.set(true);
@@ -197,10 +199,11 @@ async fn late_reconciliation_admission_wakes_nested_execution_without_unsolicite
         }
     }
     let operation = |value: &str| Document {
-        pin: Json::object([
+        pin: ivy_task_board::operations::ObjectPin::from_json(Json::object([
             ("objectId", "accepted".into()),
             ("revision", Json::Number(1.0)),
-        ]),
+        ]))
+        .unwrap(),
         value: value.into(),
         content_hash: ivy_contracts::hash::hash_json(&Json::from(value)).unwrap(),
         parent_id: None,
@@ -211,25 +214,24 @@ async fn late_reconciliation_admission_wakes_nested_execution_without_unsolicite
         gate: &execution_gate,
         calls: Cell::new(0),
     };
-    let execution_jobs = LocalExecutor::default();
-    let queue = ExecutionQueue::new(&program, &execution_jobs);
-    let invocation_jobs = LocalExecutor::default();
-    let invocations = EngineInvocations::new(&invocation_jobs);
-    let reconciliation_jobs = LocalExecutor::default();
-    let category_jobs = LocalExecutor::default();
-    let mut driver = Box::pin(invocation_jobs.drive(reconciliation_jobs.drive(
-        execution_jobs.drive(category_jobs.drive(async {
-            root_gate.wait().await;
-            invocations.stop().await;
-        })),
-    )));
+    let queue;
+    let invocations;
+    let spawner;
+    let jobs = LocalExecutor::default();
+    spawner = jobs.spawner();
+    queue = ExecutionQueue::new(&program, &spawner);
+    invocations = EngineInvocations::new(&spawner);
+    let mut driver = Box::pin(jobs.drive(async {
+        root_gate.wait().await;
+        invocations.stop().await;
+    }));
     let wake = Arc::new(WakeFlag(AtomicBool::new(true)));
     assert!(poll_registered(driver.as_mut(), &wake).await.is_pending());
     assert!(!wake.0.load(Ordering::Acquire));
     assert_eq!(program.calls.get(), 0);
-    // The factory's real queue order is already idle. Reconciliation then
-    // submits an invocation whose admission enqueues lower-layer execution.
-    reconciliation_jobs.spawn(Box::pin(async {
+    // The factory's shared queue is already idle. Reconciliation then submits
+    // an invocation whose admission enqueues execution on this same queue.
+    jobs.spawn(Box::pin(async {
         drop(
             invocations
                 .run(async { queue.execute(operation("original"))?.await })

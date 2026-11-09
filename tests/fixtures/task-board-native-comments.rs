@@ -175,7 +175,7 @@ impl ReadEvidenceStore for Store {
             (current.required("pin")?.clone(), value)
         };
         Ok(Document {
-            pin,
+            pin: ivy_task_board::operations::ObjectPin::from_json(pin).unwrap(),
             value,
             parent_id: None,
             content_hash: String::new(),

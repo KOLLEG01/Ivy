@@ -25,9 +25,9 @@ impl<S: CommentSource + ?Sized, E: From<IvyError>> CommentPort<'_, S, E> {
     }
 }
 impl<S: CommentSource + ?Sized, E: From<IvyError>> TreeReads<E> for CommentPort<'_, S, E> {
-    async fn hydrate(&self, task: &Json, owner: &Json) -> Result<Option<Json>, E> {
+    async fn hydrate(&self, task: Json, owner: &Json) -> Result<Option<Json>, E> {
         self.comments
-            .hydrate(task, Self::owner(owner)?)
+            .hydrate_owned(task, Self::owner(owner)?)
             .await
             .map_err(|e| self.failure(e))
     }
@@ -67,7 +67,7 @@ impl<S: CommentSource + ?Sized, E>
         {
             return Ok(full);
         }
-        self.hydrate(task, owner)
+        self.hydrate(task.clone(), owner)
             .await?
             .ok_or_else(|| IvyError::internal().into())
     }

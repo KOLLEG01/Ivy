@@ -160,7 +160,15 @@ impl<S: Store + ReadEvidenceStore> Store for Trace<'_, S> {
     async fn prepared_mutation_id(&self, _: &str) -> IvyResult<JsString> {
         panic!("Preparation requested mutation identity")
     }
-    async fn write_prepared(&self, _: &str, _: &Json, _: &JsString, _: &Json) -> IvyResult<Json> {
+    async fn write_prepared(
+        &self,
+        _: &str,
+        _: &Json,
+        _: &JsString,
+        _: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
+    ) -> IvyResult<Json> {
         panic!("Preparation published mutation")
     }
 }

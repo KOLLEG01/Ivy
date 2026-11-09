@@ -138,7 +138,7 @@ impl<S: Store, C: Fn() -> String> ExecutionProgram for Program<'_, S, C> {
         } else {
             self.plan.call.wait().await;
         }
-        let id = operation.pin.required("objectId")?.as_js_string().unwrap();
+        let id = &operation.pin.object_id;
         let result = Json::object([
             (
                 "operationId",

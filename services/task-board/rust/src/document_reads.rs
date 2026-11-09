@@ -1,23 +1,19 @@
 //! Local and remote document reads over stored JSON.
 use super::{
-    json_values::{self as v, Value},
-    legacy_reads::read_legacy_with,
-    local_reads::SqliteReads,
-    record_upgrades::upgrade_stored_with,
-    store::ObjectReads,
+    json_values::Value, legacy_reads::read_legacy_owned_with, local_reads::SqliteReads,
+    record_upgrades::upgrade_stored_owned_with, store::ObjectReads,
 };
 use crate::{
     engine_read::read_policy::TaskReadStore,
     engine_read::{comment_reads::CommentReadStore, condition_policy::ConditionStore},
-    journal_store::{CacheEntries, CachedRecord, Contracts, ReadCache, remember_record},
+    journal_store::{CachedValue, Contracts, ReadCache, remember_record},
+    operations::{ObjectPin, StoredRecord},
 };
-use ivy_contracts::{
-    IvyError, IvyJson as Json, JsString, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
-};
+use ivy_contracts::{IvyError, IvyJson as Json, JsString};
 
 #[allow(async_fn_in_trait)]
 pub(crate) trait TreeReads<E> {
-    async fn hydrate(&self, task: &Json, owner: &Json) -> Result<Option<Json>, E>;
+    async fn hydrate(&self, task: Json, owner: &Json) -> Result<Option<Json>, E>;
     fn summary(&self, task: &Json, tree: &Json, owner: &Json) -> Result<Option<Json>, E>;
     async fn range(
         &self,
@@ -62,99 +58,19 @@ fn cache_key(
         .extend(format!(":{revision}:{primary}:{archived}:{retained}").encode_utf16());
     Ok(Some(Json::String(text)))
 }
-fn cache_get(cache: &Option<CacheEntries>, key: &Option<Json>) -> Option<Json> {
-    let (Some(cache), Some(key)) = (cache, key) else {
-        return None;
-    };
-    cache
-        .borrow()
-        .iter()
-        .find(|(saved, _)| saved == key)
-        .and_then(|(_, entry)| entry.materialized.clone())
-}
 impl<R, C, Parse, SqlFailure, M> DocumentReads<'_, R, C, Parse, SqlFailure, M> {
-    async fn task_value<E>(&self, task: &Json, owner: &Json, prepared: bool) -> Result<Json, E>
-    where
-        R: ObjectReads<E>,
-        M: TreeReads<E>,
-        E: From<IvyError>,
-    {
-        let full = if task
-            .get("commentStore")
-            .and_then(|tree| tree.get("kind"))
-            .is_some()
-        {
-            self.comments.hydrate(task, owner).await?
-        } else {
-            read_legacy_with(task, Some(owner), |params| self.objects.read(params)).await?
-        }
-        .ok_or_else(IvyError::internal)?;
-        if prepared {
-            return Ok(full);
-        }
-        Ok(
-            upgrade_stored_with("task-board/task", &full, |params| self.objects.read(params))
-                .await?
-                .into_owned(),
-        )
-    }
-    pub(crate) async fn read_document<E>(
+    pub(crate) fn check_remote_record<E>(
         &self,
         key: &str,
         address: &Json,
         primary: bool,
         include_archived: bool,
-        retained: bool,
-    ) -> Result<Json, E>
+        result: &Json,
+    ) -> Result<(), E>
     where
-        R: ObjectReads<E>,
         C: Contracts,
-        M: TreeReads<E>,
         E: From<IvyError>,
-        Parse: Fn(&str) -> Result<Json, E>,
-        SqlFailure: Fn(ivy_store::rusqlite::Error) -> E,
     {
-        let object_id = if address.as_js_string().is_some() {
-            address
-        } else {
-            address.required("objectId")?
-        };
-        if self.local.contracts.local(key)?
-            || self.local.key::<E>(Some(object_id))?.as_deref() == Some(key)
-        {
-            let mut document = self.local.document::<E>(key, address, primary)?;
-            if !retained
-                && key == "task-board/task"
-                && document.required("value")?.get("commentStore").is_some()
-            {
-                let parent = document.required("metadata")?.required("parentId")?;
-                let operation = self
-                    .local
-                    .document::<E>("task-board/operation", parent, false)?;
-                let request = operation.required("value")?.required("request")?;
-                let owner = request.get("taskId").ok_or_else(|| {
-                    IvyError::new(
-                        "task_board_scope_mismatch",
-                        "A prepared conversation must belong to its original task operation.",
-                    )
-                })?;
-                let full = self
-                    .task_value(document.required("value")?, owner, true)
-                    .await?;
-                document.insert("value", full);
-            }
-            return Ok(document);
-        }
-        let cache = self.cache.and_then(ReadCache::entries);
-        let cache_key = cache_key(key, address, primary, include_archived, retained)?;
-        if let Some(document) = cache_get(&cache, &cache_key) {
-            return Ok(document);
-        }
-        let mut params = Json::object([("objectId", object_id.clone())]);
-        if address.as_js_string().is_none() {
-            params.insert("revision", address.required("revision")?.clone());
-        }
-        let result = self.objects.read(Some(params)).await?;
         let object = result.required("object")?;
         let revision = result.required("revision")?;
         let content = result.required("content")?;
@@ -200,53 +116,37 @@ impl<R, C, Parse, SqlFailure, M> DocumentReads<'_, R, C, Parse, SqlFailure, M> {
             )
             .into());
         }
-        let pin = Json::object([
-            ("objectId", object.required("id")?.clone()),
-            ("revision", revision.required("revision")?.clone()),
-        ]);
-        let value = content.required("value")?;
-        let full = if retained {
-            value.clone()
-        } else if key == "task-board/task" {
-            self.task_value(value, object.required("id")?, false)
-                .await?
-        } else {
-            upgrade_stored_with(key, value, |params| self.objects.read(params))
-                .await?
-                .into_owned()
-        };
-        let document = Json::object([
-            ("key", key.into()),
-            ("pin", pin.clone()),
-            ("value", full.clone()),
-            ("metadata", object.clone()),
-            ("revision", revision.clone()),
-        ]);
-        if let (Some(cache), Some(cache_key)) = (cache, cache_key) {
-            if canonical(&full, MANAGEMENT_FRAME_BYTES)?.len() <= 65536
-                && cache.borrow().len() < 256
-            {
-                let record = CachedRecord {
-                    object_id: pin.required("objectId")?.clone(),
-                    document: None,
-                    materialized: Some(document.clone()),
-                    retained_bytes: 0,
-                };
-                let mut entries = cache.borrow_mut();
-                remember_record(&mut entries, cache_key, record);
-            }
-        }
-        Ok(document)
+        Ok(())
     }
-    // Remaining mutation programs adapt here; the read policy above owns JSON.
-    pub(crate) async fn read_graph<E>(
+    async fn task_value<E>(&self, task: Json, owner: &Json, prepared: bool) -> Result<Json, E>
+    where
+        R: ObjectReads<E>,
+        M: TreeReads<E>,
+        E: From<IvyError>,
+    {
+        let full = if task
+            .get("commentStore")
+            .and_then(|tree| tree.get("kind"))
+            .is_some()
+        {
+            self.comments.hydrate(task, owner).await?
+        } else {
+            read_legacy_owned_with(task, Some(owner), |params| self.objects.read(params)).await?
+        }
+        .ok_or_else(IvyError::internal)?;
+        if prepared {
+            return Ok(full);
+        }
+        upgrade_stored_owned_with("task-board/task", full, |params| self.objects.read(params)).await
+    }
+    pub(crate) async fn read_document<E>(
         &self,
         key: &str,
-        address: &Value,
+        address: &Json,
         primary: bool,
         include_archived: bool,
         retained: bool,
-    ) -> Result<Value, E>
+    ) -> Result<Json, E>
     where
         R: ObjectReads<E>,
         C: Contracts,
@@ -255,10 +155,198 @@ impl<R, C, Parse, SqlFailure, M> DocumentReads<'_, R, C, Parse, SqlFailure, M> {
         Parse: Fn(&str) -> Result<Json, E>,
         SqlFailure: Fn(ivy_store::rusqlite::Error) -> E,
     {
-        let address = v::decoded_comment::<E>(address)?;
-        self.read_document(key, &address, primary, include_archived, retained)
-            .await
-            .map(|value| (&value).clone())
+        Ok(self
+            .read_record(key, address, primary, include_archived, retained)
+            .await?
+            .into_json())
+    }
+    pub(crate) async fn read_record<E>(
+        &self,
+        key: &str,
+        address: &Json,
+        primary: bool,
+        include_archived: bool,
+        retained: bool,
+    ) -> Result<StoredRecord, E>
+    where
+        R: ObjectReads<E>,
+        C: Contracts,
+        M: TreeReads<E>,
+        E: From<IvyError>,
+        Parse: Fn(&str) -> Result<Json, E>,
+        SqlFailure: Fn(ivy_store::rusqlite::Error) -> E,
+    {
+        self.record_with(
+            key,
+            address,
+            primary,
+            include_archived,
+            retained,
+            Ok,
+            |record| Ok(record.clone()),
+        )
+        .await
+    }
+
+    async fn record_with<T, E>(
+        &self,
+        key: &str,
+        address: &Json,
+        primary: bool,
+        include_archived: bool,
+        retained: bool,
+        take: impl FnOnce(StoredRecord) -> Result<T, E>,
+        copy: impl FnOnce(&StoredRecord) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        R: ObjectReads<E>,
+        C: Contracts,
+        M: TreeReads<E>,
+        E: From<IvyError>,
+        Parse: Fn(&str) -> Result<Json, E>,
+        SqlFailure: Fn(ivy_store::rusqlite::Error) -> E,
+    {
+        let object_id = if address.as_js_string().is_some() {
+            address
+        } else {
+            address.required("objectId")?
+        };
+        let local = self.local.contracts.local(key)?;
+        let local_key = if local {
+            None
+        } else {
+            self.local.key::<E>(Some(object_id))?
+        };
+        let stored_key = if key == "task-board/task"
+            && local_key.as_deref() == Some(crate::operations::PREPARED_PAYLOAD)
+        {
+            crate::operations::PREPARED_PAYLOAD
+        } else {
+            key
+        };
+        if local || local_key.as_deref() == Some(stored_key) {
+            let mut document = self.local.record::<E>(stored_key, address, primary)?;
+            if stored_key != key {
+                document.value =
+                    super::local_reads::prepared_task(self.local.contracts, document.value)?;
+            }
+            if !retained
+                && key == "task-board/task"
+                && document
+                    .value
+                    .get("commentStore")
+                    .is_some_and(|store| !store.is_null())
+            {
+                let parent = document.metadata.required("parentId")?;
+                let operation = self
+                    .local
+                    .record::<E>("task-board/operation", parent, false)?;
+                let owner = Json::String(
+                    super::local_reads::prepared_task_owner(
+                        &operation.value,
+                        &document.pin.to_json(),
+                    )?
+                    .clone(),
+                );
+                let full = self.task_value(document.value, &owner, true).await?;
+                document.value = full;
+            }
+            return take(document);
+        }
+        let cache = self.cache.and_then(ReadCache::entries);
+        let cache_key = cache_key(key, address, primary, include_archived, retained)?;
+        if let (Some(cache), Some(cache_key)) = (&cache, &cache_key) {
+            if let Some(document) = cache
+                .borrow()
+                .iter()
+                .find(|(saved, _)| saved == cache_key)
+                .and_then(|(_, entry)| match &entry.value {
+                    CachedValue::Materialized(record) => Some(record),
+                    CachedValue::Workflow(_) => None,
+                })
+            {
+                return copy(document);
+            }
+        }
+        let mut params = Json::object([("objectId", object_id.clone())]);
+        if address.as_js_string().is_none() {
+            params.insert("revision", address.required("revision")?.clone());
+        }
+        let mut result = self.objects.read(Some(params)).await?;
+        self.check_remote_record::<E>(key, address, primary, include_archived, &result)?;
+        let object = result.required("object")?;
+        let revision = result.required("revision")?;
+        let content = result.required("content")?;
+        let pin = ObjectPin {
+            object_id: object
+                .required("id")?
+                .as_js_string()
+                .ok_or_else(IvyError::internal)?
+                .clone(),
+            revision: revision
+                .required("revision")?
+                .as_f64()
+                .ok_or_else(IvyError::internal)?,
+        };
+        content.required("value")?;
+        let owner = object.required("id")?.clone();
+        let value = result.get_mut("content").unwrap().remove("value").unwrap();
+        let full = if retained {
+            value
+        } else if key == "task-board/task" {
+            self.task_value(value, &owner, false).await?
+        } else {
+            upgrade_stored_owned_with(key, value, |params| self.objects.read(params)).await?
+        };
+        let object = result.remove("object").unwrap();
+        let revision = result.remove("revision").unwrap();
+        let mut document = Some(StoredRecord {
+            key: key.into(),
+            pin,
+            value: full,
+            metadata: object,
+            revision,
+        });
+        if let (Some(cache), Some(cache_key)) = (cache, cache_key) {
+            let mut entries = cache.borrow_mut();
+            if let Some(CachedValue::Materialized(cached)) = remember_record(
+                &mut entries,
+                cache_key,
+                document.as_ref().unwrap().retained_bytes(),
+                || CachedValue::Materialized(document.take().unwrap()),
+            ) {
+                return copy(cached);
+            }
+        }
+        take(document.unwrap())
+    }
+    // Mutation programs receive the existing owned domain document.
+    pub(crate) async fn read_graph<E>(
+        &self,
+        key: &str,
+        address: &Value,
+        primary: bool,
+        include_archived: bool,
+        retained: bool,
+    ) -> Result<crate::operations::Document, E>
+    where
+        R: ObjectReads<E>,
+        C: Contracts,
+        M: TreeReads<E>,
+        E: From<IvyError>,
+        Parse: Fn(&str) -> Result<Json, E>,
+        SqlFailure: Fn(ivy_store::rusqlite::Error) -> E,
+    {
+        self.record_with(
+            key,
+            address,
+            primary,
+            include_archived,
+            retained,
+            |record| record.into_document().map_err(E::from),
+            |record| record.document().map_err(E::from),
+        )
+        .await
     }
 }
 impl<R, C, Parse, SqlFailure, M, E> TaskReadStore<E>
@@ -272,11 +360,16 @@ where
     SqlFailure: Fn(ivy_store::rusqlite::Error) -> E,
 {
     async fn read(&self, key: &str, address: &Json, header_only: bool) -> Result<Json, E> {
-        Ok(self
-            .read_document(key, address, true, true, header_only)
-            .await?
-            .required("value")?
-            .clone())
+        self.record_with(
+            key,
+            address,
+            true,
+            true,
+            header_only,
+            |record| Ok(record.value),
+            |record| Ok(record.value.clone()),
+        )
+        .await
     }
 }
 impl<R, C, Parse, SqlFailure, M, E> crate::wake::WakeStore<E>
@@ -362,7 +455,7 @@ where
             address.ok_or_else(IvyError::internal)?,
             primary,
             include_archived,
-            false,
+            key == "task-board/task",
         )
         .await
     }

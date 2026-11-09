@@ -1171,6 +1171,31 @@
       ],
       "additionalProperties": false
     },
+    "ObjectCountQuery": {
+      "type": "object",
+      "properties": {
+        "contractKey": { "type": "string", "minLength": 1, "maxLength": 192 },
+        "contractVersions": {
+          "type": "array", "items": { "$ref": "#/$defs/ContractVersion" },
+          "minItems": 1, "maxItems": 64, "uniqueItems": true
+        },
+        "where": { "$ref": "#/$defs/QueryPredicate" },
+        "groupBy": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(object\\.(id|parentId|ownerObjectId|name|path|position|icon|contractKey|revision|contractVersion|archivedAt|effectivelyArchived|createdAt|updatedAt|hasContractChildren)|data:/.*)$",
+            "maxLength": 512
+          },
+          "minItems": 1, "maxItems": 2, "uniqueItems": true
+        },
+        "includeArchived": { "type": "boolean" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
+        "cursor": { "type": "string", "minLength": 1, "maxLength": 8192 }
+      },
+      "required": ["contractKey", "groupBy"],
+      "additionalProperties": false
+    },
     "ServiceConnect": {
       "type": "object",
       "properties": {

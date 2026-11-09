@@ -10,6 +10,12 @@ transactions and have no execution ordering guarantee. Request count, request by
 and aggregate response bytes obey the [shared limits](../packages/contracts/src/limits.ts).
 MCP continues to use its standard single-message envelope.
 
+UI change hints carry scopes, not documents or delivery authority. Content writes
+use `objects/<contract>/parent/<id>` for direct children or `objects/<contract>/root`
+for top-level Objects. Parent IDs outside the scope character/length limits fall
+back to the contract family. Navigation, archival, deletion and broad invalidations
+still cover narrower subscribers. Reconnect always rereads current state.
+
 ## Access and storage
 
 - Use the configured canonical base URL for links, cookies and redirects, including subpath
@@ -67,6 +73,9 @@ Sources: [Objects](../services/hive/rust/src/objects.rs), [contract admission](.
   no caller SQL, regex or implicit structured-value stringification is accepted.
   JSON queries may include complete documents at the selected revisions; their bytes count
   toward the same page bound and the cursor binds this option.
+  `objects.count` uses the same filters and scalar admission to count current revisions in
+  SQL, grouped by one or two fields. Groups use ascending typed keys and bounded pages;
+  no object identities or documents are returned, and oversized cursor keys fail explicitly.
 - Cursors bind the complete query and deterministic order. Pagination reads current state,
   not a cross-request snapshot; truncation and retention gaps must be explicit. A continuation
   must advance or fail, never return an endless empty page.

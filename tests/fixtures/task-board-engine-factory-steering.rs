@@ -1,4 +1,20 @@
 use super::*;
+async fn observed_diagnostics(
+    control: &ivy_task_board::service::ServiceControl,
+    connection: &ServiceConnection,
+    count: usize,
+) -> Json {
+    bounded(async {
+        loop {
+            let value = control.readiness(connection).await.unwrap();
+            if f(&value, "diagnostics").as_array().unwrap().len() == count {
+                return value;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+}
 use control::signals;
 use driver::{count, exact_evidence, frames, reached};
 use ivy_task_board::engine_invocations::InvocationRequest;
@@ -247,7 +263,7 @@ impl Scenario {
             journal.update(
                 "task-board/task",
                 &"task".into(),
-                f(&current.pin, "revision").as_f64().unwrap(),
+                f(&current.pin.to_json(), "revision").as_f64().unwrap(),
                 &task,
                 &clock().into(),
             )?;
@@ -342,7 +358,7 @@ async fn factory_readiness_reports_native_silence_and_matching_activity_without_
         let run_before = fixture.rows("task-board/run");
         let revisions_before = count(&fixture, "SELECT count(*) FROM revisions");
         fixture.clock.advance(60_000.0);
-        let silent = bounded(service.control.readiness(&first)).await.unwrap();
+        let silent = observed_diagnostics(&service.control, &first, 1).await;
         assert_eq!(f(&silent, "ready"), &true.into());
         let diagnostics = f(&silent, "diagnostics").as_array().unwrap();
         assert_eq!(diagnostics.len(), 1);
@@ -359,7 +375,7 @@ async fn factory_readiness_reports_native_silence_and_matching_activity_without_
             frames(&peer, "control-observation").len() >= before + 2
         })
         .await;
-        let stable = bounded(service.control.readiness(&first)).await.unwrap();
+        let stable = observed_diagnostics(&service.control, &first, 1).await;
         let diagnostics = f(&stable, "diagnostics").as_array().unwrap();
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(f(&diagnostics[0], "firstObservedAt"), &first_observed);
@@ -373,17 +389,51 @@ async fn factory_readiness_reports_native_silence_and_matching_activity_without_
                     (
                         "payload",
                         Json::object([
+                            ("serviceNodeId", node.into()),
+                            ("epoch", "epoch".into()),
                             ("method", method),
-                            ("params", Json::object([("threadId", thread.into())])),
+                            (
+                                "params",
+                                Json::object([
+                                    ("threadId", thread.into()),
+                                    ("turnId", "turn".into()),
+                                ]),
+                            ),
                         ]),
                     ),
                 ]),
             )])
         };
+        let mut missing_epoch = notice("native-agent", "thread", "item/delta".into());
+        missing_epoch
+            .get_mut("params")
+            .unwrap()
+            .get_mut("payload")
+            .unwrap()
+            .remove("epoch");
+        let mut foreign_epoch = notice("native-agent", "thread", "item/delta".into());
+        foreign_epoch
+            .get_mut("params")
+            .unwrap()
+            .get_mut("payload")
+            .unwrap()
+            .insert("epoch", "foreign-epoch".into());
+        let mut foreign_turn = notice("native-agent", "thread", "item/delta".into());
+        foreign_turn
+            .get_mut("params")
+            .unwrap()
+            .get_mut("payload")
+            .unwrap()
+            .get_mut("params")
+            .unwrap()
+            .insert("turnId", "foreign-turn".into());
         for value in [
             notice("other-agent", "thread", "item/delta".into()),
             notice("native-agent", "other-thread", "item/delta".into()),
             notice("native-agent", "thread", "thread/status/changed".into()),
+            missing_epoch,
+            foreign_epoch,
+            foreign_turn,
         ] {
             service.control.notification(&value);
         }
@@ -397,7 +447,7 @@ async fn factory_readiness_reports_native_silence_and_matching_activity_without_
             frames(&peer, "control-observation").len() >= before + 2
         })
         .await;
-        let unchanged = bounded(service.control.readiness(&first)).await.unwrap();
+        let unchanged = observed_diagnostics(&service.control, &first, 1).await;
         let diagnostics = f(&unchanged, "diagnostics").as_array().unwrap();
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(f(&diagnostics[0], "firstObservedAt"), &first_observed);
@@ -413,7 +463,7 @@ async fn factory_readiness_reports_native_silence_and_matching_activity_without_
                 if f(&ready, "diagnostics").as_array().unwrap().is_empty() {
                     break;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(2)).await;
             }
         })
         .await;
@@ -427,7 +477,7 @@ async fn factory_readiness_reports_native_silence_and_matching_activity_without_
             &Json::Array(vec![])
         );
         fixture.clock.advance(1.0);
-        let elapsed = bounded(service.control.readiness(&first)).await.unwrap();
+        let elapsed = observed_diagnostics(&service.control, &first, 1).await;
         let diagnostics = f(&elapsed, "diagnostics").as_array().unwrap();
         assert_eq!(diagnostics.len(), 1);
         let expected_time =
@@ -444,14 +494,14 @@ async fn factory_readiness_reports_native_silence_and_matching_activity_without_
                     if f(&ready, "diagnostics").as_array().unwrap().is_empty() {
                         break;
                     }
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(Duration::from_millis(2)).await;
                 }
             })
             .await;
             fixture.clock.advance(60_000.0);
             assert_eq!(
                 f(
-                    &bounded(service.control.readiness(&first)).await.unwrap(),
+                    &observed_diagnostics(&service.control, &first, 1).await,
                     "diagnostics"
                 )
                 .as_array()

@@ -59,7 +59,8 @@ fn native_reopen_fixtures_for(
     version: &str,
     owner: Option<&Json>,
 ) -> Json {
-    let identity = owner.and_then(|owner| owner.get("catalogSourceHash"))
+    let identity = owner
+        .and_then(|owner| owner.get("catalogSourceHash"))
         .map(|hash| Json::object([("sourceHash", hash.clone())]));
     let source = catalogs
         .checked_native_contract(&version.into(), identity.as_ref())
@@ -812,8 +813,8 @@ async fn terminal_snapshots_outputs_and_transcripts_match_original_over_actual_j
                             "UPDATE revisions SET value_json=? WHERE id=? AND revision=?",
                             params![
                                 canonical(&v, MANAGEMENT_FRAME_BYTES).unwrap(),
-                                s(&d.pin, "objectId").to_utf8().unwrap(),
-                                num(&d.pin, "revision")
+                                s(&d.pin.to_json(), "objectId").to_utf8().unwrap(),
+                                num(&d.pin.to_json(), "revision")
                             ],
                         )
                         .unwrap();
@@ -822,7 +823,7 @@ async fn terminal_snapshots_outputs_and_transcripts_match_original_over_actual_j
                                 "UPDATE documents SET name=? WHERE id=?",
                                 params![
                                     name.as_str().unwrap(),
-                                    s(&d.pin, "objectId").to_utf8().unwrap()
+                                    s(&d.pin.to_json(), "objectId").to_utf8().unwrap()
                                 ],
                             )
                             .unwrap();
@@ -910,16 +911,32 @@ async fn actual_snapshot_and_transcript_reopen_without_io_or_writes_and_refuse_c
         let initial = actions[0].required("args").unwrap().as_array().unwrap();
         let mut run = fixtures.required("run").unwrap().clone();
         let mut original_owner = Json::object([("serviceNodeId", "native-agent".into())]);
-        let original_version = if upgrade && provider == Some("codex") { "0.159.2" } else { version };
+        let original_version = if upgrade && provider == Some("codex") {
+            "0.159.2"
+        } else {
+            version
+        };
         if upgrade {
-            let identity = (provider == Some("claude")).then(|| Json::object([(
-                "nativeExecutableHash", "sha256:d13d3e2a03135e08f7db3bd2509c086dab0968549834c0c46df03af3002e65a3".into(),
-            )]));
-            let previous = catalogs.checked_native_contract(&original_version.into(), identity.as_ref()).unwrap();
+            let identity = (provider == Some("claude")).then(|| {
+                Json::object([(
+                    "nativeExecutableHash",
+                    "sha256:d13d3e2a03135e08f7db3bd2509c086dab0968549834c0c46df03af3002e65a3"
+                        .into(),
+                )])
+            });
+            let previous = catalogs
+                .checked_native_contract(&original_version.into(), identity.as_ref())
+                .unwrap();
             let mut plan = run.required("plan").unwrap().clone();
             plan.insert("nativeVersion", original_version.into());
-            plan.insert("catalogSourceHash", previous.catalog().required("sourceHash").unwrap().clone());
-            original_owner.insert("catalogSourceHash", plan.required("catalogSourceHash").unwrap().clone());
+            plan.insert(
+                "catalogSourceHash",
+                previous.catalog().required("sourceHash").unwrap().clone(),
+            );
+            original_owner.insert(
+                "catalogSourceHash",
+                plan.required("catalogSourceHash").unwrap().clone(),
+            );
             run.insert("plan", plan);
         }
         if provider.is_some() {
@@ -942,13 +959,23 @@ async fn actual_snapshot_and_transcript_reopen_without_io_or_writes_and_refuse_c
         }
         let mut later = destination.clone();
         later.insert("serviceNodeId", "later-agent".into());
-        let selection = |plan: &Json| Json::object([
-            ("nativeVersion", plan.required("nativeVersion").unwrap().clone()),
-            ("catalogSourceHash", plan.required("catalogSourceHash").unwrap().clone()),
-        ]);
+        let selection = |plan: &Json| {
+            Json::object([
+                (
+                    "nativeVersion",
+                    plan.required("nativeVersion").unwrap().clone(),
+                ),
+                (
+                    "catalogSourceHash",
+                    plan.required("catalogSourceHash").unwrap().clone(),
+                ),
+            ])
+        };
         let route = |source: Json, target: Json, catalog: &Json| {
             let mut route = Json::object([("source", source), ("target", target)]);
-            if upgrade { route.insert("catalog", selection(catalog)); }
+            if upgrade {
+                route.insert("catalog", selection(catalog));
+            }
             route
         };
         let task = |routes| {
@@ -967,7 +994,11 @@ async fn actual_snapshot_and_transcript_reopen_without_io_or_writes_and_refuse_c
                     fixtures.required("run").unwrap().required("plan").unwrap(),
                 )]),
                 task(vec![
-                    route(run.required("target").unwrap().clone(), later.clone(), run.required("plan").unwrap()),
+                    route(
+                        run.required("target").unwrap().clone(),
+                        later.clone(),
+                        run.required("plan").unwrap(),
+                    ),
                     route(destination.clone(), later, run.required("plan").unwrap()),
                 ]),
             ]
@@ -1041,8 +1072,11 @@ async fn actual_snapshot_and_transcript_reopen_without_io_or_writes_and_refuse_c
                             &id(100),
                         )
                         .unwrap();
-                    let original =
-                        native_reopen_fixtures_for(&catalogs, original_version, Some(&original_owner));
+                    let original = native_reopen_fixtures_for(
+                        &catalogs,
+                        original_version,
+                        Some(&original_owner),
+                    );
                     let args = original.required("actions").unwrap().as_array().unwrap()[0]
                         .required("args")
                         .unwrap()
@@ -1066,12 +1100,32 @@ async fn actual_snapshot_and_transcript_reopen_without_io_or_writes_and_refuse_c
                         .unwrap();
                     if upgrade {
                         let mut stale_owner = observing.clone();
-                        stale_owner.insert("catalogSourceHash", run.required("plan").unwrap().required("catalogSourceHash").unwrap().clone());
-                        let stale = native_reopen_fixtures_for(&catalogs, original_version, Some(&stale_owner));
-                        let args = stale.required("actions").unwrap().as_array().unwrap()[0].required("args").unwrap().as_array().unwrap();
+                        stale_owner.insert(
+                            "catalogSourceHash",
+                            run.required("plan")
+                                .unwrap()
+                                .required("catalogSourceHash")
+                                .unwrap()
+                                .clone(),
+                        );
+                        let stale = native_reopen_fixtures_for(
+                            &catalogs,
+                            original_version,
+                            Some(&stale_owner),
+                        );
+                        let args = stale.required("actions").unwrap().as_array().unwrap()[0]
+                            .required("args")
+                            .unwrap()
+                            .as_array()
+                            .unwrap();
                         let before = db.total_changes();
-                        assert!(turns.save_snapshot(&args[0], &args[1], &args[2]).await.is_err(),
-                            "The current address cannot relabel reads from a retired catalog");
+                        assert!(
+                            turns
+                                .save_snapshot(&args[0], &args[1], &args[2])
+                                .await
+                                .is_err(),
+                            "The current address cannot relabel reads from a retired catalog"
+                        );
                         assert_eq!(db.total_changes(), before);
                     }
                     for key in ["accountId", "provider"] {
@@ -1387,8 +1441,11 @@ async fn actual_snapshot_and_transcript_reopen_without_io_or_writes_and_refuse_c
                             .is_err()
                     );
                     assert_eq!(db.total_changes(), before);
-                    let original =
-                        native_reopen_fixtures_for(&catalogs, original_version, Some(&original_owner));
+                    let original = native_reopen_fixtures_for(
+                        &catalogs,
+                        original_version,
+                        Some(&original_owner),
+                    );
                     let args = original.required("actions").unwrap().as_array().unwrap()[0]
                         .required("args")
                         .unwrap()

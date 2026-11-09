@@ -564,6 +564,45 @@ pub fn canonical(value: &IvyJson, maximum_bytes: usize) -> IvyResult<String> {
 pub fn canonical_size(value: &IvyJson, maximum_bytes: usize) -> IvyResult<usize> {
     encode_into(value, maximum_bytes, true, true, Discard)
 }
+/// Compare canonical JSON exactly without retaining either encoded string.
+/// Validate the complete left value before the right, including when unequal.
+pub fn canonical_equal(left: &IvyJson, right: &IvyJson, maximum_bytes: usize) -> IvyResult<bool> {
+    canonical_size(left, maximum_bytes)?;
+    canonical_size(right, maximum_bytes)?;
+    // Validation bounds recursion to 128 levels. Stable sorting retains the
+    // encoder's order among raw duplicate keys; ordinary object equality does not.
+    fn equal(left: &IvyJson, right: &IvyJson) -> bool {
+        match (left, right) {
+            (IvyJson::Array(a), IvyJson::Array(b)) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| equal(a, b))
+            }
+            (IvyJson::Object(a), IvyJson::Object(b)) => {
+                if a.len() != b.len() {
+                    return false;
+                }
+                let mut a: Vec<_> = a.iter().collect();
+                let mut b: Vec<_> = b.iter().collect();
+                a.sort_by(|a, b| a.0.cmp(&b.0));
+                b.sort_by(|a, b| a.0.cmp(&b.0));
+                a.iter()
+                    .zip(b)
+                    .all(|(a, b)| a.0 == b.0 && equal(&a.1, &b.1))
+            }
+            _ => left == right,
+        }
+    }
+    Ok(equal(left, right))
+}
+/// Count an object from borrowed fields with the same limits and duplicate-key
+/// semantics as `canonical_size(&IvyJson::Object(..))`.
+pub fn canonical_object_size<'a>(
+    pairs: impl IntoIterator<Item = (&'a JsString, &'a IvyJson)>,
+    maximum_bytes: usize,
+) -> IvyResult<usize> {
+    let mut pairs: Vec<_> = pairs.into_iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+    encode_object_pairs(&pairs, maximum_bytes, Discard)
+}
 /// Canonicalize a borrowed object projection with IvyJson::object's last-value rule.
 /// Field values retain their original depth, shared node budget and error order.
 pub(crate) fn canonical_object<'a>(
@@ -575,19 +614,33 @@ pub(crate) fn canonical_object<'a>(
     pairs.reverse();
     pairs.sort_by(|a, b| a.0.cmp(b.0));
     pairs.dedup_by(|a, b| a.0 == b.0);
+    encode_object_pairs(&pairs, maximum_bytes, out).map(|_| ())
+}
+fn encode_object_pairs(
+    pairs: &[(&JsString, &IvyJson)],
+    maximum_bytes: usize,
+    out: impl std::fmt::Write,
+) -> IvyResult<usize> {
     let mut encoder = Encoder {
-        out, maximum_bytes, nodes: 1, sorted: true, validate: true, accounted: 0,
+        out,
+        maximum_bytes,
+        nodes: 1,
+        sorted: true,
+        validate: true,
+        accounted: 0,
     };
     encoder.punctuation("{")?;
     for (index, (key, value)) in pairs.iter().enumerate() {
-        if index > 0 { encoder.punctuation(",")?; }
+        if index > 0 {
+            encoder.punctuation(",")?;
+        }
         encoder.string(key)?;
         encoder.emit(":")?;
         encoder.value(value, 1)?;
     }
     encoder.punctuation("}")?;
     encoder.account(2 + pairs.len().saturating_sub(1))?;
-    Ok(())
+    Ok(encoder.accounted)
 }
 /// Encode an object's generated array inline or as canonical JSON text in a
 /// string field. The latter retains separate inner and outer budgets.
@@ -599,24 +652,37 @@ pub(crate) fn canonical_object_with_array<'a>(
     maximum_bytes: usize,
     out: impl std::fmt::Write,
 ) -> IvyResult<()> {
-    let mut pairs: Vec<_> = pairs.into_iter().filter(|(key, _)| *key != array_key)
-        .map(|(key, value)| (key, Some(value))).collect();
+    let mut pairs: Vec<_> = pairs
+        .into_iter()
+        .filter(|(key, _)| *key != array_key)
+        .map(|(key, value)| (key, Some(value)))
+        .collect();
     pairs.push((array_key, None));
     pairs.reverse();
     pairs.sort_by(|a, b| a.0.cmp(b.0));
     pairs.dedup_by(|a, b| a.0 == b.0);
     let mut encoder = Encoder {
-        out, maximum_bytes, nodes: 1, sorted: true, validate: true, accounted: 0,
+        out,
+        maximum_bytes,
+        nodes: 1,
+        sorted: true,
+        validate: true,
+        accounted: 0,
     };
     let mut records = records.into_iter();
     encoder.punctuation("{")?;
     for (index, (key, value)) in pairs.iter().enumerate() {
-        if index > 0 { encoder.punctuation(",")?; }
+        if index > 0 {
+            encoder.punctuation(",")?;
+        }
         encoder.string(key)?;
         encoder.emit(":")?;
         if *key == array_key {
-            if array_string { encoder.string_records(records.by_ref(), 1)?; }
-            else { encoder.records(records.by_ref(), 1)?; }
+            if array_string {
+                encoder.string_records(records.by_ref(), 1)?;
+            } else {
+                encoder.records(records.by_ref(), 1)?;
+            }
         } else {
             encoder.value(value.unwrap(), 1)?;
         }
@@ -630,8 +696,15 @@ pub(crate) fn canonical_array(
     maximum_bytes: usize,
     out: impl std::fmt::Write,
 ) -> IvyResult<()> {
-    Encoder { out, maximum_bytes, nodes: 0, sorted: true, validate: true, accounted: 0 }
-        .records(records, 0)
+    Encoder {
+        out,
+        maximum_bytes,
+        nodes: 0,
+        sorted: true,
+        validate: true,
+        accounted: 0,
+    }
+    .records(records, 0)
 }
 /// Validate a generated standalone canonical array without retaining its text.
 pub fn validate_canonical_array(
@@ -642,7 +715,9 @@ pub fn validate_canonical_array(
 }
 struct Discard;
 impl std::fmt::Write for Discard {
-    fn write_str(&mut self, _: &str) -> std::fmt::Result { Ok(()) }
+    fn write_str(&mut self, _: &str) -> std::fmt::Result {
+        Ok(())
+    }
 }
 pub(crate) fn canonical_into(
     value: &IvyJson,
@@ -724,7 +799,10 @@ impl<W: std::fmt::Write> std::fmt::Write for QuotedString<'_, W> {
     fn write_str(&mut self, text: &str) -> std::fmt::Result {
         if self.error.is_none() {
             for c in text.chars() {
-                if let Err(error) = self.encoder.scalar(c) { self.error = Some(error); break; }
+                if let Err(error) = self.encoder.scalar(c) {
+                    self.error = Some(error);
+                    break;
+                }
             }
         }
         // Finish validating the inner array even if its escaped text exceeded
@@ -733,22 +811,44 @@ impl<W: std::fmt::Write> std::fmt::Write for QuotedString<'_, W> {
     }
 }
 impl<W: std::fmt::Write> Encoder<W> {
-    fn string_records(&mut self, records: impl IntoIterator<Item = IvyResult<IvyJson>>, depth: usize) -> IvyResult<()> {
+    fn string_records(
+        &mut self,
+        records: impl IntoIterator<Item = IvyResult<IvyJson>>,
+        depth: usize,
+    ) -> IvyResult<()> {
         self.node(depth)?;
         self.emit("\"")?;
         let maximum_bytes = self.maximum_bytes;
-        let mut quoted = QuotedString { encoder: self, error: None };
-        Encoder { out: &mut quoted, maximum_bytes, nodes: 0, sorted: true, validate: true, accounted: 0 }
-            .records(records, 0)?;
-        if let Some(error) = quoted.error { return Err(error); }
+        let mut quoted = QuotedString {
+            encoder: self,
+            error: None,
+        };
+        Encoder {
+            out: &mut quoted,
+            maximum_bytes,
+            nodes: 0,
+            sorted: true,
+            validate: true,
+            accounted: 0,
+        }
+        .records(records, 0)?;
+        if let Some(error) = quoted.error {
+            return Err(error);
+        }
         quoted.encoder.emit("\"")
     }
-    fn records(&mut self, records: impl IntoIterator<Item = IvyResult<IvyJson>>, depth: usize) -> IvyResult<()> {
+    fn records(
+        &mut self,
+        records: impl IntoIterator<Item = IvyResult<IvyJson>>,
+        depth: usize,
+    ) -> IvyResult<()> {
         self.node(depth)?;
         self.punctuation("[")?;
         let mut count = 0usize;
         for record in records {
-            if count > 0 { self.punctuation(",")?; }
+            if count > 0 {
+                self.punctuation(",")?;
+            }
             self.value(&record?, depth + 1)?;
             count += 1;
         }
@@ -784,7 +884,7 @@ impl<W: std::fmt::Write> Encoder<W> {
         self.emit("\"")?;
         for unit in char::decode_utf16(s.0.iter().copied()) {
             match unit {
-                Err(e) => self.emit(&format!("\\u{:04x}", e.unpaired_surrogate()))?,
+                Err(e) => self.escaped_unit(e.unpaired_surrogate())?,
                 Ok(c) => self.scalar(c)?,
             }
         }
@@ -799,12 +899,24 @@ impl<W: std::fmt::Write> Encoder<W> {
             '\t' => self.emit("\\t"),
             '\u{8}' => self.emit("\\b"),
             '\u{c}' => self.emit("\\f"),
-            c if (c as u32) < 32 => self.emit(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 32 => self.escaped_unit(c as u16),
             c => {
                 let mut b = [0; 4];
                 self.emit(c.encode_utf8(&mut b))
             }
         }
+    }
+    fn escaped_unit(&mut self, unit: u16) -> IvyResult<()> {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let escaped = [
+            b'\\',
+            b'u',
+            HEX[usize::from(unit >> 12)],
+            HEX[usize::from((unit >> 8) & 15)],
+            HEX[usize::from((unit >> 4) & 15)],
+            HEX[usize::from(unit & 15)],
+        ];
+        self.emit(std::str::from_utf8(&escaped).expect("JSON escapes contain only ASCII"))
     }
     fn value(&mut self, value: &IvyJson, depth: usize) -> IvyResult<()> {
         enum Part<'a> {

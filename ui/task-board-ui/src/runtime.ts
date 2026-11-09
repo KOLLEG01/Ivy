@@ -4,6 +4,7 @@ import { uiRuntime, route } from '../../../packages/ui-client/src/runtime';
 import { upgradeTaskRecord, upgradeResultRecord } from '../../../packages/sdk/src/client.js';
 import { CommentReader } from '../../../packages/sdk/src/task-comments.js';
 import type { CommentTree } from '../../../packages/sdk/src/task-comments.js';
+import type { TaskHistoryFields } from './field-history';
 export const { base, client, uiUrl, notifications, live } = uiRuntime(definition.metadata);
 const conversationReader = new CommentReader(client);
 export type { TaskBoard, Operation, Wire };
@@ -21,6 +22,18 @@ export const statusTone = (value: string) => ['completed', 'succeeded', 'passed'
 export interface Documents { delivery: TaskBoard.Delivery; task: TaskBoard.Task; run: TaskBoard.Run; result: TaskBoard.Result; review: TaskBoard.Review; history: TaskBoard.History; 'native-plan': TaskBoard.NativePlan; 'native-signals': TaskBoard.NativeSignals; 'native-transcript': TaskBoard.NativeTranscript; 'native-result-page': TaskBoard.NativeResultPage; 'native-read-evidence': TaskBoard.NativeReadEvidence; 'native-full-turn-transcript': TaskBoard.NativeFullTurnTranscript; 'native-turn-snapshot': TaskBoard.NativeTurnSnapshot }
 export interface Document<K extends keyof Documents> { value: Documents[K]; pin: TaskBoard.ObjectPin; read: Operation.ObjectRead; commentRange?: { start: number; end: number; total: number } }
 export const documentContractVersions = (key: keyof Documents): string[] => readableVersions('task-board/' + key);
+/** Historical field comparisons never need to materialize the conversation. */
+export async function readTaskFields(pin: TaskBoard.ObjectPin, root: string | null, signal: AbortSignal): Promise<TaskHistoryFields> {
+  const read = await client.request('objects.read', pin, { signal });
+  const raw = documentValue('task', read, root) as TaskBoard.Task & {
+    commentStore?: unknown; latestChecks?: unknown; deliveries?: unknown;
+  };
+  const { comments: _comments, commentDeliveries: _receipts, commentStore: _store,
+    latestChecks: _checks, deliveries: _deliveries, ...header } = raw;
+  const task = upgradeTaskRecord({ ...header, comments: [], commentDeliveries: [] });
+  const { fields, workflowState, wakeAt, dependencies, lastHistory, publication } = task;
+  return { fields, workflowState, wakeAt, dependencies, lastHistory, publication };
+}
 export async function readDocument<K extends keyof Documents>(
   key: K,
   pin: string | TaskBoard.ObjectPin,
@@ -67,9 +80,13 @@ export function decodeDocument<K extends keyof Documents>(
   read: Operation.ObjectRead,
   root?: string | null,
 ): Document<K> {
-  if (read.object.contractKey !== 'task-board/' + key || !documentContractVersions(key).includes(read.revision.contractVersion) || read.content.encoding !== 'json' || read.revision.mediaType !== 'application/json') throw new Error('This saved record needs a compatible UI release. Drafts remain in this tab.');
-  if (root !== undefined && read.object.parentId !== root) throw new Error('This record belongs to a different workspace.');
+  documentValue(key, read, root);
   const value = key === 'task' && !(read.content.value as unknown as { commentStore?: unknown }).commentStore ? upgradeTaskRecord(read.content.value as TaskBoard.Task) : key === 'result' ? upgradeResultRecord(read.content.value as TaskBoard.Result) : read.content.value;
   return { value: value as Documents[K], pin: { objectId: read.object.id, revision: read.revision.revision }, read };
+}
+function documentValue(key: keyof Documents, read: Operation.ObjectRead, root?: string | null): unknown {
+  if (read.object.contractKey !== 'task-board/' + key || !documentContractVersions(key).includes(read.revision.contractVersion) || read.content.encoding !== 'json' || read.revision.mediaType !== 'application/json') throw new Error('This saved record needs a compatible UI release. Drafts remain in this tab.');
+  if (root !== undefined && read.object.parentId !== root) throw new Error('This record belongs to a different workspace.');
+  return read.content.value;
 }
 export const consoleObject = (pin: TaskBoard.ObjectPin) => new URL('#/objects?id=' + encodeURIComponent(pin.objectId) + '&revision=' + pin.revision, base).href;

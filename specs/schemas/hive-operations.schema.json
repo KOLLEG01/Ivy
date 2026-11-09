@@ -3028,6 +3028,62 @@
       ],
       "additionalProperties": false
     },
+    "ObjectsCountParams": {
+      "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/ObjectCountQuery"
+    },
+    "ObjectsCountResult": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "values": {
+                "type": "object",
+                "maxProperties": 2,
+                "additionalProperties": {
+                  "type": [
+                    "null",
+                    "boolean",
+                    "number",
+                    "string"
+                  ]
+                }
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "values",
+              "count"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 200
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8192
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "nextCursor"
+      ],
+      "additionalProperties": false
+    },
     "ObjectsSearchParams": {
       "type": "object",
       "properties": {

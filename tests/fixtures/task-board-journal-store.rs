@@ -190,7 +190,7 @@ impl Contracts for FixtureContracts {
 }
 fn document(value: Document) -> Json {
     Json::object([
-        ("pin", value.pin),
+        ("pin", value.pin.to_json()),
         ("value", value.value),
         (
             "parentId",
@@ -535,7 +535,8 @@ async fn inspection_evidence_delegates_to_the_same_validated_sqlite_journal() {
             .await
             .unwrap()
             .unwrap()
-            .pin,
+            .pin
+            .to_json(),
         pin
     );
     assert_eq!(
@@ -792,6 +793,8 @@ async fn concrete_journal_routes_match_original_storage_and_rpc_traces() {
                             step.required("value").unwrap(),
                             &"retained-identity".into(),
                             step.required("destination").unwrap(),
+                            None,
+                            None,
                         )
                         .await
                 }
@@ -815,9 +818,27 @@ async fn concrete_journal_routes_match_original_storage_and_rpc_traces() {
             ("idAllocations", Json::Number(id_allocations.get() as f64)),
             ("tables", snapshot(&db)),
         ]);
+        // The frozen oracle predates the recovery index. Expect its explicit
+        // initialization marker alongside all original rows and outcomes.
+        let mut expected = case.required("expected").unwrap().clone();
+        let Json::Array(markers) = expected
+            .get_mut("tables")
+            .unwrap()
+            .get_mut("markers")
+            .unwrap()
+        else {
+            panic!("The journal oracle must include its marker rows")
+        };
+        markers.insert(
+            0,
+            Json::object([
+                ("key", "pending-operations-index".into()),
+                ("value", "1".into()),
+            ]),
+        );
         assert_eq!(
             canonical(&actual, MANAGEMENT_FRAME_BYTES).unwrap(),
-            canonical(case.required("expected").unwrap(), MANAGEMENT_FRAME_BYTES).unwrap(),
+            canonical(&expected, MANAGEMENT_FRAME_BYTES).unwrap(),
             "{}",
             text(case, "name")
         );
@@ -847,7 +868,7 @@ async fn local_writes_progress_without_running_history_collection() {
         let mutation = JsString::from("retained");
         tokio::time::timeout(
             Duration::from_secs(1),
-            store.write_prepared(key, value, &mutation, destination),
+            store.write_prepared(key, value, &mutation, destination, None, None),
         )
         .await
         .expect("Local workflow write waited for cleanup")
@@ -910,7 +931,13 @@ async fn local_writes_progress_without_running_history_collection() {
         )
         .unwrap();
         let client = Arc::new(Client {
-            input: Json::object([("pendingCleanup", pending.into())]),
+            input: Json::object([
+                ("pendingCleanup", pending.into()),
+                (
+                    "query",
+                    Json::object([("items", Json::Array(vec![])), ("nextCursor", Json::Null)]),
+                ),
+            ]),
             trace: Mutex::default(),
         });
         let value = Json::object([("value", "new".into())]);
@@ -1011,13 +1038,12 @@ async fn local_writes_progress_without_running_history_collection() {
                     .await
                     .is_err()
             );
-            assert_eq!(
-                *client.trace.lock().unwrap(),
-                vec![Json::Array(vec![
-                    "objects.read".into(),
-                    Json::object([("objectId", "task".into())])
-                ])]
-            );
+            let trace = client.trace.lock().unwrap();
+            assert_eq!(trace.len(), 1);
+            let call = trace[0].as_array().unwrap();
+            assert_eq!(call[0], "objects.query".into());
+            assert_eq!(call[1].get("contractKey"), Some(&"task-board/task".into()));
+            assert_eq!(call[1].get("includeArchived"), Some(&true.into()));
         } else {
             store.collect_local().await.unwrap();
             assert!(store.journal.key(&"old".into()).unwrap().is_none());
@@ -1094,10 +1120,15 @@ async fn original_operation_values_complete_through_real_journal_cas_and_cleanup
         hash_json(values(expected, "outcomes")[0].required("value").unwrap()).unwrap()
     );
     assert_eq!(
-        operations.begin(&args[0], &args[1]).await.unwrap().pin,
-        begin.pin
+        operations
+            .begin(&args[0], &args[1])
+            .await
+            .unwrap()
+            .pin
+            .to_json(),
+        begin.pin.to_json()
     );
-    let id = string(&begin.pin, "objectId");
+    let id = string(&begin.pin.to_json(), "objectId");
     let outcome = &values(&steps[1], "args")[1];
     assert_eq!(operations.finish(&id, outcome).await.unwrap(), *outcome);
     assert_eq!(operations.finish(&id, outcome).await.unwrap(), *outcome);
@@ -1300,6 +1331,8 @@ async fn remote_run_writes_retain_the_original_task_until_completion() {
                         &value,
                         &"original-write".into(),
                         &destination,
+                        None,
+                        None,
                     )
                     .await
                     .unwrap();
@@ -1463,4 +1496,18 @@ async fn retained_operations_use_the_concrete_journal_and_require_admission() {
         1
     );
     assert!(client.trace.lock().unwrap().is_empty());
+}
+
+impl ivy_sdk::rpc::OptionalRpcClient for Client {
+    fn request_optional<'a>(
+        &'a self,
+        method: &'a str,
+        params: Option<Json>,
+        options: ivy_sdk::rpc::RequestOptions,
+    ) -> ivy_sdk::rpc::RequestFuture<'a> {
+        match params {
+            Some(params) => ivy_sdk::rpc::RpcClient::request(self, method, params, options),
+            None => Box::pin(async { Err(ivy_contracts::IvyError::internal()) }),
+        }
+    }
 }

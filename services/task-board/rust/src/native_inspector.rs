@@ -7,9 +7,13 @@ use crate::{
     turn_output::{page_cursor, turns_params},
 };
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, agent_schema::validate_agent,
-    checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical,
-    limits::MANAGEMENT_FRAME_BYTES, native_backend::BackendIdentity,
+    IvyError, IvyJson as Json, IvyResult, JsString,
+    agent_schema::validate_agent,
+    checked_native_contract::CheckedNativeContracts,
+    hash::{hash_json, hash_object},
+    json::canonical_equal,
+    limits::MANAGEMENT_FRAME_BYTES,
+    native_backend::BackendIdentity,
 };
 use ivy_sdk::{
     clock::parse_date,
@@ -20,6 +24,43 @@ use std::collections::HashSet;
 
 #[allow(async_fn_in_trait)]
 pub trait InspectionStore: ReadEvidenceStore {
+    async fn task_header(&self, address: &Json) -> IvyResult<Document> {
+        self.read_document("task-board/task", address, true).await
+    }
+    async fn task_has_comment(
+        &self,
+        task: &Json,
+        _task_id: &JsString,
+        id: &JsString,
+    ) -> IvyResult<bool> {
+        Ok(
+            !crate::operations::selected_task_comments(task, &[Json::String(id.clone())])?
+                .is_empty(),
+        )
+    }
+    /// Include closed and historical questions. The open-question summary is
+    /// insufficient when mirroring an original connection's eventual answer.
+    async fn task_native_questions(
+        &self,
+        task: &Json,
+        _task_id: &JsString,
+        run_id: &JsString,
+        comment_id: Option<&JsString>,
+    ) -> IvyResult<Vec<Json>> {
+        Ok(task
+            .required("comments")?
+            .as_array()
+            .ok_or_else(IvyError::internal)?
+            .iter()
+            .filter(|comment| crate::native_comments::question_for_run(comment, run_id))
+            .filter(|comment| {
+                comment_id.is_none_or(|id| {
+                    comment.get("commentId").and_then(Json::as_js_string) == Some(id)
+                })
+            })
+            .cloned()
+            .collect())
+    }
     async fn verify_owner(&self) -> IvyResult<()>;
     async fn named_document(
         &self,
@@ -114,9 +155,7 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
 }
 fn same(a: Option<&Json>, b: Option<&Json>) -> IvyResult<bool> {
     match (a, b) {
-        (Some(a), Some(b)) => {
-            Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
-        }
+        (Some(a), Some(b)) => canonical_equal(a, b, MANAGEMENT_FRAME_BYTES),
         _ => Ok(a.is_none() && b.is_none()),
     }
 }
@@ -361,15 +400,15 @@ impl<S: InspectionStore> NativeInspector<'_, S> {
                     &name.into(),
                     &format!(
                         "advance:{}",
-                        hash_json(&Json::object([
-                            ("pin", saved.pin.clone()),
-                            ("value", value.clone())
-                        ]))?
+                        hash_object([
+                            (&"pin".into(), &saved.pin.to_json()),
+                            (&"value".into(), &value)
+                        ])?
                     ),
                 )?,
                 Json::object([
-                    ("objectId", saved.pin.required("objectId")?.clone()),
-                    ("expectedRevision", saved.pin.required("revision")?.clone()),
+                    ("objectId", Json::String(saved.pin.object_id.clone())),
+                    ("expectedRevision", Json::Number(saved.pin.revision)),
                 ]),
             )
         } else {

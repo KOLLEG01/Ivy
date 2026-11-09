@@ -201,7 +201,15 @@ impl<S: Store + ReadEvidenceStore> Store for Trace<'_, S> {
     async fn prepared_mutation_id(&self, _: &str) -> IvyResult<JsString> {
         panic!("Recovery prepared mutation")
     }
-    async fn write_prepared(&self, _: &str, _: &Json, _: &JsString, _: &Json) -> IvyResult<Json> {
+    async fn write_prepared(
+        &self,
+        _: &str,
+        _: &Json,
+        _: &JsString,
+        _: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
+    ) -> IvyResult<Json> {
         panic!("Recovery published mutation")
     }
 }
@@ -361,7 +369,10 @@ async fn recovery_proof_selection_matches_original_over_exact_journal_and_receip
             task.insert("value", value);
         }
         let task = Document {
-            pin: task.required("pin").unwrap().clone(),
+            pin: ivy_task_board::operations::ObjectPin::from_json(
+                task.required("pin").unwrap().clone(),
+            )
+            .unwrap(),
             value: task.required("value").unwrap().clone(),
             parent_id: Some("root".into()),
             content_hash: String::new(),
@@ -493,12 +504,14 @@ async fn context_recovery_refuses_another_account_with_the_same_native_thread_id
             cache: None,
         };
         let task = Document {
-            pin: base
-                .required("task")
-                .unwrap()
-                .required("pin")
-                .unwrap()
-                .clone(),
+            pin: ivy_task_board::operations::ObjectPin::from_json(
+                base.required("task")
+                    .unwrap()
+                    .required("pin")
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap(),
             value: task,
             parent_id: Some("root".into()),
             content_hash: String::new(),
@@ -578,7 +591,7 @@ async fn current_recovery_resolves_questions_reads_exact_receipts_and_refuses_sn
         store: &store,
         catalogs: &catalogs,
     }
-    .save(&call.pin, &observation, &identity)
+    .save(&call.pin.to_json(), &observation, &identity)
     .await
     .unwrap();
     call.value.insert("evidence", artifact);
@@ -587,7 +600,7 @@ async fn current_recovery_resolves_questions_reads_exact_receipts_and_refuses_sn
         .journal
         .update(
             "task-board/native-call",
-            &s(&call.pin, "objectId"),
+            &s(&call.pin.to_json(), "objectId"),
             2.0,
             &call.value,
             &"2026-01-02T03:04:05.006Z".into(),
@@ -595,7 +608,10 @@ async fn current_recovery_resolves_questions_reads_exact_receipts_and_refuses_sn
         .unwrap();
     let task = base.required("task").unwrap();
     let mut task = Document {
-        pin: task.required("pin").unwrap().clone(),
+        pin: ivy_task_board::operations::ObjectPin::from_json(
+            task.required("pin").unwrap().clone(),
+        )
+        .unwrap(),
         value: task.required("value").unwrap().clone(),
         parent_id: Some("root".into()),
         content_hash: String::new(),

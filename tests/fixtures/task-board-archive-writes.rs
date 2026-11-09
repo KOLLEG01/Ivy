@@ -67,7 +67,7 @@ impl ObjectReads<Failure> for NoReads {
     }
 }
 impl TreeReads<Failure> for NoReads {
-    async fn hydrate(&self, _: &Json, _: &Json) -> std::result::Result<Option<Json>, Failure> {
+    async fn hydrate(&self, _: Json, _: &Json) -> std::result::Result<Option<Json>, Failure> {
         unreachable!()
     }
     fn summary(&self, _: &Json, _: &Json, _: &Json) -> std::result::Result<Option<Json>, Failure> {
@@ -133,6 +133,7 @@ async fn publish(
             destination,
             true,
             &text("3.4.0"),
+            None,
         )
         .await
 }

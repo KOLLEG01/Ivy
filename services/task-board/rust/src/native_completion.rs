@@ -2,7 +2,7 @@
 use super::*;
 use crate::{
     deliveries::initial_delivery, engine_actions::result_comment_fits,
-    engine_read::conversation::run_handoff,
+    operations::CompletionComments,
 };
 use ivy_sdk::clock::{date_to_iso, parse_date};
 
@@ -21,12 +21,12 @@ pub(super) fn initial(task: &Json, run: &Json) -> Json {
 pub(super) fn changing_execution(task: &Json, run: &Json) -> bool {
     f(task, "executionChangeRequested").as_bool() == Some(true) && f(run, "cancellation").is_null()
 }
-pub(super) fn intent(task: &Json, run: &Json, run_id: &JsString, active: bool) -> Json {
+pub(super) fn intent(task: &Json, run: &Json, handoff: Option<&Json>, active: bool) -> Json {
     if active && changing_execution(task, run) {
         return Json::Null;
     }
-    if let Some(comment) = run_handoff(task, run_id).filter(|c| !f(c, "handoff").is_null()) {
-        return f(&comment, "handoff").clone();
+    if let Some(comment) = handoff.filter(|c| !f(c, "handoff").is_null()) {
+        return f(comment, "handoff").clone();
     }
     if eq(f(run, "owner"), "source", "native")
         && !one(&initial(task, run), "workflowState", &["done", "cancelled"])
@@ -42,7 +42,17 @@ pub(super) fn after(at: &JsString, delay: f64) -> IvyResult<Json> {
     ))
 }
 fn limited(value: &Json, units: usize) -> Json {
-    Json::String(JsString(text(value).0.into_iter().take(units).collect()))
+    Json::String(JsString(
+        value
+            .as_js_string()
+            .map_or_else(Vec::new, |text| text.0[..text.0.len().min(units)].to_vec()),
+    ))
+}
+fn take_array(task: &mut Json, key: &str) -> Vec<Json> {
+    match task.get_mut(key) {
+        Some(Json::Array(values)) => std::mem::take(values),
+        _ => vec![],
+    }
 }
 
 impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublicationEvidence>
@@ -58,6 +68,8 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
         done: &Json,
         outcome: &Json,
         handoff: &Json,
+        comments: &CompletionComments,
+        compact: bool,
         steps: &mut P,
     ) -> IvyResult<Json> {
         let request = f(&operation.value, "request");
@@ -164,8 +176,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                 {
                     let origin = self
                         .store
-                        .read(
-                            "task-board/task",
+                        .read_task_header(
                             &Json::object([
                                 ("objectId", f(run, "taskId").clone()),
                                 (
@@ -180,30 +191,17 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                         final_task.insert("executionChangeRequested", true.into());
                     }
                 }
-                final_task.insert(
-                    "commentDeliveries",
-                    Json::Array(
-                        array(f(&final_task, "commentDeliveries"))
-                            .iter()
-                            .map(|v| {
-                                if array(f(f(run, "originalRequest"), "commentIds"))
-                                    .contains(f(v, "commentId"))
-                                {
-                                    patch(
-                                        v,
-                                        [
-                                            ("state", "queued".into()),
-                                            ("updatedAt", Json::String(at.clone())),
-                                            ("code", f(done, "code").clone()),
-                                        ],
-                                    )
-                                } else {
-                                    v.clone()
-                                }
-                            })
-                            .collect(),
-                    ),
-                );
+                let mut receipts = take_array(&mut final_task, "commentDeliveries");
+                for receipt in &mut receipts {
+                    if array(f(f(run, "originalRequest"), "commentIds"))
+                        .contains(f(receipt, "commentId"))
+                    {
+                        receipt.insert("state", "queued".into());
+                        receipt.insert("updatedAt", Json::String(at.clone()));
+                        receipt.insert("code", f(done, "code").clone());
+                    }
+                }
+                final_task.insert("commentDeliveries", Json::Array(receipts));
                 let detail = crate::native_rate_limit::waiting_detail(
                     retry.as_js_string().ok_or_else(IvyError::internal)?,
                 );
@@ -226,21 +224,21 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
             final_task.insert("runtimeWait", Json::Null);
         }
         if !cancelled {
-            let handoff_comment = run_handoff(&final_task, s(run_pin, "objectId")?);
+            let handoff_comment = comments.handoff.as_ref();
             let inputs = array(f(f(run, "originalRequest"), "commentIds"));
-            let answered = !inputs.is_empty()
-                && array(f(&final_task, "comments")).iter().any(|c| {
-                    eq(c, "authorKind", "agent")
-                        && f(f(c, "run"), "objectId") == f(run_pin, "objectId")
-                        && !f(c, "replyTo").is_null()
-                        && inputs.contains(f(c, "replyTo"))
-                });
-            let mut comment = handoff_comment.clone().unwrap_or_else(|| {
+            let answered = comments.answered;
+            let mut comment = handoff_comment.cloned().unwrap_or_else(|| {
                 Json::object([
                     ("commentId", f(request, "operationId").clone()),
                     (
                         "sequence",
-                        Json::Number(array(f(&final_task, "comments")).len() as f64 + 1.0),
+                        Json::Number(
+                            if compact {
+                                n(f(&final_task, "commentStore"), "length")
+                            } else {
+                                array(f(&final_task, "comments")).len() as f64
+                            } + 1.0,
+                        ),
                     ),
                     ("author", f(&operation.value, "actor").clone()),
                     ("authorKind", "agent".into()),
@@ -290,23 +288,28 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                 );
             }
             if handoff_comment.is_some() {
-                final_task.insert(
-                    "comments",
-                    Json::Array(
-                        array(f(&final_task, "comments"))
-                            .iter()
-                            .map(|c| {
-                                if f(c, "commentId") == f(&comment, "commentId") {
-                                    comment.clone()
-                                } else {
-                                    c.clone()
-                                }
-                            })
-                            .collect(),
-                    ),
-                );
+                if compact {
+                    let mut selected = take_array(&mut final_task, "comments");
+                    if let Some(existing) = selected
+                        .iter_mut()
+                        .find(|c| f(c, "sequence") == f(&comment, "sequence"))
+                    {
+                        *existing = comment;
+                    } else {
+                        selected.push(comment);
+                    }
+                    final_task.insert("comments", Json::Array(selected));
+                } else {
+                    let mut selected = take_array(&mut final_task, "comments");
+                    for existing in &mut selected {
+                        if f(existing, "commentId") == f(&comment, "commentId") {
+                            *existing = comment.clone();
+                        }
+                    }
+                    final_task.insert("comments", Json::Array(selected));
+                }
             } else if !answered && fits {
-                let mut comments = array(f(&final_task, "comments")).to_vec();
+                let mut comments = take_array(&mut final_task, "comments");
                 comments.push(comment);
                 final_task.insert("comments", Json::Array(comments));
                 final_task.insert(

@@ -4,10 +4,10 @@ use crate::{
         mutation_ports::{LocalMutationStore, WriteFailure, typed_write_cause},
         persistent_reads::json_values::{self as v, Value},
     },
-    operations::local::mutation,
+    operations::{Document, local::mutation},
 };
 use ivy_contracts::{IvyError, JsString, limits::MANAGEMENT_FRAME_BYTES};
-use std::future::Future;
+use std::{future::Future, ops::AsyncFn};
 
 const GATE: &str = "task-board/coordination";
 pub(crate) struct Calls<'a, S, N, G, C> {
@@ -17,7 +17,7 @@ pub(crate) struct Calls<'a, S, N, G, C> {
     pub(crate) gates: G,
     pub(crate) now: C,
 }
-fn f(value: &Value, key: &str) -> Result<Value, IvyError> {
+fn f<'a>(value: &'a Value, key: &str) -> &'a Value {
     v::field(value, key)
 }
 fn text(value: &str) -> Value {
@@ -29,7 +29,8 @@ fn object(fields: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
 fn changed(value: &Value, fields: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
     v::object(
         v::fields(value)
-            .into_iter()
+            .iter()
+            .cloned()
             .chain(fields.into_iter().map(|(k, v)| (k.into(), v))),
     )
 }
@@ -40,9 +41,9 @@ fn require(ok: bool, code: &str, message: &str) -> Result<(), IvyError> {
         Err(IvyError::new(code, message))
     }
 }
-fn finished(value: &Value) -> Result<bool, IvyError> {
-    let phase = f(value, "phase")?;
-    Ok(phase.eq(&text("succeeded")) || phase.eq(&text("failed")))
+fn finished(value: &Value) -> bool {
+    let phase = f(value, "phase");
+    phase.is_str("succeeded") || phase.is_str("failed")
 }
 fn concat(values: impl IntoIterator<Item = Value>) -> Result<Value, IvyError> {
     let mut result = JsString::from("");
@@ -51,28 +52,23 @@ fn concat(values: impl IntoIterator<Item = Value>) -> Result<Value, IvyError> {
     }
     Ok(Value::String(result))
 }
-fn mutation_step(prefix: &str, revision: &Value, id: &Value) -> Result<Value, IvyError> {
-    let mut step = JsString::from(format!("{prefix}:{:.0}:", v::number(revision)?));
+fn mutation_step(prefix: &str, revision: f64, id: &Value) -> Result<Value, IvyError> {
+    let mut step = JsString::from(format!("{prefix}:{revision:.0}:"));
     step.0.extend(v::string(id)?.0);
     Ok(Value::String(step))
 }
-fn active_id(value: &Value) -> Result<Value, IvyError> {
-    let active = f(value, "activeOperation")?;
-    if v::nullish(&active) {
-        Ok(Value::Null)
-    } else {
-        f(&active, "objectId")
-    }
+fn active_id(value: &Value) -> &Value {
+    f(f(value, "activeOperation"), "objectId")
 }
 fn positive(value: &Value) -> Result<bool, IvyError> {
     Ok(v::number(value)? > 0.0)
 }
 impl<S, N, G, C> Calls<'_, S, N, G, C> {
-    pub(crate) async fn current<E, NF>(&self, name: &Value) -> Result<Value, WriteFailure<E>>
+    pub(crate) async fn current<E, NF>(&self, name: &Value) -> Result<Document, WriteFailure<E>>
     where
         S: LocalMutationStore<E>,
         N: Fn(Value) -> NF,
-        NF: Future<Output = Result<Option<Value>, WriteFailure<E>>>,
+        NF: Future<Output = Result<Option<Document>, WriteFailure<E>>>,
         C: Fn() -> Value,
     {
         let mut value = (self.named)(name.clone()).await?;
@@ -124,7 +120,7 @@ impl<S, N, G, C> Calls<'_, S, N, G, C> {
             }
         }
         let valid = match &value {
-            Some(value) => f(&f(value, "value")?, "principalId")?.eq(self.principal),
+            Some(value) => f(&value.value, "principalId").eq(self.principal),
             None => false,
         };
         require(
@@ -134,36 +130,34 @@ impl<S, N, G, C> Calls<'_, S, N, G, C> {
         )?;
         Ok(value.unwrap())
     }
-    pub(crate) async fn acquire<E, NF, GF>(&self, operation: &Value) -> Result<(), WriteFailure<E>>
+    pub(crate) async fn acquire<E, NF>(&self, operation: &Document) -> Result<(), WriteFailure<E>>
     where
         S: LocalMutationStore<E>,
         N: Fn(Value) -> NF,
-        NF: Future<Output = Result<Option<Value>, WriteFailure<E>>>,
-        G: Fn(Value) -> GF,
-        GF: Future<Output = Result<Vec<Value>, WriteFailure<E>>>,
+        NF: Future<Output = Result<Option<Document>, WriteFailure<E>>>,
+        G: AsyncFn(&Document) -> Result<Vec<Value>, WriteFailure<E>>,
         C: Fn() -> Value,
     {
-        let id = f(&f(operation, "pin")?, "objectId")?;
+        let id = &Value::String(operation.pin.object_id.clone());
         let pin = object([("objectId", id.clone()), ("revision", Value::Number(1.0))]);
-        for name in (self.gates)(operation.clone()).await? {
+        for name in (self.gates)(operation).await? {
             let current = self.current(&name).await?;
-            let value = f(&current, "value")?;
-            let active = f(&value, "activeOperation")?;
+            let value = &current.value;
+            let active = f(&value, "activeOperation");
             if v::present(&(active)) {
                 require(
-                    ivy_contracts::json::canonical(&(active), MANAGEMENT_FRAME_BYTES)?
-                        == ivy_contracts::json::canonical(&(pin), MANAGEMENT_FRAME_BYTES)?,
+                    ivy_contracts::json::canonical_equal(active, &pin, MANAGEMENT_FRAME_BYTES)?,
                     "task_board_publication_busy",
                     "Reconcile the recorded publication before starting another workflow action.",
                 )?;
                 continue;
             }
-            let current_pin = f(&current, "pin")?;
+            let current_pin = &current.pin;
             let next = changed(
                 &value,
                 [
                     ("activeOperation", pin.clone()),
-                    ("updatedAt", f(&f(operation, "value")?, "createdAt")?),
+                    ("updatedAt", f(&operation.value, "createdAt").clone()),
                 ],
             );
             self.store
@@ -171,26 +165,26 @@ impl<S, N, G, C> Calls<'_, S, N, G, C> {
                     GATE,
                     &next,
                     &mutation(
-                        &f(&current_pin, "objectId")?,
-                        mutation_step("acquire", &f(&current_pin, "revision")?, &id)?,
+                        &Value::String(current_pin.object_id.clone()),
+                        mutation_step("acquire", current_pin.revision, &id)?,
                     )?,
                     &object([
-                        ("objectId", f(&current_pin, "objectId")?),
-                        ("expectedRevision", f(&current_pin, "revision")?),
+                        ("objectId", Value::String(current_pin.object_id.clone())),
+                        ("expectedRevision", Value::Number(current_pin.revision)),
                     ]),
                 )
                 .await?;
         }
         Ok(())
     }
-    pub(crate) async fn reserved<E>(&self, operation: &Value) -> Result<bool, WriteFailure<E>>
+    pub(crate) async fn reserved<E>(&self, operation: &Document) -> Result<bool, WriteFailure<E>>
     where
         S: LocalMutationStore<E>,
     {
-        let first = v::at(&f(&f(operation, "value")?, "writes")?, 0)?;
+        let first = v::at(f(&operation.value, "writes"), 0)?;
         if !v::present(&(first))
-            || !f(&first, "contractKey")?.eq(&text("task-board/task"))
-            || !v::present(&(f(&first, "outcome")?))
+            || !f(&first, "contractKey").eq(&text("task-board/task"))
+            || !v::present(&(f(&first, "outcome")))
         {
             return Ok(false);
         }
@@ -198,34 +192,30 @@ impl<S, N, G, C> Calls<'_, S, N, G, C> {
             .store
             .read_graph(
                 "task-board/task",
-                &f(&f(&first, "payload")?, "object")?,
+                f(f(&first, "payload"), "object"),
                 false,
                 false,
                 true,
             )
             .await?;
-        let publication = f(&f(&payload, "value")?, "publication")?;
-        let publication_id = if v::nullish(&publication) {
-            Value::Null
-        } else {
-            f(&publication, "objectId")?
-        };
+        let publication = f(&payload.value, "publication");
+        let publication_id = f(publication, "objectId");
         require(
-            publication_id.eq(&f(&f(operation, "pin")?, "objectId")?)
-                && f(&publication, "revision")?.eq(&Value::Number(1.0)),
+            publication_id.eq(&Value::String(operation.pin.object_id.clone()))
+                && f(&publication, "revision").eq(&Value::Number(1.0)),
             "task_board_publication_pending",
             "The first Task write must durably retain its owning publication marker.",
         )?;
-        let destination = f(&first, "destination")?;
+        let destination = f(&first, "destination");
         require(
-            v::has(&destination, "create")?
-                || f(&destination, "objectId")?.eq(&f(&f(&first, "outcome")?, "objectId")?),
+            v::has(&destination, "create")
+                || f(&destination, "objectId").eq(f(f(&first, "outcome"), "objectId")),
             "task_board_stage_conflict",
             "The retained Task reservation receipt names another destination.",
         )?;
         Ok(true)
     }
-    pub(crate) async fn release<E, NF, GF>(
+    pub(crate) async fn release<E, NF>(
         &self,
         id: &Value,
         reserved: bool,
@@ -233,9 +223,8 @@ impl<S, N, G, C> Calls<'_, S, N, G, C> {
     where
         S: LocalMutationStore<E>,
         N: Fn(Value) -> NF,
-        NF: Future<Output = Result<Option<Value>, WriteFailure<E>>>,
-        G: Fn(Value) -> GF,
-        GF: Future<Output = Result<Vec<Value>, WriteFailure<E>>>,
+        NF: Future<Output = Result<Option<Document>, WriteFailure<E>>>,
+        G: AsyncFn(&Document) -> Result<Vec<Value>, WriteFailure<E>>,
         C: Fn() -> Value,
     {
         let operation = self
@@ -243,71 +232,72 @@ impl<S, N, G, C> Calls<'_, S, N, G, C> {
             .read_graph("task-board/operation", id, true, false, false)
             .await?;
         let task_reserved = reserved && self.reserved(&operation).await?;
-        let value = f(&operation, "value")?;
-        for name in (self.gates)(operation.clone()).await? {
+        let value = &operation.value;
+        for name in (self.gates)(&operation).await? {
             let current = self.current(&name).await?;
-            if !active_id(&f(&current, "value")?)?.eq(id) {
+            if !active_id(&current.value).eq(id) {
                 continue;
             }
             require(
-                finished(&value)? || task_reserved,
+                finished(&value) || task_reserved,
                 "task_board_publication_pending",
                 "An unfinished publication gate cannot be released before its first Task reservation is durable.",
             )?;
-            self.clear(&current, id, &f(&value, "updatedAt")?).await?;
+            self.clear(&current, id, f(&value, "updatedAt")).await?;
         }
         Ok(())
     }
-    pub(crate) async fn release_unstarted<E, NF, GF>(
-        &self,
-        id: &Value,
-    ) -> Result<bool, WriteFailure<E>>
+    pub(crate) async fn release_unstarted<E, NF>(&self, id: &Value) -> Result<bool, WriteFailure<E>>
     where
         S: LocalMutationStore<E>,
         N: Fn(Value) -> NF,
-        NF: Future<Output = Result<Option<Value>, WriteFailure<E>>>,
-        G: Fn(Value) -> GF,
-        GF: Future<Output = Result<Vec<Value>, WriteFailure<E>>>,
+        NF: Future<Output = Result<Option<Document>, WriteFailure<E>>>,
+        G: AsyncFn(&Document) -> Result<Vec<Value>, WriteFailure<E>>,
         C: Fn() -> Value,
     {
         let operation = self
             .store
             .read_graph("task-board/operation", id, true, false, false)
             .await?;
-        let value = f(&operation, "value")?;
-        if finished(&value)? || positive(&v::length(&f(&value, "writes")?)?)? {
+        let value = &operation.value;
+        if finished(&value) || positive(&v::length(f(&value, "writes"))?)? {
             return Ok(false);
         }
         let mut released = false;
-        for name in (self.gates)(operation.clone()).await? {
+        for name in (self.gates)(&operation).await? {
             let current = self.current(&name).await?;
-            if !active_id(&f(&current, "value")?)?.eq(id) {
+            if !active_id(&current.value).eq(id) {
                 continue;
             }
-            self.clear(&current, id, &f(&value, "updatedAt")?).await?;
+            self.clear(&current, id, f(&value, "updatedAt")).await?;
             released = true;
         }
         Ok(released)
     }
-    async fn clear<E>(&self, current: &Value, id: &Value, at: &Value) -> Result<(), WriteFailure<E>>
+    async fn clear<E>(
+        &self,
+        current: &Document,
+        id: &Value,
+        at: &Value,
+    ) -> Result<(), WriteFailure<E>>
     where
         S: LocalMutationStore<E>,
     {
-        let pin = f(current, "pin")?;
+        let pin = &current.pin;
         self.store
             .write_graph(
                 GATE,
                 &changed(
-                    &f(current, "value")?,
+                    &current.value,
                     [("activeOperation", Value::Null), ("updatedAt", at.clone())],
                 ),
                 &mutation(
-                    &f(&pin, "objectId")?,
-                    mutation_step("release", &f(&pin, "revision")?, &id)?,
+                    &Value::String(pin.object_id.clone()),
+                    mutation_step("release", pin.revision, &id)?,
                 )?,
                 &object([
-                    ("objectId", f(&pin, "objectId")?),
-                    ("expectedRevision", f(&pin, "revision")?),
+                    ("objectId", Value::String(pin.object_id.clone())),
+                    ("expectedRevision", Value::Number(pin.revision)),
                 ]),
             )
             .await?;

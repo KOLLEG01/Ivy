@@ -419,10 +419,23 @@ fn native_fixture() -> NativeFixture {
     comment.insert("delivery", pin(300));
     let task = Json::object([
         ("taskKey", "TASK-0123".into()),
+        (
+            "fields",
+            json(
+                r#"{"title":"Delivery fixture","description":"","acceptanceCriteria":[],"category":null,"control":"user","priority":2,"executionRequirement":null,"workspaceRequirement":{"kind":"task_workspace"},"userContact":"chat","dueAt":null}"#,
+            ),
+        ),
         ("lastHistory", pin(600)),
         ("publication", Json::Null),
+        ("wakeAt", Json::Null),
+        ("dependencies", Json::Array(vec![])),
+        ("runtimeWait", Json::Null),
         ("comments", Json::Array(vec![comment])),
     ]);
+    assert_eq!(
+        hash_json(&ivy_sdk::upgrade_task_record(&task).unwrap()).unwrap(),
+        hash_json(&task).unwrap()
+    );
     let mut input = json(
         r#"{"schemaVersion":1,"workspaceId":"workspace","operationId":"original","sequence":1,"payload":{"text":"Main handoff","images":[]},"state":"completed","nativeCalls":{"resume":null,"turn":null,"interrupt":null},"turnId":"turn","epoch":"epoch","error":null,"cancellation":null}"#,
     );
@@ -570,7 +583,7 @@ async fn real_publication_delivery_identity_survives_lost_reply_reopen_and_owner
                 .unwrap();
             let first = initial_delivery(
                 &Json::Null,
-                &operation.pin,
+                &operation.pin.to_json(),
                 &id(100),
                 &"comment".into(),
                 &"chat".into(),
@@ -610,7 +623,7 @@ async fn real_publication_delivery_identity_survives_lost_reply_reopen_and_owner
                 ("attachment", Json::Null),
             ]);
             operations
-                .finish(s(&operation.pin, "objectId"), &outcome)
+                .finish(s(&operation.pin.to_json(), "objectId"), &outcome)
                 .await
                 .unwrap();
             *client.delivery.lock().unwrap() = Some(created.clone());
@@ -735,7 +748,7 @@ async fn real_publication_delivery_identity_survives_lost_reply_reopen_and_owner
                 f(&confirmed.value, "chatRequest"),
                 retained_request.as_ref().unwrap()
             );
-            confirmed_pin = Some(confirmed.pin);
+            confirmed_pin = Some(confirmed.pin.to_json());
         } else {
             let before = db.total_changes();
             let count = client.calls.lock().unwrap().len();
@@ -754,7 +767,7 @@ async fn real_publication_delivery_identity_survives_lost_reply_reopen_and_owner
                 )
                 .await
                 .unwrap();
-            assert_eq!(confirmed.pin, confirmed_pin.clone().unwrap());
+            assert_eq!(confirmed.pin.to_json(), confirmed_pin.clone().unwrap());
             client
                 .owner
                 .store(false, std::sync::atomic::Ordering::Relaxed);

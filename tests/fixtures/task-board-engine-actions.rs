@@ -59,7 +59,6 @@ async fn publish_operation<C: Fn() -> String>(
     let validation = ActionValidation {
         store: &store,
         checks: &store,
-        task_read: &read,
     };
     let catalogs =
         CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
@@ -230,7 +229,10 @@ async fn append_only_publication_rebases_but_assignment_changes_prevent_executio
         .await
         .unwrap_err();
     assert_eq!(e.code, "revision_conflict");
-    assert_eq!(f(&world.saved().pin, "revision"), &Json::Number(4.0));
+    assert_eq!(
+        f(&world.saved().pin.to_json(), "revision"),
+        &Json::Number(4.0)
+    );
 }
 #[tokio::test(flavor = "current_thread")]
 async fn retarget_changes_the_question_without_creating_an_answer_or_queued_input() {
@@ -402,7 +404,10 @@ async fn admitted_handoff_rejects_replaced_claim_or_changed_work_before_any_task
             publish_operation(&world, &ops, &op).await.unwrap_err().code,
             "task_board_handoff_changed"
         );
-        assert_eq!(f(&world.saved().pin, "revision"), &Json::Number(2.0));
+        assert_eq!(
+            f(&world.saved().pin.to_json(), "revision"),
+            &Json::Number(2.0)
+        );
         assert!(f(&world.saved().value, "publication").is_null());
     }
 }

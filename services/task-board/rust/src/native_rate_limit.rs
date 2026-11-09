@@ -5,7 +5,8 @@ use crate::{
 };
 use chrono::{NaiveDate, TimeDelta};
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
+    IvyError, IvyJson as Json, IvyResult, JsString, json::canonical_equal,
+    limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::clock::{LocalParts, TimeZone, date_to_iso, parse_date};
 
@@ -50,9 +51,7 @@ fn equal(v: &Json, key: &str, value: &str) -> bool {
 }
 fn same(a: Option<&Json>, b: Option<&Json>) -> IvyResult<bool> {
     Ok(match (a, b) {
-        (Some(a), Some(b)) => {
-            canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?
-        }
+        (Some(a), Some(b)) => canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)?,
         (None, None) => true,
         _ => false,
     })
@@ -390,7 +389,7 @@ impl<S: Store, I: RetryInspection> FailedRateLimit<'_, S, I> {
         if !crate::native_plan::matches_task_primary(r.required("target")?, value)? {
             return Ok(None);
         }
-        if r.get("taskId") != task.pin.get("objectId")
+        if r.get("taskId").and_then(Json::as_js_string) != Some(&task.pin.object_id)
             || !equal(r, "phase", "failed")
             || !equal(field(r, "externalOutcome"), "code", "native_failed")
             || !equal(field(r, "externalOutcome"), "state", "failed")
@@ -431,7 +430,8 @@ impl<S: Store, I: RetryInspection> FailedRateLimit<'_, S, I> {
         {
             return Ok(None);
         }
-        let Inspection::Found { metadata, turns } = self.inspector.find(&run.pin).await? else {
+        let Inspection::Found { metadata, turns } = self.inspector.find(&run.pin.to_json()).await?
+        else {
             return Ok(None);
         };
         let m = field(&metadata, "reply");

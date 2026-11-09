@@ -17,6 +17,7 @@ export function useRemote<T>(
   loader: (signal: AbortSignal) => Promise<T>,
   intervalMs = 0,
   live?: RemoteSource,
+  enabled?: () => boolean,
 ) {
   // A connection only replaces polling when this loader has an explicit source.
   const updates =
@@ -39,18 +40,20 @@ export function useRemote<T>(
     queued: ReturnType<typeof setTimeout> | undefined,
     unsubscribe: (() => void) | undefined;
   let initial: ReturnType<typeof setTimeout> | undefined;
+  const canRead = () => !document.hidden && (enabled?.() ?? true);
   // Coalesce bursts; retain a hint arriving during a read for one follow-up.
   const schedule = () => {
     dirty = true;
-    if (stopped || document.hidden || loading.value || queued) return;
+    if (stopped || !canRead() || loading.value || queued) return;
     queued = setTimeout(() => {
       queued = undefined;
-      if (!stopped && !document.hidden && dirty && !loading.value)
+      if (!stopped && canRead() && dirty && !loading.value)
         void refresh();
     }, 250);
   };
   const refresh = async () => {
     if (stopped) return;
+    if (!canRead()) { dirty = true; return; }
     clearTimeout(queued);
     clearTimeout(initial);
     started = true;
@@ -84,8 +87,21 @@ export function useRemote<T>(
     schedule();
   };
   const visible = () => {
-    if (!document.hidden) schedule();
+    if (!document.hidden && (dirty || updates || intervalMs)) schedule();
   };
+  if (enabled) watch(enabled, active => {
+    if (active) schedule();
+    else {
+      dirty = true;
+      clearTimeout(queued);
+      clearTimeout(initial);
+      queued = undefined;
+      serial++;
+      controller?.abort();
+      controller = null;
+      loading.value = false;
+    }
+  });
   onMounted(() => {
     const subscribe = () => {
       if (!updates) return;
@@ -121,13 +137,13 @@ export function useRemote<T>(
         }, 250);
       else void refresh();
     }
+    document.addEventListener("visibilitychange", visible);
     if (updates || intervalMs) {
       window.addEventListener("online", online);
-      document.addEventListener("visibilitychange", visible);
       timer = setInterval(
         () => {
           if (
-            !document.hidden &&
+            canRead() &&
             !loading.value &&
             (!updates || !connected || error.value)
           )
@@ -148,5 +164,5 @@ export function useRemote<T>(
     window.removeEventListener("online", online);
     document.removeEventListener("visibilitychange", visible);
   });
-  return { value, loading, error, updatedAt, refresh };
+  return { value, loading, error, updatedAt, refresh, invalidate: schedule };
 }

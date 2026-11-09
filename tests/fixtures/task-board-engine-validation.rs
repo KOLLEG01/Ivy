@@ -6,16 +6,9 @@ use support::*;
 
 async fn validate(world: &World, request: &Json, task: &Json, source: &str) -> IvyResult<()> {
     let store = world;
-    let read = |address: Json,
-                primary: bool|
-     -> futures_util::future::LocalBoxFuture<
-        '_,
-        IvyResult<ivy_task_board::native_lifecycle::LifecycleDocument>,
-    > { Box::pin(async move { world.read_task(&address, primary) }) };
     ActionValidation {
         store: &store,
         checks: &store,
-        task_read: &read,
     }
     .validate(
         request,

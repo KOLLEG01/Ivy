@@ -2,8 +2,7 @@
 mod reference_data;
 use ivy_contracts::checked_native_contract::CheckedNativeContracts;
 use ivy_contracts::{
-    Outcome,
-    IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::parse,
+    IvyError, IvyJson as Json, IvyResult, JsString, Outcome, hash::hash_json, json::parse,
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_task_board::{
@@ -37,12 +36,10 @@ fn s<'a>(v: &'a Json, k: &str) -> &'a JsString {
 fn data() -> &'static Json {
     static D: OnceLock<Json> = OnceLock::new();
     D.get_or_init(|| {
-        let p = reference_data::read(include_bytes!("task-board-engine-publication-cases.json.gz"));
-        parse(
-            std::str::from_utf8(&p).unwrap(),
-            MANAGEMENT_FRAME_BYTES,
-        )
-        .unwrap()
+        let p = reference_data::read(include_bytes!(
+            "task-board-engine-publication-cases.json.gz"
+        ));
+        parse(std::str::from_utf8(&p).unwrap(), MANAGEMENT_FRAME_BYTES).unwrap()
     })
 }
 fn error(v: &Json) -> IvyError {
@@ -103,7 +100,8 @@ struct World {
 }
 fn document(v: &Json) -> Document {
     Document {
-        pin: v.required("pin").unwrap().clone(),
+        pin: ivy_task_board::operations::ObjectPin::from_json(v.required("pin").unwrap().clone())
+            .unwrap(),
         value: v.required("value").unwrap().clone(),
         parent_id: f(f(v, "metadata"), "parentId").as_js_string().cloned(),
         content_hash: hash_json(v.required("value").unwrap()).unwrap(),
@@ -172,7 +170,15 @@ impl Store for World {
             .unwrap()
             .clone())
     }
-    async fn write_prepared(&self, k: &str, v: &Json, m: &JsString, d: &Json) -> IvyResult<Json> {
+    async fn write_prepared(
+        &self,
+        k: &str,
+        v: &Json,
+        m: &JsString,
+        d: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
+    ) -> IvyResult<Json> {
         self.replay.call(
             "apply",
             [k.into(), v.clone(), Json::String(m.clone()), d.clone()],
@@ -223,7 +229,7 @@ impl TaskWriteSink for ObservedBindings {
     async fn written(&self, operation: &Document, pin: &Json, task: &Json) -> IvyResult<()> {
         assert!(
             self.operations.iter().any(|expected| {
-                expected.pin == operation.pin
+                expected.pin.to_json() == operation.pin.to_json()
                     && expected.content_hash == operation.content_hash
                     && hash_json(&expected.value).unwrap() == hash_json(&operation.value).unwrap()
                     && expected.parent_id == operation.parent_id
@@ -299,7 +305,7 @@ impl PublicationRoutes<Json> for Bindings {
             self.0.call(
                 "native",
                 [
-                    operation.pin.clone(),
+                    operation.pin.to_json(),
                     operation.value.clone(),
                     transcript.cloned().unwrap_or(Json::Null),
                 ],
@@ -317,7 +323,7 @@ impl PublicationRoutes<Json> for Bindings {
         routed(
             self.0.call(
                 "lifecycle",
-                [operation.pin.clone(), operation.value.clone(), outcome],
+                [operation.pin.to_json(), operation.value.clone(), outcome],
             )?,
             steps,
         )
@@ -334,7 +340,7 @@ impl PublicationRoutes<Json> for Bindings {
             self.0.call(
                 "existing",
                 [
-                    operation.pin.clone(),
+                    operation.pin.to_json(),
                     operation.value.clone(),
                     outcome,
                     normalized.cloned().map(Json::String).unwrap_or(Json::Null),

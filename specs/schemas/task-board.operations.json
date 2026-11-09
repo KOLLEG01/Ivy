@@ -84,6 +84,11 @@
       "definition": "#/$defs/NativeReadEvidence"
     },
     {
+      "key": "task-board/prepared-payload",
+      "version": "1.0.0",
+      "definition": "#/$defs/PreparedPayload"
+    },
+    {
       "key": "task-board/native-signals",
       "version": "1.0.0",
       "definition": "#/$defs/NativeSignals"
@@ -249,7 +254,7 @@
     },
     "list": {
       "input": "#/$defs/TaskListQuery",
-      "output": "#/$defs/TaskListResult",
+      "output": "#/$defs/ListResult",
       "mutation": false
     },
     "markCommentsRead": {

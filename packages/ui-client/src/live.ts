@@ -4,6 +4,13 @@ import type { RemoteUpdates } from "@ivy/ui";
 import type { Agent, BrowserNotifications } from "../../sdk/src/client.js";
 import { sameNativeBackend } from '../../contracts/src/native-backend.js';
 
+/** Writes invalidate direct children; navigation changes still send a broader hint. */
+export function objectParentScope(contractKey: string, parentId: string | null): string {
+  const family = 'objects/' + contractKey;
+  const scope = parentId === null ? family + '/root' : family + '/parent/' + parentId;
+  return scope.length <= 512 && (parentId === null || /^[A-Za-z0-9._-]+$/.test(parentId)) ? scope : family;
+}
+
 /** The SDK combines explicit loader subscriptions on one socket per app/tab. */
 export function liveUpdates(notifications: BrowserNotifications) {
   const updates: RemoteUpdates = {

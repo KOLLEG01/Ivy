@@ -121,6 +121,7 @@ struct World<'a> {
     service: JsString,
     source_checks: Cell<usize>,
     source_gaps: Cell<usize>,
+    routing_source: RefCell<Option<Json>>,
 }
 impl<'a> World<'a> {
     fn new(input: &'a Json) -> Self {
@@ -211,6 +212,7 @@ impl<'a> World<'a> {
             service: "task-board-node".into(),
             source_checks: Cell::new(0),
             source_gaps: Cell::new(num(input, "sourceGaps") as usize),
+            routing_source: RefCell::new(input.get("routingSource").cloned()),
         }
     }
     fn event(&self, args: impl IntoIterator<Item = Json>) {
@@ -297,7 +299,11 @@ impl Store for World<'_> {
         self.fail("read")?;
         let value = self.records.get(a.as_js_string().unwrap()).unwrap().clone();
         Ok(Document {
-            pin: Json::object([("objectId", a.clone()), ("revision", Json::Number(1.0))]),
+            pin: ivy_task_board::operations::ObjectPin::from_json(Json::object([
+                ("objectId", a.clone()),
+                ("revision", Json::Number(1.0)),
+            ]))
+            .unwrap(),
             content_hash: hash_json(&value)?,
             value,
             parent_id: Some("root".into()),
@@ -309,7 +315,15 @@ impl Store for World<'_> {
     async fn prepared_mutation_id(&self, _: &str) -> IvyResult<JsString> {
         panic!("No writes")
     }
-    async fn write_prepared(&self, _: &str, _: &Json, _: &JsString, _: &Json) -> IvyResult<Json> {
+    async fn write_prepared(
+        &self,
+        _: &str,
+        _: &Json,
+        _: &JsString,
+        _: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
+    ) -> IvyResult<Json> {
         panic!("No writes")
     }
 }
@@ -444,6 +458,11 @@ impl ReconcileEngine for World<'_> {
         if self.input.get("routing").is_some() {
             self.event(["route".into(), Json::String(id.clone())]);
             self.fail("route")?;
+            if self.routing_source.borrow().is_some() {
+                ivy_task_board::task_routing::QuestionRouting::default()
+                    .route(self, id)
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -553,7 +572,7 @@ fn source_protection_precedes_readiness_and_reuses_the_existing_cleanup_cadence(
 }
 
 #[test]
-fn question_routing_and_direct_turn_adoption_precede_scheduling_without_bypassing_failure() {
+fn question_routing_failure_keeps_independent_scheduling_and_native_adoption_guards() {
     for failed in [None, Some("adopt"), Some("route")] {
         let mut input = Json::object([
             (
@@ -607,14 +626,15 @@ fn question_routing_and_direct_turn_adoption_precede_scheduling_without_bypassin
             let expected = if failed == "adopt" {
                 vec!["route", "adopt"]
             } else {
-                vec!["route"]
+                vec!["route", "adopt", "sync", "drain", "signals", "schedule"]
             };
+            let width = expected.len();
             assert_eq!(
                 events
                     .chunks(expected.len())
                     .map(|v| v.iter().map(String::as_str).collect::<Vec<_>>())
                     .collect::<Vec<_>>(),
-                vec![expected; events.len() / if failed == "adopt" { 2 } else { 1 }]
+                vec![expected; events.len() / width]
             );
             assert!(
                 subject
@@ -636,6 +656,156 @@ fn question_routing_and_direct_turn_adoption_precede_scheduling_without_bypassin
             assert!(subject.diagnostics().is_empty());
         }
     }
+}
+
+impl ivy_task_board::task_routing::RoutingEngine for World<'_> {
+    async fn read_task(
+        &self,
+        task: &JsString,
+        include_archived: bool,
+    ) -> IvyResult<ivy_task_board::native_lifecycle::LifecycleDocument> {
+        assert!(
+            !include_archived,
+            "The relay must retain its existing archive guard"
+        );
+        if task != &id(100) {
+            return Err(IvyError::new(
+                "task_board_record_archived",
+                "An archived workflow record is not writable workflow state.",
+            ));
+        }
+        let value = self.routing_source.borrow().clone().unwrap();
+        Ok(ivy_task_board::native_lifecycle::LifecycleDocument {
+            document: Document {
+                pin: ivy_task_board::operations::ObjectPin::from_json(Json::object([
+                    ("objectId", Json::String(task.clone())),
+                    ("revision", 1.0.into()),
+                ]))
+                .unwrap(),
+                content_hash: hash_json(&value)?,
+                value,
+                parent_id: None,
+            },
+            metadata: Json::object([("effectivelyArchived", false.into())]),
+        })
+    }
+    async fn aggregate(&self, _: &Json, _: &JsString) -> IvyResult<()> {
+        panic!("No recipient mutation is allowed")
+    }
+    async fn scoped_operation(&self, _: &Json) -> IvyResult<JsString> {
+        panic!("No recipient mutation is allowed")
+    }
+    async fn native_comment(&self, _: &Json) -> IvyResult<()> {
+        panic!("An archived recipient must not be started or written")
+    }
+}
+
+#[test]
+fn actual_archived_question_relay_is_visible_while_sender_scheduling_continues() {
+    let question = Json::object([
+        ("commentId", "obsolete-pause-question".into()),
+        ("purpose", "question".into()),
+        ("authorKind", "agent".into()),
+        ("body", "Is the completed maintenance pause over?".into()),
+        (
+            "recipient",
+            Json::object([("kind", "task".into()), ("taskId", Json::String(id(101)))]),
+        ),
+        ("requests", Json::Array(vec![])),
+        ("responses", Json::Array(vec![])),
+        ("attachments", Json::Array(vec![])),
+        ("replyTo", Json::Null),
+    ]);
+    let source = Json::object([
+        ("taskKey", "TASK-0100".into()),
+        ("workflowState", "todo".into()),
+        ("publication", Json::Null),
+        ("comments", Json::Array(vec![question.clone()])),
+        ("commentDeliveries", Json::Array(vec![])),
+    ]);
+    let input = Json::object([
+        (
+            "counts",
+            Json::Array(vec![0.0.into(), 0.0.into(), 1.0.into(), 0.0.into()]),
+        ),
+        ("routing", true.into()),
+        ("adoption", true.into()),
+        ("routingSource", source.clone()),
+    ]);
+    let world = World::new(&input);
+    let tasks = Tasks::default();
+    let subject = Reconciler::new(&world, &world, &tasks);
+    let waker = Waker::from(Arc::new(Noop));
+    let mut cx = Context::from_waker(&waker);
+    for _ in 0..12 {
+        let mut tick = Box::pin(subject.tick());
+        assert!(tick.as_mut().poll(&mut cx).is_ready());
+        for _ in 0..8 {
+            world.release(None);
+            tasks.pump(&mut cx);
+        }
+    }
+    assert!(world.trace.borrow().iter().any(|e| {
+        e.as_array()
+            .and_then(|args| args.first())
+            .is_some_and(|name| name.is_str("schedule"))
+    }));
+    assert_eq!(world.routing_source.borrow().as_ref().unwrap(), &source);
+    assert_eq!(
+        ivy_sdk::open_task_questions(world.routing_source.borrow().as_ref().unwrap(), None)
+            .unwrap()
+            .len(),
+        1
+    );
+    let diagnostic = subject
+        .diagnostics()
+        .into_iter()
+        .find(|d| f(d, "code").is_str("task_board_record_archived"))
+        .unwrap();
+    assert_eq!(
+        f(f(&diagnostic, "resource"), "objectId"),
+        &Json::from(format!("questions:{}", id(100).to_utf8().unwrap()))
+    );
+    let message = s(&diagnostic, "message").to_utf8().unwrap();
+    assert!(
+        message.contains("obsolete-pause-question")
+            && message.contains(&id(101).to_utf8().unwrap())
+            && message.contains("remains open")
+    );
+    assert!(s(&diagnostic, "message").0.len() <= 2048);
+    let mut resolved = source;
+    resolved.insert(
+        "comments",
+        Json::Array(vec![
+            question,
+            Json::object([
+                ("commentId", "user-resolution".into()),
+                ("purpose", "update".into()),
+                ("authorKind", "user".into()),
+                ("body", "This question is explicitly resolved.".into()),
+                (
+                    "resolvesQuestions",
+                    Json::Array(vec!["obsolete-pause-question".into()]),
+                ),
+            ]),
+        ]),
+    );
+    *world.routing_source.borrow_mut() = Some(resolved);
+    subject.task_changed();
+    for _ in 0..6 {
+        let mut tick = Box::pin(subject.tick());
+        assert!(tick.as_mut().poll(&mut cx).is_ready());
+        for _ in 0..8 {
+            world.release(None);
+            tasks.pump(&mut cx);
+        }
+    }
+    assert!(
+        !subject
+            .diagnostics()
+            .iter()
+            .any(|d| f(d, "code").is_str("task_board_record_archived"))
+    );
 }
 fn pump(
     tasks: &Tasks<'_>,

@@ -52,6 +52,10 @@ export interface QueryItem {
   values: Record<string, Scalar>
   document?: ObjectRead;
 }
+export interface ObjectCountQuery extends Pick<ObjectQuery, 'contractKey' | 'contractVersions' | 'where' | 'includeArchived' | 'limit' | 'cursor'> {
+  groupBy: string[];
+}
+export interface CountItem { values: Record<string, Scalar>; count: number }
 export interface Page<T> { items: T[]; nextCursor: string | null; historyComplete?: boolean }
 export interface EventFilter { topics?: string[]; sources?: string[]; objectIds?: string[] }
 export interface HiveEvent {

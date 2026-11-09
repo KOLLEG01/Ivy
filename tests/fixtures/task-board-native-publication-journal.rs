@@ -187,7 +187,7 @@ async fn adopted_turn_reopen_reuses_exact_journal_writes_and_preserves_later_tic
                 ),
             ]);
             let operation = operations.begin(&request, &actor("native")).await.unwrap();
-            original = Some(s(&operation.pin, "objectId").clone());
+            original = Some(s(&operation.pin.to_json(), "objectId").clone());
             operation
         };
         let fail_final =
@@ -237,7 +237,7 @@ async fn adopted_turn_reopen_reuses_exact_journal_writes_and_preserves_later_tic
                 .journal
                 .update(
                     "task-board/task",
-                    s(&current.pin, "objectId"),
+                    s(&current.pin.to_json(), "objectId"),
                     3.0,
                     &later,
                     &clock().into(),
@@ -256,7 +256,7 @@ async fn adopted_turn_reopen_reuses_exact_journal_writes_and_preserves_later_tic
                 ),
                 counts
             );
-            assert_eq!(f(&current.pin, "revision"), &Json::Number(4.0));
+            assert_eq!(f(&current.pin.to_json(), "revision"), &Json::Number(4.0));
             assert_eq!(
                 f(&current.value, "updatedAt"),
                 &Json::from("2026-01-02T03:04:06.000Z")
@@ -625,7 +625,7 @@ async fn actual_publication_reopen_reuses_records_and_retains_cleanup_dependenci
                 ("generation", Json::Number(1.0)),
             ]);
             let op = operations.begin(&request, &actor).await.unwrap();
-            operation_id = Some(s(&op.pin, "objectId").clone());
+            operation_id = Some(s(&op.pin.to_json(), "objectId").clone());
             op
         };
         let fail_final =
@@ -683,7 +683,10 @@ async fn actual_publication_reopen_reuses_records_and_retains_cleanup_dependenci
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(dependency, s(&operation.pin, "objectId").to_utf8().unwrap());
+            assert_eq!(
+                dependency,
+                s(&operation.pin.to_json(), "objectId").to_utf8().unwrap()
+            );
             let original = operations
                 .store
                 .read("task-board/run", &run_pin, false)
@@ -715,7 +718,7 @@ async fn actual_publication_reopen_reuses_records_and_retains_cleanup_dependenci
                     .is_empty()
             );
             operations
-                .finish(s(&operation.pin, "objectId"), &out)
+                .finish(s(&operation.pin.to_json(), "objectId"), &out)
                 .await
                 .unwrap();
             assert_eq!(count("SELECT COUNT(*) FROM cleanup_roots"), 3);

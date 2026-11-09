@@ -2,21 +2,8 @@
 import { ArrowRight } from "@lucide/vue";
 import Disclosure from "./Disclosure.vue";
 import RevisionDiff from "./RevisionDiff.vue";
-
-export interface FieldChange {
-  field: string;
-  before: string;
-  after: string;
-  /** Long text shows a line comparison on demand instead of both values inline. */
-  long?: boolean;
-}
-export interface ChangeEntry {
-  id: string;
-  actor: string;
-  at: string;
-  summary?: string;
-  changes: FieldChange[];
-}
+import type { ChangeEntry } from '../lib/change-history';
+export type { ChangeEntry, FieldChange } from '../lib/change-history';
 /** A revision history that states which fields changed and how, newest first. */
 defineProps<{ entries: ChangeEntry[] }>();
 const time = (value: string) => new Date(value).toLocaleString();

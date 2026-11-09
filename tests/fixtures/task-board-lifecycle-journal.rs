@@ -304,16 +304,16 @@ async fn retained_lifecycle_survives_actual_partial_publication_reopen_and_repla
                 ("reason", "requested".into()),
             ]);
             let begun = operations.begin(&request, &actor).await.unwrap();
-            operation_pin = Some(begun.pin.clone());
+            operation_pin = Some(begun.pin.to_json());
             let mut proposed = call.clone();
             proposed.insert("observation", Json::Null);
             operations
-                .prepare_native(s(&begun.pin, "objectId"), &proposed)
+                .prepare_native(s(&begun.pin.to_json(), "objectId"), &proposed)
                 .await
                 .unwrap();
             operations
                 .observe_native(
-                    s(&begun.pin, "objectId"),
+                    s(&begun.pin.to_json(), "objectId"),
                     s(call, "key"),
                     call.required("observation").unwrap(),
                 )
@@ -322,7 +322,7 @@ async fn retained_lifecycle_survives_actual_partial_publication_reopen_and_repla
             let operation = Store::read(
                 &operations.store,
                 "task-board/operation",
-                begun.pin.required("objectId").unwrap(),
+                begun.pin.to_json().required("objectId").unwrap(),
                 true,
             )
             .await
@@ -369,11 +369,11 @@ async fn retained_lifecycle_survives_actual_partial_publication_reopen_and_repla
                 .journal
                 .read("task-board/task", &Json::String(id(100)), true)
                 .unwrap();
-            assert_eq!(num(&current.pin, "revision"), 3.0);
+            assert_eq!(num(&current.pin.to_json(), "revision"), 3.0);
             let operation = Store::read(
                 &operations.store,
                 "task-board/operation",
-                begun.pin.required("objectId").unwrap(),
+                begun.pin.to_json().required("objectId").unwrap(),
                 true,
             )
             .await
@@ -534,7 +534,7 @@ async fn lifecycle_metadata_preserves_current_head_archive_flags_cache_and_exact
         .read_with_metadata("task-board/task", &pin(100, 2.0), true, true)
         .await
         .unwrap();
-    assert_eq!(document.pin, pin(100, 2.0));
+    assert_eq!(document.pin.to_json(), pin(100, 2.0));
     assert_eq!(metadata, object);
     let (_, again) = store
         .read_with_metadata("task-board/task", &pin(100, 2.0), true, true)
@@ -767,7 +767,14 @@ async fn archive_membership_reopens_original_identity_after_failures_before_and_
                     )
                     .await
                     .unwrap();
-                operation_id = Some(operation.pin.required("objectId").unwrap().clone());
+                operation_id = Some(
+                    operation
+                        .pin
+                        .to_json()
+                        .required("objectId")
+                        .unwrap()
+                        .clone(),
+                );
                 operation
             } else {
                 Store::read(

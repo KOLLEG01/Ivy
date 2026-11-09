@@ -92,7 +92,7 @@ fn publication_program_matches_original_retained_steps_callbacks_and_restarts() 
             }
             if step.get("finish").is_some() {
                 ready(operations.finish(
-                    &s(&operation.pin, "objectId"),
+                    &s(&operation.pin.to_json(), "objectId"),
                     &Json::object([("operationId", "epoch:1:id".into()), ("task", Json::Null)]),
                 ))
                 .unwrap();

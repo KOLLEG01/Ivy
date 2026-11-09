@@ -4,17 +4,17 @@ use crate::{
     allocation::{AllocationStore, reserves_workspace, shared_project_key, shared_project_owner},
     checks::date,
     coordination::{GraphError, Parent, validate_parent},
-    engine_actions::{ActionPolicies, ActionTaskRead},
+    engine_actions::ActionPolicies,
     journal_store::Contracts,
     lifecycle_journal::{LifecycleJournal, LifecyclePages},
     local_workspaces::{LocalWorkspaces, workspace_key},
     native_lifecycle::LifecycleStore,
     operations::Store,
-    wake::{WakeStore, comments_pending, queued_input, validate_dependencies},
+    wake::{WakeStore, queued_input, validate_dependencies},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::canonical,
+    IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::canonical_equal,
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::rpc::RpcClient;
@@ -22,6 +22,26 @@ use std::collections::HashSet;
 
 #[allow(async_fn_in_trait)]
 pub trait ActionValidationStore: AllocationStore + LifecycleStore + WakeStore {
+    async fn retarget_question(
+        &self,
+        task: &Json,
+        _: &JsString,
+        id: &Json,
+    ) -> IvyResult<Option<Json>> {
+        Ok(ivy_sdk::open_task_questions(task, None)?
+            .into_iter()
+            .find(|c| {
+                c.get("commentId") == Some(id) && c.get("nativeInput").is_none_or(Json::is_null)
+            }))
+    }
+    async fn comment_context(
+        &self,
+        task: &Json,
+        _: &JsString,
+        request: &Json,
+    ) -> IvyResult<CommentContext> {
+        CommentContext::from_task(task, request)
+    }
     async fn reserve_available_workspace(
         &self,
         host: &JsString,
@@ -38,6 +58,22 @@ impl<
     Q: LifecyclePages,
 > ActionValidationStore for LifecycleJournal<'_, '_, R, P, C, I, Q>
 {
+    async fn retarget_question(
+        &self,
+        task: &Json,
+        owner: &JsString,
+        id: &Json,
+    ) -> IvyResult<Option<Json>> {
+        self.journal.retarget_question(task, owner, id).await
+    }
+    async fn comment_context(
+        &self,
+        task: &Json,
+        id: &JsString,
+        request: &Json,
+    ) -> IvyResult<CommentContext> {
+        self.journal.comment_context(task, id, request).await
+    }
     async fn reserve_available_workspace(
         &self,
         host: &JsString,
@@ -52,6 +88,80 @@ impl<
         }
         .reserve_available(host, path, task, operation)
         .await
+    }
+}
+/// Only identities relevant to this request, plus explicitly resolved questions.
+pub struct CommentContext {
+    pub identity_used: bool,
+    pub reply_exists: bool,
+    pub resolutions: Vec<Json>,
+    pub requests: HashSet<JsString>,
+    pub responses: HashSet<JsString>,
+}
+impl CommentContext {
+    pub fn validate_identities(mut self, request: &Json) -> IvyResult<()> {
+        require(
+            !self.identity_used && self.reply_exists,
+            "task_board_comment_mismatch",
+            "Comment identity or reply target is invalid.",
+        )?;
+        for item in arr(f(request, "requests"))? {
+            require(
+                self.requests.insert(s(item, "requestId")?.clone()),
+                "mutation_conflict",
+                "Request identity is already used.",
+            )?;
+        }
+        for item in arr(f(request, "responses"))? {
+            let id = s(item, "requestId")?;
+            require(
+                self.requests.contains(id),
+                "task_board_response_request_missing",
+                "A typed response must reference an existing typed request.",
+            )?;
+            require(
+                self.responses.insert(id.clone()),
+                "task_board_request_already_answered",
+                "This typed request already has a response.",
+            )?;
+        }
+        Ok(())
+    }
+    pub fn from_task(task: &Json, request: &Json) -> IvyResult<Self> {
+        let comments = arr(f(task, "comments"))?;
+        let resolutions = f(request, "resolvesQuestions").as_array().unwrap_or(&[]);
+        let wanted = ["requests", "responses"]
+            .iter()
+            .flat_map(|field| f(request, field).as_array().unwrap_or(&[]))
+            .map(|item| s(item, "requestId"))
+            .collect::<IvyResult<HashSet<_>>>()?;
+        let mut result = Self {
+            identity_used: false,
+            reply_exists: f(request, "replyTo").is_null(),
+            resolutions: vec![],
+            requests: HashSet::new(),
+            responses: HashSet::new(),
+        };
+        for comment in comments {
+            result.identity_used |= f(comment, "commentId") == f(request, "commentId");
+            result.reply_exists |= f(comment, "commentId") == f(request, "replyTo");
+            if resolutions.contains(f(comment, "commentId")) {
+                result.resolutions.push(comment.clone());
+            }
+            for item in arr(f(comment, "requests"))? {
+                let id = s(item, "requestId")?;
+                if wanted.contains(id) {
+                    result.requests.insert(id.clone());
+                }
+            }
+            for item in arr(f(comment, "responses"))? {
+                let id = s(item, "requestId")?;
+                if wanted.contains(id) {
+                    result.responses.insert(id.clone());
+                }
+            }
+        }
+        Ok(result)
     }
 }
 #[allow(async_fn_in_trait)]
@@ -75,7 +185,6 @@ pub trait ActionValidationChecks {
 pub struct ActionValidation<'a, S, P> {
     pub store: &'a S,
     pub checks: &'a P,
-    pub task_read: &'a ActionTaskRead<'a>,
 }
 fn f<'a>(v: &'a Json, k: &str) -> &'a Json {
     static NULL: Json = Json::Null;
@@ -100,9 +209,7 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
 fn same(a: Option<&Json>, b: Option<&Json>) -> IvyResult<bool> {
     Ok(match (a, b) {
         (None, None) => true,
-        (Some(a), Some(b)) => {
-            canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?
-        }
+        (Some(a), Some(b)) => canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)?,
         _ => false,
     })
 }
@@ -229,7 +336,7 @@ impl<S: ActionValidationStore, P: ActionValidationChecks> ActionValidation<'_, S
         validate_parent(id.clone(), Some(own.clone()), |id| async move {
             let d = self
                 .store
-                .lifecycle_read("task-board/task", &Json::String(id), true, false)
+                .task_header(&Json::String(id), true, false)
                 .await?;
             Ok::<_, IvyError>(Parent {
                 archived: f(&d.metadata, "effectivelyArchived").as_bool() == Some(true),
@@ -309,7 +416,13 @@ impl<S: ActionValidationStore, P: ActionValidationChecks> ActionValidation<'_, S
                 ) && (eq(f(task, "fields"), "control", "agent")
                     || comment_request
                     || execution_change
-                    || eq(request, "action", "defer") && comments_pending(task)),
+                    || eq(request, "action", "defer")
+                        && crate::scheduler::has_queued_input(
+                            self.store,
+                            task,
+                            s(request, "taskId")?,
+                        )
+                        .await?),
                 "task_board_user_controlled",
                 "Automatic allocation requires agent control or continuation of an explicitly triggered turn.",
             )?;
@@ -317,19 +430,17 @@ impl<S: ActionValidationStore, P: ActionValidationChecks> ActionValidation<'_, S
         let id = s(request, "taskId")?;
         match s(request, "action")?.to_utf8()?.as_str() {
             "retargetQuestion" => {
-                let questions = ivy_sdk::open_task_questions(task, None)?;
-                let question = questions
-                    .iter()
-                    .find(|question| {
-                        f(question, "commentId") == f(request, "questionId")
-                            && f(question, "nativeInput").is_null()
-                    })
+                let selected = self
+                    .store
+                    .retarget_question(task, id, request.required("questionId")?)
+                    .await?
                     .ok_or_else(|| {
                         IvyError::new(
                             "task_board_comment_mismatch",
                             "Only an unresolved ordinary question can change its recipient.",
                         )
                     })?;
+                let question = &selected;
                 require(
                     eq(actor, "source", "user")
                         || eq(actor, "source", "worker")
@@ -345,11 +456,7 @@ impl<S: ActionValidationStore, P: ActionValidationChecks> ActionValidation<'_, S
                         "A question must address a different task.",
                     )?;
                     self.store
-                        .read(
-                            "task-board/task",
-                            f(f(request, "recipient"), "taskId"),
-                            true,
-                        )
+                        .read_task_header(f(f(request, "recipient"), "taskId"), true)
                         .await?;
                 }
             }
@@ -460,20 +567,33 @@ impl<S: ActionValidationStore, P: ActionValidationChecks> ActionValidation<'_, S
                     "Native Task allocation is automatic for agent-controlled work.",
                 )?;
                 if comment_request {
+                    let ids = arr(f(request, "commentIds"))?;
+                    let entries = self.store.comment_entries(task, id, ids).await?;
+                    // Historical repeated IDs can pair a queued receipt with another
+                    // matching input record. Preserve that original ID-based policy.
+                    let comments = if ids.iter().all(|id| {
+                        entries.iter().any(|entry| {
+                            f(f(entry, "comment"), "commentId") == id
+                                && queued_input(f(entry, "comment"))
+                        })
+                    }) {
+                        vec![]
+                    } else {
+                        self.store.read_task_comments(task, id, ids).await?
+                    };
                     require(
-                        comments_pending(task)
-                            && arr(f(request, "commentIds"))?.iter().all(|id| {
-                                arr(f(task, "commentDeliveries")).is_ok_and(|items| {
-                                    items.iter().any(|delivery| {
-                                        f(delivery, "commentId") == id
-                                            && eq(delivery, "state", "queued")
-                                    })
-                                }) && arr(f(task, "comments")).is_ok_and(|items| {
-                                    items.iter().any(|comment| {
-                                        f(comment, "commentId") == id && queued_input(comment)
-                                    })
+                        ids.iter().all(|id| {
+                            entries.iter().any(|entry| {
+                                let receipt = f(entry, "receipt");
+                                f(receipt, "commentId") == id && eq(receipt, "state", "queued")
+                            }) && entries
+                                .iter()
+                                .map(|entry| f(entry, "comment"))
+                                .chain(comments.iter())
+                                .any(|comment| {
+                                    f(comment, "commentId") == id && queued_input(comment)
                                 })
-                            }),
+                        }),
                         "task_board_invalid_transition",
                         "A comment-triggered turn requires queued external comments.",
                     )?;
@@ -702,11 +822,7 @@ impl<S: ActionValidationStore, P: ActionValidationChecks> ActionValidation<'_, S
                         "A task question belongs to its sender and names a different receiving task.",
                     )?;
                     self.store
-                        .read(
-                            "task-board/task",
-                            f(f(request, "recipient"), "taskId"),
-                            true,
-                        )
+                        .read_task_header(f(f(request, "recipient"), "taskId"), true)
                         .await?;
                 }
                 require(
@@ -747,9 +863,10 @@ impl<S: ActionValidationStore, P: ActionValidationChecks> ActionValidation<'_, S
                         validate_dependencies(self.store, Some(id), arr(ids)?).await?;
                     }
                 }
+                let context = self.store.comment_context(task, id, request).await?;
                 for id in f(request, "resolvesQuestions").as_array().unwrap_or(&[]) {
                     require(
-                        arr(f(task, "comments"))?.iter().any(|comment| {
+                        context.resolutions.iter().any(|comment| {
                             f(comment, "commentId") == id
                                 && eq(comment, "purpose", "question")
                                 && f(comment, "nativeInput").is_null()
@@ -772,17 +889,30 @@ impl<S: ActionValidationStore, P: ActionValidationChecks> ActionValidation<'_, S
                         "task_board_forbidden",
                         "Directed agent comments must identify another source task and cannot reopen Done.",
                     )?;
-                    let source = (self.task_read)(f(request, "sourceTaskId").clone(), true)
+                    let source_id = s(request, "sourceTaskId")?;
+                    let source = self
+                        .store
+                        .task_header(&Json::String(source_id.clone()), true, false)
                         .await?
                         .document
                         .value;
-                    let routed = !f(request, "questionSource").is_null()
-                        && arr(f(&source, "comments"))?.iter().any(|comment| {
-                            f(comment, "commentId") == f(f(request, "questionSource"), "commentId")
-                                && eq(comment, "purpose", "question")
-                                && eq(f(comment, "recipient"), "kind", "task")
-                                && f(f(comment, "recipient"), "taskId") == f(request, "taskId")
-                        });
+                    let questions = if f(request, "questionSource").is_null() {
+                        vec![]
+                    } else {
+                        self.store
+                            .read_task_comments(
+                                &source,
+                                source_id,
+                                &[f(f(request, "questionSource"), "commentId").clone()],
+                            )
+                            .await?
+                    };
+                    let routed = questions.iter().any(|comment| {
+                        f(comment, "commentId") == f(f(request, "questionSource"), "commentId")
+                            && eq(comment, "purpose", "question")
+                            && eq(f(comment, "recipient"), "kind", "task")
+                            && f(f(comment, "recipient"), "taskId") == f(request, "taskId")
+                    });
                     require(
                         f(request, "questionSource").is_null() || routed,
                         "task_board_forbidden",
@@ -831,48 +961,7 @@ impl<S: ActionValidationStore, P: ActionValidationChecks> ActionValidation<'_, S
                         ]))
                         .await?;
                 }
-                let comments = arr(f(task, "comments"))?;
-                require(
-                    !comments
-                        .iter()
-                        .any(|c| f(c, "commentId") == f(request, "commentId"))
-                        && (f(request, "replyTo").is_null()
-                            || comments
-                                .iter()
-                                .any(|c| f(c, "commentId") == f(request, "replyTo"))),
-                    "task_board_comment_mismatch",
-                    "Comment identity or reply target is invalid.",
-                )?;
-                let mut requests = HashSet::new();
-                let mut responses = HashSet::new();
-                for c in comments {
-                    for r in arr(f(c, "requests"))? {
-                        requests.insert(s(r, "requestId")?.clone());
-                    }
-                    for r in arr(f(c, "responses"))? {
-                        responses.insert(s(r, "requestId")?.clone());
-                    }
-                }
-                for item in arr(f(request, "requests"))? {
-                    require(
-                        requests.insert(s(item, "requestId")?.clone()),
-                        "mutation_conflict",
-                        "Request identity is already used.",
-                    )?;
-                }
-                for item in arr(f(request, "responses"))? {
-                    let id = s(item, "requestId")?;
-                    require(
-                        requests.contains(id),
-                        "task_board_response_request_missing",
-                        "A typed response must reference an existing typed request.",
-                    )?;
-                    require(
-                        responses.insert(id.clone()),
-                        "task_board_request_already_answered",
-                        "This typed request already has a response.",
-                    )?;
-                }
+                context.validate_identities(request)?;
             }
             "uploadAttachment" => {
                 let text = s(request, "bytesBase64")?;

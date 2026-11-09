@@ -5,7 +5,7 @@ use crate::{
     journal_store::{Contracts, JournalStore},
     local_workspaces::{LocalWorkspaces, workspace_key},
     native_lifecycle::{LifecycleDocument, LifecycleStore},
-    operations::{Document, Store},
+    operations::{Document, PreparedPayload, Store, TaskChange},
     read_evidence::ReadEvidenceStore,
 };
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString};
@@ -77,14 +77,110 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
     async fn read(&self, k: &str, a: &Json, p: bool) -> IvyResult<Document> {
         Store::read(self.journal, k, a, p).await
     }
+    async fn read_task_header(&self, address: &Json, primary: bool) -> IvyResult<Document> {
+        self.journal.read_task_header(address, primary).await
+    }
+    async fn read_task_comments(
+        &self,
+        task: &Json,
+        task_id: &JsString,
+        ids: &[Json],
+    ) -> IvyResult<Vec<Json>> {
+        self.journal.read_task_comments(task, task_id, ids).await
+    }
+    async fn has_task_comment(
+        &self,
+        task: &Json,
+        task_id: &JsString,
+        id: &JsString,
+    ) -> IvyResult<bool> {
+        self.journal.has_task_comment(task, task_id, id).await
+    }
+    async fn read_completion_comments(
+        &self,
+        task: &Json,
+        task_id: &JsString,
+        run: &JsString,
+        inputs: &[Json],
+    ) -> IvyResult<crate::operations::CompletionComments> {
+        self.journal
+            .read_completion_comments(task, task_id, run, inputs)
+            .await
+    }
+    async fn read_prepared(&self, k: &str, a: &Json) -> IvyResult<Document> {
+        self.journal.read_prepared(k, a).await
+    }
+    async fn prepare_payload(&self, k: &str, v: Json, d: &Json) -> IvyResult<PreparedPayload> {
+        self.journal.prepare_payload(k, v, d).await
+    }
+    async fn prepare_task_change(
+        &self,
+        value: &Json,
+        destination: &Json,
+        change: TaskChange,
+    ) -> IvyResult<PreparedPayload> {
+        self.journal
+            .prepare_task_change(value, destination, change)
+            .await
+    }
     async fn write(&self, k: &str, v: &Json, m: &str, d: &Json) -> IvyResult<Json> {
         self.journal.write(k, v, m, d).await
     }
     async fn prepared_mutation_id(&self, m: &str) -> IvyResult<JsString> {
         self.journal.prepared_mutation_id(m).await
     }
-    async fn write_prepared(&self, k: &str, v: &Json, m: &JsString, d: &Json) -> IvyResult<Json> {
-        self.journal.write_prepared(k, v, m, d).await
+    async fn write_prepared(
+        &self,
+        k: &str,
+        v: &Json,
+        m: &JsString,
+        d: &Json,
+        version: Option<&JsString>,
+        references: Option<&Json>,
+    ) -> IvyResult<Json> {
+        self.journal
+            .write_prepared(k, v, m, d, version, references)
+            .await
+    }
+}
+impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsString>
+    JournalStore<'_, R, P, C, I>
+{
+    pub(crate) async fn lifecycle_task_header(
+        &self,
+        address: &Json,
+        primary: bool,
+        include_archived: bool,
+    ) -> IvyResult<LifecycleDocument> {
+        let (mut document, metadata) = self
+            .read_with_metadata("task-board/task", address, primary, include_archived)
+            .await?;
+        let value = &document.value;
+        if !self.contracts.local("task-board/task")?
+            && value.get("commentStore").is_some_and(|tree| {
+                tree.get("kind").is_some_and(|kind| kind.is_str("tree"))
+                    && tree.get("summary").is_some_and(|v| !v.is_null())
+            })
+            && ["comments", "commentDeliveries"].iter().all(|key| {
+                value
+                    .get(*key)
+                    .and_then(Json::as_array)
+                    .is_some_and(|v| v.is_empty())
+            })
+        {
+            document.value =
+                crate::journal_store::persistent_reads::record_upgrades::upgrade_stored_owned(
+                    self.client.as_ref(),
+                    "task-board/task",
+                    document.value,
+                )
+                .await?;
+        } else {
+            document = self
+                .materialize_document("task-board/task", document)
+                .await?;
+        }
+        Ok(LifecycleDocument { document, metadata })
     }
 }
 impl<
@@ -95,6 +191,27 @@ impl<
     Q: LifecyclePages,
 > LifecycleStore for LifecycleJournal<'_, '_, R, P, C, I, Q>
 {
+    async fn task_header(
+        &self,
+        address: &Json,
+        primary: bool,
+        archived: bool,
+    ) -> IvyResult<LifecycleDocument> {
+        self.journal
+            .lifecycle_task_header(address, primary, archived)
+            .await
+    }
+    async fn comment_entries(
+        &self,
+        task: &Json,
+        id: &JsString,
+        ids: &[Json],
+    ) -> IvyResult<Vec<Json>> {
+        self.journal.comment_entries(task, id, ids).await
+    }
+    async fn queued_comment_ids(&self, task: &Json, id: &JsString) -> IvyResult<Vec<Json>> {
+        self.journal.queued_comment_ids(task, id).await
+    }
     async fn migration_evidence(
         &self,
         catalogs: &ivy_contracts::checked_native_contract::CheckedNativeContracts,
@@ -105,7 +222,11 @@ impl<
             store: self,
             catalogs,
         }
-        .read(&call.pin, call.value.required("evidence")?, expected)
+        .read(
+            &call.pin.to_json(),
+            call.value.required("evidence")?,
+            expected,
+        )
         .await
     }
     fn migration_quiescent(&self, task: &JsString, operation: &JsString) -> IvyResult<()> {

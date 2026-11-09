@@ -5,7 +5,7 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, Outcome, chat_schema::validate_chat,
-    hash::hash_json, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
+    hash::hash_json, json::canonical_equal, limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::{
     main_chat::{CHAT_INTERFACE_VERSION, main_chat, main_notification_checked},
@@ -98,7 +98,7 @@ fn require(b: bool, c: &str, m: &str) -> IvyResult<()> {
     if b { Ok(()) } else { Err(IvyError::new(c, m)) }
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)
 }
 fn patch(v: &Json, fields: impl IntoIterator<Item = (&'static str, Json)>) -> Json {
     let mut v = v.clone();
@@ -175,17 +175,18 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
         )?;
         let task = self
             .store
-            .read(
-                "task-board/task",
+            .read_task_header(
                 written.unwrap().required("payload")?.required("object")?,
                 false,
             )
             .await?
             .value;
-        let comment = array(f(&task, "comments"))
-            .iter()
-            .find(|c| f(c, "commentId") == f(v, "commentId"))
-            .cloned();
+        let comment = self
+            .store
+            .read_task_comments(&task, s(v, "taskId")?, &[v.required("commentId")?.clone()])
+            .await?
+            .into_iter()
+            .next();
         require(
             comment.is_some() && f(&task, "lastHistory").as_object().is_some(),
             "task_board_delivery_mismatch",
@@ -343,23 +344,12 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
                 "task-board/delivery",
                 &next,
                 &mutation(
-                    s(&current.pin, "objectId")?,
-                    &format!(
-                        "delivery:{}:{}",
-                        current
-                            .pin
-                            .required("revision")?
-                            .as_f64()
-                            .ok_or_else(IvyError::internal)?,
-                        hash_json(&next)?
-                    ),
+                    &current.pin.object_id,
+                    &format!("delivery:{}:{}", current.pin.revision, hash_json(&next)?),
                 )?,
                 &Json::object([
-                    ("objectId", current.pin.required("objectId")?.clone()),
-                    (
-                        "expectedRevision",
-                        current.pin.required("revision")?.clone(),
-                    ),
+                    ("objectId", Json::String(current.pin.object_id.clone())),
+                    ("expectedRevision", Json::Number(current.pin.revision)),
                 ]),
             )
             .await?;

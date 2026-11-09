@@ -357,7 +357,7 @@ impl<S: CoordinationStore, C: Fn() -> String, P: Contracts, E: AdmissionExecutio
             .await?;
         if eq(&operation.value, "phase", "failed") {
             coordination
-                .release(s(&operation.pin, "objectId")?, false)
+                .release(&operation.pin.object_id, false)
                 .await?;
             return Ok(Json::Null);
         }

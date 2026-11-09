@@ -280,8 +280,9 @@ impl<D, R, C: Contracts, Parse, Failure> LocalHistory<'_, D, R, C, Parse, Failur
                     });
                     index.forget(&id);
                     let key = head[1].string()?;
-                    let unresolved = self.local.contracts.local(&key)?
-                        && has_unresolved_workflow_outcome(&value)?
+                    // Prepared public records are local evidence too. Preserve
+                    // uncertain outcomes under every key until they are settled.
+                    let unresolved = has_unresolved_workflow_outcome(&value)?
                         || key == "task-board/native-call"
                             && (field::<ReadFailure<E>>(Some(&value), "state")?
                                 != Some(&Json::from("observed"))
@@ -573,6 +574,13 @@ impl<D, R, C: Contracts, Parse, Failure> LocalHistory<'_, D, R, C, Parse, Failur
         if !self.full(reserved_bytes, reserved_rows, false)? {
             return Ok(());
         }
+        let due = self.local.rows::<ReadFailure<E>>(
+            "SELECT root_id FROM cleanup_roots ORDER BY delete_after,rowid",
+            &[],
+        )?;
+        if due.is_empty() {
+            return Ok(());
+        }
         let mut incoming_ids = Ids::default();
         if let Some(id) = protected_id.filter(|id| !id.0.is_empty()) {
             incoming_ids.add(id.clone());
@@ -691,10 +699,6 @@ impl<D, R, C: Contracts, Parse, Failure> LocalHistory<'_, D, R, C, Parse, Failur
         }
         let mut index = Index::default();
         self.refresh(&mut index, true).await?;
-        let due = self.local.rows::<ReadFailure<E>>(
-            "SELECT root_id FROM cleanup_roots ORDER BY delete_after,rowid",
-            &[],
-        )?;
         for (offset, row) in due.iter().enumerate() {
             if !self.full(reserved_bytes, reserved_rows, true)? {
                 break;

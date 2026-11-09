@@ -145,7 +145,7 @@ impl World {
             .update(
                 "task-board/task",
                 &"task".into(),
-                f(&d.pin, "revision").as_f64().unwrap(),
+                f(&d.pin.to_json(), "revision").as_f64().unwrap(),
                 &value,
                 &self.now().into(),
             )
@@ -173,8 +173,8 @@ impl World {
         self.local()
             .update(
                 "task-board/operation",
-                &s(&operation.pin, "objectId"),
-                f(&operation.pin, "revision").as_f64().unwrap(),
+                &s(&operation.pin.to_json(), "objectId"),
+                f(&operation.pin.to_json(), "revision").as_f64().unwrap(),
                 &value,
                 &self.now().into(),
             )
@@ -265,6 +265,8 @@ impl Store for &World {
         value: &Json,
         id: &JsString,
         destination: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
     ) -> IvyResult<Json> {
         self.write(key, value, &id.to_utf8()?, destination).await
     }
@@ -562,7 +564,7 @@ async fn allocation_failure_creates_runtime_retry_without_a_task_blocker_or_wake
             millis
         );
         assert_eq!(world.read_task().content_hash, hash_json(&value).unwrap());
-        assert_eq!(world.read_task().pin, pin("task", 1.0));
+        assert_eq!(world.read_task().pin.to_json(), pin("task", 1.0));
         for field in ["blocker", "wakeAt", "nextReviewAt", "reason", "detail"] {
             assert!(request.get(field).is_none());
         }
@@ -635,9 +637,15 @@ async fn pending_original_intent_wins_over_new_task_revision_and_future_retry() 
         Json::object([("retryAt", "2026-11-01T00:00:00.000Z".into())]),
     );
     world.set_task(value);
+    let reads = world.count("read");
     assert_eq!(
         f(&world.run().await.unwrap(), "recovered"),
-        original.pin.get("objectId").unwrap()
+        original.pin.to_json().get("objectId").unwrap()
+    );
+    assert_eq!(
+        world.count("read"),
+        reads,
+        "Retained recovery precedes the current Task read"
     );
     assert_eq!(world.count("allocate"), 1);
     assert_eq!(world.count("review"), 1);
@@ -747,7 +755,11 @@ async fn only_conclusive_unapplied_failure_allows_a_delayed_exact_successor() {
         );
         let current = world
             .local()
-            .read("task-board/operation", f(&original.pin, "objectId"), true)
+            .read(
+                "task-board/operation",
+                f(&original.pin.to_json(), "objectId"),
+                true,
+            )
             .unwrap();
         failure.insert(
             "error",
@@ -764,7 +776,11 @@ async fn only_conclusive_unapplied_failure_allows_a_delayed_exact_successor() {
         );
         let current = world
             .local()
-            .read("task-board/operation", f(&original.pin, "objectId"), true)
+            .read(
+                "task-board/operation",
+                f(&original.pin.to_json(), "objectId"),
+                true,
+            )
             .unwrap();
         failure.insert("writes", Json::Array(vec![]));
         world.update_operation(&current, failure);
@@ -787,7 +803,10 @@ async fn only_conclusive_unapplied_failure_allows_a_delayed_exact_successor() {
         assert_eq!(f(&attempt.value, "sequence"), &Json::Number(2.0));
         assert_eq!(
             f(&attempt.value, "previous"),
-            &pin(&s(&attempt.pin, "objectId").to_utf8().unwrap(), 1.0)
+            &pin(
+                &s(&attempt.pin.to_json(), "objectId").to_utf8().unwrap(),
+                1.0
+            )
         );
         let predecessor = world
             .local()
@@ -852,7 +871,7 @@ async fn future_wait_rate_limit_and_recovery_delay_do_not_create_new_attempts() 
         assert_eq!(world.count("allocate"), 0);
         assert_eq!(world.count("dispatch"), 0);
         assert_eq!(world.read_task().content_hash, hash_json(&value).unwrap());
-        assert_eq!(world.read_task().pin, pin("task", 1.0));
+        assert_eq!(world.read_task().pin.to_json(), pin("task", 1.0));
         if mode == "recovery" {
             *world.now.borrow_mut() = "2026-10-23T00:01:00.000Z".into();
             assert_eq!(
@@ -893,7 +912,7 @@ async fn prepared_intent_identity_is_verified_before_replaying_a_completed_opera
             .local()
             .update(
                 "task-board/scheduler-attempt",
-                &s(&saved.pin, "objectId"),
+                &s(&saved.pin.to_json(), "objectId"),
                 1.0,
                 &corrupted,
                 &AT.into(),

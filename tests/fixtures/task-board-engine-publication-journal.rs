@@ -212,7 +212,7 @@ struct LostFinalWrite<'a, W> {
 }
 impl<W: TaskWriteSink> TaskWriteSink for LostFinalWrite<'_, W> {
     async fn written(&self, operation: &Document, pin: &Json, task: &Json) -> IvyResult<()> {
-        assert_eq!(s(&operation.pin, "objectId"), self.operation_id);
+        assert_eq!(s(&operation.pin.to_json(), "objectId"), self.operation_id);
         assert_eq!(
             f(f(&operation.value, "request"), "operationId"),
             &Json::from("create-journal")
@@ -294,11 +294,11 @@ async fn actual_create_reopens_original_key_result_history_and_task_after_lost_f
             let content = Json::object([
                 ("summary", "Original final material".into()),
                 ("artifacts", Json::Array(vec![])),
-                ("checks", Json::Array(vec![])),
                 ("codeReferences", Json::Array(vec![])),
                 ("repositoryResult", Json::Null),
                 ("limitations", Json::Array(vec![])),
             ]);
+            retained_admission("ResultContent", &content).unwrap();
             let request = Json::object([
                 ("action", "create".into()),
                 ("operationId", "create-journal".into()),
@@ -313,7 +313,7 @@ async fn actual_create_reopens_original_key_result_history_and_task_after_lost_f
                 ("source", "user".into()),
             ]);
             let operation = operations.begin(&request, &actor).await.unwrap();
-            operation_id = Some(s(&operation.pin, "objectId").clone());
+            operation_id = Some(s(&operation.pin.to_json(), "objectId").clone());
             operation
         };
         let gates = PublicationCoordination {
@@ -322,7 +322,7 @@ async fn actual_create_reopens_original_key_result_history_and_task_after_lost_f
             now: &operations.now,
         };
         let failed = Cell::new(round == 0);
-        let id = s(&operation.pin, "objectId").clone();
+        let id = s(&operation.pin.to_json(), "objectId").clone();
         let projection = Projection::default();
         let notices = TaskCommentNotices;
         let node = JsString::from("board-node");
@@ -382,7 +382,7 @@ async fn actual_create_reopens_original_key_result_history_and_task_after_lost_f
             .await
             .unwrap();
         let writes = f(&saved.value, "writes").as_array().unwrap();
-        assert_eq!(writes.len(), 4);
+        assert_eq!(writes.len(), 4, "round {round}: {result:?}");
         let stages = writes
             .iter()
             .map(|w| {
@@ -401,7 +401,7 @@ async fn actual_create_reopens_original_key_result_history_and_task_after_lost_f
             )
             .await
             .unwrap();
-        assert_eq!(f(&task.pin, "revision"), &Json::Number(2.0));
+        assert_eq!(f(&task.pin.to_json(), "revision"), &Json::Number(2.0));
         assert_eq!(f(&task.value, "taskKey"), &Json::from("TASK-0001"));
         assert_eq!(f(&task.value, "publication"), &Json::Null);
         assert_eq!(
@@ -422,7 +422,7 @@ async fn actual_create_reopens_original_key_result_history_and_task_after_lost_f
             assert!(
                 observed
                     .iter()
-                    .all(|v| &Json::String(v.0.clone()) == f(&task.pin, "objectId"))
+                    .all(|v| &Json::String(v.0.clone()) == f(&task.pin.to_json(), "objectId"))
             );
         }
         if round == 0 {
@@ -457,7 +457,7 @@ async fn actual_create_reopens_original_key_result_history_and_task_after_lost_f
             revisions = count(&connection, "revisions");
         } else {
             let outcome = result.unwrap();
-            assert_eq!(f(&outcome, "task"), &task.pin);
+            assert_eq!(f(&outcome, "task"), &task.pin.to_json());
             assert_eq!(stages, original_stages);
             assert_eq!(
                 hash_json(&task.value).unwrap(),

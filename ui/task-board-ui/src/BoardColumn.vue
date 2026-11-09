@@ -29,10 +29,10 @@ import {
   StatusBadge,
 } from "@ivy/ui";
 import { usePage } from "../../../packages/ui-client/src/runtime";
-import { invalidateRuntimeCards, readCard } from './card-read';
-import { mapConcurrent } from '../../../packages/ui-client/src/concurrency';
+import { objectParentScope } from "../../../packages/ui-client/src/live";
+import { nativeRead } from '../../../packages/ui-client/src/native';
 import { useCommentVisibility } from './comment-visibility';
-import { and, base, client, notifications, taskContractVersions, tr } from "./runtime";
+import { and, base, client, tr } from "./runtime";
 import type { TaskBoard } from "./runtime";
 import { taskFilter } from "./task-filter";
 import { prefetchTask } from './task-read';
@@ -57,6 +57,7 @@ const props = defineProps<{
   count: number | null;
   href: (id: string) => string;
   disabled: boolean;
+  active?: boolean;
   pendingTaskId?: string | null;
   archiveDisabled?: boolean;
   swimlane: string;
@@ -91,46 +92,30 @@ const toggleOrder = () => {
   } catch {
     /* Optional view state. */
   }
-  pages.reset();
 };
 const manual = computed(() => !props.archived && order.value === "manual");
 const ranked = computed(() => manual.value && props.workspace.role === "user");
 const showCrossAgent = useCommentVisibility();
 const serviceScope = (node: string) => 'services/task-board/' + node;
-watch(() => props.workspace.serviceNodeId, (node, _previous, cleanup) => {
-  cleanup(notifications.subscribeChanges([serviceScope(node)], () => invalidateRuntimeCards(node)));
-}, { immediate: true });
 const pages = usePage(async (signal, cursor) => {
   const waiting = props.column.id === 'waiting' && !props.archived;
-  const complete = waiting || props.swimlane === 'category';
-  const load = (cursor: string | null) => client.request('objects.query', {
-    contractKey: 'task-board/task', contractVersions: taskContractVersions,
+  const result = await nativeRead(client, props.workspace.serviceNodeId, 'task-board.list', {
+    view: 'cards',
     where: and(taskFilter(props.workspace.rootObjectId, props.query), props.archived
       ? { op: 'eq', field: 'object.effectivelyArchived', value: true }
       : { op: 'in', field: 'data:/workflowState', value: props.column.states }),
     ...(props.archived ? { includeArchived: true } : {}),
-    select: ['data:/taskKey'],
     orderBy: props.archived ? [{ field: 'object.updatedAt', direction: 'desc' }, { field: 'object.id', direction: 'asc' }]
       : [...(props.swimlane === 'category' ? [{ field: 'data:/fields/category', direction: 'asc' as const }] : []),
         ...(manual.value ? [{ field: 'object.position', direction: 'asc' as const }]
           : [{ field: 'data:/fields/priority', direction: 'desc' as const }, { field: 'object.createdAt', direction: 'desc' as const }])],
     // Hive always breaks sort ties by object ID; an explicit fourth field exceeds the query contract.
-    limit: complete ? 200 : 20, ...(cursor ? { cursor } : {}),
-  }, { signal });
-  const result = await load(cursor ?? null);
-  // Fetch the entire Waiting lane so a lower-priority User wait never hides behind another group's page.
-  const cursors = new Set<string>();
-  while (complete && result.nextCursor) {
-    if (cursors.has(result.nextCursor)) throw new Error('Waiting groups could not finish. Refresh the board.');
-    cursors.add(result.nextCursor);
-    const page = await load(result.nextCursor);
-    result.items.push(...page.items); result.nextCursor = page.nextCursor;
-  }
-  const items = await mapConcurrent(result.items, async item => {
-    const view = await readCard(props.workspace.serviceNodeId, item.objectId, item.revision, signal);
+    limit: 20, ...(cursor ? { cursor } : {}),
+  }, signal) as TaskBoard.CardListResult;
+  const items = result.items.map(view => {
     const task = view.task, fields = task.fields;
     return {
-      id: item.objectId, taskKey: task.taskKey, title: fields.title, category: fields.category ?? '',
+      id: view.object.objectId, taskKey: task.taskKey, title: fields.title, category: fields.category ?? '',
       priority: fields.priority, control: fields.control,
       requestedEnvironment: fields.executionRequirement?.kind === 'host' ? fields.executionRequirement.hostId : '',
       resolvedHost: task.claim?.target.hostId ?? '', condition: view.executionCondition.state,
@@ -141,13 +126,16 @@ const pages = usePage(async (signal, cursor) => {
       context: { workflowState: task.workflowState, control: fields.control, claimed: !!task.claim,
         waiting: task.runtimeWait?.reason ?? '', hasResult: !!task.latestResult, publishing: !!task.publication },
     };
-  }, signal);
+  });
   if (waiting) items.sort((a, b) => waitingGroups.findIndex(group => group.id === a.group) - waitingGroups.findIndex(group => group.id === b.group));
   return { nextCursor: result.nextCursor, items };
-}, 15000, () => 'ivy.task-board.column:' + JSON.stringify([base.href, order.value, props.workspace.serviceNodeId,
+}, 15000, () => 'ivy.task-board.cards:' + JSON.stringify([base.href, order.value, props.workspace.serviceNodeId,
   props.workspace.callerPrincipalId, props.column.id, !!props.archived, props.swimlane,
   ['q', 'status', 'control', 'host', 'category', 'project'].map(key => props.query.get(key))]),
-  () => ['objects/task-board/task', serviceScope(props.workspace.serviceNodeId)]);
+  () => [objectParentScope('task-board/task', props.workspace.rootObjectId), serviceScope(props.workspace.serviceNodeId)],
+  () => props.active !== false && (!props.lanes?.length || props.lanes.some(lane => !props.collapsedLanes?.includes(lane))));
+watch([order, () => props.swimlane], pages.reset);
+const paginated = computed(() => !!pages.value.value?.nextCursor || pages.page.value > 1);
 
 type Item = { id: string; category: string; group: string; context: TransitionContext };
 const dragging = ref<Item | null>(null),
@@ -216,7 +204,7 @@ const movable = (item: { id: string; context: TransitionContext }) =>
   !taskDisabled(item.id) &&
   props.workspace.role === "user" &&
   (ranked.value || transitions(item.context).length > 0);
-defineExpose({ refresh: pages.refresh });
+defineExpose({ refresh: pages.invalidate });
 </script>
 <template>
   <section
@@ -280,6 +268,16 @@ defineExpose({ refresh: pages.refresh });
       @click="pages.reset"
       >Restart from first page</Button
     >
+    <PageControls
+      v-if="paginated"
+      :aria-label="column.title + tr(' – Seiten', ' pages')"
+      :count="pages.value.value?.items.length ?? 0"
+      :page="pages.page.value"
+      :has-next="!!pages.value.value?.nextCursor"
+      :loading="pages.loading.value"
+      @next="pages.next"
+      @previous="pages.previous"
+    />
     </div>
     <div
       v-for="(section, sectionIndex) in sections" :key="section.id"
@@ -298,7 +296,7 @@ defineExpose({ refresh: pages.refresh });
       <section v-for="group in section.groups" :key="group.id" :aria-label="group.title || undefined"
         :data-waiting-group="group.id || undefined" class="flex flex-col gap-2"
         >
-      <h3 v-if="group.title" class="px-1.5 pt-2 text-xs font-semibold text-muted-foreground">{{ group.title }} <span class="font-normal">{{ group.items.length }}</span></h3>
+      <h3 v-if="group.title" class="px-1.5 pt-2 text-xs font-semibold text-muted-foreground">{{ group.title }} <span class="font-normal">{{ group.items.length }}{{ paginated ? tr(' auf dieser Seite', ' on this page') : '' }}</span></h3>
       <template
         v-for="task in group.items"
         :key="task.id"
@@ -483,19 +481,9 @@ defineExpose({ refresh: pages.refresh });
         v-if="pages.value.value && section.count === 0"
         class="px-3 py-6 text-center text-xs text-muted-foreground"
       >
-        No tasks
+        {{ paginated ? tr('Keine Aufgaben auf dieser Seite', 'No tasks on this page') : tr('Keine Aufgaben', 'No tasks') }}
       </p>
     </div>
-    <PageControls
-      v-if="pages.value.value?.nextCursor || pages.page.value > 1"
-      :count="pages.value.value?.items.length ?? 0"
-      :page="pages.page.value"
-      :has-next="!!pages.value.value?.nextCursor"
-      :loading="pages.loading.value"
-      :style="lanes ? { gridColumn, gridRow: 2 + lanes.length * 2 } : undefined"
-      @next="pages.next"
-      @previous="pages.previous"
-    />
   </section>
 </template>
 <style scoped>

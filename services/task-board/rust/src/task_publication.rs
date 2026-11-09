@@ -9,7 +9,7 @@ use super::{
 };
 use super::{
     comment_writes::tree::{CommentWriteJobs, TreeCommentWriter},
-    reference_writes::{task_attachment_pins, task_references},
+    reference_writes::{ReferencePages, task_attachment_pins, task_references},
 };
 use crate::{
     local_executor::LocalExecutor,
@@ -25,7 +25,7 @@ use ivy_sdk::{
 };
 use std::sync::Arc;
 
-struct Requests<'a, R>(&'a R);
+pub(super) struct Requests<'a, R>(pub(super) &'a R);
 impl<R: RpcClient> LocalMutationSource<()> for Requests<'_, R> {
     async fn request_owned(
         &self,
@@ -51,6 +51,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         value: &Json,
         destination: &Json,
         version: &str,
+        pages: ReferencePages,
     ) -> IvyResult<(Json, Json)> {
         let owner = destination.required("objectId")?;
         let comments = TaskComments::new(
@@ -111,9 +112,10 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                 named.insert("conversation", root.required("object")?.clone());
             }
             let attachments = task_attachment_pins::<()>(&full).map_err(failure)?;
-            let references = task_references(&source, &identity, owner, &named, &attachments)
-                .await
-                .map_err(failure)?;
+            let references =
+                task_references(&source, &identity, owner, &named, &attachments, pages)
+                    .await
+                    .map_err(failure)?;
             Ok((stored, references))
         }
         .await;

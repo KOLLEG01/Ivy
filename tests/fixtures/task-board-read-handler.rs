@@ -123,6 +123,69 @@ fn exact(actual: &Json, expected: &Json) {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn card_pages_share_owner_read_dispatch_and_preserve_other_list_queries() {
+    let entered = Cell::new(0);
+    let original = IvyError::new("original_page_failure", "Keep the original page failure.")
+        .with_details(Json::object([(
+            "detail",
+            Json::String(ivy_contracts::JsString(vec![0xd800])),
+        )]));
+    let read = |args: Json, context: InvocationContext| -> LocalReadFuture<'_, IvyError> {
+        let entered = &entered;
+        let original = &original;
+        async move {
+            entered.set(entered.get() + 1);
+            assert_eq!(context.generation, 7);
+            if yes(&args, "fail") {
+                return Err(original.clone().into());
+            }
+            Ok(args)
+        }
+        .boxed_local()
+    };
+    let other = Other(Cell::new(0));
+    let service = ReadService {
+        read: &read,
+        other: &other,
+    };
+    let context = || {
+        InvocationContext::detached(
+            "page-caller".into(),
+            None,
+            7,
+            RequestOptions::default().cancellation,
+            IvyError::internal(),
+        )
+    };
+    let cards = Json::object([("view", "cards".into()), ("limit", 20.0.into())]);
+    exact(
+        &service
+            .handle("list", cards.clone(), context())
+            .await
+            .unwrap(),
+        &cards,
+    );
+    let mut failing = cards;
+    failing.insert("fail", true.into());
+    exact(
+        &service
+            .handle("list", failing, context())
+            .await
+            .unwrap_err()
+            .to_wire(),
+        &original.to_wire(),
+    );
+    let summary = Json::object([("status", "todo".into())]);
+    let result = service
+        .handle("list", summary.clone(), context())
+        .await
+        .unwrap();
+    exact(f(&result, "arguments"), &summary);
+    assert_eq!(entered.get(), 2);
+    assert_eq!(other.0.get(), 1);
+}
+
 // No Clone/Debug/Display/Error/Send/Sync is supplied for this payload.
 struct LocalCause {
     identity: Rc<()>,
@@ -264,8 +327,15 @@ async fn native_read_edge_preserves_local_identity_admission_capacity_and_other_
             &IvyError::new("limit_exceeded", "Service handler capacity is full.").to_wire(),
         );
         assert_eq!(entered.get(), before + 64);
+        assert_eq!(bridge.retained_usage().0, 64);
         release.set(true);
         gate.notify_waiters();
+        bounded(async {
+            while bridge.retained_usage().0 != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
         let passed = bridge.handler("list")(
             Json::object([("retained", true.into())]),
             InvocationContext::detached(

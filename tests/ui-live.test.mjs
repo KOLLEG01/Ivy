@@ -15,9 +15,9 @@ import * as executionModels from '../dist/packages/ui-client/src/execution-model
 
 // Exercise the actual composable and SFC setup with controlled transports and time.
 const require = createRequire(import.meta.url);
-function load(file, bindings = {}) {
+function load(file, bindings = {}, inlineTemplate = false) {
   let source = readFileSync(file, "utf8");
-  if (file.endsWith(".vue")) source = compileScript(parse(source).descriptor, { id: file }).content;
+  if (file.endsWith(".vue")) source = compileScript(parse(source).descriptor, { id: file, inlineTemplate }).content;
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const module = { exports: {} };
   new Function("require", "module", "exports", code)(name => name in bindings ? bindings[name] : name === '../../contracts/src/native-backend.js' ? nativeBackend :
@@ -27,7 +27,7 @@ function load(file, bindings = {}) {
 }
 const remote = load("packages/ui/src/composables/remote.ts");
 const ui = { ...remote, ...load("packages/ui/src/composables/page-position.ts") };
-const { liveUpdates, nativeInputUpdates } = load("packages/ui-client/src/live.ts", { "@ivy/ui": remote });
+const { liveUpdates, nativeInputUpdates, objectParentScope } = load("packages/ui-client/src/live.ts", { "@ivy/ui": remote });
 const runtime = load("packages/ui-client/src/runtime.ts", {
   "@ivy/ui": ui, "../../sdk/src/client.js": { browserClient: () => ({}), browserNotifications: () => ({}) }, "./live": { liveUpdates },
   "../../contracts/src/ui-route.js": load("packages/contracts/src/ui-route.ts"),
@@ -301,6 +301,127 @@ function setup(t) {
 async function settle() { for (let i = 0; i < 20; i++) await Promise.resolve(); await vue.nextTick(); }
 async function advance(t, ms) { t.mock.timers.tick(ms); await settle(); }
 
+test('shared page controls distinguish omitted previous availability from explicit false in their rendered buttons', async t => {
+  const mount = setup(t), icon = { render: () => null };
+  for (const [props, previousDisabled] of [
+    [{ page: 1 }, true], [{ page: 3 }, false],
+    [{ page: 3, hasPrevious: false }, true], [{ page: 1, hasPrevious: true }, false],
+    [{ page: 3, loading: true }, true],
+  ]) {
+    const buttons = [];
+    const component = load('packages/ui/src/patterns/PageControls.vue', {
+      '@lucide/vue': { ChevronLeft: icon, ChevronRight: icon },
+      '../components/button': { Button: { props: { disabled: Boolean },
+        setup(props) { buttons.push(props.disabled); return () => null; } } },
+    }, true).default;
+    mount(component, { count: 20, hasNext: true, ...props }); await settle();
+    assert.deepEqual(buttons, [previousDisabled, props.loading ?? false], JSON.stringify(props));
+  }
+});
+
+function boardColumn(t, columnId, swimlane) {
+  const mount = setup(t), calls = [], fixture = Array.from({ length: 53 }, (_, i) => ({
+    object: { objectId: 'task-' + i, revision: i + 1 },
+    task: { taskKey: 'TASK-' + i, workflowState: columnId === 'waiting' ? 'waiting' : 'review',
+      fields: { title: 'Task ' + i, category: ['Alpha', 'Beta', 'Gamma'][Math.floor(i / 20)],
+        control: 'user', priority: i < 20 ? 4 : i < 40 ? 2 : 0 }, claim: null, publication: null,
+      runtimeWait: null, latestResult: null, openQuestionCount: 0, wakeAt: null },
+    executionCondition: { state: i < 20 ? 'failed' : i < 40 ? 'deferred' : 'needs_user', detail: '' },
+    commentCount: i, directCommentCount: i,
+  }));
+  const and = (...args) => ({ op: 'and', args }), runtimeBindings = { and,
+    rootWhere: root => ({ op: 'eq', field: 'object.parentId', value: root }),
+    tr: (_de, en) => en, base: new URL('https://fixture.invalid/'), client: {} };
+  const board = load('ui/task-board-ui/src/board.ts', { '@lucide/vue': {}, './runtime': runtimeBindings });
+  const filter = load('ui/task-board-ui/src/task-filter.ts', { './runtime': runtimeBindings });
+  let failure = false;
+  const component = load('ui/task-board-ui/src/BoardColumn.vue', {
+    '@lucide/vue': {}, '@ivy/ui': ui, './runtime': runtimeBindings, './board': board,
+    './task-filter': filter, './ArchiveOutputsHint.vue': {}, './task-read': { prefetchTask() {} },
+    './comment-visibility': { useCommentVisibility: () => vue.ref(false) },
+    '../../../packages/ui-client/src/runtime': runtime,
+    '../../../packages/ui-client/src/live': { objectParentScope },
+    '../../../packages/ui-client/src/native': { nativeRead: async (_client, node, name, args, signal) => {
+      assert.equal(node, 'owner'); assert.equal(name, 'task-board.list'); assert.equal(args.view, 'cards');
+      assert.equal(args.limit, 20); assert.ok(signal instanceof AbortSignal); calls.push(structuredClone(args));
+      if (failure && args.cursor) throw new Error('Page temporarily unavailable');
+      const start = args.cursor ? Number(args.cursor.slice('opaque-'.length)) : 0;
+      return { view: 'cards', items: structuredClone(fixture.slice(start, start + 20)),
+        nextCursor: start + 20 < fixture.length ? 'opaque-' + (start + 20) : null };
+    } },
+  }).default;
+  const notifications = new Notifications();
+  const api = mount(component, { workspace: { serviceNodeId: 'owner', callerPrincipalId: 'reader',
+    rootObjectId: 'root', role: 'user' }, query: new URLSearchParams('control=user&host=host'),
+    column: { id: columnId, title: columnId, states: columnId === 'waiting' ? ['todo', 'waiting'] : ['review'] },
+    count: fixture.length, href: id => '#/' + id, disabled: false, active: true, swimlane,
+    lanes: swimlane === 'category' ? ['Alpha', 'Beta', 'Gamma'] : [''] }, notifications);
+  return { api, calls, fixture, notifications, fail: value => { failure = value; } };
+}
+
+test('workspace write hints isolate board pages and preserve broad, owner, hidden and reconnect updates', async t => {
+  const { calls, notifications } = boardColumn(t, 'waiting', 'category'); await settle();
+  assert.deepEqual([...notifications.changes.values()], [['objects/task-board/task/parent/root', 'services/task-board/owner']]);
+  notifications.change(objectParentScope('task-board/task', 'other')); await advance(t, 250);
+  notifications.change(objectParentScope('task-board/task', null)); await advance(t, 250);
+  assert.equal(calls.length, 1, 'Another workspace and top-level writes do not reload this page.');
+  for (const scope of [objectParentScope('task-board/task', 'root'), 'objects/task-board/task', 'objects', 'services/task-board/owner']) {
+    for (let i = 0; i < 5; i++) notifications.change(scope);
+    await advance(t, 250);
+  }
+  assert.equal(calls.length, 5, 'Each relevant burst uses one existing page refresh.');
+  document.hidden = true; document.dispatchEvent(new Event('visibilitychange'));
+  notifications.change(objectParentScope('task-board/task', 'root')); await advance(t, 30000);
+  assert.equal(calls.length, 5);
+  document.hidden = false; document.dispatchEvent(new Event('visibilitychange')); await advance(t, 250);
+  assert.equal(calls.length, 6, 'Visibility resumes from the retained dirty hint.');
+  notifications.ready(false); notifications.ready(true); await advance(t, 250);
+  assert.equal(calls.length, 7, 'Reconnect observes authoritative current state.');
+});
+
+test('parent hint scopes distinguish top-level objects and preserve bounded family fallback', () => {
+  assert.equal(objectParentScope('fixture/value', null), 'objects/fixture/value/root');
+  assert.equal(objectParentScope('fixture/value', 'root'), 'objects/fixture/value/parent/root');
+  assert.equal(objectParentScope('fixture/value', 'alpha._-9'), 'objects/fixture/value/parent/alpha._-9');
+  for (const id of ['', 'a/b', '🙂', 'x'.repeat(500)])
+    assert.equal(objectParentScope('fixture/value', id), 'objects/fixture/value');
+  const length = 512 - 'objects/fixture/value/parent/'.length;
+  assert.equal(objectParentScope('fixture/value', 'x'.repeat(length)).length, 512);
+  assert.equal(objectParentScope('fixture/value', 'x'.repeat(length + 1)), 'objects/fixture/value');
+});
+
+for (const [columnId, swimlane] of [['waiting', 'none'], ['waiting', 'category'], ['review', 'category']])
+test(`board ${columnId}/${swimlane} retains one bounded page and reaches every group through original cursors`, async t => {
+  const { api, calls, fixture } = boardColumn(t, columnId, swimlane); await settle();
+  assert.equal(calls.length, 1, 'A continuation never triggers an automatic whole-column collection.');
+  assert.equal(api.items.length, 20); assert.equal(api.paginated, true);
+  assert.equal(api.pages.value.value.nextCursor, 'opaque-20');
+  assert.match(JSON.stringify(calls[0].where), /object.parentId.*root/);
+  assert.match(JSON.stringify(calls[0].where), /data:\/fields\/control.*user/);
+  assert.match(JSON.stringify(calls[0].where), /data:\/fields\/executionRequirement\/hostId.*host/);
+  const ids = api.items.map(item => item.id);
+  api.pages.next(); await settle(); assert.equal(api.items.length, 20); ids.push(...api.items.map(item => item.id));
+  api.pages.next(); await settle(); assert.equal(api.items.length, 13); ids.push(...api.items.map(item => item.id));
+  assert.equal(api.pages.value.value.nextCursor, null); assert.equal(api.paginated, true);
+  assert.deepEqual(calls.map(call => call.cursor), [undefined, 'opaque-20', 'opaque-40']);
+  assert.deepEqual([...ids].sort(), fixture.map(row => row.object.objectId).sort());
+  if (columnId === 'waiting') assert.equal(api.sections.flatMap(section => section.groups).find(group => group.id === 'user').items.length, 13,
+    'Lower-priority User waits remain reachable on the final page.');
+  api.pages.previous(); await settle(); assert.equal(calls.at(-1).cursor, 'opaque-20'); assert.equal(api.items.length, 20);
+  api.toggleOrder(); await settle(); assert.equal(api.pages.page.value, 1); assert.equal(calls.at(-1).cursor, undefined);
+  assert.deepEqual(calls.at(-1).orderBy.at(-1), { field: 'object.position', direction: 'asc' });
+});
+
+test('board grouped page failures retain cards and retry the original cursor without fetching later pages', async t => {
+  const { api, calls, fail } = boardColumn(t, 'waiting', 'category'); await settle();
+  const first = api.items.map(item => item.id); fail(true); api.pages.next(); await settle();
+  assert.equal(api.pages.error.value, 'Page temporarily unavailable'); assert.deepEqual(api.items.map(item => item.id), first);
+  assert.equal(calls.length, 2); assert.equal(calls.at(-1).cursor, 'opaque-20');
+  fail(false); await api.pages.refresh(); await settle();
+  assert.equal(api.pages.error.value, null); assert.equal(calls.length, 3); assert.equal(calls.at(-1).cursor, 'opaque-20');
+  assert.equal(api.items.length, 20); assert.equal(api.items[0].id, 'task-20');
+});
+
 function attachmentsFixture(t, call, backend) {
   const mount = setup(t);
   const { useMessageAttachments } = load('packages/ui-client/src/message-attachments.ts', {
@@ -409,6 +530,90 @@ test('live loaders take their initial snapshot after acknowledgement and retain 
   await settle(); assert.equal(fallback, 0);
   await advance(t, 250); assert.equal(fallback, 1);
   unavailable.ready(true); await advance(t, 250); assert.equal(fallback, 2, 'late connection setup reconciles the uncovered interval');
+});
+
+test('explicit invalidations and live hints share one read and retain one in-flight follow-up', async t => {
+  const mount = setup(t), notifications = new Notifications(), signals = [];
+  let api, release;
+  mount({ setup() {
+    api = remote.useRemote(async signal => {
+      signals.push(signal);
+      if (signals.length === 1) await new Promise(resolve => { release = resolve; });
+      return signals.length;
+    }, 15000, ['objects/task-board/task']);
+    return {};
+  } }, {}, notifications);
+  await settle();
+  for (let n = 0; n < 20; n++) { api.invalidate(); notifications.change('objects/task-board/task'); }
+  await advance(t, 15000);
+  assert.equal(signals.length, 1); assert.equal(signals[0].aborted, false);
+  release(); await settle(); await advance(t, 250);
+  assert.equal(signals.length, 2); assert.equal(api.value.value, 2);
+  for (let n = 0; n < 20; n++) { api.invalidate(); notifications.change('objects/task-board/task'); }
+  await advance(t, 249); assert.equal(signals.length, 2);
+  await advance(t, 1); assert.equal(signals.length, 3);
+  await advance(t, 15000); assert.equal(signals.length, 3, 'A healthy source needs no redundant poll.');
+});
+
+test('disabled and hidden views defer initial, explicit, event, reconnect and fallback reads', async t => {
+  const mount = setup(t), notifications = new Notifications(), enabled = vue.ref(false);
+  document.hidden = true;
+  let reads = 0, api;
+  mount({ setup() { api = remote.useRemote(async () => ++reads, 15000, ['objects/task-board/task'], () => enabled.value); return {}; } }, {}, notifications);
+  await settle(); await api.refresh(); api.invalidate();
+  notifications.change('objects/task-board/task'); notifications.ready(false); notifications.ready(true);
+  await advance(t, 30000); assert.equal(reads, 0);
+  document.hidden = false; document.dispatchEvent(new Event('visibilitychange'));
+  await advance(t, 250); assert.equal(reads, 0);
+  enabled.value = true; await settle();
+  window.dispatchEvent(new Event('online')); notifications.change('objects/task-board/task');
+  await advance(t, 250); assert.equal(reads, 1);
+  enabled.value = false; await settle();
+  notifications.ready(false); api.invalidate(); await api.refresh();
+  await advance(t, 30000); assert.equal(reads, 1);
+  enabled.value = true; await settle(); await advance(t, 250);
+  assert.equal(reads, 2); assert.equal(api.error.value, null);
+});
+
+test('pausing a paged view aborts stale work, preserves its cursor and reconciles once on reopening', async t => {
+  const mount = setup(t), notifications = new Notifications(), enabled = vue.ref(true), calls = [];
+  let pages, release;
+  mount({ setup() {
+    pages = runtime.usePage(async (signal, cursor) => {
+      const index = calls.push({ signal, cursor });
+      if (index === 3) await new Promise(resolve => { release = resolve; });
+      return { items: [index], nextCursor: cursor ? null : 'second-page' };
+    }, 15000, () => 'paused-page', ['objects/task-board/task'], () => enabled.value);
+    return {};
+  } }, {}, notifications);
+  await settle(); pages.next(); await settle();
+  assert.equal(pages.page.value, 2); assert.equal(calls[1].cursor, 'second-page');
+  pages.invalidate(); await advance(t, 250); assert.equal(calls.length, 3);
+  enabled.value = false; await settle();
+  assert.equal(calls[2].signal.aborted, true); assert.equal(pages.loading.value, false);
+  notifications.change('objects/task-board/task'); pages.invalidate(); await advance(t, 30000);
+  assert.equal(calls.length, 3); assert.deepEqual(pages.value.value.items, [2]);
+  enabled.value = true; await settle(); await advance(t, 250);
+  assert.equal(calls.length, 4); assert.equal(calls[3].cursor, 'second-page');
+  release(); await settle(); assert.deepEqual(pages.value.value.items, [4], 'A transport ignoring abort cannot replace the reopened page.');
+  enabled.value = false; await settle(); pages.reset(); await settle();
+  assert.equal(calls.length, 4); assert.equal(pages.page.value, 1);
+  enabled.value = true; await settle(); await advance(t, 250);
+  assert.equal(calls.length, 5); assert.equal(calls[4].cursor, undefined);
+});
+
+test('hidden manual loaders resume their deferred initial read without acquiring background polling', async t => {
+  const mount = setup(t); document.hidden = true;
+  let reads = 0, api;
+  mount({ setup() { api = remote.useRemote(async () => ++reads); return {}; } });
+  await settle(); await advance(t, 30000); assert.equal(reads, 0);
+  document.hidden = false; document.dispatchEvent(new Event('visibilitychange'));
+  await advance(t, 250); assert.equal(reads, 1);
+  document.dispatchEvent(new Event('visibilitychange')); window.dispatchEvent(new Event('online'));
+  await advance(t, 30000); assert.equal(reads, 1);
+  document.hidden = true; await api.refresh(); assert.equal(reads, 1);
+  document.hidden = false; document.dispatchEvent(new Event('visibilitychange'));
+  await advance(t, 250); assert.equal(reads, 2);
 });
 
 test("reactive live scopes follow their owner without refreshing for unrelated hosts", async t => {
@@ -545,6 +750,7 @@ test("Secretary keeps dirty configuration and its save revision across push and 
   const component = load("ui/secretary-ui/src/RulesView.vue", {
     "@ivy/ui": remote,
     "./runtime": {
+      base: new URL('https://fixture.invalid/'),
       client: { request: async () => ({ items: [] }) }, tr: (_de, en) => en,
       readDocument: async () => {
         reads++;

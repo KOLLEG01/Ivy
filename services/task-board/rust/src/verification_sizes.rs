@@ -61,6 +61,18 @@ where
 pub async fn fill_verification_sizes_with<E, F, Fut>(
     key: &str,
     value: &Json,
+    read: F,
+) -> Result<Json, E>
+where
+    E: From<IvyError>,
+    F: FnMut(Option<Json>) -> Fut,
+    Fut: Future<Output = Result<Json, E>>,
+{
+    fill_verification_sizes_owned_with(key, value.clone(), read).await
+}
+pub async fn fill_verification_sizes_owned_with<E, F, Fut>(
+    key: &str,
+    mut stored: Json,
     mut read: F,
 ) -> Result<Json, E>
 where
@@ -69,9 +81,8 @@ where
     Fut: Future<Output = Result<Json, E>>,
 {
     if key != "task-board/task" {
-        return Ok(value.clone());
+        return Ok(stored);
     }
-    let mut stored = value.clone();
     fill_findings(property_mut(&mut stored, "latestChecks"), &mut read).await?;
     if let Some(content) = property_mut(&mut stored, "content") {
         fill_findings(property_mut(content, "checks"), &mut read).await?;

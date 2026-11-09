@@ -3,15 +3,22 @@
 use super::*;
 use ivy_contracts::json::stringify;
 use ivy_task_board::native_runtime::{NativeRuntime, NativeRuntimeInputs};
-use std::rc::Rc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 #[path = "task-board-native-process.rs"]
 mod process;
 
-struct PromptOwner(Rc<Cell<bool>>);
+struct PromptOwner {
+    alive: Arc<AtomicBool>,
+    drop_thread: Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
+}
 impl Drop for PromptOwner {
     fn drop(&mut self) {
-        self.0.set(false);
+        *self.drop_thread.lock().unwrap() = Some(std::thread::current().id());
+        self.alive.store(false, Ordering::Release);
     }
 }
 impl TaskPrompts for PromptOwner {
@@ -89,13 +96,194 @@ fn inputs(root: &Root, prompts: PromptOwner) -> NativeRuntimeInputs<PromptOwner>
         chat_readable_versions: packaged.chat_readable_versions,
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn sqlite_write_wait_keeps_actual_sdk_readiness_and_heartbeats_responsive() {
+    let peer = Peer::start_mode(Some("--native-policies")).await;
+    let root = Root::new();
+    let (path, mut config) = instance(&root, true, "task-board");
+    config.insert("publicBaseUrl", peer.url.clone().into());
+    std::fs::write(&path, stringify(&config, 32768).unwrap()).unwrap();
+    let alive = Arc::new(AtomicBool::new(true));
+    let mut inputs = inputs(
+        &root,
+        PromptOwner {
+            alive: alive.clone(),
+            drop_thread: Arc::new(std::sync::Mutex::new(None)),
+        },
+    );
+    inputs.catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let catalog = inputs
+        .catalogs
+        .checked_native_contract(&"0.159.2".into(), None)
+        .unwrap();
+    let draft = Json::object([
+        ("nativeVersion", "0.159.2".into()),
+        (
+            "catalogSourceHash",
+            catalog.catalog().required("sourceHash").unwrap().clone(),
+        ),
+        (
+            "definitions",
+            Json::object(
+                [
+                    ("threadStart", "thread/start"),
+                    ("threadResume", "thread/resume"),
+                    ("turnStart", "turn/start"),
+                    ("turnInterrupt", "turn/interrupt"),
+                ]
+                .into_iter()
+                .map(|(key, method)| {
+                    (
+                        key,
+                        Json::from(catalog.definition_hash(&method.into()).unwrap()),
+                    )
+                }),
+            ),
+        ),
+        ("threadStart", Json::Object(vec![])),
+        ("threadResume", Json::Object(vec![])),
+        ("turnStart", Json::object([("input", Json::Array(vec![]))])),
+    ]);
+    let runtime = NativeRuntime::prepare(&path, inputs).await.unwrap();
+    let client = runtime.host.service.client.clone();
+    let control = runtime.host.service.control.clone();
+    let data = runtime.host.config.data_root().to_owned();
+    let shutdown = Notify::new();
+    let script = async {
+        let connection = bounded(client.wait_ready(None)).await.unwrap();
+        let blocker = Connection::open(data.join("task-board.sqlite")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let heartbeats = || {
+            peer.methods(1)
+                .iter()
+                .filter(|method| method.as_str() == "service.heartbeat")
+                .count()
+        };
+        let before = heartbeats();
+        let request = Json::object([
+            ("name", "savePlan".into()),
+            ("operationId", "sqlite-busy-plan".into()),
+            (
+                "arguments",
+                Json::object([
+                    ("action", "savePlan".into()),
+                    ("operationId", "sqlite-busy-plan".into()),
+                    ("plan", draft),
+                ]),
+            ),
+        ]);
+        let mut reply = Box::pin(connection.request(
+            "test.invokeRegistered",
+            request.clone(),
+            RequestOptions::default(),
+        ));
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(2400)) => {},
+            result = &mut reply => panic!("The original SQLite write must remain blocked: {result:?}"),
+        }
+        let readiness =
+            tokio::time::timeout(Duration::from_millis(250), control.readiness(&connection))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(readiness.get("ready"), Some(&true.into()));
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            connection.request("system.status", Json::Null, RequestOptions::default()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            heartbeats() > before,
+            "Actual SDK heartbeats must continue during synchronous SQLite work"
+        );
+        blocker.execute_batch("COMMIT;").unwrap();
+        let original = bounded(reply).await.unwrap();
+        assert!(
+            original.get("error").is_none(),
+            "Original write: {original:?}"
+        );
+        let replay = bounded(connection.request(
+            "test.invokeRegistered",
+            request,
+            RequestOptions::default(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            original.required("result").unwrap(),
+            replay.required("result").unwrap()
+        );
+        shutdown.notify_one();
+    };
+    let (result, ()) = tokio::join!(runtime.run(shutdown.notified()), script);
+    result.unwrap();
+    assert!(!alive.load(Ordering::Acquire));
+    let database = Connection::open(data.join("task-board.sqlite")).unwrap();
+    database
+        .execute_batch("BEGIN EXCLUSIVE; ROLLBACK;")
+        .unwrap();
+    peer.finish().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropping_native_runtime_observer_closes_and_drains_its_original_worker() {
+    let peer = Peer::start_mode(Some("--native-policies")).await;
+    let root = Root::new();
+    let (path, mut config) = instance(&root, true, "task-board");
+    config.insert("publicBaseUrl", peer.url.clone().into());
+    std::fs::write(&path, stringify(&config, 32768).unwrap()).unwrap();
+    let alive = Arc::new(AtomicBool::new(true));
+    let drop_thread = Arc::new(std::sync::Mutex::new(None));
+    let runtime = NativeRuntime::prepare(
+        &path,
+        inputs(
+            &root,
+            PromptOwner {
+                alive: alive.clone(),
+                drop_thread: drop_thread.clone(),
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    let client = runtime.host.service.client.clone();
+    let data = runtime.host.config.data_root().to_owned();
+    let mut work = Box::pin(runtime.run(std::future::pending()));
+    tokio::select! {
+        result = work.as_mut() => panic!("Native owner ended before observation was cancelled: {result:?}"),
+        ready = client.wait_ready(None) => { ready.unwrap(); },
+    }
+    drop(work);
+    until(|| !alive.load(Ordering::Acquire)).await;
+    assert!(!client.ready());
+    assert_ne!(
+        *drop_thread.lock().unwrap(),
+        Some(std::thread::current().id())
+    );
+    let database = Connection::open(data.join("task-board.sqlite")).unwrap();
+    database
+        .execute_batch("BEGIN EXCLUSIVE; ROLLBACK;")
+        .unwrap();
+    peer.finish().await;
+}
 #[tokio::test(flavor = "current_thread")]
 async fn native_runtime_owns_configured_journal_and_resources_until_shutdown() {
     for open in [false, true] {
         let root = Root::new();
         let (path, config) = instance(&root, true, "task-board");
-        let alive = Rc::new(Cell::new(true));
-        let inputs = inputs(&root, PromptOwner(alive.clone()));
+        let alive = Arc::new(AtomicBool::new(true));
+        let drop_thread = Arc::new(std::sync::Mutex::new(None));
+        let inputs = inputs(
+            &root,
+            PromptOwner {
+                alive: alive.clone(),
+                drop_thread: drop_thread.clone(),
+            },
+        );
         let runtime = NativeRuntime::prepare(&path, inputs).await.unwrap();
         let data = root.0.join("configured data");
         assert_eq!(runtime.host.config.json(), &config);
@@ -114,10 +302,17 @@ async fn native_runtime_owns_configured_journal_and_resources_until_shutdown() {
             drop(journal);
         }
         let shutdown = async {
-            assert!(alive.get());
+            assert!(alive.load(Ordering::Acquire));
         };
         bounded(runtime.run(shutdown)).await.unwrap();
-        assert!(!alive.get(), "Prompt owner must release after shutdown");
+        assert!(
+            !alive.load(Ordering::Acquire),
+            "Prompt owner must release after shutdown"
+        );
+        assert_ne!(
+            *drop_thread.lock().unwrap(),
+            Some(std::thread::current().id())
+        );
         let health = json(&std::fs::read_to_string(data.join("health.json")).unwrap());
         assert_eq!(health.get("instanceId"), config.get("instanceId"));
         assert_eq!(health.get("buildId"), config.get("buildId"));
@@ -155,11 +350,22 @@ async fn native_runtime_rejects_build_and_service_identity_before_opening_journa
     ] {
         let root = Root::new();
         let (path, _) = instance(&root, matching, component);
-        let alive = Rc::new(Cell::new(true));
-        let inputs = inputs(&root, PromptOwner(alive.clone()));
+        let alive = Arc::new(AtomicBool::new(true));
+        let drop_thread = Arc::new(std::sync::Mutex::new(None));
+        let inputs = inputs(
+            &root,
+            PromptOwner {
+                alive: alive.clone(),
+                drop_thread: drop_thread.clone(),
+            },
+        );
         let result = NativeRuntime::prepare(path, inputs).await;
         assert_eq!(result.err().unwrap().code, error);
-        assert!(!alive.get());
+        assert!(!alive.load(Ordering::Acquire));
+        assert_eq!(
+            *drop_thread.lock().unwrap(),
+            Some(std::thread::current().id())
+        );
         let data = root.0.join("configured data");
         assert!(!data.join("task-board.sqlite").exists());
         assert!(!data.join("health.json").exists());
@@ -176,8 +382,15 @@ async fn native_runtime_registers_the_full_catalog_and_serves_an_sdk_workspace_c
     let (path, mut config) = instance(&root, true, "task-board");
     config.insert("publicBaseUrl", peer.url.clone().into());
     std::fs::write(&path, stringify(&config, 32768).unwrap()).unwrap();
-    let alive = Rc::new(Cell::new(true));
-    let inputs = inputs(&root, PromptOwner(alive.clone()));
+    let alive = Arc::new(AtomicBool::new(true));
+    let drop_thread = Arc::new(std::sync::Mutex::new(None));
+    let inputs = inputs(
+        &root,
+        PromptOwner {
+            alive: alive.clone(),
+            drop_thread: drop_thread.clone(),
+        },
+    );
     let advertisement = inputs.registry.value().clone();
     let runtime = NativeRuntime::prepare(&path, inputs).await.unwrap();
     let client = runtime.host.service.client.clone();
@@ -220,14 +433,18 @@ async fn native_runtime_registers_the_full_catalog_and_serves_an_sdk_workspace_c
                 .is_some_and(|value| json(&value).get("ready") == Some(&Json::Bool(true)))
         })
         .await;
-        assert!(alive.get());
+        assert!(alive.load(Ordering::Acquire));
         shutdown.notify_one();
     };
     let (result, ()) =
         bounded(async { tokio::join!(runtime.run(shutdown.notified()), script) }).await;
     result.unwrap();
     assert!(!client.ready());
-    assert!(!alive.get());
+    assert!(!alive.load(Ordering::Acquire));
+    assert_ne!(
+        *drop_thread.lock().unwrap(),
+        Some(std::thread::current().id())
+    );
     let registrations = peer
         .frames
         .lock()
@@ -248,7 +465,7 @@ async fn native_runtime_registers_the_full_catalog_and_serves_an_sdk_workspace_c
             .as_array()
             .unwrap()
             .len(),
-        54
+        58
     );
     let health = json(&std::fs::read_to_string(data.join("health.json")).unwrap());
     assert_eq!(health.get("ready"), Some(&Json::Bool(false)));

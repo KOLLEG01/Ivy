@@ -8,7 +8,7 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
-    checked_native_contract::CheckedNativeContracts, json::canonical,
+    checked_native_contract::CheckedNativeContracts, json::canonical_equal,
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use std::collections::HashSet;
@@ -165,8 +165,7 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
 }
 fn same(value: Option<&Json>, expected: &Json) -> IvyResult<bool> {
     match value {
-        Some(value) => Ok(canonical(value, MANAGEMENT_FRAME_BYTES)?
-            == canonical(expected, MANAGEMENT_FRAME_BYTES)?),
+        Some(value) => canonical_equal(value, expected, MANAGEMENT_FRAME_BYTES),
         None => Ok(false),
     }
 }
@@ -232,6 +231,56 @@ fn archived_message(reply: &Json, thread_id: &JsString) -> IvyResult<bool> {
 impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
     ContextRecovery<'_, S, Q>
 {
+    async fn unanswered(&self, task: &Document) -> IvyResult<bool> {
+        let run = string(task.value.required("lastRun")?, "objectId")?;
+        if field(&task.value, "comments")
+            .as_array()
+            .is_some_and(|comments| comments.is_empty())
+            && field(&task.value, "commentStore")
+                .get("kind")
+                .is_some_and(|kind| kind.is_str("tree"))
+            && field(&task.value, "commentStore")
+                .get("summary")
+                .is_some_and(|summary| !summary.is_null())
+        {
+            let questions = crate::wake::open_question_metadata(&task.value)?;
+            if questions.is_empty() {
+                return (self.unanswered_question)(&task.value, run);
+            }
+            let ids = questions
+                .iter()
+                .map(|question| question.required("commentId").cloned())
+                .collect::<IvyResult<Vec<_>>>()?;
+            let comments = self
+                .store
+                .read_task_comments(&task.value, &task.pin.object_id, &ids)
+                .await?;
+            let comments: Vec<_> = comments
+                .into_iter()
+                .filter(|comment| {
+                    questions.iter().any(|question| {
+                        field(comment, "commentId") == field(question, "commentId")
+                            && field(comment, "sequence") == field(question, "sequence")
+                            && field(comment, "recipient") == field(question, "recipient")
+                            && field(comment, "purpose").is_str("question")
+                    })
+                })
+                .collect();
+            require(
+                comments.len() == questions.len(),
+                "task_board_comment_mismatch",
+                "The retained questions differ from their conversation summary.",
+            )?;
+            // This is input only to the read-only question policy. Resolution
+            // was established by the exact-root summary; native inputs still
+            // need their actual original Run before that policy can filter them.
+            let mut projection = task.value.clone();
+            projection.remove("commentStore");
+            projection.insert("comments", Json::Array(comments));
+            return (self.unanswered_question)(&projection, run);
+        }
+        (self.unanswered_question)(&task.value, run)
+    }
     async fn observed(
         &self,
         proof: &UnstartedAttempt,
@@ -263,7 +312,11 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
             store: self.store,
             catalogs: self.catalogs,
         }
-        .read(&call.pin, call.value.required("evidence")?, &identity)
+        .read(
+            &call.pin.to_json(),
+            call.value.required("evidence")?,
+            &identity,
+        )
         .await?;
         require(
             observation.get("phase") == call.value.get("ownerPhase")
@@ -309,16 +362,13 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
         let result_run = field(&result.value, "run");
         require(
             result.value.get("taskId").and_then(Json::as_js_string) == Some(task_id)
-                && result_run.get("objectId") == run.pin.get("objectId")
+                && result_run.get("objectId").and_then(Json::as_js_string)
+                    == Some(&run.pin.object_id)
                 && result_run
                     .required("revision")?
                     .as_f64()
                     .ok_or_else(IvyError::internal)?
-                    < run
-                        .pin
-                        .required("revision")?
-                        .as_f64()
-                        .ok_or_else(IvyError::internal)?,
+                    < run.pin.revision,
             "task_board_evidence_mismatch",
             "Recovery requires the exact saved attempt before its terminal publication.",
         )?;
@@ -353,10 +403,7 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
         let Some(primary) = primary(&task.value) else {
             return Ok(false);
         };
-        if (self.unanswered_question)(
-            &task.value,
-            string(task.value.required("lastRun")?, "objectId")?,
-        )? {
+        if self.unanswered(task).await? {
             return Ok(false);
         }
         missing_proof(
@@ -375,7 +422,7 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
                     return Ok(false);
                 }
                 let Some(proof) = self
-                    .unstarted_attempt(string(&task.pin, "objectId")?, primary, &run)
+                    .unstarted_attempt(&task.pin.object_id, primary, &run)
                     .await?
                 else {
                     return Ok(false);
@@ -400,10 +447,7 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
         let Some(primary) = primary(&task.value) else {
             return Ok(false);
         };
-        if (self.unanswered_question)(
-            &task.value,
-            string(task.value.required("lastRun")?, "objectId")?,
-        )? {
+        if self.unanswered(task).await? {
             return Ok(false);
         }
         missing_proof(
@@ -428,18 +472,14 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
                         return Ok(false);
                     }
                     if first
-                        && context_recovery_history(
-                            self.store,
-                            &task.value,
-                            string(&task.pin, "objectId")?,
-                        )
-                        .await?
-                        .is_some()
+                        && context_recovery_history(self.store, &task.value, &task.pin.object_id)
+                            .await?
+                            .is_some()
                     {
                         return Ok(false);
                     }
                     let Some(proof) = self
-                        .unstarted_attempt(string(&task.pin, "objectId")?, primary, &run)
+                        .unstarted_attempt(&task.pin.object_id, primary, &run)
                         .await?
                     else {
                         return Ok(false);
@@ -466,7 +506,7 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
                         self.store,
                         "task-board/task",
                         &Json::object([
-                            ("objectId", task.pin.required("objectId")?.clone()),
+                            ("objectId", Json::String(task.pin.object_id.clone())),
                             (
                                 "revision",
                                 run.value

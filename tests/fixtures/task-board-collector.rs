@@ -270,7 +270,7 @@ impl<S: TurnEvidenceStore + Store> CollectionStore for CollectionTrace<'_, S> {
             .db
             .query_row(
                 "SELECT name FROM documents WHERE id=?",
-                [s(&d.pin, "objectId").to_utf8().unwrap()],
+                [s(&d.pin.to_json(), "objectId").to_utf8().unwrap()],
                 |r| r.get::<_, String>(0),
             )
             .unwrap()
@@ -439,8 +439,8 @@ async fn collectors_match_original_traces_checkpoints_and_partial_effects_over_a
                             "UPDATE revisions SET value_json=? WHERE id=? AND revision=?",
                             params![
                                 canonical(&v, MANAGEMENT_FRAME_BYTES).unwrap(),
-                                s(&d.pin, "objectId").to_utf8().unwrap(),
-                                num(&d.pin, "revision")
+                                s(&d.pin.to_json(), "objectId").to_utf8().unwrap(),
+                                num(&d.pin.to_json(), "revision")
                             ],
                         )
                         .unwrap();

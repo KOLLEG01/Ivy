@@ -26,11 +26,8 @@ use crate::{
     journal_store::{
         Contracts, JournalStore, ReadScopes,
         persistent_reads::{
-            comment_port::CommentPort,
-            document_reads::DocumentReads,
-            local_history::{HistoryCollections, LocalHistory},
-            local_reads::SqliteReads,
-            store::RpcObjectReads,
+            comment_port::CommentPort, document_reads::DocumentReads, local_history::LocalHistory,
+            local_reads::SqliteReads, store::RpcObjectReads,
         },
     },
     lifecycle_journal::LifecycleJournal,
@@ -54,7 +51,7 @@ use crate::{
     native_recovery::ContextRecovery,
     native_signals::NativeSignals,
     native_turn_evidence::TurnEvidence,
-    operations::{Document, Operations},
+    operations::{Document, Operations, Store},
     publication_coordination::PublicationCoordination,
     read_evidence::ReadEvidenceStore,
     reconciler::{ReconcilePolicies, Reconciler},
@@ -266,6 +263,9 @@ impl<
     async fn read_task(&self, id: &JsString) -> IvyResult<Document> {
         (self.task_read)(id.clone()).await
     }
+    async fn pending_comment_ids(&self, task: &Document) -> IvyResult<Vec<Json>> {
+        crate::scheduler::queued_input_ids(self.checks.core.store, task).await
+    }
     fn enabled(&self) -> bool {
         self.current.scheduler_enabled()
     }
@@ -420,7 +420,8 @@ impl<
             _ => return Err(IvyError::internal()),
         };
         let opened = (self.open_journal)(settings)?;
-        let scopes = ReadScopes::default();
+        let budget = control.work_budget();
+        let scopes = ReadScopes::with_budget(budget.clone());
         let journal = JournalStore {
             journal: LocalJournal {
                 connection: &opened.connection,
@@ -459,7 +460,6 @@ impl<
         let objects = RpcObjectReads {
             client: journal.client.as_ref(),
         };
-        let history_collections = HistoryCollections::default();
         let current_comments = scopes.cache().comments(journal.client.clone());
         let read_condition = |task: &Json, wake: Option<&Json>| {
             condition_policy::task_condition(&read_local, task, wake)
@@ -480,15 +480,23 @@ impl<
             &read_local,
             &current_reads,
             &objects,
-            &history_collections,
+            scopes.cache().history_collections(),
             HistoryLimits {
                 count: journal.limits.count,
                 bytes: journal.limits.bytes,
             },
         );
-        let cleanup = || history.collect::<NativeReadFailure>(0, 0, None, None);
+        let cleanup = || -> futures_util::future::LocalBoxFuture<'_, IvyResult<()>> {
+            Box::pin(async {
+                crate::reconciler::reconcile_cleanup_result(
+                    history.collect::<NativeReadFailure>(0, 0, None, None).await,
+                )
+            })
+        };
         // Declarations precede their borrowed job queues. InternalCalls carries
         // only the shared admission gate/channel/read context across the cycle.
+        let spawner;
+        let scoped;
         let policies;
         let operations;
         let categories;
@@ -519,16 +527,6 @@ impl<
         let proofs;
         let services;
         let program;
-        let category_jobs = LocalExecutor::default();
-        let category_scoped = ReadScopeExecutor {
-            scopes: &scopes,
-            executor: &category_jobs,
-        };
-        let execution_jobs = LocalExecutor::default();
-        let execution_scoped = ReadScopeExecutor {
-            scopes: &scopes,
-            executor: &execution_jobs,
-        };
         let execution;
         let handoff_admission;
         let admission_runtime;
@@ -541,24 +539,23 @@ impl<
         let signals;
         let scheduler;
         let reconcile_components;
-        let reconcile_jobs = LocalExecutor::default();
-        let reconcile_scoped = ReadScopeExecutor {
-            scopes: &scopes,
-            executor: &reconcile_jobs,
-        };
-        let reconciler;
         let runtime;
         let service_runtime;
         let read_runtime;
         let public;
         let owner_read;
         let current_public;
-        let invocation_jobs = LocalExecutor::default();
-        let invocation_scoped = ReadScopeExecutor {
+        let invocations;
+        let reconciler;
+        // All borrowed graph values precede their one queue, so queued jobs
+        // retire before any referenced dependency is dropped.
+        let jobs = LocalExecutor::default();
+        spawner = jobs.spawner();
+        scoped = ReadScopeExecutor {
             scopes: &scopes,
-            executor: &invocation_jobs,
+            executor: &spawner,
         };
-        let invocations = EngineInvocations::new(&invocation_scoped);
+        invocations = EngineInvocations::with_budget(&scoped, budget);
         let (calls, internal_owner) = invocations.internal_calls(&scopes);
         policies = self.policies.bind(PolicyContext {
             journal: &journal,
@@ -577,7 +574,7 @@ impl<
             now: &self.now,
         };
         let store = &operations.store;
-        categories = CategoryProjection::new(store, principal, &policies, &category_scoped);
+        categories = CategoryProjection::new(store, principal, &policies, &scoped);
         checks = EngineChecks {
             core: TaskChecks {
                 store,
@@ -620,7 +617,7 @@ impl<
             Box::pin(async move {
                 reads::lifecycle_document(
                     current_reads
-                        .read_document("task-board/task", &address, primary, false, false)
+                        .read_record("task-board/task", &address, primary, false, false)
                         .await
                         .map_err(crate::engine_read::read_failure::provider_read_error)?,
                 )
@@ -628,7 +625,7 @@ impl<
         };
         scheduler_task_read =
             |id: JsString| -> futures_util::future::LocalBoxFuture<'_, IvyResult<Document>> {
-                Box::pin(async { Ok(action_task_read(Json::String(id), true).await?.document) })
+                Box::pin(async { store.read_task_header(&Json::String(id), true).await })
             };
         routing_task_read = |id: JsString,
                              archived: bool|
@@ -636,14 +633,11 @@ impl<
             '_,
             IvyResult<crate::native_lifecycle::LifecycleDocument>,
         > {
-            let current_reads = &current_reads;
+            let journal = &journal;
             Box::pin(async move {
-                reads::lifecycle_document(
-                    current_reads
-                        .read_document("task-board/task", &Json::String(id), true, archived, false)
-                        .await
-                        .map_err(crate::engine_read::read_failure::provider_read_error)?,
-                )
+                journal
+                    .lifecycle_task_header(&Json::String(id), true, archived)
+                    .await
             })
         };
         scheduler_runtime = SchedulerRuntime::new(
@@ -698,7 +692,6 @@ impl<
         validation = ActionValidation {
             store,
             checks: &checks,
-            task_read: &action_task_read,
         };
         actions = TaskActions {
             store,
@@ -773,48 +766,15 @@ impl<
             principal_id: principal,
             services: &services,
         };
-        execution = ExecutionQueue::new(&program, &execution_scoped);
+        execution = ExecutionQueue::new(&program, &scoped);
         handoff_admission = |request: Json,
                              actor: Json|
          -> futures_util::future::LocalBoxFuture<'_, IvyResult<Json>> {
-            let validation = &validation;
-            let task_read = &action_task_read;
+            let actions = &actions;
             Box::pin(async move {
-                let task = task_read(
-                    Json::object([
-                        ("objectId", request.required("taskId")?.clone()),
-                        ("revision", request.required("expectedRevision")?.clone()),
-                    ]),
-                    true,
-                )
-                .await?;
-                let now = (self.now)();
-                validation
-                    .validate(
-                        &request,
-                        &task.document.value,
-                        &actor,
-                        &now.into(),
-                        request
-                            .required("operationId")?
-                            .as_js_string()
-                            .ok_or_else(IvyError::internal)?,
-                    )
-                    .await?;
-                Ok(Json::object([
-                    (
-                        "run",
-                        task.document
-                            .value
-                            .required("claim")?
-                            .required("run")?
-                            .clone(),
-                    ),
-                    (
-                        "work",
-                        crate::engine_actions::handoff_work(&task.document.value)?,
-                    ),
-                ]))
+                actions
+                    .admit_handoff(&request, &actor, &(self.now)().into())
+                    .await
             })
         };
         admission_runtime = AdmissionRuntime {
@@ -896,8 +856,7 @@ impl<
             signals: &signals,
             adoption: &adoption,
         };
-        reconciler =
-            Reconciler::new_with_cleanup(store, &reconcile_components, &reconcile_scoped, cleanup);
+        reconciler = Reconciler::new_with_cleanup(store, &reconcile_components, &scoped, &cleanup);
         runtime = ReconcilerRuntime {
             reconciler: &reconciler,
             native: &native,
@@ -940,6 +899,23 @@ impl<
                     .into());
                 }
                 admission.verify_owner().await?;
+                if query.get("view").is_some_and(|view| view.is_str("cards")) {
+                    let check_cancelled = || {
+                        if context.signal.is_cancelled() {
+                            Err(IvyError::internal())
+                        } else {
+                            Ok(())
+                        }
+                    };
+                    return current_reads
+                        .card_page(
+                            query,
+                            conversation,
+                            &check_cancelled,
+                            |options| async move { store.page("task-board/task", &options).await },
+                        )
+                        .await;
+                }
                 // taskDocument selects a retained header. The current read core
                 // alone decides indexed windows versus full materialization.
                 let address = query.get("task");
@@ -990,26 +966,22 @@ impl<
             read: &owner_read,
             other: &public,
         };
-        let result = invocation_jobs
-            .drive(
-                reconcile_jobs.drive(execution_jobs.drive(category_jobs.drive(
-                    activation.run_engine_with_handler(
-                        &control,
-                        generation,
-                        &current_public,
-                        &admission,
-                        &invocations,
-                        internal_owner,
-                        &runtime,
-                        &self.clock,
-                        async {
-                            execution.settled().await;
-                            categories.settled().await;
-                            Ok(())
-                        },
-                    ),
-                ))),
-            )
+        let result = jobs
+            .drive(activation.run_engine_with_handler(
+                &control,
+                generation,
+                &current_public,
+                &admission,
+                &invocations,
+                internal_owner,
+                &runtime,
+                &self.clock,
+                async {
+                    execution.settled().await;
+                    categories.settled().await;
+                    Ok(())
+                },
+            ))
             .await;
         // All accepted read producers and their generation have retired. A
         // failed range can still own immutable sibling requests in the SDK.

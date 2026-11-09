@@ -1,6 +1,6 @@
 use super::value::{self, *};
 use ivy_contracts::{IvyJson as Json, JsString};
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
 fn pretty(compact: &str) -> String {
     let mut output = String::new();
@@ -169,8 +169,9 @@ fn author<'a>(task: &Value<'a>, comments: &[Value<'a>]) -> Result<Json> {
     ]))
 }
 
-pub(super) fn preserve_task<'a>(task: Value<'a>) -> Result<Json> {
-    let mut current = value::object_rest(&task, "latestChecks")?;
+pub(super) fn preserve_task(original: Json) -> Result<Json> {
+    original.as_object().ok_or_else(value::invalid)?;
+    let task = value::borrow(&original);
     let mut groups = Vec::new();
     let latest = value::field(&task, "latestChecks")?;
     if value::has_items(&latest)? {
@@ -193,13 +194,20 @@ pub(super) fn preserve_task<'a>(task: Value<'a>) -> Result<Json> {
         ));
     }
     let mut comments = Vec::new();
-    for comment in value::array_items(&value::field(&task, "comments")?)? {
+    let mut handoffs = Vec::new();
+    for (index, comment) in value::array_items(&value::field(&task, "comments")?)?
+        .into_iter()
+        .enumerate()
+    {
         let handoff = value::field(&comment, "handoff")?;
         if !value::present(&handoff) {
             comments.push(comment);
             continue;
         }
-        let clean = value::object_rest(&handoff, "checks")?;
+        handoff
+            .as_deref()
+            .and_then(Json::as_object)
+            .ok_or_else(value::invalid)?;
         let checks = value::field(&handoff, "checks")?;
         if value::has_items(&checks)? {
             groups.push((
@@ -211,20 +219,15 @@ pub(super) fn preserve_task<'a>(task: Value<'a>) -> Result<Json> {
             ));
         }
         if value::present(&checks) {
-            let mut changed = value::copy_object(&comment)?;
-            value::put(&mut changed, "handoff", value::owned(value::finish(clean)));
-            comments.push(value::owned(value::finish(changed)));
-        } else {
-            comments.push(comment);
+            handoffs.push((index, value::object_rest(&handoff, "checks")?));
         }
+        comments.push(comment);
     }
     if groups.is_empty() {
-        value::put(
-            &mut current,
-            "comments",
-            value::owned(value::array(comments)),
-        );
-        return Ok(value::finish(current));
+        drop(comments);
+        drop(groups);
+        drop(task);
+        return Ok(apply(original, handoffs, Vec::new()));
     }
     let author = author(&task, &comments)?;
     let mut sequence: f64 = 0.0;
@@ -348,10 +351,25 @@ pub(super) fn preserve_task<'a>(task: Value<'a>) -> Result<Json> {
             comments.push(value::owned(value::finish(comment)));
         }
     }
-    value::put(
-        &mut current,
-        "comments",
-        value::owned(value::array(comments)),
-    );
-    Ok(value::finish(current))
+    let added = comments
+        .into_iter()
+        .filter_map(|comment| match comment {
+            Some(Cow::Owned(comment)) => Some(comment),
+            _ => None,
+        })
+        .collect();
+    drop(task);
+    Ok(apply(original, handoffs, added))
+}
+
+fn apply(mut task: Json, handoffs: Vec<(usize, Json)>, added: Vec<Json>) -> Json {
+    task.remove("latestChecks");
+    let Some(Json::Array(comments)) = task.get_mut("comments") else {
+        unreachable!("the original conversation was admitted above")
+    };
+    for (index, handoff) in handoffs {
+        comments[index].insert("handoff", handoff);
+    }
+    comments.extend(added);
+    task
 }

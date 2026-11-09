@@ -101,7 +101,7 @@ async fn executable_registers_current_inputs_and_stops_offline_with_its_journal_
         .unwrap();
     assert_eq!(
         ivy_contracts::hash::hash_json(registration).unwrap(),
-        "sha256:4281b554095477b15f417256bb6bdcd23998c95e3b4f4de7774a2d689f08f144"
+        "sha256:fc0d6c0bbf16114c47700081e888e58b5defdfe819ee02cc2b3692225824ddef"
     );
     let response = frames
         .iter()

@@ -10,7 +10,7 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, agent_schema::validate_agent,
-    checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical,
+    checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical_equal,
     limits::MANAGEMENT_FRAME_BYTES, native_backend::BackendIdentity,
 };
 use ivy_sdk::{
@@ -33,10 +33,62 @@ pub struct LifecycleDocument {
     pub document: Document,
     pub metadata: Json,
 }
+pub(crate) fn selected_comment_entries(task: &Json, ids: &[Json]) -> IvyResult<Vec<Json>> {
+    let comments = task
+        .required("comments")?
+        .as_array()
+        .ok_or_else(IvyError::internal)?;
+    let receipts = task
+        .required("commentDeliveries")?
+        .as_array()
+        .ok_or_else(IvyError::internal)?;
+    Ok(comments
+        .iter()
+        .filter_map(|comment| {
+            if !ids.contains(comment.get("commentId")?) {
+                return None;
+            }
+            let receipt = receipts
+                .iter()
+                .find(|r| r.get("commentId") == comment.get("commentId"))?;
+            Some(Json::object([
+                ("comment", comment.clone()),
+                ("receipt", receipt.clone()),
+            ]))
+        })
+        .collect())
+}
 /// Page and archival operations use the admitted current store and its exact
 /// readable versions. No local/remote paging or archive policy is guessed here.
 #[allow(async_fn_in_trait)]
 pub trait LifecycleStore: Store {
+    async fn task_header(
+        &self,
+        address: &Json,
+        primary: bool,
+        archived: bool,
+    ) -> IvyResult<LifecycleDocument> {
+        self.lifecycle_read("task-board/task", address, primary, archived)
+            .await
+    }
+    async fn comment_entries(
+        &self,
+        task: &Json,
+        _id: &JsString,
+        ids: &[Json],
+    ) -> IvyResult<Vec<Json>> {
+        selected_comment_entries(task, ids)
+    }
+    async fn queued_comment_ids(&self, task: &Json, _id: &JsString) -> IvyResult<Vec<Json>> {
+        task.required("commentDeliveries")?
+            .as_array()
+            .ok_or_else(IvyError::internal)?
+            .iter()
+            .filter(|receipt| receipt.get("state").is_some_and(|v| v.is_str("queued")))
+            .map(|receipt| receipt.required("commentId").cloned())
+            .collect()
+    }
+
     fn migration_quiescent(&self, _task: &JsString, _operation: &JsString) -> IvyResult<()> {
         Err(IvyError::new(
             "task_board_route_migration_unsupported",
@@ -209,6 +261,14 @@ impl<S: Store, C: Fn() -> String> LifecycleOperations for Operations<S, C> {
 pub trait LifecyclePublication {
     fn pin(&self) -> IvyResult<Json>;
     async fn write(&mut self, key: &str, value: &Json, destination: &Json) -> IvyResult<Json>;
+    async fn write_task_change(
+        &mut self,
+        _value: &Json,
+        _destination: &Json,
+        _change: crate::operations::TaskChange,
+    ) -> IvyResult<Json> {
+        Err(IvyError::internal())
+    }
     async fn create(&mut self, key: &str, value: &Json, label: &JsString) -> IvyResult<Json>;
 }
 impl<S: Store, C: Fn() -> String> LifecyclePublication for Publication<'_, S, C> {
@@ -218,8 +278,35 @@ impl<S: Store, C: Fn() -> String> LifecyclePublication for Publication<'_, S, C>
     async fn write(&mut self, k: &str, v: &Json, d: &Json) -> IvyResult<Json> {
         Publication::write(self, k, v, d).await
     }
+    async fn write_task_change(
+        &mut self,
+        value: &Json,
+        destination: &Json,
+        change: crate::operations::TaskChange,
+    ) -> IvyResult<Json> {
+        Publication::write_task_change(self, value, destination, change).await
+    }
     async fn create(&mut self, k: &str, v: &Json, l: &JsString) -> IvyResult<Json> {
         Publication::create(self, k, v, l).await
+    }
+}
+async fn write_header<P: LifecyclePublication>(
+    steps: &mut P,
+    task: &Json,
+    destination: &Json,
+) -> IvyResult<Json> {
+    if field(field(task, "commentStore"), "kind").is_str("tree")
+        && ["comments", "commentDeliveries"].iter().all(|key| {
+            task.get(*key)
+                .and_then(Json::as_array)
+                .is_some_and(|v| v.is_empty())
+        })
+    {
+        steps
+            .write_task_change(task, destination, crate::operations::TaskChange::Header)
+            .await
+    } else {
+        steps.write("task-board/task", task, destination).await
     }
 }
 pub struct NativeLifecycle<'a, S, E, O> {
@@ -285,7 +372,7 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     }
 }
 fn same(a: &Json, b: &Json) -> IvyResult<bool> {
-    Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+    canonical_equal(a, b, MANAGEMENT_FRAME_BYTES)
 }
 fn object(v: &Json) -> Json {
     if v.as_object().is_some() {
@@ -343,7 +430,7 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
             .store
             .read(
                 "task-board/operation",
-                operation.pin.required("objectId")?,
+                &Json::String(operation.pin.object_id.clone()),
                 true,
             )
             .await?;
@@ -447,13 +534,13 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                 .engine
                 .scoped_operation_id(&Json::Array(vec![
                     "task-board-lifecycle".into(),
-                    operation.pin.required("objectId")?.clone(),
+                    Json::String(operation.pin.object_id.clone()),
                     Json::String(key.clone()),
                 ]))
                 .await?;
             self.operations
                 .prepare_native(
-                    s(&operation.pin, "objectId")?,
+                    &operation.pin.object_id,
                     &Json::object([
                         ("key", Json::String(key.clone())),
                         ("owner", target),
@@ -491,7 +578,7 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                 was_observed: !field(&saved, "observation").is_null(),
                 retain: |observed: Json| async move {
                     self.operations
-                        .observe_native(s(&operation.pin, "objectId")?, key, &observed)
+                        .observe_native(&operation.pin.object_id, key, &observed)
                         .await
                 },
             },
@@ -533,11 +620,11 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
         )?;
         let current = self
             .store
-            .lifecycle_read("task-board/task", request.required("taskId")?, true, true)
+            .task_header(request.required("taskId")?, true, true)
             .await?
             .document;
         require(
-            field(&current.pin, "revision") == field(request, "expectedRevision")
+            &Json::Number(current.pin.revision) == field(request, "expectedRevision")
                 && field(&current.value, "claim").is_null()
                 && field(&current.value, "publication").is_null(),
             "revision_conflict",
@@ -730,7 +817,7 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                         Json::object([
                             ("op", "eq".into()),
                             ("field", "data:/taskId".into()),
-                            ("value", task.pin.required("objectId")?.clone()),
+                            ("value", Json::String(task.pin.object_id.clone())),
                         ]),
                     ),
                 ]);
@@ -783,15 +870,13 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                             continue;
                         }
                         require(
-                            field(previous, "objectId") == field(&task.pin, "objectId"),
+                            field(previous, "objectId")
+                                == &Json::String(task.pin.object_id.clone()),
                             "task_board_history_mismatch",
                             "Previous native contexts must belong to this ticket.",
                         )?;
                         let result = async {
-                            let old = self
-                                .store
-                                .lifecycle_read("task-board/task", previous, true, true)
-                                .await?;
+                            let old = self.store.task_header(previous, true, true).await?;
                             add(
                                 field(&old.document.value, "primaryResourceRef"),
                                 BackendIdentity::optional(
@@ -841,7 +926,7 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
             .engine
             .scoped_operation_id(&Json::Array(vec![
                 "task-board-new-thread-plan".into(),
-                operation.pin.required("objectId")?.clone(),
+                Json::String(operation.pin.object_id.clone()),
             ]))
             .await?;
         let allocation = self.engine.allocate(task, &operation_id).await?;
@@ -1004,16 +1089,13 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
         task: &Document,
         archived: bool,
     ) -> IvyResult<Json> {
-        let id = field(&task.pin, "objectId");
-        let current = self
-            .store
-            .lifecycle_read("task-board/task", id, true, true)
-            .await?;
+        let id = &Json::String(task.pin.object_id.clone());
+        let current = self.store.task_header(id, true, true).await?;
         let saved = self
             .store
             .read(
                 "task-board/operation",
-                field(&operation.pin, "objectId"),
+                &Json::String(operation.pin.object_id.clone()),
                 true,
             )
             .await?;
@@ -1024,14 +1106,15 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                 latest = outcome;
             }
         }
+        let fallback_revision = Json::Number(task.pin.revision);
         let revision = latest
             .get("revision")
             .filter(|value| !value.is_null())
-            .unwrap_or(field(&task.pin, "revision"));
+            .unwrap_or(&fallback_revision);
         require(
-            field(&current.document.pin, "revision") == revision
+            &Json::Number(current.document.pin.revision) == revision
                 || field(field(&current.document.value, "publication"), "objectId")
-                    == field(&operation.pin, "objectId"),
+                    == &Json::String(operation.pin.object_id.clone()),
             "revision_conflict",
             "The ticket changed before its archive membership was saved.",
         )?;
@@ -1041,10 +1124,10 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
         {
             return Ok(metadata);
         }
-        let revision = field(&current.document.pin, "revision").clone();
+        let revision = Json::Number(current.document.pin.revision);
         let mutation = self
             .operations
-            .archive_identity(s(&operation.pin, "objectId")?)
+            .archive_identity(&operation.pin.object_id)
             .await?;
         let result = self
             .store
@@ -1101,16 +1184,15 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
             fields.insert("control", "agent".into());
         }
         value.insert("fields", fields);
-        let reserved = steps
-            .write(
-                "task-board/task",
-                &value,
-                &Json::object([
-                    ("objectId", task.pin.required("objectId")?.clone()),
-                    ("expectedRevision", task.pin.required("revision")?.clone()),
-                ]),
-            )
-            .await?;
+        let reserved = write_header(
+            steps,
+            &value,
+            &Json::object([
+                ("objectId", Json::String(task.pin.object_id.clone())),
+                ("expectedRevision", Json::Number(task.pin.revision)),
+            ]),
+        )
+        .await?;
         let detail = if eq(request, "action", "newThread") {
             join(
                 "Work explicitly requested in a new Codex task. ",
@@ -1127,7 +1209,7 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
         };
         let history = Json::object([
             ("schemaVersion", Json::Number(1.0)),
-            ("taskId", task.pin.required("objectId")?.clone()),
+            ("taskId", Json::String(task.pin.object_id.clone())),
             (
                 "operationId",
                 field(&operation.value, "operationId").clone(),
@@ -1144,7 +1226,7 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                 .into(),
             ),
             ("detail", Json::String(detail)),
-            ("previousTask", task.pin.clone()),
+            ("previousTask", task.pin.to_json()),
             (
                 "previousHistory",
                 task.value.required("lastHistory")?.clone(),
@@ -1165,16 +1247,15 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
         value.insert("publication", Json::Null);
         outcome.insert(
             "task",
-            steps
-                .write(
-                    "task-board/task",
-                    &value,
-                    &Json::object([
-                        ("objectId", task.pin.required("objectId")?.clone()),
-                        ("expectedRevision", reserved.required("revision")?.clone()),
-                    ]),
-                )
-                .await?,
+            write_header(
+                steps,
+                &value,
+                &Json::object([
+                    ("objectId", Json::String(task.pin.object_id.clone())),
+                    ("expectedRevision", reserved.required("revision")?.clone()),
+                ]),
+            )
+            .await?,
         );
         Ok(())
     }
@@ -1201,10 +1282,7 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
             ("objectId", request.required("taskId")?.clone()),
             ("revision", request.required("expectedRevision")?.clone()),
         ]);
-        let current = self
-            .store
-            .lifecycle_read("task-board/task", &address, true, true)
-            .await?;
+        let current = self.store.task_header(&address, true, true).await?;
         let task = current.document;
         if array(field(&operation.value, "writes")).is_empty() {
             require(
@@ -1227,7 +1305,7 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                 "Restore the ticket before requesting new work.",
             )?;
             self.engine
-                .aggregate(&task.value, s(&task.pin, "objectId")?)
+                .aggregate(&task.value, &task.pin.object_id)
                 .await?;
         }
         // Admission and aggregate errors remain outside the native-outcome catch.
@@ -1274,7 +1352,7 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                         // restart. Bind this host effect to the retained archive.
                         let mut cleanup = vec![
                             "task-board-output-cleanup".into(),
-                            operation.pin.required("objectId")?.clone(),
+                            Json::String(operation.pin.object_id.clone()),
                             Json::String(node.clone()),
                         ];
                         if let Some(backend) = backend {
@@ -1315,11 +1393,11 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                         .await?;
                 }
                 if field(&outcome, "task").is_null() {
-                    outcome.insert("task", task.pin.clone());
+                    outcome.insert("task", task.pin.to_json());
                 }
-                outcome.insert("archive", self.store.stat(s(&task.pin, "objectId")?).await?);
+                outcome.insert("archive", self.store.stat(&task.pin.object_id).await?);
                 if archived {
-                    self.store.release_workspace(s(&task.pin, "objectId")?)?;
+                    self.store.release_workspace(&task.pin.object_id)?;
                 }
             }
             Ok(())

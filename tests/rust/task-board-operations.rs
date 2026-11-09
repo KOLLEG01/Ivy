@@ -23,8 +23,6 @@ mod comment_reads;
 mod condition_policy;
 #[path = "../fixtures/task-board-configuration.rs"]
 mod configuration;
-#[path = "../fixtures/task-board-execution-backends.rs"]
-mod execution_backends;
 #[path = "../fixtures/task-board-conversation.rs"]
 mod conversation_policy;
 #[path = "../fixtures/task-board-current-history.rs"]
@@ -33,6 +31,8 @@ mod current_history;
 mod deliveries;
 #[path = "../fixtures/task-board-durable-admission.rs"]
 mod durable_admission;
+#[path = "../fixtures/task-board-execution-backends.rs"]
+mod execution_backends;
 #[path = "../fixtures/task-board-lifecycle.rs"]
 mod lifecycle;
 #[path = "../fixtures/task-board-persistent-reads.rs"]
@@ -63,7 +63,7 @@ fn pin(id: &str, revision: f64) -> Json {
     ])
 }
 fn document_result(document: Document) -> Json {
-    Json::object([("pin", document.pin), ("value", document.value)])
+    Json::object([("pin", document.pin.to_json()), ("value", document.value)])
 }
 #[derive(Clone)]
 struct Stored {
@@ -177,7 +177,7 @@ impl Store for Memory {
         self.documents
             .borrow()
             .iter()
-            .find(|d| s(&d.document.pin, "objectId") == id)
+            .find(|d| s(&d.document.pin.to_json(), "objectId") == id)
             .map(|d| d.document.clone())
             .ok_or_else(|| IvyError::new("not_found", "Missing fixture document."))
     }
@@ -211,17 +211,25 @@ impl Store for Memory {
             .and_then(Json::as_js_string)
             .and_then(|id| {
                 docs.iter()
-                    .position(|d| s(&d.document.pin, "objectId") == *id)
+                    .position(|d| s(&d.document.pin.to_json(), "objectId") == *id)
             });
         let (name, parent, pin) = if let Some(index) = existing {
             let old = &docs[index];
-            let id = s(&old.document.pin, "objectId").to_utf8().unwrap();
+            let id = s(&old.document.pin.to_json(), "objectId")
+                .to_utf8()
+                .unwrap();
             (
                 old.name.clone(),
                 old.document.parent_id.clone(),
                 pin(
                     &id,
-                    old.document.pin.required("revision")?.as_f64().unwrap() + 1.0,
+                    old.document
+                        .pin
+                        .to_json()
+                        .required("revision")?
+                        .as_f64()
+                        .unwrap()
+                        + 1.0,
                 ),
             )
         } else {
@@ -236,7 +244,7 @@ impl Store for Memory {
             key: key.into(),
             name,
             document: Document {
-                pin: pin.clone(),
+                pin: ivy_task_board::operations::ObjectPin::from_json(pin.clone()).unwrap(),
                 value: value.clone(),
                 parent_id: parent,
                 content_hash: hash_json(value)?,
@@ -266,6 +274,8 @@ impl Store for Memory {
         value: &Json,
         mutation: &JsString,
         destination: &Json,
+        _version: Option<&JsString>,
+        _references: Option<&Json>,
     ) -> IvyResult<Json> {
         self.record([
             text("apply"),
@@ -312,7 +322,9 @@ fn retained_protocol_matches_original_outcomes_bytes_and_effect_order() {
         )
         .unwrap()
     } else {
-        let result = reference_data::read(include_bytes!("../fixtures/task-board-operations-cases.json.gz"));
+        let result = reference_data::read(include_bytes!(
+            "../fixtures/task-board-operations-cases.json.gz"
+        ));
         parse(
             std::str::from_utf8(&result).unwrap(),
             MANAGEMENT_FRAME_BYTES,
@@ -330,7 +342,7 @@ fn retained_protocol_matches_original_outcomes_bytes_and_effect_order() {
                 let mut docs = engine.store.documents.borrow_mut();
                 let doc = docs
                     .iter_mut()
-                    .find(|d| s(&d.document.pin, "objectId") == s(patch, "id"))
+                    .find(|d| s(&d.document.pin.to_json(), "objectId") == s(patch, "id"))
                     .unwrap();
                 if let Some(parent) = patch.get("parentId") {
                     doc.document.parent_id = parent.as_js_string().cloned();

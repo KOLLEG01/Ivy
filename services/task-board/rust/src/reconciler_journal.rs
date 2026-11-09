@@ -7,10 +7,9 @@ use crate::{
     scheduler_journal::SchedulerJournalBindings,
 };
 use ivy_contracts::{IvyResult, JsString};
-use ivy_sdk::rpc::RpcClient;
 use ivy_store::sqlite::error;
 impl<
-    R: RpcClient + 'static,
+    R: ivy_sdk::rpc::OptionalRpcClient + 'static,
     P: Contracts,
     C: Fn() -> String,
     I: Fn() -> JsString,

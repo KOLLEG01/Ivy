@@ -168,7 +168,10 @@ async fn task_write_observer_matches_original_selection_notice_bytes_order_and_f
             .cloned()
             .unwrap_or_else(|| "board-node".into());
         let operation = Document {
-            pin: f(f(row, "operation"), "pin").clone(),
+            pin: ivy_task_board::operations::ObjectPin::from_json(
+                f(f(row, "operation"), "pin").clone(),
+            )
+            .unwrap(),
             value: f(f(row, "operation"), "value").clone(),
             parent_id: Some("root".into()),
             content_hash: String::new(),

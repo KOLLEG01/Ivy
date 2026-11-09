@@ -138,7 +138,7 @@ const SNAPSHOT: &str = "The conversation snapshot belongs to another ticket.";
 #[tokio::test]
 async fn immutable_snapshots_check_contract_revision_and_each_owner_for_both_read_versions() {
     for version in ["1.0.0", "2.0.0"] {
-        for case in 0..11 {
+        for case in 0..14 {
             let p = pin("n");
             let mut response = saved(&p, leaf(1));
             *mutate(&mut response, &["revision", "contractVersion"]) = version.into();
@@ -155,6 +155,30 @@ async fn immutable_snapshots_check_contract_revision_and_each_owner_for_both_rea
                 }
                 9 => *mutate(&mut response, &["revision"]) = J::Null,
                 10 => *mutate(&mut response, &["content", "value"]) = J::Null,
+                11 => {
+                    let valid = response.get("content").unwrap().clone();
+                    *mutate(&mut response, &["content", "encoding"]) = "text".into();
+                    let J::Object(fields) = &mut response else {
+                        unreachable!()
+                    };
+                    fields.push(("content".into(), valid));
+                }
+                12 => {
+                    let content = mutate(&mut response, &["content"]);
+                    *mutate(content, &["value"]) = J::Null;
+                    let J::Object(fields) = content else {
+                        unreachable!()
+                    };
+                    fields.push(("value".into(), leaf(1)));
+                }
+                13 => {
+                    let valid = response.get("object").unwrap().clone();
+                    *mutate(&mut response, &["object", "contractKey"]) = "other".into();
+                    let J::Object(fields) = &mut response else {
+                        unreachable!()
+                    };
+                    fields.push(("object".into(), valid));
+                }
                 _ => {}
             }
             let calls = Arc::new(AtomicUsize::new(0));
@@ -185,6 +209,125 @@ async fn immutable_snapshots_check_contract_revision_and_each_owner_for_both_rea
             } else {
                 invalid(result, SNAPSHOT);
             }
+        }
+    }
+}
+
+#[tokio::test]
+async fn owned_snapshots_preserve_first_value_buffers_and_observed_cache_identity() {
+    for version in ["1.0.0", "2.0.0"] {
+        for (maximum, fail_first) in [
+            (0, false),
+            (8 * 1024 * 1024, false),
+            (8 * 1024 * 1024, true),
+        ] {
+            let mut node = leaf(1);
+            *mutate(&mut node, &["entry", "comment", "body"]) =
+                J::String(JsString(vec![0xd800, 0, 65, 0xdfff].repeat(65536)));
+            let body_pointer = node
+                .get("entry")
+                .unwrap()
+                .get("comment")
+                .unwrap()
+                .get("body")
+                .unwrap()
+                .as_js_string()
+                .unwrap()
+                .0
+                .as_ptr() as usize;
+            let J::Object(fields) = mutate(&mut node, &["entry", "comment"]) else {
+                unreachable!()
+            };
+            fields.extend([
+                ("body".into(), J::Null),
+                ("opaque".into(), J::Number(-0.0)),
+                ("opaque".into(), J::String(JsString(vec![0xdc00]))),
+            ]);
+            let J::Object(fields) = &mut node else {
+                unreachable!()
+            };
+            fields.extend([("taskId".into(), "other".into()), ("entry".into(), J::Null)]);
+            let expected_hash = ivy_contracts::hash::hash_json(&node).unwrap();
+            let mut response = saved(&pin("owned"), node);
+            *mutate(&mut response, &["revision", "contractVersion"]) = version.into();
+            let J::Object(fields) = mutate(&mut response, &["content"]) else {
+                unreachable!()
+            };
+            fields.push(("value".into(), J::Null));
+            let J::Object(fields) = &mut response else {
+                unreachable!()
+            };
+            fields.push(("content".into(), J::Null));
+            let response = Arc::new(Mutex::new(Some(response)));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let reads = calls.clone();
+            let observed = Arc::new(AtomicUsize::new(0));
+            let observations = observed.clone();
+            let reader = CommentReader::with_maximum_bytes(
+                source(move |p, _| {
+                    assert_eq!(p, pin("owned"));
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    let value = response.lock().unwrap().take().expect("one source read");
+                    Box::pin(async move { Ok(value) })
+                }),
+                tokio::runtime::Handle::current(),
+                maximum,
+            )
+            .with_node_observer(Arc::new(move |p, node| {
+                assert_eq!(p, &pin("owned"));
+                assert_eq!(
+                    node.get("entry")
+                        .unwrap()
+                        .get("comment")
+                        .unwrap()
+                        .get("body")
+                        .unwrap()
+                        .as_js_string()
+                        .unwrap()
+                        .0
+                        .as_ptr() as usize,
+                    body_pointer
+                );
+                let first = observations.fetch_add(1, Ordering::SeqCst) == 0;
+                if first && fail_first {
+                    Err(ReadError("observer failed"))
+                } else {
+                    Ok(())
+                }
+            }));
+            if fail_first {
+                assert!(matches!(
+                    reader.node(&pin("owned"), &"task".into(), None).await,
+                    Err(CommentError::Source(ReadError("observer failed")))
+                ));
+            }
+            let node = reader
+                .node(&pin("owned"), &"task".into(), None)
+                .await
+                .unwrap();
+            assert_eq!(
+                ivy_contracts::hash::hash_json(&node).unwrap(),
+                expected_hash
+            );
+            if maximum > 0 {
+                let cancelled = CancellationToken::new();
+                cancelled.cancel();
+                let cached = reader
+                    .clone()
+                    .node(&pin("owned"), &"task".into(), Some(&cancelled))
+                    .await
+                    .unwrap();
+                assert!(Arc::ptr_eq(&node, &cached));
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                observed.load(Ordering::SeqCst),
+                if maximum > 0 {
+                    2 + usize::from(fail_first)
+                } else {
+                    1
+                }
+            );
         }
     }
 }
@@ -409,7 +552,10 @@ async fn cache_rejects_expanded_json_that_fits_its_wire_budget() {
         maximum,
     );
     reader.remember(&pin("large"), node).unwrap();
-    reader.node(&pin("large"), &"task".into(), None).await.unwrap();
+    reader
+        .node(&pin("large"), &"task".into(), None)
+        .await
+        .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 

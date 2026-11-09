@@ -85,8 +85,9 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
         };
         require(
             field(&task.value, "claim").is_null()
-                && same(&source.pin, request.required("run")?)?
-                && source.value.get("taskId") == task.pin.get("objectId")
+                && same(&source.pin.to_json(), request.required("run")?)?
+                && source.value.get("taskId").and_then(Json::as_js_string)
+                    == Some(&task.pin.object_id)
                 && ["completed", "failed", "cancelled"]
                     .iter()
                     .any(|v| eq(&source.value, "phase", v))
@@ -119,7 +120,7 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
         )?;
         require(
             !moves_primary
-                || (same(&source.pin, task.value.required("lastRun")?)?
+                || (same(&source.pin.to_json(), task.value.required("lastRun")?)?
                     && same(
                         &original_primary,
                         task.value.required("primaryResourceRef")?,
@@ -182,13 +183,17 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
 
         if first {
             self.store
-                .migration_quiescent(s(&task.pin, "objectId")?, s(&operation.pin, "objectId")?)?;
+                .migration_quiescent(&task.pin.object_id, &operation.pin.object_id)?;
             let current_run = self
                 .store
-                .read("task-board/run", source.pin.required("objectId")?, true)
+                .read(
+                    "task-board/run",
+                    &Json::String(source.pin.object_id.clone()),
+                    true,
+                )
                 .await?;
             require(
-                same(&current_run.pin, &source.pin)?,
+                current_run.pin == source.pin,
                 "revision_conflict",
                 "Reload the source attempt before migrating its route.",
             )?;
@@ -408,20 +413,19 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
         let mut next = task.value.clone();
         next.insert("publication", steps.pin()?);
         next.insert("updatedAt", at.clone());
-        let reserved = steps
-            .write(
-                "task-board/task",
-                &next,
-                &Json::object([
-                    ("objectId", task.pin.required("objectId")?.clone()),
-                    ("expectedRevision", task.pin.required("revision")?.clone()),
-                    ("expectedArchived", archived.into()),
-                ]),
-            )
-            .await?;
+        let reserved = write_header(
+            steps,
+            &next,
+            &Json::object([
+                ("objectId", Json::String(task.pin.object_id.clone())),
+                ("expectedRevision", Json::Number(task.pin.revision)),
+                ("expectedArchived", archived.into()),
+            ]),
+        )
+        .await?;
         let history = Json::object([
             ("schemaVersion", Json::Number(1.0)),
-            ("taskId", task.pin.required("objectId")?.clone()),
+            ("taskId", Json::String(task.pin.object_id.clone())),
             (
                 "operationId",
                 operation.value.required("operationId")?.clone(),
@@ -436,14 +440,14 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
                     s(request, "reason")?,
                 )),
             ),
-            ("previousTask", task.pin.clone()),
+            ("previousTask", task.pin.to_json()),
             (
                 "previousHistory",
                 task.value.required("lastHistory")?.clone(),
             ),
             ("fromTarget", old_target),
             ("toTarget", target.clone()),
-            ("priorRun", source.pin.clone()),
+            ("priorRun", source.pin.to_json()),
             ("result", Json::Null),
             ("review", Json::Null),
         ]);
@@ -460,19 +464,18 @@ impl<S: LifecycleStore, E: LifecycleEngine, O: LifecycleOperations> NativeLifecy
         next.insert("nativeRoutes", routes);
         next.insert("lastHistory", history.clone());
         next.insert("publication", Json::Null);
-        let task = steps
-            .write(
-                "task-board/task",
-                &next,
-                &Json::object([
-                    ("objectId", task.pin.required("objectId")?.clone()),
-                    ("expectedRevision", reserved.required("revision")?.clone()),
-                    ("expectedArchived", archived.into()),
-                ]),
-            )
-            .await?;
+        let task = write_header(
+            steps,
+            &next,
+            &Json::object([
+                ("objectId", Json::String(task.pin.object_id.clone())),
+                ("expectedRevision", reserved.required("revision")?.clone()),
+                ("expectedArchived", archived.into()),
+            ]),
+        )
+        .await?;
         outcome.insert("task", task);
-        outcome.insert("run", source.pin.clone());
+        outcome.insert("run", source.pin.to_json());
         outcome.insert("history", history);
         Ok(())
     }

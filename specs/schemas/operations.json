@@ -142,6 +142,13 @@
       "access": "client",
       "mutation": false
     },
+    "objects.count": {
+      "input": "#/$defs/ObjectsCountParams",
+      "output": "#/$defs/ObjectsCountResult",
+      "access": "client",
+      "mutation": false,
+      "discoverable": false
+    },
     "objects.search": {
       "input": "#/$defs/ObjectsSearchParams",
       "output": "#/$defs/ObjectsSearchResult",

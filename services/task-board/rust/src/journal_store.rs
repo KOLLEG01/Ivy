@@ -6,16 +6,17 @@ use crate::{
     local_blobs::{BlobError, BlobPin, LocalBlobs},
     local_gates::LocalGates,
     local_journal::{LocalJournal, require},
-    local_retention::{HistoryLimits, LocalRetention},
+    local_retention::HistoryLimits,
     local_workspaces::{WorkspaceDocument, WorkspaceOwner},
-    operations::{Document, Store},
+    operations::{Document, PREPARED_PAYLOAD, PreparedPayload, Store, StoredRecord, TaskChange},
     read_evidence::ReadEvidenceStore,
+    work_budget::{Reservation, WorkBudget},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     hash::{digest, hash_json},
-    json::{canonical, parse},
+    json::{canonical_size, parse},
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::{
@@ -33,6 +34,8 @@ use std::{
     task::{Context, Poll},
 };
 
+#[path = "comment_index.rs"]
+pub(crate) mod comment_index;
 #[path = "comment_writes.rs"]
 pub(crate) mod comment_writes;
 #[path = "durable_admission.rs"]
@@ -43,6 +46,8 @@ pub(crate) mod mutation_ports;
 pub mod persistent_reads;
 #[path = "reference_writes.rs"]
 pub(crate) mod reference_writes;
+#[path = "task_changes.rs"]
+mod task_changes;
 #[path = "task_publication.rs"]
 mod task_publication;
 #[path = "write_completion.rs"]
@@ -79,38 +84,48 @@ impl<P: Contracts + ?Sized> Contracts for &P {
     }
 }
 
-#[derive(Clone)]
 struct ReadRecord {
     document: Document,
     archived: bool,
     metadata: Option<Json>,
+    references: Option<Json>,
 }
 
-#[derive(Clone)]
-struct CachedRecord {
-    object_id: Json,
-    document: Option<ReadRecord>,
-    materialized: Option<Json>,
-    retained_bytes: usize,
-}
-fn remember_record(entries: &mut Vec<(Json, CachedRecord)>, key: Json, mut record: CachedRecord) {
-    let mut bytes = std::mem::size_of::<CachedRecord>()
-        + key.retained_bytes()
-        + record.object_id.retained_bytes();
-    if let Some(read) = &record.document {
-        bytes += read.document.pin.retained_bytes()
-            + read.document.value.retained_bytes()
-            + read.document.content_hash.capacity()
-            + read
-                .document
-                .parent_id
-                .as_ref()
-                .map_or(0, |id| id.0.capacity() * 2)
-            + read.metadata.as_ref().map_or(0, Json::retained_bytes);
+impl ReadRecord {
+    fn retained_bytes(&self) -> usize {
+        self.document.retained_bytes()
+            + self.metadata.as_ref().map_or(0, Json::retained_bytes)
+            + self.references.as_ref().map_or(0, Json::retained_bytes)
     }
-    bytes += record.materialized.as_ref().map_or(0, Json::retained_bytes);
+}
+
+enum CachedValue {
+    Workflow(ReadRecord),
+    Materialized(StoredRecord),
+}
+
+struct CachedRecord {
+    value: CachedValue,
+    retained_bytes: usize,
+    _reservation: Arc<Reservation>,
+}
+impl CachedRecord {
+    fn object_id(&self) -> &JsString {
+        match &self.value {
+            CachedValue::Workflow(record) => &record.document.pin.object_id,
+            CachedValue::Materialized(record) => &record.pin.object_id,
+        }
+    }
+}
+fn remember_record(
+    entries: &mut CacheRecords,
+    key: Json,
+    value_bytes: usize,
+    take: impl FnOnce() -> CachedValue,
+) -> Option<&CachedValue> {
+    let bytes = std::mem::size_of::<CachedRecord>() + key.retained_bytes() + value_bytes;
     if bytes > 64 * 1024 || entries.len() >= 256 {
-        return;
+        return None;
     }
     let retained: usize = entries
         .iter()
@@ -118,16 +133,96 @@ fn remember_record(entries: &mut Vec<(Json, CachedRecord)>, key: Json, mut recor
         .map(|(_, record)| record.retained_bytes)
         .sum();
     if retained.saturating_add(bytes) > 4 * 1024 * 1024 {
-        return;
+        return None;
     }
-    record.retained_bytes = bytes;
-    if let Some((_, existing)) = entries.iter_mut().find(|(saved, _)| saved == &key) {
-        *existing = record;
+    let Ok(reservation) = entries.budget.cache(bytes) else {
+        return None;
+    };
+    if !entries.iter().any(|(saved, _)| saved == &key) && !entries.grow() {
+        return None;
+    }
+    // Admission precedes taking the original record. Callers project only the
+    // fields they need from the admitted record, or consume it on a cache miss.
+    let record = CachedRecord {
+        value: take(),
+        retained_bytes: bytes,
+        _reservation: reservation,
+    };
+    let index = if let Some(index) = entries.iter().position(|(saved, _)| saved == &key) {
+        entries[index].1 = record;
+        index
     } else {
         entries.push((key, record));
+        entries.len() - 1
+    };
+    Some(&entries[index].1.value)
+}
+struct CacheRecords {
+    values: Vec<(Json, CachedRecord)>,
+    budget: WorkBudget,
+    allocation: Arc<Reservation>,
+}
+impl CacheRecords {
+    fn new(budget: WorkBudget) -> Self {
+        Self {
+            values: Vec::new(),
+            allocation: budget.cache(0).expect("An empty cache has no byte charge."),
+            budget,
+        }
+    }
+    fn grow(&mut self) -> bool {
+        if self.values.len() < self.values.capacity() {
+            return true;
+        }
+        let old = self.allocation.bytes();
+        let capacity = (self.values.capacity().saturating_mul(2)).clamp(4, 256);
+        let slot = std::mem::size_of::<(Json, CachedRecord)>();
+        if self.allocation.resize(capacity * slot).is_err() {
+            return false;
+        }
+        if self
+            .values
+            .try_reserve_exact(capacity - self.values.len())
+            .is_err()
+        {
+            self.allocation
+                .resize(old)
+                .expect("Releasing a cache charge cannot exceed its budget.");
+            return false;
+        }
+        // Include unused Vec slots after allocator rounding. A cache is only
+        // an optimization: loss of capacity never rejects the original read.
+        if self
+            .allocation
+            .resize(self.values.capacity() * slot)
+            .is_err()
+        {
+            self.values = Vec::new();
+            self.allocation
+                .resize(0)
+                .expect("Releasing an empty cache cannot exceed its budget.");
+            return false;
+        }
+        true
     }
 }
-type CacheEntries = Rc<RefCell<Vec<(Json, CachedRecord)>>>;
+impl Default for CacheRecords {
+    fn default() -> Self {
+        Self::new(WorkBudget::default())
+    }
+}
+impl std::ops::Deref for CacheRecords {
+    type Target = Vec<(Json, CachedRecord)>;
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+impl std::ops::DerefMut for CacheRecords {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.values
+    }
+}
+type CacheEntries = Rc<RefCell<CacheRecords>>;
 enum CacheBinding {
     Fixed(CacheEntries),
     Scoped(RefCell<Option<CacheEntries>>),
@@ -139,16 +234,26 @@ pub struct ReadCache(
     OnceCell<
         persistent_reads::task_comments::TaskComments<ivy_sdk::task_comments::RpcCommentSource>,
     >,
+    persistent_reads::local_history::HistoryCollections,
+    WorkBudget,
 );
 impl Default for ReadCache {
     fn default() -> Self {
+        let budget = WorkBudget::default();
         Self(
-            CacheBinding::Fixed(CacheEntries::default()),
+            CacheBinding::Fixed(Rc::new(RefCell::new(CacheRecords::new(budget.clone())))),
             OnceCell::new(),
+            persistent_reads::local_history::HistoryCollections::default(),
+            budget,
         )
     }
 }
 impl ReadCache {
+    pub(crate) fn history_collections(
+        &self,
+    ) -> &persistent_reads::local_history::HistoryCollections {
+        &self.2
+    }
     pub(crate) fn comments(
         &self,
         client: Arc<dyn RpcClient>,
@@ -176,12 +281,20 @@ pub struct ReadScopes {
 pub(crate) struct CapturedReadScope(Option<CacheEntries>);
 impl Default for ReadScopes {
     fn default() -> Self {
-        Self {
-            cache: ReadCache(CacheBinding::Scoped(RefCell::default()), OnceCell::new()),
-        }
+        Self::with_budget(WorkBudget::default())
     }
 }
 impl ReadScopes {
+    pub fn with_budget(budget: WorkBudget) -> Self {
+        Self {
+            cache: ReadCache(
+                CacheBinding::Scoped(RefCell::default()),
+                OnceCell::new(),
+                persistent_reads::local_history::HistoryCollections::default(),
+                budget,
+            ),
+        }
+    }
     pub fn cache(&self) -> &ReadCache {
         &self.cache
     }
@@ -189,7 +302,11 @@ impl ReadScopes {
     pub fn with_read_cache<F: Future>(&self, work: F) -> ReadScopeFuture<'_, F> {
         ReadScopeFuture {
             scopes: self,
-            entries: Some(self.cache.entries().unwrap_or_default()),
+            entries: Some(
+                self.cache.entries().unwrap_or_else(|| {
+                    Rc::new(RefCell::new(CacheRecords::new(self.cache.3.clone())))
+                }),
+            ),
             work: Box::pin(work),
         }
     }
@@ -242,8 +359,8 @@ impl<F: Future> Future for ReadScopeFuture<'_, F> {
     }
 }
 
-/// Runs on the journal owner's blocking context. A transaction never spans a
-/// remote await; retention rechecks its graph before committing a collection.
+/// Retained workflow and remote publication share the current generation owner.
+/// A transaction never spans a remote await; collection rechecks its graph.
 pub struct JournalStore<'a, R, P, C, I> {
     pub journal: LocalJournal<'a>,
     pub client: Arc<R>,
@@ -294,21 +411,43 @@ fn attachment_content_matches(value: &Json, bytes: &[u8]) -> IvyResult<bool> {
 impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsString>
     JournalStore<'_, R, P, C, I>
 {
-    fn retention(&self) -> LocalRetention<'_, R> {
-        LocalRetention {
+    pub async fn collect_local(&self) -> IvyResult<()>
+    where
+        R: ivy_sdk::rpc::OptionalRpcClient,
+    {
+        use crate::engine_read::read_failure::{ReadFailure, provider_read_error};
+        use persistent_reads::{
+            local_history::{HistoryCollections, LocalHistory},
+            local_reads::SqliteReads,
+            store::RpcObjectReads,
+        };
+        let local = SqliteReads {
             journal: LocalJournal {
                 connection: self.journal.connection,
                 root_object_id: self.journal.root_object_id.clone(),
             },
+            contracts: &self.contracts,
+            parse: |raw: &str| parse(raw, MANAGEMENT_FRAME_BYTES).map_err(ReadFailure::from),
+            sqlite_failure: |failure| ReadFailure::from(error(failure)),
+        };
+        let objects = RpcObjectReads {
             client: self.client.as_ref(),
-            limits: HistoryLimits {
+        };
+        let fallback = HistoryCollections::default();
+        let collections = self.cache.map_or(&fallback, ReadCache::history_collections);
+        LocalHistory::new(
+            &local,
+            self,
+            &objects,
+            collections,
+            HistoryLimits {
                 count: self.limits.count,
                 bytes: self.limits.bytes,
             },
-        }
-    }
-    pub async fn collect_local(&self) -> IvyResult<()> {
-        self.retention().collect(0, 0, None, None).await
+        )
+        .collect::<std::convert::Infallible>(0, 0, None, None)
+        .await
+        .map_err(provider_read_error)
     }
 
     pub async fn read_record(
@@ -318,10 +457,15 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         primary: bool,
         include_archived: bool,
     ) -> IvyResult<Document> {
-        Ok(self
-            .record(key, address, primary, include_archived)
-            .await?
-            .document)
+        self.record_with(
+            key,
+            address,
+            primary,
+            include_archived,
+            |record| Ok(record.document),
+            |record| Ok(record.document.clone()),
+        )
+        .await
     }
 
     pub(crate) async fn materialize_document(
@@ -331,7 +475,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
     ) -> IvyResult<Document> {
         let mut value = document.value;
         if key == "task-board/task" {
-            let mut owner = document.pin.required("objectId")?.clone();
+            let mut owner = Json::String(document.pin.object_id.clone());
             if value.get("commentStore").is_some_and(|v| !v.is_null())
                 && let Some(parent) = document.parent_id.as_ref()
                 && Some(parent) != self.journal.root_object_id.as_ref()
@@ -342,49 +486,43 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                     &Json::String(parent.clone()),
                     true,
                 )?;
-                owner = operation
-                    .value
-                    .required("request")?
-                    .get("taskId")
-                    .filter(|id| id.as_js_string().is_some())
-                    .cloned()
-                    .ok_or_else(|| {
-                        IvyError::new(
-                            "task_board_scope_mismatch",
-                            "A prepared conversation must belong to its original task operation.",
-                        )
-                    })?;
+                owner = persistent_reads::local_reads::prepared_task_owner(
+                    &operation.value,
+                    &document.pin.to_json(),
+                )?
+                .clone()
+                .into();
             }
-            value = match persistent_reads::read_legacy_conversation(
-                self.client.as_ref(),
-                &value,
-                owner.as_js_string().ok_or_else(IvyError::internal)?,
-            )
-            .await?
+            let owner = owner.as_js_string().ok_or_else(IvyError::internal)?;
+            value = if value
+                .get("commentStore")
+                .and_then(|tree| tree.get("kind"))
+                .is_some()
             {
-                Some(full) => full,
-                None => {
-                    let uncached = ReadCache::default();
-                    let cache = self.cache.unwrap_or(&uncached);
-                    let comments = cache.comments(self.client.clone());
-                    let full = comments
-                        .hydrate(&value, owner.as_js_string().ok_or_else(IvyError::internal)?)
-                        .await;
-                    if self.cache.is_none() {
-                        comments.settled().await;
-                    }
-                    full.map_err(|failure| match failure {
-                        persistent_reads::task_comments::CommentFailure::Source(error)
-                        | persistent_reads::task_comments::CommentFailure::Ivy(error) => error,
-                    })?
-                    .ok_or_else(IvyError::internal)?
+                let uncached = ReadCache::default();
+                let cache = self.cache.unwrap_or(&uncached);
+                let comments = cache.comments(self.client.clone());
+                let full = comments.hydrate_owned(value, owner).await;
+                if self.cache.is_none() {
+                    comments.settled().await;
                 }
+                full.map_err(|failure| match failure {
+                    persistent_reads::task_comments::CommentFailure::Source(error)
+                    | persistent_reads::task_comments::CommentFailure::Ivy(error) => error,
+                })?
+                .ok_or_else(IvyError::internal)?
+            } else {
+                persistent_reads::read_legacy_conversation_owned(self.client.as_ref(), value, owner)
+                    .await?
+                    .ok_or_else(IvyError::internal)?
             };
         }
-        document.value =
-            persistent_reads::record_upgrades::upgrade_stored(self.client.as_ref(), key, &value)
-                .await?
-                .into_owned();
+        document.value = persistent_reads::record_upgrades::upgrade_stored_owned(
+            self.client.as_ref(),
+            key,
+            value,
+        )
+        .await?;
         Ok(document)
     }
 
@@ -397,15 +535,23 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         primary: bool,
         include_archived: bool,
     ) -> IvyResult<(Document, Json)> {
-        let record = self.record(key, address, primary, include_archived).await?;
-        let metadata = match record.metadata {
+        let (document, metadata) = self
+            .record_with(
+                key,
+                address,
+                primary,
+                include_archived,
+                |record| Ok((record.document, record.metadata)),
+                |record| Ok((record.document.clone(), record.metadata.clone())),
+            )
+            .await?;
+        let metadata = match metadata {
             Some(metadata) => metadata,
-            None => self.journal.metadata(
-                string(&record.document.pin, "objectId")?,
-                &self.contracts.version(key)?,
-            )?,
+            None => self
+                .journal
+                .metadata(&document.pin.object_id, &self.contracts.version(key)?)?,
         };
-        Ok((record.document, metadata))
+        Ok((document, metadata))
     }
 
     pub async fn write_attachment(
@@ -625,6 +771,11 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         if let Some(select) = provided("select") {
             params.insert("select", select.clone());
         }
+        for field in ["includeArchived", "includeContent"] {
+            if let Some(value) = provided(field) {
+                params.insert(field, value.clone());
+            }
+        }
         if let Some(cursor) = provided("cursor")
             .filter(|cursor| cursor.as_js_string().is_some_and(|s| !s.0.is_empty()))
         {
@@ -646,10 +797,22 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                     .read("task-board/operation", &Json::String(parent.clone()), true)?;
             if let Some(captured) = persistent_reads::local_reads::prepared_version(
                 key,
-                &document.pin,
+                &document.pin.to_json(),
                 &document.content_hash,
                 &operation.value,
             )? {
+                if key == PREPARED_PAYLOAD
+                    || key == "task-board/task"
+                        && document
+                            .value
+                            .get("commentStore")
+                            .is_some_and(|tree| !tree.is_null())
+                {
+                    persistent_reads::local_reads::prepared_task_owner(
+                        &operation.value,
+                        &document.pin.to_json(),
+                    )?;
+                }
                 version = captured;
             }
         }
@@ -658,29 +821,44 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         Ok(version)
     }
 
-    async fn record(
+    async fn record_with<T>(
         &self,
         key: &str,
         address: &Json,
         primary: bool,
         include_archived: bool,
-    ) -> IvyResult<ReadRecord> {
+        take: impl FnOnce(ReadRecord) -> IvyResult<T>,
+        copy: impl FnOnce(&ReadRecord) -> IvyResult<T>,
+    ) -> IvyResult<T> {
         let id = address
             .as_js_string()
             .or_else(|| address.get("objectId").and_then(Json::as_js_string))
             .ok_or_else(IvyError::internal)?;
-        if self.contracts.local(key)? || self.journal.key(id)?.as_deref() == Some(key) {
-            let document = self.journal.read(key, address, primary)?;
-            let version = self.validate_local_record(key, &document)?;
-            let metadata = if version != self.contracts.version(key)? {
+        let local = self.contracts.local(key)?;
+        let local_key = if local { None } else { self.journal.key(id)? };
+        let stored_key =
+            if key == "task-board/task" && local_key.as_deref() == Some(PREPARED_PAYLOAD) {
+                PREPARED_PAYLOAD
+            } else {
+                key
+            };
+        if local || local_key.as_deref() == Some(stored_key) {
+            let mut document = self.journal.read(stored_key, address, primary)?;
+            let version = self.validate_local_record(stored_key, &document)?;
+            let metadata = if version != self.contracts.version(stored_key)? {
                 Some(self.journal.metadata(id, &version)?)
             } else {
                 None
             };
-            return Ok(ReadRecord {
+            if stored_key != key {
+                document.value =
+                    persistent_reads::local_reads::prepared_task(&self.contracts, document.value)?;
+            }
+            return take(ReadRecord {
                 document,
                 archived: false,
                 metadata,
+                references: None,
             });
         }
         let cache_key = address.as_js_string().is_none().then(|| {
@@ -697,9 +875,12 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                 .borrow()
                 .iter()
                 .find(|(key, _)| key == cache_key)
-                .and_then(|(_, entry)| entry.document.as_ref())
+                .and_then(|(_, entry)| match &entry.value {
+                    CachedValue::Workflow(record) => Some(record),
+                    CachedValue::Materialized(_) => None,
+                })
             {
-                return Ok(document.clone());
+                return copy(document);
             }
         }
         let params = if address.as_js_string().is_some() {
@@ -710,7 +891,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                 ("revision", address.required("revision")?.clone()),
             ])
         };
-        let result = self
+        let mut result = self
             .client
             .request("objects.read", params, RequestOptions::default())
             .await?;
@@ -750,35 +931,56 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         let value = content.required("value")?;
         self.contracts
             .validate_record(key, string(revision, "contractVersion")?, value)?;
-        let record = ReadRecord {
-            document: Document {
-                pin: pin(&result)?,
-                value: value.clone(),
-                parent_id: object.required("parentId")?.as_js_string().cloned(),
-                content_hash: revision.required("contentHash")?.as_str()?,
+        let document = Document {
+            pin: crate::operations::ObjectPin {
+                object_id: string(object, "id")?.clone(),
+                revision: revision
+                    .required("revision")?
+                    .as_f64()
+                    .ok_or_else(IvyError::internal)?,
             },
-            archived,
-            metadata: Some(object.clone()),
+            value: Json::Null,
+            parent_id: object.required("parentId")?.as_js_string().cloned(),
+            content_hash: revision.required("contentHash")?.as_str()?,
         };
-        if let (Some(cache), Some(cache_key)) = (cache, cache_key) {
-            let mut entries = cache.borrow_mut();
-            if revision
+        // The transport has relinquished this payload and metadata. Preserve
+        // their original buffers after all admission checks have succeeded.
+        let value = result.get_mut("content").unwrap().remove("value").unwrap();
+        let metadata = result.remove("object").unwrap();
+        let references = result.get_mut("revision").unwrap().remove("references");
+        let mut record = Some(ReadRecord {
+            document: Document { value, ..document },
+            archived,
+            metadata: Some(metadata),
+            references,
+        });
+        let cacheable = if cache.is_some() && cache_key.is_some() {
+            result
+                .required("revision")?
                 .required("byteLength")?
                 .as_f64()
                 .ok_or_else(IvyError::internal)?
                 <= 65536.0
-                && entries.len() < 256
-            {
-                let cached = CachedRecord {
-                    object_id: record.document.pin.required("objectId")?.clone(),
-                    document: Some(record.clone()),
-                    materialized: None,
-                    retained_bytes: 0,
-                };
-                remember_record(&mut entries, cache_key, cached);
+        } else {
+            false
+        };
+        // Preserve references for publication and release the unused transport
+        // fields before copying only the selected output.
+        drop(result);
+        if let (Some(cache), Some(cache_key)) = (cache, cache_key) {
+            let mut entries = cache.borrow_mut();
+            if cacheable && entries.len() < 256 {
+                if let Some(CachedValue::Workflow(cached)) = remember_record(
+                    &mut entries,
+                    cache_key,
+                    record.as_ref().unwrap().retained_bytes(),
+                    || CachedValue::Workflow(record.take().unwrap()),
+                ) {
+                    return copy(cached);
+                }
             }
         }
-        Ok(record)
+        take(record.unwrap())
     }
 
     /// Here `None` means the explicit null parent. Store::named supplies the root
@@ -851,14 +1053,13 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         )?;
         match items.first() {
             Some(item) => Ok(Some(
-                self.record(
+                self.read_record(
                     key,
                     item.required("objectId")?,
                     parent == self.journal.root_object_id.as_ref(),
                     false,
                 )
-                .await?
-                .document,
+                .await?,
             )),
             None => Ok(None),
         }
@@ -977,8 +1178,13 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         mutation: &JsString,
         destination: &Json,
         retained: bool,
+        selected_version: Option<&JsString>,
+        selected_references: Option<&Json>,
     ) -> IvyResult<Json> {
-        let version = self.contracts.version(key)?;
+        let version = match selected_version {
+            Some(version) => version.to_utf8()?,
+            None => self.contracts.version(key)?,
+        };
         self.contracts
             .validate_record(key, &version.clone().into(), value)?;
         let create = destination.get("create");
@@ -994,7 +1200,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                     .as_deref()
                     == Some("task-board/operation"))
         {
-            canonical(value, MANAGEMENT_FRAME_BYTES)?;
+            canonical_size(value, MANAGEMENT_FRAME_BYTES)?;
             let now = (self.now)().into();
             // Reconciliation collects history. Workflow writes, especially gate
             // releases, must not wait for cleanup's remote receipt checks.
@@ -1023,12 +1229,19 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         // Domain reads hydrate the entire conversation. Only its bounded header
         // and immutable nodes belong in Hive, including prepared-write replay.
         let published;
-        let (value, references) = if key == "task-board/task"
+        let (value, references) = if let Some(references) = selected_references {
+            (value, references.clone())
+        } else if key == "task-board/task"
             && create.is_none()
             && persistent_reads::task_comments::comment_node_version(&version).is_some()
         {
             published = self
-                .publish_task_content(value, destination, &version)
+                .publish_task_content(
+                    value,
+                    destination,
+                    &version,
+                    reference_writes::ReferencePages::Retained,
+                )
                 .await?;
             (&published.0, published.1.clone())
         } else {
@@ -1080,39 +1293,20 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                     .named_record(key, string(create.unwrap(), "name")?, parent)
                     .await?;
                 require(
-                    existing
-                        .as_ref()
-                        .is_some_and(|d| d.pin.get("revision") == Some(&Json::Number(1.0)))
+                    existing.as_ref().is_some_and(|d| d.pin.revision == 1.0)
                         && existing.as_ref().map(|d| hash_json(&d.value)).transpose()?
                             == Some(hash_json(value)?),
                     "revision_conflict",
                     "The durable TaskBoard identity already contains different content.",
                 )?;
-                return Ok(existing.unwrap().pin);
+                return Ok(existing.unwrap().pin.to_json());
             }
             Err(failure) => return Err(failure),
         };
         if let Some(cache) = self.cache.and_then(ReadCache::entries) {
             let id = result.required("object")?.required("id")?;
             let mut entries = cache.borrow_mut();
-            entries.retain(|(_, record)| &record.object_id != id);
-            if canonical(value, usize::MAX)?.len() <= 65536 && entries.len() < 256 {
-                let object = result.required("object")?;
-                // The original write key omits includeArchived. It consumes a
-                // bounded slot but pinned reads use a different key; preserve it.
-                let primary =
-                    object.get("parentId") == Some(&nullable(self.journal.root_object_id.as_ref()));
-                remember_record(
-                    &mut entries,
-                    Json::Array(vec![key.into(), pin(&result)?, primary.into()]),
-                    CachedRecord {
-                        object_id: id.clone(),
-                        document: None,
-                        materialized: None,
-                        retained_bytes: 0,
-                    },
-                );
-            }
+            entries.retain(|(_, record)| Some(record.object_id()) != id.as_js_string());
         }
         pin(&result)
     }
@@ -1155,7 +1349,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         self.journal.key(id)
     }
     fn complete_local_workflow(&self, id: &JsString, at: &JsString) -> IvyResult<()> {
-        self.retention().complete_workflow(id, at, None)
+        self.journal.complete_workflow(id, at, None)
     }
     async fn named(
         &self,
@@ -1171,8 +1365,118 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         .await
     }
     async fn read(&self, key: &str, address: &Json, primary: bool) -> IvyResult<Document> {
-        let document = self.record(key, address, primary, false).await?.document;
+        let document = self.read_record(key, address, primary, false).await?;
         self.materialize_document(key, document).await
+    }
+    async fn read_task_header(&self, address: &Json, primary: bool) -> IvyResult<Document> {
+        Ok(self
+            .lifecycle_task_header(address, primary, false)
+            .await?
+            .document)
+    }
+    async fn read_task_comments(
+        &self,
+        task: &Json,
+        task_id: &JsString,
+        ids: &[Json],
+    ) -> IvyResult<Vec<Json>> {
+        self.selected_comments(task, task_id, ids).await
+    }
+    async fn has_task_comment(
+        &self,
+        task: &Json,
+        task_id: &JsString,
+        id: &JsString,
+    ) -> IvyResult<bool> {
+        if let Some(tree) = task
+            .get("commentStore")
+            .filter(|v| v.get("kind").is_some_and(|k| k.is_str("tree")))
+        {
+            return Ok(self
+                .comment_positions(tree, task_id, &[(0, id.clone())])
+                .await?[0]
+                .is_some());
+        }
+        Ok(task
+            .required("comments")?
+            .as_array()
+            .ok_or_else(IvyError::internal)?
+            .iter()
+            .any(|comment| comment.get("commentId").and_then(Json::as_js_string) == Some(id)))
+    }
+    async fn read_completion_comments(
+        &self,
+        task: &Json,
+        task_id: &JsString,
+        run: &JsString,
+        inputs: &[Json],
+    ) -> IvyResult<crate::operations::CompletionComments> {
+        self.completion_comment_projection(task, task_id, run, inputs)
+            .await
+    }
+    async fn read_prepared(&self, key: &str, address: &Json) -> IvyResult<Document> {
+        self.read_record(key, address, false, false).await
+    }
+    async fn prepare_payload(
+        &self,
+        key: &str,
+        value: Json,
+        destination: &Json,
+    ) -> IvyResult<PreparedPayload> {
+        let version = self.contracts.version(key)?;
+        if key == "task-board/task"
+            && destination.get("create").is_none()
+            && !self.contracts.local(key)?
+            && persistent_reads::task_comments::comment_node_version(&version).is_some()
+        {
+            let (content, references) = self
+                .publish_task_content(
+                    &value,
+                    destination,
+                    &version,
+                    reference_writes::ReferencePages::Immutable,
+                )
+                .await?;
+            Ok(PreparedPayload {
+                key: PREPARED_PAYLOAD.into(),
+                value: Json::object([
+                    ("schemaVersion", Json::Number(1.0)),
+                    ("contractKey", key.into()),
+                    ("contractVersion", version.clone().into()),
+                    ("content", content),
+                    ("references", references),
+                ]),
+                version: Some(version.into()),
+            })
+        } else {
+            Ok(PreparedPayload {
+                key: key.into(),
+                value,
+                version: None,
+            })
+        }
+    }
+    async fn prepare_task_change(
+        &self,
+        value: &Json,
+        destination: &Json,
+        change: TaskChange,
+    ) -> IvyResult<PreparedPayload> {
+        let version = self.contracts.version("task-board/task")?;
+        let (content, references) = self
+            .publish_task_change(value, destination, &version, change)
+            .await?;
+        Ok(PreparedPayload {
+            key: PREPARED_PAYLOAD.into(),
+            value: Json::object([
+                ("schemaVersion", Json::Number(1.0)),
+                ("contractKey", "task-board/task".into()),
+                ("contractVersion", version.clone().into()),
+                ("content", content),
+                ("references", references),
+            ]),
+            version: Some(version.into()),
+        })
     }
     async fn write(
         &self,
@@ -1181,7 +1485,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         mutation: &str,
         destination: &Json,
     ) -> IvyResult<Json> {
-        self.write_identity(key, value, &mutation.into(), destination, false)
+        self.write_identity(key, value, &mutation.into(), destination, false, None, None)
             .await
     }
     async fn prepared_mutation_id(&self, mutation: &str) -> IvyResult<JsString> {
@@ -1197,8 +1501,10 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         value: &Json,
         mutation: &JsString,
         destination: &Json,
+        version: Option<&JsString>,
+        references: Option<&Json>,
     ) -> IvyResult<Json> {
-        self.write_identity(key, value, mutation, destination, true)
+        self.write_identity(key, value, mutation, destination, true, version, references)
             .await
     }
 }
@@ -1272,12 +1578,27 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         primary: bool,
         include_archived: bool,
     ) -> IvyResult<WorkspaceDocument> {
-        let record = self.record(key, address, primary, include_archived).await?;
-        Ok(WorkspaceDocument {
-            pin: record.document.pin,
-            value: record.document.value,
-            effectively_archived: record.archived,
-        })
+        self.record_with(
+            key,
+            address,
+            primary,
+            include_archived,
+            |record| {
+                Ok(WorkspaceDocument {
+                    pin: record.document.pin.into_json(),
+                    value: record.document.value,
+                    effectively_archived: record.archived,
+                })
+            },
+            |record| {
+                Ok(WorkspaceDocument {
+                    pin: record.document.pin.to_json(),
+                    value: record.document.value.clone(),
+                    effectively_archived: record.archived,
+                })
+            },
+        )
+        .await
     }
     async fn stat(&self, id: &JsString) -> IvyResult<Json> {
         self.client
@@ -1287,5 +1608,38 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                 RequestOptions::default(),
             )
             .await
+    }
+}
+
+impl<
+    R: RpcClient + 'static,
+    P: Contracts,
+    C: Fn() -> String,
+    I: Fn() -> JsString,
+    E: From<IvyError>,
+> persistent_reads::local_history::HistoryDocuments<E> for JournalStore<'_, R, P, C, I>
+{
+    async fn history_document(
+        &self,
+        key: &str,
+        address: Option<&Json>,
+        primary: bool,
+        include_archived: bool,
+    ) -> Result<Json, E> {
+        let mut document = self
+            .read_record(
+                key,
+                address.ok_or_else(IvyError::internal)?,
+                primary,
+                include_archived,
+            )
+            .await?;
+        if key != "task-board/task" {
+            document = self.materialize_document(key, document).await?;
+        }
+        Ok(Json::object([
+            ("pin", document.pin.into_json()),
+            ("value", document.value),
+        ]))
     }
 }

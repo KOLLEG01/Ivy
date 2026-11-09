@@ -4,24 +4,15 @@ use crate::engine_read::conversation::cross_agent_comment;
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::stringify,
 };
-use std::{collections::BTreeSet, sync::Mutex};
+use std::sync::Mutex;
 
-pub(crate) fn summary(task: &Json, owner: &JsString, open: &[JsString]) -> IvyResult<Json> {
+pub(crate) fn summary(task: &Json, owner: &JsString, open: &[Json]) -> IvyResult<Json> {
     let comments = task
         .required("comments")?
         .as_array()
         .ok_or_else(IvyError::internal)?;
-    let open: BTreeSet<_> = open.iter().collect();
-    let questions = comments
+    let questions = open
         .iter()
-        .filter(|comment| {
-            comment.get("purpose") == Some(&Json::from("question"))
-                && comment.get("sourceTaskId").is_none_or(Json::is_null)
-                && comment
-                    .get("commentId")
-                    .and_then(Json::as_js_string)
-                    .is_some_and(|id| open.contains(id))
-        })
         .map(|comment| {
             let mut question = Json::object([
                 ("commentId", comment.required("commentId")?.clone()),
@@ -48,22 +39,13 @@ pub(crate) fn summary(task: &Json, owner: &JsString, open: &[JsString]) -> IvyRe
     ]))
 }
 pub(crate) fn current_summary(task: &Json, owner: &JsString) -> IvyResult<Json> {
-    let ids = ivy_sdk::open_task_questions(task, None)?
-        .iter()
-        .map(|q| {
-            q.required("commentId")?
-                .as_js_string()
-                .cloned()
-                .ok_or_else(IvyError::internal)
-        })
-        .collect::<IvyResult<Vec<_>>>()?;
-    summary(task, owner, &ids)
+    summary(task, owner, &ivy_sdk::open_task_questions(task, None)?)
 }
 fn summary_key(tree: &Json, owner: &JsString) -> IvyResult<String> {
     hash_json(&Json::object([
         ("taskId", Json::String(owner.clone())),
         ("root", tree.required("root")?.clone()),
-        ("model", Json::Number(3.0)),
+        ("model", Json::Number(4.0)),
     ]))
 }
 pub(super) fn summary_cached(
@@ -81,37 +63,39 @@ pub(super) fn summary_cached(
         .get(&key)
         .cloned())
 }
-pub(super) fn prepare(value: &Json) -> Option<(Json, Json)> {
-    let tree = value
+pub(super) fn tree(value: &Json) -> Option<&Json> {
+    value
         .get("commentStore")
-        .filter(|v| v.get("kind").is_some())?;
-    let mut header = value.clone();
-    header.remove("commentStore");
-    Some((tree.clone(), header))
+        .filter(|v| v.get("kind").is_some())
+}
+pub(super) fn prepare(mut value: Json) -> Option<(Json, Json)> {
+    tree(&value)?;
+    let tree = value.remove("commentStore").unwrap();
+    Some((tree, value))
+}
+pub(super) fn with_comments(mut header: Json, entries: &mut [Json]) -> IvyResult<Json> {
+    let mut comments = Vec::with_capacity(entries.len());
+    for entry in entries {
+        entry.required("comment")?;
+        comments.push(entry.remove("comment").unwrap());
+    }
+    header.insert("comments", Json::Array(comments));
+    Ok(header)
 }
 pub(super) fn finish(
     summaries: &Mutex<ProjectionCache>,
     mut header: Json,
     tree: &Json,
     owner: &JsString,
-    entries: &[Json],
-    open: &[JsString],
+    entries: Vec<Json>,
+    open: &[Json],
 ) -> IvyResult<Json> {
-    header.insert(
-        "comments",
-        Json::Array(
-            entries
-                .iter()
-                .map(|entry| entry.required("comment").cloned())
-                .collect::<IvyResult<_>>()?,
-        ),
-    );
     header.insert(
         "commentDeliveries",
         Json::Array(
             entries
-                .iter()
-                .filter_map(|entry| entry.get("receipt").filter(|v| !v.is_null()).cloned())
+                .into_iter()
+                .filter_map(|mut entry| entry.remove("receipt").filter(|v| !v.is_null()))
                 .collect(),
         ),
     );

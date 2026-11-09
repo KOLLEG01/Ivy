@@ -2,6 +2,7 @@
 //! precedence remain explicit owner bindings; no legacy full-reader default.
 use super::conversation::cross_agent_comment as cross_agent;
 use super::read_policy::{IvyPolicies, QuestionPolicies, TaskReadStore};
+use crate::journal_store::persistent_reads::json_values::copy_with;
 use crate::wake::wake_condition;
 use futures_util::future::{join_all, poll_fn};
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString};
@@ -276,6 +277,8 @@ pub async fn read_task<
                 async move {
                     if let Some(entry) = selected.iter().find(|entry| {
                         field(field(entry, "comment"), "commentId") == field(question, "commentId")
+                            && field(field(entry, "comment"), "sequence")
+                                == field(question, "sequence")
                     }) {
                         return Ok::<Json, E>(field(entry, "comment").clone());
                     }
@@ -403,15 +406,10 @@ pub fn task_card<E: From<IvyError>, P: QuestionPolicies<E>>(
             })
             .count()
     } else {
-        let open = policies.open_questions(task)?;
-        comments
+        policies
+            .open_questions(task)?
             .iter()
-            .filter(|c| {
-                field(c, "commentId")
-                    .as_js_string()
-                    .is_some_and(|id| open.contains(id))
-                    && !is(field(c, "recipient"), "kind", "task")
-            })
+            .filter(|c| !is(field(c, "recipient"), "kind", "task"))
             .count()
     };
     let mut card_task = Json::object([] as [(&str, Json); 0]);
@@ -462,74 +460,65 @@ pub fn task_view_page<E: From<IvyError>, P: QuestionPolicies<E>>(
     let task = view.required("task")?;
     let comments = array(field(task, "comments"));
     let q = field(query, "comments");
-    let all: Vec<_> = if field(q, "questionsOnly").as_bool() == Some(true) {
-        let open = policies.open_questions(task)?;
-        comments
-            .iter()
-            .filter(|c| {
-                field(c, "commentId")
-                    .as_js_string()
-                    .is_some_and(|id| open.contains(id))
-            })
-            .collect()
+    let open = policies.open_questions(task)?;
+    let all = if field(q, "questionsOnly").as_bool() == Some(true) {
+        open.as_slice()
     } else {
-        comments.iter().collect()
+        comments
     };
     let limit = optional_number(q, "limit", 50)?;
     let offset = optional_number(q, "offset", all.len().saturating_sub(limit))?;
     let selected =
         &all[offset.min(all.len())..(offset + limit).min(all.len()).max(offset.min(all.len()))];
-    let open = policies.open_questions(task)?;
-    let mut content = task.clone();
-    content.insert(
-        "comments",
-        Json::Array(selected.iter().map(|c| (*c).clone()).collect()),
-    );
-    content.insert(
-        "commentDeliveries",
-        Json::Array(
-            array(field(task, "commentDeliveries"))
-                .iter()
-                .filter(|r| {
-                    selected
-                        .iter()
-                        .any(|c| field(c, "commentId") == field(r, "commentId"))
-                })
-                .cloned()
-                .collect(),
-        ),
-    );
-    let mut result = view.clone();
-    result.insert("task", content);
-    result.insert(
-        "openQuestions",
-        Json::Array(
-            comments
-                .iter()
-                .filter(|c| {
-                    field(c, "commentId")
-                        .as_js_string()
-                        .is_some_and(|id| open.contains(id))
-                        && !is(field(c, "recipient"), "kind", "task")
-                })
-                .cloned()
-                .collect(),
-        ),
-    );
-    result.insert(
-        "commentPage",
-        Json::object([
-            ("total", Json::Number(all.len() as f64)),
-            ("offset", Json::Number(offset as f64)),
+    let total = all.len();
+    let selected_count = selected.len();
+    let content = copy_with(
+        task,
+        [
+            ("comments", Json::Array(selected.to_vec())),
             (
-                "nextOffset",
-                if offset + selected.len() < all.len() {
-                    Json::Number((offset + selected.len()) as f64)
-                } else {
-                    Json::Null
-                },
+                "commentDeliveries",
+                Json::Array(
+                    array(field(task, "commentDeliveries"))
+                        .iter()
+                        .filter(|r| {
+                            selected
+                                .iter()
+                                .any(|c| field(c, "commentId") == field(r, "commentId"))
+                        })
+                        .cloned()
+                        .collect(),
+                ),
             ),
-        ]),
+        ],
     );
-    Ok(result)
+    Ok(copy_with(
+        view,
+        [
+            ("task", content),
+            (
+                "openQuestions",
+                Json::Array(
+                    open.into_iter()
+                        .filter(|c| !is(field(c, "recipient"), "kind", "task"))
+                        .collect(),
+                ),
+            ),
+            (
+                "commentPage",
+                Json::object([
+                    ("total", Json::Number(total as f64)),
+                    ("offset", Json::Number(offset as f64)),
+                    (
+                        "nextOffset",
+                        if offset + selected_count < total {
+                            Json::Number((offset + selected_count) as f64)
+                        } else {
+                            Json::Null
+                        },
+                    ),
+                ]),
+            ),
+        ],
+    ))
 }

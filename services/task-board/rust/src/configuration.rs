@@ -60,7 +60,7 @@ pub async fn configuration_view<S: Store>(store: &S) -> IvyResult<Json> {
             "object",
             current
                 .as_ref()
-                .map(|d| d.pin.clone())
+                .map(|d| d.pin.to_json())
                 .unwrap_or(Json::Null),
         ),
         (
@@ -397,7 +397,9 @@ pub(crate) async fn supports_backend_options(
                 .cloned();
             require_selection(
                 models.len() <= 1000
-                    && cursor.as_ref().is_none_or(|next| cursors.len() < 19 && !cursors.contains(next)),
+                    && cursor
+                        .as_ref()
+                        .is_none_or(|next| cursors.len() < 19 && !cursors.contains(next)),
                 "task_board_model_unavailable",
                 "Model discovery exceeded its complete snapshot limit.",
             )?;

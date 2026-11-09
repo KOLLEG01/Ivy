@@ -22,17 +22,30 @@ pub fn upgrade_configuration_record(configuration: &Json) -> IvyResult<Cow<'_, J
 /// Normalize historical Task content to the current wakeAt/dependencies model.
 /// Contract-version admission and conversation hydration belong to the caller.
 pub fn upgrade_task_record(value: &Json) -> IvyResult<Json> {
+    upgrade_task_record_owned(value.clone())
+}
+/// Upgrade an already owned record without copying its unchanged payloads.
+pub fn upgrade_task_record_owned(value: Json) -> IvyResult<Json> {
     task::json(value)
 }
 pub fn upgrade_comment_record(comment: &Json) -> IvyResult<Json> {
-    task::comment(comment)
+    task::comment(comment.clone())
 }
 pub fn upgrade_run_record(run: &Json) -> IvyResult<Json> {
+    upgrade_run_record_owned(run.clone())
+}
+pub fn upgrade_run_record_owned(run: Json) -> IvyResult<Json> {
     task::run(run)
 }
 pub fn upgrade_result_content(content: &Json) -> IvyResult<Json> {
+    upgrade_result_content_owned(content.clone())
+}
+pub fn upgrade_result_content_owned(content: Json) -> IvyResult<Json> {
     result::json_content(content)
 }
 pub fn upgrade_result_record(result: &Json) -> IvyResult<Json> {
+    upgrade_result_record_owned(result.clone())
+}
+pub fn upgrade_result_record_owned(result: Json) -> IvyResult<Json> {
     self::result::json_record(result)
 }

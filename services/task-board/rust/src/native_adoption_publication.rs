@@ -63,7 +63,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
         })?;
         if array(f(op, "writes")).is_empty() {
             require(
-                f(&task.metadata, "currentRevision") == f(&task.document.pin, "revision")
+                f(&task.metadata, "currentRevision") == &Json::Number(task.document.pin.revision)
                     && f(&task.metadata, "effectivelyArchived").as_bool() != Some(true)
                     && eq(f(value, "fields"), "control", "agent")
                     && f(value, "claim").is_null()
@@ -78,10 +78,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
             ("action", "continue".into()),
             ("operationId", f(request, "operationId").clone()),
             ("taskId", Json::String(task_id.clone())),
-            (
-                "expectedRevision",
-                f(&task.document.pin, "revision").clone(),
-            ),
+            ("expectedRevision", Json::Number(task.document.pin.revision)),
             (
                 "feedback",
                 "Track the turn started directly in the saved native thread.".into(),
@@ -113,10 +110,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                 ),
                 &Json::object([
                     ("objectId", Json::String(task_id.clone())),
-                    (
-                        "expectedRevision",
-                        f(&task.document.pin, "revision").clone(),
-                    ),
+                    ("expectedRevision", Json::Number(task.document.pin.revision)),
                 ]),
             )
             .await?;
@@ -192,7 +186,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                         "Tracking a turn started directly in the existing agent conversation."
                             .into(),
                     ),
-                    ("previousTask", task.document.pin.clone()),
+                    ("previousTask", task.document.pin.to_json()),
                     ("previousHistory", f(value, "lastHistory").clone()),
                     ("priorRun", f(request, "run").clone()),
                     ("fromTarget", Json::Null),

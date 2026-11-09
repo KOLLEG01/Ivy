@@ -160,12 +160,25 @@ export const rustTests = {
   "tests/rust/host-memory.rs": {
     package: "ivy-host-runtime", test: "host-memory",
   },
+  "tests/rust/task-board-document-json.rs": {
+    package: "ivy-task-board", test: "task-board-document-json",
+  },
   "tests/fixtures/task-board-document-json.rs": {
-    package: "ivy-task-board", test: "task-board-host-runtime", filter: "document_json::",
+    package: "ivy-task-board", test: "task-board-document-json", filter: "document_json::",
   },
   "tests/fixtures/task-board-archive-writes.rs": {
     package: "ivy-task-board", lib: true,
     filter: "journal_store::persistent_reads::document_writes::archive_tests::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-record-ownership.rs": {
+    package: "ivy-task-board", lib: true,
+    filter: "engine_factory::reads::tests::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-read-scopes.rs": {
+    package: "ivy-task-board", test: "task-board-output", filter: "read_scopes::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-allocation-continuation.rs": {
+    package: "ivy-task-board", lib: true, filter: "allocation::continuation_tests::", testThreads: 1,
   },
   "tests/fixtures/task-board-run-source-writes.rs": {
     package: "ivy-task-board", lib: true,
@@ -760,11 +773,101 @@ export const rustTests = {
     "package": "ivy-task-board",
     "test": "task-board-operations"
   },
+  "tests/fixtures/task-board-operations-cases.json.gz": {
+    package: "ivy-task-board", test: "task-board-operations",
+    filter: "retained_protocol_matches_original_outcomes_bytes_and_effect_order",
+  },
+  "tests/fixtures/task-board-program.rs": {
+    package: "ivy-task-board", test: "task-board-operations", filter: "publication::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-keys.rs": {
+    package: "ivy-task-board", test: "task-board-operations", filter: "task_keys::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-gate-journal.rs": {
+    package: "ivy-task-board", test: "task-board-blobs", filter: "gates::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-engine-execution.rs": {
+    package: "ivy-task-board", test: "task-board-output",
+    filter: "engine_execution::publication_gates_and_retained_execution_match_original_recovery", testThreads: 1,
+  },
+  "tests/fixtures/task-board-publication.rs": {
+    package: "ivy-task-board", test: "task-board-blobs",
+    filter: "publication::attachment_and_remote_query_publication_match_original_scope_bytes_and_errors", testThreads: 1,
+  },
+  "tests/rust/task-board-large-writes.rs": {
+    package: "ivy-task-board", test: "task-board-large-writes",
+  },
+  "tests/rust/task-board-actions.rs": {
+    package: "ivy-task-board", test: "task-board-actions",
+  },
+  "tests/fixtures/task-board-engine-actions.rs": {
+    package: "ivy-task-board", test: "task-board-actions", filter: "engine_actions::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-engine-validation.rs": {
+    package: "ivy-task-board", test: "task-board-actions", filter: "engine_validation::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-engine-read.rs": {
+    package: "ivy-task-board", test: "task-board-reads", filter: "engine_read::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-copy-projections.rs": {
+    package: "ivy-task-board", test: "task-board-reads", filter: "copy_projections::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-card-pages.rs": {
+    package: "ivy-task-board", lib: true, filter: "journal_store::persistent_reads::card_pages::tests::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-read-handler.rs": {
+    package: "ivy-task-board", test: "task-board-read-handler", filter: "read_handler::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-persistent-reads.rs": {
+    package: "ivy-task-board", test: "task-board-operations", filter: "persistent_reads::prefix_boundaries_preserve_payloads_errors_and_original_read_order", testThreads: 1,
+  },
+  "tests/fixtures/task-board-tree-comments.rs": {
+    package: "ivy-task-board", test: "task-board-operations", filter: "tree_comments::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-condition.rs": {
+    package: "ivy-task-board", test: "task-board-operations", filter: "condition_policy::", testThreads: 1,
+  },
   "tests/fixtures/task-board-large-task-writes.rs": {
     "package": "ivy-task-board",
-    "test": "task-board-host-runtime",
+    "test": "task-board-large-writes",
     "filter": "large_task_writes::",
     "testThreads": 1
+  },
+  "tests/fixtures/task-board-receipt-writes.rs": {
+    package: "ivy-task-board", test: "task-board-large-writes", filter: "large_task_writes::receipts::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-response-writes.rs": {
+    package: "ivy-task-board", test: "task-board-large-writes", filter: "large_task_writes::responses::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-native-header-reads.rs": {
+    package: "ivy-task-board", test: "task-board-large-writes", filter: "large_task_writes::native_headers::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-consumer-reads.rs": {
+    package: "ivy-task-board", test: "task-board-large-writes", filter: "large_task_writes::consumer_reads::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-admission-writes.rs": {
+    package: "ivy-task-board", test: "task-board-large-writes", filter: "large_task_writes::admission_writes::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-retarget-writes.rs": {
+    package: "ivy-task-board", test: "task-board-large-writes", filter: "large_task_writes::retarget::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-scheduler.rs": {
+    package: "ivy-task-board", test: "task-board-operations", filter: "scheduler::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-wake.rs": {
+    package: "ivy-task-board", test: "task-board-host-runtime", filter: "wake_policy::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-task-routing.rs": {
+    package: "ivy-task-board", test: "task-board-output", filter: "task_routing::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-engine-factory-scheduler.rs": {
+    package: "ivy-task-board", test: "task-board-output", filter: "service::factory::scheduler::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-deliveries.rs": {
+    package: "ivy-task-board", test: "task-board-operations", filter: "deliveries::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-prompts.rs": {
+    package: "ivy-task-board", test: "task-board-output", filter: "prompts::", testThreads: 1,
   },
   "tests/fixtures/task-board-lifecycle.rs": {
     "package": "ivy-task-board",
@@ -803,7 +906,7 @@ export const rustTests = {
   },
   "tests/fixtures/task-board-checks.rs": {
     "package": "ivy-task-board",
-    "test": "task-board-output",
+    "test": "task-board-checks",
     "filter": "checks::",
     "testThreads": 1
   },
@@ -812,6 +915,14 @@ export const rustTests = {
     "test": "task-board-output",
     "filter": "engine_admission::public_admission_",
     "testThreads": 1
+  },
+  "tests/fixtures/task-board-engine-invocations.rs": {
+    package: "ivy-task-board", test: "task-board-output",
+    filter: "engine_admission::invocations::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-local-executor.rs": {
+    package: "ivy-task-board", test: "task-board-output",
+    filter: "local_executor::", testThreads: 1,
   },
   "tests/fixtures/task-board-configuration.rs": {
     "package": "ivy-task-board",
@@ -962,6 +1073,12 @@ export const rustTests = {
     "filter": "reconciler::generation::",
     "testThreads": 1
   },
+  "tests/fixtures/task-board-journal-thread.rs": {
+    "package": "ivy-task-board",
+    "lib": true,
+    "filter": "journal_thread::tests::",
+    "testThreads": 1
+  },
   "tests/fixtures/task-board-reconciler.rs": {
     "package": "ivy-task-board",
     "test": "task-board-output",
@@ -993,6 +1110,11 @@ export const rustTests = {
     "package": "ivy-task-board",
     "test": "task-board-blobs",
     "filter": "workspaces::"
+  },
+  "tests/fixtures/task-board-conversation.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-host-runtime",
+    "filter": "conversation_policy::"
   },
   "tests/fixtures/task-board-comment-reads.rs": {
     "package": "ivy-task-board",
@@ -1033,6 +1155,18 @@ export const rustTests = {
     "filter": "native_comments::",
     "testThreads": 1
   },
+  "tests/fixtures/task-board-native-comment-reads.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-large-writes",
+    "filter": "large_task_writes::native_comment_reads::",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-engine-factory-native.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-output",
+    "filter": "service::factory::native::",
+    "testThreads": 1
+  },
   "tests/fixtures/task-board-orchestrator.rs": {
     "package": "ivy-task-board",
     "test": "task-board-output",
@@ -1057,10 +1191,34 @@ export const rustTests = {
     "filter": "native_publication::",
     "testThreads": 1
   },
+  "tests/fixtures/task-board-engine-publication.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-output",
+    "filter": "engine_publication::",
+    "testThreads": 1
+  },
   "tests/fixtures/task-board-native-policies.rs": {
     "package": "ivy-task-board",
     "test": "task-board-output",
     "filter": "native_policies::",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-service-lifecycle.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-output",
+    "filter": "service::lifecycle::",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-generation-readiness.rs": {
+    "package": "ivy-task-board",
+    "lib": true,
+    "filter": "generation::tests::",
+    "testThreads": 1
+  },
+  "tests/fixtures/task-board-engine-factory-observations.rs": {
+    "package": "ivy-task-board",
+    "test": "task-board-output",
+    "filter": "service::factory::observations::",
     "testThreads": 1
   },
   "tests/fixtures/task-board-host-runtime.rs": {
@@ -1565,6 +1723,9 @@ export const rustTests = {
     "test": "hive-storage-worker",
     "filter": "store::query::",
     "testThreads": 1
+  },
+  "tests/rust/hive_query_counts.rs": {
+    package: "ivy-hive", test: "hive-storage-worker", filter: "store::query::counts::", testThreads: 1,
   },
   "tests/rust/hive_peer_delivery.rs": {
     "package": "ivy-hive",

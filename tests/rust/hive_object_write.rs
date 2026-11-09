@@ -4,6 +4,139 @@ use ivy_hive::objects;
 use serde_json::{Value, json};
 use std::time::Duration;
 
+#[test]
+fn write_hints_follow_current_parent_and_rollback_without_changing_durable_events() {
+    let mut store = Store::open(std::path::Path::new(":memory:")).unwrap();
+    store
+        .connection()
+        .execute_batch(&super::query::seed(false))
+        .unwrap();
+    let family = "objects/fixture/value";
+    let boundary = "x".repeat(512 - format!("{family}/parent/").len());
+    let too_long = format!("{boundary}x");
+    let cases = [
+        (None, format!("{family}/root")),
+        (Some("root"), format!("{family}/parent/root")),
+        (Some("alpha._-9"), format!("{family}/parent/alpha._-9")),
+        (Some("a/b"), family.into()),
+        (Some("🙂"), family.into()),
+        (
+            Some(boundary.as_str()),
+            format!("{family}/parent/{boundary}"),
+        ),
+        (Some(too_long.as_str()), family.into()),
+    ];
+    let principal = super::Principal {
+        principal_id: "fixture".into(),
+        credential_digest: "unused".into(),
+    };
+    for (i, (parent, expected)) in cases.into_iter().enumerate() {
+        if let Some(parent) = parent {
+            let mut sql = String::from("BEGIN IMMEDIATE;");
+            super::query::insert(
+                &mut sql,
+                parent,
+                "fixture/value",
+                "1.0.0",
+                "NULL",
+                false,
+                "json",
+                "{}",
+                1,
+            );
+            sql.push_str("COMMIT;");
+            store.connection().execute_batch(&sql).unwrap();
+        }
+        store
+            .connection()
+            .execute("UPDATE objects SET parent_id=? WHERE id='id20'", [parent])
+            .unwrap();
+        store.take_changes();
+        store
+            .transaction(|s| {
+                s.append_core_event(
+                    &principal,
+                    &"id20".into(),
+                    1,
+                    &"write".into(),
+                    &format!("write-{i}").into(),
+                    &"2026-01-01".into(),
+                    None,
+                )
+            })
+            .unwrap();
+        assert_eq!(store.changes(), &[JsString::from(expected)]);
+        let payload: String = store
+            .connection()
+            .query_row(
+                "SELECT payload FROM events ORDER BY sequence DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&payload).unwrap(),
+            json!({"objectId":"id20","revision":1,"operation":"write"})
+        );
+        let before = store.changes().to_vec();
+        let count: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        let error = store
+            .transaction(|s| {
+                s.append_core_event(
+                    &principal,
+                    &"id01".into(),
+                    1,
+                    &"write".into(),
+                    &"rollback".into(),
+                    &"2026-01-01".into(),
+                    None,
+                )?;
+                Err::<(), _>(IvyError::new("fixture_failure", "rollback"))
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "fixture_failure");
+        assert_eq!(store.changes(), before);
+        assert_eq!(
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            count
+        );
+    }
+    for operation in ["move", "archive", "delete"] {
+        store.take_changes();
+        store
+            .append_core_event(
+                &principal,
+                &"id20".into(),
+                1,
+                &operation.into(),
+                &operation.into(),
+                &"2026-01-01".into(),
+                Some(&"fixture/value".into()),
+            )
+            .unwrap();
+        assert_eq!(store.changes(), &[JsString::from("objects")]);
+    }
+    store.take_changes();
+    store
+        .append_core_event(
+            &principal,
+            &"unavailable".into(),
+            1,
+            &"write".into(),
+            &"missing".into(),
+            &"2026-01-01".into(),
+            Some(&"fixture/value".into()),
+        )
+        .unwrap();
+    assert_eq!(store.changes(), &[JsString::from(family)]);
+}
+
 pub(super) fn bind(step: &mut Value, rows: &[Value]) {
     for binding in step["bindings"].as_array().unwrap().clone() {
         let id = rows[binding["from"].as_u64().unwrap() as usize]["value"]["object"]["id"].clone();

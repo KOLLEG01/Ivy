@@ -345,14 +345,30 @@ async fn native_mirroring_uses_factory_recovery_original_identity_and_current_co
                         > 0
                 })
                 .await;
-                let diagnostics = service.control.readiness(&second).await.unwrap();
+                // Readiness is an owner-observed snapshot. Allow its periodic
+                // refresh after the original native status has been inspected.
+                if !secret {
+                    tokio::time::sleep(Duration::from_millis(2100)).await;
+                }
+                let diagnostics = bounded(async {
+                    loop {
+                        let diagnostics = service.control.readiness(&second).await.unwrap();
+                        if !secret || f(&diagnostics, "diagnostics").as_array().unwrap().iter().any(|d|
+                            f(d, "code") == &"invalid_arguments".into()
+                            && f(d, "message") == &"Value does not match TaskBoard definition Operation.".into()) {
+                            break diagnostics;
+                        }
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+                    }
+                }).await;
                 let ds = f(&diagnostics, "diagnostics").as_array().unwrap();
                 if secret {
                     assert!(
                         ds.iter()
                             .any(|d| f(d, "code") == &"invalid_arguments".into()
                                 && f(d, "message")
-                                    == &"Value does not match its TaskBoard contract.".into()),
+                                    == &"Value does not match TaskBoard definition Operation."
+                                        .into()),
                         "Secret response must retain its exact current-schema refusal: {diagnostics:?}"
                     );
                 } else {
@@ -470,7 +486,11 @@ async fn native_mirroring_uses_factory_recovery_original_identity_and_current_co
             )
             .await
             .unwrap();
-            assert_eq!(hash_json(&saved).unwrap(), hash_json(&recovered.2).unwrap());
+            let expected = ivy_task_board::journal_store::persistent_reads::operation_receipt::operation_receipt::<IvyError>(&recovered.2).unwrap();
+            assert_eq!(
+                saved, expected,
+                "Public operation reads retain the original compact receipt"
+            );
             assert_eq!(
                 fixture
                     .database()

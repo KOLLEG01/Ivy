@@ -3,7 +3,7 @@ use ivy_contracts::{IvyError, IvyJson, IvyResult, json::parse};
 use ivy_contracts::{
     JsString,
     builtin_schema::SchemaBundle,
-    json::{canonical, compare_versions},
+    json::{compare_versions, validate_json},
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use std::collections::HashMap;
@@ -18,6 +18,7 @@ const INTERNAL: &[(&str, &str)] = &[
     ("task-board/native-plan", "NativePlan"),
     ("task-board/native-call", "NativeCall"),
     ("task-board/operation", "Operation"),
+    ("task-board/prepared-payload", "PreparedPayload"),
     ("task-board/coordination", "Coordination"),
     ("task-board/native-evidence", "NativeEvidence"),
     ("task-board/native-read-evidence", "NativeReadEvidence"),
@@ -44,6 +45,21 @@ pub struct RuntimeContracts {
     readable: HashMap<String, Vec<JsString>>,
 }
 impl RuntimeContracts {
+    /// Hydrated domain values and compact current headers have distinct schemas.
+    pub fn validate_task(&self, task: &IvyJson) -> IvyResult<()> {
+        if task
+            .get("commentStore")
+            .is_some_and(|value| !value.is_null())
+        {
+            self.validate_record(
+                "task-board/task",
+                &self.version("task-board/task")?.into(),
+                task,
+            )
+        } else {
+            self.validate_definition("Task", task)
+        }
+    }
     pub fn from_documents(documents: Vec<IvyJson>) -> IvyResult<Self> {
         let definitions = SchemaBundle::from_documents(documents)?;
         let metadata = crate::runtime_inputs::metadata()?;
@@ -139,7 +155,7 @@ impl Contracts for RuntimeContracts {
             }
             return self.validate_definition(name, value);
         }
-        canonical(value, MANAGEMENT_FRAME_BYTES)?;
+        validate_json(value, MANAGEMENT_FRAME_BYTES)?;
         let schema = self
             .records
             .get(&(key.to_owned(), version.clone()))
@@ -158,7 +174,7 @@ impl Contracts for RuntimeContracts {
         }
     }
     fn validate_definition(&self, name: &str, value: &IvyJson) -> IvyResult<()> {
-        canonical(value, MANAGEMENT_FRAME_BYTES)?;
+        validate_json(value, MANAGEMENT_FRAME_BYTES)?;
         if self
             .definitions
             .matches(&format!("{DOCUMENT}#/$defs/{name}"), value)?

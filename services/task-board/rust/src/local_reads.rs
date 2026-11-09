@@ -2,6 +2,7 @@
 use crate::{
     journal_store::Contracts,
     local_journal::{LocalJournal, require},
+    operations::{ObjectPin, StoredRecord},
 };
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json};
 use ivy_store::rusqlite::{
@@ -34,23 +35,90 @@ pub(crate) fn prepared_version(
         }
         require(
             captured.is_none()
-                && write.get("contractKey") == Some(&Json::from(key))
+                && write
+                    .get("payloadContract")
+                    .or_else(|| write.get("contractKey"))
+                    == Some(&Json::from(key))
                 && payload.and_then(|v| v.get("mediaType"))
                     == Some(&Json::from("application/json"))
                 && payload.and_then(|v| v.get("contentHash")) == Some(&Json::from(content_hash)),
             "task_board_evidence_mismatch",
             "The prepared payload must match its unique original publication and bytes.",
         )?;
-        captured = Some(
+        captured = Some(if key == crate::operations::PREPARED_PAYLOAD {
+            "1.0.0".into()
+        } else {
             write
                 .required("contractVersion")?
                 .as_js_string()
                 .ok_or_else(IvyError::internal)?
-                .to_utf8()?,
-        );
+                .to_utf8()?
+        });
     }
     // During staging recovery the payload may precede its committed write entry.
     Ok(captured)
+}
+
+/// Decode a compact local snapshot only for a domain Task read. Its stored
+/// bytes and content hash remain the immutable operation evidence.
+pub(crate) fn prepared_task<C: Contracts>(contracts: &C, mut payload: Json) -> IvyResult<Json> {
+    require(
+        payload.get("contractKey") == Some(&Json::from("task-board/task")),
+        "task_board_contract_mismatch",
+        "The prepared payload must contain its original Task record.",
+    )?;
+    let version = payload
+        .required("contractVersion")?
+        .as_js_string()
+        .ok_or_else(IvyError::internal)?;
+    contracts.validate_record("task-board/task", version, payload.required("content")?)?;
+    Ok(payload.remove("content").unwrap())
+}
+
+pub(crate) fn prepared_task_owner<'a>(operation: &'a Json, pin: &Json) -> IvyResult<&'a JsString> {
+    let writes = operation
+        .get("writes")
+        .and_then(Json::as_array)
+        .unwrap_or(&[]);
+    let mut selected = writes.iter().filter(|write| {
+        write
+            .get("payload")
+            .and_then(|payload| payload.get("object"))
+            == Some(pin)
+    });
+    let mut owner = None;
+    if let Some(write) = selected.next() {
+        require(
+            selected.next().is_none()
+                && write.get("contractKey") == Some(&Json::from("task-board/task")),
+            "task_board_scope_mismatch",
+            "A prepared Task must have one original destination.",
+        )?;
+        owner = write
+            .get("destination")
+            .and_then(|destination| destination.get("objectId"))
+            .or_else(|| {
+                write
+                    .get("outcome")
+                    .and_then(|outcome| outcome.get("objectId"))
+            })
+            .and_then(Json::as_js_string);
+    }
+    let requested = operation
+        .get("request")
+        .and_then(|request| request.get("taskId"))
+        .and_then(Json::as_js_string);
+    require(
+        owner.is_none() || requested.is_none() || owner == requested,
+        "task_board_scope_mismatch",
+        "The prepared Task destination differs from its original request.",
+    )?;
+    owner.or(requested).ok_or_else(|| {
+        IvyError::new(
+            "task_board_scope_mismatch",
+            "A prepared conversation must belong to its original Task operation.",
+        )
+    })
 }
 
 impl LocalJournal<'_> {
@@ -224,6 +292,19 @@ impl<C: Contracts, Parse, Failure> SqliteReads<'_, C, Parse, Failure> {
         Parse: Fn(&str) -> Result<Json, E>,
         Failure: Fn(ivy_store::rusqlite::Error) -> E,
     {
+        Ok(self.record::<E>(key, reference, primary)?.into_json())
+    }
+    pub(crate) fn record<E>(
+        &self,
+        key: &str,
+        reference: &Json,
+        primary: bool,
+    ) -> Result<StoredRecord, E>
+    where
+        E: From<IvyError>,
+        Parse: Fn(&str) -> Result<Json, E>,
+        Failure: Fn(ivy_store::rusqlite::Error) -> E,
+    {
         let id = if reference.as_js_string().is_some() {
             reference
         } else {
@@ -260,7 +341,10 @@ impl<C: Contracts, Parse, Failure> SqliteReads<'_, C, Parse, Failure> {
             })?;
         let encoded = row[2].string()?;
         let value = (self.parse)(&encoded)?;
-        let pin = Json::object([("objectId", id.clone()), ("revision", revision.clone())]);
+        let pin = ObjectPin {
+            object_id: id.as_js_string().ok_or_else(IvyError::internal)?.clone(),
+            revision: revision.as_f64().ok_or_else(IvyError::internal)?,
+        };
         let parent = if matches!(head[3], Column::Null) {
             Json::Null
         } else {
@@ -278,10 +362,19 @@ impl<C: Contracts, Parse, Failure> SqliteReads<'_, C, Parse, Failure> {
             && parent != root
             && self.key::<E>(Some(&parent))?.as_deref() == Some("task-board/operation")
         {
-            let operation = self.document::<E>("task-board/operation", &parent, true)?;
+            let operation = self.record::<E>("task-board/operation", &parent, true)?;
+            let wire_pin = pin.to_json();
             if let Some(captured) =
-                prepared_version(key, &pin, &content_hash, operation.required("value")?)?
+                prepared_version(key, &wire_pin, &content_hash, &operation.value)?
             {
+                if key == crate::operations::PREPARED_PAYLOAD
+                    || key == "task-board/task"
+                        && value
+                            .get("commentStore")
+                            .is_some_and(|tree| !tree.is_null())
+                {
+                    prepared_task_owner(&operation.value, &wire_pin)?;
+                }
                 self.contracts
                     .validate_record(key, &captured.clone().into(), &value)?;
                 version = captured;
@@ -313,13 +406,13 @@ impl<C: Contracts, Parse, Failure> SqliteReads<'_, C, Parse, Failure> {
             ("createdAt", row[3].string()?.into()),
             ("references", Json::Object(vec![])),
         ]);
-        Ok(Json::object([
-            ("key", key.into()),
-            ("pin", pin),
-            ("value", value),
-            ("metadata", metadata),
-            ("revision", revision_record),
-        ]))
+        Ok(StoredRecord {
+            key: key.into(),
+            pin,
+            value,
+            metadata,
+            revision: revision_record,
+        })
     }
     pub fn failed_handoff<E>(&self, run_id: &JsString) -> Result<Option<Json>, E>
     where

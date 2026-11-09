@@ -10,56 +10,54 @@ use ivy_contracts::{
 use ivy_task_board::turn_output::*;
 use std::{path::Path, process::Command};
 
+#[path = "../fixtures/task-board-categories.rs"]
+mod categories;
+#[path = "../fixtures/task-board-engine-actions.rs"]
+mod engine_actions;
+#[path = "../fixtures/task-board-engine-admission.rs"]
+mod engine_admission;
+#[path = "../fixtures/task-board-engine-execution.rs"]
+mod engine_execution;
+#[path = "../fixtures/task-board-engine-publication.rs"]
+mod engine_publication;
+#[path = "../fixtures/task-board-engine-validation.rs"]
+mod engine_validation;
 #[path = "../fixtures/task-board-frozen-contracts.rs"]
 mod frozen_contracts;
 #[path = "../fixtures/task-board-host-service.rs"]
 mod host_service;
 #[path = "../fixtures/task-board-inspector.rs"]
 mod inspector;
-#[path = "../fixtures/task-board-signals.rs"]
-mod signals;
+#[path = "../fixtures/task-board-local-executor.rs"]
+mod local_executor;
 #[path = "../fixtures/task-board-native-comments.rs"]
 mod native_comments;
-#[path = "../fixtures/task-board-orchestrator.rs"]
-mod orchestrator;
-#[path = "../fixtures/task-board-rate-limit.rs"]
-mod rate_limit;
-#[path = "../fixtures/task-board-reconciler.rs"]
-mod reconciler;
 #[path = "../fixtures/task-board-native-publication.rs"]
 mod native_publication;
-#[path = "../fixtures/task-board-categories.rs"]
-mod categories;
-#[path = "../fixtures/task-board-engine-read.rs"]
-mod engine_read;
-#[path = "../fixtures/task-board-engine-execution.rs"]
-mod engine_execution;
-#[path = "../fixtures/task-board-engine-admission.rs"]
-mod engine_admission;
-#[path = "../fixtures/task-board-engine-publication.rs"]
-mod engine_publication;
-#[path = "../fixtures/task-board-engine-actions.rs"]
-mod engine_actions;
-#[path = "../fixtures/task-board-engine-validation.rs"]
-mod engine_validation;
-#[path = "../fixtures/task-board-checks.rs"]
-mod checks;
+#[path = "../fixtures/task-board-orchestrator.rs"]
+mod orchestrator;
+#[path = "../fixtures/task-board-prompts.rs"]
+mod prompts;
+#[path = "../fixtures/task-board-rate-limit.rs"]
+mod rate_limit;
 #[path = "../fixtures/task-board-read-scopes.rs"]
 mod read_scopes;
+#[path = "../fixtures/task-board-reconciler.rs"]
+mod reconciler;
+#[path = "../fixtures/task-board-service.rs"]
+mod service;
+#[path = "../fixtures/task-board-signals.rs"]
+mod signals;
 #[path = "../fixtures/task-board-task-routing.rs"]
 mod task_routing;
 #[path = "../fixtures/task-board-task-written.rs"]
 mod task_written;
-#[path = "../fixtures/task-board-prompts.rs"]
-mod prompts;
-#[path = "../fixtures/task-board-service.rs"]
-mod service;
-#[path = "../fixtures/task-board-local-executor.rs"]
-mod local_executor;
 
 #[test]
 fn native_output_helpers_match_original_typescript() {
-    let result = reference_data::read(include_bytes!("../fixtures/task-board-output-cases.json.gz"));
+    let result = reference_data::read(include_bytes!(
+        "../fixtures/task-board-output-cases.json.gz"
+    ));
     let cases = parse(
         std::str::from_utf8(&result).unwrap(),
         MANAGEMENT_FRAME_BYTES,

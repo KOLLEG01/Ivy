@@ -44,7 +44,7 @@ impl TaskWriteSink for HeldObserver {
         // expected context from the Operation supplied by the adapter itself.
         let index = usize::from(task.get("retained").is_some());
         let expected = &self.operations[index];
-        assert_eq!(operation.pin, expected.pin);
+        assert_eq!(operation.pin.to_json(), expected.pin.to_json());
         assert_eq!(operation.content_hash, expected.content_hash);
         assert_eq!(hash_json(&operation.value)?, hash_json(&expected.value)?);
         assert_eq!(operation.parent_id, expected.parent_id);

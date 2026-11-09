@@ -21,6 +21,17 @@ pub struct PreparedTaskBoard {
     pub service: TaskBoardService,
     pub owner: ServiceOwner,
 }
+struct CloseOnDrop<'a> {
+    service: &'a TaskBoardService,
+    armed: bool,
+}
+impl Drop for CloseOnDrop<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            drop(self.service.close());
+        }
+    }
+}
 
 impl PreparedTaskBoard {
     /// Drive the admitted engine on its owning thread until a host control or
@@ -31,16 +42,30 @@ impl PreparedTaskBoard {
         factory: &F,
         shutdown: impl Future<Output = ()>,
     ) -> IvyResult<()> {
+        self.run_owner(|owner| owner.run(factory), shutdown).await
+    }
+
+    /// Keep socket I/O, control polling and health publication on the host
+    /// runtime while the supplied owner retains and drains its engine graph.
+    pub(crate) async fn run_owner<F: Future<Output = IvyResult<()>>>(
+        self,
+        run_owner: impl FnOnce(ServiceOwner) -> F,
+        shutdown: impl Future<Output = ()>,
+    ) -> IvyResult<()> {
         let Self {
             health,
             service,
             owner,
             ..
         } = self;
+        let mut close_on_drop = CloseOnDrop {
+            service: &service,
+            armed: true,
+        };
         health
             .write(false, "Connecting TaskBoard to Hive.".into(), None)
             .await?;
-        let generation = owner.run(factory);
+        let generation = run_owner(owner);
         let monitor = async {
             let mut control = tokio::time::interval(Duration::from_millis(500));
             let mut heartbeat = tokio::time::interval(Duration::from_secs(2));
@@ -80,6 +105,7 @@ impl PreparedTaskBoard {
                 result.and(closed).and(finished)
             }
         };
+        close_on_drop.armed = false;
         let stopped = health.write(false, "TaskBoard stopped.".into(), None).await;
         result.and(stopped)
     }

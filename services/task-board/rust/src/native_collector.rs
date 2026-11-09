@@ -10,7 +10,9 @@ use crate::{
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
-    checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical,
+    checked_native_contract::CheckedNativeContracts,
+    hash::{hash_json, hash_object},
+    json::canonical_size,
 };
 use std::collections::HashSet;
 
@@ -71,7 +73,7 @@ fn reference(observed: &Json, artifact: Json) -> IvyResult<Json> {
 }
 fn artifact<S: CollectionStore>(store: &S, document: &Document) -> IvyResult<Json> {
     Ok(Json::object([
-        ("object", document.pin.clone()),
+        ("object", document.pin.to_json()),
         ("label", Json::String(store.document_name(document)?)),
         ("contentHash", document.content_hash.clone().into()),
         ("mediaType", "application/json".into()),
@@ -250,7 +252,7 @@ impl<S: CollectionStore> FullTurnCollector<'_, S> {
             ),
             (
                 "fullTurnBytes",
-                Json::Number(canonical(&full, MAXIMUM_BYTES)?.len() as f64),
+                Json::Number(canonical_size(&full, MAXIMUM_BYTES)? as f64),
             ),
             ("verification", verification),
             (
@@ -328,7 +330,7 @@ impl<S: CollectionStore> NativeCollector<'_, S> {
                 "task_board_evidence_mismatch",
                 "The retained transcript must preserve its collection identity.",
             )?;
-            return Ok(existing.pin);
+            return Ok(existing.pin.to_json());
         }
         let value = Json::object([
             ("schemaVersion", Json::Number(1.0)),
@@ -373,7 +375,7 @@ impl<S: CollectionStore> NativeCollector<'_, S> {
                     "task_board_evidence_mismatch",
                     "A competing collection must retain the same original identity.",
                 )?;
-                Ok(winner.ok_or_else(IvyError::internal)?.pin)
+                Ok(winner.ok_or_else(IvyError::internal)?.pin.to_json())
             }
             Err(error) => Err(error),
         }
@@ -444,18 +446,15 @@ impl<S: CollectionStore> NativeCollector<'_, S> {
                     s(value, "collectionId")?,
                     &format!(
                         "checkpoint:{}",
-                        hash_json(&Json::object([
-                            ("pin", document.pin.clone()),
-                            ("value", value.clone())
-                        ]))?
+                        hash_object([
+                            (&"pin".into(), &document.pin.to_json()),
+                            (&"value".into(), value)
+                        ])?
                     ),
                 )?,
                 &Json::object([
-                    ("objectId", document.pin.required("objectId")?.clone()),
-                    (
-                        "expectedRevision",
-                        document.pin.required("revision")?.clone(),
-                    ),
+                    ("objectId", Json::String(document.pin.object_id.clone())),
+                    ("expectedRevision", Json::Number(document.pin.revision)),
                 ]),
             )
             .await?;
@@ -566,7 +565,7 @@ impl<S: CollectionStore> NativeCollector<'_, S> {
                     match full.collect(run, &document, &observed, budget).await? {
                         Some(artifact) => NativeCollection::Complete { artifact },
                         None => NativeCollection::Pending {
-                            transcript: document.pin,
+                            transcript: document.pin.to_json(),
                         },
                     },
                 );
@@ -619,7 +618,7 @@ impl<S: CollectionStore> NativeCollector<'_, S> {
         }
         if document.value.get("nextCursor") != Some(&Json::Null) {
             return Ok(NativeCollection::Pending {
-                transcript: document.pin,
+                transcript: document.pin.to_json(),
             });
         }
         let turns = match inspector
@@ -628,7 +627,7 @@ impl<S: CollectionStore> NativeCollector<'_, S> {
         {
             Inspection::Pending { .. } => {
                 return Ok(NativeCollection::Pending {
-                    transcript: document.pin,
+                    transcript: document.pin.to_json(),
                 });
             }
             Inspection::Found { turns, .. } => turns,

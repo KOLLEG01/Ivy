@@ -13,6 +13,64 @@ use std::{
 #[path = "task-board-internal-calls.rs"]
 mod internal;
 
+#[tokio::test(flavor = "current_thread")]
+async fn invocation_reply_moves_original_utf16_buffer_and_holds_capacity_until_observed() {
+    use ivy_task_board::{local_executor::LocalExecutor, work_budget::WorkBudget};
+    let pointer = Cell::new(0usize);
+    let executor = LocalExecutor::default();
+    let budget = WorkBudget::default();
+    let invocations = EngineInvocations::with_budget(&executor, budget.clone());
+    let reply = invocations
+        .run(async {
+            let mut value = Vec::with_capacity(8192);
+            value.push(0xd800);
+            pointer.set(value.as_ptr() as usize);
+            Ok(Json::String(JsString(value)))
+        })
+        .unwrap();
+    executor.drive(invocations.settled()).await;
+    assert_eq!(
+        budget.retained_usage().0,
+        1,
+        "Unread replies remain admitted work."
+    );
+    assert!(budget.retained_usage().1 >= 8192 * 2);
+    let value = reply.await.unwrap();
+    assert_eq!(
+        value.as_js_string().unwrap().0.as_ptr() as usize,
+        pointer.get()
+    );
+    assert_eq!(value.as_js_string().unwrap().0, [0xd800]);
+    assert_eq!(budget.retained_usage(), (0, 0));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn completed_unread_invocations_keep_the_shared_count_limit_and_release_on_observation() {
+    use ivy_task_board::{
+        local_executor::LocalExecutor,
+        work_budget::{MAX_WORK_ITEMS, WorkBudget},
+    };
+    let executor = LocalExecutor::default();
+    let budget = WorkBudget::default();
+    let invocations = EngineInvocations::with_budget(&executor, budget.clone());
+    let replies: Vec<_> = (0..MAX_WORK_ITEMS)
+        .map(|_| invocations.run(async { Ok(Json::Null) }).unwrap())
+        .collect();
+    executor.drive(invocations.settled()).await;
+    let failure = invocations.run(async { Ok(Json::Null) }).err().unwrap();
+    assert_eq!(failure.code, "limit_exceeded");
+    assert_eq!(failure.outcome, ivy_contracts::Outcome::NotExecuted);
+    assert_eq!(budget.retained_usage().0, MAX_WORK_ITEMS);
+    for reply in replies {
+        assert_eq!(reply.await.unwrap(), Json::Null);
+    }
+    assert_eq!(budget.retained_usage(), (0, 0));
+    let next = invocations.run(async { Ok(Json::Bool(true)) }).unwrap();
+    executor.drive(invocations.stop()).await;
+    assert_eq!(next.await.unwrap(), Json::Bool(true));
+    assert_eq!(budget.retained_usage(), (0, 0));
+}
+
 #[derive(Default)]
 pub(super) struct Executor<'a> {
     work: RefCell<VecDeque<Pin<Box<dyn Future<Output = ()> + 'a>>>>,

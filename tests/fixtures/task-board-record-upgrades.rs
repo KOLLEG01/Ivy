@@ -2,8 +2,8 @@ use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString};
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use ivy_task_board::journal_store::persistent_reads::{
     fill_verification_sizes, read_legacy_conversation,
-    record_upgrades::{upgrade_stored, upgrade_stored_with},
-    verification_sizes::fill_verification_sizes_with,
+    record_upgrades::{upgrade_stored, upgrade_stored_owned_with, upgrade_stored_with},
+    verification_sizes::{fill_verification_sizes_owned_with, fill_verification_sizes_with},
 };
 use std::{collections::VecDeque, sync::Mutex};
 
@@ -119,6 +119,19 @@ async fn retained_sizes_cover_checks_comments_and_deliveries_without_mutating_th
         .unwrap();
     assert_eq!(artifacts[0].get("byteLength"), Some(&Json::Number(17.0)));
     assert_eq!(artifacts[1].get("byteLength"), Some(&Json::Number(99.0)));
+    let owned_client = Client::new((0..4).map(|_| Ok(saved())));
+    let owned = fill_verification_sizes_owned_with("task-board/task", input, |params| async {
+        owned_client
+            .request("objects.read", params.unwrap(), RequestOptions::default())
+            .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(owned, full);
+    assert_eq!(
+        *owned_client.trace.lock().unwrap(),
+        *client.trace.lock().unwrap()
+    );
 }
 #[tokio::test(flavor = "current_thread")]
 async fn evidence_mismatch_stops_before_a_later_read_and_retains_source_errors() {
@@ -149,6 +162,17 @@ async fn evidence_mismatch_stops_before_a_later_read_and_retains_source_errors()
         .await
         .unwrap_err();
     assert_eq!(result, failure);
+    let owned_client = Client::new([Err(failure.clone())]);
+    let result =
+        fill_verification_sizes_owned_with("task-board/task", input.clone(), |params| async {
+            owned_client
+                .request("objects.read", params.unwrap(), RequestOptions::default())
+                .await
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(result, failure);
+    assert_eq!(owned_client.trace.lock().unwrap().len(), 1);
     // Generic callers can retain a borrowed, non-Send cause without a JS exception adapter.
     enum Failure<'a> {
         Ivy(IvyError),
@@ -242,6 +266,13 @@ async fn shared_record_upgrades_preserve_retained_findings_and_unrelated_records
     .await
     .unwrap_err();
     assert_eq!(error, ivy_sdk::upgrade_result_record(&invalid).unwrap_err());
+    let owned_error =
+        upgrade_stored_owned_with::<IvyError, _, _>("task-board/result", invalid, |_| async {
+            panic!("unexpected owned read")
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(owned_error, error);
 }
 #[tokio::test(flavor = "current_thread")]
 async fn retained_comment_prefix_checks_scope_length_and_native_state_overlays() {

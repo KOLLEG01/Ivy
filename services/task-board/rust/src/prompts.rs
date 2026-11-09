@@ -1,6 +1,6 @@
 //! Current ticket instructions and retained contact text. Formatting neither
 //! changes workflow state nor dispatches a native request or user message.
-use crate::wake::missing_wake_trigger;
+use crate::wake::{missing_wake_trigger, open_question_metadata};
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, json::stringify};
 
 pub const ATTACHMENT_GUIDANCE: &str = "Attach files only when explicitly requested or when they add clear value. Limit attachments to what is necessary and keep them as small as possible. Attach build artifacts only when explicitly requested by the user.";
@@ -48,7 +48,6 @@ fn text<'a>(value: &'a Json, key: &str) -> IvyResult<&'a JsString> {
 fn push(output: &mut JsString, text: &str) {
     output.0.extend(text.encode_utf16());
 }
-
 /// Execution-setting changes stop at a safe boundary. Ordinary input asks the
 /// same conversation to decide from the current ticket, including closed work.
 pub fn task_prompt(
@@ -71,8 +70,7 @@ pub fn task_prompt(
         &mut output,
         ". Read the ticket and new comments. Decide from the current ticket whether to reply, continue work or wait, and act in this turn. ",
     );
-    let questions = ivy_sdk::open_task_questions(task, None)?;
-    if missing_wake_trigger(task, !questions.is_empty()) {
+    if missing_wake_trigger(task, !open_question_metadata(task)?.is_empty()) {
         push(
             &mut output,
             "This ticket was waiting without a wake-up trigger. Continue work, submit the completed result for review, or record a question, watched ticket or next appointment. ",

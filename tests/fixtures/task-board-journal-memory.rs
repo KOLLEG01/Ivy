@@ -3,7 +3,7 @@ use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use ivy_store::rusqlite::{Connection, params};
 use ivy_task_board::{
     local_journal::{self, LocalJournal},
-    local_retention::{HistoryLimits, LocalRetention},
+    local_retention::HistoryLimits,
 };
 
 const TIME: &str = "2026-01-02T03:04:05.006Z";
@@ -41,10 +41,13 @@ fn peak_bytes() -> usize {
         * 1024
 }
 
-fn seed(db: &Connection) {
+fn seed(db: &Connection, key: &str) {
     local_journal::initialize(db).unwrap();
     let encoded = canonical(
-        &Json::object([("body", "x".repeat(1024 * 1024).into())]),
+        &Json::object([
+            ("phase", "accepted".into()),
+            ("body", "x".repeat(1024 * 1024).into()),
+        ]),
         MANAGEMENT_FRAME_BYTES,
     )
     .unwrap();
@@ -52,15 +55,7 @@ fn seed(db: &Connection) {
         let id = format!("record-{index:02}");
         db.execute(
             "INSERT INTO documents VALUES(?,?,?,?,?,?,?)",
-            params![
-                id,
-                "task-board/task",
-                id,
-                Option::<String>::None,
-                1,
-                TIME,
-                TIME
-            ],
+            params![id, key, id, Option::<String>::None, 1, TIME, TIME],
         )
         .unwrap();
         db.execute(
@@ -72,13 +67,13 @@ fn seed(db: &Connection) {
 }
 
 #[test]
-fn local_pages_drop_record_bodies_before_sorting() {
-    if !isolated("journal_memory::local_pages_drop_record_bodies_before_sorting") {
+fn local_pages_read_only_indexed_operation_heads() {
+    if !isolated("journal_memory::local_pages_read_only_indexed_operation_heads") {
         return;
     }
     let temp = super::Temporary::new();
     let db = Connection::open(temp.0.join("pages.sqlite")).unwrap();
-    seed(&db);
+    seed(&db, "task-board/operation");
     let journal = LocalJournal {
         connection: &db,
         root_object_id: None,
@@ -89,21 +84,28 @@ fn local_pages_drop_record_bodies_before_sorting() {
         (
             "where",
             Json::object([
-                ("op", "contains".into()),
-                ("field", "data:/body".into()),
-                ("value", "xx".into()),
+                ("op", "in".into()),
+                ("field", "data:/phase".into()),
+                (
+                    "value",
+                    Json::Array(
+                        ["accepted", "preparing", "publishing", "needs_attention"]
+                            .map(Json::from)
+                            .to_vec(),
+                    ),
+                ),
             ]),
         ),
         (
             "orderBy",
             Json::Array(vec![Json::object([
                 ("field", "object.id".into()),
-                ("direction", "desc".into()),
+                ("direction", "asc".into()),
             ])]),
         ),
     ]);
-    for expected in ["record-31", "record-30"] {
-        let page = journal.page("task-board/task", &query).unwrap();
+    for expected in ["record-00", "record-01"] {
+        let page = journal.page("task-board/operation", &query).unwrap();
         let items = page.required("items").unwrap().as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].required("objectId").unwrap(), &expected.into());
@@ -119,8 +121,20 @@ fn local_pages_drop_record_bodies_before_sorting() {
 
 struct NoRemote;
 impl RpcClient for NoRemote {
-    fn request<'a>(&'a self, _: &'a str, _: Json, _: RequestOptions) -> RequestFuture<'a> {
-        panic!("This local graph has no remote owner")
+    fn request<'a>(
+        &'a self,
+        method: &'a str,
+        params: Json,
+        _: RequestOptions,
+    ) -> RequestFuture<'a> {
+        assert_eq!(method, "objects.query");
+        assert_eq!(params.get("contractKey"), Some(&"task-board/task".into()));
+        Box::pin(async {
+            Ok(Json::object([
+                ("items", Json::Array(vec![])),
+                ("nextCursor", Json::Null),
+            ]))
+        })
     }
 }
 
@@ -131,7 +145,7 @@ async fn retention_streams_current_record_bodies() {
     }
     let temp = super::Temporary::new();
     let db = Connection::open(temp.0.join("retention.sqlite")).unwrap();
-    seed(&db);
+    seed(&db, "task-board/task");
     let journal = LocalJournal {
         connection: &db,
         root_object_id: None,
@@ -146,16 +160,21 @@ async fn retention_streams_current_record_bodies() {
             &"unused".into(),
         )
         .unwrap();
-    let retention = LocalRetention {
-        journal,
-        client: &NoRemote,
-        limits: HistoryLimits { count: 0, bytes: 0 },
-    };
-    retention
+    journal
         .complete_workflow(&"unused".into(), &TIME.into(), None)
         .unwrap();
     let before = peak_bytes();
-    retention.collect(0, 0, None, None).await.unwrap();
+    super::retention::collect(
+        &db,
+        &NoRemote,
+        HistoryLimits { count: 0, bytes: 0 },
+        0,
+        0,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     let after = peak_bytes();
     assert!(
         after < before + 16 * 1024 * 1024,
@@ -166,4 +185,18 @@ async fn retention_streams_current_record_bodies() {
         .unwrap();
     assert_eq!(remaining, 32);
     assert!(db.is_autocommit());
+}
+
+impl ivy_sdk::rpc::OptionalRpcClient for NoRemote {
+    fn request_optional<'a>(
+        &'a self,
+        method: &'a str,
+        params: Option<Json>,
+        options: ivy_sdk::rpc::RequestOptions,
+    ) -> ivy_sdk::rpc::RequestFuture<'a> {
+        match params {
+            Some(params) => ivy_sdk::rpc::RpcClient::request(self, method, params, options),
+            None => Box::pin(async { Err(ivy_contracts::IvyError::internal()) }),
+        }
+    }
 }

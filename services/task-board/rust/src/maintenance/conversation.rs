@@ -6,7 +6,7 @@ use crate::journal_store::{
     comment_writes::tree::save_node,
     mutation_ports::{LocalMutationSource, WriteFailure},
     persistent_reads::comment_port::CommentPort,
-    reference_writes::{task_attachment_pins, task_references},
+    reference_writes::{ReferencePages, task_attachment_pins, task_references},
 };
 
 struct Requests<'a>(&'a dyn RpcClient);
@@ -205,6 +205,7 @@ impl<S: MaintenanceStore> Retention<'_, S> {
                 &owner,
                 &named,
                 &task_attachment_pins(task).map_err(failure)?,
+                ReferencePages::Retained,
             )
             .await
             .map_err(failure)?

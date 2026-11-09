@@ -23,7 +23,7 @@ fn task(id: &str) -> Document {
         ("commentDeliveries", Json::Array(vec![])),
     ]);
     Document {
-        pin: pin(id, 1.0),
+        pin: ivy_task_board::operations::ObjectPin::from_json(pin(id, 1.0)).unwrap(),
         content_hash: hash_json(&value).unwrap(),
         value,
         parent_id: Some("root".into()),
@@ -92,7 +92,7 @@ impl World {
         self.docs
             .borrow()
             .iter()
-            .find(|(d, _)| f(&d.pin, "objectId") == &Json::from(id))
+            .find(|(d, _)| f(&d.pin.to_json(), "objectId") == &Json::from(id))
             .unwrap()
             .0
             .clone()
@@ -102,7 +102,7 @@ impl World {
     }
     fn put(&self, d: Document, archived: bool) {
         let mut docs = self.docs.borrow_mut();
-        docs.retain(|(v, _)| f(&v.pin, "objectId") != f(&d.pin, "objectId"));
+        docs.retain(|(v, _)| f(&v.pin.to_json(), "objectId") != f(&d.pin.to_json(), "objectId"));
         docs.push((d, archived));
     }
     fn append(&self, id: &str, c: Json) {
@@ -122,8 +122,14 @@ impl RoutingEngine for World {
         let docs = self.docs.borrow();
         let (d, a) = docs
             .iter()
-            .find(|(d, _)| f(&d.pin, "objectId").as_js_string() == Some(id))
+            .find(|(d, _)| f(&d.pin.to_json(), "objectId").as_js_string() == Some(id))
             .ok_or_else(|| IvyError::new("not_found", "Exact target not found"))?;
+        if *a && !archived {
+            return Err(IvyError::new(
+                "task_board_record_archived",
+                "An archived workflow record is not writable workflow state.",
+            ));
+        }
         Ok(LifecycleDocument {
             document: d.clone(),
             metadata: Json::object([("effectivelyArchived", (*a).into())]),
@@ -146,7 +152,7 @@ impl RoutingEngine for World {
         if failure.as_ref().is_none_or(|(_, apply)| *apply) {
             let id = s(r, "taskId").to_utf8().unwrap();
             let mut d = self.get(&id);
-            assert_eq!(f(&d.pin, "revision"), f(r, "expectedRevision"));
+            assert_eq!(f(&d.pin.to_json(), "revision"), f(r, "expectedRevision"));
             let mut c = r.clone();
             for k in ["action", "taskId", "expectedRevision"] {
                 c.remove(k);
@@ -154,10 +160,7 @@ impl RoutingEngine for World {
             let mut rows = f(&d.value, "comments").as_array().unwrap().to_vec();
             rows.push(c);
             d.value.insert("comments", Json::Array(rows));
-            d.pin.insert(
-                "revision",
-                Json::Number(f(&d.pin, "revision").as_f64().unwrap() + 1.0),
-            );
+            d.pin.revision = f(&d.pin.to_json(), "revision").as_f64().unwrap() + 1.0;
             self.put(d, false);
         }
         if let Some((error, _)) = failure {
@@ -375,7 +378,7 @@ async fn relay_retry_uses_current_target_revision_and_lost_reply_never_duplicate
         let first = w.sent.borrow()[0].clone();
         if !applied {
             let mut target = w.get("target");
-            target.pin.insert("revision", Json::Number(2.0));
+            target.pin.revision = 2.0;
             w.put(target, false);
         }
         w.route().await.unwrap();
@@ -418,6 +421,100 @@ async fn relay_body_is_bounded_and_read_failure_is_not_absence() {
     );
     assert_eq!(w.sent.borrow().len(), 1);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn unavailable_recipient_keeps_its_question_open_and_does_not_starve_other_relays() {
+    for archived in [false, true] {
+        let mut sender = source();
+        sender.value.insert(
+            "comments",
+            Json::Array(vec![
+                question("blocked-question", recipient("unavailable")),
+                question("active-question", recipient("target")),
+            ]),
+        );
+        let w = World::new(vec![sender, task("target")]);
+        if archived {
+            w.put(task("unavailable"), true);
+        }
+        let original = w.get("source").value;
+        for _ in 0..2 {
+            let error = w.route().await.unwrap_err();
+            assert_eq!(
+                error.code,
+                if archived {
+                    "task_board_record_archived"
+                } else {
+                    "not_found"
+                }
+            );
+            assert_eq!(error.outcome, Outcome::NotExecuted);
+            let message = error.message_js().to_utf8().unwrap();
+            assert!(
+                message.contains("blocked-question")
+                    && message.contains("source")
+                    && message.contains("unavailable")
+                    && message.contains("remains open")
+            );
+            assert!(error.message_js().0.len() <= 2048);
+            assert_eq!(w.sent.borrow().len(), 1);
+            assert_eq!(f(&w.sent.borrow()[0], "taskId"), &Json::from("target"));
+            assert_eq!(w.get("source").value, original);
+            assert_eq!(
+                ivy_sdk::open_task_questions(&w.get("source").value, None)
+                    .unwrap()
+                    .len(),
+                2
+            );
+            assert!(
+                w.reads
+                    .borrow()
+                    .iter()
+                    .all(|(_, include_archived)| !include_archived)
+            );
+        }
+        if archived {
+            assert!(
+                f(&w.get("unavailable").value, "comments")
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                w.docs
+                    .borrow()
+                    .iter()
+                    .find(|(d, _)| f(&d.pin.to_json(), "objectId") == &Json::from("unavailable"))
+                    .unwrap()
+                    .1
+            );
+        }
+        w.append(
+            "source",
+            Json::object([
+                ("commentId", "explicit-resolution".into()),
+                ("authorKind", "user".into()),
+                ("purpose", "update".into()),
+                (
+                    "body",
+                    "The obsolete request is explicitly resolved.".into(),
+                ),
+                (
+                    "resolvesQuestions",
+                    Json::Array(vec!["blocked-question".into()]),
+                ),
+            ]),
+        );
+        w.route().await.unwrap();
+        assert_eq!(w.sent.borrow().len(), 1);
+        assert_eq!(
+            ivy_sdk::open_task_questions(&w.get("source").value, None)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
 #[tokio::test(flavor = "current_thread")]
 async fn delegated_saved_review_is_forwarded_once_per_result_with_parent_owned_acceptance() {
     let w = World::new(vec![child(), task("parent")]);
@@ -442,7 +539,7 @@ async fn delegated_saved_review_is_forwarded_once_per_result_with_parent_owned_a
     assert_eq!(w.sent.borrow().len(), 1);
     assert_eq!(w.aggregates.get(), 1);
     let mut next = w.get("child");
-    next.pin.insert("revision", Json::Number(20.0));
+    next.pin.revision = 20.0;
     next.value.insert("latestResult", pin("result", 2.0));
     w.put(next, false);
     forward_delegated_review(&w, &w.get("child")).await.unwrap();

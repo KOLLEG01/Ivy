@@ -105,6 +105,28 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
 impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsString> InspectionStore
     for InspectionJournal<'_, '_, R, P, C, I>
 {
+    async fn task_header(&self, address: &Json) -> IvyResult<Document> {
+        Store::read_task_header(self.journal, address, true).await
+    }
+    async fn task_has_comment(
+        &self,
+        task: &Json,
+        task_id: &JsString,
+        id: &JsString,
+    ) -> IvyResult<bool> {
+        Store::has_task_comment(self.journal, task, task_id, id).await
+    }
+    async fn task_native_questions(
+        &self,
+        task: &Json,
+        task_id: &JsString,
+        run_id: &JsString,
+        comment_id: Option<&JsString>,
+    ) -> IvyResult<Vec<Json>> {
+        self.journal
+            .native_question_comments(task, task_id, run_id, comment_id)
+            .await
+    }
     async fn verify_owner(&self) -> IvyResult<()> {
         verify_owner(
             self.journal.client.as_ref(),
@@ -158,12 +180,6 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         self.journal.named_record(key, name, Some(parent)).await
     }
     fn document_name(&self, document: &Document) -> IvyResult<JsString> {
-        self.journal.journal.name(
-            document
-                .pin
-                .required("objectId")?
-                .as_js_string()
-                .ok_or_else(IvyError::internal)?,
-        )
+        self.journal.journal.name(&document.pin.object_id)
     }
 }

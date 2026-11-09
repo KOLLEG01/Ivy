@@ -89,8 +89,17 @@ wss.on('connection',(socket,request)=>{
     }
     else if(factory&&method==='system.status')reply(id,{runtimeEpoch:'11111111-1111-4111-8111-111111111111'});
     else if(nativePolicies&&method==='objects.query'){
-      assert.ok(['task-board/task','task-board/run','task-board/delivery','task-board/result','task-board/configuration'].includes(params.contractKey));
-      assert.ok(Array.isArray(params.contractVersions)&&params.contractVersions.length>0);
+      if(params.contractVersions===undefined){
+        // Startup protects legacy Run sources across all published versions.
+        assert.ok(['task-board/run','task-board/revision-protection'].includes(params.contractKey),JSON.stringify(params));
+        const predicate=params.contractKey==='task-board/run'
+          ?{op:'not',arg:{field:'data:/phase',op:'in',value:['completed','failed','cancelled']}}
+          :{field:'object.name',op:'contains',value:'Run source '};
+        assert.deepEqual(params,{contractKey:params.contractKey,includeArchived:true,where:{op:'and',args:[{field:'object.parentId',op:'isNull'},predicate]},orderBy:[{field:'object.id',direction:'asc'}],limit:100});
+      }else{
+        assert.ok(['task-board/task','task-board/run','task-board/delivery','task-board/result','task-board/configuration'].includes(params.contractKey),JSON.stringify(params));
+        assert.ok(Array.isArray(params.contractVersions)&&params.contractVersions.length>0,JSON.stringify(params));
+      }
       reply(id,{items:[],nextCursor:null});
     }
     else if(factory&&method==='events.head')reply(id,{throughSequence:0});
