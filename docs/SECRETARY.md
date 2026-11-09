@@ -22,4 +22,10 @@ Read **secretary.status** and source recovery issues first. Use **secretary.oper
 
 Every assignment returns the same decision format defined by the [runner](../services/secretary/rust/src/assignment_runner.rs). Main and Voice delivery follow current contact rules; results with no notification stay in the journal. The execution journal retains original delivery operations and evidence. Native concurrency is bounded by recordsPerTick; remaining work stays queued.
 
+For a unified AgentManager, the execution target includes its explicit `backend`
+identity (backend ID, provider and account). Secretary retains that selection with
+the native target and uses it for dispatch, evidence and follow-up. Reusable threads
+are scoped to that identity; selecting another account starts a separate thread.
+Existing unfinished operations keep their original owner and are not reassigned.
+
 Main/Voice follow-up uses **secretary_follow_up** with an item or execution object reference and a question. Poll **secretary_follow_up_read** with the original operation ID. Its read-only context uses the retained result and trigger.

@@ -63,7 +63,7 @@ impl AssignmentNative<'_, '_, '_> {
             self.tools.clone(),
             text(self.evidence.settings.required("identity")?, "principalId")?,
             NativeOwnerIdentity {
-                backend: None,
+                backend: ivy_contracts::native_backend::BackendIdentity::optional(target.get("backend"))?,
                 service_node_id: text(target, "serviceNodeId")?,
                 host_id: Some(text(target, "hostId")?),
                 native_version: text(target, "nativeVersion")?,

@@ -3,12 +3,13 @@ use crate::{
     assignment_native::AssignmentNative,
     assignment_prompt::assignment_prompt,
     assignment_result::{assignment_completion, assignment_turn},
-    assignment_runner::{AssignmentRunner, release_lease},
+    assignment_runner::{AssignmentRunner, release_lease, thread_lease_name},
     schema::{Schema, validate},
     store::Record,
 };
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, checked_native_contract::CheckedNativeContracts,
+    native_backend::BackendIdentity,
 };
 use ivy_sdk::{
     clock::{Clock, date_to_iso},
@@ -47,15 +48,16 @@ impl AssignmentExecution<'_, '_, '_> {
                 interface_version: "1.0.0".into(),
             }],
         )?;
+        let backend = BackendIdentity::optional(execution.required("executionTarget")?.get("backend"))?;
         let status = selected
             .call(
                 &"agent.status".into(),
-                IvyJson::object(Vec::<(String, IvyJson)>::new()),
+                BackendIdentity::select_arguments(backend.as_ref(), IvyJson::object(Vec::<(String, IvyJson)>::new()))?,
                 None,
                 ToolCallOptions::default(),
             )
             .await?;
-        let target = IvyJson::object(
+        let mut target = IvyJson::object(
             [
                 "serviceNodeId",
                 "hostId",
@@ -65,8 +67,9 @@ impl AssignmentExecution<'_, '_, '_> {
             ]
             .map(|key| (key, status.get(key).cloned().unwrap_or(IvyJson::Null))),
         );
+        if let Some(backend) = &backend { target.insert("backend", backend.json()); }
         validate(Schema::NativeTarget, &target)?;
-        if status.get("serviceNodeId") != execution.get("serviceNodeId")
+        if !BackendIdentity::matches(&status, backend.as_ref()) || status.get("serviceNodeId") != execution.get("serviceNodeId")
             || !nonempty(status.get("epoch"))
         {
             return Err(IvyError::new(
@@ -104,14 +107,7 @@ impl AssignmentExecution<'_, '_, '_> {
         let lease_key = "secretary/thread-lease";
         let mut lease = None;
         if reuse.is_some_and(|v| v != &"new".into()) {
-            let name = if reuse == Some(&"main".into()) {
-                "main".to_owned()
-            } else {
-                format!(
-                    "assignment-{}",
-                    assignment.required("assignmentId")?.as_str()?
-                )
-            };
+            let name = thread_lease_name(assignment, execution.required("executionTarget")?)?;
             let active_id = current.required("pin")?.required("objectId")?;
             lease = Some(
                 if let Some(saved) = journal.named(lease_key, &name, true)? {

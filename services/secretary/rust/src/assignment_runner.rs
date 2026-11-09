@@ -4,6 +4,19 @@ use ivy_contracts::{IvyJson, IvyResult};
 
 const NATIVE_CALL: &str = "secretary/assignment-native-call";
 const THREAD_LEASE: &str = "secretary/thread-lease";
+pub fn thread_lease_name(assignment: &IvyJson, target: &IvyJson) -> IvyResult<String> {
+    let mut name = if assignment.required("execution")?.get("reuse") == Some(&"main".into()) {
+        "main".to_owned()
+    } else {
+        format!("assignment-{}", assignment.required("assignmentId")?.as_str()?)
+    };
+    if let Some(backend) = target.get("backend") {
+        ivy_contracts::native_backend::BackendIdentity::from_json(backend)?;
+        name.push('-');
+        name.push_str(&ivy_contracts::hash::hash_json(backend)?[7..]);
+    }
+    Ok(name)
+}
 
 pub fn execution_failure_disposition(code: &str, attempts: f64, age_ms: f64) -> &'static str {
     let pending = matches!(
@@ -83,14 +96,7 @@ pub fn release_lease(journal: &Journal, current: &IvyJson) -> IvyResult<()> {
     if reuse.is_none() || reuse == Some(&"new".into()) {
         return Ok(());
     }
-    let name = if reuse == Some(&"main".into()) {
-        "main".to_owned()
-    } else {
-        format!(
-            "assignment-{}",
-            assignment.required("assignmentId")?.as_str()?
-        )
-    };
+    let name = thread_lease_name(assignment, execution.required("executionTarget")?)?;
     if let Some(lease) = journal.named(THREAD_LEASE, &name, true)? {
         if lease.value.get("activeExecutionObjectId") == current.required("pin")?.get("objectId") {
             let mut next = lease.value.clone();

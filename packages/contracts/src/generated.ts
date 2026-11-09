@@ -643,6 +643,7 @@ export namespace Chat {
   export type HistoryPage = { "entries": Array<(Chat.InputView) | (Chat.ReplyView)>; "throughSequence": number; "hasMore": boolean; };
 }
 export namespace Secretary {
+  export type BackendIdentity = { "backendId": string; "provider": "codex" | "claude"; "accountId": string; };
   export type Pin = { "objectId": string; "revision": number; };
   export type Scope = { "secretaryId": string; "rootObjectId": string; };
   export type SourceDefinition = { "sourceId": string; "accountId": string; "kind": "email" | "teams" | "whatsapp"; "producerPrincipalIds": Array<string>; "allowedSenderIds": (Array<string>) | (null); "ownSenderIds": Array<string>; };
@@ -662,8 +663,8 @@ export namespace Secretary {
   export type WhatsAppRuleOverride = { "enabled"?: boolean; "minimumUrgency"?: "normal" | "high" | "critical"; "window"?: (Secretary.ContactWindow) | (null); "questionsOnly"?: boolean; };
   export type VoiceRuleOverride = { "enabled"?: boolean; "minimumUrgency"?: "critical"; "window"?: (Secretary.ContactWindow) | (null); "immediateOnly"?: boolean; };
   export type RuleOverrides = { "main"?: Secretary.ContactRuleOverride; "whatsapp"?: Secretary.WhatsAppRuleOverride; "voice"?: Secretary.VoiceRuleOverride; "researchMaxMinutes"?: number; };
-  export type ExecutionTarget = { "serviceNodeId": string; "threadCwd": string; "model": (string) | (null); "effort": "low" | "medium" | "high" | "xhigh"; "permissions": string; };
-  export type NativeTarget = { "serviceNodeId": string; "hostId": string; "nativeVersion": string; "nativeExecutableHash": string; "catalogHash": string; };
+  export type ExecutionTarget = { "serviceNodeId": string; "backend"?: Secretary.BackendIdentity; "threadCwd": string; "model": (string) | (null); "effort": "low" | "medium" | "high" | "xhigh"; "permissions": string; };
+  export type NativeTarget = { "serviceNodeId": string; "backend"?: Secretary.BackendIdentity; "hostId": string; "nativeVersion": string; "nativeExecutableHash": string; "catalogHash": string; };
   export type SecretaryConfiguration = { "schemaVersion": 1; "rules": Secretary.GlobalRules; "execution": (Secretary.ExecutionTarget) | (null); "browserNotifications"?: boolean; "updatedAt": string; };
   export type ScheduleTrigger = { "kind": "schedule"; "timeZone": string; "cadence": "interval" | "daily" | "weekly"; "intervalMinutes": (number) | (null); "localTime": (string) | (null); "weekdays": Array<number>; };
   export type EventTrigger = { "kind": "event"; "topic": string; "topicVersion": string; "sourceServiceNodeId": (string) | (null); "eventKind": (string) | (null); };

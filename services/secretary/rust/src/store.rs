@@ -57,12 +57,12 @@ impl Record {
     }
     pub fn versions(self) -> &'static [&'static str] {
         match self {
-            Self::Configuration => &["1.0.0", "1.1.0"],
+            Self::Configuration => &["1.0.0", "1.1.0", "1.2.0"],
             Self::Item => &["1.0.0", "1.1.0", "1.2.0", "1.3.0"],
             Self::Assignment => &["1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"],
             Self::ScheduleProgress | Self::EventProgress => &["1.0.0", "1.1.0", "1.2.0"],
             Self::Execution => &[
-                "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0",
+                "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0",
             ],
             _ => &["1.0.0"],
         }

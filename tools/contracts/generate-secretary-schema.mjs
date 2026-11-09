@@ -13,6 +13,7 @@ const expectedScope = { ...ref('Scope'), description: 'Copy this value unchanged
 const stamp = { type: 'string', pattern: '^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$' };
 const time = { type: 'string', pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' };
 const defs = {
+  BackendIdentity: JSON.parse(readFileSync('specs/schemas/agent.schema.json', 'utf8')).$defs.BackendIdentity,
   Pin: object({ objectId: text(), revision: integer(1) }),
   Scope: object({ secretaryId: text(64), rootObjectId: text() }),
   SourceDefinition: object({ sourceId: text(64), accountId: text(), kind: enumeration('email', 'teams', 'whatsapp'),
@@ -37,8 +38,8 @@ const defs = {
   WhatsAppRuleOverride: optionalObject({ enabled: { type: 'boolean' }, minimumUrgency: enumeration('normal', 'high', 'critical'), window: nullable(ref('ContactWindow')), questionsOnly: { type: 'boolean' } }),
   VoiceRuleOverride: optionalObject({ enabled: { type: 'boolean' }, minimumUrgency: { const: 'critical' }, window: nullable(ref('ContactWindow')), immediateOnly: { type: 'boolean' } }),
   RuleOverrides: optionalObject({ main: ref('ContactRuleOverride'), whatsapp: ref('WhatsAppRuleOverride'), voice: ref('VoiceRuleOverride'), researchMaxMinutes: integer(0, 5) }),
-  ExecutionTarget: object({ serviceNodeId: text(), threadCwd: text(4096), model: nullable(text(128)), effort: enumeration('low', 'medium', 'high', 'xhigh'), permissions: text(128) }),
-  NativeTarget: object({ serviceNodeId: text(), hostId: text(), nativeVersion: text(), nativeExecutableHash: hash, catalogHash: hash }),
+  ExecutionTarget: optionalObject({ serviceNodeId: text(), backend: ref('BackendIdentity'), threadCwd: text(4096), model: nullable(text(128)), effort: enumeration('low', 'medium', 'high', 'xhigh'), permissions: text(128) }, ['serviceNodeId','threadCwd','model','effort','permissions']),
+  NativeTarget: optionalObject({ serviceNodeId: text(), backend: ref('BackendIdentity'), hostId: text(), nativeVersion: text(), nativeExecutableHash: hash, catalogHash: hash }, ['serviceNodeId','hostId','nativeVersion','nativeExecutableHash','catalogHash']),
   SecretaryConfiguration: optionalObject({ schemaVersion: { const: 1 }, rules: ref('GlobalRules'), execution: nullable(ref('ExecutionTarget')), browserNotifications: { type: 'boolean' }, updatedAt: stamp }, ['schemaVersion', 'rules', 'execution', 'updatedAt']),
   ScheduleTrigger: object({ kind: { const: 'schedule' }, timeZone: text(128), cadence: enumeration('interval', 'daily', 'weekly'), intervalMinutes: nullable(integer(1, 10080)), localTime: nullable(time), weekdays: array(integer(0, 6), 7) }),
   EventTrigger: object({ kind: { const: 'event' }, topic: text(128), topicVersion: text(32), sourceServiceNodeId: nullable(text()), eventKind: nullable(text(256)) }),

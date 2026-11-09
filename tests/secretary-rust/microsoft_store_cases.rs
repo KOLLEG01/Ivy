@@ -364,6 +364,7 @@ async fn original_microsoft_schemas_local_graph_and_native_recovery() {
                 .unwrap()
                 .clone(),
             NativeOwnerIdentity {
+                backend: None,
                 service_node_id: text("serviceNodeId"),
                 host_id: Some(text("hostId")),
                 native_version: text("nativeVersion"),
