@@ -915,7 +915,7 @@ impl State {
             let mut prior: Option<(&String, &String)> = None;
             for (id, (c, v)) in &releases {
                 if c == component && json::compare_versions(v, version).ok() == Some(std::cmp::Ordering::Less)
-                    && prior.is_none_or(|(_, best)| json::compare_versions(v, best).ok() == Some(std::cmp::Ordering::Greater)) { prior = Some((id, v)); }
+                    && prior.is_none_or(|(_, best)| matches!(json::compare_versions(v, best).ok(), Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal))) { prior = Some((id, v)); }
             }
             if let Some((id, _)) = prior { protected.insert(id.clone()); }
         }
