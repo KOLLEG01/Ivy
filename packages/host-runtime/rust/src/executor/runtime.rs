@@ -83,12 +83,7 @@ impl NativeActivationRuntime {
             preparation,
             job_launcher,
             inspector,
-            if cfg!(windows) {
-                "win32"
-            } else {
-                std::env::consts::OS
-            }
-            .into(),
+            crate::native_plan::host_os().into(),
             docker,
             systemd,
         ))
@@ -247,7 +242,9 @@ impl NativeActivationRuntime {
     }
 }
 impl ActivationRuntime for NativeActivationRuntime {
-    fn node_runtime(&self) -> Option<crate::node_runtime::NodeRuntime> { self.preparation.node.clone() }
+    fn node_runtime(&self) -> Option<crate::node_runtime::NodeRuntime> {
+        self.preparation.node.clone()
+    }
     fn prepare<'a>(
         &'a self,
         c: &'a OperationContext,
@@ -299,7 +296,7 @@ impl ActivationRuntime for NativeActivationRuntime {
                 let mut handles = slot.lock().await;
                 self.reconcile_unit(c, &instance, target.as_ref(), allow_start, &mut handles)
                     .await
-            } else if self.platform == "win32"
+            } else if ["win32", "darwin"].contains(&self.platform.as_str())
                 && instance.get("componentId") != Some(&"host-executor".into())
             {
                 // Installed bootstrap instances use the same OS authority as

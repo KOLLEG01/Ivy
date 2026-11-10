@@ -292,11 +292,7 @@ pub async fn relocate_native_storage(
                         "Native recovery needs an exact supported storage layout.",
                     )
                 })?;
-            let platform = if cfg!(windows) {
-                "win32"
-            } else {
-                std::env::consts::OS
-            };
+            let platform = crate::native_plan::host_os();
             let arch = match std::env::consts::ARCH {
                 "x86_64" => "x64",
                 "aarch64" => "arm64",

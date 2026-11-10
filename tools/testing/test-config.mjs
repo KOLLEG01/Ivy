@@ -134,6 +134,15 @@ export const privateRepo = false;
 
 // Explicit Cargo targets keep --files narrow and do not infer service ownership.
 export const rustTests = {
+  "tests/rust/host-journal-native-cases.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-actions",
+    "filter": "journal_cases::"
+  },
+  "tests/rust/host-file-events.rs": {
+    "package": "ivy-host-runtime",
+    "test": "host-file-events"
+  },
   "tests/rust/host-shared-server.rs": { package: "ivy-codex-server", test: "shared-server" },
   "tests/rust/agent-native-connection.rs": {
     package: "ivy-agent-manager", test: "agent-interactions", filter: "native_connection_cases::", testThreads: 1,

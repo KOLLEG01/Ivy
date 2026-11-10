@@ -95,7 +95,7 @@ fn measured_space(path: &Path) -> io::Result<Space> {
     }
     Ok(value)
 }
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn measured_space(path: &Path) -> io::Result<Space> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
     let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Path contains NUL."))?;
@@ -109,7 +109,7 @@ fn measured_space(path: &Path) -> io::Result<Space> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Filesystem byte count exceeds u64."));
     Ok(Space { available: bytes(value.f_bavail as u64)?, total: bytes(value.f_blocks as u64)? })
 }
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, unix)))]
 fn measured_space(_path: &Path) -> io::Result<Space> { Err(io::Error::new(io::ErrorKind::Unsupported, "Unsupported host platform.")) }
 
 fn probe(mut path: PathBuf) -> io::Result<Space> {

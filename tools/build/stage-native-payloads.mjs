@@ -89,7 +89,7 @@ export function stageNativePayloads({ component, root = process.cwd(), outputRoo
   plan ??= materializeNativePlan(JSON.parse(readFileSync(resolve(root, 'services', component, 'deploy.json'), 'utf8')));
   if (plan.schemaVersion !== 1 || typeof plan.version !== 'string' || !plan.version || typeof plan.requirements?.node !== 'string' || !plan.requirements.node) throw Error('Native staging requires the unchanged v1 plan and Node requirement.');
   if (!identity || identity.schemaVersion !== 1 || typeof identity.version !== 'string' || !identity.version || !/^sha256:[0-9a-f]{64}$/.test(identity.buildId)) throw Error('A shared native build identity is required.');
-  const os = choices(plan.requirements.os, ['win32', 'linux'], ['win32', 'linux']);
+  const os = choices(plan.requirements.os, ['win32', 'linux', 'darwin'], ['win32', 'linux', 'darwin']);
   const arch = choices(plan.requirements.arch, ['x64', 'arm64'], ['x64', 'arm64']);
   const platforms = Object.values(rustBackendTargets).filter(p => { const [o, a] = p.split('-'); return os.includes(o) && arch.includes(a); });
   if (platforms.length !== 1) throw Error('Native staging requires one materialized host plan.');
@@ -98,7 +98,7 @@ export function stageNativePayloads({ component, root = process.cwd(), outputRoo
       plan.readiness?.command?.executable !== `dist/native/${platforms[0]}/ivy-health${suffix}`)
     throw Error('Native staging requires direct native service and health commands.');
   if (!Array.isArray(payloads)) throw Error('Explicit prebuilt payload records are required.');
-  if (!requiredBinaries || Array.isArray(requiredBinaries) || typeof requiredBinaries !== 'object' || Object.keys(requiredBinaries).some(key => !['win32', 'linux'].includes(key))) throw Error('Required native helpers must be declared by OS.');
+  if (!requiredBinaries || Array.isArray(requiredBinaries) || typeof requiredBinaries !== 'object' || Object.keys(requiredBinaries).some(key => !['win32', 'linux', 'darwin'].includes(key))) throw Error('Required native helpers must be declared by OS.');
   for (const names of Object.values(requiredBinaries)) if (!Array.isArray(names) || names.some(name => typeof name !== 'string' || !/^[A-Za-z0-9_-]+$/.test(name))) throw Error('Invalid required native helper name.');
   const selected = new Map(platforms.map(platform => [platform, { primary: 0, files: new Map(), instructions: null }]));
   const seen = new Set();
@@ -151,7 +151,7 @@ export function stageNativePayloads({ component, root = process.cwd(), outputRoo
   for (const [platform, group] of selected) {
     if (group.primary !== 1) throw Error('The prepared host requires the selected component payload.');
     const windows = platform.startsWith('win32-');
-    for (const name of ['ivy-' + component, 'ivy-health', ...(requiredBinaries[windows ? 'win32' : 'linux'] ?? [])]) {
+    for (const name of ['ivy-' + component, 'ivy-health', ...(requiredBinaries[platform.split('-')[0]] ?? [])]) {
       const file = group.files.get((name + (windows ? '.exe' : '')).toLowerCase());
       if (!file || file.name !== name + (windows ? '.exe' : '')) throw Error('Required native executable is missing: ' + platform + '/' + name);
     }
@@ -174,7 +174,7 @@ export function stageNativePayloads({ component, root = process.cwd(), outputRoo
     for (const { source, name, runtime } of group.files.values()) {
       const path = resolve(directory, name);
       copyFileSync(source, path);
-      if (platform.startsWith('linux-') && !runtime) {
+      if (!platform.startsWith('win32-') && !runtime) {
         if (process.platform !== 'win32') chmodSync(path, 0o755);
         linuxExecutables.push(path);
       }

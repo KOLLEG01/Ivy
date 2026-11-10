@@ -4,6 +4,8 @@ use crate::{IvyJson, IvyResult, bootstrap_restart::NativeBootstrapRestartOs};
 use futures_util::future::BoxFuture;
 use std::path::PathBuf;
 mod automatic;
+#[cfg(target_os = "macos")]
+pub mod launchd;
 mod systemd;
 #[cfg(windows)]
 pub(crate) mod windows;
@@ -25,10 +27,17 @@ pub fn bootstrap_os(
             distribution,
             node,
         )))
+    } else if cfg!(target_os = "macos") {
+        #[cfg(target_os = "macos")]
+        {
+            return Ok(std::sync::Arc::new(launchd::LaunchdBootstrapOs));
+        }
+        #[cfg(not(target_os = "macos"))]
+        unreachable!()
     } else {
         Err(crate::IvyError::new(
             "unsupported_runtime",
-            "Bootstrap maintenance supports Windows and systemd Linux.",
+            "Bootstrap maintenance supports Windows, macOS and systemd Linux.",
         ))
     }
 }

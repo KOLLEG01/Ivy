@@ -8,7 +8,7 @@ pub fn require_restore_platform<'a>(manifest: &J, node: impl Into<Option<&'a Nod
     let node = node.into();
     let node_matches = platform.get("node") == Some(&"unavailable".into())
         || node.is_some_and(|node| platform.get("node") == Some(&format!("v{}", node.version).into()));
-    let os = if cfg!(windows) { "win32" } else { "linux" };
+    let os = crate::native_plan::host_os();
     let arch = match std::env::consts::ARCH {
         "x86_64" => "x64",
         "aarch64" => "arm64",

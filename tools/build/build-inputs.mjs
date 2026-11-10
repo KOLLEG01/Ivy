@@ -1,7 +1,7 @@
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 
-const targets = new Set(['win32-x64', 'win32-arm64', 'linux-x64', 'linux-arm64']);
+const targets = new Set(['win32-x64', 'win32-arm64', 'linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64']);
 const invalid = () => Error('Build inputs require a bounded version 1 target map of distinct checkout-relative file paths.');
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const folded = value => value.replace(/[A-Z]/g, c => c.toLowerCase());

@@ -477,11 +477,7 @@ impl Inner {
         require(
             candidate.get("componentId") == Some(&"host-executor".into())
                 && next.get("os")
-                    == Some(&IvyJson::from(if cfg!(windows) {
-                        "win32"
-                    } else {
-                        std::env::consts::OS
-                    })),
+                    == Some(&IvyJson::from(crate::native_plan::host_os())),
             "target_conflict",
             "Maintenance requires this platform's checked host-executor candidate.",
         )?;

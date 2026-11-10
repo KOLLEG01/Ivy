@@ -6,6 +6,37 @@ mod owner;
 use owner::{ExitAction, Policy};
 
 #[test]
+fn health_wait_uses_expiry_and_never_spins_after_stale_or_future_timestamps() {
+    use std::time::Duration;
+    assert_eq!(
+        owner::health_check_delay(100_000, 100_000),
+        Duration::from_secs(15)
+    );
+    assert_eq!(
+        owner::health_check_delay(100_000, 114_999),
+        Duration::from_millis(1)
+    );
+    assert_eq!(
+        owner::health_check_delay(100_000, 115_000),
+        Duration::from_millis(1)
+    );
+    assert_eq!(
+        owner::health_check_delay(101_000, 100_000),
+        Duration::from_secs(16)
+    );
+    assert_eq!(
+        owner::health_check_delay(i64::MIN, i64::MAX),
+        Duration::from_millis(1)
+    );
+    let mut policy = Policy::new(false);
+    policy.launched(0);
+    policy.ready(10);
+    policy.unready(15_000);
+    assert!(!policy.readiness_expired(15_010, 30_000));
+    assert!(policy.readiness_expired(45_001, 30_000));
+}
+
+#[test]
 fn restart_policies_preserve_exit_and_uncertain_outcomes() {
     for (policy, code, error, expected) in [
         ("never", Some(1), None, ExitAction::Exited),
@@ -130,4 +161,30 @@ fn executor_clock_boundaries_are_strict_and_allow_only_one_second_future() {
     ] {
         assert_eq!(manager::executor_fresh(100_000, 100_000 - age), fresh);
     }
+}
+
+#[test]
+fn macos_uses_the_manager_process_topology_and_linux_keeps_systemd() {
+    use ivy_contracts::IvyJson as J;
+    use ivy_service_manager::topology::owner_ids;
+    let configuration = J::object([(
+        "instances",
+        J::Array(
+            ["host-executor", "service-manager", "agent-manager"]
+                .into_iter()
+                .map(|id| {
+                    J::object([
+                        ("instanceId", id.into()),
+                        ("componentId", id.into()),
+                        ("engine", "process".into()),
+                    ])
+                })
+                .collect(),
+        ),
+    )]);
+    assert_eq!(
+        owner_ids("darwin", &configuration).unwrap(),
+        vec![ivy_contracts::JsString::from("agent-manager")]
+    );
+    assert!(owner_ids("linux", &configuration).unwrap().is_empty());
 }

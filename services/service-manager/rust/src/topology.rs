@@ -94,7 +94,7 @@ impl Owners {
 /// Select from accepted local configuration, never directly from a Hive hint.
 /// Disabled process instances still need an owner to observe a later target.
 pub fn owner_ids(platform: &str, configuration: &IvyJson) -> IvyResult<Vec<JsString>> {
-    if platform != "win32" {
+    if !["win32", "darwin"].contains(&platform) {
         return Ok(Vec::new());
     }
     let Some(IvyJson::Array(instances)) = configuration.get("instances") else {

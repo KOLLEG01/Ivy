@@ -264,11 +264,7 @@ async fn verify_candidate_for_runtime(
             let manifest = release_manifest(
                 &read_json(&manifest_path, CONFIGURATION_BYTES).map_err(FileError::error)?,
             )?;
-            let os = if cfg!(windows) {
-                "win32"
-            } else {
-                std::env::consts::OS
-            };
+            let os = crate::native_plan::host_os();
             let arch = match std::env::consts::ARCH {
                 "x86_64" => "x64",
                 "aarch64" => "arm64",

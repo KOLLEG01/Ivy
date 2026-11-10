@@ -3,6 +3,14 @@
 //! Times here are elapsed milliseconds from the owner's monotonic clock. The
 //! journal adapter converts the remaining restart delay to a wall-clock date.
 
+/// A healthy owner waits for a file event or the existing freshness boundary,
+/// rather than racing each heartbeat with an independent periodic health poll.
+pub fn health_check_delay(observed_ms: i64, now_ms: i64) -> std::time::Duration {
+    std::time::Duration::from_millis(
+        (i128::from(observed_ms) + 15_000 - i128::from(now_ms)).clamp(1, 16_000) as u64,
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitAction {
     Exited,

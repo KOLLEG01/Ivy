@@ -16,7 +16,7 @@ use ivy_host_runtime::{
     runtime_maintenance::runtime_reset_active,
 };
 use ivy_sdk::service::ServiceClient;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc};
 use tokio::sync::{Mutex, watch};
 
 pub struct Manager {
@@ -212,7 +212,7 @@ impl Manager {
             owners
                 .lock()
                 .await
-                .reconcile(if cfg!(windows) { "win32" } else { "linux" }, &accepted)
+                .reconcile(ivy_host_runtime::native_plan::host_os(), &accepted)
                 .await?;
             health
                 .write(false, None, "Connecting and reconciling host state.".into())
@@ -225,20 +225,24 @@ impl Manager {
         }
         tokio::spawn({
             let shutdown = shutdown.clone();
+            let mut events = ivy_host_runtime::file_events::FileEvents::new([
+                configuration.path.clone(),
+                health_file.control_path(),
+            ]);
             async move {
-                let mut next_refresh = tokio::time::Instant::now() + Duration::from_secs(2);
                 loop {
-                    tokio::select! { _ = control_signal.changed() => break, _ = tokio::time::sleep(Duration::from_millis(500)) => () }
                     if health_file.control().await.ok().flatten().is_some() {
                         let _ = shutdown.close().await;
                         break;
                     }
-                    if tokio::time::Instant::now() >= next_refresh {
-                        // Offline local ownership must follow accepted file edits
-                        // too. Failed input keeps the prior owners and is retried;
-                        // connected report callbacks surface the same error.
-                        let _ = refresh().await;
-                        next_refresh = tokio::time::Instant::now() + Duration::from_secs(2);
+                    // Failed input keeps prior owners and is retried by the
+                    // bounded fallback, including when Hive is disconnected.
+                    let _ = refresh().await;
+                    let delay = events.fallback();
+                    tokio::select! {
+                        _ = control_signal.changed() => break,
+                        _ = events.changed() => (),
+                        _ = tokio::time::sleep(delay) => (),
                     }
                 }
             }

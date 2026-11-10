@@ -66,7 +66,10 @@ pub use crate::executor_lock::ExecutorLock;
 #[derive(Clone, Copy)]
 pub struct HistoryLimits { pub count: usize, pub bytes: usize }
 impl Default for HistoryLimits { fn default() -> Self { Self { count: 10_000, bytes: 64 * 1024 * 1024 } } }
-struct State { db: Connection, config: IvyJson, clock: Arc<dyn Clock>, storage_space: Option<(i64, IvyJson)> }
+struct State { db: Connection, config: IvyJson, clock: Arc<dyn Clock>, storage_space: Option<(i64, IvyJson)>, wake: Arc<std::sync::atomic::AtomicBool>, wake_path: PathBuf }
+
+/// A replaceable wake hint, never an alternative source of deployment state.
+pub fn change_path(config: &IvyJson) -> IvyResult<PathBuf> { Ok(path(config.required("runtimeRoot")?)?.join("runtime-change.json")) }
 #[derive(Default)]
 struct RetentionIds { seen:BTreeSet<String>, order:Vec<String> }
 impl RetentionIds {
@@ -89,7 +92,17 @@ impl HostJournal {
         let state = self.state.clone();
         internal(tokio::task::spawn_blocking(move || {
             let mut state = internal(state.lock())?;
-            work(state.as_mut().ok_or_else(IvyError::internal)?)
+            let state = state.as_mut().ok_or_else(IvyError::internal)?;
+            let result = work(state);
+            // Publish only after the outer transaction ended. SQLite hooks also
+            // see rolled-back changes; an extra hint is harmless. Heartbeat and
+            // observation writes deliberately never feed back into this wakeup.
+            if state.db.is_autocommit() && state.wake.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                let _ = crate::config::write_json(&state.wake_path, &IvyJson::object([
+                    ("schemaVersion", 1.0.into()), ("generation", uuid::Uuid::new_v4().to_string().into())
+                ]));
+            }
+            result
         }).await)?
     }
     pub async fn close(&self) -> IvyResult<()> {
@@ -118,7 +131,7 @@ impl HostJournal {
         self.with(move |s| s.policy(&target).map(|policy| policy.map(|(_, config)| config))).await
     }
     pub async fn use_configuration(&self, config: IvyJson) -> IvyResult<()> {
-        self.with(move |s| { same_installation(&s.config, &config)?; s.transaction(|s| s.identities(&config))?; s.config = config; Ok(()) }).await
+        self.with(move |s| { same_installation(&s.config, &config)?; s.transaction(|s| s.identities(&config))?; if s.config != config { s.wake.store(true, std::sync::atomic::Ordering::Release); } s.config = config; Ok(()) }).await
     }
     pub async fn configuration_adoption(&self) -> IvyResult<Option<IvyJson>> {
         self.with(|s| s.configuration_adoption()).await
@@ -443,7 +456,9 @@ impl State {
         let format: i64 = internal(db.query_row("PRAGMA user_version", [], |r| r.get(0)))?;
         require(format == 0 || format == 1, "unsupported_storage", "Host journal format is not supported by this executor.")?;
         internal(db.execute_batch(SCHEMA))?;
-        let state = Self { db, config, clock, storage_space: None };
+        let wake_path = change_path(&config)?;
+        let wake = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let state = Self { db, config, clock, storage_space: None, wake: wake.clone(), wake_path };
         state.transaction(|s| {
             let host = s.config.required("hostId")?.as_str()?;
             require(s.text("SELECT value FROM meta WHERE key=?", "hostId")?.is_none_or(|v| v == host), "target_conflict", "A host journal cannot be reused for another host identity.")?;
@@ -467,6 +482,11 @@ impl State {
             internal(s.db.execute("INSERT OR IGNORE INTO meta VALUES (?,?)", params!["installation", installation]))?;
             s.identities(&s.config)
         })?;
+        internal(state.db.update_hook(Some(move |_: ivy_store::rusqlite::hooks::Action, _: &str, table: &str, _: i64| {
+            if matches!(table, "operations" | "runtime_targets" | "installed") {
+                wake.store(true, std::sync::atomic::Ordering::Release);
+            }
+        })))?;
         Ok(state)
     }
     fn transaction<T>(&self, work: impl FnOnce(&Self) -> IvyResult<T>) -> IvyResult<T> {

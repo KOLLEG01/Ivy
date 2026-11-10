@@ -79,12 +79,13 @@
               "items": {
                 "enum": [
                   "win32",
-                  "linux"
+                  "linux",
+                  "darwin"
                 ]
               },
               "uniqueItems": true,
               "minItems": 1,
-              "maxItems": 2
+              "maxItems": 3
             },
             "arch": {
               "type": "array",
@@ -701,12 +702,13 @@
               "items": {
                 "enum": [
                   "win32",
-                  "linux"
+                  "linux",
+                  "darwin"
                 ]
               },
               "uniqueItems": true,
               "minItems": 1,
-              "maxItems": 2
+              "maxItems": 3
             },
             "arch": {
               "type": "array",
@@ -2036,7 +2038,8 @@
             "os": {
               "enum": [
                 "win32",
-                "linux"
+                "linux",
+                "darwin"
               ]
             },
             "arch": {
@@ -2420,7 +2423,8 @@
             "os": {
               "enum": [
                 "win32",
-                "linux"
+                "linux",
+                "darwin"
               ]
             },
             "arch": {
@@ -3489,7 +3493,8 @@
         "os": {
           "enum": [
             "win32",
-            "linux"
+            "linux",
+            "darwin"
           ]
         },
         "installationId": {

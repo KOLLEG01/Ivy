@@ -2,6 +2,17 @@
 use crate::{IvyError, IvyJson, IvyResult};
 use std::path::{Path, PathBuf};
 
+/// Host identity follows the deployment and Node platform contracts.
+pub const fn host_os() -> &'static str {
+    if cfg!(windows) {
+        "win32"
+    } else if cfg!(target_os = "macos") {
+        "darwin"
+    } else {
+        std::env::consts::OS
+    }
+}
+
 fn invalid(message: &str) -> IvyError {
     IvyError::new("invalid_arguments", message)
 }
@@ -24,7 +35,7 @@ pub fn materialize_native_plan(mut plan: IvyJson, os: &str, arch: &str) -> IvyRe
     if !is_native_plan(&plan) {
         return Ok(plan);
     }
-    if !["win32", "linux"].contains(&os) || !["x64", "arm64"].contains(&arch) {
+    if !["win32", "linux", "darwin"].contains(&os) || !["x64", "arm64"].contains(&arch) {
         return Err(invalid(
             "Native preparation requires a supported host platform.",
         ));
@@ -79,11 +90,7 @@ pub fn materialize_native_plan(mut plan: IvyJson, os: &str, arch: &str) -> IvyRe
 pub fn materialize_native_plan_for_host(plan: IvyJson) -> IvyResult<IvyJson> {
     materialize_native_plan(
         plan,
-        if cfg!(windows) {
-            "win32"
-        } else {
-            std::env::consts::OS
-        },
+        host_os(),
         match std::env::consts::ARCH {
             "x86_64" => "x64",
             "aarch64" => "arm64",
@@ -95,11 +102,7 @@ pub fn materialize_native_plan_for_host(plan: IvyJson) -> IvyResult<IvyJson> {
 /// Existing artifacts keep their flat helper paths; prepared native artifacts
 /// colocate helpers with the service under the selected platform directory.
 pub fn native_binary_path(artifact: &Path, name: &str) -> PathBuf {
-    let os = if cfg!(windows) {
-        "win32"
-    } else {
-        std::env::consts::OS
-    };
+    let os = host_os();
     let arch = match std::env::consts::ARCH {
         "x86_64" => "x64",
         "aarch64" => "arm64",

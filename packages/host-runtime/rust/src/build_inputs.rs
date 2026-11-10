@@ -8,7 +8,7 @@ use std::{
     path::Path,
 };
 
-const TARGETS: [&str; 4] = ["win32-x64", "win32-arm64", "linux-x64", "linux-arm64"];
+const TARGETS: [&str; 6] = ["win32-x64", "win32-arm64", "linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64"];
 const DECLARATION_BYTES: u64 = 64 * 1024;
 
 #[derive(Deserialize)]

@@ -33,6 +33,7 @@ pub mod emitted_runtime;
 pub mod executor_lock;
 pub mod executor;
 pub mod filesystem;
+pub mod file_events;
 pub mod exec_file;
 pub mod health;
 pub mod memory;

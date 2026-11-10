@@ -30,7 +30,10 @@ fn source() -> IvyJson {
         plan.insert(key, command);
     }
     let mut requirements = plan.required("requirements").unwrap().clone();
-    requirements.insert("os", IvyJson::Array(vec!["win32".into(), "linux".into()]));
+    requirements.insert(
+        "os",
+        IvyJson::Array(vec!["win32".into(), "linux".into(), "darwin".into()]),
+    );
     requirements.insert("arch", IvyJson::Array(vec!["x64".into(), "arm64".into()]));
     plan.insert("requirements", requirements);
     plan
@@ -44,6 +47,8 @@ fn native_prepared_plan_matches_only_the_selected_artifact() {
         ("win32", "arm64"),
         ("linux", "x64"),
         ("linux", "arm64"),
+        ("darwin", "x64"),
+        ("darwin", "arm64"),
     ] {
         let selected = materialize_native_plan(original.clone(), os, arch).unwrap();
         validate_host("BuildPlan", &selected).unwrap();
@@ -109,7 +114,7 @@ fn invalid_native_commands_fail_and_intentional_javascript_is_unchanged() {
         ]),
     );
     assert!(materialize_native_plan(bad, "win32", "x64").is_err());
-    assert!(materialize_native_plan(source(), "darwin", "x64").is_err());
+    assert!(materialize_native_plan(source(), "freebsd", "x64").is_err());
 }
 
 use ivy_contracts::{JsString, hash::hash_json};
@@ -146,11 +151,7 @@ fn write(path: &Path, bytes: &[u8]) {
     fs::write(path, bytes).unwrap();
 }
 fn os() -> &'static str {
-    if cfg!(windows) {
-        "win32"
-    } else {
-        std::env::consts::OS
-    }
+    ivy_host_runtime::native_plan::host_os()
 }
 fn arch() -> &'static str {
     match std::env::consts::ARCH {
@@ -791,4 +792,40 @@ async fn native_archive_round_trip_checks_direct_commands_and_selected_helpers()
             assert!(received.is_err(), "{mode}");
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn launchd_plan_keeps_escaped_argv_and_background_policy() {
+    use ivy_contracts::IvyJson as J;
+    let plan = J::object([
+        ("os", "darwin".into()),
+        ("installationId", "ivy-next-aaaaaaaaaaaa".into()),
+        ("artifactRoot", "/tmp/A & B".into()),
+        ("configPath", "/tmp/host config.json".into()),
+        ("runtimeRoot", "/tmp/runtime".into()),
+        ("candidateId", "candidate".into()),
+    ]);
+    let process = J::object([
+        ("name", "ivy-next-aaaaaaaaaaaa-bbbbbbbbbbbb".into()),
+        ("instanceId", "host".into()),
+        ("componentId", "host-executor".into()),
+        ("configPath", "/tmp/instance.json".into()),
+        (
+            "entrypoint",
+            J::object([
+                (
+                    "executable",
+                    "dist/native/darwin-arm64/ivy-host-executor".into(),
+                ),
+                ("args", J::Array(vec!["literal <arg>".into()])),
+            ]),
+        ),
+    ]);
+    let content = ivy_host_runtime::bootstrap_os::launchd::plist(&plan, &process).unwrap();
+    assert!(content.contains("/tmp/A &amp; B/dist/native/darwin-arm64/ivy-host-executor"));
+    assert!(content.contains("<string>literal &lt;arg&gt;</string>"));
+    assert!(content.contains("<key>ProcessType</key><string>Background</string>"));
+    assert!(!content.contains("StartCalendarInterval"));
+    assert!(!content.contains("caffeinate"));
 }

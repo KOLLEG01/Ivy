@@ -32,7 +32,7 @@ impl Configuration {
         self.owners
             .lock()
             .await
-            .reconcile(if cfg!(windows) { "win32" } else { "linux" }, &next)
+            .reconcile(ivy_host_runtime::native_plan::host_os(), &next)
             .await?;
         Ok(next)
     }

@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, rmdirSync,
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { compileRustBackend, precompileRustLibrary } from '../tools/build/build-rust-backend.mjs';
+import { compileRustBackend, precompileRustLibrary, rustBackendTargets } from '../tools/build/build-rust-backend.mjs';
 import { buildNativeDeployment } from '../tools/build/build-native-deployment.mjs';
 import { componentBuildInputs } from '../tools/build/build-inputs.mjs';
 
@@ -106,7 +106,7 @@ test('foreign compiler artifacts and traversal names are rejected before staging
   assert.equal(existsSync(join(f.root, '.local/build')), false);
 }));
 
-for (const [os, target] of [['win32', 'x86_64-pc-windows-msvc'], ['linux', 'x86_64-unknown-linux-gnu']]) {
+for (const [os, target] of [['win32', 'x86_64-pc-windows-msvc'], ['linux', 'x86_64-unknown-linux-gnu'], ['darwin', 'x86_64-apple-darwin']]) {
   test(`native Host deployment includes its automatic worker and consumed platform assets (${os})`, () => fixture(f => {
     const helpers = ['ivy-health', 'ivy-job', 'ivy-host-job'];
     f.targets.push({ name: 'ivy-bootstrap-auto-worker', kind: ['bin'] });
@@ -125,7 +125,7 @@ for (const [os, target] of [['win32', 'x86_64-pc-windows-msvc'], ['linux', 'x86_
       mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, 'fixture ' + name);
     }
     const plan = { schemaVersion: 1, componentId: 'host-executor', kind: 'service', version: f.identity.version,
-      requirements: { node: '>=24 <25', os: ['win32', 'linux'], arch: ['x64'] },
+      requirements: { node: '>=24 <25', os: ['win32', 'linux', 'darwin'], arch: ['x64'] },
       entrypoint: { executable: 'dist/native/ivy-host-executor', args: [], timeoutMs: 5000 },
       readiness: { timeoutMs: 5000, command: { executable: 'dist/native/ivy-health', args: [], timeoutMs: 1000 } } };
     writeFileSync(join(f.root, 'services/host-executor/deploy.json'), JSON.stringify(plan));
@@ -217,10 +217,8 @@ test('declared build inputs reject missing, linked and malformed files before na
 }));
 
 test('configured Cargo builds and executes the selected native fixture with required features', { skip: !process.env.IVY_CARGO }, () => fixture(f => {
-  const target = new Map([
-    ['win32-x64', 'x86_64-pc-windows-msvc'], ['win32-arm64', 'aarch64-pc-windows-msvc'],
-    ['linux-x64', 'x86_64-unknown-linux-gnu'], ['linux-arm64', 'aarch64-unknown-linux-gnu'],
-  ]).get(`${process.platform}-${process.arch}`);
+  const target = Object.keys(rustBackendTargets).find(target =>
+    rustBackendTargets[target] === `${process.platform}-${process.arch}`);
   const result = f.build({ cargo: undefined, target });
   assert.equal(result.files.length, 2);
   for (const file of result.files) assert.equal(execFileSync(file, [], { encoding: 'utf8', windowsHide: true }).trim(), 'native-builder');

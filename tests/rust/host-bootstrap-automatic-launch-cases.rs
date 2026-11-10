@@ -37,6 +37,8 @@ fn target() -> &'static str {
         ("windows", "aarch64") => "win32-arm64",
         ("linux", "x86_64") => "linux-x64",
         ("linux", "aarch64") => "linux-arm64",
+        ("macos", "x86_64") => "darwin-x64",
+        ("macos", "aarch64") => "darwin-arm64",
         _ => panic!("Unqualified target"),
     }
 }
