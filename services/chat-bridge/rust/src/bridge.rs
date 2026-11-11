@@ -207,13 +207,7 @@ impl<'a> ChatBridge<'a> {
                     .required("operationId")?
                     .as_js_string()
                     .ok_or_else(IvyError::internal)?;
-                let operation = self.main.operations.find(caller, operation_id).await?;
-                require(
-                    operation.is_some(),
-                    "not_found",
-                    "This caller has no retained ChatBridge operation with that identity.",
-                )?;
-                operation.unwrap().value
+                self.main.operations.read(caller, operation_id).await?.value
             }
             "createMain" => self.main.create(caller, args).await?,
             "send" => self.main.queue().send(caller, args).await?,

@@ -116,6 +116,7 @@ struct Client {
     owner: std::sync::atomic::AtomicBool,
     lose: std::sync::atomic::AtomicBool,
     confirmed: std::sync::atomic::AtomicBool,
+    operation_error: Mutex<Option<(&'static str, Outcome)>>,
     readiness: Mutex<Option<(&'static str, Json)>>,
     calls: Mutex<Vec<Json>>,
     target: Json,
@@ -298,7 +299,13 @@ impl RpcClient for Client {
                                 )])]),
                             ),
                         ])),
-                        "chat.operation" => self.operation(s(args, "operationId")),
+                        "chat.operation" => {
+                            if let Some((code, outcome)) = *self.operation_error.lock().unwrap() {
+                                return Err(IvyError::new(code, "Original receipt unavailable.")
+                                    .with_outcome(outcome));
+                            }
+                            self.operation(s(args, "operationId"))
+                        }
                         "chat.notify" => {
                             let delivery = self.delivery.lock().unwrap().clone().unwrap();
                             let db = Connection::open(&self.path).unwrap();
@@ -484,6 +491,38 @@ fn native_fixture() -> NativeFixture {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn real_publication_delivery_identity_survives_lost_reply_reopen_and_owner_replacement() {
+    retained_delivery(Recovery::Original).await;
+}
+#[derive(Clone, Copy, PartialEq)]
+enum Recovery {
+    Original,
+    FormatterDrift,
+    Expired,
+    MissingAfterDrift,
+    UnknownNotFound,
+    AlteredRequest,
+}
+#[tokio::test(flavor = "current_thread")]
+async fn retained_chat_uses_original_receipt_after_formatter_changes() {
+    retained_delivery(Recovery::FormatterDrift).await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn expired_chat_receipt_preserves_original_request_without_notify() {
+    retained_delivery(Recovery::Expired).await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn absent_chat_receipt_does_not_dispatch_changed_formatter_text() {
+    retained_delivery(Recovery::MissingAfterDrift).await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn unknown_chat_lookup_cannot_authorize_another_notify() {
+    retained_delivery(Recovery::UnknownNotFound).await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn altered_retained_chat_text_cannot_match_the_original_receipt() {
+    retained_delivery(Recovery::AlteredRequest).await;
+}
+async fn retained_delivery(recovery: Recovery) {
     struct Temp(std::path::PathBuf);
     impl Drop for Temp {
         fn drop(&mut self) {
@@ -505,6 +544,7 @@ async fn real_publication_delivery_identity_survives_lost_reply_reopen_and_owner
         owner: std::sync::atomic::AtomicBool::new(true),
         lose: std::sync::atomic::AtomicBool::new(true),
         confirmed: std::sync::atomic::AtomicBool::new(false),
+        operation_error: Mutex::new(None),
         readiness: Mutex::new(None),
         calls: Mutex::default(),
         target: fixture.target,
@@ -541,7 +581,11 @@ async fn real_publication_delivery_identity_survives_lost_reply_reopen_and_owner
             principal_id: "caller".into(),
             service_node_id: "task-board-node".into(),
             policies: Policies {
-                handoff: handoff.clone(),
+                handoff: if round > 0 && recovery != Recovery::Original {
+                    "Changed formatter; never replace the retained text.".into()
+                } else {
+                    handoff.clone()
+                },
                 voice: "voice".into(),
                 phone: Json::Null,
             },
@@ -714,6 +758,47 @@ async fn real_publication_delivery_identity_survives_lost_reply_reopen_and_owner
                 .unwrap();
             assert_eq!(f(&uncertain.value, "state"), &Json::from("outcome_unknown"));
         } else if round == 1 {
+            let held_code = match recovery {
+                Recovery::Expired => {
+                    *client.operation_error.lock().unwrap() =
+                        Some(("operation_expired", Outcome::NotExecuted));
+                    Some("operation_expired")
+                }
+                Recovery::MissingAfterDrift => {
+                    *client.operation_error.lock().unwrap() =
+                        Some(("not_found", Outcome::NotExecuted));
+                    Some("task_board_delivery_mismatch")
+                }
+                Recovery::UnknownNotFound => {
+                    *client.operation_error.lock().unwrap() = Some(("not_found", Outcome::Unknown));
+                    Some("not_found")
+                }
+                Recovery::AlteredRequest => {
+                    let saved = store
+                        .read("task-board/delivery", &delivery_id.clone().into(), true)
+                        .await
+                        .unwrap();
+                    let mut changed = saved.value.clone();
+                    let mut request = changed.required("chatRequest").unwrap().clone();
+                    request.insert("text", "Altered stored text".into());
+                    changed.insert("chatRequest", request.clone());
+                    store
+                        .write(
+                            "task-board/delivery",
+                            &changed,
+                            "fixture-altered-request",
+                            &Json::object([
+                                ("objectId", delivery_id.clone().into()),
+                                ("expectedRevision", saved.pin.revision.into()),
+                            ]),
+                        )
+                        .await
+                        .unwrap();
+                    retained_request = Some(request);
+                    Some("task_board_delivery_unresolved")
+                }
+                _ => None,
+            };
             subject.step(delivery_id).await.unwrap();
             let waiting = store
                 .read(
@@ -727,9 +812,27 @@ async fn real_publication_delivery_identity_survives_lost_reply_reopen_and_owner
                 f(&waiting.value, "chatRequest"),
                 retained_request.as_ref().unwrap()
             );
+            if let Some(code) = held_code {
+                assert_eq!(f(&waiting.value, "state"), &Json::from("outcome_unknown"));
+                assert_eq!(f(&waiting.value, "code"), &Json::from(code));
+            }
             let before = db.total_changes();
             subject.step(delivery_id).await.unwrap();
             assert_eq!(db.total_changes(), before);
+            if held_code.is_some() {
+                let calls = client.calls.lock().unwrap();
+                assert_eq!(
+                    calls
+                        .iter()
+                        .filter(|c| f(&c.as_array().unwrap()[1], "qualifiedName")
+                            == &Json::from("chat.notify"))
+                        .count(),
+                    1,
+                    "Only the original lost-reply admission may send"
+                );
+                assert_eq!(client.requests.lock().unwrap().len(), 1);
+                return;
+            }
         } else if round == 2 {
             client
                 .confirmed

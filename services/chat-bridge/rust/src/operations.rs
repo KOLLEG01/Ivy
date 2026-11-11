@@ -122,6 +122,21 @@ impl<'a> ChatOperations<'a> {
         }
         Ok(result)
     }
+    pub async fn read(&self, caller: &JsString, operation_id: &JsString) -> IvyResult<Document> {
+        if let Some(original) = self.find(caller, operation_id).await? {
+            return Ok(original);
+        }
+        // Absence outside the receipt ring cannot authorize another notification.
+        // Retained originals remain readable regardless of their issued-at epoch.
+        self.store
+            .validate_operation_id(operation_id, None, false)
+            .await
+            .map_err(|error| error.into_ivy())?;
+        Err(IvyError::new(
+            "not_found",
+            "This caller has no retained ChatBridge operation with that identity.",
+        ))
+    }
     pub async fn begin(&self, caller: &JsString, original: &Json) -> IvyResult<Document> {
         self.admission.authorize(
             caller,

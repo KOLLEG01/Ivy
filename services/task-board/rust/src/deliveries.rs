@@ -194,14 +194,14 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
         )?;
         Ok((task, comment.unwrap()))
     }
-    async fn current(&self, id: &JsString) -> IvyResult<Option<Document>> {
+    async fn current(&self, id: &JsString) -> IvyResult<Option<(Document, Json, Json)>> {
         let current = self
             .store
             .read("task-board/delivery", &Json::String(id.clone()), true)
             .await?;
         let v = &current.value;
         if eq(v, "state", "confirmed") {
-            return Ok(Some(current));
+            return Ok(None);
         }
         let publication = self
             .store
@@ -299,7 +299,7 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
                     )?
                     && same(f(p, "channel"), f(f(v, "chatTarget"), "channel"))?
                     && same(f(p, "source"), f(&task, "lastHistory"))?
-                    && f(p, "text") == &Json::String(self.engine.handoff(&task, &comment)?),
+                    && f(p, "text").as_js_string().is_some(),
                 "task_board_delivery_mismatch",
                 "Chat delivery must retain the exact Comment handoff and configured Main channel.",
             )?;
@@ -326,7 +326,7 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
             "task_board_delivery_mismatch",
             "Active delivery state must retain its exact provider operation identity.",
         )?;
-        Ok(Some(current))
+        Ok(Some((current, task, comment)))
     }
     async fn update(&self, current: &Document, next: Json) -> IvyResult<()> {
         if same(
@@ -486,7 +486,7 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
             ("data", reply.clone()),
         ]))
     }
-    async fn chat(&self, current: &Document) -> IvyResult<()> {
+    async fn chat(&self, current: &Document, task: &Json, comment: &Json) -> IvyResult<()> {
         let v = &current.value;
         let target = if !f(v, "chatRequest").is_null() {
             f(v, "chatTarget").clone()
@@ -552,7 +552,15 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
                 )
                 .await
             {
-                Err(e) if e.code == "not_found" => {
+                Err(e) if e.code == "not_found" && e.outcome == Outcome::NotExecuted => {
+                    // Read the original operation before consulting today's formatter.
+                    // An absent receipt permits admission only for a still-verifiable
+                    // unsent request. Expired or unknown operations never reach notify.
+                    require(
+                        f(request, "text") == &Json::String(self.engine.handoff(task, comment)?),
+                        "task_board_delivery_mismatch",
+                        "The unsent Main handoff differs from its original Comment.",
+                    )?;
                     self.channel_call(
                         true,
                         "notify",
@@ -972,13 +980,10 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
     }
     pub async fn step(&self, id: &JsString) -> IvyResult<()> {
         self.engine.verify_owner().await?;
-        let Some(current) = self.current(id).await? else {
+        let Some((current, task, comment)) = self.current(id).await? else {
             return Ok(());
         };
         let v = &current.value;
-        if eq(v, "state", "confirmed") {
-            return Ok(());
-        }
         if eq(v, "state", "outcome_unknown")
             && !(eq(v, "activeRoute", "phone") && !f(v, "phoneRequest").is_null()
                 || eq(v, "activeRoute", "chat") && !f(v, "chatRequest").is_null())
@@ -988,7 +993,7 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
         if eq(v, "activeRoute", "phone") {
             self.phone(&current).await
         } else {
-            self.chat(&current).await
+            self.chat(&current, &task, &comment).await
         }
     }
 }

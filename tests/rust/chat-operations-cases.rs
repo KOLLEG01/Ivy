@@ -80,6 +80,112 @@ fn document(doc: Option<Document>) -> Json {
     .unwrap_or(Json::Null)
 }
 #[tokio::test]
+async fn original_lookup_distinguishes_expired_absence_and_retains_old_epoch_receipts() {
+    let output = reference_data::read(include_bytes!("fixtures/chat-operations-cases.json.gz"));
+    let fixture = parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap();
+    let case = fixture
+        .required("cases")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| text(case, "kind") == "run")
+        .unwrap();
+    let now = fixture.required("now").unwrap().as_f64().unwrap() as i64;
+    let path = Fixture::new();
+    let clock = Arc::new(Time(AtomicI64::new(now)));
+    let store = ChatStore::with_clock(Arc::new(Client), None, Some(path.0.clone()), clock.clone())
+        .await
+        .unwrap();
+    let epoch = "11111111-1111-4111-8111-111111111111";
+    store.set_runtime_epoch(epoch.into()).await.unwrap();
+    let admission = ChatAdmission::new(case.required("definition").unwrap()).unwrap();
+    let ops = ChatOperations::new(&store, &admission).unwrap();
+    let caller = "alice".into();
+    let operation = |offset: i64, number: u8| {
+        ivy_contracts::JsString::from(format!(
+            "{epoch}:{}:00000000-0000-4000-8000-{number:012}",
+            now + offset
+        ))
+    };
+    let expired = operation(-3, 1);
+    let retained = operation(-2, 2);
+    let absent = operation(0, 3);
+    let request = |identity: &ivy_contracts::JsString| {
+        Json::object([
+            ("action", "notify".into()),
+            ("operationId", Json::String(identity.clone())),
+            ("expectedBridge", admission.expected(&caller)),
+            (
+                "channel",
+                admission
+                    .definition()
+                    .required("channels")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()[0]
+                    .required("channel")
+                    .unwrap()
+                    .clone(),
+            ),
+            (
+                "source",
+                Json::object([
+                    ("objectId", "00000000-0000-4000-8000-000000000600".into()),
+                    ("revision", 1.0.into()),
+                ]),
+            ),
+            ("text", "Original retained notice".into()),
+        ])
+    };
+    let original = ops.begin(&caller, &request(&expired)).await.unwrap();
+    ops.reject_unapplied(&original.pin.object_id, "refused", "Never notified.")
+        .await
+        .unwrap();
+    let pending = ops.begin(&caller, &request(&retained)).await.unwrap();
+    store
+        .set_limits(ivy_chat_bridge::store::local::Limits {
+            count: 0,
+            bytes: 64 * 1024 * 1024,
+        })
+        .await
+        .unwrap();
+    // Looking up a current missing identity applies normal bounded retention.
+    let error = ops.read(&caller, &absent).await.err().unwrap();
+    assert_eq!(error.code, "not_found");
+    assert_eq!(error.outcome, ivy_contracts::Outcome::NotExecuted);
+    assert!(ops.find(&caller, &expired).await.unwrap().is_none());
+    let error = ops.read(&caller, &expired).await.err().unwrap();
+    assert_eq!(error.code, "operation_expired");
+    assert_eq!(error.outcome, ivy_contracts::Outcome::NotExecuted);
+    assert_eq!(
+        ops.read(&"bob".into(), &retained).await.err().unwrap().code,
+        "not_found"
+    );
+    let original = ops.read(&caller, &retained).await.unwrap();
+    assert_eq!(original.pin, pending.pin);
+    assert_eq!(
+        canonical(&original.value, usize::MAX).unwrap(),
+        canonical(&pending.value, usize::MAX).unwrap()
+    );
+    drop(ops);
+    store.close().await.unwrap();
+    let reopened = ChatStore::with_clock(Arc::new(Client), None, Some(path.0.clone()), clock)
+        .await
+        .unwrap();
+    reopened
+        .set_runtime_epoch("22222222-2222-4222-8222-222222222222".into())
+        .await
+        .unwrap();
+    let ops = ChatOperations::new(&reopened, &admission).unwrap();
+    assert_eq!(ops.read(&caller, &retained).await.unwrap().pin, pending.pin);
+    assert_eq!(
+        ops.read(&caller, &absent).await.err().unwrap().code,
+        "operation_expired"
+    );
+    reopened.close().await.unwrap();
+}
+#[tokio::test]
 async fn admitted_operation_identity_replay_and_recovery_match_original() {
     let output = reference_data::read(include_bytes!("fixtures/chat-operations-cases.json.gz"));
     let fixture = parse(std::str::from_utf8(&output).unwrap(), usize::MAX).unwrap();
