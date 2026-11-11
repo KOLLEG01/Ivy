@@ -14,6 +14,8 @@ use std::{
 mod adoption;
 #[path = "task-board-native-publication-journal.rs"]
 mod journal;
+#[path = "task-board-native-release.rs"]
+mod release;
 
 const AT: &str = "2026-01-02T03:04:05.006Z";
 fn f<'a>(v: &'a Json, k: &str) -> &'a Json {
@@ -210,6 +212,7 @@ struct World {
     creates: RefCell<Vec<(String, Json)>>,
     calls: RefCell<Vec<(Json, Json)>>,
     pending: Cell<usize>,
+    pending_operations: Cell<bool>,
     failure: RefCell<Option<Json>>,
     workspace_reads: Cell<usize>,
     workspace_observation: RefCell<Option<Json>>,
@@ -239,6 +242,7 @@ impl World {
             creates: RefCell::new(vec![]),
             calls: RefCell::new(vec![]),
             pending: Cell::new(0),
+            pending_operations: Cell::new(false),
             failure: RefCell::new(None),
             workspace_reads: Cell::new(0),
             workspace_observation: RefCell::new(None),
@@ -380,6 +384,15 @@ impl World {
     }
 }
 impl Store for World {
+    fn task_operations_pending(
+        &self,
+        task: &JsString,
+        except: Option<&JsString>,
+    ) -> IvyResult<bool> {
+        assert_eq!(task, &id(1));
+        assert_eq!(except, Some(&id(3)));
+        Ok(self.pending_operations.get())
+    }
     fn root_object_id(&self) -> Option<JsString> {
         Some("root".into())
     }
@@ -429,7 +442,7 @@ impl LifecycleStore for World {
     async fn task_header(
         &self,
         address: &Json,
-        primary_read: bool,
+        _primary_read: bool,
         archived: bool,
     ) -> IvyResult<LifecycleDocument> {
         let mut document = self.lookup("task-board/task", address)?;
@@ -438,8 +451,15 @@ impl LifecycleStore for World {
             "currentRevision",
             f(&current.pin.to_json(), "revision").clone(),
         )]);
+        metadata.insert("effectivelyArchived", self.archived.get().into());
+        if self.archived.get() && !archived {
+            return Err(IvyError::new(
+                "task_board_record_archived",
+                "Fixture ticket is archived.",
+            ));
+        }
         if self.compact.get() {
-            assert!(primary_read && archived);
+            assert!(archived);
             self.header_reads.set(self.header_reads.get() + 1);
             metadata.insert("effectivelyArchived", self.archived.get().into());
             document.value.insert("comments", Json::Array(vec![]));

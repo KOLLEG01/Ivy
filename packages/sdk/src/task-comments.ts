@@ -34,7 +34,7 @@ export class CommentReader {
     let node = this.cache.get(key)?.node;
     if (!node) {
       const saved = await this.client.request('objects.read', pin, signal ? { signal } : {});
-      if (saved.object.contractKey !== commentNodeKey || !['1.0.0', '2.0.0'].includes(saved.revision.contractVersion) ||
+      if (saved.object.contractKey !== commentNodeKey || !['1.0.0', '2.0.0', '2.1.0'].includes(saved.revision.contractVersion) ||
           saved.object.parentId !== taskId || saved.object.ownerObjectId !== taskId ||
           saved.content.encoding !== 'json' || saved.revision.revision !== pin.revision)
         throw new Error('The conversation snapshot belongs to another ticket.');

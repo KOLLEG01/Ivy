@@ -852,7 +852,7 @@ impl<S: ActionValidationStore, P: ActionValidationChecks> ActionValidation<'_, S
                         || !eq(request, "purpose", "handoff")
                         || !f(request, "handoff").is_null(),
                     "task_board_handoff_required",
-                    "A worker handoff must explicitly declare review readiness or waiting.",
+                    "A worker handoff must explicitly declare its workflow or native context intent.",
                 )?;
                 if !f(request, "handoff").is_null() {
                     date(Some(f(f(request, "handoff"), "wakeAt")))?;

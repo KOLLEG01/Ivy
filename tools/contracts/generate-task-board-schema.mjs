@@ -21,7 +21,7 @@ const workflowStates = ['backlog', 'todo', 'in_progress', 'waiting', 'review', '
 Object.assign(defs, {
   NativePlan: agent('Plan'), NativePlanDraft: agent('PlanDraft'),
   NativeRequest: obj({ backend: agent('BackendIdentity'), nativeVersion: id, catalogSourceHash: hash,
-    method: { enum: ['thread/start', 'thread/resume', 'turn/start', 'turn/steer', 'turn/interrupt'] }, params: agent('ParametersRef') }, ['nativeVersion', 'catalogSourceHash', 'method', 'params']),
+    method: { enum: ['thread/start', 'thread/resume', 'turn/start', 'turn/steer', 'turn/interrupt', 'agent.release'] }, params: agent('ParametersRef') }, ['nativeVersion', 'catalogSourceHash', 'method', 'params']),
   ObjectPin: obj({ objectId: id, revision: integer(1) }),
   Target: obj({ hostId: id, serviceNodeId: id, backend: agent('BackendIdentity') }, ['hostId', 'serviceNodeId']),
   Capability: obj({ key: { ...str(64, 1), pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }, label: str(128, 1) }),
@@ -181,7 +181,7 @@ Object.assign(defs.CommentActionRequest.properties, {
   contactUser: { type: 'boolean', description: 'Request contact through the configured Main or voice route for an important question. Routine updates stay in the ticket. Completion contact is automatic.' },
   moveToTodo: { type: 'boolean', description: 'Explicitly reopen a Done task with this comment. Otherwise new comments are processed without reopening task work.' },
   nativeInput: agent('PendingInput'),
-  handoff: { ...ref('Handoff'), description: 'Required for a worker handoff. Declare whether the overall task is ready for review or remains waiting. Applied only after confirmed native completion.' },
+  handoff: { ...ref('Handoff'), description: 'Required for a worker handoff. Select the next workflow state, or omit workflowState and declare only nativeContext to preserve the previous workflow and result. Applied only after confirmed native completion.' },
   resolvesQuestions: { ...array(id, 32), uniqueItems: true, description: 'Explicitly resolve these ordinary ticket questions with the explanation in body. Native inputs must be answered at their owner.' },
 });
 defs.CommentActionRequest.allOf = [{
@@ -213,6 +213,7 @@ Object.assign(defs, {
     comments: { type: 'array', items: ref('Comment') }, commentDeliveries: { type: 'array', items: ref('CommentDelivery') }, agentCommentCount: integer(), workRevision: integer(),
     attachments: array(ref('TaskAttachment'), 256), createdAt: timestamp, updatedAt: timestamp }),
   NativeCallOrigin: { oneOf: [obj({ kind: { const: 'initial' } }), obj({ kind: { const: 'reattach' }, predecessor: ref('ObjectPin'), preparedEpoch: id }),
+    obj({ kind: { const: 'release' } }),
     obj({ kind: { const: 'steer' }, commentIds: array(id, 512), workRevision: integer(), peersHash: hash, predecessor: nullable(ref('ObjectPin')),
       observedDependencies: { type: 'object', additionalProperties: hash, maxProperties: 128 }, wakeAt: nullable(timestamp), executionChangeRequested: bool }, ['kind', 'commentIds', 'workRevision', 'peersHash', 'predecessor'])] },
   NativeCall: obj({ owner: agent('NativeOwnerIdentity'), operationId: id, request: ref('NativeRequest'), expectedDefinitionHash: hash, origin: ref('NativeCallOrigin'),
@@ -253,6 +254,9 @@ const contractVersions = { task: '1.9.0', run: '1.2.0', configuration: '1.2.0', 
 // Internal owner observations are durable actions, but are never public service tools or accepted
 // as a user/worker ActionRequest. Their referenced bytes precede every resulting publication.
 defs.NativeUpdateRequest = obj({ action: { const: 'nativeUpdate' }, ...existing, run: ref('ObjectPin'), change: { oneOf: [
+  obj({ kind: { const: 'attachRelease' }, call: ref('ObjectPin') }),
+  obj({ kind: { const: 'observeRelease' }, call: ref('ObjectPin') }),
+  obj({ kind: { const: 'retainContext' }, code: id }),
   obj({ kind: { const: 'adoptTurn' }, metadata: agent('ReadObservation'), turns: agent('ReadObservation') }),
   obj({ kind: { const: 'attachCall' }, slot: { enum: ['thread', 'turn', 'interrupt', 'steer'] }, call: ref('ObjectPin') }),
   obj({ kind: { const: 'reattachCall' }, call: ref('ObjectPin') }),
@@ -406,7 +410,20 @@ Object.assign(defs.Task.properties, wakeFields, { runtimeWait: nullable(ref('Run
 defs.Task.required.push('wakeAt', 'dependencies', 'runtimeWait');
 Object.assign(defs.TaskCard.properties, { runtimeWait: nullable(ref('RuntimeWait')) });
 defs.TaskCard.required.push('runtimeWait');
-defs.Handoff = obj({ workflowState: { enum: ['review', 'waiting', 'todo'] }, ...wakeFields }, ['workflowState']);
+defs.Handoff = obj({ workflowState: { enum: ['review', 'waiting', 'todo'] }, ...wakeFields,
+  nativeContext: { enum: ['release', 'retain'], description: 'release explicitly declares that no remaining work or afterwork needs volatile REPL/browser/tool state. TaskBoard may release only its own subscription after native completion and durable result publication. Omitted or retain preserves the context. This never archives or replaces the thread.' },
+}, []);
+defs.Handoff.allOf = [
+  { anyOf: [{ required: ['workflowState'] }, { required: ['nativeContext'] }] },
+  { if: { not: { required: ['workflowState'] } }, then: { not: { anyOf: [{ required: ['wakeAt'] }, { required: ['dependencies'] }] } } },
+];
+
+defs.ContextRelease = obj({ state: { enum: ['pending', 'observing', 'succeeded', 'retained', 'outcome_unknown'] },
+  expectedOperationId: id, commentCount: integer(), workRevision: integer(), call: nullable(ref('ObjectPin')), code: nullable(id) });
+defs.Run.properties.contextRelease = ref('ContextRelease');
+// A short dispatch fence. Comments still append; new native work waits only until
+// the original release is accepted by its owner or conclusively retained locally.
+defs.Task.properties.contextRelease = ref('ObjectPin');
 defs.Comment.properties.handoff = ref('Handoff');
 Object.assign(defs.CreateRequest.properties, wakeFields);
 Object.assign(defs.EditRequest.properties, wakeFields);
@@ -426,13 +443,13 @@ defs.StoredContinueRequest.properties.recoveryFor = ref('ObjectPin');
 defs.StoredExecutionRequest = { oneOf: [ref('StoredStartRequest'), ref('StoredContinueRequest')] };
 defs.Run.properties.originalRequest = ref('StoredExecutionRequest');
 defs.Claim.properties.request = ref('StoredExecutionRequest');
-contractVersions.task = '3.5.0';
+contractVersions.task = '3.6.0';
 contractVersions.history = '1.1.0';
 contractVersions.configuration = '1.3.0';
-defs.PreparedWrite.properties.contractVersion.enum.push('2.3.0', '3.0.0', '3.1.0', '3.2.0', '3.3.0', '3.4.0', '3.5.0');
+defs.PreparedWrite.properties.contractVersion.enum.push('2.3.0', '3.0.0', '3.1.0', '3.2.0', '3.3.0', '3.4.0', '3.5.0', '3.6.0');
 // Exact evidence pins are already paged; the ticket metadata byte budget is the storage bound.
 delete defs.Task.properties.attachments.maxItems;
-contractVersions.run = '3.1.0';
+contractVersions.run = '3.2.0';
 contractVersions.result = '2.2.0';
 defs.TaskView.properties.commentPage = obj({ total: integer(), offset: integer(), nextOffset: nullable(integer()),
   nextBefore: nullable(integer(1)), order: { enum: ['asc', 'desc'] } }, ['total', 'offset', 'nextOffset']);
@@ -442,6 +459,8 @@ defs.Task.allOf = [
   { if: { properties: { workflowState: { const: 'in_progress' }, fields: { properties: { control: { const: 'agent' } } } } }, then: { properties: { claim: ref('Claim') } } },
 ];
 defs.Run.allOf = [
+  { if: { required: ['contextRelease'] }, then: { properties: { phase: { const: 'completed' }, result: ref('ObjectPin'), finishedAt: timestamp,
+    externalOutcome: { properties: { state: { const: 'succeeded' } } } } } },
   { if: { properties: { phase: { enum: ['running', 'waiting_input', 'publishing_result', 'completed'] } } },
     then: { properties: { primaryResourceRef: resource, turnId: id, nativeEpoch: id } } },
   when('phase', 'completed', { result: ref('ObjectPin'), finishedAt: timestamp }),

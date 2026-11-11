@@ -1067,7 +1067,11 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         let mut references = Json::object(Vec::<(String, Json)>::new());
         match key {
             "task-board/task" => {
-                for (field, name) in [("latestResult", "result"), ("lastRun", "run")] {
+                for (field, name) in [
+                    ("latestResult", "result"),
+                    ("lastRun", "run"),
+                    ("contextRelease", "context-release"),
+                ] {
                     if let Some(pin) = value.get(field).filter(|v| !v.is_null()) {
                         references.insert(name, pin.clone());
                     }
@@ -1348,6 +1352,13 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
     }
     fn complete_local_workflow(&self, id: &JsString, at: &JsString) -> IvyResult<()> {
         self.journal.complete_workflow(id, at, None)
+    }
+    fn task_operations_pending(
+        &self,
+        task: &JsString,
+        except: Option<&JsString>,
+    ) -> IvyResult<bool> {
+        self.journal.task_operations_pending(task, except)
     }
     async fn named(
         &self,

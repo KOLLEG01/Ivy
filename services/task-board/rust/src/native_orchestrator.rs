@@ -371,7 +371,7 @@ impl<S: LifecycleStore, E: OrchestrationEngine, V: OrchestrationServices>
                 .read("task-board/run", &Json::String(run.clone()), true)
                 .await?;
             let value = &after.value;
-            if finished_run(value) {
+            if finished_run(value) && !crate::native_release::pending(value) {
                 self.threads.borrow_mut().retain(|v| &v.run != run);
                 self.retries.borrow_mut().retain(|v| &v.0 != run);
             }
@@ -387,7 +387,10 @@ impl<S: LifecycleStore, E: OrchestrationEngine, V: OrchestrationServices>
             } else {
                 Json::Null
             };
-            if equal(value, "phase", "outcome_unknown") || equal(&waiting, "reason", "host") {
+            if equal(value, "phase", "outcome_unknown")
+                || equal(&waiting, "reason", "host")
+                || equal(field(value, "contextRelease"), "state", "outcome_unknown")
+            {
                 let code = field(field(value, "externalOutcome"), "code")
                     .as_js_string()
                     .map(JsString::to_utf8)
@@ -401,6 +404,7 @@ impl<S: LifecycleStore, E: OrchestrationEngine, V: OrchestrationServices>
                 .any(|v| equal(value, "phase", v))
                 && !self.unresolved(&after, NativeSlot::Steer).await?
                 && !self.unresolved(&after, NativeSlot::Thread).await?
+                && !crate::native_release::pending(value)
                 || before.pin == after.pin
             {
                 break;
@@ -554,7 +558,7 @@ impl<S: LifecycleStore, E: OrchestrationEngine, V: OrchestrationServices>
             .store
             .read("task-board/run", &Json::String(run_id.clone()), true)
             .await?;
-        if finished_run(&run.value) {
+        if finished_run(&run.value) && !crate::native_release::pending(&run.value) {
             self.progress.forget(run_id);
             self.threads.borrow_mut().retain(|v| &v.run != run_id);
             self.retries.borrow_mut().retain(|v| &v.0 != run_id);
@@ -569,11 +573,88 @@ impl<S: LifecycleStore, E: OrchestrationEngine, V: OrchestrationServices>
         {
             return Ok(());
         }
-        let task = self
+        let task_header = self
             .store
-            .task_header(run.value.required("taskId")?, true, false)
-            .await?
-            .document;
+            .task_header(
+                run.value.required("taskId")?,
+                true,
+                finished_run(&run.value),
+            )
+            .await?;
+        let task = task_header.document;
+        if finished_run(&run.value) {
+            self.progress.forget(run_id);
+            self.threads.borrow_mut().retain(|v| &v.run != run_id);
+            if !crate::native_release::pending(&run.value) {
+                self.retries.borrow_mut().retain(|v| &v.0 != run_id);
+                return Ok(());
+            }
+            if crate::native_release::call(&run.value).is_null() {
+                let eligible = field(&task_header.metadata, "effectivelyArchived").as_bool()
+                    != Some(true)
+                    && crate::native_release::eligible(&task.value, &run.value, &run.pin.to_json())
+                    && self
+                        .store
+                        .queued_comment_ids(&task.value, &task.pin.object_id)
+                        .await?
+                        .is_empty();
+                let unsupported = eligible
+                    && crate::native_plan::catalog(
+                        self.catalogs,
+                        crate::native_plan::routed_selection(&task.value, &run.value)?,
+                    )?
+                    .definition_hash(&"thread/unsubscribe".into())
+                    .is_err();
+                if !eligible || unsupported {
+                    return self
+                        .update(
+                            &run,
+                            &task,
+                            Json::object([
+                                ("kind", "retainContext".into()),
+                                (
+                                    "code",
+                                    if eligible {
+                                        "native_context_release_unsupported"
+                                    } else {
+                                        "native_context_needed"
+                                    }
+                                    .into(),
+                                ),
+                            ]),
+                        )
+                        .await;
+                }
+                if let Err(error) = self
+                    .services
+                    .prepare(
+                        run_id,
+                        NativeSlot::Release,
+                        Some(&Json::object([("kind", "release".into())])),
+                    )
+                    .await
+                {
+                    if error.code != "task_board_context_release_pending" {
+                        return Err(error);
+                    }
+                }
+            } else if let Err(error) = self.services.advance(run_id, NativeSlot::Release).await {
+                if ![
+                    "task_board_context_retained",
+                    "task_board_context_release_pending",
+                ]
+                .contains(&error.code.as_str())
+                {
+                    return Err(error);
+                }
+            }
+            return Ok(());
+        }
+        // New claims may already contain queued comments. The previous release
+        // owns this short dispatch boundary; waiting is ordinary progress.
+        if !field(&task.value, "contextRelease").is_null() {
+            return Ok(());
+        }
         let selected =
             crate::native_plan::routed_target(&task.value, run.value.required("target")?)?;
         let backend = BackendIdentity::optional(selected.get("backend"))?;

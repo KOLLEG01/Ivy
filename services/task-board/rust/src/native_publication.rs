@@ -26,6 +26,8 @@ use std::{collections::HashSet, sync::Arc};
 mod adoption_publication;
 #[path = "native_completion.rs"]
 mod completion_policy;
+#[path = "native_release_publication.rs"]
+mod release_publication;
 
 /// The dependency keeps closed Run/call/plan graphs until publication finishes.
 pub trait NativePublicationStore: LifecycleStore {
@@ -284,7 +286,17 @@ impl<S: Store + ReadEvidenceStore + TurnEvidenceStore, P: TaskPrompts> NativePub
             store: self.store,
             catalogs: self.catalogs,
         }
-        .intended_call_for_task(r, NativeSlot::Steer, Some(o), self.prompts, Some(task))
+        .intended_call_for_task(
+            r,
+            if eq(o, "kind", "release") {
+                NativeSlot::Release
+            } else {
+                NativeSlot::Steer
+            },
+            Some(o),
+            self.prompts,
+            Some(task),
+        )
         .await
     }
     fn resolve(&self, r: &Json) -> IvyResult<Json> {
@@ -559,6 +571,13 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
         )?;
         if eq(change, "kind", "adoptTurn") {
             return self.publish_adopted_turn(operation, steps).await;
+        }
+        if one(
+            change,
+            "kind",
+            &["attachRelease", "observeRelease", "retainContext"],
+        ) {
+            return self.publish_context_release(operation, steps).await;
         }
         let at = f(op, "createdAt");
         let task_id = s(request, "taskId")?;
@@ -1880,6 +1899,64 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                 "",
             ));
         }
+        if active
+            && eq(&done, "state", "succeeded")
+            && completion_comments
+                .as_ref()
+                .and_then(|comments| comments.handoff.as_ref())
+                .is_some_and(|comment| eq(f(comment, "handoff"), "nativeContext", "release"))
+            && f(run, "cancellation").is_null()
+            && self
+                .store
+                .queued_comment_ids(&final_task, task_id)
+                .await?
+                .is_empty()
+        {
+            let mut latest = None;
+            let mut settled = true;
+            for slot in ["steer", "interrupt", "turn", "thread"] {
+                let pin = f(f(run, "calls"), slot);
+                if pin.is_null() {
+                    continue;
+                }
+                let (_, observed) = self.observed(run, pin).await?;
+                if !one(&observed, "phase", &["succeeded", "failed"]) {
+                    settled = false;
+                }
+                if latest.is_none()
+                    && f(&observed, "epoch") == f(run, "nativeEpoch")
+                    && !f(&observed, "requestId").is_null()
+                {
+                    latest = Some(f(&observed, "operationId").clone());
+                }
+            }
+            if settled && let Some(expected) = latest {
+                next.insert(
+                    "contextRelease",
+                    Json::object([
+                        ("state", "pending".into()),
+                        ("expectedOperationId", expected),
+                        (
+                            "commentCount",
+                            Json::Number(crate::native_release::comment_count(&final_task)),
+                        ),
+                        (
+                            "workRevision",
+                            Json::Number(
+                                n(&final_task, "workRevision")
+                                    + if eq(&declared_handoff, "workflowState", "review") {
+                                        1.0
+                                    } else {
+                                        0.0
+                                    },
+                            ),
+                        ),
+                        ("call", Json::Null),
+                        ("code", Json::Null),
+                    ]),
+                );
+            }
+        }
         let mut retired: Vec<Json> = if finished_run(&next) {
             f(&next, "calls")
                 .as_object()
@@ -2169,6 +2246,9 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
             let published = self.engine.now();
             let operation_id = &operation.pin.object_id;
             for root in std::iter::once(run_pin).chain(retired.iter()) {
+                if root == run_pin && crate::native_release::pending(&next) {
+                    continue;
+                }
                 self.store.complete_after_publication(
                     s(root, "objectId")?,
                     &published,

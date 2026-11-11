@@ -25,7 +25,7 @@ pub(super) fn intent(task: &Json, run: &Json, handoff: Option<&Json>, active: bo
     if active && changing_execution(task, run) {
         return Json::Null;
     }
-    if let Some(comment) = handoff.filter(|c| !f(c, "handoff").is_null()) {
+    if let Some(comment) = handoff.filter(|c| !f(f(c, "handoff"), "workflowState").is_null()) {
         return f(comment, "handoff").clone();
     }
     if eq(f(run, "owner"), "source", "native")
@@ -99,6 +99,9 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
             ("lastRun", f(outcome, "run").clone()),
         ] {
             final_task.insert(key, value);
+        }
+        if crate::native_release::pending(next) {
+            final_task.insert("contextRelease", f(outcome, "run").clone());
         }
         let publication_error = self.store.failed_handoff(s(run_pin, "objectId")?)?;
         let restored_state = if eq(&initial, "workflowState", "in_progress") {

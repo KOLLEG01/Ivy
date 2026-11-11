@@ -48,6 +48,7 @@ pub mod native_progress;
 pub mod native_publication;
 pub mod native_rate_limit;
 pub mod native_recovery;
+pub mod native_release;
 pub mod native_runtime;
 pub mod native_signals;
 pub mod native_state;

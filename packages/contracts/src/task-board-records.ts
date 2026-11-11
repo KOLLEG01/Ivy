@@ -27,7 +27,8 @@ export function upgradeCommentRecord(comment: TaskBoard.Comment): TaskBoard.Comm
   if (!comment.handoff) return comment;
   const handoff = comment.handoff as TaskBoard.Handoff & StoredSchedule;
   if (!('nextSteps' in handoff || 'nextReviewAt' in handoff || 'waiting' in handoff)) return comment;
-  return { ...comment, handoff: { workflowState: handoff.workflowState,
+  return { ...comment, handoff: { ...(handoff.workflowState !== undefined ? { workflowState: handoff.workflowState } : {}),
+    ...(handoff.nativeContext !== undefined ? { nativeContext: handoff.nativeContext } : {}),
     ...schedule(handoff), ...(handoff.wakeAt !== undefined ? { wakeAt: handoff.wakeAt } : {}),
     ...(handoff.dependencies ? { dependencies: handoff.dependencies } : {}) } };
 }

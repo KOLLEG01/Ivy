@@ -28,6 +28,7 @@ use std::{
 pub enum Lane {
     Operations,
     Runs,
+    ContextReleases,
     Tasks,
     Deliveries,
 }
@@ -36,7 +37,7 @@ impl Lane {
     pub fn key(self) -> &'static str {
         match self {
             Self::Operations => "task-board/operation",
-            Self::Runs => "task-board/run",
+            Self::Runs | Self::ContextReleases => "task-board/run",
             Self::Tasks => "task-board/task",
             Self::Deliveries => "task-board/delivery",
         }
@@ -235,6 +236,8 @@ fn query(l: Lane, limit: f64, c: Option<&JsString>) -> Json {
                 "field",
                 if l == Lane::Deliveries {
                     "data:/state"
+                } else if l == Lane::ContextReleases {
+                    "data:/contextRelease/state"
                 } else {
                     "data:/phase"
                 }
@@ -255,6 +258,7 @@ fn query(l: Lane, limit: f64, c: Option<&JsString>) -> Json {
                             "cancel_requested",
                             "outcome_unknown",
                         ],
+                        Lane::ContextReleases => vec!["pending", "observing", "outcome_unknown"],
                         _ => vec!["pending", "dispatching", "outcome_unknown"],
                     }
                     .into_iter()
@@ -280,6 +284,11 @@ fn query(l: Lane, limit: f64, c: Option<&JsString>) -> Json {
         ("limit", Json::Number(limit)),
         ("orderBy", Json::Array(order)),
     ]);
+    if l == Lane::ContextReleases {
+        // Historical Runs remain in the ordinary phase scan. Only this
+        // published version admits the optional completion release field.
+        q.insert("contractVersions", Json::Array(vec!["3.2.0".into()]));
+    }
     if let Some(c) = c.filter(|s| !s.0.is_empty()) {
         q.insert("cursor", Json::String(c.clone()));
     }
@@ -475,7 +484,7 @@ impl<S: ReconcileStore, E: ReconcileEngine> Shared<'_, S, E> {
                 Lane::Deliveries => {
                     self.engine.delivery(id).await?;
                 }
-                Lane::Runs => {
+                Lane::Runs | Lane::ContextReleases => {
                     if !self.process_native_run(id).await? {
                         return Ok(());
                     }
@@ -806,24 +815,43 @@ impl<'a, 'x, S: ReconcileStore + 'a, E: ReconcileEngine + 'a, X: ReconcileExecut
             }
             sh.record(&"publication".into(), None);
             let recovering = sh.state.borrow().recovering;
-            if let Some(l) = recovering {
-                if !sh.state.borrow().recovery_scanned {
-                    let scanned = self.scan(l).await?;
-                    sh.state.borrow_mut().recovery_scanned = scanned;
-                }
-                self.recover_gates().await?;
-                let mut st = sh.state.borrow_mut();
-                if st.recovery_scanned && st.active.is_empty() {
-                    st.recovering = if l == Lane::Operations {
-                        Some(Lane::Runs)
-                    } else {
-                        None
+            if let Some(mut l) = recovering {
+                let mut gates_checked = false;
+                loop {
+                    if !sh.state.borrow().recovery_scanned {
+                        let scanned = self.scan(l).await?;
+                        sh.state.borrow_mut().recovery_scanned = scanned;
+                    }
+                    if !gates_checked {
+                        self.recover_gates().await?;
+                        gates_checked = true;
+                    }
+                    let mut st = sh.state.borrow_mut();
+                    if !st.recovery_scanned || !st.active.is_empty() {
+                        break;
+                    }
+                    st.recovering = match l {
+                        Lane::Operations => Some(Lane::Runs),
+                        Lane::Runs => Some(Lane::ContextReleases),
+                        _ => None,
                     };
                     st.recovery_scanned = false;
+                    if l != Lane::Runs {
+                        break;
+                    }
+                    // An empty release subset must not add an idle startup
+                    // tick. Nonempty pages retain the same admission fence.
+                    l = Lane::ContextReleases;
                 }
             } else {
                 let lane = sh.state.borrow().lane;
-                let mut scan = Box::pin(async { self.scan(LANES[lane]).await.map(|_| ()) });
+                let mut scan = Box::pin(async {
+                    self.scan(LANES[lane]).await?;
+                    if LANES[lane] == Lane::Runs {
+                        self.scan(Lane::ContextReleases).await?;
+                    }
+                    Ok::<(), IvyError>(())
+                });
                 let mut gates = Box::pin(self.recover_gates());
                 let mut a = None;
                 let mut b = None;

@@ -29,7 +29,7 @@ fn run(method: &str) {
             body.0.extend(JsString::from("😀tail").0);
             comment.insert("body", Json::String(body));
         }
-        let output = match method {
+        let mut output = match method {
             "task" => task_prompt(
                 &task,
                 row.required("service").unwrap().as_js_string().unwrap(),
@@ -40,6 +40,13 @@ fn run(method: &str) {
             _ => unreachable!(),
         }
         .unwrap();
+        if method == "task" && row.required("executionChange").unwrap() != &Json::Bool(true) {
+            let guidance = JsString::from(
+                " In a final handoff, set handoff.nativeContext=release only when no remaining work or afterwork needs volatile tool, browser or REPL state; otherwise retain or omit it.",
+            );
+            assert!(output.0.ends_with(&guidance.0));
+            output.0.truncate(output.0.len() - guidance.0.len());
+        }
         assert_eq!(
             output.0.len() as f64,
             row.required("units").unwrap().as_f64().unwrap(),

@@ -65,7 +65,10 @@ impl<S: Store + ReadEvidenceStore> NativeEvidence<'_, S> {
         expected: &EvidenceIdentity,
         source: &NativeContract,
     ) -> IvyResult<()> {
-        if source.output_schema(&expected.method).is_err() {
+        if source
+            .output_schema(crate::native_release::definition(&expected.method))
+            .is_err()
+        {
             return Err(IvyError::new(
                 "task_board_native_method_unsupported",
                 "The evidence method is not in the exact checked native client catalog.",
@@ -141,7 +144,11 @@ impl<S: Store + ReadEvidenceStore> NativeEvidence<'_, S> {
                 call.value
                     .get("expectedDefinitionHash")
                     .and_then(Json::as_js_string)
-                    == Some(&source.definition_hash(&expected.method)?.into()),
+                    == Some(
+                        &source
+                            .definition_hash(crate::native_release::definition(&expected.method))?
+                            .into(),
+                    ),
                 mismatch,
             )?;
             Ok(source)

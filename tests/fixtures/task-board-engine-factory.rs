@@ -490,6 +490,18 @@ impl<V: Contracts> LifecyclePages for Policies<'_, V> {
                     "object.id" => Json::from(id.clone()),
                     "data:/phase" => value.required("phase")?.clone(),
                     "data:/state" => value.required("state")?.clone(),
+                    "data:/contextRelease/state" => {
+                        assert_eq!(key, "task-board/run");
+                        assert_eq!(
+                            options.get("contractVersions"),
+                            Some(&Json::Array(vec!["3.2.0".into()]))
+                        );
+                        value
+                            .get("contextRelease")
+                            .and_then(|v| v.get("state"))
+                            .cloned()
+                            .unwrap_or(Json::Null)
+                    }
                     "data:/workflowState" if self.fixture.steering.is_some() => {
                         value.required("workflowState")?.clone()
                     }

@@ -150,6 +150,131 @@ struct Guard {
 }
 
 #[tokio::test]
+async fn managed_release_keeps_original_logical_receipt_account_and_unsubscribe_binding() {
+    use ivy_contracts::{hash::hash_json, native_backend::BackendIdentity};
+    let backend = BackendIdentity::from_json(&json(
+        r#"{"backendId":"codex","provider":"codex","accountId":"default"}"#,
+    ))
+    .unwrap();
+    let target = NativeOwnerIdentity {
+        backend: Some(backend.clone()),
+        service_node_id: "native-agent".into(),
+        host_id: Some("host".into()),
+        native_version: "0.163.0".into(),
+        native_executable_hash: format!("sha256:{}", "d".repeat(64)).into(),
+        catalog_hash: format!("sha256:{}", "c".repeat(64)).into(),
+    };
+    let call = NativeOperationCall {
+        operation_id: "original-release".into(),
+        method: "agent.release".into(),
+        params: json(
+            r#"{"threadId":"thread","expectedEpoch":"epoch","expectedOperationId":"last-turn"}"#,
+        ),
+        definition_hash: format!("sha256:{}", "b".repeat(64)).into(),
+    };
+    let receipt = IvyJson::object([
+        ("schemaVersion", 1.0.into()),
+        ("backend", backend.json()),
+        ("operationId", IvyJson::String(call.operation_id.clone())),
+        ("callerPrincipalId", "caller".into()),
+        (
+            "serviceNodeId",
+            IvyJson::String(target.service_node_id.clone()),
+        ),
+        (
+            "nativeVersion",
+            IvyJson::String(target.native_version.clone()),
+        ),
+        (
+            "nativeExecutableHash",
+            IvyJson::String(target.native_executable_hash.clone()),
+        ),
+        ("method", IvyJson::String(call.method.clone())),
+        ("params", call.params.clone()),
+        (
+            "requestHash",
+            hash_json(&IvyJson::object([
+                ("method", "agent.release".into()),
+                ("params", call.params.clone()),
+            ]))
+            .unwrap()
+            .into(),
+        ),
+        ("phase", "succeeded".into()),
+        ("epoch", "epoch".into()),
+        ("requestId", IvyJson::Null),
+        ("reply", IvyJson::Null),
+        ("code", IvyJson::Null),
+        ("createdAt", "2026-01-02T03:04:05.000Z".into()),
+        ("updatedAt", "2026-01-02T03:04:05.000Z".into()),
+        (
+            "release",
+            json(r#"{"kind":"logical","otherSubscribers":true}"#),
+        ),
+    ]);
+    let client = Arc::new(Client {
+        input: IvyJson::object([
+            ("target", target.to_json()),
+            (
+                "steps",
+                IvyJson::Array(vec![
+                    IvyJson::object([("value", receipt.clone())]),
+                    IvyJson::object([("value", receipt.clone())]),
+                ]),
+            ),
+        ]),
+        trace: Mutex::new(vec![]),
+        calls: Mutex::new(0),
+        lists: Mutex::new(HashMap::new()),
+        options: RequestOptions::default(),
+    });
+    let owner = NativeOwner::new(
+        Arc::new(ToolClients::new(client.clone())),
+        "caller".into(),
+        target,
+        RequestOptions::default(),
+    );
+    let observed = owner
+        .dispatch_local(&call, || async { Ok(()) })
+        .await
+        .unwrap()
+        .unwrap();
+    owner.check_operation(&observed, &call).unwrap();
+    assert_eq!(observed, receipt);
+    assert_eq!(owner.operation(&call).await.unwrap(), receipt);
+    let trace = client.trace.lock().unwrap();
+    let sends: Vec<_> = trace
+        .iter()
+        .filter(|v| v.get("method").is_some_and(|m| m.is_str("tools.call")))
+        .collect();
+    assert_eq!(sends.len(), 2);
+    let params = field(sends[0], "params");
+    assert_eq!(
+        field(params, "qualifiedName"),
+        &IvyJson::from("agent.release")
+    );
+    let args = field(params, "arguments");
+    assert_eq!(args.get("backend"), Some(&backend.json()));
+    assert_eq!(
+        args.get("expectedDefinitionHash"),
+        Some(&IvyJson::String(call.definition_hash))
+    );
+    assert_eq!(
+        args.get("expectedOperationId"),
+        Some(&IvyJson::from("last-turn"))
+    );
+    assert!(args.get("method").is_none() && args.get("params").is_none());
+    assert_eq!(
+        field(field(sends[1], "params"), "qualifiedName"),
+        &IvyJson::from("agent.operation")
+    );
+    assert_eq!(
+        client.lists.lock().unwrap().get("codex.thread/unsubscribe"),
+        Some(&1)
+    );
+}
+
+#[tokio::test]
 async fn native_binding_cache_separates_legacy_backend_and_account_identities() {
     use ivy_contracts::native_backend::BackendIdentity;
 

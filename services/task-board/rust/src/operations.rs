@@ -209,6 +209,17 @@ pub trait Store {
     }
     fn local_key(&self, id: &JsString) -> IvyResult<Option<String>>;
     fn complete_local_workflow(&self, id: &JsString, at: &JsString) -> IvyResult<()>;
+    /// One current-head query; incomplete local work cannot prove release safety.
+    fn task_operations_pending(
+        &self,
+        _task: &JsString,
+        _except: Option<&JsString>,
+    ) -> IvyResult<bool> {
+        Err(IvyError::new(
+            "task_board_pending_work_unavailable",
+            "The owning journal must check accepted ticket work before release.",
+        ))
+    }
     async fn named(
         &self,
         key: &str,

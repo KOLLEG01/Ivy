@@ -107,6 +107,42 @@ fn saved(pin: &J, value: J) -> J {
         ),
     ])
 }
+
+#[tokio::test]
+async fn context_handoff_nodes_keep_published_version_and_ticket_ownership_checks() {
+    for (version, owner, valid) in [
+        ("1.0.0", "task", true),
+        ("2.0.0", "task", true),
+        ("2.1.0", "task", true),
+        ("2.1.0", "other", false),
+        ("2.2.0", "task", false),
+    ] {
+        let mut record = saved(&pin("current"), leaf(1));
+        record
+            .get_mut("revision")
+            .unwrap()
+            .insert("contractVersion", version.into());
+        record
+            .get_mut("object")
+            .unwrap()
+            .insert("ownerObjectId", owner.into());
+        let reader = CommentReader::new(
+            source(move |_, _| {
+                let record = record.clone();
+                Box::pin(async move { Ok(record) })
+            }),
+            tokio::runtime::Handle::current(),
+        );
+        assert_eq!(
+            reader
+                .node(&pin("current"), &"task".into(), None)
+                .await
+                .is_ok(),
+            valid,
+            "{version}/{owner}"
+        );
+    }
+}
 fn id(pin: &J) -> String {
     pin.get("objectId").unwrap().as_str().unwrap()
 }

@@ -1,7 +1,7 @@
 //! Finite registration inputs, not the finalized current runtime bundle.
 use ivy_contracts::{
     IvyJson as Json, JsString, builtin_schema::SchemaBundle, canonical_bundle::Bundle,
-    core_schema::validate_shared, json::parse,
+    core_schema::validate_shared, json::parse, schema::SchemaValidators,
 };
 use ivy_task_board::{
     journal_store::Contracts,
@@ -125,7 +125,7 @@ async fn native_registry_keeps_management_private_and_preserves_schema_and_reade
         guarded,
         [
             "3.5.0", "3.4.0", "3.3.0", "3.2.0", "3.1.0", "3.0.0", "2.3.0", "2.2.0", "2.1.0",
-            "2.0.0", "1.12.0", "1.11.0",
+            "2.0.0", "1.12.0", "1.11.0", "3.6.0",
         ]
         .into_iter()
         .map(|version| ("task-board/task".to_owned(), version.to_owned()))
@@ -305,8 +305,17 @@ async fn native_registry_keeps_management_private_and_preserves_schema_and_reade
         seen.push(key);
     }
     let mut published = Vec::new();
+    let validators = SchemaValidators::default();
     for contract in task_board_contracts().unwrap() {
         let key = contract.required("key").unwrap().as_str().unwrap();
+        if let Some(schema) = contract.get("jsonSchema") {
+            validators.compile(schema).unwrap_or_else(|error| {
+                panic!(
+                    "Published {key} {} cannot be registered: {error:?}",
+                    contract.required("version").unwrap().as_str().unwrap()
+                )
+            });
+        }
         if !published.contains(&key) {
             published.push(key);
         }
@@ -318,7 +327,7 @@ async fn native_registry_keeps_management_private_and_preserves_schema_and_reade
         .unwrap();
     assert_eq!(
         task.required("writeVersions").unwrap(),
-        &json(r#"["3.5.0"]"#)
+        &json(r#"["3.6.0"]"#)
     );
     assert!(
         task.required("readVersions")

@@ -160,6 +160,18 @@ struct Trace<'a, S> {
     state: &'a State,
 }
 impl<S: NativeDriverStore> NativeDriverStore for Trace<'_, S> {
+    async fn release_task_header(
+        &self,
+        address: &Json,
+    ) -> IvyResult<ivy_task_board::native_lifecycle::LifecycleDocument> {
+        let mut value = self.inner.release_task_header(address).await?;
+        if let Some(archived) = self.state.fault.borrow().get("releaseArchived") {
+            value
+                .metadata
+                .insert("effectivelyArchived", archived.clone());
+        }
+        Ok(value)
+    }
     async fn named_call(&self, name: &JsString) -> IvyResult<Option<Document>> {
         event(
             &self.state.log,
@@ -184,6 +196,13 @@ impl<S: NativeDriverStore> NativeDriverStore for Trace<'_, S> {
     }
 }
 impl<S: Store + ReadEvidenceStore> Store for Trace<'_, S> {
+    fn task_operations_pending(
+        &self,
+        task: &JsString,
+        except: Option<&JsString>,
+    ) -> IvyResult<bool> {
+        self.inner.task_operations_pending(task, except)
+    }
     fn root_object_id(&self) -> Option<JsString> {
         self.inner.root_object_id()
     }

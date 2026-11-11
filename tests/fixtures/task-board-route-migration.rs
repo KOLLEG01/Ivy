@@ -214,7 +214,7 @@ fn sqlite_migration_fence_keeps_unknown_lifecycle_work_until_the_current_head_is
             &other,
         )
         .unwrap();
-    assert!(!journal.route_migration_pending(&task, &own).unwrap());
+    assert!(!journal.task_operations_pending(&task, Some(&own)).unwrap());
     let unknown = make(
         task.clone(),
         "original",
@@ -233,7 +233,7 @@ fn sqlite_migration_fence_keeps_unknown_lifecycle_work_until_the_current_head_is
         )
         .unwrap();
     assert!(
-        journal.route_migration_pending(&task, &own).unwrap(),
+        journal.task_operations_pending(&task, Some(&own)).unwrap(),
         "An unknown domain outcome retains its migration fence even with a terminal native observation"
     );
     let unobserved = make(task.clone(), "original", "failed", vec![template], false);
@@ -241,7 +241,7 @@ fn sqlite_migration_fence_keeps_unknown_lifecycle_work_until_the_current_head_is
         .update("task-board/operation", &pending, 1.0, &unobserved, at)
         .unwrap();
     assert!(
-        journal.route_migration_pending(&task, &own).unwrap(),
+        journal.task_operations_pending(&task, Some(&own)).unwrap(),
         "A prepared lifecycle call without a conclusive original receipt cannot move"
     );
     let conclusive = make(
@@ -255,7 +255,7 @@ fn sqlite_migration_fence_keeps_unknown_lifecycle_work_until_the_current_head_is
         .update("task-board/operation", &pending, 2.0, &conclusive, at)
         .unwrap();
     assert!(
-        !journal.route_migration_pending(&task, &own).unwrap(),
+        !journal.task_operations_pending(&task, Some(&own)).unwrap(),
         "Historical unresolved revisions do not override the conclusive current head"
     );
     let accepted = make(task.clone(), "another", "accepted", vec![], false);
@@ -269,12 +269,12 @@ fn sqlite_migration_fence_keeps_unknown_lifecycle_work_until_the_current_head_is
             &id(303),
         )
         .unwrap();
-    assert!(journal.route_migration_pending(&task, &own).unwrap());
+    assert!(journal.task_operations_pending(&task, Some(&own)).unwrap());
     let finished = make(task.clone(), "another", "succeeded", vec![], false);
     journal
         .update("task-board/operation", &id(303), 1.0, &finished, at)
         .unwrap();
-    assert!(!journal.route_migration_pending(&task, &own).unwrap());
+    assert!(!journal.task_operations_pending(&task, Some(&own)).unwrap());
 }
 
 fn scoped_plan(plan: &Json, contract: &ivy_contracts::native_contract::NativeContract) -> Json {

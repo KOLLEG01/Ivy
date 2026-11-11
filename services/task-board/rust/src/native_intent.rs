@@ -55,6 +55,7 @@ pub enum NativeSlot {
     Turn,
     Steer,
     Interrupt,
+    Release,
 }
 impl NativeSlot {
     pub fn as_str(self) -> &'static str {
@@ -63,6 +64,7 @@ impl NativeSlot {
             Self::Turn => "turn",
             Self::Steer => "steer",
             Self::Interrupt => "interrupt",
+            Self::Release => "release",
         }
     }
 }
@@ -95,6 +97,29 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     } else {
         Err(IvyError::new(code, message))
     }
+}
+fn validate_request(
+    contract: &ivy_contracts::native_contract::NativeContract,
+    request: &Json,
+) -> IvyResult<()> {
+    if !field(request, "method").is_str("agent.release") {
+        return validate_native_invocation(contract, request, NATIVE_PARAMETERS_BYTES);
+    }
+    let mut input = request.required("params")?.clone();
+    input.insert("operationId", "release-validation".into());
+    input.insert("nativeVersion", request.required("nativeVersion")?.clone());
+    input.insert(
+        "expectedDefinitionHash",
+        contract
+            .definition_hash(&"thread/unsubscribe".into())?
+            .into(),
+    );
+    if let Some(backend) = request.get("backend") {
+        input.insert("backend", backend.clone());
+    }
+    ivy_contracts::agent_schema::validate_agent("ThreadReleaseInput", &input)?;
+    ivy_contracts::json::canonical_size(&input, NATIVE_PARAMETERS_BYTES)?;
+    Ok(())
 }
 fn parameters(value: &Json) -> Json {
     match value {
@@ -164,7 +189,28 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
         let plan = field(run, "plan");
         let primary = field(run, "primaryResourceRef");
         let mut definition = "turnStart";
-        let (method, params) = if field(origin, "kind").is_str("steer") {
+        let (method, params) = if slot == NativeSlot::Release {
+            require(
+                field(origin, "kind").is_str("release")
+                    && field(run, "phase").is_str("completed")
+                    && !field(run, "result").is_null(),
+                "task_board_native_order",
+                "Release requires a completed Run and its durable result.",
+            )?;
+            (
+                "agent.release",
+                Json::object([
+                    ("threadId", primary.required("nativeId")?.clone()),
+                    ("expectedEpoch", run.required("nativeEpoch")?.clone()),
+                    (
+                        "expectedOperationId",
+                        run.required("contextRelease")?
+                            .required("expectedOperationId")?
+                            .clone(),
+                    ),
+                ]),
+            )
+        } else if field(origin, "kind").is_str("steer") {
             require(
                 slot == NativeSlot::Steer
                     && primary.as_object().is_some()
@@ -284,19 +330,22 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
         if let Some(backend) = contract.backend() {
             request.insert("backend", backend.json());
         }
-        validate_native_invocation(&contract, &request, NATIVE_PARAMETERS_BYTES)?;
-        let expected = if slot == NativeSlot::Steer
+        validate_request(&contract, &request)?;
+        let expected = if slot == NativeSlot::Release
+            || slot == NativeSlot::Steer
             || selection.get("nativeVersion") != plan.get("nativeVersion")
             || selection.get("catalogSourceHash") != plan.get("catalogSourceHash")
             || selected.backend
                 != ivy_contracts::native_backend::BackendIdentity::optional(plan.get("backend"))?
         {
-            contract.definition_hash(&method.into())?.into()
+            contract
+                .definition_hash(crate::native_release::definition(&method.into()))?
+                .into()
         } else {
             field(plan, "definitions").required(definition)?.clone()
         };
         let mut value = Json::object([("request", request), ("expectedDefinitionHash", expected)]);
-        if selected.backend.is_some() {
+        if selected.backend.is_some() || slot == NativeSlot::Release {
             value.insert("owner", selected.to_json());
         }
         Ok(value)
@@ -325,7 +374,30 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
         operation_id: &JsString,
     ) -> IvyResult<Json> {
         let contract = catalog(self.catalogs, request)?;
-        validate_native_invocation(&contract, request, NATIVE_PARAMETERS_BYTES)?;
+        validate_request(&contract, request)?;
+        if field(request, "method").is_str("agent.release") {
+            let mut retained = request.clone();
+            retained.insert(
+                "params",
+                Json::object([
+                    ("schemaVersion", Json::Number(1.0)),
+                    ("nativeVersion", request.required("nativeVersion")?.clone()),
+                    (
+                        "nativeExecutableHash",
+                        contract.catalog().required("nativeExecutableHash")?.clone(),
+                    ),
+                    ("catalogHash", contract.catalog_hash().into()),
+                    ("method", "agent.release".into()),
+                    ("reservedFields", Json::Array(vec![])),
+                    ("params", request.required("params")?.clone()),
+                ]),
+            );
+            ivy_contracts::agent_schema::validate_agent(
+                "ParametersRef",
+                retained.required("params")?,
+            )?;
+            return Ok(retained);
+        }
         let parent = self.store.root_object_id();
         // Preserve the original hash/error boundary even though inline parameter
         // references do not publish an Object or consume this mutation identity.
@@ -345,6 +417,27 @@ impl<S: Store + ReadEvidenceStore> NativeIntent<'_, S> {
     pub fn resolve_native_request(&self, request: &Json) -> IvyResult<Json> {
         self.store.validate("NativeRequest", request)?;
         let contract = catalog(self.catalogs, request)?;
+        if field(request, "method").is_str("agent.release") {
+            let params = request.required("params")?;
+            require(
+                field(params, "method").is_str("agent.release")
+                    && params.get("nativeVersion") == request.get("nativeVersion")
+                    && params.get("nativeExecutableHash")
+                        == contract.catalog().get("nativeExecutableHash")
+                    && field(params, "catalogHash").as_js_string()
+                        == Some(&contract.catalog_hash().into())
+                    && params
+                        .get("reservedFields")
+                        .and_then(Json::as_array)
+                        .is_some_and(|fields| fields.is_empty()),
+                "task_board_native_intent_mismatch",
+                "Managed release parameters must retain their exact checked owner.",
+            )?;
+            let mut resolved = request.clone();
+            resolved.insert("params", params.required("params")?.clone());
+            validate_request(&contract, &resolved)?;
+            return Ok(resolved);
+        }
         let params = read_native_parameters(
             &contract,
             string(request, "method")?,

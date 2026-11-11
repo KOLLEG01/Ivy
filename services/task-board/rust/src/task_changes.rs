@@ -264,7 +264,11 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
             )?;
         }
         let mut named = Json::Object(vec![]);
-        for (field, name) in [("latestResult", "result"), ("lastRun", "run")] {
+        for (field, name) in [
+            ("latestResult", "result"),
+            ("lastRun", "run"),
+            ("contextRelease", "context-release"),
+        ] {
             if let Some(pin) = stored.get(field).filter(|pin| !pin.is_null()) {
                 named.insert(name, pin.clone());
             }
@@ -284,7 +288,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
             .ok_or_else(IvyError::internal)?
             .iter()
             .filter(|(name, _)| {
-                !["conversation", "result", "run"]
+                !["conversation", "result", "run", "context-release"]
                     .iter()
                     .any(|key| name == &JsString::from(*key))
             })

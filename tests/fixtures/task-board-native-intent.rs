@@ -55,6 +55,119 @@ pub(super) fn validate(name: &str, value: &Json) -> IvyResult<()> {
         ))
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_release_uses_checked_unsubscribe_with_compact_original_owner_parameters() {
+    let raw = reference_data::read(include_bytes!("task-board-native-driver-cases.json.gz"));
+    let data = parse(std::str::from_utf8(&raw).unwrap(), MANAGEMENT_FRAME_BYTES).unwrap();
+    let mut run = data.as_array().unwrap()[0]
+        .required("base")
+        .unwrap()
+        .required("run")
+        .unwrap()
+        .clone();
+    run.insert("phase", "completed".into());
+    run.insert(
+        "result",
+        Json::object([("objectId", "result".into()), ("revision", 1.0.into())]),
+    );
+    run.insert("nativeEpoch", "original-epoch".into());
+    run.insert(
+        "primaryResourceRef",
+        Json::object([
+            ("kind", "thread".into()),
+            ("namespace", "codex".into()),
+            ("nativeId", "original-thread".into()),
+            (
+                "serviceNodeId",
+                run.required("target")
+                    .unwrap()
+                    .required("serviceNodeId")
+                    .unwrap()
+                    .clone(),
+            ),
+        ]),
+    );
+    run.insert(
+        "contextRelease",
+        Json::object([("expectedOperationId", "last-turn".into())]),
+    );
+    let database = Connection::open_in_memory().unwrap();
+    local_journal::initialize(&database).unwrap();
+    let store = JournalStore {
+        journal: LocalJournal {
+            connection: &database,
+            root_object_id: Some("root".into()),
+        },
+        client: Arc::new(NoRpc),
+        contracts: Policy {
+            trace: RefCell::default(),
+            allowed_records: HashSet::new(),
+        },
+        limits: HistoryLimits::default(),
+        now: || String::from("2026-01-02T03:04:05.000Z"),
+        new_id: || "unused".into(),
+        cache: None,
+    };
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let selected = catalogs
+        .checked_native_contract(&"0.163.0".into(), None)
+        .unwrap();
+    run.get_mut("plan")
+        .unwrap()
+        .insert("nativeVersion", "0.163.0".into());
+    run.get_mut("plan").unwrap().insert(
+        "catalogSourceHash",
+        selected.catalog().required("sourceHash").unwrap().clone(),
+    );
+    let intent = NativeIntent {
+        store: &store,
+        catalogs: &catalogs,
+    };
+    let intended = intent
+        .intended_call(
+            &run,
+            ivy_task_board::native_intent::NativeSlot::Release,
+            Some(&Json::object([("kind", "release".into())])),
+            &ivy_task_board::prompts::CurrentTaskPrompts,
+        )
+        .await
+        .unwrap();
+    let request = intended.required("request").unwrap();
+    assert_eq!(
+        request.required("method").unwrap(),
+        &Json::from("agent.release")
+    );
+    assert_eq!(
+        request
+            .required("params")
+            .unwrap()
+            .required("expectedOperationId")
+            .unwrap(),
+        &Json::from("last-turn")
+    );
+    let retained = intent
+        .retain_native_request(request, &"original-release".into())
+        .unwrap();
+    validate("NativeRequest", &retained).unwrap();
+    assert_eq!(intent.resolve_native_request(&retained).unwrap(), *request);
+    assert!(intended.get("owner").is_some());
+    let mut changed = retained.clone();
+    changed.get_mut("params").unwrap().insert(
+        "nativeExecutableHash",
+        format!("sha256:{}", "f".repeat(64)).into(),
+    );
+    assert!(intent.resolve_native_request(&changed).is_err());
+    let mut changed = retained;
+    changed
+        .get_mut("params")
+        .unwrap()
+        .get_mut("params")
+        .unwrap()
+        .insert("unexpected", true.into());
+    assert!(intent.resolve_native_request(&changed).is_err());
+}
 struct Policy {
     trace: RefCell<Vec<Json>>,
     allowed_records: HashSet<String>,

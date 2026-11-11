@@ -520,6 +520,34 @@ impl NativeOwner {
         F: Future<Output = Result<(), X>>,
         N: Fn(X) -> X,
     {
+        if call.method.eq_str("agent.release") {
+            // Managed caller release is bound to the native unsubscribe definition,
+            // but its request and original receipt remain explicitly agent.release.
+            self.binding(&"thread/unsubscribe".into(), Some(&call.definition_hash))
+                .await?;
+            let mut args = call.params.clone();
+            args.insert("operationId", IvyJson::String(call.operation_id.clone()));
+            args.insert(
+                "nativeVersion",
+                IvyJson::String(self.target.native_version.clone()),
+            );
+            args.insert(
+                "expectedDefinitionHash",
+                IvyJson::String(call.definition_hash.clone()),
+            );
+            let value = self
+                .call_management_with_error(
+                    "release",
+                    args,
+                    Some(call.operation_id.clone()),
+                    guard,
+                    true,
+                    Some(call),
+                    retry_guard_failure,
+                )
+                .await?;
+            return Ok((!value.is_null()).then_some(value));
+        }
         let binding = self
             .binding(&call.method, Some(&call.definition_hash))
             .await?;
@@ -549,7 +577,11 @@ impl NativeOwner {
                 .as_ref()
                 .map_or("codex", |backend| backend.id())
         ));
-        name.0.extend(&call.method.0);
+        name.0.extend(if call.method.eq_str("agent.release") {
+            "thread/unsubscribe".encode_utf16().collect::<Vec<_>>()
+        } else {
+            call.method.0.clone()
+        });
         let fresh = tools.refresh(&tools.binding(&name, None).await?).await?;
         require(
             fresh

@@ -459,6 +459,10 @@ impl<S, H, W, I, N, G> DocumentWrites<'_, S, H, W, I, N, G> {
             if v::present(&(run)) {
                 references.push(("run".into(), run.clone()));
             }
+            let release = f(&value, "contextRelease");
+            if v::present(release) {
+                references.push(("context-release".into(), release.clone()));
+            }
             if v::present(&(f(&value, "completionIssue"))) {
                 if let Some(pin) =
                     recovery_reference(reads, f(f(&value, "completionIssue"), "run")).await?

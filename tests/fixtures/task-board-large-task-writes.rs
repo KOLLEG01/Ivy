@@ -2492,6 +2492,79 @@ async fn explicit_header_and_system_append_keep_original_pins_and_bound_tree_wor
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn context_release_fence_keeps_only_its_current_exact_run_reference() {
+    use ivy_task_board::lifecycle_journal::LifecycleJournal;
+    let mut fixture = conversation_fixture(0, 0);
+    let old = Json::object([("objectId", "release-run".into()), ("revision", 1.0.into())]);
+    fixture
+        .get_mut("task")
+        .unwrap()
+        .get_mut("content")
+        .unwrap()
+        .get_mut("value")
+        .unwrap()
+        .insert("contextRelease", old.clone());
+    fixture
+        .get_mut("task")
+        .unwrap()
+        .get_mut("revision")
+        .unwrap()
+        .get_mut("references")
+        .unwrap()
+        .insert("context-release", old.clone());
+    let value = fixture
+        .required("task")
+        .unwrap()
+        .required("content")
+        .unwrap()
+        .required("value")
+        .unwrap();
+    let hash = hash_json(value).unwrap();
+    let bytes = canonical(value, JSON_OBJECT_CONTENT_BYTES).unwrap().len();
+    let revision = fixture
+        .get_mut("task")
+        .unwrap()
+        .get_mut("revision")
+        .unwrap();
+    revision.insert("contractVersion", "3.6.0".into());
+    revision.insert("contentHash", hash.into());
+    revision.insert("byteLength", Json::Number(bytes as f64));
+    let hive = Arc::new(Hive::new(&fixture));
+    let db = Connection::open_in_memory().unwrap();
+    initialize(&db).unwrap();
+    let journal = snapshot_store(&db, hive.clone());
+    let pages = NoPages;
+    let store = LifecycleJournal {
+        journal: &journal,
+        pages: &pages,
+    };
+    let mut header = store
+        .task_header(&"task".into(), true, false)
+        .await
+        .unwrap()
+        .document
+        .value;
+    let latest = Json::object([("objectId", "release-run".into()), ("revision", 2.0.into())]);
+    header.insert("contextRelease", latest.clone());
+    let prepared = store
+        .prepare_task_change(&header, &destination(1.0), TaskChange::Header)
+        .await
+        .unwrap();
+    let refs = prepared.value.required("references").unwrap();
+    assert_eq!(refs.get("context-release"), Some(&latest));
+    assert!(!refs.as_object().unwrap().iter().any(|(_, pin)| pin == &old));
+    header.remove("contextRelease");
+    let prepared = store
+        .prepare_task_change(&header, &destination(1.0), TaskChange::Header)
+        .await
+        .unwrap();
+    let refs = prepared.value.required("references").unwrap();
+    assert!(refs.get("context-release").is_none());
+    assert!(!refs.as_object().unwrap().iter().any(|(_, pin)| pin == &old));
+    assert_eq!(hive.state.lock().unwrap().comment_reads, 0);
+}
+
 struct EditChecks<'a, S>(&'a S, &'a RuntimeContracts);
 impl<S: Store> ivy_task_board::engine_validation::ActionValidationChecks for EditChecks<'_, S> {
     async fn aggregate(&self, task: &Json, id: &JsString) -> IvyResult<()> {

@@ -670,6 +670,10 @@ impl LifecycleStore for World<'_> {
         let mut result = self
             .lifecycle_read("task-board/task", address, primary, archived)
             .await?;
+        if self.input().get("releaseArchived") == Some(&Json::Bool(true)) {
+            assert!(archived);
+            result.metadata = Json::object([("effectivelyArchived", true.into())]);
+        }
         if self.compact.get() {
             result
                 .document

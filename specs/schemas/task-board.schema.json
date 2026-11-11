@@ -27,7 +27,8 @@
             "thread/resume",
             "turn/start",
             "turn/steer",
-            "turn/interrupt"
+            "turn/interrupt",
+            "agent.release"
           ]
         },
         "params": {
@@ -2804,7 +2805,7 @@
         },
         "handoff": {
           "$ref": "#/$defs/Handoff",
-          "description": "Required for a worker handoff. Declare whether the overall task is ready for review or remains waiting. Applied only after confirmed native completion."
+          "description": "Required for a worker handoff. Select the next workflow state, or omit workflowState and declare only nativeContext to preserve the previous workflow and result. Applied only after confirmed native completion."
         },
         "resolvesQuestions": {
           "type": "array",
@@ -4057,6 +4058,9 @@
         "executionChangeRequested": {
           "type": "boolean",
           "description": "A running turn is yielding so the same conversation can continue with the latest execution settings. Consumed with its durable follow-up claim."
+        },
+        "contextRelease": {
+          "$ref": "#/$defs/ObjectPin"
         }
       },
       "required": [
@@ -4141,6 +4145,18 @@
             "kind",
             "predecessor",
             "preparedEpoch"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "release"
+            }
+          },
+          "required": [
+            "kind"
           ],
           "additionalProperties": false
         },
@@ -4656,6 +4672,9 @@
             }
           ]
         },
+        "contextRelease": {
+          "$ref": "#/$defs/ContextRelease"
+        },
         "executionContext": {
           "$ref": "#/$defs/ExecutionContext"
         }
@@ -4687,6 +4706,36 @@
       ],
       "additionalProperties": false,
       "allOf": [
+        {
+          "if": {
+            "required": [
+              "contextRelease"
+            ]
+          },
+          "then": {
+            "properties": {
+              "phase": {
+                "const": "completed"
+              },
+              "result": {
+                "$ref": "#/$defs/ObjectPin"
+              },
+              "finishedAt": {
+                "type": "string",
+                "minLength": 24,
+                "maxLength": 24,
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+              },
+              "externalOutcome": {
+                "properties": {
+                  "state": {
+                    "const": "succeeded"
+                  }
+                }
+              }
+            }
+          }
+        },
         {
           "if": {
             "properties": {
@@ -5199,6 +5248,54 @@
         },
         "change": {
           "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "attachRelease"
+                },
+                "call": {
+                  "$ref": "#/$defs/ObjectPin"
+                }
+              },
+              "required": [
+                "kind",
+                "call"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "observeRelease"
+                },
+                "call": {
+                  "$ref": "#/$defs/ObjectPin"
+                }
+              },
+              "required": [
+                "kind",
+                "call"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "retainContext"
+                },
+                "code": {
+                  "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+                }
+              },
+              "required": [
+                "kind",
+                "code"
+              ],
+              "additionalProperties": false
+            },
             {
               "type": "object",
               "properties": {
@@ -5861,7 +5958,7 @@
         },
         "handoff": {
           "$ref": "#/$defs/Handoff",
-          "description": "Required for a worker handoff. Declare whether the overall task is ready for review or remains waiting. Applied only after confirmed native completion."
+          "description": "Required for a worker handoff. Select the next workflow state, or omit workflowState and declare only nativeContext to preserve the previous workflow and result. Applied only after confirmed native completion."
         },
         "resolvesQuestions": {
           "type": "array",
@@ -6149,7 +6246,8 @@
             "3.2.0",
             "3.3.0",
             "3.4.0",
-            "3.5.0"
+            "3.5.0",
+            "3.6.0"
           ]
         },
         "payload": {
@@ -6271,7 +6369,8 @@
             "3.2.0",
             "3.3.0",
             "3.4.0",
-            "3.5.0"
+            "3.5.0",
+            "3.6.0"
           ]
         },
         "content": {
@@ -8046,10 +8145,112 @@
           },
           "maxItems": 128,
           "uniqueItems": true
+        },
+        "nativeContext": {
+          "enum": [
+            "release",
+            "retain"
+          ],
+          "description": "release explicitly declares that no remaining work or afterwork needs volatile REPL/browser/tool state. TaskBoard may release only its own subscription after native completion and durable result publication. Omitted or retain preserves the context. This never archives or replaces the thread."
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "anyOf": [
+            {
+              "required": [
+                "workflowState"
+              ]
+            },
+            {
+              "required": [
+                "nativeContext"
+              ]
+            }
+          ]
+        },
+        {
+          "if": {
+            "not": {
+              "required": [
+                "workflowState"
+              ]
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "wakeAt"
+                  ]
+                },
+                {
+                  "required": [
+                    "dependencies"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ContextRelease": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "pending",
+            "observing",
+            "succeeded",
+            "retained",
+            "outcome_unknown"
+          ]
+        },
+        "expectedOperationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "commentCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "workRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "call": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
-        "workflowState"
+        "state",
+        "expectedOperationId",
+        "commentCount",
+        "workRevision",
+        "call",
+        "code"
       ],
       "additionalProperties": false
     },

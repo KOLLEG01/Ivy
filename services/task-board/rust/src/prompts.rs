@@ -4,6 +4,7 @@ use crate::wake::{missing_wake_trigger, open_question_metadata};
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, json::stringify};
 
 pub const ATTACHMENT_GUIDANCE: &str = "Attach files only when explicitly requested or when they add clear value. Limit attachments to what is necessary and keep them as small as possible. Attach build artifacts only when explicitly requested by the user.";
+pub const CONTEXT_GUIDANCE: &str = " In a final handoff, set handoff.nativeContext=release only when no remaining work or afterwork needs volatile tool, browser or REPL state; otherwise retain or omit it.";
 
 const NOTICE_GUIDANCE: &str = "For a TaskBoard notice, summarize the outcome and any decision the user needs to make, and include the ticket reference. Leave detailed working evidence in the ticket. Preserve exact proposed public text when approval depends on that text. Do not request an acknowledgement for an unchanged status. ";
 
@@ -79,6 +80,7 @@ pub fn task_prompt(
         );
     }
     push(&mut output, ATTACHMENT_GUIDANCE);
+    push(&mut output, CONTEXT_GUIDANCE);
     Ok(output)
 }
 

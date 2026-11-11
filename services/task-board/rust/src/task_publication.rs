@@ -99,7 +99,11 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                 .validate_record("task-board/task", &version.into(), &stored)?;
             canonical(&stored, JSON_OBJECT_CONTENT_BYTES)?;
             let mut named = Json::Object(vec![]);
-            for (field, name) in [("latestResult", "result"), ("lastRun", "run")] {
+            for (field, name) in [
+                ("latestResult", "result"),
+                ("lastRun", "run"),
+                ("contextRelease", "context-release"),
+            ] {
                 if let Some(pin) = stored.get(field).filter(|pin| !pin.is_null()) {
                     named.insert(name, pin.clone());
                 }

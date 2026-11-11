@@ -347,6 +347,17 @@ Sources: [allocation](../services/task-board/rust/src/scheduler.rs),
 - A confirmed native completion applies an optional handoff workflowState. Only overall Review
   readiness notifies the user. Without a handoff, active work continues; replies to waiting or
   reviewed tickets preserve that state and result. Absence of a handoff is not an error.
+- `handoff.nativeContext=release` explicitly declares that no remaining work or afterwork
+  needs volatile tool, browser or REPL state. Omission or `retain` preserves the subscription.
+  A handoff containing only `nativeContext` preserves the prior workflow, result and acceptance;
+  scheduling fields require an explicit workflow state.
+  After confirmed completion and durable result publication, the existing Run records a compact
+  caller-scoped release intent. Current Task/Run CAS, queued input and the original native epoch
+  guard dispatch; accepted release operations retain their original receipts through recovery.
+  Comments remain writable. New native work waits only until the owner accepts that original
+  release or TaskBoard conclusively retains the context. Provider ordering then preserves foreign
+  subscribers and a later continuation of the same saved thread. Release neither archives nor
+  deletes a thread, and actual unloading follows the provider's native idle policy.
 - Serialize publication per Task until the first Task write has durably retained the owning
   Operation marker. Root coordination additionally covers shared category indexes and execution admission. That marker and Task CAS then protect the unfinished publication while up to twenty
   independent Tasks reconcile concurrently. Free slots continue reconciling while another Task

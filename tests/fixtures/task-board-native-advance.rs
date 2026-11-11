@@ -7,6 +7,8 @@ use ivy_task_board::{
     native_intent::NativeIntent,
 };
 use std::sync::OnceLock;
+#[path = "task-board-native-release-driver.rs"]
+mod release_driver;
 #[path = "task-board-native-retained-resume.rs"]
 mod retained_resume;
 
@@ -147,15 +149,19 @@ impl Client {
             ivy_contracts::native_backend::BackendIdentity::optional(status.get("backend"))
                 .unwrap(),
         );
-        let definitions = [
+        let mut methods = vec![
             "thread/resume",
             "turn/start",
             "turn/steer",
             "turn/interrupt",
-        ]
-        .into_iter()
-        .map(|m| (m.into(), source.definition(&m.into()).unwrap()))
-        .collect();
+        ];
+        if input.get("slot").is_some_and(|v| v.is_str("release")) {
+            methods.push("thread/unsubscribe");
+        }
+        let definitions = methods
+            .into_iter()
+            .map(|m| (m.into(), source.definition(&m.into()).unwrap()))
+            .collect();
         Self {
             input: input.clone(),
             base: base.clone(),
@@ -307,6 +313,41 @@ impl RpcClient for Client {
             }
             if name == "agent.status" {
                 return Ok(merge(status, self.input.get("status")));
+            }
+            if name == "agent.release" {
+                assert_eq!(self.slot, "release");
+                let actual = args.required("arguments")?;
+                let call = self.base.required("calls")?.required("release")?;
+                assert_eq!(actual.get("operationId"), Some(&Json::from("original")));
+                assert_eq!(
+                    actual.get("expectedDefinitionHash"),
+                    call.get("expectedDefinitionHash")
+                );
+                for key in ["threadId", "expectedEpoch", "expectedOperationId"] {
+                    assert_eq!(
+                        actual.get(key),
+                        call.required("request")?
+                            .required("params")?
+                            .required("params")?
+                            .get(key)
+                    );
+                }
+                assert!(actual.get("method").is_none() && actual.get("params").is_none());
+                *self.invokes.lock().unwrap() += 1;
+                if let Some(code) = self.invoke_error.lock().unwrap().take() {
+                    return Err(failure(code));
+                }
+                let phase = self
+                    .input
+                    .get("releaseResult")
+                    .map(|v| v.as_str().unwrap())
+                    .unwrap_or_else(|| "accepted".to_owned());
+                let value = operation(&self.base, "release", &phase, "2026-01-02T03:04:05.007Z");
+                return Ok(if phase == "accepted" {
+                    value
+                } else {
+                    merge(&value, self.input.get("observation"))
+                });
             }
             if name == "agent.prevent" {
                 return Ok(operation(

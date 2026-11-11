@@ -47,6 +47,15 @@ pub trait NativeDriverConnection: NativeDriverRuntime {
 #[allow(async_fn_in_trait)]
 pub trait NativeDriverStore: Store + ReadEvidenceStore {
     async fn named_call(&self, name: &JsString) -> IvyResult<Option<Document>>;
+    async fn release_task_header(
+        &self,
+        _address: &Json,
+    ) -> IvyResult<crate::native_lifecycle::LifecycleDocument> {
+        Err(IvyError::new(
+            "task_board_context_release_unsupported",
+            "Release reconciliation requires current archive metadata.",
+        ))
+    }
 }
 impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsString> NativeDriverStore
     for JournalStore<'_, R, P, C, I>
@@ -58,6 +67,12 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
             self.journal.root_object_id.as_ref(),
         )
         .await
+    }
+    async fn release_task_header(
+        &self,
+        address: &Json,
+    ) -> IvyResult<crate::native_lifecycle::LifecycleDocument> {
+        self.lifecycle_task_header(address, true, true).await
     }
 }
 /// Bind this to the journal's authenticated RPC client and the accepted current
@@ -143,10 +158,16 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
         ))
     }
     pub async fn status(&self, run: &Json, call: &Json) -> IvyResult<Json> {
-        let task = self
-            .store
-            .read_task_header(run.required("taskId")?, true)
-            .await?;
+        let task = if field(field(call, "origin"), "kind").is_str("release") {
+            self.store
+                .release_task_header(run.required("taskId")?)
+                .await?
+                .document
+        } else {
+            self.store
+                .read_task_header(run.required("taskId")?, true)
+                .await?
+        };
         self.status_for_task(&task.value, run, call).await
     }
     async fn status_for_task(&self, task: &Json, run: &Json, call: &Json) -> IvyResult<Json> {
@@ -279,9 +300,15 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
     /// Reconcile only the attached original operation. Confirmed owner absence
     /// reaches domain dispatch guards; a missing receipt never authorizes replay.
     pub async fn advance(&self, run_id: &JsString, slot: NativeSlot) -> IvyResult<Json> {
-        let current = self.current(run_id).await?;
+        let current = self
+            .current_for(run_id, slot == NativeSlot::Release)
+            .await?;
         let run = &current.run.value;
-        let pin = field(field(run, "calls"), slot.as_str());
+        let pin = if slot == NativeSlot::Release {
+            crate::native_release::call(run)
+        } else {
+            field(field(run, "calls"), slot.as_str())
+        };
         require(
             !pin.is_null(),
             "task_board_native_order",
@@ -309,14 +336,7 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
                 .ok_or_else(IvyError::internal)?
         {
             return self
-                .update(
-                    &current,
-                    Json::object([
-                        ("kind", "observeCall".into()),
-                        ("slot", slot.as_str().into()),
-                        ("call", call.pin.to_json()),
-                    ]),
-                )
+                .update(&current, observation_change(slot, call.pin.to_json()))
                 .await;
         }
         require(
@@ -384,9 +404,7 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
                             ("expectedRevision",Json::Number(call_ref.pin.revision)),
                         ]),
                     ).await?;
-                    self.update(current_ref,Json::object([
-                        ("kind","observeCall".into()),("slot",slot.as_str().into()),("call",saved),
-                    ])).await
+                    self.update(current_ref, observation_change(slot, saved)).await
                 },
             },
             Some(move |original: NativeOperationCall, absence: Json| async move {
@@ -394,11 +412,30 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
                 let current = current_ref;
                 let call = call_ref;
                 let native_request = native_request_ref;
+                if slot == NativeSlot::Release &&
+                    (current.archived || owner.target() != &original_owner || !crate::native_release::eligible(&current.task.value, run, &current.run.pin.to_json())) {
+                    self.update(current, Json::object([
+                        ("kind", "retainContext".into()), ("code", "native_context_needed".into()),
+                    ])).await?;
+                    return Err(IvyError::new("task_board_context_retained", "New work retains the context before the absent original release is dispatched.")
+                        .with_outcome(ivy_contracts::Outcome::NotExecuted));
+                }
+                if slot == NativeSlot::Release {
+                    require(!self.store.task_operations_pending(&current.task.pin.object_id, None)?,
+                        "task_board_context_release_pending", "Release waits for accepted ticket operations to settle.")?;
+                }
                 require(owner.target() == &original_owner,
                     "task_board_native_route_changed", "A different current route cannot dispatch an original call. Reconcile its retained owner without replay.")?;
                 let status = self.status_for_task(&current.task.value,run,&call.value).await?;
                 require(absence.get("epoch")==status.get("epoch"),
                     "task_board_native_epoch_changed", "Absence and current native status must come from the same epoch.")?;
+                if slot == NativeSlot::Release && status.get("epoch") != run.get("nativeEpoch") {
+                    self.update(current, Json::object([
+                        ("kind", "retainContext".into()), ("code", "native_epoch_changed".into()),
+                    ])).await?;
+                    return Err(IvyError::new("task_board_context_retained", "The absent original release cannot detach a replacement native epoch.")
+                        .with_outcome(ivy_contracts::Outcome::NotExecuted));
+                }
                 let thread_pin = field(field(run,"calls"),"thread");
                 let primary_failed = if slot==NativeSlot::Turn && !thread_pin.is_null() {
                     let thread = Store::read(self.store,"task-board/native-call",thread_pin,true).await?;
@@ -408,7 +445,7 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
                     && (current.active || !field(run,"cancellation").is_null());
                 if (!current.active || !field(run,"cancellation").is_null() || primary_failed
                     || slot==NativeSlot::Steer && status.get("epoch")!=run.get("nativeEpoch"))
-                    && slot!=NativeSlot::Interrupt && !attaching_turn
+                    && slot!=NativeSlot::Interrupt && slot!=NativeSlot::Release && !attaching_turn
                 {
                     let prevented = owner.management("prevent",Json::object([
                         ("operationId",call.value.required("operationId")?.clone()),
@@ -456,13 +493,27 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
                     require(status.get("epoch")==run.get("nativeEpoch"),"task_board_native_epoch_changed",
                         "An old turn cannot be interrupted as if the replacement owner controlled it.")?;
                 }
-                owner.dispatch_local(&original,|| async {
-                    let fresh = self.current(run_id).await?;
+                let dispatched = owner.dispatch_local(&original,|| async {
+                    let fresh = self.current_for(run_id, slot == NativeSlot::Release).await?;
                     require(fresh.run.pin == current.run.pin
                         && fresh.task.pin == current.task.pin,
                         "revision_conflict","Task or Run changed before native dispatch; reconcile it before sending.")?;
+                    if slot == NativeSlot::Release {
+                        require(!fresh.archived && !self.store.task_operations_pending(&fresh.task.pin.object_id, None)?,
+                            "task_board_context_release_pending", "Accepted ticket work retains the context before release admission.")?;
+                    }
                     self.runtime.verify_owner().await
-                }).await
+                }).await;
+                if slot == NativeSlot::Release && let Err(error) = &dispatched
+                    && error.outcome == ivy_contracts::Outcome::NotExecuted
+                    && error.code != "task_board_context_release_pending" {
+                    self.update(current, Json::object([
+                        ("kind", "retainContext".into()), ("code", error.code_js().into()),
+                    ])).await?;
+                    return Err(IvyError::new("task_board_context_retained", "The optional release was not executed; the context remains attached.")
+                        .with_outcome(ivy_contracts::Outcome::NotExecuted));
+                }
+                dispatched
             }),
             Some("task_board_native_absence_conflict"),
         ).await?;
@@ -479,6 +530,25 @@ struct Current {
     run: Document,
     task: Document,
     active: bool,
+    archived: bool,
+}
+fn observation_change(slot: NativeSlot, call: Json) -> Json {
+    let mut change = Json::object([
+        (
+            "kind",
+            if slot == NativeSlot::Release {
+                "observeRelease"
+            } else {
+                "observeCall"
+            }
+            .into(),
+        ),
+        ("call", call),
+    ]);
+    if slot != NativeSlot::Release {
+        change.insert("slot", slot.as_str().into());
+    }
+    change
 }
 fn field<'a>(v: &'a Json, key: &str) -> &'a Json {
     static NULL: Json = Json::Null;
@@ -498,6 +568,9 @@ fn string<'a>(v: &'a Json, key: &str) -> IvyResult<&'a JsString> {
 }
 impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<'_, S, R, P> {
     async fn current(&self, run_id: &JsString) -> IvyResult<Current> {
+        self.current_for(run_id, false).await
+    }
+    async fn current_for(&self, run_id: &JsString, release: bool) -> IvyResult<Current> {
         self.runtime.verify_owner().await?;
         let run = Store::read(
             self.store,
@@ -506,16 +579,37 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
             true,
         )
         .await?;
-        let task = self
-            .store
-            .read_task_header(run.value.required("taskId")?, true)
-            .await?;
+        let (task, archived) = if release {
+            let value = self
+                .store
+                .release_task_header(run.value.required("taskId")?)
+                .await?;
+            let archived = value
+                .metadata
+                .required("effectivelyArchived")?
+                .as_bool()
+                .ok_or_else(IvyError::internal)?;
+            (value.document, archived)
+        } else {
+            (
+                self.store
+                    .read_task_header(run.value.required("taskId")?, true)
+                    .await?,
+                false,
+            )
+        };
         require(
-            !["completed", "failed", "cancelled"]
-                .iter()
-                .any(|s| field(&run.value, "phase") == &Json::from(*s)),
+            release
+                || !["completed", "failed", "cancelled"]
+                    .iter()
+                    .any(|s| field(&run.value, "phase") == &Json::from(*s)),
             "task_board_native_order",
             "Native execution requires an unfinished Run.",
+        )?;
+        require(
+            release || field(&task.value, "contextRelease").is_null(),
+            "task_board_context_release_pending",
+            "The original release must be admitted or retained before new native work.",
         )?;
         require(
             field(&task.value, "publication").is_null(),
@@ -529,7 +623,12 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
             "revision_conflict",
             "Native execution requires the exact current claimed Run revision.",
         )?;
-        Ok(Current { run, task, active })
+        Ok(Current {
+            run,
+            task,
+            active,
+            archived,
+        })
     }
     async fn update(&self, current: &Current, change: Json) -> IvyResult<Json> {
         let scope = Json::object([
@@ -560,12 +659,21 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
     ) -> IvyResult<Json> {
         let initial = Json::object([("kind", "initial".into())]);
         let origin = origin.unwrap_or(&initial);
-        let current = self.current(run_id).await?;
+        let current = self
+            .current_for(run_id, slot == NativeSlot::Release)
+            .await?;
         let attaching_turn = slot == NativeSlot::Thread
             && !field(&current.run.value, "turnId").is_null()
             && (current.active || !field(&current.run.value, "cancellation").is_null());
         require(
-            if slot == NativeSlot::Interrupt {
+            if slot == NativeSlot::Release {
+                !current.archived
+                    && crate::native_release::eligible(
+                        &current.task.value,
+                        &current.run.value,
+                        &current.run.pin.to_json(),
+                    )
+            } else if slot == NativeSlot::Interrupt {
                 !field(&current.run.value, "cancellation").is_null()
             } else {
                 attaching_turn
@@ -574,6 +682,15 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
             "task_board_claim_inactive",
             "Only an active claim may prepare execution; retained turns may reattach for observation or cancellation.",
         )?;
+        if slot == NativeSlot::Release {
+            require(
+                !self
+                    .store
+                    .task_operations_pending(&current.task.pin.object_id, None)?,
+                "task_board_context_release_pending",
+                "Release preparation waits for accepted ticket operations.",
+            )?;
+        }
         let mut scope = vec![
             "task-board-native-call".into(),
             current.run.value.required("operationId")?.clone(),
@@ -664,9 +781,13 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
             });
         }
         let call = call.unwrap();
-        if field(field(&current.run.value, "calls"), slot.as_str())
-            .get("objectId")
-            .and_then(Json::as_js_string)
+        if (if slot == NativeSlot::Release {
+            crate::native_release::call(&current.run.value)
+        } else {
+            field(field(&current.run.value, "calls"), slot.as_str())
+        })
+        .get("objectId")
+        .and_then(Json::as_js_string)
             == Some(&call.pin.object_id)
         {
             return Ok(call.pin.to_json());
@@ -674,7 +795,9 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
         let mut change = Json::object([
             (
                 "kind",
-                if field(origin, "kind") == &Json::from("reattach") {
+                if slot == NativeSlot::Release {
+                    "attachRelease".into()
+                } else if field(origin, "kind") == &Json::from("reattach") {
                     "reattachCall".into()
                 } else {
                     "attachCall".into()
@@ -682,7 +805,7 @@ impl<S: NativeDriverStore, R: NativeDriverRuntime, P: TaskPrompts> NativeDriver<
             ),
             ("call", call.pin.to_json()),
         ]);
-        if field(origin, "kind") != &Json::from("reattach") {
+        if slot != NativeSlot::Release && field(origin, "kind") != &Json::from("reattach") {
             change.insert("slot", slot.as_str().into());
         }
         self.update(&current, change).await?;

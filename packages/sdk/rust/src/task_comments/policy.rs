@@ -50,7 +50,7 @@ pub(super) fn snapshot(mut saved: Json, pin: &NodePin, task_id: &JsString) -> Iv
     let revision = saved.get("revision");
     let content = saved.get("content");
     if !text(object.and_then(|v| v.get("contractKey")), COMMENT_NODE_KEY)
-        || !["1.0.0", "2.0.0"]
+        || !["1.0.0", "2.0.0", "2.1.0"]
             .iter()
             .any(|version| text(revision.and_then(|v| v.get("contractVersion")), version))
         || object

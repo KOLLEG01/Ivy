@@ -42,6 +42,43 @@ fn num(v: &Json, k: &str) -> f64 {
 fn id(n: usize) -> JsString {
     format!("00000000-0000-4000-8000-{n:012}").into()
 }
+fn query_fields_admitted(key: &str, options: &Json) -> bool {
+    static CONTRACTS: OnceLock<Vec<Json>> = OnceLock::new();
+    let contracts =
+        CONTRACTS.get_or_init(|| ivy_task_board::schema::task_board_contracts().unwrap());
+    let selected: Vec<_> = contracts
+        .iter()
+        .filter(|contract| {
+            f(contract, "key").is_str(key)
+                && options
+                    .get("contractVersions")
+                    .and_then(Json::as_array)
+                    .is_none_or(|versions| versions.contains(f(contract, "version")))
+        })
+        .collect();
+    fn admits(schema: &Json, value: &Json) -> bool {
+        if let Some(field) = value.get("field").and_then(Json::as_js_string) {
+            if let Some(pointer) = field.to_utf8().unwrap().strip_prefix("data:") {
+                if ivy_contracts::schema::scalar_types(schema, &pointer.into())
+                    .unwrap()
+                    .is_empty()
+                {
+                    return false;
+                }
+            }
+        }
+        match value {
+            Json::Object(properties) => properties.iter().all(|(_, value)| admits(schema, value)),
+            Json::Array(values) => values.iter().all(|value| admits(schema, value)),
+            _ => true,
+        }
+    }
+    selected.iter().all(|contract| {
+        contract
+            .get("jsonSchema")
+            .is_none_or(|schema| admits(schema, options))
+    })
+}
 fn data() -> &'static Json {
     static DATA: OnceLock<Json> = OnceLock::new();
     DATA.get_or_init(|| {
@@ -124,6 +161,8 @@ struct World<'a> {
     routing_source: RefCell<Option<Json>>,
     archived_tasks: RefCell<Vec<JsString>>,
     header_failure: RefCell<Option<IvyError>>,
+    release_ids: Vec<JsString>,
+    release_queries: RefCell<Vec<Json>>,
 }
 impl<'a> World<'a> {
     fn new(input: &'a Json) -> Self {
@@ -217,6 +256,8 @@ impl<'a> World<'a> {
             routing_source: RefCell::new(input.get("routingSource").cloned()),
             archived_tasks: RefCell::default(),
             header_failure: RefCell::default(),
+            release_ids: Vec::new(),
+            release_queries: RefCell::default(),
         }
     }
     fn event(&self, args: impl IntoIterator<Item = Json>) {
@@ -366,6 +407,45 @@ impl AllocationStore for World<'_> {
         panic!("No reservation")
     }
     async fn page(&self, k: &str, o: &Json) -> IvyResult<Json> {
+        assert!(
+            query_fields_admitted(k, o),
+            "Query is not admitted by every selected published schema: {o:?}"
+        );
+        if k == "task-board/run" && f(f(o, "where"), "field").is_str("data:/contextRelease/state") {
+            assert_eq!(f(o, "contractVersions"), &Json::Array(vec!["3.2.0".into()]));
+            self.release_queries.borrow_mut().push(o.clone());
+            let start = f(o, "cursor")
+                .as_js_string()
+                .map(|v| v.to_utf8().unwrap().parse::<usize>().unwrap())
+                .unwrap_or(0);
+            let limit = num(o, "limit") as usize;
+            return Ok(Json::object([
+                (
+                    "items",
+                    Json::Array(
+                        self.release_ids
+                            .iter()
+                            .skip(start)
+                            .take(limit)
+                            .map(|id| {
+                                Json::object([
+                                    ("objectId", Json::String(id.clone())),
+                                    ("revision", Json::Number(1.0)),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ),
+                (
+                    "nextCursor",
+                    if start + limit < self.release_ids.len() {
+                        (start + limit).to_string().into()
+                    } else {
+                        Json::Null
+                    },
+                ),
+            ]));
+        }
         self.event(["page".into(), k.into(), o.clone()]);
         let l = [
             "task-board/operation",
@@ -554,6 +634,82 @@ impl ReconcileEngine for World<'_> {
     async fn delivery(&self, id: &JsString) -> IvyResult<()> {
         self.work("delivery", id).await
     }
+}
+
+#[test]
+fn release_recovery_scopes_new_fields_and_drains_all_pages_before_scheduling() {
+    let input = Json::object([
+        (
+            "counts",
+            Json::Array(vec![0.0.into(), 1.0.into(), 1.0.into(), 0.0.into()]),
+        ),
+        ("pageSize", Json::Number(1.0)),
+    ]);
+    let mut world = World::new(&input);
+    for n in [301, 302] {
+        world.release_ids.push(id(n));
+        world.records.insert(
+            id(n),
+            Json::object([
+                ("taskId", Json::String(id(n - 200))),
+                ("phase", "completed".into()),
+                (
+                    "contextRelease",
+                    Json::object([("state", "pending".into())]),
+                ),
+            ]),
+        );
+    }
+    let tasks = Tasks::default();
+    let subject = Reconciler::new(&world, &world, &tasks);
+    let waker = Waker::from(Arc::new(Noop));
+    let mut cx = Context::from_waker(&waker);
+    for _ in 0..8 {
+        for _ in 0..8 {
+            tasks.pump(&mut cx);
+            world.release(Some(&id(100)));
+        }
+        let mut tick = Box::pin(subject.tick());
+        assert!(tick.as_mut().poll(&mut cx).is_ready());
+    }
+    assert!(!subject.recovered());
+    assert!(
+        !world
+            .trace
+            .borrow()
+            .iter()
+            .any(|event| event.as_array().unwrap()[0].is_str("schedule"))
+    );
+    for _ in 0..40 {
+        for _ in 0..8 {
+            tasks.pump(&mut cx);
+            world.release(None);
+        }
+        let mut tick = Box::pin(subject.tick());
+        assert!(tick.as_mut().poll(&mut cx).is_ready());
+    }
+    assert!(subject.recovered());
+    assert!(subject.diagnostics().is_empty());
+    let trace = world.trace.borrow();
+    let first_schedule = trace
+        .iter()
+        .position(|event| event.as_array().unwrap()[0].is_str("schedule"))
+        .unwrap();
+    for run in [300, 301, 302] {
+        let first_drain = trace
+            .iter()
+            .position(|event| event == &Json::Array(vec!["drain".into(), Json::String(id(run))]))
+            .unwrap();
+        assert!(first_drain < first_schedule);
+    }
+    let queries = world.release_queries.borrow();
+    assert!(queries.iter().any(|query| f(query, "cursor").is_str("1")));
+    let mut unscoped = queries[0].clone();
+    unscoped.remove("contractVersions");
+    assert!(
+        !query_fields_admitted("task-board/run", &unscoped),
+        "The original cross-version predicate must remain rejected."
+    );
 }
 
 #[test]

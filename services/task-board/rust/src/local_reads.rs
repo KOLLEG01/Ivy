@@ -123,7 +123,11 @@ pub(crate) fn prepared_task_owner<'a>(operation: &'a Json, pin: &Json) -> IvyRes
 
 impl LocalJournal<'_> {
     /// Read only current heads and return one bit; provider replies stay in SQLite.
-    pub fn route_migration_pending(&self, task: &JsString, except: &JsString) -> IvyResult<bool> {
+    pub fn task_operations_pending(
+        &self,
+        task: &JsString,
+        except: Option<&JsString>,
+    ) -> IvyResult<bool> {
         self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM documents d JOIN revisions r
              ON r.id=d.id AND r.revision=d.current_revision
@@ -133,7 +137,7 @@ impl LocalJournal<'_> {
                  OR json_extract(r.value_json,'$.error.execution')='unknown'
                  OR EXISTS(SELECT 1 FROM json_each(r.value_json,'$.nativeCalls') c
                    WHERE COALESCE(json_extract(c.value,'$.observation.phase'),'') NOT IN ('succeeded','failed'))))",
-            [crate::local_journal::text(except), crate::local_journal::text(task)],
+            [except.map(crate::local_journal::text).unwrap_or_default(), crate::local_journal::text(task)],
             |row| row.get(0),
         ).map_err(ivy_store::sqlite::error)
     }
