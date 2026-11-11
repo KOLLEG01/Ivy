@@ -237,6 +237,22 @@ impl NativeOperations {
     pub fn journal(&self) -> Arc<Mutex<NativeJournal>> {
         self.inner.memory.clone()
     }
+    pub fn thread_has_pending_work(&self, thread: &JsString, except: &Identity) -> IvyResult<bool> {
+        let except = Self::key(except)?;
+        Ok(self
+            .inner
+            .active
+            .lock()
+            .unwrap()
+            .calls
+            .values()
+            .any(|call| {
+                call.key != except
+                    && call.thread_id.as_ref() == Some(thread)
+                    && !call.method.eq_str("agent.release")
+                    && !ivy_contracts::native_contract::is_read_only_native_method(&call.method)
+            }))
+    }
     /// Report the persisted origin, independently of the current RPC route.
     /// Missing provider provenance must be seeded by the original owner.
     pub fn storage_identity(&self) -> IvyResult<IvyJson> {

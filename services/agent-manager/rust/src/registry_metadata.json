@@ -236,6 +236,22 @@
           },
           {
             "namespace": "agent",
+            "name": "release",
+            "interfaceVersion": "1.0.0",
+            "description": "Release only this caller's settled thread subscription after its work, result and volatile tool state are complete. Retain other callers; journal the original logical or native outcome. Read agent.operation after an uncertain response.",
+            "inputSchema": {
+              "$agentSchema": "ThreadReleaseInput"
+            },
+            "outputSchema": {
+              "$agentSchema": "Operation"
+            },
+            "annotations": {
+              "readOnlyHint": false,
+              "idempotentHint": true
+            }
+          },
+          {
+            "namespace": "agent",
             "name": "invoke",
             "interfaceVersion": "1.0.0",
             "description": "Dispatch one idempotent native request and return its committed operation receipt.",

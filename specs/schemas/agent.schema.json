@@ -1764,6 +1764,9 @@
             }
           ]
         },
+        "release": {
+          "$ref": "#/$defs/ThreadReleaseResult"
+        },
         "backend": {
           "$ref": "#/$defs/BackendIdentity"
         }
@@ -1813,6 +1816,13 @@
             "properties": {
               "phase": {
                 "const": "succeeded"
+              }
+            },
+            "not": {
+              "properties": {
+                "method": {
+                  "const": "agent.release"
+                }
               }
             }
           },
@@ -1927,6 +1937,19 @@
                   "succeeded"
                 ]
               }
+            },
+            "not": {
+              "properties": {
+                "method": {
+                  "const": "agent.release"
+                },
+                "phase": {
+                  "const": "succeeded"
+                },
+                "requestId": {
+                  "type": "null"
+                }
+              }
             }
           },
           "then": {
@@ -1941,6 +1964,181 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "required": [
+              "release"
+            ]
+          },
+          "then": {
+            "properties": {
+              "method": {
+                "const": "agent.release"
+              },
+              "phase": {
+                "const": "succeeded"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "agent.release"
+              },
+              "phase": {
+                "const": "succeeded"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "release"
+            ],
+            "properties": {
+              "code": {
+                "type": "null"
+              }
+            },
+            "oneOf": [
+              {
+                "properties": {
+                  "epoch": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "minLength": 1
+                  },
+                  "requestId": {
+                    "type": "null"
+                  },
+                  "reply": {
+                    "type": "null"
+                  },
+                  "release": {
+                    "properties": {
+                      "kind": {
+                        "const": "logical"
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "epoch": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "minLength": 1
+                  },
+                  "requestId": {
+                    "$ref": "#/$defs/RequestId"
+                  },
+                  "reply": {
+                    "type": "object",
+                    "properties": {
+                      "result": {
+                        "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Json"
+                      }
+                    },
+                    "required": [
+                      "result"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "release": {
+                    "properties": {
+                      "kind": {
+                        "const": "native"
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "ThreadReleaseInput": {
+      "type": "object",
+      "properties": {
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "nativeVersion": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "expectedDefinitionHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "threadId": {
+          "type": "string",
+          "maxLength": 1024,
+          "minLength": 1
+        },
+        "expectedEpoch": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "expectedOperationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "backend": {
+          "$ref": "#/$defs/BackendIdentity"
+        }
+      },
+      "required": [
+        "operationId",
+        "nativeVersion",
+        "expectedDefinitionHash",
+        "threadId",
+        "expectedEpoch",
+        "expectedOperationId"
+      ],
+      "additionalProperties": false
+    },
+    "ThreadReleaseResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "logical"
+            },
+            "otherSubscribers": {
+              "const": true
+            }
+          },
+          "required": [
+            "kind",
+            "otherSubscribers"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "native"
+            },
+            "status": {
+              "enum": [
+                "unsubscribed",
+                "notLoaded",
+                "notSubscribed"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "status"
+          ],
+          "additionalProperties": false
         }
       ]
     },

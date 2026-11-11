@@ -68,6 +68,42 @@ struct OperationState {
     clock: bool,
     durable: bool,
 }
+struct Subscriber {
+    caller: JsString,
+    operation: JsString,
+    attached: bool,
+    pending: Vec<JsString>,
+}
+struct Subscription {
+    callers: Vec<Subscriber>,
+    idle: bool,
+}
+impl Subscription {
+    fn bytes(&self) -> usize {
+        self.callers.capacity() * size_of::<Subscriber>()
+            + self
+                .callers
+                .iter()
+                .map(|caller| {
+                    (caller.caller.0.capacity() + caller.operation.0.capacity()) * size_of::<u16>()
+                        + caller.pending.capacity() * size_of::<JsString>()
+                        + caller
+                            .pending
+                            .iter()
+                            .map(|id| id.0.capacity() * size_of::<u16>())
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+    }
+}
+/// A connection-local attribution, independent of receipt retention. This is
+/// evidence for a later guarded release, never proof that a turn has finished.
+pub struct ThreadSubscription<'a> {
+    pub operation_id: &'a JsString,
+    pub attached: bool,
+    pub settled: bool,
+    pub shared: bool,
+}
 impl OperationState {
     fn new(value: &IvyJson, durable: bool) -> Self {
         Self {
@@ -272,6 +308,8 @@ pub struct NativeJournal {
     operations: Rows<Row<OperationState>>,
     inputs: Rows<Row<InputState>>,
     observations: Rows<Observation>,
+    subscriptions: Rows<Subscription>,
+    subscriptions_complete: bool,
     revisions: HashMap<String, f64>,
     epoch: Option<JsString>,
     clock: Arc<JournalClock>,
@@ -314,6 +352,8 @@ impl NativeJournal {
             operations: Rows::new(),
             inputs: Rows::new(),
             observations: Rows::new(),
+            subscriptions: Rows::new(),
+            subscriptions_complete: true,
             revisions: HashMap::new(),
             epoch: None,
             clock,
@@ -327,6 +367,8 @@ impl NativeJournal {
         self.operations.clear();
         self.inputs.clear();
         self.observations.clear();
+        self.subscriptions.clear();
+        self.subscriptions_complete = true;
         self.revisions = HashMap::new();
         self.epoch = None;
         self.on_terminal = None;
@@ -366,6 +408,309 @@ impl NativeJournal {
         self.operations.bytes(|row| row.charge)
             + self.inputs.bytes(|row| row.charge)
             + self.observations.bytes(Observation::bytes)
+            + self.subscriptions.bytes(Subscription::bytes)
+    }
+    pub fn thread_subscription(
+        &self,
+        thread: &JsString,
+        caller: &JsString,
+    ) -> IvyResult<Option<ThreadSubscription<'_>>> {
+        if !self.subscriptions_complete || self.epoch.is_none() || thread.0.len() > 1024 {
+            return Ok(None);
+        }
+        let key = canonical(&IvyJson::String(thread.clone()), MANAGEMENT_FRAME_BYTES)?;
+        Ok(self.subscriptions.get(&key).and_then(|entry| {
+            entry
+                .callers
+                .iter()
+                .find(|entry| &entry.caller == caller)
+                .map(|own| ThreadSubscription {
+                    operation_id: &own.operation,
+                    attached: own.attached,
+                    settled: own.pending.is_empty(),
+                    shared: entry.callers.len() > 1,
+                })
+        }))
+    }
+    fn observe_subscriber(
+        &mut self,
+        thread: &JsString,
+        identity: &Identity,
+        attached: bool,
+        settled: bool,
+    ) -> IvyResult<()> {
+        if !self.subscriptions_complete {
+            return Ok(());
+        }
+        // Unattributable or oversized native identities must never turn an
+        // incomplete ownership list into permission to unsubscribe. Existing
+        // native work still completes; only later automatic release is barred.
+        if thread.0.is_empty()
+            || thread.0.len() > 1024
+            || identity.caller_principal_id.0.len() > 256
+            || identity.operation_id.0.len() > 256
+        {
+            self.subscriptions_complete = false;
+            self.subscriptions.clear();
+            return Ok(());
+        }
+        let key = canonical(&IvyJson::String(thread.clone()), MANAGEMENT_FRAME_BYTES)?;
+        if self.subscriptions.get(&key).is_none() {
+            self.subscriptions.insert(
+                key.clone(),
+                Subscription {
+                    callers: Vec::new(),
+                    idle: false,
+                },
+            );
+        }
+        let entry = self.subscriptions.get_mut(&key).unwrap();
+        if !settled {
+            entry.idle = false;
+        }
+        if let Some(caller) = entry
+            .callers
+            .iter_mut()
+            .find(|v| v.caller == identity.caller_principal_id)
+        {
+            // A late reply must not replace a newer dispatch's identity/state.
+            if !settled || caller.operation == identity.operation_id {
+                caller.operation = identity.operation_id.clone();
+            }
+            if settled {
+                caller.pending.retain(|id| id != &identity.operation_id);
+                caller.pending.shrink_to_fit();
+            } else if !caller.pending.contains(&identity.operation_id) {
+                caller.pending.push(identity.operation_id.clone());
+            }
+            caller.attached |= attached;
+        } else {
+            entry.callers.push(Subscriber {
+                caller: identity.caller_principal_id.clone(),
+                operation: identity.operation_id.clone(),
+                attached,
+                pending: if settled {
+                    Vec::new()
+                } else {
+                    vec![identity.operation_id.clone()]
+                },
+            });
+        }
+        if self.bytes() > self.limits.max_journal_bytes {
+            self.subscriptions_complete = false;
+            self.subscriptions.clear();
+        }
+        Ok(())
+    }
+    /// The caller proves completion separately. These connection facts only
+    /// establish that its exact last interest is still current and settled.
+    pub fn check_thread_release(
+        &self,
+        thread: &JsString,
+        identity: &Identity,
+        epoch: &JsString,
+        expected_operation: &JsString,
+    ) -> IvyResult<bool> {
+        require(
+            self.epoch.as_ref() == Some(epoch),
+            "native_state_conflict",
+            "Release belongs to another native epoch.",
+        )?;
+        let own = self.thread_subscription(thread, &identity.caller_principal_id)?;
+        require(
+            own.is_some(),
+            "native_subscription_unknown",
+            "No complete current subscription attribution exists for this caller.",
+        )?;
+        let own = own.unwrap();
+        require(
+            own.operation_id == expected_operation && own.attached && own.settled,
+            "native_subscription_changed",
+            "The caller subscription changed or still has unresolved native work.",
+        )?;
+        let key = canonical(&IvyJson::String(thread.clone()), MANAGEMENT_FRAME_BYTES)?;
+        require(
+            self.subscriptions
+                .get(&key)
+                .unwrap()
+                .callers
+                .iter()
+                .all(|caller| caller.pending.is_empty()),
+            "native_thread_busy",
+            "The thread has unresolved native work.",
+        )?;
+        for input in self.inputs.values().filter(|row| row.state.pending) {
+            let value = input.read()?;
+            require(
+                value
+                    .get("threadId")
+                    .is_some_and(|id| !id.is_null() && id.as_js_string() != Some(thread)),
+                "native_thread_busy",
+                "A native input is still pending for this thread or has no attributable thread.",
+            )?;
+        }
+        Ok(own.shared)
+    }
+    pub fn finish_logical_release(
+        &mut self,
+        identity: &Identity,
+        thread: &JsString,
+        epoch: &JsString,
+        expected_operation: &JsString,
+    ) -> IvyResult<IvyJson> {
+        require(
+            self.check_thread_release(thread, identity, epoch, expected_operation)?,
+            "native_state_conflict",
+            "The last caller requires an actual native unsubscribe.",
+        )?;
+        self.check_thread_idle(thread)?;
+        let mut value = self.existing(identity)?;
+        require(
+            is(&value, "phase", "accepted") && is(&value, "method", "agent.release"),
+            "native_state_conflict",
+            "Logical release requires its original accepted management operation.",
+        )?;
+        set(&mut value, "phase", "succeeded".into())?;
+        set(&mut value, "epoch", epoch.clone().into())?;
+        set(&mut value, "updatedAt", IvyJson::String((self.clock)()))?;
+        value.insert(
+            "release",
+            IvyJson::object([
+                ("kind", "logical".into()),
+                ("otherSubscribers", true.into()),
+            ]),
+        );
+        // A terminal callback can fail after committing the row. Preserve the
+        // same logical effect as that original row, even when its observer fails.
+        let saved = self.save(value);
+        if !self
+            .existing(identity)?
+            .get("phase")
+            .is_some_and(|phase| phase.is_str("succeeded"))
+        {
+            return saved;
+        }
+        let key = canonical(&IvyJson::String(thread.clone()), MANAGEMENT_FRAME_BYTES)?;
+        self.subscriptions
+            .get_mut(&key)
+            .unwrap()
+            .callers
+            .retain(|caller| caller.caller != identity.caller_principal_id);
+        self.subscriptions
+            .get_mut(&key)
+            .unwrap()
+            .callers
+            .shrink_to_fit();
+        saved
+    }
+    pub fn check_thread_idle(&self, thread: &JsString) -> IvyResult<()> {
+        let key = canonical(&IvyJson::String(thread.clone()), MANAGEMENT_FRAME_BYTES)?;
+        require(
+            self.subscriptions_complete
+                && self.subscriptions.get(&key).is_some_and(|entry| entry.idle),
+            "native_thread_busy",
+            "The native thread is not confirmed idle in the current wire order.",
+        )
+    }
+    pub fn observe_thread_status(
+        &mut self,
+        epoch: &JsString,
+        thread: &JsString,
+        status: Option<&IvyJson>,
+    ) -> IvyResult<()> {
+        if self.epoch.as_ref() == Some(epoch) && thread.0.len() <= 1024 {
+            let key = canonical(&IvyJson::String(thread.clone()), MANAGEMENT_FRAME_BYTES)?;
+            if let Some(entry) = self.subscriptions.get_mut(&key) {
+                entry.idle = status
+                    .and_then(|v| v.get("type"))
+                    .is_some_and(|v| v.is_str("idle"));
+            }
+        }
+        Ok(())
+    }
+    /// Also used by transient interactions: those can issue the same native
+    /// mutations without creating a durable operation row in this journal.
+    pub fn observe_thread_dispatch(
+        &mut self,
+        epoch: &JsString,
+        identity: &Identity,
+        method: &JsString,
+        params: &IvyJson,
+    ) -> IvyResult<()> {
+        if self.epoch.as_ref() == Some(epoch)
+            && !method.eq_str("thread/unsubscribe")
+            && !method.eq_str("agent.release")
+            && !ivy_contracts::native_contract::is_read_only_native_method(method)
+        {
+            if let Some(value) = params.get("threadId") {
+                if let Some(thread) = value.as_js_string() {
+                    self.observe_subscriber(thread, identity, false, false)?;
+                } else {
+                    self.subscriptions_complete = false;
+                    self.subscriptions.clear();
+                }
+            }
+        }
+        Ok(())
+    }
+    pub fn observe_thread_reply(
+        &mut self,
+        epoch: &JsString,
+        identity: &Identity,
+        method: &JsString,
+        params: &IvyJson,
+        reply: &IvyJson,
+    ) -> IvyResult<()> {
+        if self.epoch.as_ref() != Some(epoch) {
+            return Ok(());
+        }
+        if ivy_contracts::native_contract::is_read_only_native_method(method) {
+            return Ok(());
+        }
+        if method.eq_str("thread/unsubscribe") {
+            if let Some(thread) = params.get("threadId").and_then(IvyJson::as_js_string) {
+                if reply
+                    .get("result")
+                    .and_then(|v| v.get("status"))
+                    .is_some_and(|v| {
+                        ["unsubscribed", "notLoaded", "notSubscribed"]
+                            .iter()
+                            .any(|status| v.is_str(status))
+                    })
+                {
+                    // The native subscription belongs to this shared RPC
+                    // connection. A raw unsubscribe releases every Ivy caller.
+                    let key = canonical(&IvyJson::String(thread.clone()), MANAGEMENT_FRAME_BYTES)?;
+                    self.subscriptions.remove(&key);
+                    self.subscriptions.shrink();
+                }
+            }
+            return Ok(());
+        }
+        if let Some(thread) = params.get("threadId").and_then(IvyJson::as_js_string) {
+            self.observe_subscriber(thread, identity, false, true)?;
+        }
+        if ["thread/start", "thread/resume", "thread/fork"]
+            .iter()
+            .any(|name| method.eq_str(name))
+        {
+            let attached = reply
+                .get("result")
+                .and_then(|v| v.get("thread"))
+                .and_then(|v| v.get("id"))
+                .and_then(IvyJson::as_js_string);
+            if reply.get("result").is_some()
+                && (attached.is_none()
+                    || method.eq_str("thread/resume")
+                        && params.get("threadId").and_then(IvyJson::as_js_string) != attached)
+            {
+                self.subscriptions_complete = false;
+                self.subscriptions.clear();
+            } else if let Some(thread) = attached {
+                self.observe_subscriber(thread, identity, true, true)?;
+            }
+        }
+        Ok(())
     }
     fn key(identity: &Identity) -> IvyResult<String> {
         validate_shared(
@@ -589,9 +934,14 @@ impl NativeJournal {
         let json = stringify(&value, usize::MAX)?.into_boxed_str();
         let charge = json.len() + if prevent { 0 } else { OUTCOME_RESERVATION };
         let cleanup = prevent
-            || ["thread/unsubscribe", "turn/interrupt", "agent.answer"]
-                .iter()
-                .any(|name| method == &JsString::from(*name));
+            || [
+                "thread/unsubscribe",
+                "turn/interrupt",
+                "agent.answer",
+                "agent.release",
+            ]
+            .iter()
+            .any(|name| method == &JsString::from(*name));
         require(
             self.operations.len() + if cleanup { 0 } else { 4 } < self.limits.max_operations,
             "native_journal_capacity",
@@ -637,6 +987,8 @@ impl NativeJournal {
         )?;
         self.lose_unfinished(&"native_epoch_lost".into())?;
         self.retire_inputs(&"native_epoch_lost".into())?;
+        self.subscriptions.clear();
+        self.subscriptions_complete = true;
         self.epoch = Some(epoch.clone());
         Ok(())
     }
@@ -693,6 +1045,8 @@ impl NativeJournal {
         }
         self.lose_unfinished(code)?;
         self.retire_inputs(code)?;
+        self.subscriptions.clear();
+        self.subscriptions_complete = true;
         self.epoch = None;
         Ok(())
     }
@@ -714,6 +1068,12 @@ impl NativeJournal {
         set(&mut value, "epoch", IvyJson::String(epoch.clone()))?;
         set(&mut value, "requestId", request_id.clone())?;
         set(&mut value, "updatedAt", IvyJson::String((self.clock)()))?;
+        self.observe_thread_dispatch(
+            epoch,
+            identity,
+            text(&value, "method")?,
+            field(&value, "params")?,
+        )?;
         self.save(value)
     }
     pub fn finish(
@@ -738,6 +1098,21 @@ impl NativeJournal {
             "Only the exact dispatched request in the current epoch can record a native result.",
         )?;
         let succeeded = reply.get("result").is_some();
+        let release = is(&value, "method", "agent.release");
+        if release && succeeded {
+            let status = reply.required("result")?.required("status")?;
+            require(
+                ["unsubscribed", "notLoaded", "notSubscribed"]
+                    .iter()
+                    .any(|name| status.is_str(name)),
+                "native_invalid_frame",
+                "Native unsubscribe did not return its original status.",
+            )?;
+            value.insert(
+                "release",
+                IvyJson::object([("kind", "native".into()), ("status", status.clone())]),
+            );
+        }
         set(
             &mut value,
             "phase",
@@ -758,7 +1133,20 @@ impl NativeJournal {
             },
         )?;
         set(&mut value, "updatedAt", IvyJson::String((self.clock)()))?;
-        self.save(value)
+        let saved = self.save(value)?;
+        let unsubscribe = JsString::from("thread/unsubscribe");
+        self.observe_thread_reply(
+            epoch,
+            identity,
+            if release {
+                &unsubscribe
+            } else {
+                text(&saved, "method")?
+            },
+            field(&saved, "params")?,
+            reply,
+        )?;
+        Ok(saved)
     }
     pub fn reject_before_dispatch(
         &mut self,

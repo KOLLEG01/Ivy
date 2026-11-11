@@ -266,7 +266,18 @@ impl NativeInteractions {
         let bytes = Entry::metadata(&caller, &id, &hash)
             .saturating_add((caller.0.capacity() + id.0.capacity() + self.epoch.0.capacity()) * 2)
             .saturating_add(method.retained_bytes())
-            .saturating_add(params.retained_bytes());
+            .saturating_add(params.retained_bytes())
+            // A live per-thread lock owns one bounded key while this accepted
+            // mutation is queued or awaiting its original native reply.
+            .saturating_add(
+                params
+                    .get("threadId")
+                    .and_then(IvyJson::as_js_string)
+                    .filter(|thread| thread.0.len() <= 1024)
+                    .map_or(0, |thread| {
+                        thread.0.len().saturating_mul(2).saturating_add(128)
+                    }),
+            );
         state.prune((self.clock)(), bytes);
         if state.entries.len() >= state.limits.count
             || state.bytes().saturating_add(bytes) >= state.limits.bytes

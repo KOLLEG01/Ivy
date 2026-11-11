@@ -37,6 +37,9 @@ pub use ivy_contracts::limits::{
 pub type HookFuture = Pin<Box<dyn Future<Output = IvyResult<()>> + Send>>;
 pub type BeforeSend = Arc<dyn Fn(IvyJson) -> HookFuture + Send + Sync>;
 pub type BeforeResolve = Arc<dyn Fn(IvyJson, IvyJson) -> HookFuture + Send + Sync>;
+/// Small synchronous observations borrow the validated reply. They must not
+/// perform blocking I/O or await another command on the same RPC actor.
+pub type ReplyObserver = Arc<dyn Fn(&IvyJson) -> IvyResult<()> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct RequestOptions {
@@ -46,6 +49,7 @@ pub struct RequestOptions {
     pub detach_on_timeout: bool,
     pub before_send: Option<BeforeSend>,
     pub before_resolve: Option<BeforeResolve>,
+    pub observe_reply: Option<ReplyObserver>,
 }
 impl Default for RequestOptions {
     fn default() -> Self {
@@ -56,6 +60,7 @@ impl Default for RequestOptions {
             detach_on_timeout: false,
             before_send: None,
             before_resolve: None,
+            observe_reply: None,
         }
     }
 }
@@ -808,6 +813,14 @@ impl Actor {
                             "Native outcome commit failed.",
                         )
                     })?;
+            }
+            if let Some(observe) = &self.pending[index].options.observe_reply {
+                observe(&reply).map_err(|_| {
+                    IvyError::new(
+                        "native_outcome_commit_failed",
+                        "Native outcome commit failed.",
+                    )
+                })?;
             }
             let p = self.pending.remove(index);
             self.admission.complete(&id_key);

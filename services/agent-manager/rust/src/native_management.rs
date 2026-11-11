@@ -68,6 +68,7 @@ const TOOLS: &[&str] = &[
     "frameLimits",
     "prevent",
     "invoke",
+    "release",
     "interact",
     "interaction",
     "read",
@@ -436,6 +437,39 @@ impl NativeManagement {
                     .wait()
                     .await
             }
+            "release" => {
+                require(
+                    args.get("operationId")
+                        == context.operation_id.clone().map(IvyJson::String).as_ref(),
+                    "mutation_conflict",
+                    "Outer and release operation IDs must match.",
+                )?;
+                require(
+                    args.get("nativeVersion") == state.owner.catalog.get("version")
+                        && state
+                            .definitions
+                            .get(&JsString::from("thread/unsubscribe"))
+                            .is_some_and(|hash| Some(hash) == args.get("expectedDefinitionHash")),
+                    "native_definition_mismatch",
+                    "Release requires the installed native unsubscribe definition.",
+                )?;
+                let identity = caller_identity(context.caller_principal_id, context.operation_id)?;
+                state
+                    .dispatch
+                    .release(
+                        identity,
+                        IvyJson::object([
+                            ("threadId", args.required("threadId")?.clone()),
+                            ("expectedEpoch", args.required("expectedEpoch")?.clone()),
+                            (
+                                "expectedOperationId",
+                                args.required("expectedOperationId")?.clone(),
+                            ),
+                        ]),
+                    )?
+                    .wait()
+                    .await
+            }
             "invoke" => {
                 require(
                     self.bound(&args, &context, true),
@@ -460,7 +494,8 @@ impl NativeManagement {
                     "Interaction requires its bound native method and original identity.",
                 )?;
                 let identity = caller_identity(context.caller_principal_id, context.operation_id)?;
-                let rpc = state.owner.rpc.clone();
+                let dispatch = state.dispatch.clone();
+                let observed_identity = identity.clone();
                 state
                     .interactions
                     .run(
@@ -469,24 +504,7 @@ impl NativeManagement {
                         args.required("method")?.as_js_string().unwrap().clone(),
                         args.remove("params").ok_or_else(IvyError::internal)?,
                         move |request| async move {
-                            let timeout_ms =
-                                native_read_timeout_ms(&request.method, &request.params);
-                            rpc.request(
-                                request.method,
-                                request.params,
-                                RequestOptions {
-                                    timeout_ms,
-                                    request_id: Some(request.request_id.into()),
-                                    detach_on_timeout: request.detach_on_timeout,
-                                    priority: if request.interaction_priority {
-                                        Priority::Interaction
-                                    } else {
-                                        Priority::Background
-                                    },
-                                    ..Default::default()
-                                },
-                            )
-                            .await
+                            dispatch.interact(observed_identity, request).await
                         },
                     )?
                     .wait()

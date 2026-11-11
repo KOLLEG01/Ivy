@@ -2,10 +2,10 @@
 mod backends;
 #[path = "agent-browser-notices.rs"]
 mod browser_notices;
-#[path = "agent-host-runtime.rs"]
-mod host_runtime;
 #[path = "agent-health-work.rs"]
 mod health_work;
+#[path = "agent-host-runtime.rs"]
+mod host_runtime;
 #[path = "../fixtures/reference-data.rs"]
 mod reference_data;
 #[path = "agent-staged-files.rs"]
@@ -427,7 +427,7 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
                 );
             }
         }
-        for name in ["agent.prevent", "agent.answer"] {
+        for name in ["agent.prevent", "agent.answer", "agent.release"] {
             let error = set.management[&name.into()](IvyJson::Null, admission_context.clone())
                 .await
                 .unwrap_err();
@@ -456,6 +456,8 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
         let mut expected_handlers = field(data(), "handlers").as_array().unwrap().to_vec();
         expected_handlers.push("agent.cleanupTaskOutputs".into());
         expected_handlers.push("agent.backends".into());
+        expected_handlers.push("agent.storageIdentity".into());
+        expected_handlers.push("agent.release".into());
         expected_handlers.sort_by_key(|v| v.as_js_string().unwrap().clone());
         same(&IvyJson::Array(names), &IvyJson::Array(expected_handlers));
         let mut expected_native = field(&catalog, "clientRequests")

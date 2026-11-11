@@ -96,6 +96,131 @@ fn exact(reply: &IvyJson, bytes: usize, error: bool) {
 }
 
 #[tokio::test]
+async fn borrowed_reply_observers_preserve_the_original_payload_after_waiter_loss() {
+    let (rpc, mut peer, input) =
+        NativeRpc::start_frames(Arc::new(catalog()), Events::default()).unwrap();
+    let scenario = std::panic::AssertUnwindSafe(async {
+        for abandoned in [false, true] {
+            let payload = body(4 * 1024 * 1024);
+            let pointer = payload.as_js_string().unwrap().0.as_ptr() as usize;
+            let (observed, mut observations) = mpsc::unbounded_channel();
+            let client = rpc.clone();
+            let mut call: Call = Box::pin(async move {
+                client
+                    .request(
+                        "account/logout".into(),
+                        IvyJson::Null,
+                        RequestOptions {
+                            request_id: Some(format!("borrowed-{abandoned}").into()),
+                            observe_reply: Some(Arc::new(move |reply| {
+                                let value = reply.required("result")?.as_js_string().unwrap();
+                                assert_eq!(value.0.as_ptr() as usize, pointer);
+                                assert_eq!(value.0.capacity(), 2 * 1024 * 1024);
+                                observed.send(()).unwrap();
+                                Ok(())
+                            })),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+            });
+            poll_fn(|cx| {
+                assert!(call.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            let frame = tokio::time::timeout(Duration::from_secs(5), peer.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let id = frame.required("id").unwrap().clone();
+            let mut retained = (!abandoned).then_some(call);
+            input
+                .try_send(IvyJson::object([("id", id), ("result", payload)]))
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), observations.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let Some(call) = retained.take() {
+                let reply = call.await.unwrap();
+                assert_eq!(
+                    reply
+                        .required("result")
+                        .unwrap()
+                        .as_js_string()
+                        .unwrap()
+                        .0
+                        .as_ptr() as usize,
+                    pointer
+                );
+            }
+        }
+    })
+    .catch_unwind()
+    .await;
+    rpc.close("test-complete").await;
+    if let Err(panic) = scenario {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
+async fn failed_borrowed_reply_observation_keeps_the_original_outcome_unknown() {
+    let (rpc, mut peer, input) =
+        NativeRpc::start_frames(Arc::new(catalog()), Events::default()).unwrap();
+    let scenario = std::panic::AssertUnwindSafe(async {
+        let (committed, mut commits) = mpsc::unbounded_channel();
+        let client = rpc.clone();
+        let mut call: Call = Box::pin(async move {
+            client
+                .request(
+                    "account/logout".into(),
+                    IvyJson::Null,
+                    RequestOptions {
+                        request_id: Some("borrowed-error".into()),
+                        before_resolve: Some(Arc::new(move |_, _| {
+                            committed.send(()).unwrap();
+                            Box::pin(async { Ok(()) })
+                        })),
+                        observe_reply: Some(Arc::new(|_| {
+                            Err(IvyError::new("fixture_observer_failed", "failed"))
+                        })),
+                        ..Default::default()
+                    },
+                )
+                .await
+        });
+        poll_fn(|cx| {
+            assert!(call.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let frame = tokio::time::timeout(Duration::from_secs(5), peer.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        input
+            .try_send(IvyJson::object([
+                ("id", frame.required("id").unwrap().clone()),
+                ("result", IvyJson::Null),
+            ]))
+            .unwrap();
+        let error = call.await.unwrap_err();
+        assert_eq!(error.code, "native_outcome_commit_failed");
+        assert_eq!(error.outcome, Outcome::Unknown);
+        assert_eq!(commits.try_recv().unwrap(), ());
+        assert!(!rpc.connected());
+    })
+    .catch_unwind()
+    .await;
+    rpc.close("test-complete").await;
+    if let Err(panic) = scenario {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
 async fn abandoned_native_waiters_still_commit_and_original_hook_errors_keep_heap_until_consumed() {
     use codex_admission::Priority::Background;
     let (rpc, mut peer, input) =

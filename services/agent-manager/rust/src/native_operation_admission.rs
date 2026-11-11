@@ -40,9 +40,14 @@ impl Admission {
         prevent: bool,
     ) -> IvyResult<Reservation> {
         let control = prevent
-            || ["agent.answer", "turn/interrupt", "thread/unsubscribe"]
-                .iter()
-                .any(|name| method.eq_str(name));
+            || [
+                "agent.answer",
+                "agent.release",
+                "turn/interrupt",
+                "thread/unsubscribe",
+            ]
+            .iter()
+            .any(|name| method.eq_str(name));
         // Include owned identity capacity, task/watch/index/hash metadata and
         // known copies. Duplicate tasks retain neither params nor the action.
         // Opaque action captures retain their own lifetime and are not measured.
@@ -59,7 +64,7 @@ impl Admission {
                     params
                         .get("threadId")
                         .and_then(IvyJson::as_js_string)
-                        .map_or(0, |id| id.0.len().saturating_mul(2)),
+                        .map_or(0, |id| id.0.len().saturating_mul(4)),
                 );
         }
         self.budget

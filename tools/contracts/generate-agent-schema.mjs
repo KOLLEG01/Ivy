@@ -369,6 +369,20 @@ const definitions = {
     reply: nullable(ref("Reply")),
     code: nullable(id),
   }),
+  ThreadReleaseInput: object({
+    operationId: wire("Identifier"),
+    nativeVersion: id,
+    expectedDefinitionHash: hash,
+    threadId: { ...text(1024), minLength: 1 },
+    expectedEpoch: id,
+    expectedOperationId: wire("Identifier"),
+  }),
+  ThreadReleaseResult: {
+    oneOf: [
+      object({ kind: { const: "logical" }, otherSubscribers: { const: true } }),
+      object({ kind: { const: "native" }, status: { enum: ["unsubscribed", "notLoaded", "notSubscribed"] } }),
+    ],
+  },
   InputIdentity: object({
     serviceNodeId: wire("Identifier"),
     epoch: id,
@@ -778,7 +792,7 @@ definitions.Operation.allOf = [
     then: { properties: { reply: { type: "null" } } },
   },
   {
-    if: { properties: { phase: { const: "succeeded" } } },
+    if: { properties: { phase: { const: "succeeded" } }, not: { properties: { method: { const: "agent.release" } } } },
     then: {
       properties: {
         reply: object({ result: wire("Json") }),
@@ -806,10 +820,26 @@ definitions.Operation.allOf = [
     },
   },
   {
-    if: { properties: { phase: { enum: ["dispatched", "succeeded"] } } },
+    if: { properties: { phase: { enum: ["dispatched", "succeeded"] } }, not: { properties: { method: { const: "agent.release" }, phase: { const: "succeeded" }, requestId: { type: "null" } } } },
     then: { properties: { epoch: id, requestId: ref("RequestId") } },
   },
+  {
+    if: { required: ["release"] },
+    then: { properties: { method: { const: "agent.release" }, phase: { const: "succeeded" } } },
+  },
+  {
+    if: { properties: { method: { const: "agent.release" }, phase: { const: "succeeded" } } },
+    then: {
+      required: ["release"],
+      properties: { code: { type: "null" } },
+      oneOf: [
+        { properties: { epoch: id, requestId: { type: "null" }, reply: { type: "null" }, release: { properties: { kind: { const: "logical" } } } } },
+        { properties: { epoch: id, requestId: ref("RequestId"), reply: object({ result: wire("Json") }), release: { properties: { kind: { const: "native" } } } } },
+      ],
+    },
+  },
 ];
+definitions.Operation.properties.release = ref("ThreadReleaseResult");
 definitions.PendingInput.allOf = [
   {
     if: { properties: { state: { const: "pending" } } },
@@ -920,7 +950,7 @@ const optionalBackend = (definition) => {
 };
 for (const name of [
   "Settings", "StatusInput", "NativeDiscoveryInput", "FrameLimitsInput",
-  "PreventInput", "OperationInput", "ReadInput",
+  "PreventInput", "OperationInput", "ReadInput", "ThreadReleaseInput",
   "PendingInputQuery", "InputDefinitionQuery", "AnswerInput", "NotificationQuery",
   "ProjectsInput", "ProjectResolveInput", "WorkspaceResolveInput", "DirectoryListInput",
   "StageFileInput", "ConfigureCapabilitiesInput",

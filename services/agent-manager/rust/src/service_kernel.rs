@@ -126,7 +126,9 @@ impl AgentHandlers {
                     .any(|v| name == JsString::from(*v));
                     let handler = if name == JsString::from("agent.answer") {
                         work.reply_handler(handler)
-                    } else if name == JsString::from("agent.prevent") {
+                    } else if name == JsString::from("agent.prevent")
+                        || name == JsString::from("agent.release")
+                    {
                         work.control_handler(handler)
                     } else if name == JsString::from("agent.invoke") {
                         work.invoke_handler(handler)

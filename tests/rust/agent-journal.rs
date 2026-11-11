@@ -136,6 +136,658 @@ fn items(page: &IvyJson) -> &[IvyJson] {
 }
 
 #[test]
+fn logical_release_retains_other_callers_without_manufacturing_native_evidence() {
+    let mut journal = journal(64 * MIB);
+    let epoch = JsString::from("epoch");
+    let thread = JsString::from("thread");
+    let params = json(r#"{"threadId":"thread"}"#);
+    let reply = json(r#"{"result":{"thread":{"id":"thread"}}}"#);
+    journal.begin_epoch(&epoch).unwrap();
+    let one = id("one");
+    let two = Identity {
+        caller_principal_id: "foreign".into(),
+        operation_id: "two".into(),
+    };
+    for identity in [&one, &two] {
+        journal
+            .observe_thread_reply(&epoch, identity, &"thread/resume".into(), &params, &reply)
+            .unwrap();
+    }
+    let release = id("release");
+    journal
+        .accept(&release, &"agent.release".into(), &params)
+        .unwrap();
+    assert_eq!(
+        journal
+            .finish_logical_release(&release, &thread, &epoch, &one.operation_id)
+            .unwrap_err()
+            .code,
+        "native_thread_busy"
+    );
+    journal
+        .observe_thread_status(&epoch, &thread, Some(&json(r#"{"type":"idle"}"#)))
+        .unwrap();
+    let saved = journal
+        .finish_logical_release(&release, &thread, &epoch, &one.operation_id)
+        .unwrap();
+    ivy_contracts::agent_schema::validate_agent("Operation", &saved).unwrap();
+    assert!(saved.required("reply").unwrap().is_null());
+    assert!(saved.required("requestId").unwrap().is_null());
+    assert!(
+        saved
+            .required("release")
+            .unwrap()
+            .required("kind")
+            .unwrap()
+            .is_str("logical")
+    );
+    assert!(
+        journal
+            .thread_subscription(&thread, &one.caller_principal_id)
+            .unwrap()
+            .is_none()
+    );
+    let remaining = journal
+        .thread_subscription(&thread, &two.caller_principal_id)
+        .unwrap()
+        .unwrap();
+    assert!(remaining.attached && remaining.settled && !remaining.shared);
+    assert_eq!(remaining.operation_id, &two.operation_id);
+    let mut forged = saved.clone();
+    forged.insert("method", "thread/unsubscribe".into());
+    assert!(ivy_contracts::agent_schema::validate_agent("Operation", &forged).is_err());
+    let mut forged = saved;
+    forged.insert("requestId", "invented".into());
+    assert!(ivy_contracts::agent_schema::validate_agent("Operation", &forged).is_err());
+}
+
+#[test]
+fn release_requires_current_owner_epoch_settled_work_and_no_pending_input() {
+    let mut journal = journal(64 * MIB);
+    let epoch = JsString::from("epoch");
+    let thread = JsString::from("thread");
+    let params = json(r#"{"threadId":"thread"}"#);
+    let own = id("resume");
+    let release = id("release");
+    journal.begin_epoch(&epoch).unwrap();
+    journal
+        .observe_thread_reply(
+            &epoch,
+            &own,
+            &"thread/resume".into(),
+            &params,
+            &json(r#"{"result":{"thread":{"id":"thread"}}}"#),
+        )
+        .unwrap();
+    assert!(
+        !journal
+            .check_thread_release(&thread, &release, &epoch, &own.operation_id)
+            .unwrap()
+    );
+    journal
+        .observe_thread_status(&epoch, &thread, Some(&json(r#"{"type":"idle"}"#)))
+        .unwrap();
+    journal.check_thread_idle(&thread).unwrap();
+    journal
+        .observe_thread_status(&epoch, &thread, None)
+        .unwrap();
+    assert_eq!(
+        journal.check_thread_idle(&thread).unwrap_err().code,
+        "native_thread_busy"
+    );
+    assert_eq!(
+        journal
+            .check_thread_release(&thread, &release, &"old".into(), &own.operation_id)
+            .unwrap_err()
+            .code,
+        "native_state_conflict"
+    );
+    assert_eq!(
+        journal
+            .check_thread_release(&thread, &release, &epoch, &"old".into())
+            .unwrap_err()
+            .code,
+        "native_subscription_changed"
+    );
+    let input = input_id("epoch", 13);
+    journal
+        .observe_input(&input, &"approval".into(), &params)
+        .unwrap();
+    assert_eq!(
+        journal
+            .check_thread_release(&thread, &release, &epoch, &own.operation_id)
+            .unwrap_err()
+            .code,
+        "native_thread_busy"
+    );
+    journal
+        .resolve_input_json(&epoch, &13.0.into(), &"thread".into())
+        .unwrap();
+    journal
+        .observe_thread_dispatch(&epoch, &id("new-turn"), &"turn/start".into(), &params)
+        .unwrap();
+    assert_eq!(
+        journal
+            .check_thread_release(&thread, &release, &epoch, &own.operation_id)
+            .unwrap_err()
+            .code,
+        "native_subscription_changed"
+    );
+    assert_eq!(
+        journal
+            .check_thread_release(&thread, &release, &epoch, &"new-turn".into())
+            .unwrap_err()
+            .code,
+        "native_subscription_changed"
+    );
+    journal.lose_epoch(&epoch, &"lost".into()).unwrap();
+    journal.begin_epoch(&"next".into()).unwrap();
+    assert_eq!(
+        journal
+            .check_thread_release(&thread, &release, &"next".into(), &own.operation_id)
+            .unwrap_err()
+            .code,
+        "native_subscription_unknown"
+    );
+}
+
+#[test]
+fn logical_release_callback_failure_keeps_the_committed_effect_and_original_receipt_together() {
+    let mut journal = journal(64 * MIB);
+    let epoch = JsString::from("epoch");
+    let thread = JsString::from("thread");
+    journal.begin_epoch(&epoch).unwrap();
+    let own = id("resume");
+    let other = Identity {
+        caller_principal_id: "foreign".into(),
+        operation_id: "other-resume".into(),
+    };
+    let params = json(r#"{"threadId":"thread"}"#);
+    for identity in [&own, &other] {
+        journal
+            .observe_thread_reply(
+                &epoch,
+                identity,
+                &"thread/resume".into(),
+                &params,
+                &json(r#"{"result":{"thread":{"id":"thread"}}}"#),
+            )
+            .unwrap();
+    }
+    journal
+        .observe_thread_status(&epoch, &thread, Some(&json(r#"{"type":"idle"}"#)))
+        .unwrap();
+    let release = id("release");
+    journal
+        .accept(&release, &"agent.release".into(), &params)
+        .unwrap();
+    journal.set_on_terminal(Some(Box::new(|_| {
+        Err(ivy_contracts::IvyError::new(
+            "observer_failed",
+            "Fixture observer failed after the commit.",
+        ))
+    })));
+    assert_eq!(
+        journal
+            .finish_logical_release(&release, &thread, &epoch, &own.operation_id)
+            .unwrap_err()
+            .code,
+        "observer_failed"
+    );
+    let saved = journal.get(&release).unwrap().unwrap();
+    ivy_contracts::agent_schema::validate_agent("Operation", &saved).unwrap();
+    assert!(saved.required("phase").unwrap().is_str("succeeded"));
+    assert!(
+        saved.required("requestId").unwrap().is_null()
+            && saved.required("reply").unwrap().is_null()
+    );
+    assert!(
+        journal
+            .thread_subscription(&thread, &own.caller_principal_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        journal
+            .thread_subscription(&thread, &other.caller_principal_id)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn connection_subscriptions_outlive_receipt_compaction_and_keep_foreign_callers() {
+    let mut journal = journal(64 * MIB);
+    let epoch = JsString::from("epoch");
+    let thread = JsString::from("thread");
+    let params = json(r#"{"threadId":"thread"}"#);
+    let reply = json(r#"{"result":{"thread":{"id":"thread"}}}"#);
+    journal.begin_epoch(&epoch).unwrap();
+    let own = id("own-resume");
+    journal
+        .accept(&own, &"thread/resume".into(), &params)
+        .unwrap();
+    finish(&mut journal, &own, &reply);
+    let observed = journal
+        .thread_subscription(&thread, &own.caller_principal_id)
+        .unwrap()
+        .unwrap();
+    assert!(observed.attached && observed.settled && !observed.shared);
+    assert_eq!(observed.operation_id, &own.operation_id);
+    journal.retained_in_hive(&own).unwrap();
+    journal
+        .prevent(&id("next"), &"account/logout".into(), &IvyJson::Null)
+        .unwrap();
+    assert!(journal.get(&own).unwrap().is_none());
+    assert!(
+        journal
+            .thread_subscription(&thread, &own.caller_principal_id)
+            .unwrap()
+            .unwrap()
+            .attached
+    );
+
+    let foreign = Identity {
+        caller_principal_id: "another-caller".into(),
+        operation_id: "foreign-resume".into(),
+    };
+    journal
+        .accept(&foreign, &"thread/resume".into(), &params)
+        .unwrap();
+    journal.dispatch(&foreign, &epoch, &2.0.into()).unwrap();
+    let observed = journal
+        .thread_subscription(&thread, &foreign.caller_principal_id)
+        .unwrap()
+        .unwrap();
+    assert!(observed.shared && !observed.attached && !observed.settled);
+    journal
+        .finish(&foreign, &epoch, &2.0.into(), &reply)
+        .unwrap();
+    let observed = journal
+        .thread_subscription(&thread, &foreign.caller_principal_id)
+        .unwrap()
+        .unwrap();
+    assert!(observed.shared && observed.attached && observed.settled);
+    assert!(
+        journal
+            .thread_subscription(&thread, &own.caller_principal_id)
+            .unwrap()
+            .unwrap()
+            .shared
+    );
+    journal.forget(&foreign).unwrap();
+    assert!(
+        journal
+            .thread_subscription(&thread, &own.caller_principal_id)
+            .unwrap()
+            .unwrap()
+            .shared
+    );
+    journal.lose_epoch(&epoch, &"closed".into()).unwrap();
+    journal.begin_epoch(&"replacement".into()).unwrap();
+    journal
+        .observe_thread_reply(&epoch, &foreign, &"thread/resume".into(), &params, &reply)
+        .unwrap();
+    assert!(
+        journal
+            .thread_subscription(&thread, &own.caller_principal_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        journal
+            .thread_subscription(&thread, &foreign.caller_principal_id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn pending_and_late_native_requests_preserve_the_newest_context_identity() {
+    let mut journal = journal(64 * MIB);
+    let epoch = JsString::from("epoch");
+    let thread = JsString::from("thread");
+    let params = json(r#"{"threadId":"thread"}"#);
+    journal.begin_epoch(&epoch).unwrap();
+    journal
+        .observe_thread_reply(
+            &epoch,
+            &id("resume"),
+            &"thread/resume".into(),
+            &params,
+            &json(r#"{"result":{"thread":{"id":"thread"}}}"#),
+        )
+        .unwrap();
+    let older = id("older");
+    let newer = id("newer");
+    for identity in [&older, &newer] {
+        journal
+            .observe_thread_dispatch(&epoch, identity, &"turn/start".into(), &params)
+            .unwrap();
+    }
+    // Transient interactions may lose their HTTP observer and receive replies
+    // in a different order. They still share this connection and attribution.
+    journal
+        .observe_thread_reply(
+            &epoch,
+            &newer,
+            &"turn/start".into(),
+            &params,
+            &json(r#"{"result":{}}"#),
+        )
+        .unwrap();
+    let observed = journal
+        .thread_subscription(&thread, &newer.caller_principal_id)
+        .unwrap()
+        .unwrap();
+    assert!(observed.attached && !observed.settled);
+    assert_eq!(observed.operation_id, &newer.operation_id);
+    journal
+        .observe_thread_reply(
+            &epoch,
+            &older,
+            &"turn/start".into(),
+            &params,
+            &json(r#"{"result":{}}"#),
+        )
+        .unwrap();
+    let observed = journal
+        .thread_subscription(&thread, &newer.caller_principal_id)
+        .unwrap()
+        .unwrap();
+    assert!(observed.settled);
+    assert_eq!(observed.operation_id, &newer.operation_id);
+    journal
+        .observe_thread_dispatch(&epoch, &id("unknown"), &"turn/start".into(), &params)
+        .unwrap();
+    assert!(
+        !journal
+            .thread_subscription(&thread, &newer.caller_principal_id)
+            .unwrap()
+            .unwrap()
+            .settled
+    );
+}
+
+#[test]
+fn raw_unsubscribe_releases_connection_attribution_for_all_callers_only_on_its_native_result() {
+    let mut journal = journal(64 * MIB);
+    let epoch = JsString::from("epoch");
+    let thread = JsString::from("thread");
+    let other = JsString::from("other-thread");
+    let params = json(r#"{"threadId":"thread"}"#);
+    journal.begin_epoch(&epoch).unwrap();
+    for (caller, thread_id) in [
+        ("one", "thread"),
+        ("two", "thread"),
+        ("one", "other-thread"),
+    ] {
+        let identity = Identity {
+            caller_principal_id: caller.into(),
+            operation_id: format!("{caller}-{thread_id}").into(),
+        };
+        journal
+            .observe_thread_reply(
+                &epoch,
+                &identity,
+                &"thread/resume".into(),
+                &IvyJson::object([("threadId", thread_id.into())]),
+                &IvyJson::object([(
+                    "result",
+                    IvyJson::object([("thread", IvyJson::object([("id", thread_id.into())]))]),
+                )]),
+            )
+            .unwrap();
+    }
+    let identity = Identity {
+        caller_principal_id: "one".into(),
+        operation_id: "unsubscribe".into(),
+    };
+    journal
+        .observe_thread_reply(
+            &epoch,
+            &identity,
+            &"thread/unsubscribe".into(),
+            &params,
+            &json(r#"{"error":{"code":-1,"message":"failed"}}"#),
+        )
+        .unwrap();
+    assert!(
+        journal
+            .thread_subscription(&thread, &"one".into())
+            .unwrap()
+            .unwrap()
+            .shared
+    );
+    journal
+        .observe_thread_reply(
+            &"old-epoch".into(),
+            &identity,
+            &"thread/unsubscribe".into(),
+            &params,
+            &json(r#"{"result":{"status":"unsubscribed"}}"#),
+        )
+        .unwrap();
+    assert!(
+        journal
+            .thread_subscription(&thread, &"two".into())
+            .unwrap()
+            .is_some()
+    );
+    journal
+        .observe_thread_reply(
+            &epoch,
+            &identity,
+            &"thread/unsubscribe".into(),
+            &params,
+            &json(r#"{"result":{"status":"unsubscribed"}}"#),
+        )
+        .unwrap();
+    assert!(
+        journal
+            .thread_subscription(&thread, &"one".into())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        journal
+            .thread_subscription(&thread, &"two".into())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        journal
+            .thread_subscription(&other, &"one".into())
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn incomplete_subscription_attribution_is_bounded_and_never_looks_exclusive() {
+    let mut journal = journal(32 * 1024);
+    let epoch = JsString::from("epoch");
+    let thread = JsString::from("thread");
+    let params = json(r#"{"threadId":"thread"}"#);
+    journal.begin_epoch(&epoch).unwrap();
+    journal
+        .observe_thread_reply(
+            &epoch,
+            &id("own"),
+            &"thread/resume".into(),
+            &params,
+            &json(r#"{"result":{"thread":{"id":"thread"}}}"#),
+        )
+        .unwrap();
+    assert!(
+        journal
+            .thread_subscription(&thread, &"caller".into())
+            .unwrap()
+            .is_some()
+    );
+    for number in 0..256 {
+        let value = JsString::from(format!("{number}-{}", "t".repeat(500)));
+        journal
+            .observe_thread_dispatch(
+                &epoch,
+                &id(&format!("work-{number}")),
+                &"turn/start".into(),
+                &IvyJson::object([("threadId", IvyJson::String(value))]),
+            )
+            .unwrap();
+        assert!(bytes(&journal) <= 32 * 1024);
+    }
+    assert!(
+        journal
+            .thread_subscription(&thread, &"caller".into())
+            .unwrap()
+            .is_none()
+    );
+    journal
+        .observe_thread_reply(
+            &epoch,
+            &id("later"),
+            &"thread/resume".into(),
+            &params,
+            &json(r#"{"result":{"thread":{"id":"thread"}}}"#),
+        )
+        .unwrap();
+    assert!(
+        journal
+            .thread_subscription(&thread, &"caller".into())
+            .unwrap()
+            .is_none()
+    );
+    journal.lose_epoch(&epoch, &"closed".into()).unwrap();
+    journal.begin_epoch(&"new".into()).unwrap();
+    journal
+        .observe_thread_reply(
+            &"new".into(),
+            &id("fresh"),
+            &"thread/resume".into(),
+            &params,
+            &json(r#"{"result":{"thread":{"id":"thread"}}}"#),
+        )
+        .unwrap();
+    assert!(
+        journal
+            .thread_subscription(&thread, &"caller".into())
+            .unwrap()
+            .is_some()
+    );
+    journal.close();
+    assert_eq!(bytes(&journal), 0);
+}
+
+#[test]
+fn read_only_and_unattributable_native_replies_cannot_establish_release_ownership() {
+    let mut journal = journal(64 * MIB);
+    let epoch = JsString::from("epoch");
+    let thread = JsString::from("thread");
+    let params = json(r#"{"threadId":"thread"}"#);
+    let reply = json(r#"{"result":{"thread":{"id":"thread"}}}"#);
+    journal.begin_epoch(&epoch).unwrap();
+    journal
+        .observe_thread_dispatch(&epoch, &id("read"), &"thread/read".into(), &params)
+        .unwrap();
+    journal
+        .observe_thread_reply(&epoch, &id("read"), &"thread/read".into(), &params, &reply)
+        .unwrap();
+    assert!(
+        journal
+            .thread_subscription(&thread, &"caller".into())
+            .unwrap()
+            .is_none()
+    );
+    journal
+        .observe_thread_dispatch(&epoch, &id("resume"), &"thread/resume".into(), &params)
+        .unwrap();
+    journal
+        .observe_thread_reply(
+            &epoch,
+            &id("resume"),
+            &"thread/resume".into(),
+            &params,
+            &reply,
+        )
+        .unwrap();
+    assert!(
+        journal
+            .thread_subscription(&thread, &"caller".into())
+            .unwrap()
+            .unwrap()
+            .attached
+    );
+    journal
+        .observe_thread_dispatch(&epoch, &id("later-read"), &"thread/read".into(), &params)
+        .unwrap();
+    journal
+        .observe_thread_reply(
+            &epoch,
+            &id("later-read"),
+            &"thread/read".into(),
+            &params,
+            &reply,
+        )
+        .unwrap();
+    assert_eq!(
+        journal
+            .thread_subscription(&thread, &"caller".into())
+            .unwrap()
+            .unwrap()
+            .operation_id,
+        &JsString::from("resume")
+    );
+    journal
+        .observe_thread_reply(
+            &epoch,
+            &id("contradictory-resume"),
+            &"thread/resume".into(),
+            &params,
+            &json(r#"{"result":{"thread":{"id":"different-thread"}}}"#),
+        )
+        .unwrap();
+    assert!(
+        journal
+            .thread_subscription(&thread, &"caller".into())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        journal
+            .thread_subscription(&"different-thread".into(), &"caller".into())
+            .unwrap()
+            .is_none()
+    );
+    journal.lose_epoch(&epoch, &"closed".into()).unwrap();
+    let fresh = JsString::from("fresh");
+    journal.begin_epoch(&fresh).unwrap();
+    journal
+        .observe_thread_reply(&fresh, &id("own"), &"thread/resume".into(), &params, &reply)
+        .unwrap();
+    assert!(
+        journal
+            .thread_subscription(&thread, &"caller".into())
+            .unwrap()
+            .is_some()
+    );
+    journal
+        .observe_thread_dispatch(
+            &fresh,
+            &id("unattributable"),
+            &"thread/resume".into(),
+            &json(r#"{"threadId":null}"#),
+        )
+        .unwrap();
+    assert!(
+        journal
+            .thread_subscription(&thread, &"caller".into())
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn retained_allocations_fit_reported_budget_and_lossless_outcomes_replay() {
     // Measure one process with no other test threads or unrelated allocations.
     const CHILD: &str = "IVY_JOURNAL_MEMORY_TEST_CHILD";
@@ -240,6 +892,52 @@ fn retained_allocations_fit_reported_budget_and_lossless_outcomes_replay() {
     journal.close();
     assert_eq!(bytes(&journal), 0);
     assert!(LIVE_BYTES.load(Ordering::Relaxed) <= before + 64 * 1024);
+}
+
+#[test]
+fn native_thread_observers_do_not_copy_oversized_ids_or_unrelated_request_payloads() {
+    use ivy_agent_manager::native_dispatch::thread_observation_params;
+    for oversized in [false, true] {
+        let original = JsString(vec![65; 2 * MIB]);
+        let pointer = original.0.as_ptr();
+        let params = if oversized {
+            IvyJson::object([
+                ("threadId", IvyJson::String(original)),
+                ("payload", IvyJson::Null),
+            ])
+        } else {
+            IvyJson::object([
+                ("threadId", "thread".into()),
+                ("payload", IvyJson::String(original)),
+            ])
+        };
+        let before = LIVE_BYTES.load(Ordering::Relaxed);
+        let observed = thread_observation_params(&params);
+        let retained = LIVE_BYTES.load(Ordering::Relaxed) - before;
+        assert!(
+            retained < 1024,
+            "Observer retained request body bytes: {retained}"
+        );
+        assert_eq!(
+            observed.get("threadId"),
+            Some(&if oversized {
+                IvyJson::Null
+            } else {
+                "thread".into()
+            })
+        );
+        assert!(observed.get("payload").is_none());
+        assert_eq!(
+            params
+                .required(if oversized { "threadId" } else { "payload" })
+                .unwrap()
+                .as_js_string()
+                .unwrap()
+                .0
+                .as_ptr(),
+            pointer
+        );
+    }
 }
 
 #[test]

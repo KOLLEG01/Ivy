@@ -8,10 +8,10 @@ use std::{
     task::Poll,
 };
 use tokio::sync::mpsc;
-#[path = "agent-native-input-owner.rs"]
-mod input_owner_cases;
 #[path = "agent-native-operation-admission.rs"]
 mod admission_cases;
+#[path = "agent-native-input-owner.rs"]
+mod input_owner_cases;
 #[path = "agent-native-run-results.rs"]
 mod run_result_cases;
 
@@ -24,16 +24,629 @@ struct Fixture {
     input: ivy_host_runtime::codex_rpc::NativeFrameSender,
     dispatch: NativeDispatch,
 }
+
+async fn release_frame(f: &mut Fixture, method: &str) -> ivy_host_runtime::codex_rpc::NativeFrame {
+    let frame = tokio::time::timeout(Duration::from_secs(5), f.peer.recv())
+        .await
+        .unwrap_or_else(|error| panic!("Missing native {method} frame: {error}"))
+        .unwrap();
+    assert!(
+        frame.required("method").unwrap().is_str(method),
+        "Unexpected native method"
+    );
+    frame
+}
+fn release_reply(f: &Fixture, frame: &IvyJson, result: IvyJson) {
+    f.input
+        .try_send(IvyJson::object([
+            ("id", frame.required("id").unwrap().clone()),
+            ("result", result),
+        ]))
+        .unwrap();
+}
+fn release_identity(caller: &str, operation: &str) -> Identity {
+    static ISSUED_AT: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    let issued_at = ISSUED_AT.get_or_init(|| chrono::Utc::now().timestamp_millis());
+    Identity {
+        caller_principal_id: caller.into(),
+        operation_id: format!("epoch:{issued_at}:{operation}").into(),
+    }
+}
+fn release_params(expected: &str) -> IvyJson {
+    IvyJson::object([
+        ("threadId", "same-thread".into()),
+        ("expectedEpoch", "epoch".into()),
+        (
+            "expectedOperationId",
+            release_identity("one", expected).operation_id.into(),
+        ),
+    ])
+}
+fn release_thread(status: &str) -> IvyJson {
+    IvyJson::object([(
+        "thread",
+        IvyJson::object([
+            ("id", "same-thread".into()),
+            ("status", IvyJson::object([("type", status.into())])),
+        ]),
+    )])
+}
+async fn release_resume(f: &mut Fixture, caller: &str, operation: &str) {
+    let work = f
+        .dispatch
+        .invoke(
+            release_identity(caller, operation),
+            "thread/resume".into(),
+            IvyJson::object([("threadId", "same-thread".into())]),
+        )
+        .unwrap();
+    let observed = work.clone();
+    let frame = tokio::select! {
+        frame = release_frame(f, "thread/resume") => frame,
+        outcome = observed.wait() => panic!("Resume ended before its native frame: {outcome:?}"),
+    };
+    release_reply(f, &frame, release_thread("idle"));
+    assert!(
+        work.wait()
+            .await
+            .unwrap()
+            .required("phase")
+            .unwrap()
+            .is_str("succeeded")
+    );
+}
+
+#[tokio::test]
+async fn scoped_release_preserves_foreign_subscriber_and_orders_same_thread_resume_after_original_reply()
+ {
+    let mut f = release_fixture();
+    let scenario = std::panic::AssertUnwindSafe(async {
+        release_resume(&mut f, "one", "one-resume").await;
+        release_resume(&mut f, "two", "two-resume").await;
+        let identity = release_identity("one", "one-release");
+        let params = release_params("one-resume");
+        let work = f
+            .dispatch
+            .release(identity.clone(), params.clone())
+            .unwrap();
+        let read = release_frame(&mut f, "thread/read").await;
+        assert_eq!(
+            read.required("params").unwrap().get("includeTurns"),
+            Some(&false.into())
+        );
+        release_reply(&f, &read, release_thread("idle"));
+        let logical = work.wait().await.unwrap();
+        assert!(
+            logical
+                .required("release")
+                .unwrap()
+                .required("kind")
+                .unwrap()
+                .is_str("logical")
+        );
+        assert!(
+            logical.required("requestId").unwrap().is_null()
+                && logical.required("reply").unwrap().is_null()
+        );
+        assert_eq!(
+            f.operations.read(&identity).await.unwrap(),
+            Some(logical.clone())
+        );
+        assert_eq!(
+            f.dispatch
+                .release(identity, params)
+                .unwrap()
+                .wait()
+                .await
+                .unwrap(),
+            logical
+        );
+        {
+            let memory = f.operations.journal();
+            let journal = memory.lock().unwrap();
+            assert!(
+                journal
+                    .thread_subscription(&"same-thread".into(), &"one".into())
+                    .unwrap()
+                    .is_none()
+            );
+            let foreign = journal
+                .thread_subscription(&"same-thread".into(), &"two".into())
+                .unwrap()
+                .unwrap();
+            assert!(foreign.attached && foreign.settled && !foreign.shared);
+        }
+        let identity = release_identity("two", "two-release");
+        // Losing the waiter must neither cancel cleanup nor duplicate the frame.
+        drop(
+            f.dispatch
+                .release(identity.clone(), release_params("two-resume"))
+                .unwrap(),
+        );
+        let read = release_frame(&mut f, "thread/read").await;
+        release_reply(&f, &read, release_thread("idle"));
+        let unsubscribe = release_frame(&mut f, "thread/unsubscribe").await;
+        assert_eq!(
+            unsubscribe.required("params").unwrap(),
+            &IvyJson::object([("threadId", "same-thread".into())])
+        );
+        let resumed = f
+            .dispatch
+            .invoke(
+                release_identity("two", "new-work"),
+                "thread/resume".into(),
+                IvyJson::object([("threadId", "same-thread".into())]),
+            )
+            .unwrap();
+        let unrelated = f
+            .dispatch
+            .invoke(
+                release_identity("other", "other-work"),
+                "thread/resume".into(),
+                IvyJson::object([("threadId", "other-thread".into())]),
+            )
+            .unwrap();
+        let frame = release_frame(&mut f, "thread/resume").await;
+        assert!(
+            frame
+                .required("params")
+                .unwrap()
+                .required("threadId")
+                .unwrap()
+                .is_str("other-thread")
+        );
+        release_reply(
+            &f,
+            &frame,
+            IvyJson::object([("thread", IvyJson::object([("id", "other-thread".into())]))]),
+        );
+        unrelated.wait().await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), f.peer.recv())
+                .await
+                .is_err()
+        );
+        let original = IvyJson::object([("status", "unsubscribed".into())]);
+        release_reply(&f, &unsubscribe, original.clone());
+        let frame = release_frame(&mut f, "thread/resume").await;
+        assert!(
+            frame
+                .required("params")
+                .unwrap()
+                .required("threadId")
+                .unwrap()
+                .is_str("same-thread")
+        );
+        release_reply(&f, &frame, release_thread("idle"));
+        resumed.wait().await.unwrap();
+        let saved = f.operations.read(&identity).await.unwrap().unwrap();
+        assert!(
+            saved
+                .required("release")
+                .unwrap()
+                .required("kind")
+                .unwrap()
+                .is_str("native")
+        );
+        assert_eq!(
+            saved.required("requestId").unwrap(),
+            unsubscribe.required("id").unwrap()
+        );
+        assert_eq!(
+            saved.required("reply").unwrap(),
+            &IvyJson::object([("result", original)])
+        );
+        assert_eq!(
+            f.dispatch
+                .release(identity, release_params("two-resume"))
+                .unwrap()
+                .wait()
+                .await
+                .unwrap(),
+            saved
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), f.peer.recv())
+                .await
+                .is_err()
+        );
+        let memory = f.operations.journal();
+        let journal = memory.lock().unwrap();
+        assert_eq!(
+            journal
+                .thread_subscription(&"same-thread".into(), &"two".into())
+                .unwrap()
+                .unwrap()
+                .operation_id,
+            &release_identity("two", "new-work").operation_id
+        );
+    })
+    .catch_unwind()
+    .await;
+    f.rpc.close("test_complete").await;
+    f.receipts.drain().await.unwrap();
+    if let Err(panic) = scenario {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
+async fn scoped_release_keeps_active_inputs_and_newly_accepted_work_attached() {
+    let mut f = release_fixture();
+    let scenario = std::panic::AssertUnwindSafe(async {
+        release_resume(&mut f, "one", "resume").await;
+        let work = f
+            .dispatch
+            .release(
+                release_identity("one", "active-release"),
+                release_params("resume"),
+            )
+            .unwrap();
+        let read = release_frame(&mut f, "thread/read").await;
+        release_reply(&f, &read, release_thread("active"));
+        let result = work.wait().await.unwrap();
+        assert!(
+            result
+                .required("code")
+                .unwrap()
+                .is_str("native_thread_busy")
+        );
+        let work = f
+            .dispatch
+            .release(
+                release_identity("one", "racing-release"),
+                release_params("resume"),
+            )
+            .unwrap();
+        let read = release_frame(&mut f, "thread/read").await;
+        let resumed = f
+            .dispatch
+            .invoke(
+                release_identity("one", "new-work"),
+                "thread/resume".into(),
+                IvyJson::object([("threadId", "same-thread".into())]),
+            )
+            .unwrap();
+        release_reply(&f, &read, release_thread("idle"));
+        let result = work.wait().await.unwrap();
+        assert!(
+            result
+                .required("code")
+                .unwrap()
+                .is_str("native_thread_busy")
+        );
+        let frame = release_frame(&mut f, "thread/resume").await;
+        release_reply(&f, &frame, release_thread("idle"));
+        resumed.wait().await.unwrap();
+        let work = f
+            .dispatch
+            .release(
+                release_identity("one", "stale-release"),
+                release_params("older-operation"),
+            )
+            .unwrap();
+        assert!(
+            work.wait()
+                .await
+                .unwrap()
+                .required("code")
+                .unwrap()
+                .is_str("native_subscription_changed")
+        );
+        let memory = f.operations.journal();
+        memory
+            .lock()
+            .unwrap()
+            .observe_input(
+                &IvyJson::object([
+                    ("serviceNodeId", "fixture.agent".into()),
+                    ("epoch", "epoch".into()),
+                    ("requestId", 99.0.into()),
+                ]),
+                &"item/tool/requestUserInput".into(),
+                &IvyJson::object([("threadId", "same-thread".into())]),
+            )
+            .unwrap();
+        let work = f
+            .dispatch
+            .release(
+                release_identity("one", "input-release"),
+                release_params("new-work"),
+            )
+            .unwrap();
+        assert!(
+            work.wait()
+                .await
+                .unwrap()
+                .required("code")
+                .unwrap()
+                .is_str("native_thread_busy")
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), f.peer.recv())
+                .await
+                .is_err()
+        );
+        assert!(
+            memory
+                .lock()
+                .unwrap()
+                .thread_subscription(&"same-thread".into(), &"one".into())
+                .unwrap()
+                .is_some()
+        );
+        memory
+            .lock()
+            .unwrap()
+            .resolve_input_json(&"epoch".into(), &99.0.into(), &"same-thread".into())
+            .unwrap();
+        let work = f
+            .dispatch
+            .release(
+                release_identity("one", "native-error-release"),
+                release_params("new-work"),
+            )
+            .unwrap();
+        let read = release_frame(&mut f, "thread/read").await;
+        release_reply(&f, &read, release_thread("idle"));
+        let unsubscribe = release_frame(&mut f, "thread/unsubscribe").await;
+        let error = IvyJson::object([
+            ("code", (-32603.0).into()),
+            ("message", "Fixture native rejection".into()),
+        ]);
+        f.input
+            .try_send(IvyJson::object([
+                ("id", unsubscribe.required("id").unwrap().clone()),
+                ("error", error.clone()),
+            ]))
+            .unwrap();
+        let result = work.wait().await.unwrap();
+        assert!(result.required("code").unwrap().is_str("native_error"));
+        assert_eq!(
+            result.required("reply").unwrap(),
+            &IvyJson::object([("error", error)])
+        );
+        let journal = memory.lock().unwrap();
+        let own = journal
+            .thread_subscription(&"same-thread".into(), &"one".into())
+            .unwrap()
+            .unwrap();
+        assert!(own.attached && own.settled);
+        assert_eq!(
+            own.operation_id,
+            &release_identity("one", "new-work").operation_id
+        );
+    })
+    .catch_unwind()
+    .await;
+    f.rpc.close("test_complete").await;
+    f.receipts.drain().await.unwrap();
+    if let Err(panic) = scenario {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
+async fn scoped_release_preserves_unknown_original_on_connection_loss_without_blind_replay() {
+    let mut f = release_fixture();
+    let scenario = std::panic::AssertUnwindSafe(async {
+        release_resume(&mut f, "one", "resume").await;
+        let identity = release_identity("one", "unknown-release");
+        let params = release_params("resume");
+        let work = f
+            .dispatch
+            .release(identity.clone(), params.clone())
+            .unwrap();
+        let read = release_frame(&mut f, "thread/read").await;
+        release_reply(&f, &read, release_thread("idle"));
+        let unsubscribe = release_frame(&mut f, "thread/unsubscribe").await;
+        f.rpc.close("test_connection_lost").await;
+        let unknown = work.wait().await.unwrap();
+        assert!(unknown.required("phase").unwrap().is_str("outcome_unknown"));
+        assert_eq!(
+            unknown.required("requestId").unwrap(),
+            unsubscribe.required("id").unwrap()
+        );
+        assert!(unknown.required("reply").unwrap().is_null() && unknown.get("release").is_none());
+        assert_eq!(
+            f.operations.read(&identity).await.unwrap(),
+            Some(unknown.clone())
+        );
+        assert_eq!(
+            f.dispatch
+                .release(identity, params)
+                .unwrap()
+                .wait()
+                .await
+                .unwrap(),
+            unknown
+        );
+    })
+    .catch_unwind()
+    .await;
+    f.rpc.close("test_complete").await;
+    f.receipts.drain().await.unwrap();
+    if let Err(panic) = scenario {
+        std::panic::resume_unwind(panic);
+    }
+}
 fn fixture(max_journal_bytes: usize) -> Fixture {
     fixture_with_store(max_journal_bytes, |state| {
         Arc::new(SqliteOperationStore::new(state).unwrap())
     })
+}
+
+#[tokio::test]
+async fn scoped_release_management_binds_authenticated_caller_original_operation_and_native_definition()
+ {
+    use ivy_agent_manager::native_management::{NativeManagement, NativeManagementOwner};
+    use ivy_sdk::service::InvocationContext;
+    let mut f = release_fixture();
+    let scenario = std::panic::AssertUnwindSafe(async {
+        release_resume(&mut f, "one", "one-resume").await;
+        release_resume(&mut f, "two", "two-resume").await;
+        let catalog = Arc::new(
+            parse(
+                include_str!("../../specs/native/codex-0.163.0/catalog.json"),
+                2 * 1024 * 1024,
+            )
+            .unwrap(),
+        );
+        let management = NativeManagement::new(
+            NativeManagementOwner {
+                backend: None,
+                service_node_id: "fixture.agent".into(),
+                epoch: "epoch".into(),
+                catalog,
+                rpc: f.rpc.clone(),
+                closing: Arc::new(AtomicBool::new(false)),
+                platform: "linux-x64".into(),
+            },
+            f.operations.clone(),
+            ivy_agent_manager::interactions::NativeInteractions::new(
+                "epoch".into(),
+                Default::default(),
+            ),
+        )
+        .unwrap();
+        let definition = management
+            .registry()
+            .required("namespaces")
+            .unwrap()
+            .as_array()
+            .unwrap()[0]
+            .required("tools")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| {
+                tool.get("nativeMethod")
+                    .is_some_and(|method| method.is_str("thread/unsubscribe"))
+            })
+            .unwrap();
+        let hash = ivy_contracts::hash::tool_definition_hash(definition).unwrap();
+        let handler = management
+            .handlers()
+            .remove(&JsString::from("agent.release"))
+            .unwrap();
+        let params = IvyJson::object([
+            (
+                "operationId",
+                release_identity("one", "release-api").operation_id.into(),
+            ),
+            ("nativeVersion", "0.163.0".into()),
+            ("expectedDefinitionHash", hash.into()),
+            ("threadId", "same-thread".into()),
+            ("expectedEpoch", "epoch".into()),
+            (
+                "expectedOperationId",
+                release_identity("one", "one-resume").operation_id.into(),
+            ),
+        ]);
+        let context = |caller: &str, operation: &str| {
+            InvocationContext::detached(
+                caller.into(),
+                Some(release_identity(caller, operation).operation_id),
+                1,
+                Default::default(),
+                IvyError::internal(),
+            )
+        };
+        assert_eq!(
+            handler(params.clone(), context("one", "different-operation"))
+                .await
+                .unwrap_err()
+                .code,
+            "mutation_conflict"
+        );
+        let mut wrong = params.clone();
+        wrong.insert("nativeVersion", "0.154.0".into());
+        assert_eq!(
+            handler(wrong, context("one", "release-api"))
+                .await
+                .unwrap_err()
+                .code,
+            "native_definition_mismatch"
+        );
+        let mut wrong = params.clone();
+        wrong.insert(
+            "expectedDefinitionHash",
+            format!("sha256:{}", "f".repeat(64)).into(),
+        );
+        assert_eq!(
+            handler(wrong, context("one", "release-api"))
+                .await
+                .unwrap_err()
+                .code,
+            "native_definition_mismatch"
+        );
+        let unknown = handler(params.clone(), context("unrelated", "release-api"))
+            .await
+            .unwrap();
+        assert!(
+            unknown
+                .required("code")
+                .unwrap()
+                .is_str("native_subscription_unknown")
+        );
+        let work = tokio::spawn(handler(params, context("one", "release-api")));
+        let read = release_frame(&mut f, "thread/read").await;
+        release_reply(&f, &read, release_thread("idle"));
+        let result = work.await.unwrap().unwrap();
+        assert!(result.required("callerPrincipalId").unwrap().is_str("one"));
+        assert!(
+            result
+                .required("release")
+                .unwrap()
+                .required("kind")
+                .unwrap()
+                .is_str("logical")
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), f.peer.recv())
+                .await
+                .is_err()
+        );
+        assert!(
+            f.operations
+                .journal()
+                .lock()
+                .unwrap()
+                .thread_subscription(&"same-thread".into(), &"two".into())
+                .unwrap()
+                .is_some()
+        );
+    })
+    .catch_unwind()
+    .await;
+    f.rpc.close("test_complete").await;
+    f.receipts.drain().await.unwrap();
+    if let Err(panic) = scenario {
+        std::panic::resume_unwind(panic);
+    }
 }
 fn fixture_with_store(
     max_journal_bytes: usize,
     store: impl FnOnce(
         Arc<Mutex<LocalAgentState>>,
     ) -> Arc<dyn ivy_agent_manager::native_operations::NativeOperationStore>,
+) -> Fixture {
+    fixture_with_store_and_version(max_journal_bytes, store, "0.154.0")
+}
+fn release_fixture() -> Fixture {
+    fixture_with_store_and_version(
+        128 * 1024 * 1024,
+        |state| Arc::new(SqliteOperationStore::new(state).unwrap()),
+        "0.163.0",
+    )
+}
+fn fixture_with_store_and_version(
+    max_journal_bytes: usize,
+    store: impl FnOnce(
+        Arc<Mutex<LocalAgentState>>,
+    ) -> Arc<dyn ivy_agent_manager::native_operations::NativeOperationStore>,
+    version: &str,
 ) -> Fixture {
     let root = Root::new();
     let actual = root.0.canonicalize().unwrap();
@@ -74,7 +687,7 @@ fn fixture_with_store(
         NativeJournal::new(
             Owner {
                 service_node_id: "fixture.agent".into(),
-                native_version: "0.154.0".into(),
+                native_version: version.into(),
                 native_executable_hash: format!("sha256:{}", "0".repeat(64)).into(),
             },
             Limits {
@@ -93,7 +706,11 @@ fn fixture_with_store(
     let operations = NativeOperations::new(store(state.clone()), journal.clone());
     let receipts = operations.reconcile_terminals(Arc::new(|error| panic!("{error:?}")));
     let catalog = parse(
-        include_str!("../../specs/native/codex-0.154.0/catalog.json"),
+        match version {
+            "0.154.0" => include_str!("../../specs/native/codex-0.154.0/catalog.json"),
+            "0.163.0" => include_str!("../../specs/native/codex-0.163.0/catalog.json"),
+            _ => panic!("Unexpected fixture native version"),
+        },
         2 * 1024 * 1024,
     )
     .unwrap();
@@ -116,6 +733,124 @@ fn fixture_with_store(
         peer,
         input,
         dispatch,
+    }
+}
+
+#[tokio::test]
+async fn transient_native_subscribers_keep_caller_identity_after_observer_loss_and_late_reply() {
+    let Fixture {
+        _root,
+        operations,
+        receipts,
+        rpc,
+        mut peer,
+        input,
+        dispatch,
+    } = fixture(64 * 1024 * 1024);
+    let scenario = std::panic::AssertUnwindSafe(async {
+        let interactions = ivy_agent_manager::interactions::NativeInteractions::new(
+            "epoch".into(),
+            Default::default(),
+        );
+        let thread = JsString::from("same-thread");
+        for caller in ["one", "two"] {
+            let identity = Identity {
+                caller_principal_id: caller.into(),
+                operation_id: format!("{caller}-resume").into(),
+            };
+            let owner = dispatch.clone();
+            let observed = identity.clone();
+            drop(
+                interactions
+                    .run(
+                        identity.caller_principal_id.clone(),
+                        identity.operation_id.clone(),
+                        "thread/resume".into(),
+                        IvyJson::object([("threadId", IvyJson::String(thread.clone()))]),
+                        move |request| async move { owner.interact(observed, request).await },
+                    )
+                    .unwrap(),
+            );
+            let frame = tokio::time::timeout(Duration::from_secs(5), peer.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(frame.required("method").unwrap().is_str("thread/resume"));
+            let request_id = frame.required("id").unwrap().clone();
+            {
+                let memory = operations.journal();
+                let journal = memory.lock().unwrap();
+                let pending = journal
+                    .thread_subscription(&thread, &identity.caller_principal_id)
+                    .unwrap()
+                    .unwrap();
+                assert!(!pending.attached && !pending.settled);
+                assert_eq!(pending.operation_id, &identity.operation_id);
+            }
+            input
+                .try_send(IvyJson::object([
+                    ("id", request_id),
+                    (
+                        "result",
+                        IvyJson::object([(
+                            "thread",
+                            IvyJson::object([("id", IvyJson::String(thread.clone()))]),
+                        )]),
+                    ),
+                ]))
+                .unwrap();
+            let result = interactions
+                .lookup(&identity.caller_principal_id, &identity.operation_id)
+                .unwrap()
+                .wait()
+                .await
+                .unwrap();
+            assert_eq!(
+                result.required("operationId").unwrap(),
+                &IvyJson::String(identity.operation_id.clone())
+            );
+            let memory = operations.journal();
+            let journal = memory.lock().unwrap();
+            let owned = journal
+                .thread_subscription(&thread, &identity.caller_principal_id)
+                .unwrap()
+                .unwrap();
+            assert!(owned.attached && owned.settled);
+            assert_eq!(owned.shared, caller == "two");
+            assert_eq!(owned.operation_id, &identity.operation_id);
+        }
+        let memory = operations.journal();
+        let journal = memory.lock().unwrap();
+        assert!(
+            journal
+                .thread_subscription(&thread, &"one".into())
+                .unwrap()
+                .unwrap()
+                .shared
+        );
+        assert!(
+            journal
+                .thread_subscription(&thread, &"two".into())
+                .unwrap()
+                .unwrap()
+                .shared
+        );
+    })
+    .catch_unwind()
+    .await;
+    rpc.close("test_complete").await;
+    receipts.drain().await.unwrap();
+    assert!(
+        operations
+            .journal()
+            .lock()
+            .unwrap()
+            .thread_subscription(&"same-thread".into(), &"one".into())
+            .unwrap()
+            .is_none()
+    );
+    if let Err(panic) = scenario {
+        std::panic::resume_unwind(panic);
     }
 }
 

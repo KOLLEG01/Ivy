@@ -9,9 +9,12 @@ use ivy_host_runtime::{
     codex_admission::Priority,
     codex_rpc::{Events, HookFuture, NativeNotification, NativeRpc, RequestOptions},
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 /// Notification/input delivery stays with the service. These callbacks run in
@@ -65,6 +68,25 @@ pub fn journal_events(
                 let epoch = epoch.clone();
                 let callback = callback.clone();
                 Box::pin(async move {
+                    if let Some(thread) = notification
+                        .params
+                        .get("threadId")
+                        .and_then(IvyJson::as_js_string)
+                    {
+                        if notification.method.eq_str("thread/status/changed")
+                            || notification.method.eq_str("turn/started")
+                        {
+                            memory.lock().unwrap().observe_thread_status(
+                                &epoch,
+                                thread,
+                                if notification.method.eq_str("thread/status/changed") {
+                                    notification.params.get("status")
+                                } else {
+                                    None
+                                },
+                            )?;
+                        }
+                    }
                     let resolved =
                         notification
                             .method
@@ -128,8 +150,32 @@ pub struct NativeDispatch {
     operations: NativeOperations,
     closing: Arc<AtomicBool>,
     preparation: Arc<std::sync::Mutex<ThreadPreparation>>,
+    thread_locks: Arc<Mutex<BTreeMap<JsString, Weak<tokio::sync::RwLock<()>>>>>,
+}
+enum ThreadAccess {
+    Work {
+        _guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    },
+    Release {
+        _guard: tokio::sync::OwnedRwLockWriteGuard<()>,
+    },
 }
 pub type ThreadPreparation = Arc<dyn Fn() -> HookFuture + Send + Sync>;
+/// Keep only a bounded identity in observer closures, never the request body.
+/// Null records that the caller supplied an identity we cannot safely attribute.
+pub fn thread_observation_params(params: &IvyJson) -> IvyJson {
+    IvyJson::object(params.get("threadId").map(|thread| {
+        (
+            "threadId",
+            thread
+                .as_js_string()
+                .filter(|id| id.0.len() <= 1024)
+                .cloned()
+                .map(IvyJson::String)
+                .unwrap_or(IvyJson::Null),
+        )
+    }))
+}
 impl NativeDispatch {
     pub fn new(
         rpc: NativeRpc,
@@ -142,6 +188,7 @@ impl NativeDispatch {
             epoch,
             operations,
             closing,
+            thread_locks: Arc::new(Mutex::new(BTreeMap::new())),
             preparation: Arc::new(std::sync::Mutex::new(Arc::new(|| {
                 Box::pin(async { Ok(()) })
             }))),
@@ -149,6 +196,55 @@ impl NativeDispatch {
     }
     pub fn set_thread_preparation(&self, preparation: ThreadPreparation) {
         *self.preparation.lock().unwrap() = preparation;
+    }
+    // Only accepted mutation work reaches this lock. Weak entries retain no
+    // completed thread state; calls for different threads remain independent.
+    async fn thread_lock(&self, method: &JsString, params: &IvyJson) -> Option<ThreadAccess> {
+        if ivy_contracts::native_contract::is_read_only_native_method(method) {
+            return None;
+        }
+        let thread = params
+            .get("threadId")?
+            .as_js_string()
+            .filter(|id| id.0.len() <= 1024)?;
+        let lock = {
+            let mut locks = self.thread_locks.lock().unwrap();
+            locks.retain(|_, lock| lock.strong_count() != 0);
+            match locks.get(thread).and_then(Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(tokio::sync::RwLock::new(()));
+                    locks.insert(thread.clone(), Arc::downgrade(&lock));
+                    lock
+                }
+            }
+        };
+        Some(
+            if method.eq_str("agent.release") || method.eq_str("thread/unsubscribe") {
+                ThreadAccess::Release {
+                    _guard: lock.write_owned().await,
+                }
+            } else {
+                ThreadAccess::Work {
+                    _guard: lock.read_owned().await,
+                }
+            },
+        )
+    }
+    fn check_release_waiters(&self, thread: &JsString, identity: &Identity) -> IvyResult<()> {
+        let queued = self
+            .thread_locks
+            .lock()
+            .unwrap()
+            .get(thread)
+            .is_some_and(|lock| lock.strong_count() > 1);
+        if queued || self.operations.thread_has_pending_work(thread, identity)? {
+            return Err(IvyError::new(
+                "native_thread_busy",
+                "Accepted or queued native work still needs this thread.",
+            ));
+        }
+        Ok(())
     }
     pub fn available(&self) -> IvyResult<()> {
         if !self.closing.load(Ordering::SeqCst)
@@ -180,6 +276,8 @@ impl NativeDispatch {
                 let memory = owner.operations.journal();
                 let result = async {
                     owner.available()?;
+                    let guard = owner.thread_lock(&action_method, &action_params).await;
+                    owner.available()?;
                     if ["thread/start", "thread/resume", "thread/fork"]
                         .iter()
                         .any(|m| action_method.eq_str(m))
@@ -207,6 +305,7 @@ impl NativeDispatch {
                         let identity = action_id.clone();
                         let epoch = owner.epoch.clone();
                         Arc::new(move |id, reply| {
+                            let _guard = &guard;
                             let memory = memory.clone();
                             let identity = identity.clone();
                             let epoch = epoch.clone();
@@ -253,6 +352,248 @@ impl NativeDispatch {
                     .unwrap()
                     .get(&action_id)?
                     .unwrap_or(IvyJson::Null))
+            },
+            false,
+        )
+    }
+    /// Transient interactions share the native connection and must contribute
+    /// caller ownership even when their observer times out before a late reply.
+    pub async fn interact(
+        &self,
+        identity: Identity,
+        request: crate::interactions::Request,
+    ) -> IvyResult<IvyJson> {
+        self.available()?;
+        let guard = self.thread_lock(&request.method, &request.params).await;
+        self.available()?;
+        let observe = !ivy_contracts::native_contract::is_read_only_native_method(&request.method)
+            && (request.params.get("threadId").is_some()
+                || ["thread/start", "thread/resume", "thread/fork"]
+                    .iter()
+                    .any(|method| request.method.eq_str(method)));
+        let params = thread_observation_params(&request.params);
+        let before_send = {
+            let memory = self.operations.journal();
+            let epoch = self.epoch.clone();
+            let identity = identity.clone();
+            let method = request.method.clone();
+            let params = params.clone();
+            Arc::new(move |_| {
+                let memory = memory.clone();
+                let epoch = epoch.clone();
+                let identity = identity.clone();
+                let method = method.clone();
+                let params = params.clone();
+                Box::pin(async move {
+                    memory
+                        .lock()
+                        .unwrap()
+                        .observe_thread_dispatch(&epoch, &identity, &method, &params)
+                }) as HookFuture
+            })
+        };
+        let observe_reply = {
+            let memory = self.operations.journal();
+            let epoch = self.epoch.clone();
+            let method = request.method.clone();
+            Arc::new(move |reply: &IvyJson| {
+                let _guard = &guard;
+                memory
+                    .lock()
+                    .unwrap()
+                    .observe_thread_reply(&epoch, &identity, &method, &params, reply)
+            })
+        };
+        let timeout_ms =
+            crate::native_management::native_read_timeout_ms(&request.method, &request.params);
+        self.rpc
+            .request(
+                request.method,
+                request.params,
+                RequestOptions {
+                    timeout_ms,
+                    request_id: Some(request.request_id.into()),
+                    detach_on_timeout: request.detach_on_timeout,
+                    priority: if request.interaction_priority {
+                        Priority::Interaction
+                    } else {
+                        Priority::Background
+                    },
+                    before_send: observe.then_some(before_send),
+                    observe_reply: observe.then_some(observe_reply),
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+    /// Caller-scoped release uses the same durable operation owner as native
+    /// mutations. A local release has no manufactured native reply/request ID.
+    pub fn release(&self, identity: Identity, params: IvyJson) -> IvyResult<NativeRun> {
+        let owner = self.clone();
+        let action_id = identity.clone();
+        self.operations.run(
+            identity,
+            "agent.release".into(),
+            params,
+            move |params| async move {
+                let memory = owner.operations.journal();
+                let result = async {
+                    owner.available()?;
+                    let guard = owner.thread_lock(&"agent.release".into(), &params).await;
+                    owner.available()?;
+                    let thread = params
+                        .required("threadId")?
+                        .as_js_string()
+                        .ok_or_else(IvyError::internal)?
+                        .clone();
+                    let epoch = params
+                        .required("expectedEpoch")?
+                        .as_js_string()
+                        .ok_or_else(IvyError::internal)?
+                        .clone();
+                    let expected = params
+                        .required("expectedOperationId")?
+                        .as_js_string()
+                        .ok_or_else(IvyError::internal)?
+                        .clone();
+                    owner.check_release_waiters(&thread, &action_id)?;
+                    memory
+                        .lock()
+                        .unwrap()
+                        .check_thread_release(&thread, &action_id, &epoch, &expected)?;
+                    let observe_reply = {
+                        let memory = memory.clone();
+                        let epoch = epoch.clone();
+                        let thread = thread.clone();
+                        Arc::new(move |reply: &IvyJson| {
+                            let value = reply.get("result").and_then(|v| v.get("thread"));
+                            let status = value
+                                .filter(|v| {
+                                    v.get("id").and_then(IvyJson::as_js_string) == Some(&thread)
+                                })
+                                .and_then(|v| v.get("status"));
+                            memory
+                                .lock()
+                                .unwrap()
+                                .observe_thread_status(&epoch, &thread, status)
+                        })
+                    };
+                    // This bounded native read does not attach or copy the history.
+                    // Unknown/active status is never a release authorization.
+                    let reply = owner
+                        .rpc
+                        .request(
+                            "thread/read".into(),
+                            IvyJson::object([
+                                ("threadId", thread.clone().into()),
+                                ("includeTurns", false.into()),
+                            ]),
+                            RequestOptions {
+                                timeout_ms: 15_000,
+                                detach_on_timeout: true,
+                                priority: Priority::Interaction,
+                                observe_reply: Some(observe_reply),
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    if reply
+                        .get("result")
+                        .and_then(|v| v.get("thread"))
+                        .and_then(|v| v.get("status"))
+                        .and_then(|v| v.get("type"))
+                        .is_none_or(|v| !v.is_str("idle"))
+                    {
+                        return Err(IvyError::new(
+                            "native_thread_busy",
+                            "Native thread is not confirmed idle; its context remains attached.",
+                        ));
+                    }
+                    {
+                        owner.check_release_waiters(&thread, &action_id)?;
+                        let mut journal = memory.lock().unwrap();
+                        journal.check_thread_idle(&thread)?;
+                        if journal.check_thread_release(&thread, &action_id, &epoch, &expected)? {
+                            return journal
+                                .finish_logical_release(&action_id, &thread, &epoch, &expected);
+                        }
+                    }
+                    let before_send = {
+                        let memory = memory.clone();
+                        let identity = action_id.clone();
+                        let epoch = epoch.clone();
+                        let owner = owner.clone();
+                        Arc::new(move |id| {
+                            let owner = owner.clone();
+                            let memory = memory.clone();
+                            let identity = identity.clone();
+                            let epoch = epoch.clone();
+                            let thread = thread.clone();
+                            let expected = expected.clone();
+                            Box::pin(async move {
+                                owner.check_release_waiters(&thread, &identity)?;
+                                let mut journal = memory.lock().unwrap();
+                                journal.check_thread_idle(&thread)?;
+                                if journal
+                                    .check_thread_release(&thread, &identity, &epoch, &expected)?
+                                {
+                                    return Err(IvyError::new(
+                                        "native_subscription_changed",
+                                        "Another caller now needs the native subscription.",
+                                    ));
+                                }
+                                journal.dispatch(&identity, &epoch, &id)?;
+                                Ok(())
+                            }) as HookFuture
+                        })
+                    };
+                    let before_resolve = {
+                        let memory = memory.clone();
+                        let identity = action_id.clone();
+                        let epoch = epoch.clone();
+                        Arc::new(move |id, reply| {
+                            let _guard = &guard;
+                            let memory = memory.clone();
+                            let identity = identity.clone();
+                            let epoch = epoch.clone();
+                            Box::pin(async move {
+                                memory
+                                    .lock()
+                                    .unwrap()
+                                    .finish(&identity, &epoch, &id, &reply)?;
+                                Ok(())
+                            }) as HookFuture
+                        })
+                    };
+                    owner
+                        .rpc
+                        .request(
+                            "thread/unsubscribe".into(),
+                            IvyJson::object([("threadId", params.required("threadId")?.clone())]),
+                            RequestOptions {
+                                request_id: Some(owner.operations.request_id(&action_id)?.into()),
+                                priority: Priority::Interaction,
+                                before_send: Some(before_send),
+                                before_resolve: Some(before_resolve),
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    memory
+                        .lock()
+                        .unwrap()
+                        .get(&action_id)?
+                        .ok_or_else(IvyError::internal)
+                }
+                .await;
+                if let Err(error) = result {
+                    reject_accepted(&owner.operations, &action_id, &error)?;
+                }
+                memory
+                    .lock()
+                    .unwrap()
+                    .get(&action_id)?
+                    .ok_or_else(IvyError::internal)
             },
             false,
         )
