@@ -47,6 +47,8 @@ export { default as ProjectSelect } from "./patterns/ProjectSelect.vue";
 export { default as ChoiceChips } from "./patterns/ChoiceChips.vue";
 export { default as HostMark } from "./patterns/HostMark.vue";
 export { default as UsagePill } from "./patterns/UsagePill.vue";
+export { meterText, usageTone } from "./lib/usage";
+export type { UsageMeter, UsageMeterGroup, UsagePillLevel } from "./lib/usage";
 export { default as ReplyContext } from "./patterns/ReplyContext.vue";
 export { default as HorizontalScrollIndicator } from "./patterns/HorizontalScrollIndicator.vue";
 export { default as CreatableCombobox } from "./patterns/CreatableCombobox.vue";

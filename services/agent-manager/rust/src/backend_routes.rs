@@ -1,5 +1,5 @@
 //! One service registry, with explicit native backend/account admission.
-use crate::service_kernel::HandlerSet;
+use crate::{host_metrics::HostMetrics, service_kernel::HandlerSet};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, Outcome, native_backend::BackendIdentity,
 };
@@ -141,6 +141,7 @@ impl BackendRoute {
 pub struct BackendRoutes {
     routes: Arc<Vec<Route>>,
     registry: IvyJson,
+    host_metrics: Arc<HostMetrics>,
 }
 struct Route {
     identity: Option<BackendIdentity>,
@@ -317,10 +318,15 @@ impl BackendRoutes {
                     .collect(),
             ),
             registry,
+            host_metrics: Arc::default(),
         })
     }
     pub fn registry(&self) -> &IvyJson {
         &self.registry
+    }
+    /// Host load is shared by all backends of this process.
+    pub fn host_metrics(&self) -> &Arc<HostMetrics> {
+        &self.host_metrics
     }
     pub fn handlers(&self) -> HandlerSet {
         let mut management = HashMap::new();
@@ -367,6 +373,7 @@ impl BackendRoutes {
             })
         });
         management.insert("agent.backends".into(), list);
+        management.insert("agent.hostMetrics".into(), self.host_metrics.handler());
         let native = self
             .routes
             .iter()

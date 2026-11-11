@@ -955,6 +955,18 @@ async fn start(
             }
         }
         let routes = BackendRoutes::new(routes)?;
+        // Roots become known once each backend's native home is resolved.
+        let roots = Arc::downgrade(&resources);
+        routes.host_metrics().set_project_roots(Arc::new(move || {
+            roots.upgrade().map_or_else(Vec::new, |resources| {
+                resources
+                    .backends()
+                    .iter()
+                    .filter_map(|backend| get(&backend.locations).ok().flatten())
+                    .map(|locations| locations.project_root())
+                    .collect()
+            })
+        }));
         let (reconcile, readiness) =
             resources.dependencies(text(host_config.json(), "serviceNodeId")?);
         let service = Arc::new(ServiceClient::new(service_options(

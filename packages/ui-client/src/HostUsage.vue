@@ -4,8 +4,6 @@ import { RefreshCw } from "@lucide/vue";
 import {
   Button,
   LoadingIndicator,
-  Label,
-  OptionSelect,
   Popover,
   PopoverContent,
   PopoverTrigger,
@@ -13,126 +11,119 @@ import {
   UsagePill,
   useRemote,
 } from "@ivy/ui";
+import type { UsageMeter, UsagePillLevel } from "@ivy/ui";
 import type { Agent, HiveClient } from "../../sdk/src/client.js";
-import { optionalTool, record, text } from "./native";
+import { nativeRead, optionalTool, record } from "./native";
 import { backendRead, nativeBackendLabel, nativeBackendKey, nativeMethod, sameBackend } from './native-backends';
 import type { NativeBackendScope } from './native-backends';
+import { accountGroups, metricsStale, sharedRead, systemMeters, usageBuckets } from './host-load';
+import type { AccountUsage } from './host-load';
 
-// Account usage and limits of one host, read from its native owner whenever the popover opens.
-const props = defineProps<{ client: HiveClient; node: string; backend?: Agent.BackendIdentity | undefined; accounts?: NativeBackendScope[] | undefined; label: string; ready: boolean; compact?: boolean; passive?: boolean }>();
+// Host load and every account's limits, read at most about once a minute and shared by visible tabs.
+const props = defineProps<{ client: HiveClient; node: string; backend?: Agent.BackendIdentity | undefined; accounts?: NativeBackendScope[] | undefined; label: string; ready: boolean; level?: UsagePillLevel; passive?: boolean }>();
 const open = ref(false);
-const selected = ref('');
+type Owner = { serviceNodeId: string; backend?: Agent.BackendIdentity | undefined; status: { state: string } };
+const owners = computed<Owner[]>(() => props.accounts
+  ? props.accounts.filter(value => !props.backend || value.serviceNodeId === props.node && sameBackend(value.backend, props.backend))
+  : [{ serviceNodeId: props.node, backend: props.backend, status: { state: props.ready ? 'ready' : 'offline' } }]);
 const ownerKey = (owner: { serviceNodeId: string; backend?: Agent.BackendIdentity | undefined }) => JSON.stringify([owner.serviceNodeId, nativeBackendKey(owner.backend)]);
-const owner = computed(() => props.accounts ? props.accounts.find(value => props.backend ? value.serviceNodeId === props.node && sameBackend(value.backend, props.backend) : ownerKey(value) === selected.value) ??
-  (props.backend ? null : props.accounts.find(value => value.status.state === 'ready') ?? props.accounts[0]) :
-  { serviceNodeId: props.node, backend: props.backend, status: { state: props.ready ? 'ready' : 'offline' } });
-const usage = useRemote(async signal => {
-  if (!props.ready || !owner.value || owner.value.status.state !== 'ready') return null;
-  if (props.passive && !open.value) return null;
-  const selected = owner.value;
-  if (!await optionalTool(props.client, selected.serviceNodeId, nativeMethod(selected.backend, 'account/rateLimits/read'))) return null;
-  return record(await backendRead(props.client, selected, 'account/rateLimits/read', null, signal));
-}, 60000);
-const { value: result, loading, error, refresh: load } = usage;
-watch(open, value => { if (value) void load(); });
-watch(() => JSON.stringify([props.node, props.ready, owner.value && ownerKey(owner.value)]), () => { result.value = null; void load(); });
+const sharedKey = (...parts: string[]) => JSON.stringify([location.pathname.split('/ui/')[0], ...parts]);
+let force = false;
+const active = () => props.ready && (!props.passive || open.value);
 
-interface Window { label: string; used: number; resets: string }
-interface Bucket { id: string; name: string; plan: string; windows: Window[]; notes: string[] }
-const windowLabel = (minutes: number) =>
-  !Number.isFinite(minutes) || minutes <= 0 ? "Usage"
-    : minutes % 10080 === 0 ? (minutes === 10080 ? "Weekly limit" : minutes / 10080 + "-week limit")
-    : minutes % 1440 === 0 ? (minutes === 1440 ? "Daily limit" : minutes / 1440 + "-day limit")
-    : minutes % 60 === 0 ? minutes / 60 + "-hour limit" : minutes + "-minute limit";
-const resetLabel = (seconds: unknown) => {
-  const value = Number(seconds) * 1000;
-  if (!Number.isFinite(value) || value <= 0) return "";
-  const date = new Date(value), sameDay = date.toDateString() === new Date().toDateString();
-  return "Resets " + (sameDay
-    ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    : date.toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }));
-};
-const percent = (value: unknown) => Math.min(100, Math.max(0, Math.round(Number(value) || 0)));
-const buckets = computed<Bucket[]>(() => {
-  const value = result.value;
-  if (!value) return [];
-  const byId = record(value.rateLimitsByLimitId);
-  const entries = Object.keys(byId).length ? Object.entries(byId) : [["", value.rateLimits] as const];
-  return entries.map(([id, raw]) => {
-    const limit = record(raw), windows: Window[] = [], notes: string[] = [];
-    for (const part of [limit.primary, limit.secondary]) {
-      const window = record(part);
-      if (typeof window.usedPercent === "number")
-        windows.push({ label: windowLabel(Number(window.windowDurationMins)), used: percent(window.usedPercent), resets: resetLabel(window.resetsAt) });
+const metrics = useRemote(async signal => {
+  if (!active()) return null;
+  return sharedRead(sharedKey(props.node, 'agent.hostMetrics'), 55000, async () =>
+    await optionalTool(props.client, props.node, 'agent.hostMetrics')
+      ? await nativeRead(props.client, props.node, 'agent.hostMetrics', {}, signal) as Agent.HostMetrics : null, force);
+}, 60000);
+const usage = useRemote(async signal => {
+  if (!active()) return [];
+  const reads = await Promise.all(owners.value.map(async (owner): Promise<AccountUsage> => {
+    const label = owner.backend ? nativeBackendLabel(owner.backend) : props.label;
+    const ready = owner.status.state === 'ready';
+    if (!ready) return { key: ownerKey(owner), label, ready, result: null, error: null };
+    try {
+      const result = await sharedRead(sharedKey(ownerKey(owner), 'account/rateLimits/read'), 55000, async () =>
+        await optionalTool(props.client, owner.serviceNodeId, nativeMethod(owner.backend, 'account/rateLimits/read'))
+          ? record(await backendRead(props.client, owner, 'account/rateLimits/read', null, signal)) : null, force);
+      return { key: ownerKey(owner), label, ready, result, error: null };
+    } catch (cause) {
+      signal.throwIfAborted();
+      return { key: ownerKey(owner), label, ready, result: null, error: cause instanceof Error ? cause.message : 'Usage unavailable.' };
     }
-    const individual = record(limit.individualLimit);
-    if (typeof individual.remainingPercent === "number")
-      windows.push({ label: "Your limit · " + text(individual.used) + " of " + text(individual.limit),
-        used: percent(100 - individual.remainingPercent), resets: resetLabel(individual.resetsAt) });
-    const credits = record(limit.credits);
-    if (credits.unlimited === true) notes.push("Unlimited credits");
-    else if (credits.hasCredits === true && text(credits.balance)) notes.push("Credits: " + text(credits.balance));
-    if (text(limit.rateLimitReachedType)) notes.push("Limit reached: " + text(limit.rateLimitReachedType).replaceAll("_", " "));
-    if (limit.spendControlReached === true) notes.push("Spend control reached");
-    return { id: id || text(limit.limitId), name: text(limit.limitName) || text(limit.limitId) || id || "Usage", plan: text(limit.planType), windows, notes };
-  }).filter(bucket => bucket.windows.length || bucket.notes.length);
+  }));
+  return reads;
+}, 60000);
+const loading = computed(() => metrics.loading.value || usage.loading.value);
+const refresh = async () => { force = true; try { await Promise.all([metrics.refresh(), usage.refresh()]); } finally { force = false; } };
+watch(open, value => { if (value && props.passive) void refresh(); });
+watch(() => JSON.stringify([props.node, props.ready, owners.value.map(ownerKey)]), () => {
+  metrics.value.value = null; usage.value.value = null; void metrics.refresh(); void usage.refresh();
 });
-// A limit entry without values means the host tracks limits but has no reading yet.
-const reported = computed(() => !!result.value && (Object.keys(record(result.value.rateLimitsByLimitId)).length > 0 ||
-  !!text(record(result.value.rateLimits).limitId)));
-const resetCredits = computed(() => Number(record(result.value?.rateLimitResetCredits).availableCount) || 0);
-const blocked = computed(() => result.value?.ordinaryUsageAllowed === false);
-// The core account's tightest window determines availability; separate model buckets
-// still appear in the popover. Missing readings remain unknown instead of showing 100%.
-const remaining = computed(() => {
-  if (blocked.value) return 0;
-  const byId = record(result.value?.rateLimitsByLimitId);
-  const core = buckets.value.find(bucket => bucket.id === 'codex') ??
-    (Object.keys(byId).length ? buckets.value[0] : buckets.value.find(bucket => bucket.windows.length));
-  return core?.windows.length ? Math.min(...core.windows.map(window => 100 - window.used)) : null;
-});
+
+const host = computed(() => metrics.value.value);
+const stale = computed(() => !!host.value && metricsStale(host.value));
+const measured = computed(() => host.value ? new Date(host.value.observedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '');
+const system = computed<UsageMeter[]>(() => host.value
+  ? systemMeters(host.value).map(meter => stale.value ? { ...meter, used: null, detail: 'last measured ' + measured.value } : meter)
+  : []);
+const accounts = computed(() => usage.value.value ?? owners.value.map(owner => ({ key: ownerKey(owner), label: owner.backend ? nativeBackendLabel(owner.backend) : props.label, ready: owner.status.state === 'ready', result: null, error: null })));
+const groups = computed(() => [...(system.value.length ? [{ id: 'host', meters: system.value }] : []), ...accountGroups(accounts.value)]);
+const status = computed(() => metrics.error.value ? 'host load unavailable' : stale.value ? 'stale since ' + measured.value : '');
 </script>
 <template>
   <Popover v-model:open="open">
-    <PopoverTrigger as-child><slot><UsagePill :label="label" :seed="node" :remaining="error ? null : remaining" :compact="compact" :unavailable="!ready" /></slot></PopoverTrigger>
-    <PopoverContent align="start" class="w-80 space-y-4 p-4">
+    <PopoverTrigger as-child><slot><UsagePill :label="label" :seed="node" :groups="groups" :level="level" :status="status" :unavailable="!ready" /></slot></PopoverTrigger>
+    <PopoverContent align="start" class="max-h-[min(36rem,80dvh)] w-80 space-y-4 overflow-y-auto p-4">
       <div class="flex items-center gap-2">
         <div class="min-w-0 flex-1">
           <p class="truncate text-sm font-medium">{{ label }}</p>
-          <p class="text-xs text-muted-foreground">{{ ready ? "Usage and limits" : "Usage and limits · host not ready" }}</p>
+          <p class="text-xs text-muted-foreground">{{ !ready ? "Host offline" : host ? (stale ? "Stale · last measured " : "Measured ") + measured : "Load and limits" }}</p>
         </div>
-        <Button variant="ghost" size="icon-sm" aria-label="Refresh usage" :disabled="loading" @click="load"
+        <Button variant="ghost" size="icon-sm" aria-label="Refresh usage" :disabled="loading" @click="refresh"
           ><RefreshCw :class="{ 'animate-spin': loading }" aria-hidden="true"
         /></Button>
       </div>
-      <div v-if="accounts?.length && !backend" class="space-y-1.5">
-        <Label :for="'usage-account-' + node">Provider and account</Label>
-        <OptionSelect :id="'usage-account-' + node" :model-value="owner ? ownerKey(owner) : ''" class="w-full" @update:model-value="selected = $event">
-          <option v-for="account in accounts" :key="ownerKey(account)" :value="ownerKey(account)">{{ account.backend ? nativeBackendLabel(account.backend) : account.serviceNodeId }}</option>
-        </OptionSelect>
-      </div>
-      <p v-else-if="backend" class="text-xs text-muted-foreground">{{ nativeBackendLabel(backend) }}</p>
-      <LoadingIndicator v-if="loading && !result" label="Loading usage…" />
-      <p v-else-if="error" role="alert" class="text-sm text-destructive">{{ error }}</p>
-      <template v-else-if="result">
-        <p v-if="blocked" role="alert" class="text-sm text-destructive">Included usage is currently not available on this account.</p>
-        <section v-for="bucket in buckets" :key="bucket.id || bucket.name" class="space-y-3" :aria-label="bucket.name">
-          <p v-if="buckets.length > 1 || bucket.plan" class="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-            <span class="truncate">{{ bucket.name }}</span><span v-if="bucket.plan" class="ml-auto rounded bg-muted px-1.5 py-0.5 uppercase">{{ bucket.plan }}</span>
-          </p>
-          <div v-for="window in bucket.windows" :key="window.label" class="space-y-1.5">
-            <div class="flex items-baseline gap-2 text-sm">
-              <span class="min-w-0 flex-1 truncate">{{ window.label }}</span>
-              <span class="tabular-nums text-muted-foreground">{{ window.used }}% used</span>
-            </div>
-            <Progress :model-value="window.used" :aria-label="window.label" />
-            <p v-if="window.resets" class="text-xs text-muted-foreground">{{ window.resets }}</p>
+      <LoadingIndicator v-if="loading && !host && !usage.value.value" label="Loading usage…" />
+      <section v-if="system.length" class="space-y-3" aria-label="Host load">
+        <div v-for="meter in system" :key="meter.id" class="space-y-1.5">
+          <div class="flex items-baseline gap-2 text-sm">
+            <span class="min-w-0 flex-1 truncate">{{ meter.label }}</span>
+            <span class="tabular-nums text-muted-foreground">{{ meter.used === null ? "—" : meter.used + "% used" }}</span>
           </div>
-          <p v-for="note in bucket.notes" :key="note" class="text-xs text-muted-foreground">{{ note }}</p>
-        </section>
-        <p v-if="resetCredits" class="text-xs text-muted-foreground">{{ resetCredits }} limit reset {{ resetCredits === 1 ? "credit" : "credits" }} available</p>
-        <p v-if="!buckets.length && !blocked" class="text-sm text-muted-foreground">{{ reported ? "This host has not reported usage yet." : "This host reports no usage limits." }}</p>
-      </template>
+          <Progress v-if="meter.used !== null" :model-value="meter.used" :aria-label="meter.label" />
+          <p v-if="meter.detail" class="text-xs break-words text-muted-foreground">{{ meter.detail }}</p>
+        </div>
+      </section>
+      <p v-else-if="metrics.error.value" role="alert" class="text-sm text-destructive">{{ metrics.error.value }}</p>
+      <section v-for="account in accounts" :key="account.key" class="space-y-3 border-t pt-3" :aria-label="account.label">
+        <p class="truncate text-xs font-medium text-muted-foreground">{{ account.label }}</p>
+        <p v-if="!account.ready" class="text-sm text-muted-foreground">Account not ready.</p>
+        <p v-else-if="account.error" role="alert" class="text-sm text-destructive">{{ account.error }}</p>
+        <template v-else-if="account.result">
+          <p v-if="account.result.ordinaryUsageAllowed === false" role="alert" class="text-sm text-destructive">Included usage is currently not available on this account.</p>
+          <div v-for="bucket in usageBuckets(account.result)" :key="bucket.id || bucket.name" class="space-y-3">
+            <p v-if="usageBuckets(account.result).length > 1 || bucket.plan" class="flex items-center gap-2 text-xs text-muted-foreground">
+              <span class="truncate">{{ bucket.name }}</span><span v-if="bucket.plan" class="ml-auto rounded bg-muted px-1.5 py-0.5 uppercase">{{ bucket.plan }}</span>
+            </p>
+            <div v-for="window in bucket.windows" :key="window.label" class="space-y-1.5">
+              <div class="flex items-baseline gap-2 text-sm">
+                <span class="min-w-0 flex-1 truncate">{{ window.label }}</span>
+                <span class="tabular-nums text-muted-foreground">{{ window.used }}% used</span>
+              </div>
+              <Progress :model-value="window.used" :aria-label="account.label + ' · ' + window.label" />
+              <p v-if="window.resets" class="text-xs text-muted-foreground">{{ window.resets }}</p>
+            </div>
+            <p v-for="note in bucket.notes" :key="note" class="text-xs text-muted-foreground">{{ note }}</p>
+          </div>
+          <p v-if="Number(record(account.result.rateLimitResetCredits).availableCount) > 0" class="text-xs text-muted-foreground">
+            {{ Number(record(account.result.rateLimitResetCredits).availableCount) }} limit reset credit(s) available</p>
+          <p v-if="!usageBuckets(account.result).length && account.result.ordinaryUsageAllowed !== false" class="text-sm text-muted-foreground">
+            {{ Object.keys(record(account.result.rateLimitsByLimitId)).length || record(account.result.rateLimits).limitId ? "This account has not reported usage yet." : "This account reports no usage limits." }}</p>
+        </template>
+        <p v-else-if="usage.value.value" class="text-sm text-muted-foreground">This account does not report usage limits.</p>
+      </section>
     </PopoverContent>
   </Popover>
 </template>

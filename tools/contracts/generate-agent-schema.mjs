@@ -64,6 +64,23 @@ const definitions = {
     operationReadsAvailable: bool,
   }),
   BackendsResult: object({ backends: array({ anyOf: [ref("Status"), ref("BackendPreparationFailure")] }, 8) }),
+  // Missing platform readings are null; an unfinished first CPU interval has no percentage.
+  HostMetrics: object({
+    observedAt: time,
+    sampleSeconds: integer(1, 3600),
+    memory: nullable(object({ totalBytes: integer(), usedBytes: integer() })),
+    cpu: nullable(object({
+      usedPercent: nullable({ type: "number", minimum: 0, maximum: 100 }),
+      averageSeconds: integer(1, 3600),
+      coveredSeconds: integer(0, 86400),
+    })),
+    volumes: array(object({
+      path: { ...text(4096), minLength: 1 },
+      volume: nullable(text(4096)),
+      totalBytes: integer(),
+      usedBytes: integer(),
+    }), 8),
+  }),
   NativeOwnerIdentity: object({
     backend: ref("BackendIdentity"),
     serviceNodeId: id,

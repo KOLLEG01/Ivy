@@ -4,6 +4,7 @@ mod agent_config;
 pub mod backend_routes;
 pub mod backend_readiness;
 mod backend_runtime;
+pub mod host_metrics;
 mod host_service;
 pub mod browser_notices;
 pub mod bundled_tools;

@@ -36,6 +36,13 @@ An unscoped single owner uses its existing `codex` namespace and cannot select
 another backend. Removing or reassigning a pinned account requires an explicit
 state transfer that preserves its receipts.
 
+`agent.hostMetrics` reports whole-host used memory, CPU as a time-weighted average over
+about five minutes of native counters across all logical CPUs, and the volumes holding the
+backends' project roots, each once. It samples only when read and at most once per 55
+seconds, shared by all readers of that process; the first interval and gaps over 15 minutes
+report no CPU percentage. Hosts without a native reader report null. See
+[HostMetrics](src/host_metrics.rs).
+
 The `agent.notification` and `agent.capabilities` topic payloads use version
 `1.1.0` for the optional backend identity. Published `1.0.0` definitions remain
 immutable in Hive.

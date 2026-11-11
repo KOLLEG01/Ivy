@@ -30,7 +30,6 @@ import {
   TabsContent,
   TabsList,
   TabsTrigger,
-  ToolbarContent,
   VirtualList,
   markdownImageSources,
   attachmentMarkdown,
@@ -771,7 +770,8 @@ const showArrived = async () => {
 
 <template>
   <Tabs v-model="tab" class="task-detail flex h-full min-h-0 w-full flex-col gap-0">
-    <ToolbarContent>
+    <!-- The ticket header belongs to its panel; the shell bar keeps board navigation and hosts. -->
+    <header class="@container flex h-12 shrink-0 items-center gap-2 border-b bg-background px-3 md:px-4" data-slot="task-header">
       <div class="flex min-w-0 flex-1 items-center gap-2">
         <template v-if="task.value.value">
           <component
@@ -781,8 +781,8 @@ const showArrived = async () => {
             :aria-label="stateLabel(displayStatus)"
             role="img"
           />
-          <h1 class="min-w-0 truncate text-sm font-semibold">
-            <span class="sr-only">{{ task.value.value.value.taskKey }} · </span>{{ displayContent?.title }}
+          <h1 class="flex min-w-0 items-baseline gap-1.5 text-sm font-semibold">
+            <span class="shrink-0 font-mono text-xs font-medium text-muted-foreground tabular-nums">{{ task.value.value.value.taskKey }}</span><span class="sr-only"> · </span><span class="min-w-0 truncate">{{ displayContent?.title }}</span>
           </h1>
           <StatusBadge
             v-if="displayArchived"
@@ -791,13 +791,13 @@ const showArrived = async () => {
           <template v-if="wide">
             <button
               type="button"
-              class="inline-flex h-6 shrink-0 items-center gap-1 rounded-full border px-2 text-xs text-muted-foreground hover:bg-muted"
+              class="hidden h-6 shrink-0 items-center gap-1 rounded-full border px-2 text-xs text-muted-foreground hover:bg-muted @3xl:inline-flex"
               :aria-label="tr('Host: ', 'Host: ') + hostPill"
               @click="tab = 'details'"
             ><MonitorDot class="size-3.5" aria-hidden="true" />{{ hostPill }}</button>
             <button
               type="button"
-              class="inline-flex h-6 min-w-0 items-center gap-1 rounded-full border px-2 text-xs text-muted-foreground hover:bg-muted"
+              class="hidden h-6 min-w-0 items-center gap-1 rounded-full border px-2 text-xs text-muted-foreground hover:bg-muted @3xl:inline-flex"
               :aria-label="tr('Modell: ', 'Model: ') + modelPill"
               @click="tab = 'details'"
             ><Sparkles class="size-3.5 shrink-0" aria-hidden="true" /><span class="truncate">{{ modelPill }}</span></button>
@@ -805,9 +805,9 @@ const showArrived = async () => {
         </template>
       </div>
       <TabsList v-if="wide && task.value.value" class="shrink-0">
-        <TabsTrigger value="details"><Info aria-hidden="true" />Details</TabsTrigger>
-        <TabsTrigger value="chat"><MessageSquare aria-hidden="true" />Chat</TabsTrigger>
-        <TabsTrigger value="agent"><Bot aria-hidden="true" />Agent</TabsTrigger>
+        <TabsTrigger value="details" aria-label="Details"><Info aria-hidden="true" /><span class="hidden @2xl:inline">Details</span></TabsTrigger>
+        <TabsTrigger value="chat" aria-label="Chat"><MessageSquare aria-hidden="true" /><span class="hidden @2xl:inline">Chat</span></TabsTrigger>
+        <TabsTrigger value="agent" aria-label="Agent"><Bot aria-hidden="true" /><span class="hidden @2xl:inline">Agent</span></TabsTrigger>
       </TabsList>
       <div class="flex shrink-0 items-center gap-1.5">
         <Button
@@ -881,7 +881,7 @@ const showArrived = async () => {
             ><X aria-hidden="true" /></Button
         >
       </div>
-    </ToolbarContent>
+    </header>
     <div
       v-if="!wide && task.value.value"
       class="shrink-0 border-b bg-background px-3 py-2"

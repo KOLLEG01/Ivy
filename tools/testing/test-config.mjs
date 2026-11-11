@@ -2060,6 +2060,10 @@ export const rustTests = {
     "package": "ivy-agent-manager",
     "test": "agent-notifications"
   },
+  "tests/rust/agent-host-metrics.rs": {
+    "package": "ivy-agent-manager",
+    "test": "agent-host-metrics"
+  },
   "tests/rust/agent-interactions.rs": {
     "package": "ivy-agent-manager",
     "test": "agent-interactions",

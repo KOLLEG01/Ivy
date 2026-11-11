@@ -146,7 +146,7 @@ function readBinding(client: RpcClient, node: string, method: string): Promise<B
 async function executeReadAttempt(client: RpcClient, node: string, method: string, args: Wire.Json, signal: AbortSignal): Promise<Wire.Json> {
   // Service readiness is shared. A selected provider's outage is confined to its
   // namespace, including the same backend's management observations.
-  const namespace = method === 'agent.backends' ? '$host' : method.startsWith('agent.') ? text(record(record(args).backend).backendId) || 'codex' : method.split('.')[0]!;
+  const namespace = method === 'agent.backends' || method === 'agent.hostMetrics' ? '$host' : method.startsWith('agent.') ? text(record(record(args).backend).backendId) || 'codex' : method.split('.')[0]!;
   const failureKey = node + '\u0000' + namespace;
   for (let attempt = 0; ; attempt++) {
     signal?.throwIfAborted();

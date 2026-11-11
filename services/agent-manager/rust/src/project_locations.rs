@@ -83,6 +83,9 @@ fn reference(service_node_id: &JsString, native_id: &JsString) -> IvyJson {
 }
 
 impl ProjectLocations {
+    pub fn project_root(&self) -> JsString {
+        self.0.policy.project_root.clone()
+    }
     pub fn new(
         policy: ProjectPolicy,
         register: Option<Arc<RegisterProject>>,

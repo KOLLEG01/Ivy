@@ -110,6 +110,15 @@
           },
           {
             "namespace": "agent",
+            "name": "hostMetrics",
+            "interfaceVersion": "1.0.0",
+            "description": "Read this host's shared load snapshot: used memory, CPU averaged over recent minutes and the volumes holding the configured project roots. Readers share one sample per minute.",
+            "inputSchema": { "$agentSchema": "BackendsInput" },
+            "outputSchema": { "$agentSchema": "HostMetrics" },
+            "annotations": { "readOnlyHint": true, "idempotentHint": true }
+          },
+          {
+            "namespace": "agent",
             "name": "status",
             "interfaceVersion": "1.0.0",
             "description": "Check this host’s Codex version, connection identity and operation capacity.",

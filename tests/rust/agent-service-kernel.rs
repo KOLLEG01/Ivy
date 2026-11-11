@@ -456,6 +456,7 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
         let mut expected_handlers = field(data(), "handlers").as_array().unwrap().to_vec();
         expected_handlers.push("agent.cleanupTaskOutputs".into());
         expected_handlers.push("agent.backends".into());
+        expected_handlers.push("agent.hostMetrics".into());
         expected_handlers.push("agent.storageIdentity".into());
         expected_handlers.push("agent.release".into());
         expected_handlers.sort_by_key(|v| v.as_js_string().unwrap().clone());
