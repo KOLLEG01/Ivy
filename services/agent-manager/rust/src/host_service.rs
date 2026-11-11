@@ -9,12 +9,9 @@ use crate::{
 };
 use ivy_contracts::{IvyError, IvyJson, JsString};
 use ivy_sdk::service::{ConnectionDependency, ServiceClient, ServiceFuture};
-use std::{
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 use tokio::sync::watch;
 
@@ -311,6 +308,7 @@ pub(crate) fn control_timer(
     closing: Arc<AtomicBool>,
 ) {
     let file = health.file().clone();
+    let mut events = ivy_host_runtime::file_events::FileEvents::new([file.control_path()]);
     let control = AgentControl::new(
         Arc::new(move || {
             let file = file.clone();
@@ -324,20 +322,22 @@ pub(crate) fn control_timer(
         closing,
     );
     tokio::spawn(async move {
-        let period = Duration::from_millis(500);
-        let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             if *stopped.borrow() {
                 break;
             }
+            for backend in resources.backends() {
+                if let Ok(Some(interactions)) = get(&backend.interactions) {
+                    let _ = interactions.prune();
+                }
+            }
+            control.tick();
+            let delay = events.fallback();
             tokio::select! {
                 biased;
                 _ = stopped.changed() => break,
-                _ = timer.tick() => {
-                    for backend in resources.backends() { if let Ok(Some(interactions)) = get(&backend.interactions) { let _ = interactions.prune(); } }
-                    control.tick();
-                }
+                _ = events.changed() => (),
+                _ = tokio::time::sleep(delay) => (),
             }
         }
     });

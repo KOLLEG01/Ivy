@@ -59,11 +59,7 @@ async fn actual(path: PathBuf) -> IvyResult<PathBuf> {
 }
 fn profile(node: Option<&NodeRuntime>) -> PreparationProfile {
     PreparationProfile {
-        os: if cfg!(windows) {
-            "win32"
-        } else {
-            std::env::consts::OS
-        }
+        os: crate::native_plan::host_os()
         .into(),
         arch: match std::env::consts::ARCH {
             "x86_64" => "x64",

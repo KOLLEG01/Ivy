@@ -1,4 +1,4 @@
-const platforms = new Set(['win32-x64', 'win32-arm64', 'linux-x64', 'linux-arm64']);
+const platforms = new Set(['win32-x64', 'win32-arm64', 'linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64']);
 
 /** Native source plans name platform-neutral binaries. Prepared plans name only
  * the selected host's real files; their existing requirements describe that artifact. */

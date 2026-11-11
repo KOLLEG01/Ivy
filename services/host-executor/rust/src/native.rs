@@ -75,12 +75,7 @@ impl Bindings {
                 own_instance_id: options.own_instance_id.as_deref().map(JsString::from),
                 distribution: Some(distribution.clone()),
                 process_started_at,
-                platform: if cfg!(windows) {
-                    "win32"
-                } else {
-                    std::env::consts::OS
-                }
-                .into(),
+                platform: ivy_host_runtime::native_plan::host_os().into(),
             },
             Arc::new(SystemClock),
             job_launcher.clone(),

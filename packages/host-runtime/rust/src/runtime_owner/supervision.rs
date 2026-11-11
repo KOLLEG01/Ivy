@@ -45,7 +45,7 @@ impl Drop for Control {
     }
 }
 
-/// One Windows process owner. Cancellation requests shutdown; all close callers
+/// One process owner. Cancellation requests shutdown; all close callers
 /// observe the same completed cleanup, even when an earlier waiter is dropped.
 #[derive(Clone)]
 pub struct RuntimeOwner(Arc<Control>);
@@ -97,9 +97,9 @@ impl RuntimeOwner {
     ) -> IvyResult<Self> {
         let node = node.into();
         require(
-            cfg!(windows),
+            cfg!(windows) || cfg!(target_os = "macos"),
             "unsupported_runtime",
-            "RuntimeOwner is reserved for Windows process services; Linux uses systemd directly.",
+            "RuntimeOwner supports Windows and macOS process services; Linux uses systemd directly.",
         )?;
         validate_host("HostConfig", &host)?;
         let instance = instance(&host, &instance_id)?;
@@ -156,6 +156,7 @@ impl RuntimeOwner {
             restart_code: "restart_backoff".into(),
             restart_at: None,
             last_observation: String::new(),
+            health_deadline: None,
         };
         Ok(Self(Arc::new(Control {
             pending: Mutex::new(Some(owner)),
@@ -224,6 +225,7 @@ struct Owner {
     restart_code: String,
     restart_at: Option<String>,
     last_observation: String,
+    health_deadline: Option<Instant>,
 }
 impl Owner {
     fn elapsed(&self) -> u64 {
@@ -441,11 +443,7 @@ impl Owner {
         crate::artifact::verify_runtime_requirements(
             &selected.manifest,
             self.node.as_ref().map(|node| node.version.as_str()),
-            if cfg!(windows) {
-                "win32"
-            } else {
-                std::env::consts::OS
-            },
+            crate::native_plan::host_os(),
             match std::env::consts::ARCH {
                 "x86_64" => "x64",
                 "aarch64" => "arm64",
@@ -603,6 +601,7 @@ impl Owner {
         .await
     }
     async fn tick(&mut self) -> IvyResult<()> {
+        self.health_deadline = None;
         if self.policy.blocked {
             return self
                 .observe(
@@ -754,6 +753,20 @@ impl Owner {
         .await;
         match result {
             Ok(()) => {
+                let observed = health
+                    .as_ref()
+                    .ok_or_else(IvyError::internal)?
+                    .required("observedAt")?;
+                let observed = ivy_sdk::clock::parse_date(
+                    observed.as_js_string().ok_or_else(IvyError::internal)?,
+                ) as i64;
+                self.health_deadline = Some(
+                    Instant::now()
+                        + policy::health_check_delay(
+                            observed,
+                            chrono::Utc::now().timestamp_millis(),
+                        ),
+                );
                 self.policy.ready(self.elapsed());
                 self.observe("ready", None, "", health).await
             }
@@ -789,6 +802,13 @@ impl Owner {
         }
     }
     async fn run(mut self) {
+        let mut paths = vec![crate::journal::change_path(&self.host).unwrap()];
+        if let Ok(data) = service_paths(&self.host, &self.instance_id.clone().into())
+            .and_then(|paths| path(paths.required("data")?))
+        {
+            paths.push(data.join("health.json"));
+        }
+        let mut events = crate::file_events::FileEvents::new(paths);
         while !self.cancel.is_cancelled() {
             if let Err(error) = self.tick().await {
                 if error.code == "outcome_unknown" {
@@ -807,7 +827,38 @@ impl Owner {
                     )
                     .await;
             }
-            tokio::select! { _ = self.cancel.cancelled() => break, _ = tokio::time::sleep(Duration::from_millis(500)) => () }
+            let running = self
+                .selected
+                .as_ref()
+                .is_some_and(|selected| selected.target.get("desired") == Some(&"running".into()));
+            let delay = if self.policy.blocked || !self.policy.restart_allowed || !running {
+                events.fallback()
+            } else if self.policy.manifest_ready {
+                self.health_deadline
+                    .map(|at| {
+                        at.saturating_duration_since(Instant::now())
+                            .max(Duration::from_millis(1))
+                            .min(events.fallback())
+                    })
+                    .unwrap_or(Duration::from_millis(500))
+            } else {
+                self.policy
+                    .next_restart
+                    .map(|at| Duration::from_millis(at.saturating_sub(self.elapsed()).max(1)))
+                    .map(|delay| delay.min(events.fallback()))
+                    .unwrap_or(Duration::from_millis(500))
+            };
+            let completion = self
+                .child
+                .as_ref()
+                .filter(|child| !self.policy.blocked && child.completion.current().is_none())
+                .map(|child| child.completion.clone());
+            tokio::select! {
+                _ = self.cancel.cancelled() => break,
+                _ = events.changed() => (),
+                _ = async { match completion { Some(value) => { value.wait().await; }, None => std::future::pending().await } } => (),
+                _ = tokio::time::sleep(delay) => (),
+            }
         }
         let mut result = self.stop_child().await;
         if !self.policy.blocked {

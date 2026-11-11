@@ -219,7 +219,7 @@ pub fn options(
         reconcile,
     );
     options.handlers = handlers;
-    options.heartbeat = Duration::from_secs(2);
+    options.heartbeat = Duration::from_secs(5);
     let service_node_id = value.required("serviceNodeId")?.clone();
     let readiness_health = health.clone();
     options.readiness = Some(Arc::new(move |connection| {

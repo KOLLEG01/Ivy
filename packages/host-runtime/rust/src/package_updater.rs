@@ -247,11 +247,7 @@ fn platform(node: Option<&NodeRuntime>) -> IvyJson {
     IvyJson::object([
         (
             "os",
-            if cfg!(windows) {
-                "win32"
-            } else {
-                std::env::consts::OS
-            }
+            crate::native_plan::host_os()
             .into(),
         ),
         (

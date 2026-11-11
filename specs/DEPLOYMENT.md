@@ -100,6 +100,11 @@ service and health commands run their native executables directly.
 - HostExecutor is the sole host reconciler. ServiceManager consumes durable changes for
   that host's config and package catalog and forwards local hints. A periodic authoritative
   read must recover lost hints and event gaps.
+- Local queue, target, configuration and control changes wake native filesystem watchers.
+  Hints are coalesced and re-read from authoritative state; health/observation writes do
+  not feed the deployment wake hint. Idle reconciliation falls back after 30 seconds
+  (500 ms if watching is unavailable). Owned process exits wake supervision directly;
+  health-expiry deadlines and five-second heartbeats retain the 15-second freshness boundary.
 - Validate the complete new config against the fixed installation before atomically replacing
   the local last-known-good file. Invalid/unreachable config leaves the previous file active.
 - Verify Hive's content hash against the supplied configuration, then resolve account defaults
@@ -275,6 +280,10 @@ substitute a development build for an installed artifact.
   verify its exact deletion/preservation plan and stopped owners before execution.
 
 ## Local host operations
+
+On macOS, a per-user launchd agent starts HostExecutor at login. HostExecutor owns
+ServiceManager, which owns the ordinary process services. The agent uses background
+priority and two Tokio workers, without wake schedules or sleep assertions.
 
 Shared native servers can use the optional [Codex server component](../services/codex-server/README.md)
 as independent HostExecutor instances. Its Windows startup inspection and migration

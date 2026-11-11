@@ -12,7 +12,7 @@ use ivy_store::rusqlite::Connection;
 use std::{
     fs,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
     time::Duration,
@@ -336,6 +336,21 @@ async fn wait_for(work: impl Future<Output = bool>) {
     );
 }
 use std::future::Future;
+async fn status_when(path: &Path, condition: impl Fn(&J) -> bool) -> J {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let status = config::json_file(path.to_owned(), config::CONFIGURATION_BYTES)
+                .await
+                .unwrap();
+            if condition(&status) {
+                return status;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
 #[tokio::test]
 async fn configuration_updater_coordinator_real_sdk_hints_heartbeat_and_close() {
     use ivy_host_runtime::executor::{ExecutorOptions, HostExecutor};
@@ -426,17 +441,17 @@ async fn configuration_updater_coordinator_real_sdk_hints_heartbeat_and_close() 
         .await
         .unwrap();
     let status_path = path(c.required("runtimeRoot").unwrap()).join("executor.json");
-    tokio::time::sleep(Duration::from_millis(1150)).await;
     let first = config::json_file(status_path.clone(), config::CONFIGURATION_BYTES)
         .await
         .unwrap();
-    assert_eq!(first.required("state").unwrap(), &J::from("ready"));
     assert!(first.get("configurationRevision").is_none());
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    let second = config::json_file(status_path.clone(), config::CONFIGURATION_BYTES)
-        .await
-        .unwrap();
-    assert_ne!(first.get("observedAt"), second.get("observedAt"));
+    // Observe a heartbeat while the request is blocked, before its ten-second
+    // timeout, without assuming the old one-second heartbeat cadence.
+    status_when(&status_path, |status| {
+        status.get("observedAt") != first.get("observedAt")
+            && status.get("state") == Some(&J::from("ready"))
+    })
+    .await;
     state
         .block
         .store(false, std::sync::atomic::Ordering::SeqCst);

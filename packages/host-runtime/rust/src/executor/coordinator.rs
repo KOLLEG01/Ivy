@@ -540,6 +540,11 @@ impl Coordinator {
         Ok(selected)
     }
     async fn run(self) -> IvyResult<()> {
+        let host = self.base.config().await?;
+        let mut events = crate::file_events::FileEvents::new([
+            crate::journal::change_path(&host)?,
+            config::path_value(host.required("runtimeRoot")?)?.join("desired-state-hint.json"),
+        ]);
         let mut active: Vec<Active> = Vec::new();
         let mut retention = AutomaticRetention::default();
         let retention_bindings = Arc::new(RetentionBindings { node: self.runtime.node_runtime(), clock: self.clock.clone() });
@@ -550,7 +555,7 @@ impl Coordinator {
             self.status.write("reconciling").await?;
             let status=self.status.clone();let stopped=pulse_cancel.clone();
             pulse=Some(tokio::spawn(async move{
-                let mut ticks=tokio::time::interval_at(tokio::time::Instant::now()+std::time::Duration::from_secs(1),std::time::Duration::from_secs(1));
+                let mut ticks=tokio::time::interval_at(tokio::time::Instant::now()+std::time::Duration::from_secs(5),std::time::Duration::from_secs(5));
                 ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop{tokio::select!{biased;_=stopped.cancelled()=>break,_=ticks.tick()=>{let _=status.write("ready").await;}}}
             }));
@@ -603,7 +608,7 @@ impl Coordinator {
                     }
                     if let Some(restarts)=&self.bootstrap_restarts
                         && self.clock.utc_millis() as f64>=next_bootstrap_restart {
-                        next_bootstrap_restart=self.clock.utc_millis() as f64+5000.0;
+                        next_bootstrap_restart=self.clock.utc_millis() as f64+30_000.0;
                         match restarts.reconcile(self.base.config().await?).await {
                             Ok(true)=>{self.cancel.cancel();break;}
                             Ok(false)=>{},
@@ -637,7 +642,19 @@ impl Coordinator {
                     let task=tokio::spawn(async move{let _status=status;execute_with_clock(base,input,runtime,options,cancel,clock).await});
                     active.push(Active{entry,task});
                 }
-                tokio::select!{_=self.cancel.cancelled()=>break,_=tokio::time::sleep(std::time::Duration::from_millis(250))=>{}}
+                let mut delay = if active.is_empty() { events.fallback() } else { std::time::Duration::from_millis(250) };
+                let now = self.clock.utc_millis() as f64;
+                for due in [
+                    self.configuration.as_ref().map(|_| next_configuration),
+                    self.packages.as_ref().map(|_| next_package),
+                ].into_iter().flatten() {
+                    delay = delay.min(std::time::Duration::from_millis((due - now).max(1.0) as u64));
+                }
+                tokio::select! {
+                    _ = self.cancel.cancelled() => break,
+                    _ = events.changed() => { next_reconcile = 0.0; next_bootstrap_restart = 0.0; },
+                    _ = tokio::time::sleep(delay) => {},
+                }
             }
             Ok::<(),IvyError>(())
         }).catch_unwind().await.map_err(|_|IvyError::internal()).and_then(|result|result);

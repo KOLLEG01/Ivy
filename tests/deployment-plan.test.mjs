@@ -33,7 +33,8 @@ test('deployment pipelines exclude tests and target only the requested component
 for (const component of ['host-executor', 'service-manager', 'hive', 'data-collector', 'dashboards', 'task-board', 'agent-manager', 'chat-bridge', 'secretary', 'phone-bridge']) test(`native source support and selected host commands (${component})`, () => {
   const source = JSON.parse(readFileSync(`services/${component}/deploy.json`, 'utf8'));
   const architectures = component === 'phone-bridge' ? ['x64'] : ['x64', 'arm64'];
-  for (const os of ['win32', 'linux']) for (const arch of architectures) {
+  const systems = ['host-executor', 'service-manager', 'agent-manager'].includes(component) ? ['win32', 'linux', 'darwin'] : ['win32', 'linux'];
+  for (const os of systems) for (const arch of architectures) {
     const selected = materializeNativePlan(source, { os, arch });
     const extension = os === 'win32' ? '.exe' : '';
     assert.equal(selected.entrypoint.executable, `dist/native/${os}-${arch}/ivy-${component}${extension}`);
@@ -44,13 +45,13 @@ for (const component of ['host-executor', 'service-manager', 'hive', 'data-colle
     assert.deepEqual(materializeNativePlan(selected, { os, arch }), selected);
     assert.throws(() => materializeNativePlan(selected, { os: os === 'win32' ? 'linux' : 'win32', arch }));
   }
-  assert.deepEqual(source.requirements.os, ['win32', 'linux']);
+  assert.deepEqual(source.requirements.os, systems);
   assert.deepEqual(source.requirements.arch, architectures);
   if (component === 'phone-bridge') assert.throws(() => materializeNativePlan(source, { os: 'linux', arch: 'arm64' }));
   assert.equal(source.entrypoint.executable, `dist/native/ivy-${component}`);
   const javascript = { ...source, entrypoint: { executable: 'node', args: ['worker.mjs'] } };
   assert.deepEqual(materializeNativePlan(javascript), javascript);
-  assert.throws(() => materializeNativePlan(source, { os: 'darwin', arch: 'x64' }));
+  assert.throws(() => materializeNativePlan(source, { os: 'freebsd', arch: 'x64' }));
   assert.throws(() => materializeNativePlan({ ...source, readiness: { command: { executable: 'node' } } }));
 });
 

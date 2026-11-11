@@ -95,6 +95,7 @@ impl HealthFile {
         Self { config, started_at: now(), boot_id: uuid::Uuid::new_v4().to_string(), launch_id, writes: Arc::new(Mutex::new(())) }
     }
     pub fn boot_id(&self) -> &str { &self.boot_id }
+    pub fn control_path(&self) -> std::path::PathBuf { self.config.data_root().join("control.json") }
     pub fn launch_id(&self) -> Option<&JsString> { self.launch_id.as_ref() }
     pub async fn write(&self, ready: bool, details: JsString, generation: Option<u64>) -> IvyResult<()> {
         let details = truncate_details(details);

@@ -282,7 +282,7 @@ fn service_options(
     options.handlers = handlers.management;
     options.json_handlers = handlers.native;
     options.readiness = Some(readiness);
-    options.heartbeat = Duration::from_secs(2);
+    options.heartbeat = Duration::from_secs(5);
     options.on_state = Some(service_state_observer(health, closing));
     Ok(options)
 }

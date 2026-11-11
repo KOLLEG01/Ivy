@@ -359,7 +359,7 @@ async fn backup(
         let completed_at=now(&b)?;
         let manifest=J::object([
             ("schemaVersion",J::Number(1.0)),("backupId",backup_id.clone().into()),("hostId",config.required("hostId")?.clone()),("createdAt",created_at.clone()),("completedAt",completed_at.clone()),
-            ("consistency","offline-owned-state".into()),("platform",J::object([("os",if cfg!(windows){"win32".into()}else{"linux".into()}),("arch",match std::env::consts::ARCH{"x86_64"=>"x64","aarch64"=>"arm64",v=>v}.into()),("node",node_platform.into())])),
+            ("consistency","offline-owned-state".into()),("platform",J::object([("os",crate::native_plan::host_os().into()),("arch",match std::env::consts::ARCH{"x86_64"=>"x64","aarch64"=>"arm64",v=>v}.into()),("node",node_platform.into())])),
             ("configurationHash",configuration_hash.into()),("files",J::Array(files.iter().map(BackupFile::json).collect())),("externalFiles",J::Array(external_files)),("hiveSnapshots",J::Array(hive_snapshots)),("ephemeralNativePaths",J::Array(ephemeral)),("sharedNativeHomes",J::Array(shared_homes)),("storageAreas",J::Array(areas.iter().map(StorageArea::json).collect())),
             ("excluded",J::Array(["OS owner lock files","Source checkouts, staging payloads and local releases","OS bootstrap definitions","Runtime executables/native bundles outside runtime data (hashed prerequisites)","Docker daemon images (retained immutable candidate prerequisites)","Rotating Hive snapshot directories","Shared Codex user homes and externally managed App Servers (references only; separate user-state backup required)"].into_iter().map(J::from).collect())),
         ]);

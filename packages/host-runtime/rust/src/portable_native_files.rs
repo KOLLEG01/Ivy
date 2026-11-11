@@ -53,6 +53,8 @@ pub(crate) fn native_platform() -> crate::IvyResult<&'static str> {
         ("windows", "aarch64") => Ok("win32-arm64"),
         ("linux", "x86_64") => Ok("linux-x64"),
         ("linux", "aarch64") => Ok("linux-arm64"),
+        ("macos", "x86_64") => Ok("darwin-x64"),
+        ("macos", "aarch64") => Ok("darwin-arm64"),
         _ => Err(crate::IvyError::new(
             "unsupported_platform",
             "Native package does not support this host target.",

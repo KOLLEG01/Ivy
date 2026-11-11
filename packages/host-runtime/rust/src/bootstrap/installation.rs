@@ -237,6 +237,16 @@ impl BootstrapInstallation {
                 .finish_windows(plan, config, path, replace_legacy)
                 .await;
         }
+        #[cfg(target_os = "macos")]
+        {
+            self.sync(config, plan, false).await?;
+            crate::bootstrap_os::launchd::install(plan).await?;
+            return Ok(J::object([
+                ("schemaVersion", J::Number(1.0)), ("ok", true.into()),
+                ("code", "bootstrap_installed".into()), ("data", J::object([] as [(&str,J);0])),
+            ]));
+        }
+        #[cfg(not(target_os = "macos"))]
         self.finish_linux(plan, config, replace_legacy).await
     }
 

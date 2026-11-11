@@ -310,7 +310,7 @@ const defs = {
       manifestPath: path,
       createdAt: str(64),
       platform: obj({
-        os: { enum: ["win32", "linux"] },
+        os: { enum: ["win32", "linux", "darwin"] },
         arch: { enum: ["x64", "arm64"] },
         node: str(128),
       }),
@@ -408,7 +408,7 @@ const defs = {
       completedAt: str(64),
       consistency: { const: "offline-owned-state" },
       platform: obj({
-        os: { enum: ["win32", "linux"] },
+        os: { enum: ["win32", "linux", "darwin"] },
         arch: str(64),
         node: str(128),
       }),
@@ -654,7 +654,7 @@ const defs = {
     {
       schemaVersion: { const: 1 },
       hostId: id,
-      os: { enum: ["win32", "linux"] },
+      os: { enum: ["win32", "linux", "darwin"] },
       installationId: id,
       candidateId: hash,
       artifactRoot: path,

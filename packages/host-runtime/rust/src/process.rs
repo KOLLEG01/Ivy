@@ -220,6 +220,7 @@ pub fn runtime_environment(extra: &BTreeMap<OsString, OsString>) -> BTreeMap<OsS
         "lang",
         "lc_all",
         "timezone",
+        "tokio_worker_threads",
     ];
     let overrides: Vec<_> = extra
         .keys()
