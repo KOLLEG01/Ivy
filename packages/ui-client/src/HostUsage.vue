@@ -75,7 +75,7 @@ const status = computed(() => metrics.error.value ? 'host load unavailable' : st
 <template>
   <Popover v-model:open="open">
     <PopoverTrigger as-child><slot><UsagePill :label="label" :seed="node" :groups="groups" :level="level" :status="status" :unavailable="!ready" /></slot></PopoverTrigger>
-    <PopoverContent align="start" class="max-h-[min(36rem,80dvh)] w-80 space-y-4 overflow-y-auto p-4">
+    <PopoverContent align="start" class="max-h-[min(36rem,80dvh,var(--reka-popover-content-available-height))] w-80 space-y-4 overflow-y-auto p-4">
       <div class="flex items-center gap-2">
         <div class="min-w-0 flex-1">
           <p class="truncate text-sm font-medium">{{ label }}</p>

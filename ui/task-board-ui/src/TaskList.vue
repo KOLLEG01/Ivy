@@ -30,7 +30,6 @@ import {
   client,
   readDocument,
   rootWhere,
-  taskContractVersions,
   taskStatuses,
   tr,
 } from "./runtime";
@@ -153,7 +152,6 @@ const counts = useRemote(async (signal) => {
       "objects.count",
       {
         contractKey: "task-board/task",
-        contractVersions: taskContractVersions,
         where: taskFilter(props.workspace.rootObjectId, props.query),
         groupBy: ["data:/workflowState", "data:/fields/category"],
         limit: 200,
@@ -406,7 +404,6 @@ const reorder = async (id: string, placement: Placement) => {
     if ("top" in placement) {
       const first = await client.request("objects.query", {
         contractKey: "task-board/task",
-        contractVersions: taskContractVersions,
         where: and(rootWhere(props.workspace.rootObjectId), {
           op: "in",
           field: "data:/workflowState",

@@ -1,4 +1,4 @@
-import { and, client, rootWhere, taskContractVersions } from './runtime';
+import { and, client, rootWhere } from './runtime';
 import type { Operation, TaskBoard } from './runtime';
 import type { useBoardActions } from './board-actions';
 import { nativeRead } from '../../../packages/ui-client/src/native';
@@ -65,7 +65,7 @@ export async function archiveBoardSelection(workspace: Workspace, query: URLSear
   do {
     signal.throwIfAborted();
     const page: Operation.ObjectsQueryResult = await client.request('objects.query', {
-      contractKey: 'task-board/task', contractVersions: taskContractVersions,
+      contractKey: 'task-board/task',
       where: and(taskFilter(selected.rootObjectId, filter), { op: 'in', field: 'data:/workflowState', value: ['done', 'cancelled'] }),
       orderBy: [{ field: 'object.id', direction: 'asc' }], limit: 200, ...(cursor ? { cursor } : {}),
     }, { signal });
