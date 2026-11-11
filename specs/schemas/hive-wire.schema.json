@@ -1155,6 +1155,10 @@
           "type": "boolean",
           "description": "Include the complete JSON document at each selected revision. The page remains bounded by its total response size."
         },
+        "observe": {
+          "type": "boolean",
+          "description": "Include a Hive runtime and durable event read fence in each included document's current object metadata. Requires includeContent."
+        },
         "limit": {
           "type": "integer",
           "minimum": 1,

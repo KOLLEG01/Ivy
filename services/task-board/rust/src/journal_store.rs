@@ -12,13 +12,13 @@ use crate::{
     read_evidence::ReadEvidenceStore,
     work_budget::{Reservation, WorkBudget},
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
-    hash::{digest, hash_json},
+    hash::hash_json,
     json::{canonical_size, parse},
     limits::MANAGEMENT_FRAME_BYTES,
 };
+use ivy_host_runtime::base64_content::Base64Content;
 use ivy_sdk::{
     operation_ids::scoped_operation_id,
     rpc::{RequestOptions, RpcClient},
@@ -399,13 +399,11 @@ fn blob_error(failure: BlobError) -> IvyError {
     }
 }
 
-fn attachment_content_matches(value: &Json, bytes: &[u8]) -> IvyResult<bool> {
+fn attachment_content_matches(value: &Json, content: &Base64Content<'_>) -> IvyResult<bool> {
     let value = value.as_js_string().ok_or_else(IvyError::internal)?;
-    Ok(value
-        .to_utf8()
-        .ok()
-        .and_then(|text| STANDARD.decode(text).ok())
-        .is_some_and(|decoded| decoded == bytes))
+    // Canonical base64 has one representation. Exact equality also checks every byte,
+    // after the existing owner/revision/hash guards, without decoding another body.
+    Ok(value == content.encoded())
 }
 
 impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsString>
@@ -559,10 +557,10 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         task_id: &JsString,
         operation_id: &JsString,
         attachment_id: &JsString,
-        bytes: &[u8],
+        content: &Base64Content<'_>,
     ) -> IvyResult<Json> {
         require(
-            bytes.len() <= 8 * 1024 * 1024,
+            content.byte_length() <= 8 * 1024 * 1024,
             "limit_exceeded",
             "Task attachments are limited to 8 MiB.",
         )?;
@@ -598,7 +596,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                         "content",
                         Json::object([
                             ("encoding", "base64".into()),
-                            ("value", STANDARD.encode(bytes).into()),
+                            ("value", Json::String(content.encoded().clone())),
                         ]),
                     ),
                 ]),
@@ -671,14 +669,14 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                         && existing.required("revision")?.get("contractVersion")
                             == Some(&Json::from(version))
                         && existing.required("revision")?.get("byteLength")
-                            == Some(&Json::Number(bytes.len() as f64))
+                            == Some(&Json::Number(content.byte_length() as f64))
                         && existing.required("revision")?.get("contentHash")
-                            == Some(&Json::from(digest(bytes)))
+                            == Some(&Json::from(content.content_hash()))
                         && existing.required("content")?.get("encoding")
                             == Some(&Json::from("base64"))
                         && attachment_content_matches(
                             existing.required("content")?.required("value")?,
-                            bytes,
+                            content,
                         )?,
                     "task_board_evidence_mismatch",
                     "The retained attachment must match its exact original bytes and owner.",
@@ -771,7 +769,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         if let Some(select) = provided("select") {
             params.insert("select", select.clone());
         }
-        for field in ["includeArchived", "includeContent"] {
+        for field in ["includeArchived", "includeContent", "observe"] {
             if let Some(value) = provided(field) {
                 params.insert(field, value.clone());
             }

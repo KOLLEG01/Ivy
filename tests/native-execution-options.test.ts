@@ -54,7 +54,8 @@ function transport() {
     assert.equal(method, 'tools.call'); calls.push(params);
     const name = params['qualifiedName'] as string, args = params['arguments'] as Record<string, Wire.Json>;
     const namespace = name.split('.')[0];
-    if (namespace === behavior.outage) throw new IvyError('service_unavailable', 'Only this account is down.');
+    if (namespace === behavior.outage || namespace === 'agent' && (args['backend'] as Agent.BackendIdentity | undefined)?.backendId === behavior.outage)
+      throw new IvyError('service_unavailable', 'Only this account is down.');
     if (name === 'agent.backends') return { backends: statuses };
     if (name === 'agent.status') {
       const selected = statuses.find(value => nativeBackendKey(value.backend) === nativeBackendKey(args['backend'] as Agent.BackendIdentity));
@@ -190,7 +191,7 @@ test('one account outage does not suppress sibling accounts or the host backend 
   await assert.rejects(nativeRead(f.client, serviceNodeId, a.backendId + '.model/list', {}), { code: 'service_unavailable' });
   const sent = f.calls.length;
   await assert.rejects(backendRead(f.client, { serviceNodeId, backend: a }, 'agent.status', {}), { code: 'service_unavailable' });
-  assert.equal(f.calls.length, sent, 'The same account shares its short outage observation.');
+  assert.equal(f.calls.length, sent + 1, 'The same account shares the outage window, then makes its one fresh reconnect attempt.');
   await nativeRead(f.client, serviceNodeId, b.backendId + '.model/list', {});
   await backendRead(f.client, { serviceNodeId, backend: b }, 'agent.status', {});
   assert.equal((await nativeBackendScopes(f.client, { serviceNodeId, hostId })).length, 3);

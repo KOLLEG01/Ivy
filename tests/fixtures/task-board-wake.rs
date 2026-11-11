@@ -186,6 +186,28 @@ async fn wake_precedence_keeps_comments_retries_appointments_and_manual_states_i
     let reads = Reads::default();
     let at: JsString = "2026-10-23T00:00:30.000Z".into();
     let mut own = task();
+    own.insert("dependencies", Json::Array(vec!["peer".into()]));
+    assert_eq!(
+        wake_condition(&own, &[]).get("state"),
+        Some(&"blocked_dependency".into())
+    );
+    own.insert("dependencies", Json::Array(vec![]));
+    let queued = wake_condition(&own, &[]);
+    assert_eq!(
+        queued.get("state"),
+        Some(&"queued".into()),
+        "Removing the last dependency queues continuation, not a failed execution"
+    );
+    assert_eq!(
+        ivy_task_board::engine_read::condition_policy::task_condition_snapshot(
+            &own,
+            Some(&queued),
+            None
+        )
+        .unwrap()
+        .get("state"),
+        Some(&"queued".into())
+    );
     assert!(
         !should_wake(&reads, &own, &"2026-10-23T00:00:29.999Z".into())
             .await

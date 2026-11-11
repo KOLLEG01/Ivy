@@ -129,6 +129,7 @@ impl<R, C, Parse, SqlFailure, M> DocumentReads<'_, R, C, Parse, SqlFailure, M> {
                 ),
                 ("includeArchived", true.into()),
                 ("includeContent", true.into()),
+                ("observe", true.into()),
                 ("limit", Json::Number(rows.len() as f64)),
             ]);
             let mut cursors = HashSet::new();
@@ -194,9 +195,7 @@ impl<R, C, Parse, SqlFailure, M> DocumentReads<'_, R, C, Parse, SqlFailure, M> {
             let card = match card {
                 Some(card) => card,
                 None => {
-                    let header = self
-                        .read_document("task-board/task", &pins[index], true, true, true)
-                        .await?;
+                    let header = self.observed_task_header(&pins[index]).await?;
                     if header.required("revision")?.get("contractVersion")
                         != rows[index].get("contractVersion")
                     {

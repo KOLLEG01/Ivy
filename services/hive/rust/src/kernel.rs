@@ -510,9 +510,15 @@ fn domain(
                 ("byteLength", IvyJson::Number(decoded.byte_length as f64)),
             ]))
         }
-        "objects.stat" => objects::stat(call.store, location(params)?),
+        "objects.stat" => {
+            let mut object = objects::stat(call.store, location(params)?)?;
+            if params.get("observe").and_then(IvyJson::as_bool) == Some(true) {
+                object.insert("observation", objects::observation(call.store)?);
+            }
+            Ok(object)
+        }
         "objects.read" => {
-            let read = objects::read(
+            let mut read = objects::read(
                 call.store,
                 location(params)?,
                 params
@@ -520,6 +526,11 @@ fn domain(
                     .and_then(IvyJson::as_f64)
                     .map(|v| v as u64),
             )?;
+            if params.get("observe").and_then(IvyJson::as_bool) == Some(true) {
+                read.get_mut("object")
+                    .ok_or_else(IvyError::internal)?
+                    .insert("observation", objects::observation(call.store)?);
+            }
             if context
                 .get("sessionDigest")
                 .and_then(IvyJson::as_js_string)

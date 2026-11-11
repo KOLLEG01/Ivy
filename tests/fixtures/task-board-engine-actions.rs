@@ -411,3 +411,84 @@ async fn admitted_handoff_rejects_replaced_claim_or_changed_work_before_any_task
         assert!(f(&world.saved().value, "publication").is_null());
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_publication_resolves_its_original_after_a_lost_reply_without_duplicating_bytes() {
+    let world = World::new(task());
+    let ops = Operations {
+        store: &world,
+        now: || AT.to_string(),
+    };
+    let mut req = request("uploadAttachment");
+    for (key, value) in [
+        ("attachmentId", "file"),
+        ("filename", "file.bin"),
+        ("mediaType", "application/octet-stream"),
+        ("bytesBase64", "AQID"),
+    ] {
+        req.insert(key, value.into());
+    }
+    let accepted = ops.begin(&req, &actor("user")).await.unwrap();
+    let id = accepted.pin.object_id.clone();
+    world.db.execute_batch("CREATE TEMP TRIGGER lose_upload_reply BEFORE INSERT ON documents WHEN NEW.key='task-board/history' BEGIN SELECT RAISE(ABORT,'fixture history unavailable'); END;").unwrap();
+    assert!(publish_operation(&world, &ops, &accepted).await.is_err());
+    let pending = ops
+        .failure(
+            &id,
+            &IvyError::new("reply_lost", "Reconcile original publication")
+                .with_outcome(Outcome::Unknown),
+            true,
+        )
+        .await
+        .unwrap();
+    assert!(f(&pending.value, "request").get("bytesBase64").is_none());
+    assert!(
+        f(&pending.value, "request")
+            .get("originalRequest")
+            .is_some()
+    );
+    assert_eq!(
+        world
+            .db
+            .query_row("SELECT count(*) FROM blobs", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    world
+        .db
+        .execute_batch("DROP TRIGGER lose_upload_reply")
+        .unwrap();
+    let replay = ops.begin(&req, &actor("user")).await.unwrap();
+    let outcome = publish_operation(&world, &ops, &replay).await.unwrap();
+    ops.finish(&id, &outcome).await.unwrap();
+    let count = world
+        .db
+        .query_row("SELECT count(*) FROM blobs", [], |r| r.get::<_, i64>(0))
+        .unwrap();
+    assert_eq!(count, 1);
+    let bytes = world
+        .db
+        .query_row("SELECT bytes FROM blobs", [], |r| r.get::<_, Vec<u8>>(0))
+        .unwrap();
+    assert_eq!(bytes, vec![1, 2, 3]);
+    assert_eq!(
+        f(&world.saved().value, "attachments")
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let completed = world
+        .local()
+        .read("task-board/operation", &Json::String(id.clone()), true)
+        .unwrap();
+    assert!(
+        f(&completed.value, "request")
+            .get("originalRequest")
+            .is_none()
+    );
+    assert!(f(&completed.value, "request").get("content").is_some());
+    let revision = world.saved().pin.revision;
+    support::same(&ops.finish(&id, &outcome).await.unwrap(), &outcome);
+    assert_eq!(world.saved().pin.revision, revision);
+}

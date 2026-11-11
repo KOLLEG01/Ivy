@@ -564,6 +564,21 @@ pub fn canonical(value: &IvyJson, maximum_bytes: usize) -> IvyResult<String> {
 pub fn canonical_size(value: &IvyJson, maximum_bytes: usize) -> IvyResult<usize> {
     encode_into(value, maximum_bytes, true, true, Discard)
 }
+/// Compare the complete canonical encoding with existing UTF-8 text without
+/// retaining an output string. Validation and error order match `canonical`,
+/// including after a text mismatch.
+pub fn canonical_matches(value: &IvyJson, text: &str, maximum_bytes: usize) -> IvyResult<bool> {
+    struct Compare<'a>(Option<&'a str>);
+    impl std::fmt::Write for Compare<'_> {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            self.0 = self.0.and_then(|remaining| remaining.strip_prefix(text));
+            Ok(())
+        }
+    }
+    let mut comparison = Compare(Some(text));
+    canonical_into(value, maximum_bytes, &mut comparison)?;
+    Ok(comparison.0 == Some(""))
+}
 /// Compare canonical JSON exactly without retaining either encoded string.
 /// Validate the complete left value before the right, including when unequal.
 pub fn canonical_equal(left: &IvyJson, right: &IvyJson, maximum_bytes: usize) -> IvyResult<bool> {

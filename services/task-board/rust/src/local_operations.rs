@@ -9,6 +9,7 @@ use ivy_contracts::{
     hash::{hash_json as hash, hash_object},
     limits::MANAGEMENT_FRAME_BYTES,
 };
+use std::borrow::Cow;
 
 const OPERATION: &str = "task-board/operation";
 type Result<T, E> = std::result::Result<T, WriteFailure<E>>;
@@ -118,7 +119,7 @@ pub(crate) async fn begin_graph<E, S: LocalMutationStore<E>, C: Fn() -> String>(
 ) -> Result<Document, E> {
     begin_graph_with(
         operations,
-        request,
+        Cow::Borrowed(request),
         actor,
         || std::future::ready(Ok::<_, WriteFailure<E>>(Value::Null)),
         &Value::Null,
@@ -128,7 +129,7 @@ pub(crate) async fn begin_graph<E, S: LocalMutationStore<E>, C: Fn() -> String>(
 
 pub(crate) async fn begin_graph_with<E, S: LocalMutationStore<E>, C: Fn() -> String, F>(
     operations: &Operations<S, C>,
-    request: &Value,
+    request: Cow<'_, Value>,
     actor: &Value,
     handoff: impl FnOnce() -> F,
     publication_task: &Value,
@@ -137,9 +138,9 @@ where
     F: std::future::Future<Output = Result<Value, E>>,
 {
     let caller = f(actor, "principalId");
-    let id = f(request, "operationId");
+    let id = f(&request, "operationId").clone();
     let existing = find_graph(operations, &caller, &id).await?;
-    let request_hash = text(hash(request)?);
+    let request_hash = text(hash(&request)?);
     if let Some(existing) = existing {
         require(
             f(&existing.value, "requestHash").eq(&request_hash),
@@ -154,7 +155,7 @@ where
         ("schemaVersion", Value::Number(1.0)),
         ("operationId", id.clone()),
         ("callerPrincipalId", caller.clone()),
-        ("request", request.clone()),
+        ("request", request.into_owned()),
         ("requestHash", request_hash.clone()),
         ("actor", actor.clone()),
         ("createdAt", now.clone()),
@@ -196,6 +197,9 @@ where
             &destination,
         )
         .await;
+    // The durable write has settled. Its input is no longer needed while the
+    // original receipt/read is materialized, including conflict recovery.
+    drop(value);
     // The returned read future is outside the source write's recovery catch.
     match result {
         Ok(pin) => {
@@ -234,7 +238,8 @@ pub(crate) async fn amend_graph<E, S: LocalMutationStore<E>, C: Fn() -> String>(
             return Ok(current);
         };
         changes.push(("updatedAt", text((operations.now)())));
-        let updated = fields(current.value, changes);
+        let mut updated = fields(current.value, changes);
+        super::upload_request::retain_original(&mut updated, id);
         let revision = current.pin.revision;
         let mut step = JsString::from("amend:");
         step.0.extend(format!("{revision:.0}").encode_utf16());
@@ -592,11 +597,38 @@ pub(crate) async fn finish_graph<E, S: LocalMutationStore<E>, C: Fn() -> String>
             "task_board_publication_pending",
             "All prepared writes must have durable receipts before completing the action.",
         )?;
-        Ok(Some(vec![
+        let mut changes = vec![
             ("phase", text("succeeded")),
             ("outcome", outcome.clone()),
             ("error", Value::Null),
-        ]))
+        ];
+        if eq(f(operation, "request"), "action", "uploadAttachment") {
+            let request = f(operation, "request");
+            let attachment = f(outcome, "attachment");
+            require(
+                ["attachmentId", "filename", "mediaType"].iter().all(|key| {
+                    v::present(f(attachment, key)) && f(attachment, key) == f(request, key)
+                }) && v::present(f(attachment, "object"))
+                    && v::present(f(attachment, "contentHash"))
+                    && v::present(f(attachment, "byteLength")),
+                "task_board_evidence_mismatch",
+                "The completed upload must retain its published attachment identity.",
+            )?;
+            let content = obj([
+                ("object", f(attachment, "object").clone()),
+                ("byteLength", f(attachment, "byteLength").clone()),
+                ("contentHash", f(attachment, "contentHash").clone()),
+            ]);
+            // Completion follows all durable publication receipts. Other stages
+            // retain a reference to the immutable original recovery body.
+            // Historical revisions remain immutable and follow normal retention.
+            let mut request = take_field(operation, "request");
+            request.remove("bytesBase64");
+            request.remove("originalRequest");
+            request.insert("content", content);
+            changes.push(("request", request));
+        }
+        Ok(Some(changes))
     })
     .await?;
     let value = &done.value;

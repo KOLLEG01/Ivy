@@ -10,6 +10,10 @@ pub(crate) mod decoded;
 pub(crate) mod local;
 pub(crate) use local::apply_graph;
 
+#[path = "upload_request.rs"]
+mod upload_request;
+pub use upload_request::original_upload_request;
+
 #[derive(Debug, Clone)]
 pub struct Document {
     pub pin: ObjectPin,
@@ -326,6 +330,18 @@ impl<S: Store, C: Fn() -> String> Operations<S, C> {
             .await
             .map_err(decoded::failure)
     }
+    /// Transfer an owned public request into its immutable acceptance record.
+    pub async fn begin_owned(&self, request: Json, actor: &Json) -> IvyResult<Document> {
+        local::begin_graph_with(
+            &self.decoded(),
+            std::borrow::Cow::Owned(request),
+            actor,
+            || std::future::ready(Ok(Json::Null)),
+            &Json::Null,
+        )
+        .await
+        .map_err(decoded::failure)
+    }
     /// Bind completion identity only on first admission. Replays keep the
     /// original request and binding without repeating validation or task reads.
     pub async fn begin_with_handoff<F: std::future::Future<Output = IvyResult<Json>>>(
@@ -336,7 +352,7 @@ impl<S: Store, C: Fn() -> String> Operations<S, C> {
     ) -> IvyResult<Document> {
         local::begin_graph_with(
             &self.decoded(),
-            request,
+            std::borrow::Cow::Borrowed(request),
             actor,
             || async { handoff().await.map_err(Into::into) },
             &Value::Null,

@@ -267,7 +267,10 @@ impl<
             .client
             .request(
                 "objects.stat",
-                Json::object([("objectId", Json::String(id.clone()))]),
+                Json::object([
+                    ("objectId", Json::String(id.clone())),
+                    ("observe", true.into()),
+                ]),
                 RequestOptions::default(),
             )
             .await

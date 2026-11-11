@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import ArchiveOutputsHint from "./ArchiveOutputsHint.vue";
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { crossAgentComment, openQuestions } from '../../../packages/ui-client/src/task-board';
 import {
   Alert,
@@ -26,13 +26,12 @@ import {
   RemoteState,
   ReplyContext,
   StatusBadge,
-  ScrollLoader,
-  preserveScrollAnchor,
   Tabs,
   TabsContent,
   TabsList,
   TabsTrigger,
   ToolbarContent,
+  VirtualList,
   markdownImageSources,
   attachmentMarkdown,
   useRemote,
@@ -75,9 +74,10 @@ import {
   stateIcons,
   stateLabel,
 } from "./board";
-import type { TaskBoard } from "./runtime";
+import type { Operation, TaskBoard } from "./runtime";
 import { useAction } from "./action";
-import type { DraftRequest } from "./action";
+import { useArchiveProjection, useContentProjection, useStatusProjection } from './status-projection';
+import type { DraftRequest, EditSnapshot } from "./action";
 import ActionState from "./ActionState.vue";
 import TaskEditor from "./TaskEditor.vue";
 import { useExecutionDefaults } from "./execution-defaults";
@@ -101,12 +101,19 @@ import {
   newOperationId,
 } from "../../../packages/sdk/src/client.js";
 import { hostProject } from "../../../packages/sdk/src/project-inventory.js";
-import { readTask } from './task-read';
+import { forgetTask, readTask } from './task-read';
+import { useCommentPages } from './comment-pages';
+import type { BoardProjection, TaskActions } from './board-actions';
 
 const props = defineProps<{
   taskId: string;
   workspace: TaskBoard.WorkspaceInfo;
   available: boolean;
+  taskActions?: TaskActions | null;
+  actionIssue?: string;
+  boardBlocked?: boolean;
+  boardArchive?: Operation.ObjectMetadata | null;
+  boardProjection?: BoardProjection | null;
   query: URLSearchParams;
 }>();
 const emit = defineEmits<{ changed: []; deleted: []; close: []; host: [host: string | null]; agentNode: [node: string | undefined] }>();
@@ -125,68 +132,71 @@ const { preferences: commentPreferences } = useCommentPreferences(() => props.wo
 const showCrossAgent = useCommentVisibility();
 const detailRoute = (id: string, values: Record<string, string> = {}) => taskRoute(props.workspace.serviceNodeId, id,
   { ...Object.fromEntries(['q', 'status', 'control', 'host', 'category', 'project'].flatMap(key => props.query.has(key) ? [[key, props.query.get(key)!]] : [])), ...values });
-const olderComments = ref<TaskBoard.Comment[]>([]);
-const olderLoading = ref(false), olderError = ref<string | null>(null);
 const taskRemote = useRemote((signal) => readTask(props.workspace.serviceNodeId, props.taskId, signal), 15000, ["objects/task-board/task"]);
+const action = props.taskActions?.task ?? useAction(() => props.workspace, "task:" + props.taskId);
+const archiveProjection = useArchiveProjection(() => props.workspace, props.taskId, action, () => taskRemote.value.value);
+// This is the already validated successful board RPC, not its display intent.
+// Accept it with the same metadata fence as this detail's own archive receipt.
+watch([() => props.boardArchive, () => taskRemote.value.value], ([metadata]) => {
+  if (metadata) archiveProjection.observeReceipt(metadata);
+}, { immediate: true, flush: 'sync' });
+watch([() => props.boardProjection?.card, () => taskRemote.value.value], ([card]) => {
+  if (card && card.observation?.runtimeEpoch === taskRemote.value.value?.observation?.runtimeEpoch) archiveProjection.observe(card);
+}, { immediate: true, flush: 'sync' });
+const localChangePending = computed(() => action.busy.value || !!action.saved.value && !['failed', 'succeeded'].includes(action.saved.value.phase));
+const displayArchived = computed(() => {
+  const peer = props.boardProjection, view = taskRemote.value.value;
+  return !localChangePending.value && peer?.archivePending && !peer.fromDetail && view?.object.objectId === peer.card.object.objectId &&
+    !!peer.archiveEpoch && peer.archiveEpoch === archiveProjection.observation.value?.runtimeEpoch ? peer.archived ?? false : archiveProjection.state.value;
+});
+const followingLatest = ref(true);
+const conversation = useCommentPages(taskRemote.value, (before, signal) => nativeRead(client,
+  props.workspace.serviceNodeId, 'task-board.read', { task: props.taskId, comments: { before, limit: 50 } }, signal) as Promise<TaskBoard.TaskView>, () => followingLatest.value);
 const task = { ...taskRemote, value: computed(() => {
   const view = taskRemote.value.value;
-  if (!view) return null;
-  const comments = [...new Map([...olderComments.value, ...view.task.comments].map(comment => [comment.commentId, comment])).values()]
-    .sort((a, b) => a.sequence - b.sequence);
-  return { value: { ...view.task, comments }, pin: view.object, archived: view.archived ?? false };
+  return view ? { value: { ...view.task, comments: conversation.latestComments.value }, pin: view.object, archived: archiveProjection.actual.value } : null;
 }) };
-watch(taskRemote.value, (_view, previous) => {
-  if (previous) olderComments.value = [...new Map([...olderComments.value, ...previous.task.comments]
-    .map(comment => [comment.commentId, comment])).values()];
-});
-const nextOlder = computed(() => {
-  let sequence = taskRemote.value.value?.commentPage?.total ?? 0;
-  for (const comment of [...task.value.value?.value.comments ?? []].reverse()) {
-    if (comment.sequence !== sequence) break;
-    sequence--;
-  }
-  return sequence > 0 ? sequence + 1 : null;
-});
-const loadOlder = async () => {
-  if (olderLoading.value || !nextOlder.value) return;
-  olderLoading.value = true; olderError.value = null;
-  const anchor = [...document.querySelectorAll<HTMLElement>('[id^="comment-"]')]
-    .find(element => element.getBoundingClientRect().bottom > 100);
-  const restoreScroll = preserveScrollAnchor(anchor);
-  try {
-    const view = await nativeRead(client, props.workspace.serviceNodeId, 'task-board.read',
-      { task: props.taskId, comments: { before: nextOlder.value, limit: 50 } }) as TaskBoard.TaskView;
-    olderComments.value = [...olderComments.value, ...view.task.comments];
-    await nextTick();
-    restoreScroll();
-  } catch (cause) { olderError.value = cause instanceof Error ? cause.message : String(cause); }
-  finally { olderLoading.value = false; }
+const commentList = ref<Array<{ scrollToKey: (key: string, align?: 'start' | 'center' | 'end') => void }>>([]);
+const expandedComments = ref<Record<string, boolean>>({});
+const scrollToComment = async (id: string | undefined, align: 'start' | 'center' | 'end' = 'start') => {
+  await nextTick();
+  if (id) commentList.value[0]?.scrollToKey(id, align);
 };
-const displayComments = computed(() => [...(task.value.value?.value.comments ?? []), ...optimistic.messages.value]
+const changeCommentPage = async (direction: 'older' | 'newer') => {
+  if (!await conversation[direction]()) return;
+  await nextTick();
+  await scrollToComment(displayComments.value[0]?.commentId);
+};
+const displayComments = computed(() => [...conversation.comments.value, ...optimistic.messages.value]
   .filter(comment => showCrossAgent.value || !crossAgentComment(comment, props.taskId)).sort((a, b) =>
   commentPreferences.value.order === "newest-first" ? b.sequence - a.sequence : a.sequence - b.sequence,
 ));
 const pendingQuestions = computed(() => taskView.value.value?.openQuestions ??
   openQuestions({ comments: task.value.value?.value.comments ?? [] }).filter(question => question.recipient?.kind !== 'task'));
 const replyTarget = ref<string | null>(null), commentComposer = ref<HTMLElement[]>([]);
-const replyingTo = computed(() => [...(task.value.value?.value.comments ?? []), ...pendingQuestions.value].find(comment => comment.commentId === replyTarget.value));
+const replyingTo = shallowRef<TaskBoard.Comment | undefined>();
+watch(replyTarget, id => {
+  replyingTo.value = id ? [...conversation.comments.value, ...pendingQuestions.value].find(comment => comment.commentId === id) : undefined;
+}, { flush: 'sync' });
 const answerQuestion = async (id: string) => {
   tab.value = 'chat'; replyTarget.value = id; await nextTick();
   commentComposer.value[0]?.scrollIntoView({ block: 'nearest' });
   commentComposer.value[0]?.querySelector<HTMLElement>('[contenteditable="true"]')?.focus({ preventScroll: true });
 };
 const jumpToReply = async () => {
-  while (replyTarget.value && !commentElement(replyTarget.value) && nextOlder.value && !olderLoading.value) {
-    const before = nextOlder.value;
-    await loadOlder(); await nextTick();
-    if (olderError.value || before === nextOlder.value) break;
-  }
-  commentElement(replyTarget.value ?? undefined)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  const target = replyingTo.value;
+  if (!target || !await conversation.find(target.commentId, target.sequence)) return;
+  await scrollToComment(target.commentId);
 };
 const newestCommentId = computed(() => displayComments.value
   .reduce<TaskBoard.Comment | undefined>((latest, comment) =>
     comment.authorKind === "system" && comment.body === "Ticket edited" ? latest :
       !latest || comment.sequence > latest.sequence ? comment : latest, undefined)?.commentId);
+const latestCommentPage = async () => {
+  conversation.latest();
+  await nextTick();
+  await scrollToComment(newestCommentId.value);
+};
 const commentSections = ["comments", "composer"];
 const executionDefaults = useExecutionDefaults(
   () => props.workspace,
@@ -234,7 +244,12 @@ const inherited = (
   nativeDefault: string,
 ) => value ?? `${fallback ?? nativeDefault} (default)`;
 const taskView = taskRemote;
-const action = useAction(() => props.workspace, "task:" + props.taskId);
+const editAction = props.taskActions?.edit ?? useAction(() => props.workspace, 'edit:' + props.taskId);
+const contentProjection = useContentProjection(() => props.workspace, props.taskId, editAction, () => taskRemote.value.value);
+const displayContent = contentProjection.state;
+const editPending = computed(() => editAction.busy.value || !!editAction.saved.value && !['failed', 'succeeded'].includes(editAction.saved.value.phase));
+const editIssue = ref('');
+const editConflict = shallowRef<EditSnapshot | null>(null);
 const panel = ref(""),
   deleteOpen = ref(false),
   error = ref<string | null>(null),
@@ -251,7 +266,7 @@ const terminal = computed(() =>
   ["done", "cancelled"].includes(task.value.value?.value.workflowState ?? ""),
 );
 const descriptionNeedsCollapse = computed(() => {
-  const description = task.value.value?.value.fields.description ?? "";
+  const description = displayContent.value?.description ?? "";
   return description.length > 700 || description.split("\n").length > 7;
 });
 const archive = useObjectArchive(
@@ -272,12 +287,20 @@ const publicationPending = computed(() => {
   return !!current?.value.publication && !(confirmed?.objectId === props.taskId &&
     confirmed.revision >= current.pin.revision);
 });
-const writable = computed(() => editable.value && props.available && !task.error.value && !action.locked.value && !publicationPending.value);
+// A refresh failure or a publication marker in the last snapshot does not decide
+// whether a new write is admissible. The backend checks its current revision and state.
+const writable = computed(() => !!task.value.value && editable.value && props.available && !props.boardBlocked && !action.locked.value && !editPending.value && !optimistic.pending.value && !optimistic.queued.value.length);
+const editAvailable = computed(() => props.available && editable.value && !props.boardBlocked && !action.locked.value && !optimistic.pending.value && !optimistic.queued.value.length);
+const canArchive = computed(() =>
+  props.available && props.workspace.role === "user" &&
+  !!task.value.value && !task.value.value.value.claim && !props.boardBlocked && !action.locked.value && !editPending.value &&
+  !archive.busy.value && !archive.pending.value && !optimistic.pending.value && !optimistic.queued.value.length,
+);
 const canDelete = computed(() =>
   props.available && props.workspace.role === "user" &&
   !!task.value.value && !task.value.value.value.claim &&
-  !publicationPending.value && !action.locked.value &&
-  !archive.busy.value && !archive.pending.value,
+  !publicationPending.value && !props.boardBlocked && !action.locked.value && !editPending.value &&
+  !archive.busy.value && !archive.pending.value && !optimistic.pending.value && !optimistic.queued.value.length,
 );
 // The agent task that carries this ticket's native conversation, when one exists.
 const agentTaskQuery = computed(() => {
@@ -298,7 +321,7 @@ const unresolvedApprovals = computed(() => {
         comment.responses.map((response) => response.requestId),
       ),
     );
-  return comments
+  return pendingQuestions.value
     .flatMap((comment) =>
       comment.requests.map((request) => ({ comment, request })),
     )
@@ -306,7 +329,7 @@ const unresolvedApprovals = computed(() => {
 });
 // Internal messages name their sender or recipient.
 const counterpartId = (comment: TaskBoard.Comment) => comment.sourceTaskId ?? (comment.recipient?.kind === 'task' ? comment.recipient.taskId : '');
-const sourceTaskIds = computed(() => [...new Set((task.value.value?.value.comments ?? [])
+const sourceTaskIds = computed(() => [...new Set(conversation.comments.value
   .flatMap((comment) => counterpartId(comment) ? [counterpartId(comment)] : []))]);
 const sourceTasks = useRemote(async (signal) => Object.fromEntries(await Promise.all(
   sourceTaskIds.value.map(async (id) => {
@@ -376,27 +399,65 @@ const refresh = () => {
   void task.refresh();
 };
 const optimistic = useOptimisticComment(() => props.workspace, props.taskId, action,
-  () => task.value.value?.value, () => { refresh(); emit('changed'); });
+  () => task.value.value?.value, () => { refresh(); emit('changed'); }, () => props.available && editable.value, () => !editPending.value && !props.boardBlocked);
+let confirmedEdit = editAction.saved.value?.phase === 'succeeded' ? editAction.saved.value.call.operationId : undefined;
+watch([() => editAction.saved.value?.phase, editAction.busy], ([phase, busy]) => {
+  const saved = editAction.saved.value;
+  if (phase !== 'succeeded' || busy || !saved || !editAction.identityMatches.value || confirmedEdit === saved.call.operationId) return;
+  confirmedEdit = saved.call.operationId; editIssue.value = ''; editConflict.value = null; refresh(); emit('changed');
+});
+const beginEdit = (fields: TaskBoard.TaskFields) => {
+  const cancelPreparation = contentProjection.begin(fields);
+  editIssue.value = ''; editConflict.value = null; panel.value = '';
+  // This callback belongs to the parent, so form navigation cannot cancel its original write.
+  return ({ current, conflict }: { current: EditSnapshot | null; conflict: boolean }) => {
+    if (current) contentProjection.observe({ object: current.pin, task: { fields: current.fields } });
+    cancelPreparation();
+    if (conflict) editIssue.value = tr('Das Ticket wurde inzwischen geändert. Dein Entwurf bleibt zum Vergleichen erhalten.', 'The task changed while you were editing. Your draft is retained for comparison.');
+    editConflict.value = conflict ? current : null;
+    if (!editAction.saved.value || ['failed', 'succeeded'].includes(editAction.saved.value.phase)) refresh();
+  };
+};
+const statusProjection = useStatusProjection(() => props.workspace, props.taskId, action, () => taskRemote.value.value);
+watch([() => props.boardProjection?.card, () => taskRemote.value.value], ([card]) => {
+  if (card) statusProjection.observe(card);
+}, { immediate: true, flush: 'sync' });
+const displayStatus = computed(() => {
+  const peer = props.boardProjection, view = taskRemote.value.value;
+  if (localChangePending.value || !peer?.statusPending || peer.fromDetail || !view || view.object.objectId !== peer.card.object.objectId ||
+      peer.confirmedRevision !== undefined && statusProjection.revision.value >= peer.confirmedRevision) return statusProjection.state.value;
+  return statusProjection.revision.value > peer.card.object.revision && statusProjection.actual.value !== peer.card.task.workflowState && statusProjection.actual.value !== peer.state
+    ? statusProjection.actual.value : peer.state;
+});
+const commentWritable = computed(() => !!task.value.value && editable.value && props.available && optimistic.canSubmit.value);
+const failedChange = shallowRef<{ operationId: string; message: string } | null>(null);
+watch([() => action.saved.value?.phase, action.busy, () => optimistic.pending.value?.request.commentId], ([phase, busy]) => {
+  const saved = action.saved.value, request = saved?.call.arguments as { action?: string; taskId?: string } | undefined;
+  if (!saved || busy || request?.taskId !== props.taskId || request.action === 'comment') return;
+  if (phase === 'failed' && optimistic.pending.value) failedChange.value = {
+    operationId: saved.call.operationId!,
+    message: saved.label + ': ' + (action.error.value ?? saved.detail),
+  };
+  if (phase === 'succeeded' && saved.call.operationId === failedChange.value?.operationId) failedChange.value = null;
+}, { immediate: true, flush: 'sync' });
+watch(displayComments, comments => {
+  const retained = new Set(comments.map(comment => comment.commentId));
+  for (const id of Object.keys(expandedComments.value)) if (!retained.has(id)) delete expandedComments.value[id];
+});
 const perform = async (label: string, body: ExistingAction) => {
   if (!writable.value || !task.value.value) return null;
   error.value = null;
+  failedChange.value = null;
   try {
-    const current = await readDocument(
-      "task",
-      props.taskId,
-      props.workspace.rootObjectId,
-      undefined, { limit: 0 },
-    );
-    const outcome = await action.start(label, {
-      ...body,
-      taskId: props.taskId,
-      expectedRevision: current.pin.revision,
-    } as DraftRequest);
+    const outcome = await action.start(label, async () => {
+      const current = await readDocument("task", props.taskId, props.workspace.rootObjectId, undefined, { limit: 0 });
+      return { ...body, taskId: props.taskId, expectedRevision: current.pin.revision } as DraftRequest;
+    });
     if (outcome) {
       panel.value = "";
       refresh();
       emit("changed");
-    }
+    } else if (action.error.value) error.value = action.error.value;
     return outcome;
   } catch (cause) {
     error.value =
@@ -406,17 +467,22 @@ const perform = async (label: string, body: ExistingAction) => {
     return null;
   }
 };
-const transition = (
+const transition = async (
   workflowState: "backlog" | "todo" | "in_progress" | "waiting" | "done" | "cancelled",
   detail: string | null = null,
-) =>
-  perform("Move task to " + workflowState, {
+) => {
+  if (!writable.value || !task.value.value) return null;
+  const cancelPreparation = statusProjection.begin(workflowState);
+  const outcome = await perform("Move task to " + workflowState, {
     action: "transition",
     workflowState,
     detail,
   });
+  if (!outcome) cancelPreparation();
+  return outcome;
+};
 const submitComment = async () => {
-  if (!writable.value || !commentBody.value.trim() || uploading.value || optimistic.pending.value) return;
+  if (!commentWritable.value || !commentBody.value.trim() || uploading.value) return;
   const accepted = optimistic.submit({
     action: "comment",
     commentId: crypto.randomUUID(),
@@ -455,7 +521,7 @@ const images = useAttachmentImages(
   () => task.value.value?.value.attachments ?? [],
   () => {
     const value = task.value.value?.value;
-    return value ? [value.fields.description, ...value.fields.acceptanceCriteria, ...value.comments.map((comment) => comment.body), commentBody.value] : [commentBody.value];
+    return value ? [value.fields.description, ...value.fields.acceptanceCriteria, ...conversation.comments.value.map((comment) => comment.body), commentBody.value] : [commentBody.value];
   },
 );
 // Follow the ticket's reading order, then include remaining attachments once each.
@@ -464,7 +530,7 @@ const ticketImages = computed(() => {
   if (!value) return [];
   const sources = [
     ...[value.fields.description, ...value.fields.acceptanceCriteria].flatMap(text => markdownImageSources(text)),
-    ...value.comments.flatMap(comment => [
+    ...conversation.comments.value.flatMap(comment => [
       ...markdownImageSources(comment.body),
       ...comment.attachments.map(attachment => attachmentSource(attachment.attachmentId)),
     ]),
@@ -499,6 +565,7 @@ watch([imagePreviewOpen, previewSource, imagePreviewAttempt], async ([open, sour
   onCleanup(() => { active = false; });
   imagePreviewError.value = null;
   imagePreviewLoading.value = false;
+  images.pin(open ? source : null);
   if (!open || !source) { imagePreviewOpen.value = false; return; }
   imagePreviewLoading.value = true;
   try {
@@ -567,17 +634,26 @@ const openAttachmentLink = (event: MouseEvent) => {
       .catch((cause) => { error.value = cause instanceof Error ? cause.message : "The attachment is unavailable."; });
 };
 const setArchived = async () => {
-  if (!props.available || props.workspace.role !== 'user' || !task.value.value || task.value.value.value.claim ||
-      task.value.value.value.publication || action.locked.value) return;
-  archive.clearError();
-  const result = await archive.run(
-    props.taskId,
-    !task.value.value.archived,
-  );
-  if (result) {
-    refresh();
-    emit("changed");
-  }
+  if (!canArchive.value || !task.value.value) return;
+  const archived = !task.value.value.archived, projection = archiveProjection.begin(archived);
+  let base = projection.base;
+  forgetTask(props.workspace.serviceNodeId, props.taskId);
+  try {
+    const result = await action.start(archived ? 'Archive task' : 'Restore task', async () => {
+      const object = await client.request('objects.stat', { objectId: props.taskId, observe: true });
+      if (object.contractKey !== 'task-board/task' || object.parentId !== props.workspace.rootObjectId)
+        throw new Error('This ticket belongs to another workspace.');
+      base = object.observation;
+      archiveProjection.observe({ object: { objectId: object.id, revision: object.currentRevision },
+        archived: object.effectivelyArchived, ...(object.observation ? { observation: object.observation } : {}) });
+      if (object.effectivelyArchived === archived) return null;
+      return { action: 'archive', taskId: props.taskId, expectedRevision: object.currentRevision, archived };
+    }, () => base);
+    if (result) {
+      forgetTask(props.workspace.serviceNodeId, props.taskId);
+      refresh(); emit('changed');
+    }
+  } finally { projection.cancel(); }
 };
 const retryArchive = async () => {
   const pending = archive.pending.value;
@@ -642,10 +718,18 @@ const nativeInput = (comment: TaskBoard.Comment) => task.value.value?.value.comm
 const copyId = () => void navigator.clipboard?.writeText(props.taskId);
 const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspace.serviceNodeId, props.taskId));
 const commentElement = (id: string | undefined) => id ? document.getElementById("comment-" + id) : null;
+const followComments = async (event: Event) => {
+  const container = event.currentTarget as HTMLElement;
+  await nextTick();
+  if (!container.isConnected) return;
+  const bounds = commentElement(newestCommentId.value)?.getBoundingClientRect();
+  const viewport = container.getBoundingClientRect();
+  followingLatest.value = !!bounds && bounds.top < viewport.bottom && bounds.bottom > viewport.top;
+};
 watch(() => optimistic.pending.value?.request.commentId, async id => {
   if (!id || tab.value !== 'chat') return;
-  await nextTick();
-  commentElement(id)?.scrollIntoView({ block: 'end' });
+  conversation.latest();
+  await scrollToComment(id, 'end');
 });
 // The conversation opens at the newest message so the latest answer is read first.
 let openedAtNewest = false;
@@ -653,12 +737,12 @@ watch([tab, () => task.value.value?.value.comments.length], async () => {
   if (openedAtNewest || tab.value !== "chat" || !task.value.value) return;
   openedAtNewest = true;
   const linkedQuestion = props.query.get('question');
-  if (linkedQuestion && task.value.value.value.comments.some(comment => comment.commentId === linkedQuestion)) {
-    await nextTick(); commentElement(linkedQuestion)?.scrollIntoView({ block: 'center' }); return;
+  if (linkedQuestion) {
+    await conversation.find(linkedQuestion, pendingQuestions.value.find(question => question.commentId === linkedQuestion)?.sequence);
+    await scrollToComment(linkedQuestion, 'center'); return;
   }
   if (commentPreferences.value.order === "newest-first") return;
-  await nextTick();
-  commentElement(newestCommentId.value)?.scrollIntoView({ block: "start" });
+  await scrollToComment(newestCommentId.value);
 }, { immediate: true });
 // A message arriving below the visible part of the conversation is announced with a jump button.
 const arrived = ref<TaskBoard.Comment | null>(null);
@@ -669,15 +753,18 @@ watch(() => task.value.value?.value.comments, async (comments) => {
   if (!newest) return;
   const isNew = knownSequence > 0 && newest.sequence > knownSequence;
   knownSequence = Math.max(knownSequence, newest.sequence);
-  if (!isNew || newest.authorKind === "user" || tab.value !== "chat" || commentPreferences.value.order === "newest-first") return;
+  if (!isNew || newest.authorKind === "user" || tab.value !== "chat") return;
+  if (conversation.historical.value) { arrived.value = newest; return; }
+  if (commentPreferences.value.order === "newest-first") return;
   await nextTick();
   const message = commentElement(newest.commentId), bounds = message?.getBoundingClientRect();
   const bottom = message?.closest('[data-slot=task-comment-messages]')?.getBoundingClientRect().bottom ?? innerHeight;
-  if (bounds && bounds.bottom > bottom + 1) arrived.value = newest;
+  if (!bounds || bounds.bottom > bottom + 1) arrived.value = newest;
 });
 watch(showCrossAgent, visible => { if (!visible && arrived.value && crossAgentComment(arrived.value, props.taskId)) arrived.value = null; });
-const showArrived = () => {
-  commentElement(arrived.value?.commentId)?.scrollIntoView({ block: "start", behavior: "smooth" });
+const showArrived = async () => {
+  conversation.latest();
+  await scrollToComment(arrived.value?.commentId);
   arrived.value = null;
 };
 </script>
@@ -688,17 +775,17 @@ const showArrived = () => {
       <div class="flex min-w-0 flex-1 items-center gap-2">
         <template v-if="task.value.value">
           <component
-            :is="stateIcons[task.value.value.value.workflowState] ?? stateIcons.todo"
+            :is="stateIcons[displayStatus] ?? stateIcons.todo"
             class="size-4 shrink-0"
-            :class="stateColors[task.value.value.value.workflowState] ?? 'text-muted-foreground'"
-            :aria-label="stateLabel(task.value.value.value.workflowState)"
+            :class="stateColors[displayStatus] ?? 'text-muted-foreground'"
+            :aria-label="stateLabel(displayStatus)"
             role="img"
           />
           <h1 class="min-w-0 truncate text-sm font-semibold">
-            <span class="sr-only">{{ task.value.value.value.taskKey }} · </span>{{ task.value.value.value.fields.title }}
+            <span class="sr-only">{{ task.value.value.value.taskKey }} · </span>{{ displayContent?.title }}
           </h1>
           <StatusBadge
-            v-if="task.value.value.archived"
+            v-if="displayArchived"
             label="Archived"
           />
           <template v-if="wide">
@@ -752,7 +839,7 @@ const showArrived = () => {
             </template>
             <DropdownMenuItem @select="copyId">Copy task ID</DropdownMenuItem>
             <DropdownMenuItem @select="copyLink">Copy task link</DropdownMenuItem>
-            <template v-if="task.value.value && (writable || canDelete)">
+            <template v-if="task.value.value && (writable || canArchive || canDelete)">
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 v-if="canBacklog"
@@ -772,7 +859,7 @@ const showArrived = () => {
                 >Cancel task</DropdownMenuItem
               >
               <DropdownMenuItem
-                v-if="!task.value.value.value.claim"
+                v-if="canArchive"
                 @select="setArchived"
                 >{{
                   task.value.value.archived
@@ -780,7 +867,7 @@ const showArrived = () => {
                     : "Archive task"
                 }}</DropdownMenuItem
               >
-              <ArchiveOutputsHint v-if="!task.value.value.archived && !task.value.value.value.claim" />
+              <ArchiveOutputsHint v-if="canArchive && !task.value.value.archived" />
               <DropdownMenuItem
                 v-if="canDelete"
                 variant="destructive"
@@ -808,7 +895,7 @@ const showArrived = () => {
     </div>
     <div class="task-detail-scroll min-h-0 flex-1 overscroll-contain" :class="tab === 'details' ? 'overflow-y-auto px-4 pb-5 md:px-6' : 'flex flex-col overflow-hidden'">
     <h1 v-if="!wide && task.value.value && tab === 'details'" class="mt-3 text-lg font-semibold leading-snug break-words">
-      <span class="sr-only">{{ task.value.value.value.taskKey }} · </span>{{ task.value.value.value.fields.title }}
+      <span class="sr-only">{{ task.value.value.value.taskKey }} · </span>{{ displayContent?.title }}
     </h1>
     <RemoteState
       :loading="task.loading.value"
@@ -817,6 +904,9 @@ const showArrived = () => {
       @retry="task.refresh"
     />
     <template v-if="task.value.value">
+      <Alert v-if="actionIssue" class="mt-4">
+        <AlertDescription>{{ actionIssue }}</AlertDescription>
+      </Alert>
       <Alert v-if="task.value.value.value.executionChangeRequested" class="mt-4">
         <AlertTitle>{{ tr('Einstellungswechsel ausstehend', 'Settings change pending') }}</AlertTitle>
         <AlertDescription>{{ tr(
@@ -847,7 +937,7 @@ const showArrived = () => {
         }}</AlertDescription></Alert
       >
       <ActionState
-        v-if="tab !== 'chat' && !optimistic.isComment.value && (action.saved.value?.phase !== 'succeeded' || action.error.value)"
+        v-if="tab !== 'chat' && !((statusProjection.pending.value || archiveProjection.pending.value) && action.busy.value) && !optimistic.isComment.value && (action.saved.value?.phase !== 'succeeded' || action.error.value) && (!failedChange || failedChange.operationId !== action.saved.value?.call.operationId)"
         :action="action"
         class="mt-4"
         @changed="refresh"
@@ -856,11 +946,12 @@ const showArrived = () => {
         {{ tr('Nächster Versuch:', 'Next attempt:') }} {{ new Date(task.value.value.value.completionIssue.retryAt).toLocaleString() }}.
       </p>
       <p
-        v-if="tab !== 'chat' && (error || archive.error.value)"
+        v-if="(tab !== 'chat' || task.value.value.archived) && (error || failedChange || archive.error.value)"
         role="alert"
         class="mt-4 text-sm text-destructive"
       >
-        {{ error || archive.error.value }}
+        {{ error || failedChange?.message || archive.error.value }}
+        <Button v-if="failedChange && !error" size="sm" variant="ghost" @click="failedChange = null">{{ tr('Fehlermeldung schließen', 'Dismiss change error') }}</Button>
       </p>
       <div v-if="archive.pending.value" class="mt-4 flex flex-wrap items-center gap-3" role="status">
         <span class="text-sm text-muted-foreground">{{ tr("Archivierungsaktion noch nicht bestätigt.", "Archive action awaiting confirmation.") }}</span>
@@ -870,8 +961,11 @@ const showArrived = () => {
       </div>
       <section v-if="panel === 'edit'" class="mt-4" aria-label="Edit task">
         <TaskEditor
+          :action="editAction"
+          :conflict="editConflict"
+          :on-edit="beginEdit"
           :workspace="workspace"
-          :available="available"
+          :available="editAvailable"
           :task="task.value.value"
           :questions="pendingQuestions"
           @saved="
@@ -883,6 +977,9 @@ const showArrived = () => {
         />
       </section>
       <template v-else>
+      <ActionState :action="editAction" class="mt-4" @changed="refresh" />
+      <p v-if="editIssue" class="mt-2 text-sm text-destructive" role="alert">{{ editIssue }}</p>
+      <Button v-if="editIssue || editAction.error.value || !editAction.busy.value && editAction.saved.value && ['prepared', 'unknown', 'pending', 'failed'].includes(editAction.saved.value.phase)" class="mt-2" size="sm" variant="outline" @click="panel = 'edit'">{{ tr('Entwurf prüfen', 'Review draft') }}</Button>
       <TabsContent value="details" class="mt-5">
         <div class="task-detail-grid">
           <div class="min-w-0 space-y-8 [grid-area:main]" @click="openAttachmentLink">
@@ -894,7 +991,7 @@ const showArrived = () => {
                 Description
               </h2>
               <div
-                v-if="task.value.value.value.fields.description"
+                v-if="displayContent?.description"
                 :class="
                   descriptionNeedsCollapse && !descriptionExpanded
                     ? 'max-h-60 overflow-hidden [mask-image:linear-gradient(to_bottom,black_70%,transparent)]'
@@ -902,7 +999,7 @@ const showArrived = () => {
                 "
               >
                 <ContentView
-                  :text="task.value.value.value.fields.description"
+                  :text="displayContent?.description ?? ''"
                   media-type="text/markdown"
                   :trusted-image-urls="images.urls.value"
                   :trusted-attachments="images.files.value"
@@ -922,7 +1019,7 @@ const showArrived = () => {
               >
             </section>
             <section
-              v-if="task.value.value.value.fields.acceptanceCriteria.length"
+              v-if="displayContent?.acceptanceCriteria.length"
               class="space-y-2"
               aria-labelledby="task-acceptance"
             >
@@ -934,8 +1031,7 @@ const showArrived = () => {
               </h2>
               <ul class="list-disc space-y-1 pl-5 text-sm">
                 <li
-                  v-for="criterion in task.value.value.value.fields
-                    .acceptanceCriteria"
+                  v-for="criterion in displayContent?.acceptanceCriteria"
                   :key="criterion"
                 >
                   <ContentView :text="criterion" media-type="text/markdown" :trusted-image-urls="images.urls.value" :trusted-attachments="images.files.value" :preview-image="previewImage" />
@@ -950,10 +1046,11 @@ const showArrived = () => {
               <div v-if="attachmentsOpen" class="space-y-2">
                 <TaskAttachment
                   v-for="attachment in task.value.value.value.attachments"
-                  :key="attachment.attachmentId"
+                  :key="`${taskId}:${attachment.object.objectId}:${attachment.object.revision}`"
                   :attachment="attachment"
                   :task-id="taskId"
                   :load-image="images.load"
+                  :image-url="images.urls.value[attachmentSource(attachment.attachmentId)] ?? null"
                   :preview-image="previewImage"
                 />
               </div>
@@ -976,8 +1073,8 @@ const showArrived = () => {
               <PropertyList>
                 <PropertyItem label="Status"
                   ><StatusBadge
-                    :label="stateLabel(task.value.value.value.workflowState)"
-                    :tone="statusTone(task.value.value.value.workflowState)"
+                    :label="stateLabel(displayStatus)"
+                    :tone="statusTone(displayStatus)"
                 /></PropertyItem>
                 <PropertyItem label="Worker">
                   <Bot
@@ -991,10 +1088,10 @@ const showArrived = () => {
                   }}
                 </PropertyItem>
                 <PropertyItem label="Priority">{{
-                  priorityLabel(task.value.value.value.fields.priority)
+                  priorityLabel(displayContent?.priority ?? 2)
                 }}</PropertyItem>
                 <PropertyItem label="Category">{{
-                  task.value.value.value.fields.category ?? "None"
+                  displayContent?.category ?? "None"
                 }}</PropertyItem>
                 <PropertyItem
                   v-if="task.value.value.value.fields.dueAt"
@@ -1170,20 +1267,27 @@ const showArrived = () => {
       >
         <div class="mx-auto flex h-full min-h-0 w-full max-w-3xl flex-col gap-1">
           <template v-for="section in commentSections" :key="section">
-            <div v-if="section === 'comments'" data-slot="task-comment-messages" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pt-2 sm:px-6">
-              <ScrollLoader v-if="nextOlder && commentPreferences.order === 'oldest-first'"
-                :loading="olderLoading" :error="olderError" :enabled="tab === 'chat'"
-                :label="tr('Ältere Nachrichten laden', 'Load older messages')" @load="loadOlder" />
+            <template v-if="section === 'comments'">
+              <PageControls v-if="conversation.hasOlder.value || conversation.historical.value"
+                class="mx-3 mt-0 shrink-0 sm:mx-6" :count="conversation.total.value"
+                :page="Math.floor((conversation.total.value - conversation.last.value) / 50) + 1"
+                :has-previous="conversation.hasNewer.value" :has-next="conversation.hasOlder.value"
+                :previous-label="tr('Neuere Nachrichten', 'Newer messages')" :next-label="tr('Ältere Nachrichten', 'Older messages')"
+                :loading="conversation.loading.value" @previous="changeCommentPage('newer')" @next="changeCommentPage('older')">
+                <template #summary>
+                  <span>{{ tr('Nachrichten', 'Messages') }} {{ conversation.first.value }}–{{ conversation.last.value }} / {{ conversation.total.value }}</span>
+                  <Button v-if="conversation.historical.value || conversation.loading.value" variant="link" size="sm" @click="latestCommentPage">{{ tr('Neueste', 'Latest') }}</Button>
+                </template>
+              </PageControls>
+              <p v-if="conversation.error.value" role="alert" class="px-3 text-sm text-destructive sm:px-6">{{ conversation.error.value }}</p>
               <p v-if="!displayComments.length" class="py-8 text-center text-sm text-muted-foreground">
                 {{ tr("Noch keine Nachrichten.", "No messages yet.") }}
               </p>
-              <ol v-else class="flex min-w-0 flex-col gap-1" @click="openAttachmentLink">
-                <li
-                  v-for="entry in chatEntries"
-                  :id="'comment-' + entry.comment.commentId"
-                  :key="entry.comment.commentId"
-                  class="min-w-0 scroll-mt-32"
-                >
+              <VirtualList v-else ref="commentList" data-slot="task-comment-messages"
+                class="flex-1 px-3 pt-2 sm:px-6" :aria-label="tr('Nachrichtenverlauf', 'Message history')"
+                :items="chatEntries" :item-key="entry => entry.comment.commentId" :item-id="entry => 'comment-' + entry.comment.commentId"
+                @scroll.passive="followComments" @click="openAttachmentLink">
+                <template #default="{ item: entry }">
                   <p v-if="entry.stamp" class="ivy-chat-stamp">{{ entry.stamp }}</p>
                   <p
                     v-if="entry.kind === 'event' && !entry.comment.body.includes('\n') && !entry.comment.attachments.length"
@@ -1209,7 +1313,7 @@ const showArrived = () => {
                     </template>
                     <div class="min-w-0 space-y-3">
                       <StatusBadge
-                        v-if="optimistic.pending.value?.request.commentId === entry.comment.commentId && !optimistic.issue(entry.comment.commentId)"
+                        v-if="optimistic.sending(entry.comment.commentId) && !optimistic.issue(entry.comment.commentId)"
                         role="status"
                         :label="tr('Wird gesendet…', 'Sending…')"
                         tone="neutral"
@@ -1228,7 +1332,9 @@ const showArrived = () => {
                         <Button size="sm" variant="outline" :disabled="!writable" @click="answerQuestion(entry.comment.commentId)">{{ tr('Antworten', 'Answer question') }}</Button>
                       </div>
                       <ExpandableContent
-                        v-if="!entry.comment.nativeInput || entry.comment.replyTo || nativeInput(entry.comment)?.state === 'answered' || nativeInput(entry.comment)?.state === 'expired'"
+                        :expanded="!!expandedComments[entry.comment.commentId]"
+                        @update:expanded="expandedComments[entry.comment.commentId] = $event"
+                        v-if="!entry.comment.nativeInput || entry.comment.replyTo || !pendingQuestions.some(question => question.commentId === entry.comment.commentId) || nativeInput(entry.comment)?.state === 'answered' || nativeInput(entry.comment)?.state === 'expired'"
                         :enabled="commentPreferences.collapseOlder && entry.kind !== 'user' && entry.comment.commentId !== newestCommentId"
                         :show-more-label="tr('Mehr anzeigen', 'Show more')"
                         :show-less-label="tr('Weniger anzeigen', 'Show less')"
@@ -1302,21 +1408,19 @@ const showArrived = () => {
                       >
                         <TaskAttachment
                           v-for="attachment in unembedded(entry.comment)"
-                          :key="attachment.attachmentId"
+                          :key="`${taskId}:${attachment.object.objectId}:${attachment.object.revision}`"
                           :attachment="attachment"
                           :task-id="taskId"
                           :load-image="images.load"
+                          :image-url="images.urls.value[attachmentSource(attachment.attachmentId)] ?? null"
                           :preview-image="previewImage"
                         />
                       </div>
                     </div>
                   </ConversationMessage>
-                </li>
-              </ol>
-              <ScrollLoader v-if="nextOlder && commentPreferences.order === 'newest-first'"
-                :loading="olderLoading" :error="olderError" :enabled="tab === 'chat'"
-                :label="tr('Ältere Nachrichten laden', 'Load older messages')" @load="loadOlder" />
-            </div>
+                </template>
+              </VirtualList>
+            </template>
             <template v-else>
               <p v-if="task.value.value.archived" role="status" class="my-3 rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
                 This task is archived. Restore it from the task actions to comment or change it.
@@ -1327,22 +1431,15 @@ const showArrived = () => {
                 data-slot="task-comment-composer"
                 class="ivy-chat-surface max-h-[60dvh] shrink-0 space-y-1.5 overflow-y-auto px-3 py-3 sm:px-6"
               >
-                <ActionState v-if="!uploading && !optimistic.isComment.value && (action.saved.value?.phase !== 'succeeded' || action.error.value)" :action="action" @changed="refresh" />
-                <Alert v-if="optimistic.pending.value && optimistic.issue(optimistic.pending.value.request.commentId)" role="status">
-                  <AlertTitle>{{ tr('Vorherige Nachricht noch nicht bestätigt', 'Previous message not confirmed') }}</AlertTitle>
-                  <AlertDescription class="space-y-2">
-                    <p>{{ optimistic.issue(optimistic.pending.value.request.commentId) }}</p>
-                    <Button size="sm" variant="outline" :disabled="!available || !editable || !optimistic.canRetry(optimistic.pending.value.request.commentId)" @click="optimistic.retry(optimistic.pending.value.request.commentId)">{{ tr('Originalnachricht prüfen', 'Check original message') }}</Button>
-                  </AlertDescription>
-                </Alert>
-                <Alert v-if="publicationPending && !uploading && !optimistic.pending.value && !optimistic.isComment.value" role="status">
-                  <AlertTitle>{{ tr('Änderung wird gespeichert', 'Saving task update') }}</AlertTitle>
-                  <AlertDescription>{{ tr('Ein vorheriger Vorgang wird noch abgeschlossen. Dein Text bleibt erhalten.', 'A previous action is still being completed. Your draft is retained.') }}</AlertDescription>
-                </Alert>
-                <p v-if="error || archive.error.value" role="alert" class="text-sm text-destructive">{{ error || archive.error.value }}</p>
-                <div v-if="(task.value.value.value.workflowState === 'done' && writable) || uploading" class="flex flex-wrap items-center gap-3 px-2 text-sm">
-                  <Label v-if="task.value.value.value.workflowState === 'done' && writable" class="flex items-center gap-2">
-                    <Checkbox v-model="moveToTodo" :disabled="!writable" />
+                <ActionState v-if="!uploading && !((statusProjection.pending.value || archiveProjection.pending.value) && action.busy.value) && !optimistic.isComment.value && (action.saved.value?.phase !== 'succeeded' || action.error.value) && (!failedChange || failedChange.operationId !== action.saved.value?.call.operationId)" :action="action" @changed="refresh" />
+                <p v-if="optimistic.submissionIssue.value" role="alert" class="text-sm text-destructive">{{ optimistic.submissionIssue.value }}</p>
+                <p v-if="error || failedChange || archive.error.value" role="alert" class="text-sm text-destructive">
+                  {{ error || failedChange?.message || archive.error.value }}
+                  <Button v-if="failedChange && !error" size="sm" variant="ghost" @click="failedChange = null">{{ tr('Fehlermeldung schließen', 'Dismiss change error') }}</Button>
+                </p>
+                <div v-if="(task.value.value.value.workflowState === 'done' && commentWritable) || uploading" class="flex flex-wrap items-center gap-3 px-2 text-sm">
+                  <Label v-if="task.value.value.value.workflowState === 'done' && commentWritable" class="flex items-center gap-2">
+                    <Checkbox v-model="moveToTodo" :disabled="!commentWritable" />
                     {{ tr('Nach Todo verschieben', 'Move to Todo') }}
                   </Label>
                   <span v-if="uploading" role="status" class="text-muted-foreground">{{ tr('Bilder und Dateien werden hochgeladen…', 'Uploading files…') }}</span>
@@ -1373,7 +1470,7 @@ const showArrived = () => {
                       size="icon"
                       class="size-9 self-end rounded-full"
                       aria-label="Add comment"
-                      :disabled="!writable || !commentBody.trim() || uploading || !!optimistic.pending.value"
+                      :disabled="!commentWritable || !commentBody.trim() || uploading"
                       @click="submitComment"
                     ><ArrowUp aria-hidden="true" /></Button>
                   </template>

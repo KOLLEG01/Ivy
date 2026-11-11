@@ -1,11 +1,8 @@
 import { validateAgent } from './agent-validation.js';
 import { requireThat } from './errors.js';
 import type { Agent, Wire } from './generated.js';
-
-export function sameNativeBackend(actual: Agent.BackendIdentity | undefined, expected: Agent.BackendIdentity | undefined): boolean {
-  return actual === undefined && expected === undefined || !!actual && !!expected &&
-    actual.backendId === expected.backendId && actual.provider === expected.provider && actual.accountId === expected.accountId;
-}
+import { sameNativeBackend } from './native-backend-identity.js';
+export { sameNativeBackend } from './native-backend-identity.js';
 
 /** Ivy's selector stays outside unchanged provider parameters. */
 export function backendArguments(arguments_: Wire.Json, backend?: Agent.BackendIdentity): Record<string, Wire.Json> {

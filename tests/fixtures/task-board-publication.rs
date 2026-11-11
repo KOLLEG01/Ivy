@@ -179,12 +179,19 @@ async fn verify_publication_cases(cases: &Json) {
                 let bytes = (0..count)
                     .map(|index| (index.wrapping_mul(37).wrapping_add(11) & 255) as u8)
                     .collect::<Vec<_>>();
+                let encoded = JsString::from(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &bytes,
+                ));
+                let content =
+                    ivy_host_runtime::base64_content::Base64Content::inspect(&encoded, usize::MAX)
+                        .unwrap();
                 store
                     .write_attachment(
                         &string(i, "taskId"),
                         &string(i, "operationId"),
                         &string(i, "attachmentId"),
-                        &bytes,
+                        &content,
                     )
                     .await
             } else {

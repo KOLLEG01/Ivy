@@ -12,11 +12,11 @@ use crate::{
     operations::Store,
     wake::{WakeStore, queued_input, validate_dependencies},
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::canonical_equal,
     limits::MANAGEMENT_FRAME_BYTES,
 };
+use ivy_host_runtime::base64_content;
 use ivy_sdk::rpc::RpcClient;
 use std::collections::HashSet;
 
@@ -965,12 +965,8 @@ impl<S: ActionValidationStore, P: ActionValidationChecks> ActionValidation<'_, S
             }
             "uploadAttachment" => {
                 let text = s(request, "bytesBase64")?;
-                let bytes = text.to_utf8().ok().and_then(|s| STANDARD.decode(s).ok());
                 require(
-                    bytes.as_ref().is_some_and(|bytes| {
-                        bytes.len() <= 8 * 1024 * 1024
-                            && JsString::from(STANDARD.encode(bytes)) == *text
-                    }),
+                    base64_content::visit(text, 8 * 1024 * 1024, |_| {}).is_ok(),
                     "invalid_arguments",
                     "Attachment must be canonical base64 up to 8 MiB.",
                 )?;

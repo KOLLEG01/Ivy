@@ -170,7 +170,7 @@ impl<'a, 'x, X: ReconcileExecutor<'a>> EngineInvocations<'a, 'x, X> {
                 let check_cancelled = || cancelled.clone();
                 engine
                     .invoke(
-                        &input,
+                        input,
                         &ReadContext {
                             caller_principal_id: &caller,
                             operation_id: &operation,

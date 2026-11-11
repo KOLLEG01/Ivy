@@ -29,7 +29,7 @@ import {
 import { useNativeAction, nativeActionParams } from "../../../packages/ui-client/src/native-action";
 import { backendRead, nativeMethod, sameBackend, nativeBackendLabel } from '../../../packages/ui-client/src/native-backends';
 import { nativeRouteQuery, nativeStorageOwner } from '../../../packages/ui-client/src/native-route';
-import { backendArguments } from '../../../packages/contracts/src/native-backend';
+import { backendArguments } from '../../../packages/sdk/src/native-backend.js';
 import { readNativeThreadControl } from "../../../packages/ui-client/src/native-thread-control";
 import { useNativeSettings, effectiveNativeSettings, nativeConfiguredHome } from '../../../packages/ui-client/src/native-settings';
 import { nativeModelSpeedAvailable, nativeServiceTier, nativeSpeedAvailable } from '../../../packages/ui-client/src/execution-models';

@@ -1,8 +1,6 @@
 //! Management WebSocket policy shared by Hive and its service connections.
 use futures_util::{Sink, SinkExt};
-use ivy_contracts::limits::{
-    CONNECTION_IN_FLIGHT_REQUESTS, MANAGEMENT_FRAME_BYTES, MANAGEMENT_SOCKET_BUFFER_BYTES,
-};
+use ivy_contracts::limits::{MANAGEMENT_FRAME_BYTES, MANAGEMENT_SOCKET_BUFFER_BYTES};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_tungstenite::tungstenite::{
@@ -17,8 +15,9 @@ use tokio_tungstenite::tungstenite::{
 };
 
 pub const FRAGMENT_BYTES: usize = 64 * 1024;
-const QUEUED_MESSAGES: usize = 2 * CONNECTION_IN_FLIGHT_REQUESTS;
 const OUTBOUND_BYTES: usize = 2 * MANAGEMENT_SOCKET_BUFFER_BYTES;
+// Charge queue links/cell bookkeeping as well as the retained Pending value.
+const QUEUE_ENTRY_OVERHEAD: usize = 2 * std::mem::size_of::<usize>();
 
 /// Shared retained-send capacity, independent of accepted invocation capacity.
 #[derive(Clone)]
@@ -38,7 +37,7 @@ pub enum SendError {
     Full,
 }
 pub struct Outgoing {
-    sender: mpsc::Sender<Pending>,
+    sender: mpsc::UnboundedSender<Pending>,
     local: Arc<Semaphore>,
     shared: SendBudget,
 }
@@ -54,8 +53,11 @@ impl Pending {
     }
 }
 impl SendBudget {
-    pub fn channel(&self) -> (Outgoing, mpsc::Receiver<Pending>) {
-        let (sender, receiver) = mpsc::channel(QUEUED_MESSAGES);
+    pub fn channel(&self) -> (Outgoing, mpsc::UnboundedReceiver<Pending>) {
+        // Every entry owns local and shared byte permits before entering this
+        // queue. A separate count bound rejects small notification bursts long
+        // before the retained-memory budget is full.
+        let (sender, receiver) = mpsc::unbounded_channel();
         (
             Outgoing {
                 sender,
@@ -81,7 +83,9 @@ impl Outgoing {
         if self.sender.is_closed() {
             return Err(SendError::Closed);
         }
-        let bytes = capacity.saturating_add(std::mem::size_of::<Pending>());
+        let bytes = capacity
+            .saturating_add(std::mem::size_of::<Pending>())
+            .saturating_add(QUEUE_ENTRY_OVERHEAD);
         if bytes > MANAGEMENT_SOCKET_BUFFER_BYTES {
             return Err(SendError::Full);
         }
@@ -97,15 +101,12 @@ impl Outgoing {
             .try_acquire_many_owned(bytes as u32)
             .map_err(|_| SendError::Full)?;
         self.sender
-            .try_send(Pending {
+            .send(Pending {
                 message: Some(message),
                 _local: local,
                 _shared: shared,
             })
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Closed(_) => SendError::Closed,
-                mpsc::error::TrySendError::Full(_) => SendError::Full,
-            })
+            .map_err(|_| SendError::Closed)
     }
 }
 

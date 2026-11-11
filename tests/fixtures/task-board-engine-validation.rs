@@ -20,6 +20,58 @@ async fn validate(world: &World, request: &Json, task: &Json, source: &str) -> I
     .await
 }
 #[tokio::test(flavor = "current_thread")]
+async fn attachment_admission_keeps_canonical_size_and_identity_guards_before_publication() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let mut task = task();
+    let world = World::new(task.clone());
+    let mut upload = request("uploadAttachment");
+    upload.insert("attachmentId", "file".into());
+    for encoded in ["", "AA==", "+/8=", "YWJj"] {
+        upload.insert("bytesBase64", encoded.into());
+        validate(&world, &upload, &task, "user").await.unwrap();
+    }
+    for encoded in ["AA", "AB==", "+/9=", "AA==\n", "AA==AAAA"] {
+        upload.insert("bytesBase64", encoded.into());
+        assert_eq!(
+            validate(&world, &upload, &task, "user")
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_arguments"
+        );
+    }
+    upload.insert(
+        "bytesBase64",
+        STANDARD.encode(vec![0; 8 * 1024 * 1024 + 1]).into(),
+    );
+    assert_eq!(
+        validate(&world, &upload, &task, "user")
+            .await
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+    task.insert(
+        "attachments",
+        Json::Array(vec![Json::object([("attachmentId", "file".into())])]),
+    );
+    assert_eq!(
+        validate(&world, &upload, &task, "user")
+            .await
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+    upload.insert("bytesBase64", "AA==".into());
+    assert_eq!(
+        validate(&world, &upload, &task, "user")
+            .await
+            .unwrap_err()
+            .code,
+        "mutation_conflict"
+    );
+}
+#[tokio::test(flavor = "current_thread")]
 async fn queued_external_inputs_admit_manual_and_terminal_turns_without_reopening_them() {
     for state in ["todo", "waiting", "review", "backlog", "done", "cancelled"] {
         for kind in ["user", "agent"] {

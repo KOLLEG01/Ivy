@@ -1,4 +1,4 @@
-import { callBound, canonical, discover, IvyError, nativeVersions } from '../../sdk/src/client.js';
+import { callBound, canonical, discover, freezeJson, IvyError, nativeVersions } from '../../sdk/src/client.js';
 import type { Agent, RpcClient, Wire } from '../../sdk/src/client.js';
 import { record, text } from './native.js';
 import { backendArguments } from '../../contracts/src/native-backend.js';
@@ -15,9 +15,15 @@ export interface NativeOutputPage {
 interface CompleteTurnCache {
   scope: string; epoch: string; cursor: string | null; turnHash: string; stamp: string;
   page: { turn: Record<string, Wire.Json>; next: string | null; observed: Record<string, Wire.Json>; unmaterialized: boolean };
+  download: NonNullable<NativeOutputPage['download']>;
 }
 // One original terminal snapshot per connection; a new view starts a fresh native read.
 const completeTurns = new WeakMap<RpcClient, CompleteTurnCache>();
+const outputScope = (node: string, threadId: string, turnId: string, backend?: Agent.BackendIdentity) => canonical([node, threadId, turnId, nativeBackendKey(backend)]);
+/** Release only the full snapshot belonging to the view that is leaving. */
+export function releaseNativeOutput(client: RpcClient, node: string, threadId: string, turnId: string, backend?: Agent.BackendIdentity): void {
+  if (completeTurns.get(client)?.scope === outputScope(node, threadId, turnId, backend)) completeTurns.delete(client);
+}
 const turnStamp = (turn: Record<string, Wire.Json>) => {
   const { items: _items, itemsView: _view, ...metadata } = turn; return canonical(metadata);
 };
@@ -54,9 +60,10 @@ function nativeItemEntry(value: Wire.Json, selectedTurn: string): Wire.Json {
 /** Existing item pagination first; only an exact first-page native -32601 permits full-turn reads. */
 export async function readNativeOutputPage(client: RpcClient, node: string, threadId: string, selectedTurn: string, cursor: string | undefined, signal: AbortSignal, backend?: Agent.BackendIdentity): Promise<NativeOutputPage> {
   const owner = { serviceNodeId: node, backend };
-  const scope = canonical([node, threadId, selectedTurn, nativeBackendKey(backend)]), prior = parseCursor(cursor, scope);
-  if (!prior) completeTurns.delete(client);
+  const scope = outputScope(node, threadId, selectedTurn, backend), prior = parseCursor(cursor, scope);
   const bounded = AbortSignal.any([signal, AbortSignal.timeout(35000)]);
+  bounded.throwIfAborted();
+  if (!prior) completeTurns.delete(client);
   const encode = (value: Omit<Cursor, 'format' | 'scope'>) => canonical({ format: 'ivy-native-output-1', scope, ...value });
   if (!prior || prior.mode === 'items') {
     try {
@@ -126,29 +133,38 @@ export async function readNativeOutputPage(client: RpcClient, node: string, thre
     }
   }
   const cached = completeTurns.get(client);
-  let page;
+  let page, verified: CompleteTurnCache | undefined;
   if (prior?.mode === 'full' && prior.offset > 0 && cached?.scope === scope && cached.epoch === epoch && cached.cursor === nativeCursor && cached.turnHash === prior.turnHash) {
     const metadata = await read(nativeCursor, 'notLoaded');
     if (!metadata.turn || turnStamp(metadata.turn) !== cached.stamp || metadata.next !== cached.page.next)
       return fail('Saved output changed or moved between item groups. Reload saved output.');
     page = cached.page;
+    verified = cached;
   } else page = await read(nativeCursor, 'full');
   await checkOwner();
+  bounded.throwIfAborted();
   if (!page.turn) {
     if (selectedTurn || prior?.offset) return fail('The requested saved turn is no longer on this page. Reload saved output.');
     return { items: [], nextCursor: null, mode: 'full', detail: page.unmaterialized ? 'Saved history becomes available after the first message.' : 'No saved turn is available.', download: null };
   }
-  const turn = page.turn, items = turn.items as Wire.Json[], ids = new Set<string>();
-  for (const item of items) { const id = text(record(item).id); if (!id || ids.has(id)) return fail('The complete turn has missing or duplicate item identities.'); ids.add(id); }
-  const turnHash = await hash(turn), offset = prior?.mode === 'full' ? prior.offset : 0;
+  const turn = page.turn, items = turn.items as Wire.Json[];
+  if (!verified) {
+    const ids = new Set<string>();
+    for (const item of items) { const id = text(record(item).id); if (!id || ids.has(id)) return fail('The complete turn has missing or duplicate item identities.'); ids.add(id); }
+  }
+  const turnHash = verified?.turnHash ?? await hash(turn), offset = prior?.mode === 'full' ? prior.offset : 0;
+  bounded.throwIfAborted();
   if (selectedTurn && turn.id !== selectedTurn || prior?.mode === 'full' && prior.turnId !== null && (turn.id !== prior.turnId || turnHash !== prior.turnHash) || offset > 0 && offset >= items.length)
     return fail('Saved output changed or moved between item groups. Reload saved output.');
   const end = Math.min(offset + 50, items.length);
-  if (['completed', 'failed', 'interrupted'].includes(text(turn.status)) && typeof turn.completedAt === 'number' && Number.isFinite(turn.completedAt))
-    completeTurns.set(client, { scope, epoch, cursor: nativeCursor, turnHash, stamp: turnStamp(turn), page: { ...page, turn } });
+  const download = verified?.download ?? { name: 'native-turn-' + text(turn.id).replace(/[^a-zA-Z0-9_-]/g, '_') + '.json', raw: canonical(page.observed) };
+  if (!verified && ['completed', 'failed', 'interrupted'].includes(text(turn.status)) && typeof turn.completedAt === 'number' && Number.isFinite(turn.completedAt)) {
+    freezeJson(page.observed);
+    completeTurns.set(client, { scope, epoch, cursor: nativeCursor, turnHash, stamp: turnStamp(turn), page: { ...page, turn }, download });
+  }
   const next = end < items.length ? encode({ mode: 'full', nativeCursor, epoch, offset: end, turnId: text(turn.id), turnHash })
     : !selectedTurn && page.next !== null ? encode({ mode: 'full', nativeCursor: page.next, epoch, offset: 0, turnId: null, turnHash: null }) : null;
   return { items: items.slice(offset, end).map(item => ({ item, turnId: turn.id! })), nextCursor: next, mode: 'full',
     detail: `Complete native turn · showing ${items.length ? offset + 1 : 0}–${end} of ${items.length} items.`,
-    download: { name: 'native-turn-' + text(turn.id).replace(/[^a-zA-Z0-9_-]/g, '_') + '.json', raw: canonical(page.observed) } };
+    download: { ...download } };
 }

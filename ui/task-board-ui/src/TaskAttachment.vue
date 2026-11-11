@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   Button,
   ContentView,
@@ -19,76 +19,90 @@ const props = defineProps<{
   attachment: TaskBoard.TaskAttachment;
   taskId: string;
   loadImage: (source: string) => Promise<string | null>;
+  imageUrl: string | null;
   previewImage: (source: string) => void;
 }>();
 const kind = computed(() =>
   attachmentView(props.attachment.filename, props.attachment.mediaType),
 );
+const canPreview = computed(() => kind.value !== "image" && kind.value !== "download");
 const busy = ref(false),
   error = ref<string | null>(null),
   previewUrl = ref<string | null>(null),
   previewText = ref<string | null>(null),
   dialogOpen = ref(false),
   htmlMode = ref<"preview" | "source">("preview");
-let cachedBytes: Uint8Array | null = null;
-const bytes = async () => {
-  cachedBytes ??= await attachmentBytes(props.attachment, props.taskId);
-  return cachedBytes;
+let controller: AbortController | undefined;
+let disposed = false;
+const releasePreview = () => {
+  controller?.abort(); controller = undefined;
+  if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
+  previewUrl.value = null;
+  previewText.value = null;
+  busy.value = false;
+  error.value = null;
 };
 const loadPreview = async () => {
-  if (
-    kind.value === "download" ||
-    previewUrl.value ||
-    previewText.value !== null
-  )
-    return;
+  const work = controller = new AbortController();
   busy.value = true;
   error.value = null;
   try {
-    if (kind.value === "image") {
-      previewUrl.value = await props.loadImage(attachmentSource(props.attachment.attachmentId));
-      if (!previewUrl.value) throw new Error("The saved attachment is unavailable.");
-      return;
-    }
-    const value = await bytes();
+    const value = await attachmentBytes(props.attachment, props.taskId, work.signal);
+    if (work.signal.aborted || controller !== work || !dialogOpen.value) return;
     if (kind.value === "markdown" || kind.value === "text" || kind.value === "html")
       previewText.value = new TextDecoder().decode(value);
     else
       previewUrl.value = URL.createObjectURL(
-        new Blob([new Uint8Array(value)], { type: props.attachment.mediaType }),
+        new Blob([value], { type: props.attachment.mediaType }),
       );
   } catch (cause) {
-    error.value =
+    if (!work.signal.aborted && controller === work) error.value =
       cause instanceof Error
         ? cause.message
         : "The saved attachment is unavailable.";
   } finally {
-    busy.value = false;
+    if (controller === work) { controller = undefined; busy.value = false; }
   }
 };
 const openPreview = () => {
+  if (busy.value) return;
   dialogOpen.value = true;
-  void loadPreview();
 };
+watch(dialogOpen, open => {
+  if (open) void loadPreview();
+  else releasePreview();
+}, { flush: "sync" });
 const download = async () => {
+  if (busy.value) return;
+  const work = controller = new AbortController();
   busy.value = true;
   error.value = null;
   try {
-    saveBytes(await bytes(), props.attachment.filename);
+    const value = await attachmentBytes(props.attachment, props.taskId, work.signal);
+    if (!work.signal.aborted && controller === work) saveBytes(value, props.attachment.filename);
   } catch (cause) {
-    error.value =
+    if (!work.signal.aborted && controller === work) error.value =
       cause instanceof Error
         ? cause.message
         : "The saved attachment is unavailable.";
   } finally {
-    busy.value = false;
+    if (controller === work) { controller = undefined; busy.value = false; }
   }
 };
-onMounted(() => {
-  if (kind.value === "image" || kind.value === "video") void loadPreview();
+onMounted(async () => {
+  if (kind.value !== "image") return;
+  busy.value = true;
+  try {
+    if (!await props.loadImage(attachmentSource(props.attachment.attachmentId))) throw new Error("The saved attachment is unavailable.");
+  } catch (cause) {
+    if (!disposed) error.value = cause instanceof Error ? cause.message : "The saved attachment is unavailable.";
+  } finally {
+    if (!disposed) busy.value = false;
+  }
 });
 onBeforeUnmount(() => {
-  if (previewUrl.value && kind.value !== "image") URL.revokeObjectURL(previewUrl.value);
+  disposed = true;
+  releasePreview();
 });
 </script>
 
@@ -101,7 +115,7 @@ onBeforeUnmount(() => {
       />
       <span class="min-w-0 flex-1 break-all text-sm">
         <button
-          v-if="kind === 'markdown' || kind === 'html' || kind === 'text' || kind === 'pdf'"
+          v-if="canPreview"
           type="button"
           class="text-left underline-offset-2 hover:underline"
           :disabled="busy"
@@ -116,7 +130,7 @@ onBeforeUnmount(() => {
         >
       </span>
       <Button
-        v-if="kind === 'markdown' || kind === 'html' || kind === 'text' || kind === 'pdf'"
+        v-if="canPreview"
         type="button"
         variant="outline"
         size="sm"
@@ -134,27 +148,20 @@ onBeforeUnmount(() => {
       >
     </div>
     <p
-      v-if="busy && (kind === 'image' || kind === 'video')"
+      v-if="busy && kind === 'image'"
       role="status"
       class="text-sm text-muted-foreground"
     >
       Loading preview…
     </p>
     <button
-      v-if="previewUrl && kind === 'image'"
+      v-if="imageUrl && kind === 'image'"
       type="button"
       class="block max-w-full rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       :aria-label="'Enlarge ' + attachment.filename"
       @click="previewImage(attachmentSource(attachment.attachmentId))"
-    ><img :src="previewUrl" :alt="attachment.filename" class="max-h-80 max-w-full rounded-md object-contain" /></button>
-    <video
-      v-if="previewUrl && kind === 'video'"
-      :src="previewUrl"
-      controls
-      preload="metadata"
-      class="max-h-80 max-w-full rounded-md"
-      :aria-label="attachment.filename"
-    />
+    ><img :src="imageUrl" :alt="attachment.filename" class="max-h-80 max-w-full rounded-md object-contain" /></button>
+    <Button v-if="kind === 'image' && !imageUrl && !busy" type="button" variant="outline" size="sm" :aria-label="'Enlarge ' + attachment.filename" @click="previewImage(attachmentSource(attachment.attachmentId))">Preview image</Button>
     <p v-if="error" role="alert" class="text-sm text-destructive">
       {{ error }}
     </p>
@@ -189,6 +196,14 @@ onBeforeUnmount(() => {
         :src="previewUrl"
         :title="attachment.filename"
         class="h-[70dvh] w-full rounded-md border"
+      />
+      <video
+        v-if="previewUrl && kind === 'video'"
+        :src="previewUrl"
+        controls
+        preload="metadata"
+        class="max-h-[70dvh] max-w-full rounded-md"
+        :aria-label="attachment.filename"
       />
     </DialogContent>
   </Dialog>

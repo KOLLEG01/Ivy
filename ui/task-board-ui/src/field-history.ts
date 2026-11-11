@@ -1,5 +1,5 @@
 import type { ChangeEntry, FieldChange } from '../../../packages/ui/src/lib/change-history.js';
-import type { Operation, TaskBoard } from '../../../packages/contracts/src/generated.js';
+import type { Operation, TaskBoard } from '../../../packages/sdk/src/client.js';
 
 export type TaskHistoryFields = Pick<TaskBoard.Task, 'fields' | 'workflowState' | 'wakeAt' | 'dependencies' | 'lastHistory' | 'publication'>;
 

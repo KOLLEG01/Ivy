@@ -33,7 +33,7 @@ import { objectParentScope } from "../../../packages/ui-client/src/live";
 import { nativeRead } from '../../../packages/ui-client/src/native';
 import { useCommentVisibility } from './comment-visibility';
 import { and, base, client, tr } from "./runtime";
-import type { TaskBoard } from "./runtime";
+import type { Operation, TaskBoard } from "./runtime";
 import { taskFilter } from "./task-filter";
 import { prefetchTask } from './task-read';
 import {
@@ -50,6 +50,7 @@ import {
   transitions,
 } from "./board";
 import type { BoardTransition, Placement, TransitionContext } from "./board";
+import type { BoardProjection } from './board-actions';
 const props = defineProps<{
   workspace: TaskBoard.WorkspaceInfo;
   query: URLSearchParams;
@@ -59,7 +60,10 @@ const props = defineProps<{
   disabled: boolean;
   active?: boolean;
   pendingTaskId?: string | null;
+  blockedTaskIds?: string[];
+  projections?: BoardProjection[];
   archiveDisabled?: boolean;
+  archiveAllDisabled?: boolean;
   swimlane: string;
   lanes?: string[];
   collapsedLanes?: string[];
@@ -69,10 +73,11 @@ const props = defineProps<{
   archived?: boolean;
 }>();
 const emit = defineEmits<{
-  transition: [id: string, action: BoardTransition];
-  drag: [value: { id: string; context: TransitionContext } | null];
+  transition: [id: string, action: BoardTransition, card: TaskBoard.TaskCardView];
+  drag: [value: { id: string; context: TransitionContext; card: TaskBoard.TaskCardView } | null];
+  cards: [cards: TaskBoard.TaskCardView[]];
   reorder: [id: string, placement: Placement];
-  archive: [id: string];
+  archive: [id: string, card: TaskBoard.TaskCardView];
   archiveAll: [];
 }>();
 // Each column is ordered by hand (the Hive sibling position) or by priority; the backlog starts
@@ -97,6 +102,21 @@ const manual = computed(() => !props.archived && order.value === "manual");
 const ranked = computed(() => manual.value && props.workspace.role === "user");
 const showCrossAgent = useCommentVisibility();
 const serviceScope = (node: string) => 'services/task-board/' + node;
+const cardItem = (view: TaskBoard.TaskCardView) => {
+  const task = view.task, fields = task.fields;
+  return {
+    id: view.object.objectId, card: view, placementPending: false, taskKey: task.taskKey, title: fields.title, category: fields.category ?? '',
+    priority: fields.priority, control: fields.control,
+    requestedEnvironment: fields.executionRequirement?.kind === 'host' ? fields.executionRequirement.hostId : '',
+    resolvedHost: task.claim?.target.hostId ?? '', condition: view.executionCondition.state,
+    conditionDetail: view.executionCondition.detail, openQuestionCount: task.openQuestionCount ?? 0,
+    nextReviewAt: task.wakeAt ?? '', dueAt: fields.dueAt ?? '',
+    commentCount: view.commentCount, directCommentCount: view.directCommentCount,
+    group: props.column.id === 'waiting' && !props.archived ? waitingGroup(task, view.executionCondition) : '',
+    context: { workflowState: task.workflowState, control: fields.control, claimed: !!task.claim,
+      waiting: task.runtimeWait?.reason ?? '', hasResult: !!task.latestResult, publishing: !!task.publication },
+  };
+};
 const pages = usePage(async (signal, cursor) => {
   const waiting = props.column.id === 'waiting' && !props.archived;
   const result = await nativeRead(client, props.workspace.serviceNodeId, 'task-board.list', {
@@ -112,21 +132,9 @@ const pages = usePage(async (signal, cursor) => {
     // Hive always breaks sort ties by object ID; an explicit fourth field exceeds the query contract.
     limit: 20, ...(cursor ? { cursor } : {}),
   }, signal) as TaskBoard.CardListResult;
-  const items = result.items.map(view => {
-    const task = view.task, fields = task.fields;
-    return {
-      id: view.object.objectId, taskKey: task.taskKey, title: fields.title, category: fields.category ?? '',
-      priority: fields.priority, control: fields.control,
-      requestedEnvironment: fields.executionRequirement?.kind === 'host' ? fields.executionRequirement.hostId : '',
-      resolvedHost: task.claim?.target.hostId ?? '', condition: view.executionCondition.state,
-      conditionDetail: view.executionCondition.detail, openQuestionCount: task.openQuestionCount ?? 0,
-      nextReviewAt: task.wakeAt ?? '', dueAt: fields.dueAt ?? '',
-      commentCount: view.commentCount, directCommentCount: view.directCommentCount,
-      group: waiting ? waitingGroup(task, view.executionCondition) : '',
-      context: { workflowState: task.workflowState, control: fields.control, claimed: !!task.claim,
-        waiting: task.runtimeWait?.reason ?? '', hasResult: !!task.latestResult, publishing: !!task.publication },
-    };
-  });
+  signal.throwIfAborted();
+  emit('cards', result.items);
+  const items = result.items.map(cardItem);
   if (waiting) items.sort((a, b) => waitingGroups.findIndex(group => group.id === a.group) - waitingGroups.findIndex(group => group.id === b.group));
   return { nextCursor: result.nextCursor, items };
 }, 15000, () => 'ivy.task-board.cards:' + JSON.stringify([base.href, order.value, props.workspace.serviceNodeId,
@@ -137,7 +145,7 @@ const pages = usePage(async (signal, cursor) => {
 watch([order, () => props.swimlane], pages.reset);
 const paginated = computed(() => !!pages.value.value?.nextCursor || pages.page.value > 1);
 
-type Item = { id: string; category: string; group: string; context: TransitionContext };
+type Item = { id: string; category: string; group: string; context: TransitionContext; card: TaskBoard.TaskCardView; placementPending: boolean };
 const dragging = ref<Item | null>(null),
   marker = ref<{ id: string; after: boolean } | null>(null);
 const startDrag = (event: DragEvent, item: Item) => {
@@ -156,9 +164,16 @@ const endDrag = () => {
   emit("drag", null);
 };
 const lane = (category: string) => category || "Uncategorized";
-const items = computed(() => (pages.value.value?.items ?? []).map(item => ({ ...item,
-  commentCount: showCrossAgent.value ? item.commentCount : item.directCommentCount,
-})));
+const items = computed(() => {
+  const values = new Map((pages.value.value?.items ?? []).map(item => [item.id, item]));
+  for (const projection of props.projections ?? []) {
+    const id = projection.card.object.objectId, present = values.has(id);
+    values.delete(id);
+    if (!!projection.archived === !!props.archived && (props.archived || props.column.states.includes(projection.state)) && (present || pages.page.value === 1))
+      values.set(id, { ...cardItem(projection.card), placementPending: !present });
+  }
+  return [...values.values()].map(item => ({ ...item, commentCount: showCrossAgent.value ? item.commentCount : item.directCommentCount }));
+});
 const sections = computed(() => (props.lanes ?? (props.swimlane === 'category' && !props.archived
   ? [...new Set(items.value.map(item => lane(item.category)))] : [''])).map(id => {
   const values = props.swimlane === 'category' && !props.archived ? items.value.filter(item => lane(item.category) === id) : items.value;
@@ -169,7 +184,7 @@ const sections = computed(() => (props.lanes ?? (props.swimlane === 'category' &
 }));
 // Neighbours within the same swimlane, so ranking never jumps across categories.
 const sameLane = (a: Item, b: Item | undefined) =>
-  !!b && a.group === b.group && (props.swimlane !== "category" || lane(a.category) === lane(b.category));
+  !!b && !a.placementPending && !b.placementPending && !taskDisabled(a.id) && !taskDisabled(b.id) && a.group === b.group && (props.swimlane !== "category" || lane(a.category) === lane(b.category));
 const previous = (index: number) =>
   sameLane(items.value[index]!, items.value[index - 1]) ? items.value[index - 1] : undefined;
 const next = (index: number) =>
@@ -179,7 +194,7 @@ const moreBelow = (index: number) =>
 // Dropping on the upper half of a row places the Task before it, on the lower half after it.
 const dragOver = (event: DragEvent, task: Item) => {
   const source = dragging.value;
-  if (!ranked.value || props.disabled || !source || source.id === task.id || !sameLane(source, task)) return;
+  if (!ranked.value || taskDisabled(task.id) || !source || source.id === task.id || !sameLane(source, task)) return;
   const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
   event.preventDefault();
   event.stopPropagation();
@@ -198,13 +213,31 @@ const actions = (item: { context: TransitionContext }) =>
   props.archived || props.workspace.role !== "user"
     ? []
     : transitions(item.context);
-const taskDisabled = (id: string) => props.disabled || id === props.pendingTaskId;
-const movable = (item: { id: string; context: TransitionContext }) =>
+const taskDisabled = (id: string) => props.disabled || id === props.pendingTaskId || !!props.blockedTaskIds?.includes(id) ||
+  !props.archived && items.value.some(item => item.id === id && !props.column.states.includes(item.context.workflowState));
+const movable = (item: { id: string; context: TransitionContext; placementPending?: boolean }) =>
   !props.archived &&
+  !item.placementPending &&
   !taskDisabled(item.id) &&
   props.workspace.role === "user" &&
   (ranked.value || transitions(item.context).length > 0);
-defineExpose({ refresh: pages.invalidate });
+const reveal = (state: string) => { if (props.column.states.includes(state) && pages.page.value > 1) pages.reset(); };
+// Before retiring an archive watermark, replace the held visible page. Inactive
+// columns retain no old body that could reappear when they are opened later.
+const settle = async (observation?: Operation.ObjectObservation) => {
+  if (document.hidden) return false;
+  if (props.active === false || props.lanes?.length && props.lanes.every(lane => props.collapsedLanes?.includes(lane))) {
+    pages.value.value = null;
+    return true;
+  }
+  const previous = pages.value.value;
+  await pages.refresh();
+  const current = pages.value.value;
+  return !pages.loading.value && !pages.error.value && !!current && current !== previous && (!observation || current.items.every(item =>
+    item.card.observation?.runtimeEpoch === observation.runtimeEpoch && item.card.observation.sequence >= observation.sequence));
+};
+defineExpose({ refresh: pages.invalidate, reveal, settle,
+  findCard: (id: string) => pages.value.value?.items.find(item => item.card.object.objectId === id)?.card ?? null });
 </script>
 <template>
   <section
@@ -241,12 +274,12 @@ defineExpose({ refresh: pages.invalidate });
       >
       <DropdownMenu v-if="column.id === 'done' && workspace.role === 'user'">
         <DropdownMenuTrigger as-child>
-          <Button variant="ghost" size="icon-sm" aria-label="Done actions" :disabled="disabled || archiveDisabled">
+          <Button variant="ghost" size="icon-sm" aria-label="Done actions" :disabled="disabled || archiveAllDisabled">
             <MoreHorizontal aria-hidden="true" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          <DropdownMenuItem :disabled="disabled || archiveDisabled || !count" @select="emit('archiveAll')">
+          <DropdownMenuItem :disabled="disabled || archiveAllDisabled || !count" @select="emit('archiveAll')">
             <Archive aria-hidden="true" />Archive all tasks
           </DropdownMenuItem>
           <ArchiveOutputsHint />
@@ -441,9 +474,9 @@ defineExpose({ refresh: pages.invalidate });
                 v-for="item in actions(task)"
                 :key="item.action"
                 :disabled="taskDisabled(task.id)"
-                @select="emit('transition', task.id, item.action)"
+                @select="emit('transition', task.id, item.action, task.card)"
                 >{{ item.label }}</DropdownMenuItem
-              ><template v-if="ranked"
+              ><template v-if="ranked && !task.placementPending"
                 ><DropdownMenuSeparator /><DropdownMenuItem
                   v-if="previous(items.indexOf(task)) || pages.page.value > 1"
                   :disabled="taskDisabled(task.id)"
@@ -467,7 +500,7 @@ defineExpose({ refresh: pages.invalidate });
                 ></template
               ><template v-if="!archived && workspace.role === 'user' && ['done', 'cancelled'].includes(task.context.workflowState)">
                 <DropdownMenuSeparator />
-                <DropdownMenuItem :disabled="taskDisabled(task.id) || archiveDisabled || task.context.claimed || task.context.publishing" @select="emit('archive', task.id)">
+                <DropdownMenuItem :disabled="taskDisabled(task.id) || archiveDisabled || task.context.claimed || task.context.publishing" @select="emit('archive', task.id, task.card)">
                   <Archive aria-hidden="true" />Archive task
                 </DropdownMenuItem>
                 <ArchiveOutputsHint />

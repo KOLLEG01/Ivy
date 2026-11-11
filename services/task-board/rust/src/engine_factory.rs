@@ -956,9 +956,7 @@ impl<
                     }
                     items[0].required("objectId")?.clone()
                 };
-                let header = current_reads
-                    .read_document("task-board/task", &address, true, true, true)
-                    .await?;
+                let header = current_reads.observed_task_header(&address).await?;
                 comment_reads::read_task(current_reads, conversation, &header, &query).await
             })
         };

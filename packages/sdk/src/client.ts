@@ -20,7 +20,7 @@ import {
   operationId,
   parseOperationId,
 } from "../../contracts/src/operation-id.js";
-import { canonical } from "../../contracts/src/canonical-json.js";
+import { canonical, canonicalMatches } from "../../contracts/src/canonical-json.js";
 import { nativeVersions } from "../../contracts/src/native-versions.js";
 import {
   validateProviderNotificationFrame,
@@ -43,8 +43,10 @@ export type {
 export { IvyError, requireThat } from "../../contracts/src/errors.js";
 export { upgradeTaskRecord, upgradeRunRecord, upgradeCommentRecord, upgradeConfigurationRecord, upgradeResultRecord, upgradeResultContent } from "../../contracts/src/task-board-records.js";
 export { openTaskQuestions } from "../../contracts/src/task-board-questions.js";
+export { sameNativeBackend } from "../../contracts/src/native-backend-identity.js";
 export {
   canonical,
+  canonicalMatches,
   deriveOperationId,
   operationId,
   parseOperationId,
@@ -238,9 +240,10 @@ export function callBound(
 }
 
 const toolClients = new WeakMap<RpcClient, Map<string, BoundToolClient>>();
-function freezeBinding(value: unknown): void {
+/** Share already validated JSON as an immutable snapshot without copying it. */
+export function freezeJson(value: unknown): void {
   if (!value || typeof value !== "object" || Object.isFrozen(value)) return;
-  for (const child of Object.values(value)) freezeBinding(child);
+  for (const child of Object.values(value)) freezeJson(child);
   Object.freeze(value);
 }
 
@@ -318,7 +321,7 @@ export class BoundToolClient {
           "target_conflict",
           "Discovery returned another selected provider.",
         );
-        freezeBinding(binding);
+        freezeJson(binding);
         return binding;
       });
       this.bindings.set(qualifiedName, pending);
@@ -387,7 +390,7 @@ export class BoundToolClient {
       });
       if (fresh.definitionHash === binding.definitionHash || fresh.definition.annotations?.readOnlyHint !== true ||
           fresh.definition.interfaceVersion !== binding.definition.interfaceVersion) throw error;
-      freezeBinding(fresh);
+      freezeJson(fresh);
       const pending = this.bindings.get(binding.qualifiedName);
       if (pending && await pending === binding && this.bindings.get(binding.qualifiedName) === pending)
         this.bindings.set(binding.qualifiedName, Promise.resolve(fresh));

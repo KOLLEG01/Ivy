@@ -16,14 +16,12 @@ use crate::{
     operations::{Document, TaskChange},
     wake::{WakeStore, dependency_snapshot, peer_comment},
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
-    checked_native_contract::CheckedNativeContracts,
-    hash::{digest, hash_json},
-    json::canonical_equal,
+    checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical_equal,
     limits::MANAGEMENT_FRAME_BYTES,
 };
+use ivy_host_runtime::base64_content::Base64Content;
 use ivy_sdk::rpc::RpcClient;
 
 #[allow(async_fn_in_trait)]
@@ -33,7 +31,7 @@ pub trait ActionStore: LifecycleStore + WakeStore {
         task: &JsString,
         operation: &JsString,
         attachment: &JsString,
-        bytes: &[u8],
+        content: &Base64Content<'_>,
     ) -> IvyResult<Json>;
 }
 impl<
@@ -49,10 +47,10 @@ impl<
         task: &JsString,
         operation: &JsString,
         attachment: &JsString,
-        bytes: &[u8],
+        content: &Base64Content<'_>,
     ) -> IvyResult<Json> {
         self.journal
-            .write_attachment(task, operation, attachment, bytes)
+            .write_attachment(task, operation, attachment, content)
             .await
     }
 }
@@ -293,21 +291,20 @@ pub fn result_comment_fits(
         Err(e) => Err(e),
     }
 }
-fn bytes(request: &Json) -> IvyResult<Vec<u8>> {
-    // The mandatory action admission already checked canonical base64 and its
-    // size before reservation. Recovery reuses that same admitted request.
-    STANDARD
-        .decode(s(request, "bytesBase64")?.to_utf8()?)
-        .map_err(|_| IvyError::internal())
-}
-fn attachment(request: &Json, object: Json, bytes: &[u8], actor: &Json, at: &JsString) -> Json {
+fn attachment(
+    request: &Json,
+    object: Json,
+    content: &Base64Content<'_>,
+    actor: &Json,
+    at: &JsString,
+) -> Json {
     Json::object([
         ("attachmentId", f(request, "attachmentId").clone()),
         ("object", object),
         ("filename", f(request, "filename").clone()),
         ("mediaType", f(request, "mediaType").clone()),
-        ("byteLength", Json::Number(bytes.len() as f64)),
-        ("contentHash", digest(bytes).into()),
+        ("byteLength", Json::Number(content.byte_length() as f64)),
+        ("contentHash", content.content_hash().into()),
         ("uploader", actor.clone()),
         ("createdAt", Json::String(at.clone())),
     ])
@@ -710,14 +707,25 @@ impl<S: ActionStore, P: ActionPolicies, L: ActionRestore> TaskActions<'_, S, P, 
             projected.insert("lastHistory", steps.pin()?);
             validate_task_content(&projected, id)?;
         }
+        let original_upload =
+            crate::operations::original_upload_request(self.store, operation).await?;
+        let upload_request = original_upload.as_ref().unwrap_or(request);
+        let upload = if eq(request, "action", "uploadAttachment") {
+            Some(
+                Base64Content::inspect(s(upload_request, "bytesBase64")?, 8 * 1024 * 1024)
+                    .map_err(|_| IvyError::internal())?,
+            )
+        } else {
+            None
+        };
         if first && eq(request, "action", "uploadAttachment") {
             let mut projected = next.clone();
-            let data = bytes(request)?;
+            let content = upload.as_ref().ok_or_else(IvyError::internal)?;
             projected.insert(
                 "attachments",
                 append(
                     f(previous, "attachments"),
-                    attachment(request, steps.pin()?, &data, actor, at),
+                    attachment(request, steps.pin()?, content, actor, at),
                 )?,
             );
             projected.insert("lastHistory", steps.pin()?);
@@ -1176,17 +1184,17 @@ impl<S: ActionStore, P: ActionPolicies, L: ActionRestore> TaskActions<'_, S, P, 
                 }
             }
             "uploadAttachment" => {
-                let data = bytes(request)?;
+                let content = upload.as_ref().ok_or_else(IvyError::internal)?;
                 let object = self
                     .store
                     .write_attachment(
                         id,
                         s(request, "operationId")?,
                         s(request, "attachmentId")?,
-                        &data,
+                        content,
                     )
                     .await?;
-                let item = attachment(request, object, &data, actor, at);
+                let item = attachment(request, object, content, actor, at);
                 next.insert(
                     "attachments",
                     append(f(previous, "attachments"), item.clone())?,

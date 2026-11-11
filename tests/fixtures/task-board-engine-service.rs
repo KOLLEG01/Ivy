@@ -52,9 +52,6 @@ impl ServiceRuntime for Runtime<'_> {
     fn observed_at(&self) -> JsString {
         "2026-01-02T03:04:05.006Z".into()
     }
-    fn task_changed(&self) {
-        self.replay.call("taskChanged", []).unwrap();
-    }
     fn kick(&self) {
         self.replay.call("kick", []).unwrap();
     }

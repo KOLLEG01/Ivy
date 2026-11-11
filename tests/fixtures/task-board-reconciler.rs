@@ -122,6 +122,8 @@ struct World<'a> {
     source_checks: Cell<usize>,
     source_gaps: Cell<usize>,
     routing_source: RefCell<Option<Json>>,
+    archived_tasks: RefCell<Vec<JsString>>,
+    header_failure: RefCell<Option<IvyError>>,
 }
 impl<'a> World<'a> {
     fn new(input: &'a Json) -> Self {
@@ -213,12 +215,24 @@ impl<'a> World<'a> {
             source_checks: Cell::new(0),
             source_gaps: Cell::new(num(input, "sourceGaps") as usize),
             routing_source: RefCell::new(input.get("routingSource").cloned()),
+            archived_tasks: RefCell::default(),
+            header_failure: RefCell::default(),
         }
     }
     fn event(&self, args: impl IntoIterator<Item = Json>) {
         self.trace
             .borrow_mut()
             .push(Json::Array(args.into_iter().collect()));
+    }
+    fn active_task(&self, id: &JsString) -> IvyResult<()> {
+        if self.archived_tasks.borrow().contains(id) {
+            Err(IvyError::new(
+                "task_board_record_archived",
+                "An archived workflow record is not writable workflow state.",
+            ))
+        } else {
+            Ok(())
+        }
     }
     fn fail(&self, where_: &str) -> IvyResult<()> {
         let fault = f(self.input, "fault");
@@ -309,6 +323,18 @@ impl Store for World<'_> {
             parent_id: Some("root".into()),
         })
     }
+    async fn read_task_header(&self, address: &Json, primary: bool) -> IvyResult<Document> {
+        assert!(
+            primary,
+            "Archive confirmation must retain the primary scope guard"
+        );
+        self.event(["header".into(), address.clone()]);
+        if let Some(error) = self.header_failure.borrow().clone() {
+            return Err(error);
+        }
+        self.active_task(address.as_js_string().unwrap())?;
+        self.read("task-board/task", address, primary).await
+    }
     async fn write(&self, _: &str, _: &Json, _: &str, _: &Json) -> IvyResult<Json> {
         panic!("No writes")
     }
@@ -370,9 +396,13 @@ impl AllocationStore for World<'_> {
             .map(|s| s.to_utf8().unwrap().parse::<usize>().unwrap())
             .unwrap_or(0);
         let limit = num(o, "limit") as usize;
+        let ids: Vec<_> = self.ids[l]
+            .iter()
+            .filter(|id| l != 2 || !self.archived_tasks.borrow().contains(id))
+            .collect();
         let next = if l == 0 && count == num(self.input, "regressPage") as usize {
             f(o, "cursor").clone()
-        } else if start + limit < self.ids[l].len() {
+        } else if start + limit < ids.len() {
             (start + limit).to_string().into()
         } else {
             Json::Null
@@ -381,13 +411,12 @@ impl AllocationStore for World<'_> {
             (
                 "items",
                 Json::Array(
-                    self.ids[l]
-                        .iter()
+                    ids.iter()
                         .skip(start)
                         .take(limit)
                         .map(|id| {
                             Json::object([
-                                ("objectId", Json::String(id.clone())),
+                                ("objectId", Json::String((*id).clone())),
                                 ("revision", Json::Number(1.0)),
                             ])
                         })
@@ -457,7 +486,12 @@ impl ReconcileEngine for World<'_> {
     async fn route_task_questions(&self, id: &JsString) -> IvyResult<()> {
         if self.input.get("routing").is_some() {
             self.event(["route".into(), Json::String(id.clone())]);
-            self.fail("route")?;
+            self.active_task(id)?;
+            let routed = self.fail("route");
+            if flag(self.input, "archiveAfterRouting") {
+                self.archived_tasks.borrow_mut().push(id.clone());
+            }
+            routed?;
             if self.routing_source.borrow().is_some() {
                 ivy_task_board::task_routing::QuestionRouting::default()
                     .route(self, id)
@@ -467,6 +501,9 @@ impl ReconcileEngine for World<'_> {
         Ok(())
     }
     async fn adopt_direct_turn(&self, id: &JsString) -> IvyResult<Option<JsString>> {
+        if self.active_task(id).is_err() {
+            return Ok(None);
+        }
         if self.input.get("adoption").is_some() {
             self.event(["adopt".into(), Json::String(id.clone())]);
             self.fail("adopt")?;
@@ -475,7 +512,7 @@ impl ReconcileEngine for World<'_> {
         Ok(None)
     }
     fn direct_turn_notification(&self, _: &Json) -> bool {
-        false
+        flag(self.input, "notifications")
     }
     fn service_node_id(&self) -> &JsString {
         &self.service
@@ -511,11 +548,353 @@ impl ReconcileEngine for World<'_> {
         self.work("signals", id).await
     }
     async fn schedule(&self, id: &JsString) -> IvyResult<()> {
+        self.active_task(id)?;
         self.work("schedule", id).await
     }
     async fn delivery(&self, id: &JsString) -> IvyResult<()> {
         self.work("delivery", id).await
     }
+}
+
+#[test]
+fn archived_candidates_after_a_captured_task_page_do_not_leave_failures_or_starve_work() {
+    let input = Json::object([
+        (
+            "counts",
+            Json::Array(vec![0.0.into(), 0.0.into(), 12.0.into(), 0.0.into()]),
+        ),
+        ("routing", true.into()),
+        ("notifications", true.into()),
+    ]);
+    let world = World::new(&input);
+    let tasks = Tasks::default();
+    let subject = Reconciler::new(&world, &world, &tasks);
+    let waker = Waker::from(Arc::new(Noop));
+    let mut cx = Context::from_waker(&waker);
+    for _ in 0..5 {
+        let mut tick = Box::pin(subject.tick());
+        assert!(tick.as_mut().poll(&mut cx).is_ready());
+    }
+    // The page has twelve identities, but only ten jobs have been admitted.
+    // Archive one admitted candidate before it runs, and one buffered candidate.
+    *world.archived_tasks.borrow_mut() = vec![id(100), id(110)];
+    for _ in 0..16 {
+        for _ in 0..8 {
+            tasks.pump(&mut cx);
+            world.release(None);
+        }
+        assert!(subject.notification(&Json::Null));
+        let mut tick = Box::pin(subject.tick());
+        assert!(tick.as_mut().poll(&mut cx).is_ready());
+    }
+    assert!(
+        subject.diagnostics().is_empty(),
+        "Confirmed archived scan candidates must not leave failures after later pages exclude them: {:?}",
+        subject.diagnostics()
+    );
+    let scheduled_ids = |trace: &[Json]| -> std::collections::HashSet<JsString> {
+        trace
+            .iter()
+            .filter_map(|event| {
+                let args = event.as_array()?;
+                args[0]
+                    .is_str("schedule")
+                    .then(|| args[1].as_js_string().unwrap().clone())
+            })
+            .collect()
+    };
+    let current = scheduled_ids(&world.trace.borrow());
+    assert_eq!(current.len(), 10);
+    assert!(!current.contains(&id(100)) && !current.contains(&id(110)));
+    // Restoring the records lets a subsequent scan use the same identities.
+    world.archived_tasks.borrow_mut().clear();
+    assert!(subject.notification(&Json::Null));
+    for _ in 0..16 {
+        for _ in 0..8 {
+            tasks.pump(&mut cx);
+            world.release(None);
+        }
+        let mut tick = Box::pin(subject.tick());
+        assert!(tick.as_mut().poll(&mut cx).is_ready());
+    }
+    for _ in 0..8 {
+        tasks.pump(&mut cx);
+        world.release(None);
+    }
+    assert_eq!(scheduled_ids(&world.trace.borrow()).len(), 12);
+    assert!(subject.diagnostics().is_empty());
+    let mut stop = Box::pin(subject.stop());
+    assert!(stop.as_mut().poll(&mut cx).is_ready());
+}
+
+#[test]
+fn archive_confirmation_preserves_active_unreadable_and_unknown_task_failures() {
+    let archived = || IvyError::new("task_board_record_archived", "Archive guard.");
+    for (archive_after_start, execution, header_failure) in [
+        (false, "not_executed", None),
+        (
+            true,
+            "not_executed",
+            Some(
+                IvyError::new("connection_closed", "Read unavailable.")
+                    .with_outcome(Outcome::Unknown),
+            ),
+        ),
+        (
+            true,
+            "not_executed",
+            Some(archived().with_outcome(Outcome::Unknown)),
+        ),
+        (true, "unknown", None),
+    ] {
+        let input = Json::object([
+            (
+                "counts",
+                Json::Array(vec![0.0.into(), 0.0.into(), 1.0.into(), 0.0.into()]),
+            ),
+            ("routing", true.into()),
+            (
+                "fault",
+                Json::object([
+                    ("where", "schedule".into()),
+                    ("code", "task_board_record_archived".into()),
+                    ("execution", execution.into()),
+                ]),
+            ),
+        ]);
+        let world = World::new(&input);
+        let tasks = Tasks::default();
+        let subject = Reconciler::new(&world, &world, &tasks);
+        let waker = Waker::from(Arc::new(Noop));
+        let mut cx = Context::from_waker(&waker);
+        for _ in 0..5 {
+            let mut tick = Box::pin(subject.tick());
+            assert!(tick.as_mut().poll(&mut cx).is_ready());
+        }
+        tasks.pump(&mut cx);
+        assert_eq!(world.holds.borrow().len(), 1);
+        if archive_after_start {
+            world.archived_tasks.borrow_mut().push(id(100));
+        }
+        *world.header_failure.borrow_mut() = header_failure;
+        world.release(None);
+        tasks.pump(&mut cx);
+        assert!(
+            subject.diagnostics().iter().any(|d| {
+                f(d, "code").is_str("task_board_record_archived")
+                    && f(f(d, "resource"), "objectId") == &Json::String(id(100))
+            }),
+            "An unconfirmed or unknown outcome must remain visible"
+        );
+        if execution == "unknown" {
+            assert!(
+                !world
+                    .trace
+                    .borrow()
+                    .iter()
+                    .any(|e| e.as_array().unwrap()[0].is_str("header"))
+            );
+        }
+        let mut stop = Box::pin(subject.stop());
+        assert!(stop.as_mut().poll(&mut cx).is_ready());
+    }
+}
+
+#[test]
+fn archive_confirmation_keeps_unknown_question_relay_outcomes() {
+    let input = Json::object([
+        (
+            "counts",
+            Json::Array(vec![0.0.into(), 0.0.into(), 1.0.into(), 0.0.into()]),
+        ),
+        ("routing", true.into()),
+        ("archiveAfterRouting", true.into()),
+        (
+            "fault",
+            Json::object([
+                ("where", "route".into()),
+                ("code", "task_board_record_archived".into()),
+                ("execution", "unknown".into()),
+            ]),
+        ),
+    ]);
+    let world = World::new(&input);
+    let tasks = Tasks::default();
+    let subject = Reconciler::new(&world, &world, &tasks);
+    let waker = Waker::from(Arc::new(Noop));
+    let mut cx = Context::from_waker(&waker);
+    for _ in 0..5 {
+        let mut tick = Box::pin(subject.tick());
+        assert!(tick.as_mut().poll(&mut cx).is_ready());
+    }
+    tasks.pump(&mut cx);
+    assert!(
+        subject.diagnostics().iter().any(|d| {
+            f(d, "code").is_str("task_board_record_archived")
+                && f(f(d, "resource"), "objectId")
+                    == &Json::from(format!("questions:{}", id(100).to_utf8().unwrap()))
+        }),
+        "A later source archive must not hide an unknown relay outcome"
+    );
+    let mut stop = Box::pin(subject.stop());
+    assert!(stop.as_mut().poll(&mut cx).is_ready());
+}
+
+#[test]
+fn archived_task_membership_does_not_discard_operation_run_or_delivery_recovery() {
+    for (work, counts, record) in [
+        ("recover", [1, 0, 0, 0], 200),
+        ("drain", [0, 1, 0, 0], 300),
+        ("delivery", [0, 0, 0, 1], 400),
+    ] {
+        let input = Json::object([
+            (
+                "counts",
+                Json::Array(counts.map(|n| Json::Number(n as f64)).to_vec()),
+            ),
+            (
+                "fault",
+                Json::object([
+                    ("where", work.into()),
+                    ("code", "task_board_record_archived".into()),
+                    ("execution", "unknown".into()),
+                    ("always", true.into()),
+                ]),
+            ),
+        ]);
+        let world = World::new(&input);
+        world.archived_tasks.borrow_mut().push(id(100));
+        let tasks = Tasks::default();
+        let subject = Reconciler::new(&world, &world, &tasks);
+        let waker = Waker::from(Arc::new(Noop));
+        let mut cx = Context::from_waker(&waker);
+        for _ in 0..12 {
+            let mut tick = Box::pin(subject.tick());
+            assert!(tick.as_mut().poll(&mut cx).is_ready());
+            drop(tick);
+            for _ in 0..8 {
+                tasks.pump(&mut cx);
+                world.release(None);
+            }
+        }
+        assert!(
+            subject.diagnostics().iter().any(|d| {
+                f(d, "code").is_str("task_board_record_archived")
+                    && f(f(d, "resource"), "objectId") == &Json::String(id(record))
+            }),
+            "Retained {work} work must not be discarded because its task was archived"
+        );
+        assert!(
+            !world
+                .trace
+                .borrow()
+                .iter()
+                .any(|e| e.as_array().unwrap()[0].is_str("header"))
+        );
+        let mut stop = Box::pin(subject.stop());
+        assert!(stop.as_mut().poll(&mut cx).is_ready());
+    }
+}
+
+#[test]
+fn continuous_changes_do_not_starve_unfinished_task_pages_or_later_candidates() {
+    for (count, page_size) in [(41, 50), (80, 17)] {
+        let input = Json::object([
+            (
+                "counts",
+                Json::Array(vec![
+                    0.0.into(),
+                    0.0.into(),
+                    (count as f64).into(),
+                    0.0.into(),
+                ]),
+            ),
+            ("pageSize", (page_size as f64).into()),
+            ("notifications", true.into()),
+        ]);
+        let world = World::new(&input);
+        let tasks = Tasks::default();
+        let subject = Reconciler::new(&world, &world, &tasks);
+        let waker = Waker::from(Arc::new(Noop));
+        let mut cx = Context::from_waker(&waker);
+        for _ in 0..200 {
+            // These hints arrive from independent active work, including while
+            // a bounded page still has candidates beyond the ten active jobs.
+            assert!(subject.notification(&Json::Null));
+            let mut tick = Box::pin(subject.tick());
+            assert!(tick.as_mut().poll(&mut cx).is_ready());
+            drop(tick);
+            for _ in 0..8 {
+                tasks.pump(&mut cx);
+                world.release(None);
+            }
+        }
+        let scheduled: std::collections::HashSet<_> = world
+            .trace
+            .borrow()
+            .iter()
+            .filter_map(|event| {
+                let fields = event.as_array()?;
+                fields[0].is_str("schedule").then(|| fields[1].clone())
+            })
+            .map(|id| id.as_js_string().unwrap().clone())
+            .collect();
+        assert_eq!(
+            scheduled.len(),
+            count,
+            "Every page must make progress under changes"
+        );
+    }
+}
+
+#[test]
+fn changes_during_a_page_read_keep_its_cursor_and_revisit_earlier_candidates() {
+    let input = Json::object([
+        (
+            "counts",
+            Json::Array(vec![0.0.into(), 0.0.into(), 2.0.into(), 0.0.into()]),
+        ),
+        ("pageSize", 1.0.into()),
+        ("pausePage", true.into()),
+        ("notifications", true.into()),
+    ]);
+    let world = World::new(&input);
+    let tasks = Tasks::default();
+    let subject = Reconciler::new(&world, &world, &tasks);
+    let waker = Waker::from(Arc::new(Noop));
+    let mut cx = Context::from_waker(&waker);
+    for _ in 0..4 {
+        let mut tick = Box::pin(subject.tick());
+        assert!(tick.as_mut().poll(&mut cx).is_ready());
+    }
+    let mut suspended = Box::pin(subject.tick());
+    assert!(suspended.as_mut().poll(&mut cx).is_pending());
+    assert!(subject.notification(&Json::Null));
+    world.page_gate.release();
+    assert!(suspended.as_mut().poll(&mut cx).is_ready());
+    drop(suspended);
+    for _ in 0..16 {
+        for _ in 0..8 {
+            tasks.pump(&mut cx);
+            world.release(None);
+        }
+        assert!(subject.notification(&Json::Null));
+        let mut tick = Box::pin(subject.tick());
+        assert!(tick.as_mut().poll(&mut cx).is_ready());
+    }
+    let trace = world.trace.borrow();
+    let scheduled: Vec<_> = trace
+        .iter()
+        .filter_map(|event| {
+            let fields = event.as_array()?;
+            fields[0].is_str("schedule").then(|| fields[1].clone())
+        })
+        .collect();
+    assert!(scheduled.len() >= 3);
+    assert_eq!(
+        &scheduled[..3],
+        &[id(100).into(), id(101).into(), id(100).into()]
+    );
 }
 
 #[test]
@@ -791,7 +1170,6 @@ fn actual_archived_question_relay_is_visible_while_sender_scheduling_continues()
         ]),
     );
     *world.routing_source.borrow_mut() = Some(resolved);
-    subject.task_changed();
     for _ in 0..6 {
         let mut tick = Box::pin(subject.tick());
         assert!(tick.as_mut().poll(&mut cx).is_ready());
@@ -881,7 +1259,6 @@ fn original_reconciler_matches_fair_scans_concurrent_admissions_stop_and_diagnos
                     assert!(pending_stop.is_none());
                     assert!(stopped.get());
                 }
-                "taskChanged" => subject.task_changed(),
                 "advance" => {}
                 "releasePage" => world.page_gate.release(),
                 "release" => world.release(Some(a[1].as_js_string().unwrap())),
@@ -979,7 +1356,7 @@ fn original_reconciler_matches_fair_scans_concurrent_admissions_stop_and_diagnos
         assert!(tasks.0.borrow().is_empty());
         assert!(pending_tick.is_none() && pending_stop.is_none());
     }
-    assert_eq!(steps, 1182);
-    assert_eq!(calls, 2765);
-    assert_eq!(data().as_array().unwrap().len(), 45);
+    assert_eq!(steps, 1118);
+    assert_eq!(calls, 2664);
+    assert_eq!(data().as_array().unwrap().len(), 43);
 }

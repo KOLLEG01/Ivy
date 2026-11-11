@@ -18,8 +18,8 @@ const props = withDefaults(
 );
 const contentId = useId();
 const content = ref<HTMLDivElement | null>(null);
-const expanded = ref(false),
-  overflowing = ref(false),
+const expanded = defineModel<boolean>('expanded', { default: false });
+const overflowing = ref(false),
   previewHeight = ref(100);
 const collapsed = computed(
   () => props.enabled && overflowing.value && !expanded.value,

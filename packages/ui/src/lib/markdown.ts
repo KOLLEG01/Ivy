@@ -7,7 +7,13 @@ const markdown = new MarkdownIt({ html: false, linkify: false, typographer: fals
 markdown.renderer.rules['image'] = (tokens, index, _options, env) => {
   const token = tokens[index]!, source = token.attrGet('src') ?? '';
   const verified = (env as { trustedImageUrls?: Record<string, string> }).trustedImageUrls?.[source];
-  if (!verified?.startsWith('blob:')) return `<span class="ivy-image-reference">[${markdown.utils.escapeHtml(token.content || 'Image')}]</span>`;
+  if (!verified?.startsWith('blob:')) {
+    const state = env as { trustedAttachments?: Record<string, AttachmentInfo>; previewImages?: boolean };
+    const caption = markdown.utils.escapeHtml(token.content || 'Image');
+    if (state.previewImages && state.trustedAttachments?.[source])
+      return `<button type="button" class="ivy-image-button" data-image-source="${markdown.utils.escapeHtml(String(source))}" aria-label="${markdown.utils.escapeHtml('Enlarge ' + token.content)}">[${caption}]</button>`;
+    return `<span class="ivy-image-reference">[${caption}]</span>`;
+  }
   return `<button type="button" class="ivy-image-button" aria-label="${markdown.utils.escapeHtml('Enlarge ' + token.content)}"><img class="ivy-embedded-image" src="${markdown.utils.escapeHtml(verified)}" alt="${markdown.utils.escapeHtml(token.content)}" loading="lazy"></button>`;
 };
 const defaultLink = markdown.renderer.rules['link_open'];
@@ -18,8 +24,8 @@ markdown.renderer.rules['link_open'] = (tokens, index, options, env, renderer) =
   if (attachment) { token.attrSet('class', 'ivy-attachment-link'); token.attrSet('data-file-size', fileSize(attachment.byteLength)); token.attrSet('title', attachment.name + ' · ' + fileSize(attachment.byteLength)); }
   return defaultLink ? defaultLink(tokens, index, options, env, renderer) : renderer.renderToken(tokens, index, options);
 };
-export function renderMarkdown(source: string, maximumCharacters = 262144, trustedImageUrls: Record<string, string> = {}, trustedAttachments: Record<string, AttachmentInfo> = {}): { html: string; truncated: boolean } {
-  return { html: markdown.render(source.slice(0, maximumCharacters), { trustedImageUrls, trustedAttachments }), truncated: source.length > maximumCharacters };
+export function renderMarkdown(source: string, maximumCharacters = 262144, trustedImageUrls: Record<string, string> = {}, trustedAttachments: Record<string, AttachmentInfo> = {}, previewImages = false): { html: string; truncated: boolean } {
+  return { html: markdown.render(source.slice(0, maximumCharacters), { trustedImageUrls, trustedAttachments, previewImages }), truncated: source.length > maximumCharacters };
 }
 
 /** Use the renderer's parser so code examples, reference images and escaped paths agree. */

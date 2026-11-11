@@ -1,6 +1,41 @@
 use ivy_contracts::{IvyJson, builtin_schema::SchemaBundle, json::parse};
 
 #[test]
+fn shared_trusted_roots_keep_local_references_and_owned_lifetimes() {
+    use ivy_contracts::canonical_bundle::Bundle;
+    use std::sync::Arc;
+    let roots: Vec<_> = [
+        r##"{"$id":"https://example.invalid/shared.json","$defs":{"Word":{"type":"string","pattern":"^a"}}}"##,
+        r##"{"$ref":"#/$defs/value","$defs":{"value":{"allOf":[{"$ref":"https://example.invalid/shared.json#/$defs/Word"},{"const":"alpha"}]}}}"##,
+        r##"{"$ref":"#/$defs/value","$defs":{"value":{"allOf":[{"$ref":"https://example.invalid/shared.json#/$defs/Word"},{"const":"another"}]}}}"##,
+    ].into_iter().map(|text| Arc::new(parse(text, 10000).unwrap())).collect();
+    let validator = SchemaBundle::from_shared_documents(roots.clone()).unwrap();
+    let catalog = Bundle::from_shared_documents(vec![("Shared".into(), roots[0].clone())]).unwrap();
+    drop(roots);
+    for (document, value, expected) in [
+        (1, "alpha", true),
+        (1, "another", false),
+        (2, "another", true),
+        (2, "alpha", false),
+        (2, "beta", false),
+    ] {
+        assert_eq!(
+            validator
+                .matches_document(document, "#", &value.into())
+                .unwrap(),
+            expected
+        );
+    }
+    assert!(validator.matches_document(3, "#", &IvyJson::Null).is_err());
+    let schema = catalog
+        .definition("https://example.invalid/shared.json", "Word")
+        .unwrap();
+    let bundled = SchemaBundle::from_documents(vec![schema]).unwrap();
+    assert!(bundled.matches("#", &"alpha".into()).unwrap());
+    assert!(!bundled.matches("#", &"beta".into()).unwrap());
+}
+
+#[test]
 fn named_schema_rejects_a_legacy_id_keyword_while_transport_keeps_its_original_data_id() {
     use ivy_contracts::core_schema::validate_transport;
     let error = validate_transport("ProviderCall/properties", &IvyJson::Null).unwrap_err();

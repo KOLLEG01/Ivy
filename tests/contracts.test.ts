@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   canonical,
+  canonicalMatches,
   digest,
   hashJson,
   compareVersions,
@@ -34,6 +35,9 @@ test("canonical byte limits remain exact for ASCII, escaped controls, Unicode an
       encoded = canonical(input),
       bytes = Buffer.byteLength(encoded, "utf8");
     assert.equal(canonical(input, bytes), encoded);
+    assert.equal(canonicalMatches(input, encoded, bytes), true);
+    for (const other of ['', encoded + ' ', ' ' + encoded, encoded.slice(1)]) assert.equal(canonicalMatches(input, other, bytes), false);
+    assert.throws(() => canonicalMatches(input, encoded, bytes - 1), { code: 'content_too_large' });
     assert.throws(() => canonical(input, bytes - 1), {
       code: "content_too_large",
     });
@@ -209,6 +213,8 @@ test("canonical hash vectors include integer-like keys, UTF-16 ordering and nega
     '{"10":10,"2":2,"a":[true,null,"é"],"z":0}',
   );
   assert.equal(canonical({ "\uE000": 1, "\u{10000}": 2 }), '{"𐀀":2,"":1}');
+  assert.equal(canonicalMatches({ "2": 2, "10": 10, z: -0, a: [true, null, "é"] }, '{"10":10,"2":2,"a":[true,null,"é"],"z":0}'), true);
+  assert.equal(canonicalMatches({ "\uE000": 1, "\u{10000}": 2 }, '{"𐀀":2,"":1}'), true);
   assert.equal(
     digest(""),
     "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -243,11 +249,36 @@ test("non-JSON runtime values cannot collide with valid operation arguments", ()
     cycle,
     getter,
     { [Symbol("x")]: 1 },
-  ])
+  ]) {
     assert.throws(() => canonical(value));
+    assert.throws(() => canonicalMatches(value, ''));
+  }
   assert.equal(getterCalled, false);
   assert.throws(() => canonical("x".repeat(100), 10));
   assert.equal(compareVersions("10.0.0", "2.999.0"), 1);
   assert.equal(compareVersions("1.0.0", "1.0.0"), 0);
   assert.throws(() => compareVersions("01.0.0", "1.0.0"));
+});
+
+test('canonical comparison keeps split surrogate pairs, exact limits and validation after an early mismatch', () => {
+  for (const value of ['x'.repeat(16383) + '😀\ud800', 'x'.repeat(16384) + '\udfff', '\u0000\\"\n日本語😀'.repeat(10000)]) {
+    const expected = JSON.stringify(value), bytes = Buffer.byteLength(expected);
+    assert.equal(canonical(value, bytes), expected);
+    assert.equal(canonicalMatches(value, expected, bytes), true);
+    assert.throws(() => canonicalMatches(value, '', bytes - 1), { code: 'content_too_large' });
+    const object = { [value]: [value] }, wire = '{' + expected + ':[' + expected + ']}';
+    assert.equal(canonical(object), wire); assert.equal(canonicalMatches(object, wire), true);
+  }
+  const deep = (depth: number): unknown => depth ? [deep(depth - 1)] : null;
+  assert.equal(canonicalMatches(deep(128), canonical(deep(128))), true);
+  const accessor = Object.defineProperty({}, 'a', { get() { throw new Error('Getter must not execute'); }, enumerable: true });
+  for (const [value, limit, code] of [
+    [[0, Infinity], 100, 'invalid_arguments'], [[0, accessor], 100, 'invalid_arguments'],
+    [[0, deep(129)], 10000, 'limit_exceeded'], [[0, 'long'], 2, 'content_too_large'],
+    [Array(400000).fill(0), 1000000, 'limit_exceeded'],
+    [[Infinity], 0, 'invalid_arguments'], [{ a: Infinity }, 0, 'content_too_large'],
+  ] as const) {
+    assert.throws(() => canonical(value, limit), { code });
+    assert.throws(() => canonicalMatches(value, '', limit), { code });
+  }
 });

@@ -1,6 +1,5 @@
 //! Immutable contract registration and the original object content boundary.
 use crate::store::{AuthenticatedContext, LedgerResult, ReceiptKind, Store};
-use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     core_schema::validate_shared,
@@ -11,6 +10,7 @@ use ivy_contracts::{
         TEXT_OBJECT_CONTENT_BYTES,
     },
 };
+use ivy_host_runtime::base64_content::{self, DecodeError};
 use rusqlite::{OptionalExtension, params};
 
 fn require(condition: bool, code: &str, message: &str) -> IvyResult<()> {
@@ -261,14 +261,16 @@ pub fn decode(store: &Store, contract: &IvyJson, content: &IvyJson) -> IvyResult
                     .get("value")
                     .and_then(IvyJson::as_js_string)
                     .ok_or_else(IvyError::internal)?;
-                let invalid =
-                    || IvyError::new("invalid_arguments", "Expected canonical base64 content.");
-                let value = String::from_utf16(&value.0).map_err(|_| invalid())?;
-                let bytes = STANDARD.decode(&value).map_err(|_| invalid())?;
-                require(
-                    STANDARD.encode(&bytes) == value,
-                    "invalid_arguments",
-                    "Expected canonical base64 content.",
+                let bytes = base64_content::decode(value, BINARY_OBJECT_CONTENT_BYTES).map_err(
+                    |error| match error {
+                        DecodeError::Invalid => {
+                            IvyError::new("invalid_arguments", "Expected canonical base64 content.")
+                        }
+                        DecodeError::TooLarge => IvyError::new(
+                            "content_too_large",
+                            "Decoded content exceeds its storage limit.",
+                        ),
+                    },
                 )?;
                 ContentData::Bytes(bytes)
             }

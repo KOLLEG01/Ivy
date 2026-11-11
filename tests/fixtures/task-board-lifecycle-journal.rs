@@ -661,6 +661,7 @@ impl RpcClient for ArchiveClient {
                 }
                 "objects.stat" => {
                     assert_eq!(args.required("objectId")?, &Json::String(id(100)));
+                    assert_eq!(args.get("observe"), Some(&true.into()));
                     Ok(state.metadata.clone())
                 }
                 other => panic!("Archive membership must not call {other}: {args:?}"),
@@ -842,6 +843,10 @@ async fn archive_membership_reopens_original_identity_after_failures_before_and_
                 }
                 for request in &state.lock().unwrap().requests {
                     assert_eq!(request.required("mutationId").unwrap(), archive_id);
+                    assert!(
+                        request.get("observe").is_none(),
+                        "A read fence must not alter the original archive write."
+                    );
                 }
             }
             let local_tasks: i64 = db

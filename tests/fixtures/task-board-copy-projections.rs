@@ -17,6 +17,10 @@ use std::{
 };
 
 struct Counted;
+#[path = "task-board-evidence-bytes.rs"]
+mod evidence_bytes;
+#[path = "task-board-upload-admission.rs"]
+mod upload_admission;
 #[test]
 fn object_pin_moves_utf16_identity_and_preserves_numeric_wire_hash() {
     for revision in [1.0_f64, -0.0, 0.5, 9007199254740991.0] {

@@ -342,6 +342,20 @@ impl<'a, 'x, S: CategoryStore + 'a, L: CategoryLocale + 'a, X: ReconcileExecutor
         }
     }
     fn request(&self, kind: ResultKind, immediate: bool) -> CategoryRequest<'a, 'x, S, L, X> {
+        // Queued work has not captured its event boundary yet. Readers admitted
+        // after a job starts need the next alignment, including when its head
+        // request is still pending. Full alignment and bounded in-gate checks
+        // only share queued work of the same kind.
+        if !matches!(kind, ResultKind::Null) {
+            let state = self.state.borrow();
+            if let Some(job) = state.jobs.back().filter(|job| job.immediate == immediate) {
+                return CategoryRequest {
+                    projection: self.clone(),
+                    completion: job.completion.clone(),
+                    kind,
+                };
+            }
+        }
         let completion = Rc::new(RefCell::new(Completion::default()));
         if matches!(kind, ResultKind::Null) {
             completion.borrow_mut().result = Some(Ok(()));

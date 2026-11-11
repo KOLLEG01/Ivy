@@ -24,7 +24,7 @@ struct Socket {
     closed: CancellationToken,
 }
 impl Socket {
-    fn new(budget: &Sockets) -> (Self, mpsc::Receiver<Pending>) {
+    fn new(budget: &Sockets) -> (Self, mpsc::UnboundedReceiver<Pending>) {
         let (outgoing, receiver) = budget.0.channel();
         (
             Self {

@@ -18,7 +18,6 @@ use ivy_sdk::service::InvocationContext;
 pub trait ServiceRuntime {
     fn recovered(&self) -> bool;
     fn observed_at(&self) -> JsString;
-    fn task_changed(&self);
     fn kick(&self);
 }
 #[allow(async_fn_in_trait)]
@@ -147,11 +146,7 @@ impl<
                 self.admission.verify_owner().await?;
                 self.categories.categories().await
             }
-            "archive" => {
-                let outcome = self.admission.archive(&args, &read_context).await?;
-                self.runtime.task_changed();
-                Ok(outcome)
-            }
+            "archive" => self.admission.archive(&args, &read_context).await,
             _ => {
                 require(
                     self.runtime.recovered()
@@ -160,8 +155,7 @@ impl<
                     "task_board_recovery_pending",
                     "Existing Operations and Runs are being reconciled before accepting fresh execution claims.",
                 )?;
-                let outcome = self.admission.invoke(&args, &read_context).await?;
-                self.runtime.task_changed();
+                let outcome = self.admission.invoke(args, &read_context).await?;
                 self.runtime.kick();
                 Ok(outcome)
             }

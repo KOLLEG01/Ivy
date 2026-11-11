@@ -97,6 +97,10 @@ name = "host-memory"
 path = "../../../tests/rust/host-memory.rs"
 
 [[test]]
+name = "host-base64"
+path = "../../../tests/rust/host-base64.rs"
+
+[[test]]
 name = "host-build-identity"
 path = "../../../tests/rust/host-build-identity.rs"
 

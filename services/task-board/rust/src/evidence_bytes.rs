@@ -3,7 +3,7 @@
 use ivy_contracts::{
     IvyError, IvyJson, JsString,
     hash::digest,
-    json::{canonical, parse},
+    json::{canonical_matches, parse},
     limits::MANAGEMENT_FRAME_BYTES,
 };
 
@@ -143,7 +143,7 @@ pub fn read_evidence<S: BlobStore>(
     let decoded = decoded.strip_prefix('\u{feff}').unwrap_or(decoded);
     let observation = parse(decoded, MAXIMUM_BYTES).map_err(|_| invalid_json())?;
     require(
-        canonical(&observation, MAXIMUM_BYTES)? == decoded,
+        canonical_matches(&observation, decoded, MAXIMUM_BYTES)?,
         "Native evidence must retain canonical JSON bytes.",
     )?;
     Ok(observation)

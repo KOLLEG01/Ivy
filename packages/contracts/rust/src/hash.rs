@@ -1,4 +1,8 @@
-use crate::{IvyJson, IvyResult, JsString, json::{canonical_into, canonical_object}, limits::MANAGEMENT_FRAME_BYTES};
+use crate::{
+    IvyJson, IvyResult, JsString,
+    json::{canonical_into, canonical_object},
+    limits::MANAGEMENT_FRAME_BYTES,
+};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
@@ -23,7 +27,8 @@ pub fn verify_hmac_sha256(key: &[u8], message: &[u8], signature: &[u8]) -> bool 
 pub fn digest(bytes: impl AsRef<[u8]>) -> String {
     digest_string(Sha256::digest(bytes.as_ref()).into())
 }
-fn digest_string(bytes: [u8; 32]) -> String {
+/// Format an already computed SHA-256 digest using the shared wire representation.
+pub fn digest_string(bytes: [u8; 32]) -> String {
     let mut result = String::from("sha256:");
     for byte in bytes {
         use std::fmt::Write;
@@ -41,7 +46,11 @@ struct HashWriter {
 }
 impl HashWriter {
     fn new() -> Self {
-        Self { digest: Sha256::new(), buffer: [0; 8192], used: 0 }
+        Self {
+            digest: Sha256::new(),
+            buffer: [0; 8192],
+            used: 0,
+        }
     }
     fn flush(&mut self) {
         self.digest.update(&self.buffer[..self.used]);
@@ -58,7 +67,9 @@ impl std::fmt::Write for HashWriter {
             self.flush();
             self.digest.update(text.as_bytes());
         } else {
-            if self.used + text.len() > self.buffer.len() { self.flush(); }
+            if self.used + text.len() > self.buffer.len() {
+                self.flush();
+            }
             self.buffer[self.used..self.used + text.len()].copy_from_slice(text.as_bytes());
             self.used += text.len();
         }
@@ -73,7 +84,9 @@ pub fn tool_definition_hash(definition: &IvyJson) -> IvyResult<String> {
         ));
     };
     hash_object(
-        pairs.iter().filter(|(key, _)| !key.eq_str("discovery"))
+        pairs
+            .iter()
+            .filter(|(key, _)| !key.eq_str("discovery"))
             .map(|(key, value)| (key, value)),
     )
 }
@@ -103,7 +116,14 @@ pub fn hash_object_with_array<'a>(
     records: impl IntoIterator<Item = IvyResult<IvyJson>>,
 ) -> IvyResult<String> {
     let mut writer = HashWriter::new();
-    crate::json::canonical_object_with_array(pairs, array_key, records, false, MANAGEMENT_FRAME_BYTES, &mut writer)?;
+    crate::json::canonical_object_with_array(
+        pairs,
+        array_key,
+        records,
+        false,
+        MANAGEMENT_FRAME_BYTES,
+        &mut writer,
+    )?;
     Ok(writer.finish())
 }
 /// Hash an object whose generated array is stored as canonical JSON text in a
@@ -114,6 +134,13 @@ pub fn hash_object_with_array_string<'a>(
     records: impl IntoIterator<Item = IvyResult<IvyJson>>,
 ) -> IvyResult<String> {
     let mut writer = HashWriter::new();
-    crate::json::canonical_object_with_array(pairs, string_key, records, true, MANAGEMENT_FRAME_BYTES, &mut writer)?;
+    crate::json::canonical_object_with_array(
+        pairs,
+        string_key,
+        records,
+        true,
+        MANAGEMENT_FRAME_BYTES,
+        &mut writer,
+    )?;
     Ok(writer.finish())
 }

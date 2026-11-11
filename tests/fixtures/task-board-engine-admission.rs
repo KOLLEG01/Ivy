@@ -358,7 +358,7 @@ async fn public_admission_retains_the_complete_selected_plan_account_before_writ
             generation: 7.0,
             check_cancelled: &cancelled,
         };
-        let error = engine.invoke(&request, &context).await.unwrap_err();
+        let error = engine.invoke(request, &context).await.unwrap_err();
         assert_eq!(
             error.code,
             if variant == 0 {

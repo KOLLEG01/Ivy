@@ -160,6 +160,9 @@ export const rustTests = {
   "tests/rust/host-memory.rs": {
     package: "ivy-host-runtime", test: "host-memory",
   },
+  "tests/rust/host-base64.rs": {
+    package: "ivy-host-runtime", test: "host-base64",
+  },
   "tests/rust/task-board-document-json.rs": {
     package: "ivy-task-board", test: "task-board-document-json",
   },
@@ -773,6 +776,14 @@ export const rustTests = {
     "package": "ivy-task-board",
     "test": "task-board-operations"
   },
+  "tests/fixtures/task-board-upload-retention.rs": {
+    package: "ivy-task-board", test: "task-board-operations",
+    filter: "durable_admission::upload_retention::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-current-history.rs": {
+    package: "ivy-task-board", test: "task-board-operations",
+    filter: "current_history::", testThreads: 1,
+  },
   "tests/fixtures/task-board-operations-cases.json.gz": {
     package: "ivy-task-board", test: "task-board-operations",
     filter: "retained_protocol_matches_original_outcomes_bytes_and_effect_order",
@@ -797,6 +808,9 @@ export const rustTests = {
   "tests/rust/task-board-large-writes.rs": {
     package: "ivy-task-board", test: "task-board-large-writes",
   },
+  "tests/rust/task-board-schemas.rs": {
+    package: "ivy-task-board", test: "task-board-schemas", testThreads: 1,
+  },
   "tests/rust/task-board-actions.rs": {
     package: "ivy-task-board", test: "task-board-actions",
   },
@@ -811,6 +825,12 @@ export const rustTests = {
   },
   "tests/fixtures/task-board-copy-projections.rs": {
     package: "ivy-task-board", test: "task-board-reads", filter: "copy_projections::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-upload-admission.rs": {
+    package: "ivy-task-board", test: "task-board-reads", filter: "copy_projections::upload_admission::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-evidence-bytes.rs": {
+    package: "ivy-task-board", test: "task-board-reads", filter: "copy_projections::evidence_bytes::", testThreads: 1,
   },
   "tests/fixtures/task-board-card-pages.rs": {
     package: "ivy-task-board", lib: true, filter: "journal_store::persistent_reads::card_pages::tests::", testThreads: 1,
@@ -919,6 +939,10 @@ export const rustTests = {
   "tests/fixtures/task-board-engine-invocations.rs": {
     package: "ivy-task-board", test: "task-board-output",
     filter: "engine_admission::invocations::", testThreads: 1,
+  },
+  "tests/fixtures/task-board-engine-service.rs": {
+    package: "ivy-task-board", test: "task-board-output",
+    filter: "engine_admission::service::", testThreads: 1,
   },
   "tests/fixtures/task-board-local-executor.rs": {
     package: "ivy-task-board", test: "task-board-output",

@@ -7,7 +7,9 @@ withDefaults(defineProps<{
   hasNext: boolean;
   hasPrevious?: boolean | undefined;
   loading?: boolean;
-}>(), { hasPrevious: undefined });
+  previousLabel?: string;
+  nextLabel?: string;
+}>(), { hasPrevious: undefined, previousLabel: 'Previous', nextLabel: 'Next' });
 defineEmits<{ next: []; previous: [] }>();
 </script>
 <template>
@@ -15,20 +17,20 @@ defineEmits<{ next: []; previous: [] }>();
     class="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-muted-foreground"
     aria-label="Pagination"
   >
-    <p>{{ count }} {{ count === 1 ? "item" : "items" }} · Page {{ page }}</p>
+    <p><slot name="summary">{{ count }} {{ count === 1 ? "item" : "items" }} · Page {{ page }}</slot></p>
     <div class="flex gap-2">
       <Button
         variant="outline"
         size="sm"
         :disabled="loading || !(hasPrevious ?? page > 1)"
         @click="$emit('previous')"
-        ><ChevronLeft aria-hidden="true" />Previous</Button
+        ><ChevronLeft aria-hidden="true" />{{ previousLabel }}</Button
       ><Button
         variant="outline"
         size="sm"
         :disabled="loading || !hasNext"
         @click="$emit('next')"
-        >Next<ChevronRight aria-hidden="true"
+        >{{ nextLabel }}<ChevronRight aria-hidden="true"
       /></Button>
     </div>
   </div>

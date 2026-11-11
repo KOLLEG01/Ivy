@@ -59,6 +59,13 @@ impl TreeReads<IvyError> for Trees {
 fn pin(id: &str, revision: f64) -> Json {
     Json::object([("objectId", id.into()), ("revision", revision.into())])
 }
+fn observed_pin(id: &str, revision: f64) -> Json {
+    Json::object([
+        ("objectId", id.into()),
+        ("observe", true.into()),
+        ("revision", revision.into()),
+    ])
+}
 fn task(id: &str) -> Json {
     Json::object([
         ("taskKey", format!("TASK-{id}").into()),
@@ -145,6 +152,104 @@ fn page(items: Vec<Json>, cursor: Option<&str>) -> Json {
         ("items", Json::Array(items)),
         ("nextCursor", cursor.map(Json::from).unwrap_or(Json::Null)),
     ])
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn observed_headers_bypass_immutable_pin_cache_without_replacing_its_business_snapshot() {
+    let db = ivy_store::rusqlite::Connection::open_in_memory().unwrap();
+    initialize(&db).unwrap();
+    let local = SqliteReads {
+        journal: LocalJournal {
+            connection: &db,
+            root_object_id: Some("root".into()),
+        },
+        contracts: &Catalog,
+        parse: |raw: &str| {
+            ivy_contracts::json::parse(raw, ivy_contracts::limits::MANAGEMENT_FRAME_BYTES)
+        },
+        sqlite_failure: ivy_store::sqlite::error,
+    };
+    let mut original = document("a", 1.0);
+    original
+        .get_mut("content")
+        .unwrap()
+        .get_mut("value")
+        .unwrap()
+        .get_mut("fields")
+        .unwrap()
+        .insert("description", "small cached original".into());
+    let mut archived = original.clone();
+    archived
+        .get_mut("object")
+        .unwrap()
+        .insert("effectivelyArchived", true.into());
+    archived.get_mut("object").unwrap().insert(
+        "observation",
+        Json::object([
+            ("runtimeEpoch", "same-hive".into()),
+            ("sequence", 41.0.into()),
+        ]),
+    );
+    let mut restored = archived.clone();
+    restored
+        .get_mut("object")
+        .unwrap()
+        .insert("effectivelyArchived", false.into());
+    restored
+        .get_mut("object")
+        .unwrap()
+        .get_mut("observation")
+        .unwrap()
+        .insert("sequence", 42.0.into());
+    let source = Source {
+        replies: RefCell::new(VecDeque::from([
+            (pin("a", 1.0), Ok(original)),
+            (observed_pin("a", 1.0), Ok(archived)),
+            (observed_pin("a", 1.0), Ok(restored)),
+        ])),
+        calls: RefCell::default(),
+    };
+    let cache = crate::journal_store::ReadCache::default();
+    let reads = DocumentReads {
+        local: &local,
+        objects: &source,
+        comments: &Trees,
+        cache: Some(&cache),
+    };
+    let first: Json = reads
+        .read_document::<IvyError>("task-board/task", &pin("a", 1.0), true, true, true)
+        .await
+        .unwrap();
+    for (sequence, archived) in [(41.0, true), (42.0, false)] {
+        let current: Json = reads
+            .observed_task_header::<IvyError>(&pin("a", 1.0))
+            .await
+            .unwrap();
+        assert_eq!(current.get("pin"), first.get("pin"));
+        assert_eq!(
+            current
+                .required("metadata")
+                .unwrap()
+                .get("effectivelyArchived"),
+            Some(&archived.into())
+        );
+        assert_eq!(
+            current
+                .required("metadata")
+                .unwrap()
+                .required("observation")
+                .unwrap()
+                .get("sequence"),
+            Some(&sequence.into())
+        );
+    }
+    let cached: Json = reads
+        .read_document::<IvyError>("task-board/task", &pin("a", 1.0), true, true, true)
+        .await
+        .unwrap();
+    assert_eq!(cached, first);
+    assert_eq!(source.calls.borrow().len(), 3);
+    assert!(source.replies.borrow().is_empty());
 }
 fn query() -> Json {
     Json::object([("view", "cards".into()), ("limit", 20.0.into())])
@@ -276,6 +381,128 @@ async fn run(
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn journal_adapter_preserves_observed_same_revision_archives_in_bulk_cards() {
+    use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
+    use std::sync::{Arc, Mutex};
+    struct Pages {
+        replies: Mutex<VecDeque<Json>>,
+        calls: Mutex<Vec<Json>>,
+    }
+    impl RpcClient for Pages {
+        fn request<'a>(
+            &'a self,
+            method: &'a str,
+            params: Json,
+            _: RequestOptions,
+        ) -> RequestFuture<'a> {
+            Box::pin(async move {
+                assert_eq!(method, "objects.query");
+                self.calls.lock().unwrap().push(params.clone());
+                let mut result = self.replies.lock().unwrap().pop_front().unwrap();
+                // Hive supplies the fence only when the forwarded query requests it.
+                if params.get("observe") != Some(&true.into()) {
+                    let Json::Array(rows) = result.get_mut("items").unwrap() else {
+                        panic!("Expected a fixture query page.");
+                    };
+                    for row in rows {
+                        if let Some(document) = row.get_mut("document") {
+                            document.get_mut("object").unwrap().remove("observation");
+                        }
+                    }
+                }
+                Ok(result)
+            })
+        }
+    }
+    let db = ivy_store::rusqlite::Connection::open_in_memory().unwrap();
+    initialize(&db).unwrap();
+    let mut replies = VecDeque::new();
+    for (sequence, archived) in [(41.0, true), (42.0, false)] {
+        replies.push_back(page(vec![row("a", 1.0, false)], Some("original-next")));
+        let mut header = row("a", 1.0, true);
+        let metadata = header
+            .get_mut("document")
+            .unwrap()
+            .get_mut("object")
+            .unwrap();
+        metadata.insert("effectivelyArchived", archived.into());
+        metadata.insert(
+            "observation",
+            Json::object([
+                ("runtimeEpoch", "same-hive".into()),
+                ("sequence", sequence.into()),
+            ]),
+        );
+        replies.push_back(page(vec![header], None));
+    }
+    let client = Arc::new(Pages {
+        replies: Mutex::new(replies),
+        calls: Mutex::new(vec![]),
+    });
+    let journal = crate::journal_store::JournalStore {
+        journal: LocalJournal {
+            connection: &db,
+            root_object_id: Some("root".into()),
+        },
+        client: client.clone(),
+        contracts: Catalog,
+        limits: crate::local_retention::HistoryLimits::default(),
+        now: || "2026-01-02T00:00:00.000Z".to_owned(),
+        new_id: || JsString::from("unused"),
+        cache: None,
+    };
+    let local = SqliteReads {
+        journal: LocalJournal {
+            connection: &db,
+            root_object_id: Some("root".into()),
+        },
+        contracts: &Catalog,
+        parse: |raw: &str| {
+            ivy_contracts::json::parse(raw, ivy_contracts::limits::MANAGEMENT_FRAME_BYTES)
+        },
+        sqlite_failure: ivy_store::sqlite::error,
+    };
+    let source = Source::default();
+    let reads = DocumentReads {
+        local: &local,
+        objects: &source,
+        comments: &Trees,
+        cache: None,
+    };
+    let condition = |task: &Json, wake: Option<&Json>| task_condition_snapshot(task, wake, None);
+    let policies = ConversationPolicies::with_current_questions(&condition);
+    let versions = [JsString::from("3.5.0")];
+    for (sequence, archived) in [(41.0, true), (42.0, false)] {
+        let result = reads
+            .card_page::<IvyError, _, _, _>(query(), &policies, &|| Ok(()), |options| {
+                let journal = &journal;
+                let versions = &versions;
+                async move { journal.page("task-board/task", &options, versions).await }
+            })
+            .await
+            .unwrap();
+        let card = &result.required("items").unwrap().as_array().unwrap()[0];
+        assert_eq!(card.get("object"), Some(&pin("a", 1.0)));
+        assert_eq!(card.get("archived"), Some(&archived.into()));
+        assert_eq!(
+            card.required("observation").unwrap().get("sequence"),
+            Some(&sequence.into())
+        );
+        assert_eq!(result.get("nextCursor"), Some(&"original-next".into()));
+    }
+    assert!(source.calls.borrow().is_empty());
+    assert!(client.replies.lock().unwrap().is_empty());
+    let calls = client.calls.lock().unwrap();
+    assert_eq!(calls.len(), 4);
+    for pair in calls.chunks_exact(2) {
+        assert!(pair[0].get("observe").is_none());
+        assert_eq!(pair[1].get("observe"), Some(&true.into()));
+        assert_eq!(pair[1].get("includeContent"), Some(&true.into()));
+        assert_eq!(pair[1].get("includeArchived"), Some(&true.into()));
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn two_queries_keep_selected_order_and_compact_lossless_cards_without_body_reads() {
     let first = page(
         vec![
@@ -307,6 +534,7 @@ async fn two_queries_keep_selected_order_and_compact_lossless_cards_without_body
     assert_eq!(calls.len(), 2);
     assert!(bodies.is_empty());
     assert_eq!(calls[1].get("includeContent"), Some(&true.into()));
+    assert_eq!(calls[1].get("observe"), Some(&true.into()));
     assert_eq!(calls[1].get("includeArchived"), Some(&true.into()));
     for card in cards {
         let task = card.required("task").unwrap();
@@ -362,7 +590,7 @@ async fn changed_head_uses_the_original_selected_pin_instead_of_its_newer_body()
             Ok(page(vec![row("a", 1.0, false)], None)),
             Ok(page(vec![row("a", 9.0, true)], None)),
         ],
-        vec![(pin("a", 1.0), Ok(document("a", 1.0)))],
+        vec![(observed_pin("a", 1.0), Ok(document("a", 1.0)))],
         None,
     )
     .await;
@@ -377,7 +605,7 @@ async fn changed_head_uses_the_original_selected_pin_instead_of_its_newer_body()
         Some(&pin("a", 1.0))
     );
     assert_eq!(calls.len(), 2);
-    assert_eq!(bodies, vec![pin("a", 1.0)]);
+    assert_eq!(bodies, vec![observed_pin("a", 1.0)]);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -395,15 +623,15 @@ async fn oversized_bulk_row_keeps_exact_pin_reads_without_restarting_the_page() 
             )),
         ],
         vec![
-            (pin("b", 2.0), Ok(document("b", 2.0))),
-            (pin("a", 1.0), Ok(document("a", 1.0))),
+            (observed_pin("b", 2.0), Ok(document("b", 2.0))),
+            (observed_pin("a", 1.0), Ok(document("a", 1.0))),
         ],
         None,
     )
     .await;
     assert_eq!(result.unwrap().get("nextCursor"), Some(&"next".into()));
     assert_eq!(calls.len(), 2);
-    assert_eq!(bodies, vec![pin("b", 2.0), pin("a", 1.0)]);
+    assert_eq!(bodies, vec![observed_pin("b", 2.0), observed_pin("a", 1.0)]);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -499,7 +727,7 @@ async fn page_and_body_failures_preserve_original_details_without_blind_replay()
             Ok(page(vec![row("a", 1.0, false)], None)),
             Ok(page(vec![], None)),
         ],
-        vec![(pin("a", 1.0), Err(original.clone()))],
+        vec![(observed_pin("a", 1.0), Err(original.clone()))],
         None,
     )
     .await;

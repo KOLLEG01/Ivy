@@ -86,9 +86,6 @@ impl GenerationRuntime for EngineRuntime<'_> {
     fn diagnostics(&self) -> IvyResult<Vec<Json>> {
         self.base.diagnostics()
     }
-    fn task_changed(&self) {
-        self.base.task_changed();
-    }
     fn notification(&self, value: &Json) -> bool {
         self.base.notification(value)
     }

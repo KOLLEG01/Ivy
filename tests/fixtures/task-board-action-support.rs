@@ -352,12 +352,23 @@ impl ActionValidationStore for &World {
 impl ActionStore for &World {
     async fn write_attachment(
         &self,
-        _: &JsString,
-        _: &JsString,
-        _: &JsString,
-        _: &[u8],
+        task: &JsString,
+        operation: &JsString,
+        attachment: &JsString,
+        content: &ivy_host_runtime::base64_content::Base64Content<'_>,
     ) -> IvyResult<Json> {
-        panic!("No binary upload in action tests")
+        let bytes =
+            ivy_host_runtime::base64_content::decode(content.encoded(), 8 * 1024 * 1024).unwrap();
+        let mut name = operation.clone();
+        name.0.push(b':' as u16);
+        name.0.extend(&attachment.0);
+        let pin = ivy_task_board::local_blobs::LocalBlobs::new(&self.db)
+            .save_blob(&"task-board/attachment".into(), &name, task, &bytes)
+            .unwrap();
+        Ok(Json::object([
+            ("objectId", Json::String(pin.object_id)),
+            ("revision", Json::Number(pin.revision as f64)),
+        ]))
     }
 }
 // These tests exercise action policy and retained publication, not the separate

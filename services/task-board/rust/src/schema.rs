@@ -3,10 +3,12 @@ use ivy_contracts::{IvyError, IvyJson, IvyResult, json::parse};
 use ivy_contracts::{
     JsString,
     builtin_schema::SchemaBundle,
+    canonical_bundle::Bundle,
     json::{compare_versions, validate_json},
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Complete published definitions in taskBoardContracts() return order.
 /// Historical versions retain their original schemas, retention and specs.
@@ -40,8 +42,9 @@ const INTERNAL: &[(&str, &str)] = &[
 /// schemas are admitted separately by Hive.
 pub struct RuntimeContracts {
     definitions: SchemaBundle,
+    canonical_documents: usize,
     versions: HashMap<String, String>,
-    records: HashMap<(String, JsString), Option<SchemaBundle>>,
+    records: HashMap<(String, JsString), Option<usize>>,
     readable: HashMap<String, Vec<JsString>>,
 }
 impl RuntimeContracts {
@@ -61,7 +64,8 @@ impl RuntimeContracts {
         }
     }
     pub fn from_documents(documents: Vec<IvyJson>) -> IvyResult<Self> {
-        let definitions = SchemaBundle::from_documents(documents)?;
+        let canonical_documents = documents.len();
+        let mut documents: Vec<_> = documents.into_iter().map(Arc::new).collect();
         let metadata = crate::runtime_inputs::metadata()?;
         let writers = metadata.required("writerVersions")?;
         let mut versions = HashMap::new();
@@ -69,7 +73,7 @@ impl RuntimeContracts {
         let mut readable: HashMap<String, Vec<JsString>> = HashMap::new();
         // Retain every immutable published read schema. Writer identities are
         // explicit: detached comment collections keep their original writer.
-        for contract in task_board_contracts()? {
+        for mut contract in task_board_contracts()? {
             let key = contract.required("key")?.as_str()?;
             let version = contract.required("version")?.as_str()?;
             let ordered = readable.entry(key.clone()).or_default();
@@ -85,18 +89,33 @@ impl RuntimeContracts {
             versions
                 .entry(key.clone())
                 .or_insert(writers.required(&key)?.as_str()?);
-            let schema = contract
-                .get("jsonSchema")
-                .map(|s| SchemaBundle::from_documents(vec![s.clone()]))
-                .transpose()?;
+            let schema = contract.remove("jsonSchema").map(|schema| {
+                let index = documents.len();
+                documents.push(Arc::new(schema));
+                index
+            });
             records.insert((key, version.into()), schema);
         }
         Ok(Self {
-            definitions,
+            definitions: SchemaBundle::from_shared_documents(documents)?,
+            canonical_documents,
             versions,
             records,
             readable,
         })
+    }
+    /// Registry bundling borrows the same canonical roots, preserving its public prefixes.
+    pub fn registry_schemas(&self, prefixes: &[&str]) -> IvyResult<Bundle> {
+        if prefixes.len() != self.canonical_documents {
+            return Err(IvyError::internal());
+        }
+        Bundle::from_shared_documents(
+            prefixes
+                .iter()
+                .zip(self.definitions.documents())
+                .map(|(name, document)| ((*name).to_owned(), document.clone()))
+                .collect(),
+        )
     }
     /// Exact published reader versions in numeric version order. This never
     /// changes a writer version or admits a schema outside the retained bundle.
@@ -161,7 +180,7 @@ impl Contracts for RuntimeContracts {
             .get(&(key.to_owned(), version.clone()))
             .and_then(Option::as_ref)
             .ok_or_else(Self::invalid)?;
-        if schema.matches("#", value)? {
+        if self.definitions.matches_document(*schema, "#", value)? {
             Ok(())
         } else {
             Err(IvyError::new(

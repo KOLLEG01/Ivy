@@ -6,11 +6,20 @@ import type { TaskBoard, Wire } from '../../sdk/src/client.js';
 import { hashJson } from './hash';
 
 export interface PendingArchive { objectId: string; archived: boolean; mutationId: string; call?: Wire.ToolCall }
+type ArchiveWorkspace = Pick<TaskBoard.WorkspaceInfo, 'serviceNodeId' | 'callerPrincipalId' | 'principalId' | 'rootObjectId'>;
+export interface TaskArchiveContext { workspace: ArchiveWorkspace; task?: TaskBoard.ObjectPin }
 type ArchiveOutcome = { phase: 'succeeded'; archive: Result<'objects.archive'>; operation?: TaskBoard.OperationReceipt }
   | { phase: 'failed'; message: string; operation: TaskBoard.OperationReceipt };
 
 const matchesArchive = (object: Result<'objects.stat'>, pending: PendingArchive) =>
   object.id === pending.objectId && (object.archivedAt !== null) === pending.archived && (!pending.call || object.effectivelyArchived === pending.archived);
+
+/** A successful archive reply already confirms the exact RPC's original mutation. */
+export function archiveActionOutcome(object: Result<'objects.archive'>, pending: PendingArchive): TaskBoard.ActionOutcome {
+  if (!matchesArchive(object, pending)) throw new Error('The result does not confirm the original archive action.');
+  return { operationId: pending.mutationId, archive: object, attachment: null, history: null,
+    plan: null, result: null, review: null, run: null, task: null };
+}
 
 /** Read-only recovery: a missing receipt alone never proves that an action finished. */
 export async function readArchiveOutcome(client: RpcClient, pending: PendingArchive): Promise<ArchiveOutcome | null> {
@@ -32,7 +41,7 @@ export async function readArchiveOutcome(client: RpcClient, pending: PendingArch
       // Only the owner's eviction guard proves this workflow is terminal. A not-found
       // or unavailable operation can still be awaiting acceptance or resolution.
       if (!(cause instanceof IvyError) || cause.code !== 'operation_expired') throw cause;
-      const object = await client.request('objects.stat', { objectId: pending.objectId });
+      const object = await client.request('objects.stat', { objectId: pending.objectId, observe: true });
       if (object.parentId === expected.rootObjectId && matchesArchive(object, pending)) return { phase: 'succeeded', archive: object };
       return null;
     }
@@ -49,9 +58,23 @@ export async function readArchiveOutcome(client: RpcClient, pending: PendingArch
   return matchesArchive(object, pending) ? { phase: 'succeeded', archive: object } : null;
 }
 
+async function boundTaskArchive(client: RpcClient, pending: PendingArchive, workspace: ArchiveWorkspace, task: TaskBoard.ObjectPin): Promise<Wire.ToolCall> {
+  const binding = await discover(client, 'task-board.archive', { serviceNodeId: workspace.serviceNodeId });
+  return { qualifiedName: binding.qualifiedName, serviceNodeId: workspace.serviceNodeId, expectedDefinitionHash: binding.definitionHash, expectedCallerPrincipalId: workspace.callerPrincipalId,
+    operationId: pending.mutationId, arguments: { action: 'archive', operationId: pending.mutationId,
+      taskId: task.objectId, expectedRevision: task.revision, archived: pending.archived,
+      expectedWorkspace: { callerPrincipalId: workspace.callerPrincipalId, principalId: workspace.principalId, rootObjectId: workspace.rootObjectId } } };
+}
+
 /** Service-owned tickets use their domain lifecycle from every shared archive control. */
-async function taskArchiveCall(client: RpcClient, pending: PendingArchive): Promise<Wire.ToolCall | undefined> {
+async function taskArchiveCall(client: RpcClient, pending: PendingArchive, context?: TaskArchiveContext): Promise<Wire.ToolCall | undefined> {
+  if (context?.task) return boundTaskArchive(client, pending, context.workspace, context.task);
   const object = await client.request('objects.stat', { objectId: pending.objectId });
+  if (context) {
+    if (object.contractKey !== 'task-board/task' || object.parentId !== context.workspace.rootObjectId)
+      throw new IvyError('invalid_arguments', 'This ticket belongs to another workspace.', 'not_executed');
+    return boundTaskArchive(client, pending, context.workspace, { objectId: object.id, revision: object.currentRevision });
+  }
   if (object.contractKey !== 'task-board/task') return undefined;
   let cursor: string | null = null;
   do {
@@ -59,11 +82,7 @@ async function taskArchiveCall(client: RpcClient, pending: PendingArchive): Prom
     for (const node of page.items.filter(node => node.connected && node.synced && node.ready)) {
       const workspace = await callBound(client, await discover(client, 'task-board.workspace', { serviceNodeId: node.serviceNodeId }), {}) as TaskBoard.WorkspaceInfo;
       if (workspace.rootObjectId !== object.parentId) continue;
-      const binding = await discover(client, 'task-board.archive', { serviceNodeId: node.serviceNodeId });
-      return { qualifiedName: binding.qualifiedName, serviceNodeId: node.serviceNodeId, expectedDefinitionHash: binding.definitionHash, expectedCallerPrincipalId: workspace.callerPrincipalId,
-        operationId: pending.mutationId, arguments: { action: 'archive', operationId: pending.mutationId,
-          taskId: object.id, expectedRevision: object.currentRevision, archived: pending.archived,
-          expectedWorkspace: { callerPrincipalId: workspace.callerPrincipalId, principalId: workspace.principalId, rootObjectId: workspace.rootObjectId } } };
+      return boundTaskArchive(client, pending, workspace, { objectId: object.id, revision: object.currentRevision });
     }
     cursor = page.nextCursor;
   } while (cursor);
@@ -107,14 +126,20 @@ export function useObjectArchive(client: RpcClient, key: string) {
   // Recover on mount, reconnection and return to this tab, with a bounded fallback
   // while a lost response is unresolved. Idle controls do not make any requests.
   useRemote(reconcile, 15000);
-  const run = async (objectId: string, archived: boolean) => {
+  const run = async (objectId: string, archived: boolean, context?: TaskArchiveContext) => {
     if (busy.value || storageBlocked || error.value || pending.value && (pending.value.objectId !== objectId || pending.value.archived !== archived)) return null;
+    if (!pending.value?.call && context?.task && context.task.objectId !== objectId) { error.value = 'The archive revision belongs to another ticket.'; return null; }
+    // Capture the selected owner before asynchronous preparation. Retained calls
+    // always keep their original owner, revision and identity, including on retry.
+    const selected = context && { workspace: { serviceNodeId: context.workspace.serviceNodeId,
+      callerPrincipalId: context.workspace.callerPrincipalId, principalId: context.workspace.principalId, rootObjectId: context.workspace.rootObjectId },
+      ...(context.task ? { task: { objectId: context.task.objectId, revision: context.task.revision } } : {}) };
     const replay = !!pending.value;
     busy.value = true;
     try {
       pending.value ??= { objectId, archived, mutationId: await newOperationId(client) }; persist();
       if (!pending.value.call) {
-        const call = await taskArchiveCall(client, pending.value);
+        const call = await taskArchiveCall(client, pending.value, selected);
         if (call) pending.value.call = call;
         persist();
       }

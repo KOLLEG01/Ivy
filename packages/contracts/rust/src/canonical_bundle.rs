@@ -1,10 +1,11 @@
 //! Bundling for checked-in canonical documents, separate from submitted schemas.
 use crate::{IvyError, IvyJson, IvyResult, JsString, json::parse};
+use std::sync::Arc;
 use url::Url;
 
 /// Trusted packaged documents and their stable definition-name prefixes.
 pub struct Bundle {
-    documents: Vec<(String, IvyJson)>,
+    documents: Vec<(String, Arc<IvyJson>)>,
     label: String,
 }
 struct Resolved<'a> {
@@ -20,7 +21,7 @@ impl Bundle {
                 .map(|(prefix, text)| {
                     (
                         (*prefix).to_owned(),
-                        parse(text, text.len()).expect("checked-in schema"),
+                        Arc::new(parse(text, text.len()).expect("checked-in schema")),
                     )
                 })
                 .collect(),
@@ -30,6 +31,15 @@ impl Bundle {
     /// Load owned trusted schemas. Prefixes retain the public bundled $defs names.
     /// Submitted registry schemas use schema admission instead.
     pub fn from_documents(documents: Vec<(String, IvyJson)>) -> IvyResult<Self> {
+        Self::from_shared_documents(
+            documents
+                .into_iter()
+                .map(|(name, value)| (name, Arc::new(value)))
+                .collect(),
+        )
+    }
+    /// Share the same trusted immutable roots used by local validation.
+    pub fn from_shared_documents(documents: Vec<(String, Arc<IvyJson>)>) -> IvyResult<Self> {
         let mut identities = std::collections::HashSet::new();
         let mut prefixes = std::collections::HashSet::new();
         for (prefix, document) in &documents {

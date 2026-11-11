@@ -198,12 +198,15 @@ pub async fn read_task<
         .required("effectivelyArchived")?
         .clone();
     if is(query, "view", "card") {
-        let view = Json::object([
+        let mut view = Json::object([
             ("object", pin.clone()),
             ("task", task),
             ("executionCondition", condition),
             ("archived", archived),
         ]);
+        if let Some(observation) = header.required("metadata")?.get("observation") {
+            view.insert("observation", observation.clone());
+        }
         return task_card(policies, &view, Some(&summary), Some(total));
     }
 
@@ -346,6 +349,9 @@ pub async fn read_task<
         ("executionCondition", condition),
         ("archived", archived),
     ]);
+    if let Some(observation) = header.required("metadata")?.get("observation") {
+        result.insert("observation", observation.clone());
+    }
     result.insert("openQuestions", Json::Array(user_questions));
     result.insert(
         "commentPage",
@@ -437,7 +443,7 @@ pub fn task_card<E: From<IvyError>, P: QuestionPolicies<E>>(
     }
     card_task.insert("claim", claim);
     card_task.insert("openQuestionCount", Json::Number(open_count as f64));
-    Ok(Json::object([
+    let mut result = Json::object([
         ("object", view.required("object")?.clone()),
         (
             "executionCondition",
@@ -449,7 +455,12 @@ pub fn task_card<E: From<IvyError>, P: QuestionPolicies<E>>(
         ),
         ("directCommentCount", direct),
         ("task", card_task),
-    ]))
+    ]);
+    if let Some(observation) = view.get("observation") {
+        result.insert("observation", observation.clone());
+        result.insert("archived", view.required("archived")?.clone());
+    }
+    Ok(result)
 }
 
 pub fn task_view_page<E: From<IvyError>, P: QuestionPolicies<E>>(

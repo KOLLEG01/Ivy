@@ -30,7 +30,6 @@ use tokio::sync::mpsc;
 pub trait GenerationRuntime {
     fn recovered(&self) -> bool;
     fn diagnostics(&self) -> IvyResult<Vec<Json>>;
-    fn task_changed(&self);
     fn notification(&self, value: &Json) -> bool;
     async fn verify_owner(&self) -> IvyResult<()>;
     async fn tick(&self);
@@ -74,9 +73,6 @@ impl<
             diagnostics.extend(maintenance.diagnostics());
         }
         Ok(diagnostics)
-    }
-    fn task_changed(&self) {
-        self.reconciler.task_changed();
     }
     fn notification(&self, value: &Json) -> bool {
         let native = self.native.notification(value);
@@ -453,9 +449,6 @@ impl<R: GenerationRuntime, C: Fn() -> JsString> ServiceRuntime
     }
     fn observed_at(&self) -> JsString {
         (self.now)()
-    }
-    fn task_changed(&self) {
-        self.runtime.task_changed();
     }
     fn kick(&self) {
         self.control.kick();

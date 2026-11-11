@@ -54,8 +54,9 @@ test('browser Agent contracts validate without runtime code generation', async (
   const directory = await mkdtemp(resolve(cache, 'browser-validation-test-'));
   try {
     const source = resolve(project, 'packages/contracts/src/agent-validation.ts').replaceAll('\\', '/');
+    const sdk = resolve(project, 'packages/sdk/src/native-backend.ts').replaceAll('\\', '/');
     const entry = resolve(directory, 'entry.mjs');
-    await writeFile(entry, `export { validateAgent, validateAgentFrame } from ${JSON.stringify(source)};`);
+    await writeFile(entry, `export { validateAgent } from ${JSON.stringify(sdk)}; export { validateAgentFrame } from ${JSON.stringify(source)};`);
     const result = await build({ configFile: false, root: project, logLevel: 'silent',
       plugins: [browserAgentValidation(project, directory)],
       build: { write: false, minify: false, target: 'es2023',

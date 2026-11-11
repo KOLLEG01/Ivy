@@ -55,6 +55,22 @@ export function validateJson(value: unknown, maximumBytes = managementFrameBytes
 
 /** One encoding for hashes, durable request identity and JSON content. Rejects non-JSON JS inputs. */
 export function canonical(value: unknown, maximumBytes = managementFrameBytes): string {
+  const parts: string[] = [];
+  canonicalInto(value, maximumBytes, part => parts.push(part));
+  return parts.join('');
+}
+
+/** Compare the same canonical encoding without constructing a second complete text. */
+export function canonicalMatches(value: unknown, text: string, maximumBytes = managementFrameBytes): boolean {
+  let offset = 0, matches = true;
+  canonicalInto(value, maximumBytes, part => {
+    if (matches && !text.startsWith(part, offset)) matches = false;
+    offset += part.length;
+  });
+  return matches && offset === text.length;
+}
+
+function canonicalInto(value: unknown, maximumBytes: number, write: (text: string) => void): void {
   const ancestors = new Set<object>();
   let nodes = 0;
   let bytes = 0;
@@ -65,16 +81,27 @@ export function canonical(value: unknown, maximumBytes = managementFrameBytes): 
     if (bytes > maximumBytes) fail('content_too_large', 'JSON exceeds the configured byte limit.');
     return text;
   };
-  const visit = (item: unknown, depth: number): string => {
+  const string = (text: string): void => {
+    write(account('"'));
+    for (let offset = 0; offset < text.length;) {
+      let end = Math.min(offset + 16384, text.length);
+      // Keep a surrogate pair together so JSON.stringify never escapes half of it.
+      if (end < text.length && text.charCodeAt(end - 1) >= 0xd800 && text.charCodeAt(end - 1) <= 0xdbff && text.charCodeAt(end) >= 0xdc00 && text.charCodeAt(end) <= 0xdfff) end--;
+      write(account(JSON.stringify(text.slice(offset, end)).slice(1, -1)));
+      offset = end;
+    }
+    write(account('"'));
+  };
+  const visit = (item: unknown, depth: number): void => {
     if (++nodes > 400_000 || depth > 128) fail('limit_exceeded', 'JSON structure is too complex.');
-    if (item === null) return account('null');
-    if (typeof item === 'boolean') return account(String(item));
-    if (typeof item === 'string') return account(JSON.stringify(item));
+    if (item === null) return write(account('null'));
+    if (typeof item === 'boolean') return write(account(String(item)));
+    if (typeof item === 'string') return string(item);
     if (typeof item === 'number') {
       if (!Number.isFinite(item) || (Number.isInteger(item) && !Number.isSafeInteger(item))) {
         fail('invalid_arguments', 'Numbers must be finite and integers must be safe.');
       }
-      return account(JSON.stringify(item));
+      return write(account(JSON.stringify(item)));
     }
     if (typeof item !== 'object') fail('invalid_arguments', 'Value is outside the JSON domain.');
     if (ancestors.has(item)) fail('invalid_arguments', 'Cyclic JSON value.');
@@ -84,29 +111,34 @@ export function canonical(value: unknown, maximumBytes = managementFrameBytes): 
         if (Object.getOwnPropertySymbols(item).length || Object.keys(item).length !== item.length) {
           fail('invalid_arguments', 'Arrays must be dense and have no extra properties.');
         }
-        const parts: string[] = [];
+        write('[');
         for (let i = 0; i < item.length; i++) {
           const descriptor = Object.getOwnPropertyDescriptor(item, String(i));
           if (!descriptor || !('value' in descriptor)) fail('invalid_arguments', 'JSON cannot contain accessors.');
-          parts.push(visit(descriptor.value, depth + 1));
+          if (i) write(',');
+          visit(descriptor.value, depth + 1);
         }
-        account('[' + ','.repeat(Math.max(0, parts.length - 1)) + ']');
-        return '[' + parts.join(',') + ']';
+        account('[' + ','.repeat(Math.max(0, item.length - 1)) + ']');
+        return write(']');
       }
       const prototype = Object.getPrototypeOf(item);
       if (prototype !== Object.prototype && prototype !== null) fail('invalid_arguments', 'JSON objects must be plain objects.');
       if (Object.getOwnPropertySymbols(item).length) fail('invalid_arguments', 'JSON cannot contain symbol keys.');
       const keys = Object.getOwnPropertyNames(item).sort();
-      const pairs = keys.map(key => {
+      write('{');
+      for (let index = 0; index < keys.length; index++) {
+        const key = keys[index]!;
         const descriptor = Object.getOwnPropertyDescriptor(item, key)!;
         if (!descriptor.enumerable || !('value' in descriptor)) fail('invalid_arguments', 'JSON properties must be enumerable values.');
-        return account(JSON.stringify(key) + ':') + visit(descriptor.value, depth + 1);
-      });
-      account('{' + ','.repeat(Math.max(0, pairs.length - 1)) + '}');
-      return '{' + pairs.join(',') + '}';
+        if (index) write(',');
+        string(key); write(account(':'));
+        visit(descriptor.value, depth + 1);
+      }
+      account('{' + ','.repeat(Math.max(0, keys.length - 1)) + '}');
+      return write('}');
     } finally { ancestors.delete(item); }
   };
-  return visit(value, 0);
+  visit(value, 0);
 }
 
 export function compareVersions(a: string, b: string): number {

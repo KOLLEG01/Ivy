@@ -114,6 +114,76 @@ fn fixture(length: usize, repeated: bool, queued: bool) -> Json {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn reviewed_compact_tasks_select_original_user_and_peer_deliveries() {
+    for (author, queued) in [("user", true), ("agent", true), ("agent", false)] {
+        let mut input = fixture(80, false, false);
+        let contracts = runtime_inputs::contracts().unwrap();
+        let Json::Array(nodes) = input.get_mut("nodes").unwrap() else {
+            unreachable!()
+        };
+        for row in nodes {
+            let node = row.get_mut("content").unwrap().get_mut("value").unwrap();
+            if let Some(entry) = node.get_mut("entry") {
+                let comment = entry.get_mut("comment").unwrap();
+                if comment.get("sequence") == Some(&80.0.into()) {
+                    comment.insert("authorKind", author.into());
+                    if author == "agent" {
+                        comment.insert("sourceTaskId", "peer".into());
+                    }
+                    if queued {
+                        entry.insert("receipt", json(r#"{"commentId":"c80","operationId":"original-comment","state":"queued","updatedAt":"2026-01-02T03:04:05.006Z","code":null}"#));
+                    }
+                }
+            }
+            refresh(row, &contracts);
+        }
+        let row = input.get_mut("task").unwrap();
+        let task = row.get_mut("content").unwrap().get_mut("value").unwrap();
+        task.insert("workflowState", "review".into());
+        let primary = json(
+            r#"{"kind":"thread","namespace":"codex","nativeId":"original-thread","serviceNodeId":"native-agent"}"#,
+        );
+        task.insert("primaryResourceRef", primary.clone());
+        refresh(row, &contracts);
+        let hive = Arc::new(Hive::new(&input));
+        let db = Connection::open_in_memory().unwrap();
+        initialize(&db).unwrap();
+        let journal = snapshot_store(&db, hive.clone());
+        let store = LifecycleJournal {
+            journal: &journal,
+            pages: &NoPages,
+        };
+        let header = store.read_task_header(&"task".into(), true).await.unwrap();
+        for field in ["comments", "commentDeliveries"] {
+            assert_eq!(header.value.get(field), Some(&Json::Array(vec![])));
+        }
+        let expected = if queued {
+            vec![Json::from("c80")]
+        } else {
+            vec![]
+        };
+        for _ in 0..2 {
+            assert_eq!(queued_input_ids(&store, &header).await.unwrap(), expected);
+        }
+        assert_eq!(header.value.get("primaryResourceRef"), Some(&primary));
+        assert_eq!(
+            header.value.get("workflowState"),
+            Some(&Json::from("review"))
+        );
+        if queued {
+            let entries = store
+                .comment_entries(&header.value, &"task".into(), &["c80".into()])
+                .await
+                .unwrap();
+            assert_eq!(
+                entries[0].required("receipt").unwrap().get("operationId"),
+                Some(&Json::from("original-comment"))
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn queued_inputs_keep_receipt_order_and_eligibility_after_journal_reopen() {
     for (length, repeated) in [(65, false), (300, true), (4096, false)] {
         let hive = Arc::new(Hive::new(&fixture(length, repeated, true)));

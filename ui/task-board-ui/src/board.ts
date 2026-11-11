@@ -21,6 +21,7 @@ export function waitingGroup(task: TaskBoard.TaskCard, condition: TaskBoard.Exec
   if (condition.state === 'deferred') return 'time';
   if (condition.state === 'blocked_dependency') return 'dependency';
   if (['blocked_environment', 'outcome_unknown', 'recovering', 'workflow_attention', 'publishing', 'starting', 'active'].includes(condition.state)) return 'runtime';
+  if (condition.state === 'queued') return 'preparing';
   if (task.workflowState === 'todo') return task.fields.control === 'user' ? 'todo' : 'preparing';
   if (condition.state === 'needs_user' || task.claim?.phase === 'waiting_input') return 'user';
   return task.fields.control === 'user' ? 'user' : 'error';

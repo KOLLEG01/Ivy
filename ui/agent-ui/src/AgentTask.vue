@@ -65,6 +65,7 @@ import { readNativeImage } from "../../../packages/ui-client/src/native-images";
 import {
   isUnmaterializedNativeHistory,
   readNativeOutputPage,
+  releaseNativeOutput,
 } from "../../../packages/ui-client/src/native-output-page";
 import type { NativeOutputPage } from "../../../packages/ui-client/src/native-output-page";
 import {
@@ -288,6 +289,7 @@ const refreshOutput = () => loadOutput(true);
 const reloadOutput = () => loadOutput(true, true);
 const loadEarlierOutput = () => loadOutput(false);
 const resetOutputView = (preview: boolean) => {
+  releaseNativeOutput(client, props.node, props.threadId, props.turnId, props.backend);
   outputSerial++;
   outputController?.abort();
   outputQueued = false;
@@ -943,8 +945,9 @@ const interrupt = async () => {
 };
 watch(
   () => props.turnId,
-  () => {
+  (_turn, previous) => {
     // Changing a linked turn must cancel the previous view even while its read is pending.
+    releaseNativeOutput(client, props.node, props.threadId, previous, props.backend);
     resetOutputView(true);
     void refreshOutput();
   },
@@ -1071,7 +1074,6 @@ const visibilityChanged = () => {
   void poll();
 };
 onMounted(() => {
-  void refreshOutput();
   // Journal polling stays fast; full snapshots only retry slowly when needed.
   snapshotTimer = setInterval(() => {
     if (
@@ -1094,7 +1096,15 @@ onMounted(() => {
   stopStatus = notifications.onStatus((ready) => {
     clearTimeout(timer);
     if (ready) {
-      scheduleRefresh();
+      if (!outputController) {
+        // The first read below starts after this already acknowledged subscription.
+        scheduleRefresh(['state', 'goal', 'turns']);
+      } else if (outputLoading.value && (outputPreview.value || !outputPages.value.length)) {
+        // Replace an unacknowledged initial read; do not queue a second full snapshot behind it.
+        resetOutputView(true);
+        void refreshOutput();
+        scheduleRefresh(['state', 'goal', 'turns']);
+      } else scheduleRefresh();
       void poll();
     } else timer = setTimeout(() => void poll(), 1000);
   }, [], [filter]);
@@ -1103,12 +1113,12 @@ onMounted(() => {
     void poll();
   });
   document.addEventListener("visibilitychange", visibilityChanged);
+  void refreshOutput();
   void poll();
 });
 onBeforeUnmount(() => {
   stopped = true;
-  outputSerial++;
-  outputController?.abort();
+  resetOutputView(false);
   unsubscribe?.();
   stopStatus?.();
   stopServiceChanges?.();

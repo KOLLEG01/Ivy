@@ -168,8 +168,7 @@ impl<'a, S: Store, C: Fn() -> String, P: Contracts, E: AdmissionExecution>
             ("source", source.into()),
         ])
     }
-    pub async fn invoke(&self, input: &Json, context: &ReadContext<'_>) -> IvyResult<Json> {
-        let mut request = input.clone();
+    pub async fn invoke(&self, mut request: Json, context: &ReadContext<'_>) -> IvyResult<Json> {
         (context.check_cancelled)()?;
         self.verify_owner().await?;
         require(
@@ -284,13 +283,16 @@ impl<'a, S: Store, C: Fn() -> String, P: Contracts, E: AdmissionExecution>
             request.insert("draftHash", draft_hash.into());
         }
         let operation = if eq(&request, "action", "comment") && !f(&request, "handoff").is_null() {
-            self.operations
+            let operation = self
+                .operations
                 .begin_with_handoff(&request, &actor, || {
                     (self.runtime.handoff)(request.clone(), actor.clone())
                 })
-                .await?
+                .await?;
+            drop(request);
+            operation
         } else {
-            self.operations.begin(&request, &actor).await?
+            self.operations.begin_owned(request, &actor).await?
         };
         self.execution.execute(operation).await
     }

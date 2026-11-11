@@ -313,6 +313,8 @@ async fn current_history_keeps_protected_graphs_and_retires_exact_receipts_atomi
     for mode in [
         "closed",
         "completed-object",
+        "self-original",
+        "self-original-unknown",
         "incoming",
         "unresolved",
         "external-reference",
@@ -321,6 +323,57 @@ async fn current_history_keeps_protected_graphs_and_retires_exact_receipts_atomi
     ] {
         let db = Connection::open_in_memory().unwrap();
         let mut operation = seed(&db);
+        if mode.starts_with("self-original") {
+            let mut original = operation.clone();
+            let mut request = Json::object([
+                ("action", "uploadAttachment".into()),
+                ("operationId", "original-id".into()),
+                ("taskId", "task".into()),
+                ("expectedRevision", Json::Number(1.0)),
+                ("attachmentId", "file".into()),
+                ("filename", "file.bin".into()),
+                ("mediaType", "application/octet-stream".into()),
+                ("bytesBase64", "AAE=".into()),
+            ]);
+            original.insert("requestHash", hash_json(&request).unwrap().into());
+            original.insert("request", request.clone());
+            original.insert("phase", "accepted".into());
+            original.insert("error", Json::Null);
+            operation.insert(
+                "requestHash",
+                original.required("requestHash").unwrap().clone(),
+            );
+            request.remove("bytesBase64");
+            request.insert(
+                "originalRequest",
+                Json::object([
+                    ("objectId", "closed".into()),
+                    ("revision", Json::Number(1.0)),
+                ]),
+            );
+            operation.insert("request", request);
+            if mode == "self-original-unknown" {
+                operation
+                    .get_mut("error")
+                    .unwrap()
+                    .insert("execution", "unknown".into());
+            }
+            db.execute(
+                "UPDATE revisions SET value_json=? WHERE id='closed' AND revision=1",
+                [canonical(&original, usize::MAX).unwrap()],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO revisions VALUES('closed',2,?,?)",
+                params![canonical(&operation, usize::MAX).unwrap(), AT],
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE documents SET current_revision=2 WHERE id='closed'",
+                [],
+            )
+            .unwrap();
+        }
         if mode == "completed-object" {
             let mut complete = operation.clone();
             complete.insert("phase", "succeeded".into());
@@ -396,7 +449,7 @@ async fn current_history_keeps_protected_graphs_and_retires_exact_receipts_atomi
         } else {
             result.unwrap();
         }
-        if ["closed", "completed-object", "rollback"].contains(&mode) {
+        if ["closed", "completed-object", "self-original", "rollback"].contains(&mode) {
             assert_eq!(count(&db, "documents"), 0);
             assert_eq!(count(&db, "retired_operations"), 1);
             assert_eq!(count(&db, "retired_operation_receipts"), 1);
@@ -429,6 +482,9 @@ async fn current_history_keeps_protected_graphs_and_retires_exact_receipts_atomi
         } else {
             assert_eq!(count(&db, "documents"), before, "{mode}");
             assert_eq!(count(&db, "retired_operations"), 0);
+            if mode == "self-original-unknown" {
+                assert_eq!(db.query_row("SELECT json_extract(value_json,'$.request.bytesBase64') FROM revisions WHERE id='closed' AND revision=1", [], |r|r.get::<_,String>(0)).unwrap(), "AAE=");
+            }
         }
         assert_released(&db);
     }

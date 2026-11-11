@@ -282,6 +282,15 @@ fn query(store: &Store, params: &IvyJson, counts: bool) -> IvyResult<IvyJson> {
         "invalid_arguments",
         "Query content is available only for JSON contracts.",
     )?;
+    let observe = params.get("observe").and_then(IvyJson::as_bool) == Some(true);
+    require(
+        !observe || include_content,
+        "invalid_arguments",
+        "Observed queries must include their selected documents.",
+    )?;
+    let observation = observe
+        .then(|| crate::objects::observation(store))
+        .transpose()?;
     let versions = params.get("contractVersions").and_then(IvyJson::as_array);
     let mut builder = Builder {
         bindings: vec![],
@@ -532,14 +541,18 @@ fn query(store: &Store, params: &IvyJson, counts: bool) -> IvyResult<IvyJson> {
             ])
         };
         if include_content {
-            item.insert(
-                "document",
-                crate::objects::read(
-                    store,
-                    crate::objects::Location::Id(row[0].as_js_string().unwrap()),
-                    Some(row[1].as_f64().unwrap() as u64),
-                )?,
-            );
+            let mut document = crate::objects::read(
+                store,
+                crate::objects::Location::Id(row[0].as_js_string().unwrap()),
+                Some(row[1].as_f64().unwrap() as u64),
+            )?;
+            if let Some(observation) = &observation {
+                document
+                    .get_mut("object")
+                    .ok_or_else(IvyError::internal)?
+                    .insert("observation", observation.clone());
+            }
+            item.insert("document", document);
         }
         let size = canonical(&item, MANAGEMENT_FRAME_BYTES)?.len();
         if bytes + size > PAGE_BYTES {

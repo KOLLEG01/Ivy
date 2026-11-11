@@ -227,7 +227,7 @@ for (const width of [1440, 390]) test(`a retained capacity rejection does not lo
   await send.click();
   await started.promise;
   await editor.fill('A new ordinary comment');
-  await expect(send).toBeDisabled();
+  await expect(send).toBeEnabled();
   reject.release();
   const failure = f.page.locator('[data-slot=conversation-message]').filter({ hasText: 'Previously rejected answer' });
   await expect(failure).toContainText('content_too_large; not_executed');
@@ -334,7 +334,7 @@ test('concurrent comments rebase without user retries and missing receipts resum
   const unknown = f.page.locator('[data-slot=conversation-message]').filter({ hasText: 'Unknown original outcome' });
   await expect(unknown.getByRole('button', { name: 'Retry message', exact: true })).toBeVisible();
   await editor.fill('A draft waiting for the original outcome');
-  await expect(f.page.getByRole('button', { name: 'Add comment', exact: true })).toBeDisabled();
+  await expect(f.page.getByRole('button', { name: 'Add comment', exact: true })).toBeEnabled();
   await f.page.reload();
   await expect(unknown).toHaveCount(1);
   await expect.poll(async () => (await f.task(id)).comments.filter(comment => comment.commentId === original.arguments.commentId).length,

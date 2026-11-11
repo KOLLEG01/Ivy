@@ -1,8 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { validateAgent } from '../packages/contracts/src/agent-validation.js';
-import { backendArguments, sameNativeBackend } from '../packages/contracts/src/native-backend.js';
+import { backendArguments, sameNativeBackend, validateAgent } from '../packages/sdk/src/native-backend.js';
 import { NativeContract } from '../packages/contracts/src/native-contract.js';
 import { hashJson } from '../packages/contracts/src/canonical.js';
 import { toolDefinitionHash } from '../packages/contracts/src/tool-definition.js';

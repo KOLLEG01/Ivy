@@ -159,13 +159,14 @@ Object.assign(defs, {
   MarkCommentsReadResult: obj({ task: ref('ObjectPin'), readState: ref('ObjectPin'), unreadAgentComments: integer(), unreadDirectAgentComments: integer() }),
   ExecutionCondition: obj({ state: { enum: ['idle', 'queued', 'allocating', 'starting', 'active', 'needs_user', 'deferred', 'blocked_dependency', 'blocked_environment', 'recovering', 'outcome_unknown', 'publishing', 'workflow_attention', 'failed'] }, detail: str(2048) }),
   TaskView: obj({ object: ref('ObjectPin'), task: ref('Task'), executionCondition: ref('ExecutionCondition'),
-    archived: bool }, ['object', 'task', 'executionCondition']),
+    archived: bool, observation: operation('ObjectObservation') }, ['object', 'task', 'executionCondition']),
   TaskCard: obj({ taskKey: id, fields: ref('TaskCardFields'), workflowState: { enum: workflowStates },
     claim: nullable(obj({ phase: { enum: ['claimed', 'run_created', 'starting', 'running', 'waiting_input', 'publishing_result', 'cancel_requested', 'outcome_unknown'] }, target: ref('Target') })),
     publication: nullable(ref('ObjectPin')), latestResult: nullable(ref('ObjectPin')),
     openQuestionCount: integer(), wakeAt: nullable(timestamp) }),
   TaskCardView: obj({ object: ref('ObjectPin'), task: ref('TaskCard'), executionCondition: ref('ExecutionCondition'),
-    commentCount: integer(), directCommentCount: integer() }),
+    commentCount: integer(), directCommentCount: integer(), archived: bool, observation: operation('ObjectObservation') },
+    ['object', 'task', 'executionCondition', 'commentCount', 'directCommentCount']),
   ReadResult: { anyOf: [ref('TaskView'), ref('TaskCardView')] },
 });
 defs.CommentActionRequest.required = defs.CommentActionRequest.required.filter(key => key !== 'agentDelivery');
@@ -282,7 +283,18 @@ defs.RetainedQuestionRequest = { ...defs.CommentActionRequest,
   required: [...defs.CommentActionRequest.required, 'purpose'],
   allOf: [{ not: { anyOf: [{ required: ['recipient'] }, { required: ['nativeInput'] }] } }],
 };
-defs.RetainedDurableRequest = { anyOf: [ref('DurableRequest'), ref('RetainedCreateRequest'), ref('RetainedEditRequest'), ref('RetainedQuestionRequest')] };
+// A successful upload keeps the exact published bytes' identity rather than
+// another Base64 body. This is receipt evidence, never an executable request.
+const uploadMetadata = Object.fromEntries(Object.entries(defs.UploadAttachmentRequest.properties).filter(([key]) => key !== 'bytesBase64'));
+defs.CompletedUploadRequest = obj({ ...uploadMetadata,
+  content: obj({ object: ref('ObjectPin'), byteLength: integer(1, 8388608), contentHash: hash }),
+}, [...defs.UploadAttachmentRequest.required.filter(key => key !== 'bytesBase64'), 'content']);
+// Later stages retain the accepted body at this same Operation's revision1.
+// The publication owner verifies its caller, request hash and exact metadata.
+defs.ReferencedUploadRequest = obj({ ...uploadMetadata,
+  originalRequest: obj({ objectId: id, revision: { const: 1 } }),
+}, [...defs.UploadAttachmentRequest.required.filter(key => key !== 'bytesBase64'), 'originalRequest']);
+defs.RetainedDurableRequest = { anyOf: [ref('DurableRequest'), ref('RetainedCreateRequest'), ref('RetainedEditRequest'), ref('RetainedQuestionRequest'), ref('CompletedUploadRequest'), ref('ReferencedUploadRequest')] };
 
 defs.NativeLifecycleCall = obj({ key: id,
   owner: obj({ serviceNodeId: id, hostId: id, nativeVersion: id, nativeExecutableHash: hash, catalogHash: hash }),
@@ -441,7 +453,14 @@ defs.Run.allOf = [
 defs.Operation.allOf = [when('phase', 'succeeded', { outcome: { not: nil }, error: nil }),
   when('phase', 'failed', { outcome: nil, error: { not: nil } }),
   when('phase', 'needs_attention', { error: { not: nil } }),
-  { if: { properties: { request: { properties: { action: { const: 'nativeUpdate' } } } } }, then: { properties: { actor: { properties: { source: { const: 'native' } } } } } }];
+  { if: { properties: { request: { properties: { action: { const: 'nativeUpdate' } } } } }, then: { properties: { actor: { properties: { source: { const: 'native' } } } } } },
+  { if: { properties: { request: ref('CompletedUploadRequest') } }, then: { properties: {
+    phase: { const: 'succeeded' }, writes: { items: { properties: { outcome: { not: nil } } } },
+    outcome: { type: 'object', required: ['attachment'], properties: { attachment: ref('TaskAttachment') } },
+  } } },
+  { if: { properties: { request: ref('ReferencedUploadRequest') } }, then: { properties: {
+    phase: { enum: ['accepted', 'preparing', 'publishing', 'failed', 'needs_attention'] },
+  } } }];
 defs.NativeCall.allOf = [when('state', 'prepared', { observedAt: nil, ownerPhase: nil, epoch: nil, evidence: nil, code: nil }),
   when('state', 'observed', { observedAt: timestamp, ownerPhase: defs.NativeCall.properties.ownerPhase.anyOf[0], evidence: ref('Artifact') }),
   { if: { properties: { request: { required: ['backend'] } } }, then: { required: ['owner'] } }];

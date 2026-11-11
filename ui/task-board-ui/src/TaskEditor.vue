@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref, shallowRef, toRaw, watch } from "vue";
 import {
   Alert,
   AlertDescription,
@@ -32,6 +32,7 @@ import { canonical } from "../../../packages/sdk/src/client.js";
 import { route } from "../../../packages/ui-client/src/runtime";
 import type { Document, TaskBoard, Wire } from "./runtime";
 import { useAction } from "./action";
+import type { EditSnapshot } from './action';
 import ActionState from "./ActionState.vue";
 import TaskLocationPicker from "./TaskLocationPicker.vue";
 import WikiLinkPicker from "./WikiLinkPicker.vue";
@@ -54,6 +55,11 @@ const props = defineProps<{
   available: boolean;
   task?: Pick<Document<"task">, 'value' | 'pin'>;
   questions?: TaskBoard.Comment[];
+  action?: ReturnType<typeof useAction>;
+  conflict?: EditSnapshot | null;
+  onEdit?: (fields: TaskBoard.TaskFields) => (result: {
+    current: EditSnapshot | null; conflict: boolean;
+  }) => void;
 }>();
 const emit = defineEmits<{ saved: []; cancel: [] }>();
 const defaults: TaskBoard.TaskFields = {
@@ -70,30 +76,39 @@ const defaults: TaskBoard.TaskFields = {
   allowParallel: false,
   dueAt: null,
 };
-const sameFields = (a: TaskBoard.TaskFields, b: TaskBoard.TaskFields) =>
+const sameFields = (a: TaskBoard.TaskFields | TaskBoard.TaskFieldsInput, b: TaskBoard.TaskFields | TaskBoard.TaskFieldsInput) =>
   canonical(a as unknown as Wire.Json) === canonical(b as unknown as Wire.Json);
+type Schedule = Pick<TaskBoard.Task, 'wakeAt' | 'dependencies'>;
+const sameSchedule = (a: Schedule, b: Schedule) => a.wakeAt === b.wakeAt &&
+  a.dependencies.length === b.dependencies.length && a.dependencies.every((id, index) => id === b.dependencies[index]);
+const scope = props.task?.pin.objectId ?? "new",
+  key = "ivy:task-board:draft:" + base.href + props.workspace.serviceNodeId + ":" + props.workspace.callerPrincipalId + ":" + scope;
+const action = props.action ?? useAction(() => props.workspace, "edit:" + scope);
+// A just-confirmed original can prefill a new draft before the full read catches up.
+// It never replaces the business task; save still verifies a fresh compact header.
+const confirmedDraft = (() => {
+  const saved = action.saved.value, pin = saved?.outcome?.task;
+  const request = saved?.call.arguments as TaskBoard.EditRequest | undefined;
+  return props.task && saved?.phase === 'succeeded' && !action.busy.value && !action.error.value && action.identityMatches.value &&
+    saved.call.qualifiedName === 'task-board.edit' && request?.action === 'edit' && request.taskId === props.task.pin.objectId &&
+    pin?.objectId === props.task.pin.objectId && pin.revision > props.task.pin.revision && request.fields.userContact !== undefined &&
+    request.wakeAt !== undefined && request.dependencies
+    ? { fields: request.fields as TaskBoard.TaskFields, wakeAt: request.wakeAt, dependencies: request.dependencies, revision: pin.revision } : null;
+})();
 const form = ref<TaskBoard.TaskFields>(
-  structuredClone(props.task?.value.fields ?? defaults),
+  structuredClone(toRaw(confirmedDraft?.fields ?? props.task?.value.fields ?? defaults)),
 );
 const initialState = ref<TaskBoard.Task['workflowState']>('todo');
-const wakeAt = ref<string | null>(props.task?.value.wakeAt ?? null);
-const dependencies = ref<string[]>([...props.task?.value.dependencies ?? []]);
+const wakeAt = ref<string | null>(confirmedDraft ? confirmedDraft.wakeAt : props.task?.value.wakeAt ?? null);
+const dependencies = ref<string[]>([...(confirmedDraft?.dependencies ?? props.task?.value.dependencies ?? [])]);
 const initialSummary = ref('');
-const revision = ref(props.task?.pin.revision ?? null),
+const revision = ref(confirmedDraft?.revision ?? props.task?.pin.revision ?? null),
   baseFields = ref<TaskBoard.TaskFields | null>(
-    props.task ? structuredClone(props.task.value.fields) : null,
+    props.task ? structuredClone(toRaw(confirmedDraft?.fields ?? props.task.value.fields)) : null,
   ),
-  conflict = ref<Document<"task"> | null>(null),
+  baseSchedule = ref<Schedule | null>(props.task ? { wakeAt: wakeAt.value, dependencies: [...dependencies.value] } : null),
+  conflict = shallowRef<EditSnapshot | null>(props.conflict ?? null),
   error = ref<string | null>(null);
-const scope = props.task?.pin.objectId ?? "new",
-  key =
-    "ivy:task-board:draft:" +
-    base.href +
-    props.workspace.serviceNodeId +
-    ":" +
-    props.workspace.callerPrincipalId +
-    ":" +
-    scope;
 let restoredDraft = false;
 try {
   const raw = sessionStorage.getItem(key);
@@ -106,19 +121,29 @@ try {
       form.value = retained.fields;
       delete (form.value as unknown as Record<string, unknown>).dependencies;
       delete (form.value as unknown as Record<string, unknown>).nextReviewAt;
-      wakeAt.value = retained.wakeAt ?? retained.initial?.wakeAt ?? wakeAt.value;
+      wakeAt.value = 'wakeAt' in retained ? retained.wakeAt : retained.initial?.wakeAt ?? wakeAt.value;
       dependencies.value = retained.dependencies ?? retained.initial?.dependencies ?? dependencies.value;
       revision.value = retained.revision;
       baseFields.value = retained.baseFields ??
-        (retained.revision === props.task?.pin.revision ? baseFields.value : null);
+        (props.task && retained.revision === props.task.pin.revision ? structuredClone(props.task.value.fields) : null);
+      baseSchedule.value = retained.baseSchedule ?? (props.task && retained.revision === props.task.pin.revision
+        ? { wakeAt: props.task.value.wakeAt, dependencies: [...props.task.value.dependencies] } : null);
       if (!props.task && retained.initial) {
         initialState.value = retained.initial.workflowState ?? 'todo';
         initialSummary.value = retained.initial.initialResult?.summary ?? '';
       }
       // A retained copy of already-saved fields starts from the current save base.
-      if (props.task && sameFields(retained.fields, props.task.value.fields)) {
+      if (props.task && sameFields(retained.fields, props.task.value.fields) && sameSchedule(
+        { wakeAt: wakeAt.value, dependencies: dependencies.value }, props.task.value)) {
         revision.value = props.task.pin.revision;
         baseFields.value = structuredClone(props.task.value.fields);
+        baseSchedule.value = { wakeAt: props.task.value.wakeAt, dependencies: [...props.task.value.dependencies] };
+      } else if (confirmedDraft && sameFields(retained.fields, confirmedDraft.fields) && sameSchedule(
+        { wakeAt: wakeAt.value, dependencies: dependencies.value }, confirmedDraft)) {
+        // Recovery may confirm the original after its form has already unmounted.
+        revision.value = confirmedDraft.revision;
+        baseFields.value = structuredClone(toRaw(confirmedDraft.fields));
+        baseSchedule.value = { wakeAt: confirmedDraft.wakeAt, dependencies: [...confirmedDraft.dependencies] };
       }
       restoredDraft = true;
     }
@@ -425,7 +450,7 @@ const normalizedFields = (): TaskBoard.TaskFields => {
     // A saved Task keeps its original assignment until the host is changed here.
     executionRequirement:
       props.task && !hostTouched.value
-        ? props.task.value.fields.executionRequirement
+        ? form.value.executionRequirement
         : host.value
           ? { kind: "host", hostId: host.value }
           : null,
@@ -459,11 +484,11 @@ const initialFields = (): Pick<TaskBoard.CreateRequest, 'workflowState' | 'wakeA
     ? { initialResult: { summary: initialSummary.value.trim(), artifacts: [], codeReferences: [], repositoryResult: null, limitations: [] } } : {}),
 });
 const clearDraft = () => {
-  retainDraft = false;
   sessionStorage.removeItem(key);
+  retainDraft = false;
 };
 watch(
-  [form, revision, baseFields, capabilities, host, category, nativeBackend, nativeModel, reasoningEffort, serviceTier,
+  [form, revision, baseFields, baseSchedule, capabilities, host, category, nativeBackend, nativeModel, reasoningEffort, serviceTier,
     initialState, wakeAt, dependencies, initialSummary],
   () => {
     if (!retainDraft) return;
@@ -474,7 +499,7 @@ watch(
           fields: normalizedFields(),
           wakeAt: wakeAt.value, dependencies: dependencies.value,
           revision: revision.value,
-          baseFields: baseFields.value,
+          baseFields: baseFields.value, baseSchedule: baseSchedule.value,
           ...(!props.task ? { initial: initialFields() } : {}),
           rootObjectId: props.workspace.rootObjectId,
           principalId: props.workspace.principalId,
@@ -486,7 +511,6 @@ watch(
   },
   { deep: true },
 );
-const action = useAction(() => props.workspace, "edit:" + scope);
 // Files added before the Task exists are uploaded right after it is created.
 const pendingFiles = new Map<string, File>();
 const pendingFileCount = ref(0);
@@ -540,13 +564,28 @@ const uploadPending = async (task: TaskBoard.ObjectPin, fields: TaskBoard.TaskFi
     revision = outcome.task.revision;
   }
 };
+let completedOperation: string | undefined, recoveryOperation: string | undefined;
 const recoveredAction = () => {
-  const saved = action.saved.value?.outcome?.task;
-  clearDraft();
-  if (!props.task && saved) {
-    location.hash = taskRoute(props.workspace.serviceNodeId, saved.objectId);
-  } else emit("saved");
+  const saved = action.saved.value, pin = saved?.outcome?.task;
+  if (!saved || !pin || action.busy.value || action.error.value || !action.identityMatches.value || saved.phase !== 'succeeded' || completedOperation === saved.call.operationId) return;
+  const request = saved.call.arguments as TaskBoard.ActionInput;
+  if (request.action !== 'edit' && request.action !== 'create') return;
+  if (request.action !== (props.task ? 'edit' : 'create') || props.task && (request.action !== 'edit' || request.taskId !== props.task.pin.objectId || pin.objectId !== props.task.pin.objectId)) return;
+  if (!('fields' in request) || !sameFields(normalizedFields(), request.fields) || wakeAt.value !== request.wakeAt || JSON.stringify(dependencies.value) !== JSON.stringify(request.dependencies)) return;
+  try {
+    clearDraft(); completedOperation = saved.call.operationId;
+    revision.value = pin.revision; conflict.value = null;
+    if (!props.task) location.hash = taskRoute(props.workspace.serviceNodeId, pin.objectId);
+    else emit('saved');
+  } catch { error.value = tr('Die Änderung wurde gespeichert, aber der Browser konnte den gesicherten Entwurf nicht entfernen.', 'The change was saved, but this tab could not clear its retained draft.'); }
 };
+// A lost edit response can finish through the existing background reconciliation.
+// Only matching saved fields may close this editor; inspection and uploads cannot.
+watch([() => action.saved.value?.call.operationId, () => action.saved.value?.phase, action.busy, action.error, action.identityMatches], () => {
+  const saved = action.saved.value;
+  if (saved && !['succeeded', 'failed'].includes(saved.phase)) recoveryOperation = saved.call.operationId;
+  if (props.task && recoveryOperation === saved?.call.operationId) recoveredAction();
+}, { immediate: true });
 const fixed = computed(() => !!props.task?.value.claim),
   // Once a Task has run, its native context lives on that host and in that project.
   placed = computed(() => !!props.task && taskStarted(props.task.value)),
@@ -566,6 +605,14 @@ const setDate = (key: "dueAt", event: Event) => {
   const value = (event.target as HTMLInputElement).value;
   form.value[key] = value ? new Date(value).toISOString() : null;
 };
+const useCurrentRevision = () => {
+  const current = conflict.value;
+  if (!current) return;
+  revision.value = current.pin.revision;
+  baseFields.value = structuredClone(toRaw(current.fields));
+  baseSchedule.value = { wakeAt: current.wakeAt, dependencies: [...current.dependencies] };
+  conflict.value = null;
+};
 const save = async () => {
   if (locked.value || !props.available) return;
   error.value = null;
@@ -579,44 +626,55 @@ const save = async () => {
   }
   try {
     if (props.task) {
-      const current = await readDocument(
-        "task",
-        props.task.pin.objectId,
-        props.workspace.rootObjectId,
-        undefined,
-        { limit: 0 },
-      );
-      // Unchanged fields are not saved, so the worker is not told about an empty edit.
-      const fields = normalizedFields();
-      if (current.pin.revision !== revision.value && !sameFields(fields, current.value.fields)) {
-        // Runtime updates and comments advance the Task revision without editing its fields.
-        // A restored draft may need its original revision to recover the edit base.
-        if (!baseFields.value && revision.value !== null)
-          baseFields.value = (await readDocument("task", {
-            objectId: current.pin.objectId, revision: revision.value,
-          }, props.workspace.rootObjectId, undefined, { limit: 0 })).value.fields;
-        if (!baseFields.value || !sameFields(baseFields.value, current.value.fields)) {
-          conflict.value = current;
-          return;
+      const selectedTask = props.task;
+      const fields = normalizedFields(), requestedWakeAt = wakeAt.value, requestedDependencies = [...dependencies.value];
+      fields.acceptanceCriteria = [...fields.acceptanceCriteria];
+      fields.workspaceRequirement = { ...fields.workspaceRequirement };
+      let unchanged: TaskBoard.ObjectPin | null = null;
+      let observed: EditSnapshot | null = null;
+      const settled = props.onEdit?.(fields);
+      try {
+      const outcome = await action.start('Save task changes', async () => {
+        const current = await readDocument(
+          "task", selectedTask.pin.objectId, props.workspace.rootObjectId, undefined, { limit: 0 },
+        );
+        observed = { pin: current.pin, fields: current.value.fields, wakeAt: current.value.wakeAt, dependencies: current.value.dependencies };
+        // Unchanged fields are not saved, so the worker is not told about an empty edit.
+        const requestedSchedule = { wakeAt: requestedWakeAt, dependencies: requestedDependencies };
+        if ((confirmedDraft || current.pin.revision !== revision.value) &&
+            (!sameFields(fields, current.value.fields) || !sameSchedule(requestedSchedule, current.value))) {
+          // Runtime updates and comments advance the revision without editing fields.
+          // A restored draft may need its original revision to recover the edit base.
+          if ((!baseFields.value || !baseSchedule.value) && revision.value !== null) {
+            const original = (await readDocument("task", {
+              objectId: current.pin.objectId, revision: revision.value,
+            }, props.workspace.rootObjectId, undefined, { limit: 0 })).value;
+            baseFields.value ??= original.fields;
+            baseSchedule.value ??= { wakeAt: original.wakeAt, dependencies: original.dependencies };
+          }
+          if (!baseFields.value || !baseSchedule.value || !sameFields(baseFields.value, current.value.fields) ||
+              !sameSchedule(baseSchedule.value, current.value)) {
+            conflict.value = observed;
+            return null;
+          }
         }
-      }
-      let pin: TaskBoard.ObjectPin | null = current.pin;
-      if (!sameFields(fields, current.value.fields) || wakeAt.value !== current.value.wakeAt || JSON.stringify(dependencies.value) !== JSON.stringify(current.value.dependencies)) {
-        const outcome = await action.start("Save task changes", {
-          action: "edit",
-          taskId: current.pin.objectId,
-          expectedRevision: current.pin.revision,
-          fields,
-          wakeAt: wakeAt.value, dependencies: dependencies.value,
-        });
-        pin = outcome?.task ?? null;
-      }
-      if (pin) {
+        if (!sameFields(fields, current.value.fields) || !sameSchedule(requestedSchedule, current.value)) {
+          return {
+            action: "edit", taskId: current.pin.objectId, expectedRevision: current.pin.revision, fields,
+            wakeAt: requestedWakeAt, dependencies: requestedDependencies,
+          };
+        }
+        unchanged = current.pin;
+        return null;
+      });
+      if (outcome) recoveredAction();
+      else if (unchanged) {
         clearDraft();
-        revision.value = pin.revision;
+        revision.value = (unchanged as TaskBoard.ObjectPin).revision;
         conflict.value = null;
         emit("saved");
       }
+      } finally { settled?.({ current: observed, conflict: !!conflict.value }); }
     } else {
       const fields = normalizedFields();
       const outcome = await action.start("Create task", {
@@ -974,24 +1032,20 @@ const cancel = () => {
         ><AlertTitle>The task changed while you were editing</AlertTitle
         ><AlertDescription
           ><p>
-            Your draft is retained. Compare it with the current saved fields.
+            {{ tr('Dein Entwurf bleibt erhalten. Vergleiche ihn mit den aktuell gespeicherten Werten.', 'Your draft is retained. Compare it with the current saved values.') }}
           </p>
           <RevisionDiff
             class="mt-2 w-full"
-            before-label="Current saved fields"
+            before-label="Current saved values"
             after-label="Your draft"
-            :before="JSON.stringify(conflict.value.fields, null, 2)"
-            :after="JSON.stringify(normalizedFields(), null, 2)"
+            :before="JSON.stringify({ ...conflict.fields, wakeAt: conflict.wakeAt, dependencies: conflict.dependencies }, null, 2)"
+            :after="JSON.stringify({ ...normalizedFields(), wakeAt, dependencies }, null, 2)"
           /><Button
             class="mt-2"
             type="button"
             variant="outline"
-            @click="
-              revision = conflict.pin.revision;
-              baseFields = JSON.parse(JSON.stringify(conflict.value.fields));
-              conflict = null;
-            "
-            >Use current revision with my draft</Button
+            @click="useCurrentRevision"
+            >{{ tr('Aktuellen Stand für meinen Entwurf verwenden', 'Use current revision with my draft') }}</Button
           ></AlertDescription
         ></Alert
       >

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import {
   Alert,
   AlertDescription,
@@ -36,6 +36,9 @@ import {
 } from "./runtime";
 import type { Operation, TaskBoard } from "./runtime";
 import { useAction } from "./action";
+import { useBoardActions } from "./board-actions";
+import type { TaskActions } from './board-actions';
+import { archiveBoardCard, archiveBoardSelection, readArchiveCards } from './board-archive';
 import ActionState from "./ActionState.vue";
 import { useObjectArchive } from "../../../packages/ui-client/src/object-archive";
 import { taskFilter } from "./task-filter";
@@ -97,7 +100,7 @@ const hosts = useRemote((signal) =>
   ), 0, ["services/agent-manager"]);
 const filterKey = computed(() =>
   JSON.stringify(
-    ["q", "status", "control", "host", "category"].map((key) =>
+    ["q", "status", "control", "host", "category", "project"].map((key) =>
       props.query.get(key),
     ),
   ),
@@ -177,6 +180,8 @@ const counts = useRemote(async (signal) => {
   );
 }, 30000, () => [objectParentScope('task-board/task', props.workspace.rootObjectId)], () => props.available);
 watch(filterKey, () => {
+  observedColumns.clear();
+  boardActions.clearCards();
   counts.value.value = null;
   void counts.refresh();
   search.value = props.query.get("q") ?? "";
@@ -190,13 +195,53 @@ const retainedBoardAction = useAction(() => props.workspace, "board"),
 // An older retained archive must keep its original slot while other tickets move.
 const action = workflowAction.saved.value || retainedBoardAction.saved.value?.call.qualifiedName === "task-board.archive"
   ? workflowAction : retainedBoardAction;
+const boardActions = useBoardActions(() => props.workspace, synchronizeActionSlots, findDisplayedCard, () => props.query.get('id'));
+const observedColumns = new Set<string>();
+const releaseClosedActions = () => {
+  if (columns.value.every(column => observedColumns.has(column.id)) &&
+      (!showBacklog.value || !backlogOpen.value || observedColumns.has('backlog')) && (!archiveOpen.value || observedColumns.has('archive')))
+    void boardActions.release().catch(() => {});
+};
+const observeCards = (columnId: string, cards: TaskBoard.TaskCardView[]) => {
+  boardActions.observe(cards);
+  // Every open column must receive its ordinary first page before cleanup can
+  // join a batch. Earlier empty columns cannot delay a later visible column.
+  observedColumns.add(columnId);
+  releaseClosedActions();
+};
+const detailBoardAction = computed(() => boardActions.entries.value.find(entry => entry.taskId === props.query.get('id'))?.action);
+const detailBoardArchive = computed(() => detailBoardAction.value?.identityMatches.value &&
+  detailBoardAction.value.saved.value?.phase === 'succeeded' ? detailBoardAction.value.saved.value.outcome?.archive ?? null : null);
+const detailBoardProjection = computed(() => boardActions.projections.value.find(value =>
+  value.card.object.objectId === props.query.get('id')) ?? null);
 const columnRefs = ref<InstanceType<typeof BoardColumn>[]>([]),
   backlogRef = ref<InstanceType<typeof BoardColumn> | null>(null),
   archiveRef = ref<InstanceType<typeof BoardColumn> | null>(null),
   archive = useObjectArchive(client, "ivy:task-board:archive:" + base.href + ":" + props.workspace.serviceNodeId + ":board"),
   archiveError = ref(""),
   error = ref(""),
-  preparing = ref(false);
+  preparing = ref(false),
+  archiving = ref(false);
+let archiveSelection: AbortController | null = null;
+function findDisplayedCard(id: string) {
+  for (const column of [...columnRefs.value, backlogRef.value, archiveRef.value]) {
+    const card = column?.findCard(id);
+    if (card) return card;
+  }
+  return null;
+}
+async function synchronizeActionSlots(ids: string[]) {
+  if (document.hidden) return false;
+  const filter = filterKey.value;
+  const cards = await readArchiveCards(props.workspace, ids);
+  if (cards.length !== ids.length || filter !== filterKey.value) return false;
+  const observation = cards[0]?.observation;
+  if (!observation || cards.some(card => card.observation?.runtimeEpoch !== observation.runtimeEpoch || !Number.isSafeInteger(card.observation?.sequence))) return false;
+  const fence = { runtimeEpoch: observation.runtimeEpoch, sequence: Math.max(...cards.map(card => card.observation!.sequence)) };
+  boardActions.observe(cards);
+  const columns = [...columnRefs.value, backlogRef.value, archiveRef.value].filter(column => !!column);
+  return !!columns.length && (await Promise.all(columns.map(column => column.settle(fence)))).every(Boolean) && filter === filterKey.value;
+}
 const retainedArchive = computed(() => retainedBoardAction.saved.value?.call.qualifiedName === "task-board.archive");
 // Resolve an already retained archive without showing workflow internals on the board.
 useRemote(async () => {
@@ -213,7 +258,7 @@ const pendingArchiveTaskId = computed(() => archive.pending.value?.objectId ??
   (retainedArchive.value ? (retainedBoardAction.saved.value?.call.arguments as TaskBoard.ArchiveRequest)?.taskId : null) ?? null);
 watch(() => archive.pending.value, (current, previous) => { if (previous && !current) refresh(); });
 const retryArchive = async () => {
-  if (!props.available || preparing.value || props.workspace.role !== "user") return;
+  if (!props.available || archiving.value || preparing.value || props.workspace.role !== "user") return;
   if (retainedArchive.value) {
     await retainedBoardAction.reconcile();
     if (!retainedBoardAction.canDismiss.value) await retainedBoardAction.replay();
@@ -235,6 +280,30 @@ const recovered = () => {
   if (action.saved.value?.phase === "succeeded") error.value = "";
   refresh();
 };
+watch(() => ({ selected: props.query.get('id'), active: boardActions.active.value,
+  entries: [...boardActions.entries.value, ...boardActions.detailEntries.value].map(({ taskId, action }) =>
+    ({ taskId, operationId: action.saved.value?.call.operationId, phase: action.saved.value?.phase, busy: action.busy.value, error: action.error.value })) }), (current, previous) => {
+  if (current.entries.some(({ taskId, operationId, phase }) => phase === 'succeeded' &&
+    !previous?.entries.some(entry => entry.taskId === taskId && entry.operationId === operationId && entry.phase === 'succeeded') &&
+    !boardActions.active.value.includes(taskId))) refresh();
+  // Release closed, confirmed owners in the background. Failed reads keep their
+  // original records for the next view change or ordinary capacity check.
+  releaseClosedActions();
+});
+const detailOwner = shallowRef<{ taskId: string; actions: TaskActions | null; issue: string } | null>(null);
+watch(() => props.query.get('id'), async (taskId, _previous, onCleanup) => {
+  detailOwner.value = null;
+  if (!taskId) return;
+  let current = true;
+  onCleanup(() => { current = false; });
+  try {
+    const actions = await boardActions.detail(taskId);
+    if (current) detailOwner.value = { taskId, actions, issue: '' };
+  } catch (cause) {
+    if (current) detailOwner.value = { taskId, actions: null,
+      issue: cause instanceof Error ? cause.message : 'Resolve a previous task change before starting more changes in this tab.' };
+  }
+}, { immediate: true });
 const submit = () => {
   filtersOpen.value = false;
   location.hash = link({
@@ -265,91 +334,64 @@ watch(selected, async (open, previous) => {
     (returnFocus?.isConnected ? returnFocus : document.getElementById('main-content'))?.focus({ preventScroll: true });
   }
 }, { immediate: true });
-onBeforeUnmount(() => { document.documentElement.style.overflow = originalOverflow; });
+onBeforeUnmount(() => { archiveSelection?.abort(); document.documentElement.style.overflow = originalOverflow; });
 const disabled = computed(
-  () => !props.available || preparing.value || action.locked.value,
+  () => !props.available || preparing.value,
 );
-const transition = async (id: string, operation: BoardTransition) => {
-  if (disabled.value || id === pendingArchiveTaskId.value || props.workspace.role !== "user") return;
-  preparing.value = true;
-  error.value = "";
-  try {
-    const current = await readDocument(
-      "task",
-      id,
-      props.workspace.rootObjectId,
-    );
-    if (
-      current.read.object.effectivelyArchived ||
-      !transitions(taskContext(current.value)).some(
-        (item) => item.action === operation,
-      )
-    )
-      throw new Error(
-        "This task changed. Open it to review the available actions.",
+const blockedTaskIds = computed(() => [...new Set([
+  ...boardActions.blocked.value,
+  ...[retainedBoardAction, workflowAction].flatMap(legacy => {
+    const taskId = (legacy.saved.value?.call.arguments as { taskId?: string } | undefined)?.taskId;
+    return taskId && legacy.locked.value ? [taskId] : [];
+  }),
+])]);
+const transition = async (id: string, operation: BoardTransition, card?: TaskBoard.TaskCardView) => {
+  if (disabled.value || id === pendingArchiveTaskId.value || blockedTaskIds.value.includes(id) || props.workspace.role !== "user") return;
+  for (const column of [...columnRefs.value, backlogRef.value]) column?.reveal(operation);
+  if (operation === 'backlog') backlogOpen.value = true;
+  await boardActions.run(id, async action => {
+    await action.start("Move task to " + operation, async () => {
+      const current = await readDocument(
+        "task", id, props.workspace.rootObjectId, undefined, { limit: 0 },
       );
-    await action.start("Move task to " + operation, {
-      action: "transition",
-      taskId: id,
-      expectedRevision: current.pin.revision,
-      workflowState: operation,
-      detail: null,
+      if (current.read.object.effectivelyArchived || !transitions(taskContext(current.value)).some(item => item.action === operation))
+        throw new Error("This task changed. Open it to review the available actions.");
+      return {
+        action: "transition", taskId: id, expectedRevision: current.pin.revision, workflowState: operation, detail: null,
+      };
     });
     refresh();
-  } catch (cause) {
-    error.value =
-      cause instanceof Error
-        ? cause.message
-        : "This transition is unavailable.";
-  } finally {
-    preparing.value = false;
-  }
+  }, card ? { card, state: operation } : undefined);
 };
-const archiveTasks = async (id?: string) => {
-  if (disabled.value || archivePending.value || archive.busy.value || action.busy.value || props.workspace.role !== "user") return;
-  preparing.value = true;
-  archiveError.value = "";
-  archive.clearError();
-  if (retainedArchive.value && retainedBoardAction.canDismiss.value) retainedBoardAction.dismiss();
+const archiveTasks = async (id?: string, card?: TaskBoard.TaskCardView) => {
+  if (disabled.value || props.workspace.role !== 'user') return;
+  if (id) {
+    if (!card || card.object.objectId !== id || id === pendingArchiveTaskId.value || blockedTaskIds.value.includes(id)) return;
+    await archiveBoardCard(() => props.workspace, boardActions, card, refresh);
+    return;
+  }
+  if (archiving.value) return;
+  archiving.value = true;
+  archiveError.value = '';
+  const controller = new AbortController();
+  archiveSelection = controller;
   try {
-    const ids: string[] = [];
-    if (id) ids.push(id);
-    else {
-      // Collect the whole filtered Done column before archiving changes its query pages.
-      let cursor: string | null = null;
-      do {
-        const page: Operation.ObjectsQueryResult = await client.request("objects.query", {
-          contractKey: "task-board/task",
-          contractVersions: taskContractVersions,
-          where: and(taskFilter(props.workspace.rootObjectId, props.query), {
-            op: "in", field: "data:/workflowState", value: ["done", "cancelled"],
-          }),
-          orderBy: [{ field: "object.id", direction: "asc" }],
-          limit: 200,
-          ...(cursor ? { cursor } : {}),
-        });
-        ids.push(...page.items.map((item) => item.objectId));
-        cursor = page.nextCursor;
-      } while (cursor);
-    }
-    for (const taskId of ids) {
-      const current = await readDocument("task", taskId, props.workspace.rootObjectId);
-      if (current.read.object.effectivelyArchived) continue;
-      if (!['done', 'cancelled'].includes(current.value.workflowState) || current.value.claim || current.value.publication)
-        throw new Error("A task changed. Refresh the board before archiving the remaining tasks.");
-      if (!await archive.run(taskId, true)) break;
-      refresh();
-    }
+    const result = await archiveBoardSelection(() => props.workspace, props.query, boardActions, refresh,
+      taskId => taskId === pendingArchiveTaskId.value || blockedTaskIds.value.includes(taskId), controller.signal);
+    if (result.skipped) archiveError.value = tr('Einige Aufgaben haben sich geändert oder werden noch bestätigt. Sie wurden unverändert gelassen.',
+      'Some tasks changed or still have changes being confirmed. They were left unchanged.');
   } catch (cause) {
-    archiveError.value = cause instanceof Error ? cause.message : "The tasks could not be archived.";
+    if (!controller.signal.aborted) archiveError.value = cause instanceof Error ? cause.message : 'The tasks could not be archived.';
   } finally {
-    preparing.value = false;
+    if (archiveSelection === controller) archiveSelection = null;
+    archiving.value = false;
     refresh();
   }
 };
 // Manual rank is the Tasks' order among their workspace siblings.
 const reorder = async (id: string, placement: Placement) => {
-  if (disabled.value || id === pendingArchiveTaskId.value || props.workspace.role !== "user") return;
+  if (disabled.value || id === pendingArchiveTaskId.value || blockedTaskIds.value.includes(id) || props.workspace.role !== "user") return;
+  if ('after' in placement && (blockedTaskIds.value.includes(placement.after) || placement.after === pendingArchiveTaskId.value)) return;
   preparing.value = true;
   error.value = "";
   const place = async (objectId: string, beforeObjectId: string | null) => {
@@ -390,7 +432,7 @@ const reorder = async (id: string, placement: Placement) => {
     refresh();
   }
 };
-const dragged = ref<{ id: string; context: TransitionContext } | null>(null);
+const dragged = ref<{ id: string; context: TransitionContext; card: TaskBoard.TaskCardView } | null>(null);
 const dropAction = (column: string): BoardTransition | undefined => {
   const action = (
     {
@@ -411,7 +453,7 @@ const drop = (column: string) => {
   const action = dropAction(column),
     task = dragged.value;
   dragged.value = null;
-  if (task && action) void transition(task.id, action);
+  if (task && action) void transition(task.id, action, task.card);
 };
 </script>
 <template>
@@ -561,12 +603,26 @@ const drop = (column: string) => {
     >
   </form>
   <ActionState
-    v-if="action.saved.value?.phase !== 'succeeded' || action.error.value"
+    v-if="!action.busy.value && (action.saved.value?.phase !== 'succeeded' || action.error.value)"
     :action="action"
     @changed="recovered"
   /><Alert v-if="error" variant="destructive" class="mb-4"
     ><AlertDescription>{{ error }}</AlertDescription></Alert
   >
+  <Alert v-if="boardActions.recoveryError.value" class="mb-4"><AlertDescription>{{ boardActions.recoveryError.value }}</AlertDescription></Alert>
+  <Alert v-if="boardActions.error.value" variant="destructive" class="mb-4"><AlertDescription>
+    {{ boardActions.error.value.message }}
+    <Button variant="link" size="sm" as-child><a :href="link({ id: boardActions.error.value.taskId, panel: 'sheet' })">{{ tr('Aufgabe öffnen', 'Open task') }}</a></Button>
+  </AlertDescription></Alert>
+  <template v-for="entry in boardActions.entries.value" :key="entry.taskId">
+    <Alert v-if="!entry.action.busy.value && (entry.action.error.value || entry.action.saved.value && entry.action.saved.value.phase !== 'succeeded')" class="mb-4">
+      <AlertDescription>
+        <Button variant="link" size="sm" as-child><a :href="link({ id: entry.taskId, panel: 'sheet' })">{{ entry.action.saved.value?.label ?? tr('Aufgabe öffnen', 'Open task') }}</a></Button>
+        {{ entry.action.error.value || (entry.action.saved.value?.phase === 'failed' ? entry.action.saved.value.detail : tr('Änderung noch nicht bestätigt. Sie wird automatisch geprüft.', 'Change not yet confirmed. It is checked automatically.')) }}
+        <Disclosure :title="tr('Details', 'Details')"><ActionState :action="entry.action" @changed="refresh" /></Disclosure>
+      </AlertDescription>
+    </Alert>
+  </template>
   <p
     v-if="counts.error.value"
     role="status"
@@ -619,12 +675,15 @@ const drop = (column: string) => {
         :disabled="disabled"
         :active="available"
         :pending-task-id="pendingArchiveTaskId"
-        :archive-disabled="archivePending || archive.busy.value || action.busy.value"
+        :blocked-task-ids="blockedTaskIds"
+        :projections="boardActions.projections.value"
+        :archive-all-disabled="archiving"
         :swimlane="swimlane"
         :lanes="boardLanes"
         :collapsed-lanes="collapsedLanes"
         :grid-column="columnIndex + 1"
         @transition="transition"
+        @cards="cards => observeCards(column.id, cards)"
         @reorder="reorder"
         @drag="dragged = $event"
         @archive="archiveTasks"
@@ -669,8 +728,11 @@ const drop = (column: string) => {
       :href="(id) => link({ id, panel: 'sheet' })"
       :disabled="disabled"
       :pending-task-id="pendingArchiveTaskId"
+      :blocked-task-ids="blockedTaskIds"
+      :projections="boardActions.projections.value"
       :swimlane="backlogSwimlane"
       @transition="transition"
+      @cards="cards => observeCards('backlog', cards)"
       @reorder="reorder"
       @drag="dragged = $event"
     />
@@ -692,6 +754,8 @@ const drop = (column: string) => {
       :count="null"
       :href="(id) => link({ id, panel: 'sheet' })"
       :disabled="disabled"
+      :projections="boardActions.projections.value"
+      @cards="cards => observeCards('archive', cards)"
       swimlane="none"
     />
   </Disclosure>
@@ -704,11 +768,16 @@ const drop = (column: string) => {
         >Review and update the selected task. Close to return to the same
         board.</DialogDescription
       ><TaskDetail
-        v-if="query.get('id')"
+        v-if="query.get('id') && detailOwner?.taskId === query.get('id')"
         :key="query.get('id')!"
         :task-id="query.get('id')!"
         :workspace="workspace"
-        :available="available"
+        :available="available && !detailOwner.issue"
+        :action-issue="detailOwner.issue"
+        :task-actions="detailOwner.actions"
+        :board-blocked="boardActions.boardBlocked.value.includes(query.get('id')!)"
+        :board-archive="detailBoardArchive"
+        :board-projection="detailBoardProjection"
         :query="query"
         @host="emit('host', $event)"
         @agent-node="emit('agentNode', $event)"

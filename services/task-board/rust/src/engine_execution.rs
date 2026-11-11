@@ -232,7 +232,7 @@ impl<S: ExecutionStore, C: Fn() -> String, P: ExecutionServices> CachedExecution
             }
             return Err(error);
         }
-        let request = operation.value.required("request")?.clone();
+        let request = operation.value.required("request")?;
         let mut transcript = None;
         if write_count(&operation.value)? == 0
             && is(&request, "action", "nativeUpdate")

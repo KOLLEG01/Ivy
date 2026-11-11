@@ -831,7 +831,7 @@ async fn native_casing_errors_preserve_the_projection_and_release_queued_request
         native_batch(0, Json::Null, false),
     );
     let replay = world.replay.clone();
-    for _ in 0..3 {
+    for _ in 0..2 {
         native_poll(&world, native_batch(0, Json::Null, false));
     }
     let failures: Vec<_> = [
@@ -882,4 +882,398 @@ async fn native_casing_errors_preserve_the_projection_and_release_queued_request
     assert!(locale.failures.borrow().is_empty());
     assert!(replay.steps.lock().unwrap().is_empty());
     native_typed_inputs(&locale.native).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_category_readers_share_one_queued_alignment_and_drain_after_caller_loss() {
+    let locale = native_locale();
+    for retain_readers in [true, false] {
+        let world = native_world(
+            "one queued alignment for concurrent category readers",
+            vec![native_page(vec![native_item("Work")], Json::Null)],
+            native_batch(0, Json::Null, false),
+        );
+        let executor = Executor::default();
+        let projection = CategoryProjection::new(&world, &"owner".into(), &locale, &executor);
+        let readers: Vec<_> = (0..32)
+            .map(|index| {
+                if index % 2 == 0 {
+                    projection.categories()
+                } else {
+                    projection.normalize(Some(&"work".into()))
+                }
+            })
+            .collect();
+        assert_eq!(projection.normalize(None).await.unwrap(), Json::Null);
+        assert_eq!(
+            projection
+                .revalidate(&"work".into())
+                .await
+                .unwrap_err()
+                .code,
+            "task_board_category_projection_pending"
+        );
+        if retain_readers {
+            executor
+                .drive(async {
+                    for (index, reader) in readers.into_iter().enumerate() {
+                        let value = reader.await.unwrap();
+                        if index % 2 == 0 {
+                            native_categories(value, &["Work"]);
+                        } else {
+                            assert_eq!(value, Json::from("Work"));
+                        }
+                    }
+                })
+                .await;
+        } else {
+            drop(readers);
+        }
+        executor.drain(projection.settled()).await;
+        assert!(world.replay.steps.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn category_readers_arriving_after_alignment_started_capture_a_fresh_event_head() {
+    let locale = native_locale();
+    let world = native_world(
+        "later readers need their own finite event boundary",
+        vec![native_page(vec![native_item("Work")], Json::Null)],
+        native_batch(0, Json::Null, false),
+    );
+    let executor = Executor::default();
+    let projection = CategoryProjection::new(&world, &"owner".into(), &locale, &executor);
+    native_categories(
+        executor.drive(projection.categories()).await.unwrap(),
+        &["Work"],
+    );
+    native_poll(&world, native_batch(1, Json::Null, false));
+    world.replay.steps.lock().unwrap()[0].insert("pause", true.into());
+    let first = projection.categories();
+    executor.until(world.client.1.wait(true)).await;
+    let readers: Vec<_> = (0..32)
+        .map(|index| {
+            if index % 2 == 0 {
+                projection.categories()
+            } else {
+                projection.normalize(Some(&"changed".into()))
+            }
+        })
+        .collect();
+    let batch = native_batch(2, Json::Null, true);
+    native_poll(&world, batch);
+    let mut changed = native_item("Changed");
+    changed.insert("revision", 2.0.into());
+    {
+        let mut steps = world.replay.steps.lock().unwrap();
+        let before_ack = steps.len() - 1;
+        steps.insert(
+            before_ack,
+            native_page_call(native_page(vec![changed], Json::Null), None, true),
+        );
+    }
+    world.client.1.update(true);
+    native_categories(executor.until(first).await.unwrap(), &["Work"]);
+    executor
+        .drive(async {
+            for (index, reader) in readers.into_iter().enumerate() {
+                let value = reader.await.unwrap();
+                if index % 2 == 0 {
+                    native_categories(value, &["Changed"]);
+                } else {
+                    assert_eq!(value, Json::from("Changed"));
+                }
+            }
+        })
+        .await;
+    executor.drain(projection.settled()).await;
+    assert!(world.replay.steps.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_shared_category_alignment_releases_every_reader_and_allows_a_later_retry() {
+    let locale = native_locale();
+    let world = native_world(
+        "failed shared category alignment",
+        vec![native_page(vec![native_item("Work")], Json::Null)],
+        native_batch(0, Json::Null, false),
+    );
+    {
+        let mut steps = world.replay.steps.lock().unwrap();
+        steps.truncate(1);
+        steps[0].insert(
+            "error",
+            Json::object([
+                ("code", "service_unavailable".into()),
+                ("message", "Shared category alignment failed.".into()),
+                ("outcome", "not_executed".into()),
+                ("details", Json::Null),
+            ]),
+        );
+    }
+    let executor = Executor::default();
+    let projection = CategoryProjection::new(&world, &"owner".into(), &locale, &executor);
+    let readers: Vec<_> = (0..32).map(|_| projection.categories()).collect();
+    executor
+        .drive(async {
+            for reader in readers {
+                let error = reader.await.unwrap_err();
+                assert_eq!(error.code, "service_unavailable");
+                assert_eq!(
+                    error.message_js(),
+                    JsString::from("Shared category alignment failed.")
+                );
+            }
+        })
+        .await;
+    executor.drain(projection.settled()).await;
+    assert!(world.replay.steps.lock().unwrap().is_empty());
+    let retry = native_world(
+        "later retry",
+        vec![native_page(vec![native_item("Work")], Json::Null)],
+        native_batch(0, Json::Null, false),
+    );
+    world
+        .replay
+        .steps
+        .lock()
+        .unwrap()
+        .extend(retry.replay.steps.lock().unwrap().drain(..));
+    native_categories(
+        executor.drive(projection.categories()).await.unwrap(),
+        &["Work"],
+    );
+    executor.drain(projection.settled()).await;
+    assert!(world.replay.steps.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_full_alignment_does_not_join_bounded_publication_revalidation() {
+    let locale = native_locale();
+    let world = native_world(
+        "full alignment stays outside bounded publication revalidation",
+        vec![native_page(vec![native_item("Work")], Json::Null)],
+        native_batch(0, Json::Null, false),
+    );
+    let executor = Executor::default();
+    let projection = CategoryProjection::new(&world, &"owner".into(), &locale, &executor);
+    native_categories(
+        executor.drive(projection.categories()).await.unwrap(),
+        &["Work"],
+    );
+    let gap = Json::object([
+        ("prunedThroughSequence", 2.0.into()),
+        ("resumeAfterSequence", 2.0.into()),
+    ]);
+    native_poll(&world, native_batch(2, gap.clone(), false));
+    world.replay.steps.lock().unwrap().pop_back();
+    let bounded = projection.revalidate(&"work".into());
+    let readers: Vec<_> = (0..32).map(|_| projection.categories()).collect();
+    native_poll(&world, native_batch(2, gap, false));
+    {
+        let mut steps = world.replay.steps.lock().unwrap();
+        let before_ack = steps.len() - 1;
+        steps.insert(
+            before_ack,
+            native_page_call(
+                native_page(vec![native_item("Changed")], Json::Null),
+                None,
+                false,
+            ),
+        );
+    }
+    executor
+        .drive(async {
+            assert_eq!(
+                bounded.await.unwrap_err().code,
+                "task_board_category_projection_pending"
+            );
+            for reader in readers {
+                native_categories(reader.await.unwrap(), &["Changed"]);
+            }
+        })
+        .await;
+    executor.drain(projection.settled()).await;
+    assert!(world.replay.steps.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_bounded_category_checks_share_unstarted_work_and_survive_caller_loss() {
+    let locale = native_locale();
+    for retain_callers in [true, false] {
+        let world = native_world(
+            "concurrent bounded category checks",
+            vec![native_page(vec![native_item("Work")], Json::Null)],
+            native_batch(0, Json::Null, false),
+        );
+        let executor = Executor::default();
+        let projection = CategoryProjection::new(&world, &"owner".into(), &locale, &executor);
+        executor.drive(projection.categories()).await.unwrap();
+        native_poll(&world, native_batch(1, Json::Null, false));
+        let callers: Vec<_> = (0..32)
+            .map(|index| {
+                projection.revalidate(&if index % 2 == 0 { "work" } else { "Other" }.into())
+            })
+            .collect();
+        if retain_callers {
+            executor
+                .drive(async {
+                    for (index, caller) in callers.into_iter().enumerate() {
+                        assert_eq!(
+                            caller.await.unwrap(),
+                            Json::from(if index % 2 == 0 { "Work" } else { "Other" })
+                        );
+                    }
+                })
+                .await;
+        } else {
+            drop(callers);
+        }
+        executor.drain(projection.settled()).await;
+        assert!(world.replay.steps.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn bounded_category_checks_never_join_running_or_queued_full_alignments() {
+    let locale = native_locale();
+    let world = native_world(
+        "bounded checks require a fresh admission boundary",
+        vec![native_page(vec![native_item("Work")], Json::Null)],
+        native_batch(0, Json::Null, false),
+    );
+    let executor = Executor::default();
+    let projection = CategoryProjection::new(&world, &"owner".into(), &locale, &executor);
+    executor.drive(projection.categories()).await.unwrap();
+    native_poll(&world, native_batch(1, Json::Null, false));
+    world.replay.steps.lock().unwrap()[0].insert("pause", true.into());
+    let first = projection.revalidate(&"work".into());
+    let shared = projection.revalidate(&"work".into());
+    executor.until(world.client.1.wait(true)).await;
+    assert_eq!(
+        projection
+            .revalidate(&"changed".into())
+            .await
+            .unwrap_err()
+            .code,
+        "task_board_category_projection_pending"
+    );
+    let reader = projection.categories();
+    assert_eq!(
+        projection
+            .revalidate(&"changed".into())
+            .await
+            .unwrap_err()
+            .code,
+        "task_board_category_projection_pending"
+    );
+    let mut changed = native_item("Changed");
+    changed.insert("revision", 2.0.into());
+    native_poll(&world, native_batch(2, Json::Null, true));
+    {
+        let mut steps = world.replay.steps.lock().unwrap();
+        let before_ack = steps.len() - 1;
+        steps.insert(
+            before_ack,
+            native_page_call(native_page(vec![changed], Json::Null), None, true),
+        );
+    }
+    world.client.1.update(true);
+    executor
+        .drive(async {
+            assert_eq!(first.await.unwrap(), Json::from("Work"));
+            assert_eq!(shared.await.unwrap(), Json::from("Work"));
+            native_categories(reader.await.unwrap(), &["Changed"]);
+        })
+        .await;
+    executor.drain(projection.settled()).await;
+    native_poll(&world, native_batch(2, Json::Null, false));
+    assert_eq!(
+        executor
+            .drive(projection.revalidate(&"changed".into()))
+            .await
+            .unwrap(),
+        Json::from("Changed")
+    );
+    executor.drain(projection.settled()).await;
+    assert!(world.replay.steps.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn shared_bounded_category_failures_keep_the_gate_limit_and_allow_later_retry() {
+    let locale = native_locale();
+    for gap in [false, true] {
+        let world = native_world(
+            "shared bounded category failure",
+            vec![native_page(vec![native_item("Work")], Json::Null)],
+            native_batch(0, Json::Null, false),
+        );
+        let executor = Executor::default();
+        let projection = CategoryProjection::new(&world, &"owner".into(), &locale, &executor);
+        executor.drive(projection.categories()).await.unwrap();
+        if gap {
+            native_poll(
+                &world,
+                native_batch(
+                    2,
+                    Json::object([
+                        ("prunedThroughSequence", 2.0.into()),
+                        ("resumeAfterSequence", 2.0.into()),
+                    ]),
+                    false,
+                ),
+            );
+            world.replay.steps.lock().unwrap().pop_back();
+        } else {
+            world.replay.steps.lock().unwrap().push_back(Json::object([
+                ("kind", "rpc".into()),
+                (
+                    "args",
+                    Json::Array(vec![
+                        "events.head".into(),
+                        Json::object(Vec::<(&str, Json)>::new()),
+                    ]),
+                ),
+                (
+                    "error",
+                    Json::object([
+                        ("code", "service_unavailable".into()),
+                        ("message", "Bounded alignment unavailable.".into()),
+                        ("outcome", "not_executed".into()),
+                        ("details", Json::Null),
+                    ]),
+                ),
+            ]));
+        }
+        let callers: Vec<_> = (0..32)
+            .map(|_| projection.revalidate(&"work".into()))
+            .collect();
+        executor
+            .drive(async {
+                for caller in callers {
+                    assert_eq!(
+                        caller.await.unwrap_err().code,
+                        if gap {
+                            "task_board_category_projection_pending"
+                        } else {
+                            "service_unavailable"
+                        }
+                    );
+                }
+            })
+            .await;
+        executor.drain(projection.settled()).await;
+        assert!(world.replay.steps.lock().unwrap().is_empty());
+        native_poll(&world, native_batch(2, Json::Null, false));
+        assert_eq!(
+            executor
+                .drive(projection.revalidate(&"work".into()))
+                .await
+                .unwrap(),
+            Json::from("Work")
+        );
+        executor.drain(projection.settled()).await;
+        assert!(world.replay.steps.lock().unwrap().is_empty());
+    }
 }

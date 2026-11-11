@@ -155,7 +155,6 @@ impl GenerationRuntime for HintRuntime {
     fn diagnostics(&self) -> IvyResult<Vec<Json>> {
         Ok(vec![])
     }
-    fn task_changed(&self) {}
     fn notification(&self, value: &Json) -> bool {
         self.0.borrow_mut().push(value.clone());
         true
@@ -481,7 +480,6 @@ async fn generation_retires_pending_page_public_call_and_reconciler_before_final
         service.observed_at(),
         JsString::from("2026-01-02T00:00:00.000Z")
     );
-    service.task_changed();
     // Revisit ordinary Operations, leave its admitted recovery job pending,
     // then advance through Runs to the suspended Task page read.
     for _ in 0..3 {

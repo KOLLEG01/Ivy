@@ -534,6 +534,55 @@ async fn queued_inputs_are_bounded_and_retain_context_even_for_manual_terminal_t
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn review_comments_continue_the_saved_context_and_recover_the_same_admission() {
+    for (author, queued) in [("user", true), ("agent", true), ("agent", false)] {
+        let mut value = task();
+        value.insert("workflowState", "review".into());
+        let primary = Json::object([("nativeId", "saved-thread".into())]);
+        value.insert("primaryResourceRef", primary.clone());
+        let mut comment = Json::object([
+            ("commentId", "original-comment".into()),
+            ("authorKind", author.into()),
+        ]);
+        if author == "agent" {
+            comment.insert("sourceTaskId", "peer".into());
+        }
+        value.insert("comments", Json::Array(vec![comment]));
+        value.insert(
+            "commentDeliveries",
+            Json::Array(if queued {
+                vec![Json::object([
+                    ("commentId", "original-comment".into()),
+                    ("state", "queued".into()),
+                ])]
+            } else {
+                vec![]
+            }),
+        );
+        let world = World::new(value);
+        let request = world.run().await.unwrap();
+        if !queued {
+            assert!(request.is_null());
+            assert_eq!(world.count("allocate"), 0);
+            continue;
+        }
+        assert_eq!(f(&request, "action"), &Json::from("continue"));
+        assert_eq!(
+            f(&request, "commentIds"),
+            &Json::Array(vec!["original-comment".into()])
+        );
+        assert_eq!(world.values("allocate"), vec![Json::Bool(true)]);
+        assert_eq!(
+            world.read_task().value.get("primaryResourceRef"),
+            Some(&primary)
+        );
+        assert!(world.run().await.unwrap().get("recovered").is_some());
+        assert_eq!(world.count("allocate"), 1);
+        assert_eq!(world.count("dispatch"), 1);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn allocation_failure_creates_runtime_retry_without_a_task_blocker_or_wake_rewrite() {
     for (code, reason, millis) in [
         ("native_capacity", "host", 5000),

@@ -41,7 +41,6 @@ fn clock() -> String {
 }
 #[derive(Default)]
 struct DispatchRuntime {
-    changes: Cell<usize>,
     kicks: Cell<usize>,
     stopped: Cell<bool>,
 }
@@ -51,9 +50,6 @@ impl ServiceRuntime for DispatchRuntime {
     }
     fn observed_at(&self) -> JsString {
         clock().into()
-    }
-    fn task_changed(&self) {
-        self.changes.set(self.changes.get() + 1);
     }
     fn kick(&self) {
         self.kicks.set(self.kicks.get() + 1);
@@ -65,9 +61,6 @@ impl GenerationRuntime for DispatchRuntime {
     }
     fn diagnostics(&self) -> IvyResult<Vec<Json>> {
         Ok(vec![])
-    }
-    fn task_changed(&self) {
-        self.changes.set(self.changes.get() + 1);
     }
     fn notification(&self, _: &Json) -> bool {
         panic!("No native notification in this recovery case")
@@ -707,7 +700,6 @@ async fn check_comment_recovery(question: bool) {
             .unwrap();
         retired.await.unwrap();
         let result = reply.await;
-        assert_eq!(dispatch_runtime.changes.get(), usize::from(result.is_ok()));
         assert_eq!(dispatch_runtime.kicks.get(), usize::from(result.is_ok()));
         assert!(dispatch_runtime.stopped.get());
         assert_eq!(client.owner_checks.load(Ordering::SeqCst), round + 1);

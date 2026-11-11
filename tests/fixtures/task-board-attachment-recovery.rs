@@ -220,8 +220,11 @@ async fn check_recovery(input: Json, bytes: &[u8], expected: Expected, methods: 
         new_id: || panic!("No replacement attachment ID"),
         cache: None,
     };
+    let encoded = JsString::from(STANDARD.encode(bytes));
+    let content =
+        ivy_host_runtime::base64_content::Base64Content::inspect(&encoded, usize::MAX).unwrap();
     let result = store
-        .write_attachment(&task, &operation, &attachment, bytes)
+        .write_attachment(&task, &operation, &attachment, &content)
         .await;
     match expected {
         Expected::Pin(id) => assert_eq!(

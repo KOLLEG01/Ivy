@@ -298,6 +298,55 @@ async fn indexed_cards_use_local_wake_facts_and_no_conversation_or_foreign_reads
     assert_eq!(card.get("archived"), None);
     assert!(store.ranges.borrow().is_empty());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn current_archive_observations_reach_cards_and_bounded_task_reads_without_changing_the_task_pin()
+ {
+    let store = Reads::new();
+    let condition = |task: &Json, wake: Option<&Json>| task_condition(&store, task, wake);
+    let policies = ConversationPolicies::with_current_questions(&condition);
+    let mut header = store.header.clone();
+    let observation = Json::object([
+        ("runtimeEpoch", "same-hive".into()),
+        ("sequence", 41.0.into()),
+    ]);
+    header
+        .get_mut("metadata")
+        .unwrap()
+        .insert("observation", observation.clone());
+    for query in [
+        Json::object([("view", "card".into())]),
+        Json::object([("comments", Json::object([("limit", 0.0.into())]))]),
+    ] {
+        let view = read_task(&store, &policies, &header, &query).await.unwrap();
+        assert_eq!(view.get("observation"), Some(&observation));
+        assert_eq!(view.get("archived"), Some(&true.into()));
+        assert_eq!(view.get("object"), header.get("pin"));
+    }
+    let restored = Json::object([
+        ("runtimeEpoch", "same-hive".into()),
+        ("sequence", 42.0.into()),
+    ]);
+    header
+        .get_mut("metadata")
+        .unwrap()
+        .insert("observation", restored.clone());
+    header
+        .get_mut("metadata")
+        .unwrap()
+        .insert("effectivelyArchived", false.into());
+    let view = read_task(
+        &store,
+        &policies,
+        &header,
+        &Json::object([("view", "card".into())]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(view.get("object"), store.header.get("pin"));
+    assert_eq!(view.get("observation"), Some(&restored));
+    assert_eq!(view.get("archived"), Some(&false.into()));
+}
 #[tokio::test(flavor = "current_thread")]
 async fn question_pages_keep_sequence_cursors_routes_and_bounded_reads() {
     let store = Reads::new();

@@ -1,8 +1,8 @@
 use ivy_contracts::{
     IvyJson, JsString,
     json::{
-        canonical, canonical_equal, canonical_object_size, canonical_size, parse, stringify,
-        stringify_into, stringify_size, validate_json,
+        canonical, canonical_equal, canonical_matches, canonical_object_size, canonical_size,
+        parse, stringify, stringify_into, stringify_size, validate_json,
     },
 };
 use std::{
@@ -136,6 +136,22 @@ fn counted_canonical_bytes_preserve_exact_boundaries_and_error_order() {
                 canonical_size(&value, maximum).map_err(|e| e.to_wire()),
                 expected
             );
+            let complete = full.as_deref().unwrap_or("invalid");
+            for text in [
+                "",
+                "different",
+                "null ",
+                " true",
+                complete,
+                complete.trim_end_matches('}'),
+            ] {
+                assert_eq!(
+                    canonical_matches(&value, text, maximum).map_err(|e| e.to_wire()),
+                    canonical(&value, maximum)
+                        .map(|encoded| encoded == text)
+                        .map_err(|e| e.to_wire())
+                );
+            }
             if let Some(pairs) = value.as_object() {
                 assert_eq!(
                     canonical_object_size(pairs.iter().map(|(key, value)| (key, value)), maximum)
@@ -285,6 +301,14 @@ fn canonical_equality_validates_both_full_values_before_comparing() {
             canonical_equal(left, right, usize::MAX).map_err(|e| e.to_wire()),
             expected
         );
+        for value in [left, right] {
+            assert_eq!(
+                canonical_matches(value, "different", usize::MAX).map_err(|e| e.to_wire()),
+                canonical(value, usize::MAX)
+                    .map(|_| false)
+                    .map_err(|e| e.to_wire())
+            );
+        }
     };
     for depth in [128, 129] {
         let mut nested = IvyJson::Null;
@@ -361,6 +385,10 @@ fn large_validation_does_not_materialize_the_encoded_body() {
     let borrowed_equality = peak(|| {
         assert!(canonical_equal(&value, &other, bytes).unwrap());
     });
+    let text = canonical(&value, bytes).unwrap();
+    let text_comparison = peak(|| {
+        assert!(canonical_matches(&value, &text, bytes).unwrap());
+    });
     let json = peak(|| {
         validate_json(&value, bytes).unwrap();
     });
@@ -395,7 +423,7 @@ fn large_validation_does_not_materialize_the_encoded_body() {
         );
     });
     eprintln!(
-        "JSON validation allocation peaks beside owned payload: wire={bytes}, materialized={materialized}, JSON={json}, canonical={canonical}, borrowed={borrowed}, schema={schema}, refused={refused}, original-equality={original_equality}, borrowed-equality={borrowed_equality}"
+        "JSON validation allocation peaks beside owned payload: wire={bytes}, materialized={materialized}, JSON={json}, canonical={canonical}, borrowed={borrowed}, schema={schema}, refused={refused}, original-equality={original_equality}, borrowed-equality={borrowed_equality}, text-comparison={text_comparison}"
     );
     assert!(materialized >= bytes as isize);
     assert!(original_equality >= 2 * bytes as isize);
@@ -406,6 +434,7 @@ fn large_validation_does_not_materialize_the_encoded_body() {
         schema,
         refused,
         borrowed_equality,
+        text_comparison,
     ] {
         assert!(
             amount < 64 * 1024,

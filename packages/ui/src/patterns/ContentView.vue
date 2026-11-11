@@ -8,7 +8,7 @@ const props = defineProps<{ text: string; mediaType?: string; maximumCharacters?
 const limit = computed(() => props.maximumCharacters ?? 262144);
 const loaded = ref<Record<string, string>>({}), failures = ref<string[]>([]);
 const imageUrls = computed(() => ({ ...loaded.value, ...props.trustedImageUrls }));
-const markdown = computed(() => props.mediaType === 'text/markdown' ? renderMarkdown(props.text, limit.value, imageUrls.value, props.trustedAttachments) : null);
+const markdown = computed(() => props.mediaType === 'text/markdown' ? renderMarkdown(props.text, limit.value, imageUrls.value, props.trustedAttachments, !!props.previewImage) : null);
 let controller = new AbortController();
 const attempted = new Set<string>();
 const releaseImages = () => {
@@ -47,6 +47,8 @@ const previewOpen = ref(false), preview = ref({ source: '', name: '' });
 const showImage = (event: MouseEvent) => {
   const button = event.target instanceof Element ? event.target.closest('button.ivy-image-button') : null;
   const image = button?.querySelector('img');
+  const deferred = button?.getAttribute('data-image-source');
+  if (deferred && props.trustedAttachments?.[deferred] && props.previewImage) { event.preventDefault(); props.previewImage(deferred); return; }
   const source = image ? Object.keys(imageUrls.value).find(source => imageUrls.value[source] === image.src) : undefined;
   if (!image || source === undefined) return;
   event.preventDefault();

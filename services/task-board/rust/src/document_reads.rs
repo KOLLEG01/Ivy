@@ -182,8 +182,33 @@ impl<R, C, Parse, SqlFailure, M> DocumentReads<'_, R, C, Parse, SqlFailure, M> {
             primary,
             include_archived,
             retained,
+            false,
             Ok,
             |record| Ok(record.clone()),
+        )
+        .await
+    }
+
+    /// UI observations need current metadata even when the content pin is immutable.
+    /// Reuse the header read, without the action-local immutable record cache.
+    pub(crate) async fn observed_task_header<E>(&self, address: &Json) -> Result<Json, E>
+    where
+        R: ObjectReads<E>,
+        C: Contracts,
+        M: TreeReads<E>,
+        E: From<IvyError>,
+        Parse: Fn(&str) -> Result<Json, E>,
+        SqlFailure: Fn(ivy_store::rusqlite::Error) -> E,
+    {
+        self.record_with(
+            "task-board/task",
+            address,
+            true,
+            true,
+            true,
+            true,
+            |record| Ok(record.into_json()),
+            |record| Ok(record.clone().into_json()),
         )
         .await
     }
@@ -195,6 +220,7 @@ impl<R, C, Parse, SqlFailure, M> DocumentReads<'_, R, C, Parse, SqlFailure, M> {
         primary: bool,
         include_archived: bool,
         retained: bool,
+        observe: bool,
         take: impl FnOnce(StoredRecord) -> Result<T, E>,
         copy: impl FnOnce(&StoredRecord) -> Result<T, E>,
     ) -> Result<T, E>
@@ -253,8 +279,16 @@ impl<R, C, Parse, SqlFailure, M> DocumentReads<'_, R, C, Parse, SqlFailure, M> {
             }
             return take(document);
         }
-        let cache = self.cache.and_then(ReadCache::entries);
-        let cache_key = cache_key(key, address, primary, include_archived, retained)?;
+        let cache = if observe {
+            None
+        } else {
+            self.cache.and_then(ReadCache::entries)
+        };
+        let cache_key = if observe {
+            None
+        } else {
+            cache_key(key, address, primary, include_archived, retained)?
+        };
         if let (Some(cache), Some(cache_key)) = (&cache, &cache_key) {
             if let Some(document) = cache
                 .borrow()
@@ -269,6 +303,9 @@ impl<R, C, Parse, SqlFailure, M> DocumentReads<'_, R, C, Parse, SqlFailure, M> {
             }
         }
         let mut params = Json::object([("objectId", object_id.clone())]);
+        if observe {
+            params.insert("observe", true.into());
+        }
         if address.as_js_string().is_none() {
             params.insert("revision", address.required("revision")?.clone());
         }
@@ -343,6 +380,7 @@ impl<R, C, Parse, SqlFailure, M> DocumentReads<'_, R, C, Parse, SqlFailure, M> {
             primary,
             include_archived,
             retained,
+            false,
             |record| record.into_document().map_err(E::from),
             |record| record.document().map_err(E::from),
         )
@@ -366,6 +404,7 @@ where
             true,
             true,
             header_only,
+            false,
             |record| Ok(record.value),
             |record| Ok(record.value.clone()),
         )

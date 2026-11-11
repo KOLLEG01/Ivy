@@ -55,7 +55,10 @@ fn fixture() -> Json {
 fn bundle() -> SchemaBundle {
     let root = PathBuf::from(
         std::env::var_os("IVY_TASK_BOARD_CURRENT_CONTRACTS")
-            .expect("Supply the actual complete canonical repository schema directory"),
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../specs/schemas")
+            }),
     );
     let docs: Vec<&'static str> = [
         "task-board",
@@ -305,6 +308,9 @@ fn refusal(fixture: &Json, label: &str, error: IvyError) {
     expected.remove("label");
     same(&error_value(error), &expected, label);
 }
+
+#[path = "task-board-upload-retention.rs"]
+mod upload_retention;
 
 #[tokio::test(flavor = "current_thread")]
 async fn current_admission_binds_local_journal_and_retained_replay() {

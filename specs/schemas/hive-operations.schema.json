@@ -107,6 +107,25 @@
       ],
       "additionalProperties": false
     },
+    "ObjectObservation": {
+      "type": "object",
+      "properties": {
+        "runtimeEpoch": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "runtimeEpoch",
+        "sequence"
+      ],
+      "additionalProperties": false,
+      "description": "Read ordering fence in this Hive runtime and durable event journal. It is not an object revision, a mutation receipt or evidence of workflow success."
+    },
     "ObjectMetadata": {
       "type": "object",
       "properties": {
@@ -194,6 +213,9 @@
         "updatedAt": {
           "type": "string",
           "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$"
+        },
+        "observation": {
+          "$ref": "#/$defs/ObjectObservation"
         }
       },
       "required": [
@@ -2649,6 +2671,9 @@
           "minLength": 1,
           "maxLength": 16384,
           "description": "Absolute Hive Object path; supply either path or objectId, not both."
+        },
+        "observe": {
+          "type": "boolean"
         }
       },
       "required": [],
@@ -2696,6 +2721,9 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 9007199254740991
+        },
+        "observe": {
+          "type": "boolean"
         }
       },
       "required": [],

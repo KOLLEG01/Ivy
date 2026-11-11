@@ -79,6 +79,18 @@ async fn native_registry_keeps_management_private_and_preserves_schema_and_reade
     )
     .unwrap();
     let registry = fixture(&contracts);
+    let schema_catalog = catalog();
+    let shared = TaskBoardRegistry::new(
+        &schema_catalog,
+        &contracts
+            .registry_schemas(&["TaskBoard", "Chat", "Agent", "Wire", "Hive"])
+            .unwrap(),
+        &contracts,
+        text(&schema_catalog),
+    )
+    .unwrap();
+    assert_eq!(shared.value(), registry.value());
+    assert!(contracts.registry_schemas(&["TaskBoard"]).is_err());
     assert_eq!((registry.dependency())().await.unwrap(), *registry.value());
     let namespace = &registry
         .value()

@@ -43,6 +43,235 @@ fn options() -> Options {
 }
 
 #[test]
+fn kernel_observed_object_reads_order_same_revision_archives_without_changing_original_mutations() {
+    let fixtures: Value = serde_json::from_slice(&reference_data::read(include_bytes!(
+        "../fixtures/hive-store-reference.json.gz"
+    )))
+    .unwrap();
+    let profile = fixtures["traces"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find_map(|trace| trace.get("registryRuntime"))
+        .unwrap();
+    let root = Root::new();
+    let path = root.0.join("observations.sqlite");
+    let mut kernel = compose(&path, profile, Rc::new(Cell::new(100000.0)));
+    kernel
+        .parts
+        .store
+        .connection()
+        .execute_batch(&super::query::seed(false))
+        .unwrap();
+    kernel
+        .parts
+        .store
+        .connection()
+        .execute(
+            "UPDATE objects SET created_at=?1,updated_at=?1",
+            ["2026-01-02T00:00:00.000Z"],
+        )
+        .unwrap();
+    let caller = IvyJson::from_serde(&context("http")).unwrap();
+    let read = |kernel: &mut Kernel, method: &str, params: Value| {
+        kernel
+            .execute(
+                &caller,
+                &IvyJson::from_serde(&request(method, params)["request"]).unwrap(),
+            )
+            .unwrap()
+            .required("value")
+            .unwrap()
+            .clone()
+    };
+    let before = read(
+        &mut kernel,
+        "objects.stat",
+        json!({"objectId":"id20","observe":true}),
+    );
+    ivy_contracts::core_schema::validate_output("objects.stat", &before).unwrap();
+    let fence = before.required("observation").unwrap().clone();
+    assert!(
+        read(&mut kernel, "objects.stat", json!({"objectId":"id20"}))
+            .get("observation")
+            .is_none()
+    );
+    let epoch = kernel.parts.store.runtime_epoch().unwrap();
+    kernel
+        .parts
+        .store
+        .configure_credentials(&[Credential {
+            principal_id: "alpha".into(),
+            digest: format!("sha256:{}", "a".repeat(64)).into(),
+        }])
+        .unwrap();
+    let auth = AuthenticatedContext {
+        principal_id: "alpha".into(),
+        credential_digest: format!("sha256:{}", "a".repeat(64)).into(),
+    };
+    let original = IvyJson::from_serde(
+        &json!({"objectId":"id20","archived":true,"expectedRevision":1,
+        "mutationId":format!("{}:100000:archive",epoch.to_utf8().unwrap())}),
+    )
+    .unwrap();
+    let saved = ivy_hive::objects::archive(
+        &mut kernel.parts.store,
+        &auth,
+        None,
+        &original,
+        100000,
+        &"2026-01-02T00:00:00.000Z".into(),
+    )
+    .unwrap();
+    assert!(
+        saved.get("observation").is_none(),
+        "Original mutation payloads and snapshots are unchanged."
+    );
+    let archived = read(
+        &mut kernel,
+        "objects.read",
+        json!({"objectId":"id20","observe":true}),
+    );
+    let metadata = archived.required("object").unwrap();
+    assert_eq!(
+        metadata.get("currentRevision"),
+        before.get("currentRevision")
+    );
+    assert_eq!(metadata.get("updatedAt"), before.get("updatedAt"));
+    assert_eq!(metadata.get("effectivelyArchived"), Some(&true.into()));
+    let archived_fence = metadata.required("observation").unwrap();
+    assert_eq!(
+        archived_fence.get("runtimeEpoch"),
+        fence.get("runtimeEpoch")
+    );
+    assert!(
+        archived_fence.required("sequence").unwrap().as_f64()
+            > fence.required("sequence").unwrap().as_f64()
+    );
+    let restore = IvyJson::from_serde(
+        &json!({"objectId":"id20","archived":false,"expectedRevision":1,
+        "mutationId":format!("{}:100000:restore",epoch.to_utf8().unwrap())}),
+    )
+    .unwrap();
+    ivy_hive::objects::archive(
+        &mut kernel.parts.store,
+        &auth,
+        None,
+        &restore,
+        100000,
+        &"2026-01-02T00:00:00.000Z".into(),
+    )
+    .unwrap();
+    let restored = read(
+        &mut kernel,
+        "objects.stat",
+        json!({"objectId":"id20","observe":true}),
+    );
+    let restored_fence = restored.required("observation").unwrap().clone();
+    assert_eq!(
+        restored.get("currentRevision"),
+        before.get("currentRevision")
+    );
+    assert_eq!(restored.get("updatedAt"), before.get("updatedAt"));
+    assert_eq!(restored.get("effectivelyArchived"), Some(&false.into()));
+    assert!(
+        restored_fence.required("sequence").unwrap().as_f64()
+            > archived_fence.required("sequence").unwrap().as_f64()
+    );
+    assert_eq!(
+        ivy_hive::objects::archive(
+            &mut kernel.parts.store,
+            &auth,
+            None,
+            &original,
+            100001,
+            &"2026-01-02T00:00:00.000Z".into()
+        )
+        .unwrap()
+        .to_serde()
+        .unwrap(),
+        saved.to_serde().unwrap(),
+        "A replay returns its original archived snapshot."
+    );
+    let page = read(
+        &mut kernel,
+        "objects.query",
+        json!({"contractKey":"fixture/value","includeContent":true,"observe":true,"limit":2}),
+    );
+    for row in page.required("items").unwrap().as_array().unwrap() {
+        assert_eq!(
+            row.required("document")
+                .unwrap()
+                .required("object")
+                .unwrap()
+                .get("observation"),
+            Some(&restored_fence)
+        );
+    }
+    let invalid = request(
+        "objects.query",
+        json!({"contractKey":"fixture/value","observe":true}),
+    );
+    assert_eq!(
+        kernel
+            .execute(&caller, &IvyJson::from_serde(&invalid["request"]).unwrap())
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+    let principal = Principal {
+        principal_id: "alpha".into(),
+        credential_digest: auth.credential_digest.clone(),
+    };
+    assert!(
+        kernel
+            .parts
+            .store
+            .transaction(|store| {
+                store.append_core_event(
+                    &principal,
+                    &"id20".into(),
+                    1,
+                    &"archive".into(),
+                    &"rollback".into(),
+                    &"2026-01-02T00:00:00.000Z".into(),
+                    None,
+                )?;
+                Err::<(), _>(IvyError::new("fixture_rollback", "rollback"))
+            })
+            .is_err()
+    );
+    assert_eq!(
+        ivy_hive::objects::observation(&kernel.parts.store).unwrap(),
+        restored_fence
+    );
+    kernel
+        .parts
+        .store
+        .connection()
+        .execute("DELETE FROM events", [])
+        .unwrap();
+    assert_eq!(
+        ivy_hive::objects::observation(&kernel.parts.store).unwrap(),
+        restored_fence,
+        "Retention does not rewind the fence."
+    );
+    drop(kernel);
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(
+        ivy_hive::objects::observation(&reopened).unwrap(),
+        restored_fence
+    );
+    let other = Store::open(&root.0.join("other.sqlite")).unwrap();
+    assert_ne!(
+        ivy_hive::objects::observation(&other)
+            .unwrap()
+            .get("runtimeEpoch"),
+        restored_fence.get("runtimeEpoch")
+    );
+}
+
+#[test]
 fn kernel_count_dispatch_admits_bounded_reads_and_preserves_browser_configuration_privacy() {
     // Reuse recorded startup primitives; grouped reads add no locale/date behavior.
     let fixtures: Value = serde_json::from_slice(&reference_data::read(include_bytes!(
@@ -631,6 +860,40 @@ fn compare_with_error_codes(steps: &[Value], changed: &[(usize, &str)]) -> Value
     for (index, (a, b)) in actual_rows.iter().zip(original_rows).enumerate() {
         let mut native = normalized(a, &aliases, &requests, false);
         let mut original = normalized(b, &no_aliases, &requests, true);
+        if steps[index]["op"] == "kernel"
+            && steps[index]["method"] == "binding"
+            && steps[index]["name"] == "hive.objects.read"
+        {
+            // Preserve the recorded binding and independently add only the new
+            // opt-in read contract. Every other field and the full trace stay checked.
+            let binding = &mut original["value"];
+            let definition = &mut binding["definition"];
+            assert!(
+                definition["inputSchema"]["properties"]
+                    .get("observe")
+                    .is_none()
+            );
+            definition["inputSchema"]["properties"]["observe"] = json!({"type":"boolean"});
+            let definitions = &mut definition["outputSchema"]["$defs"];
+            assert!(definitions.get("OperationObjectObservation").is_none());
+            definitions["OperationObjectMetadata"]["properties"]["observation"] =
+                json!({"$ref":"#/$defs/OperationObjectObservation"});
+            definitions["OperationObjectObservation"] = json!({
+                "type":"object",
+                "properties": {
+                    "runtimeEpoch":{"$ref":"#/$defs/WireIdentifier"},
+                    "sequence":{"type":"integer","minimum":0,"maximum":9007199254740991u64}
+                },
+                "required":["runtimeEpoch","sequence"],
+                "additionalProperties":false,
+                "description":"Read ordering fence in this Hive runtime and durable event journal. It is not an object revision, a mutation receipt or evidence of workflow success."
+            });
+            let hash = ivy_contracts::hash::tool_definition_hash(
+                &IvyJson::from_serde(definition).unwrap(),
+            )
+            .unwrap();
+            binding["definitionHash"] = hash.into();
+        }
         if steps[index]["request"]["method"] == "system.status"
             && native["value"]["kind"] == "result"
         {

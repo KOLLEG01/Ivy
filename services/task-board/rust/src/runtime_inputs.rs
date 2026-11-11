@@ -6,8 +6,8 @@ use crate::{
     schema::RuntimeContracts,
 };
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, canonical_bundle::Bundle,
-    checked_native_contract::CheckedNativeContracts, json::parse,
+    IvyError, IvyJson as Json, IvyResult, checked_native_contract::CheckedNativeContracts,
+    json::parse,
 };
 use ivy_sdk::collation::LocaleComparator;
 use std::path::PathBuf;
@@ -71,7 +71,7 @@ pub fn registry(contracts: &RuntimeContracts) -> IvyResult<TaskBoardRegistry> {
             include_str!("../../../../specs/schemas/task-board.operations.json"),
             usize::MAX,
         )?,
-        &Bundle::from_documents(documents()?)?,
+        &contracts.registry_schemas(&["TaskBoard", "Chat", "Agent", "Wire", "Operation"])?,
         contracts,
         RegistryText {
             descriptions,

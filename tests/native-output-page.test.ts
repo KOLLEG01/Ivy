@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isUnmaterializedNativeHistory, readNativeOutputPage } from '../packages/ui-client/src/native-output-page.js';
+import { isUnmaterializedNativeHistory, readNativeOutputPage, releaseNativeOutput } from '../packages/ui-client/src/native-output-page.js';
 import { IvyError } from '../packages/contracts/src/errors.js';
 import { hashJson, digest } from '../packages/contracts/src/canonical.js';
 import type { Agent, RpcClient, Wire } from '../packages/sdk/src/client.js';
@@ -64,6 +64,67 @@ test('terminal output groups reuse their original snapshot after checking curren
   f.turns[0]!.completedAt = 101;
   await assert.rejects(f.read('turn-one', first.nextCursor!), { code: 'native_output_unavailable' });
   await f.read('turn-one'); assert.equal(fullReads, 2);
+});
+
+test('terminal eight MiB output groups share immutable items, the original hash and complete download without reencoding', async t => {
+  const f = fixture('0.163.0', { backendId: 'primary', provider: 'codex', accountId: 'work' }); f.turns[0]!.completedAt = 100;
+  const big = 'x'.repeat(8388608);
+  f.turns[0]!.items = Array.from({ length: 101 }, (_, index) => ({ id: 'item-' + index, type: 'agentMessage', text: index === 100 ? big : 'Item ' + index, nested: { values: [index] } }));
+  const digest_ = crypto.subtle.digest.bind(crypto.subtle), stringify = JSON.stringify;
+  let largeHashes = 0, largeStringFragments = 0, fullReads = 0;
+  t.mock.method(crypto.subtle, 'digest', async (...args: Parameters<typeof crypto.subtle.digest>) => {
+    if ((args[1] as ArrayBuffer).byteLength >= 8388608) largeHashes++;
+    return digest_(...args);
+  });
+  t.mock.method(JSON, 'stringify', ((value: unknown, ...args: unknown[]) => {
+    if (typeof value === 'string' && value.length >= 16384) largeStringFragments++;
+    return Reflect.apply(stringify, JSON, [value, ...args]);
+  }) as typeof JSON.stringify);
+  f.state.tamper = value => { if ((value.params as Record<string, unknown>)['itemsView'] === 'full') fullReads++; return value; };
+  const first = await f.read('turn-one'), raw = first.download!.raw, fragments = largeStringFragments;
+  assert.equal(largeHashes, 1); assert(fragments > 0);
+  assert.equal(JSON.parse(raw).reply.result.data[0].items[100].text, big);
+  const item = (first.items[0] as { item: Record<string, Wire.Json> }).item;
+  assert(Object.isFrozen(item)); assert(Object.isFrozen((item.nested as { values: Wire.Json[] }).values));
+  assert.throws(() => { item.text = 'Changed saved bytes'; }, TypeError);
+  first.download!.raw = 'A caller can change its own wrapper only.';
+  const before = f.state.statusReads, second = await f.read('turn-one', first.nextCursor!), third = await f.read('turn-one', second.nextCursor!);
+  assert(f.state.statusReads > before, 'Continuation still reads the current owner.');
+  assert.equal(fullReads, 1); assert.equal(largeHashes, 1); assert.equal(largeStringFragments, fragments);
+  assert.equal(third.items.length, 1); assert.equal((third.items[0] as { item: { text: string } }).item.text, big);
+  assert.equal(second.download!.raw, raw); assert.equal(third.download!.raw, raw);
+});
+
+test('terminal output release is scoped to its client, native owner, account and linked view', async () => {
+  const backend = { backendId: 'primary', provider: 'codex' as const, accountId: 'work' }, f = fixture('0.163.0', backend); f.turns[0]!.completedAt = 100;
+  f.turns[0]!.items = Array.from({ length: 101 }, (_, index) => ({ id: 'item-' + index, type: 'agentMessage', text: 'Item ' + index }));
+  let fullReads = 0; f.state.tamper = value => { if ((value.params as Record<string, unknown>).itemsView === 'full') fullReads++; return value; };
+  const first = await f.read('turn-one');
+  releaseNativeOutput({} as RpcClient, f.node, f.threadId, 'turn-one', backend);
+  releaseNativeOutput(f.client, 'other', f.threadId, 'turn-one', backend);
+  releaseNativeOutput(f.client, f.node, 'other', 'turn-one', backend);
+  releaseNativeOutput(f.client, f.node, f.threadId, 'other', backend);
+  releaseNativeOutput(f.client, f.node, f.threadId, 'turn-one', { ...backend, accountId: 'personal' });
+  releaseNativeOutput(f.client, f.node, f.threadId, 'turn-one');
+  await f.read('turn-one', first.nextCursor!); assert.equal(fullReads, 1);
+  releaseNativeOutput(f.client, f.node, f.threadId, 'turn-one', backend);
+  await f.read('turn-one', first.nextCursor!); assert.equal(fullReads, 2);
+});
+
+test('a cancelled terminal read cannot evict a retained view or publish a late full snapshot', async t => {
+  const f = fixture(); f.turns[0]!.completedAt = 100;
+  f.turns[0]!.items = Array.from({ length: 51 }, (_, index) => ({ id: 'item-' + index, type: 'agentMessage', text: index === 50 ? 'x'.repeat(1048576) : 'Item ' + index }));
+  let fullReads = 0; f.state.tamper = value => { if ((value.params as Record<string, unknown>).itemsView === 'full') fullReads++; return value; };
+  const first = await f.read('turn-one'), cancelled = new AbortController(); cancelled.abort();
+  await assert.rejects(readNativeOutputPage(f.client, f.node, f.threadId, 'turn-one', undefined, cancelled.signal), { name: 'AbortError' });
+  await f.read('turn-one', first.nextCursor!); assert.equal(fullReads, 1);
+  const controller = new AbortController(), digest_ = crypto.subtle.digest.bind(crypto.subtle);
+  t.mock.method(crypto.subtle, 'digest', async (...args: Parameters<typeof crypto.subtle.digest>) => {
+    const result = await digest_(...args); if ((args[1] as ArrayBuffer).byteLength > 1048576) controller.abort(); return result;
+  });
+  await assert.rejects(readNativeOutputPage(f.client, f.node, f.threadId, 'turn-one', undefined, controller.signal), { name: 'AbortError' });
+  assert.equal(fullReads, 2);
+  await f.read('turn-one', first.nextCursor!); assert.equal(fullReads, 3, 'The aborted read did not populate the complete-turn cache.');
 });
 
 test('ordinary native item paging is preserved and no mid-stream or uncertain error enables fallback', async () => {

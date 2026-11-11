@@ -41,16 +41,19 @@ impl NotificationFilter {
             namespace: text(value, "namespace")?,
             name: text(value, "name")?,
             version: text(value, "version")?,
-            service_node_id: value.get("serviceNodeId")
-                .map(|_| text(value, "serviceNodeId")).transpose()?,
+            service_node_id: value
+                .get("serviceNodeId")
+                .map(|_| text(value, "serviceNodeId"))
+                .transpose()?,
         })
     }
     fn matches(&self, params: &IvyJson) -> bool {
         params.get("namespace").and_then(IvyJson::as_js_string) == Some(&self.namespace)
             && params.get("name").and_then(IvyJson::as_js_string) == Some(&self.name)
             && params.get("version").and_then(IvyJson::as_js_string) == Some(&self.version)
-            && self.service_node_id.as_ref().is_none_or(|id|
-                params.get("serviceNodeId").and_then(IvyJson::as_js_string) == Some(id))
+            && self.service_node_id.as_ref().is_none_or(|id| {
+                params.get("serviceNodeId").and_then(IvyJson::as_js_string) == Some(id)
+            })
     }
 }
 struct Session {
@@ -122,15 +125,24 @@ pub struct ProviderError {
     pub details: Option<IvyJson>,
 }
 pub type ErrorConstructor = Arc<dyn Fn(ProviderError) -> IvyError + Send + Sync>;
-fn provider_response(mut frame: IvyJson, provider_error: &ErrorConstructor) -> IvyResult<IvyResult<IvyJson>> {
+fn provider_response(
+    mut frame: IvyJson,
+    provider_error: &ErrorConstructor,
+) -> IvyResult<IvyResult<IvyJson>> {
     validate_response_frame(&frame)?;
     // The admitted envelope owns its payload. Keep the raw outcome and optional
     // details while moving them across the provider error boundary.
     if let Some(mut error) = frame.remove("error") {
         let mut data = error.remove("data").unwrap();
         Ok(Err(provider_error(ProviderError {
-            code: data.remove("code").and_then(IvyJson::into_js_string).unwrap(),
-            message: error.remove("message").and_then(IvyJson::into_js_string).unwrap(),
+            code: data
+                .remove("code")
+                .and_then(IvyJson::into_js_string)
+                .unwrap(),
+            message: error
+                .remove("message")
+                .and_then(IvyJson::into_js_string)
+                .unwrap(),
             outcome: data.remove("outcome").unwrap(),
             details: data.remove("details"),
         })))
@@ -238,8 +250,10 @@ impl PeerDelivery {
             Err(error) => Err(error),
         };
         // Preserve the transport's existing fallback and unhandled-error policy.
-        let sent = sent.or_else(|error| self.peer.send(&rpc::failure(&error, self.id.clone()), None));
-        let sent = sent.or_else(|error| self.peer.send(&rpc::failure(&error, self.id.clone()), None));
+        let sent =
+            sent.or_else(|error| self.peer.send(&rpc::failure(&error, self.id.clone()), None));
+        let sent =
+            sent.or_else(|error| self.peer.send(&rpc::failure(&error, self.id.clone()), None));
         self.settle(sent);
     }
     fn settle(&mut self, sent: IvyResult<()>) {
@@ -255,18 +269,32 @@ impl PeerDelivery {
 impl RequestEffects for PeerEffects {
     fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
-            + std::mem::size_of::<Mutex<PeerDelivery>>() + 2 * std::mem::size_of::<usize>()
+            + std::mem::size_of::<Mutex<PeerDelivery>>()
+            + 2 * std::mem::size_of::<usize>()
             + self.delivery.lock().unwrap().id.retained_bytes()
     }
     fn prepare(&self, payload: &mut Payload) -> IvyResult<()> {
-        let Payload::Execute { context: prepared, .. } = payload else { return Err(IvyError::internal()); };
+        let Payload::Execute {
+            context: prepared, ..
+        } = payload
+        else {
+            return Err(IvyError::internal());
+        };
         let mut context = self.peer.context();
         require_fresh(&context, &*self.peers.0.owners.now)?;
         if !self.connecting
-            && context.get("serviceNodeId").and_then(IvyJson::as_js_string)
+            && context
+                .get("serviceNodeId")
+                .and_then(IvyJson::as_js_string)
                 .is_some_and(|v| !v.0.is_empty())
         {
-            self.peers.0.owners.routing.lock().unwrap().caller(&context)?;
+            self.peers
+                .0
+                .owners
+                .routing
+                .lock()
+                .unwrap()
+                .caller(&context)?;
         }
         if self.connecting {
             let mut state = self.peers.0.state.lock().unwrap();
@@ -745,7 +773,13 @@ impl Peers {
         }))
     }
     fn subscribed(peer: &Peer, params: &IvyJson) -> bool {
-        peer.0.session.lock().unwrap().filters.iter().any(|filter| filter.matches(params))
+        peer.0
+            .session
+            .lock()
+            .unwrap()
+            .filters
+            .iter()
+            .any(|filter| filter.matches(params))
     }
     fn notification(&self, peer: &Peer, mut frame: IvyJson) {
         let delivered = (|| -> IvyResult<()> {
@@ -887,19 +921,30 @@ impl Peers {
     }
     fn queued(&self, peer: &Peer, frame: IvyJson, bytes: usize, lease: RequestLease) {
         let delivery = Arc::new(Mutex::new(PeerDelivery {
-            peer: peer.clone(), id: rpc::valid_request_id(frame.get("id")), lease,
-            finished: false, error: None,
+            peer: peer.clone(),
+            id: rpc::valid_request_id(frame.get("id")),
+            lease,
+            finished: false,
+            error: None,
         }));
         let connecting = frame.get("method") == Some(&"service.connect".into());
         let reply = self.0.owners.storage.dispatch(
             Request::with_effects(
-                Payload::Execute { context: IvyJson::Null, request: frame },
+                Payload::Execute {
+                    context: IvyJson::Null,
+                    request: frame,
+                },
                 PeerEffects {
-                    peers: self.clone(), peer: peer.clone(), connecting,
+                    peers: self.clone(),
+                    peer: peer.clone(),
+                    connecting,
                     delivery: delivery.clone(),
                 },
             ),
-            RequestOptions { reserved_bytes: bytes as u64, ..Default::default() },
+            RequestOptions {
+                reserved_bytes: bytes as u64,
+                ..Default::default()
+            },
         );
         let unhandled = self.0.owners.unhandled.clone();
         tokio::spawn(async move {
@@ -925,7 +970,8 @@ impl Peers {
             let selected: Vec<_> = scopes
                 .iter()
                 .filter(|scope| {
-                    session.changes
+                    session
+                        .changes
                         .iter()
                         .any(|watch| scope == &watch || below(scope, watch) || below(watch, scope))
                 })

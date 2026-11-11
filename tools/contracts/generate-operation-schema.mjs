@@ -101,6 +101,9 @@ const defs = {
     revision: uint(),
     configuration: ref("OpenaiConfiguration"),
   }),
+  ObjectObservation: obj({ runtimeEpoch: id, sequence: uint() }, undefined, {
+    description: 'Read ordering fence in this Hive runtime and durable event journal. It is not an object revision, a mutation receipt or evidence of workflow success.',
+  }),
   ObjectMetadata: obj({
     id,
     parentId: nullable(id),
@@ -639,8 +642,9 @@ op(
     byteLength: uint(0, 8388608),
   }),
 );
-op("objects.stat", byLocation({}), ref("ObjectMetadata"));
-op("objects.read", byLocation({ revision: uint(1) }), ref("ObjectRead"));
+defs.ObjectMetadata.properties.observation = ref('ObjectObservation');
+op("objects.stat", byLocation({ observe: bool }), ref("ObjectMetadata"));
+op("objects.read", byLocation({ revision: uint(1), observe: bool }), ref("ObjectRead"));
 op(
   "objects.write",
   shared("ObjectWrite"),

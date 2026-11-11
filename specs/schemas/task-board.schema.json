@@ -3393,6 +3393,9 @@
         "archived": {
           "type": "boolean"
         },
+        "observation": {
+          "$ref": "https://ivy.invalid/schemas/hive-operations.schema.json#/$defs/ObjectObservation"
+        },
         "commentPage": {
           "type": "object",
           "properties": {
@@ -3594,6 +3597,12 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991
+        },
+        "archived": {
+          "type": "boolean"
+        },
+        "observation": {
+          "$ref": "https://ivy.invalid/schemas/hive-operations.schema.json#/$defs/ObjectObservation"
         }
       },
       "required": [
@@ -5897,6 +5906,136 @@
         }
       ]
     },
+    "CompletedUploadRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "uploadAttachment"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "taskId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expectedWorkspace": {
+          "$ref": "#/$defs/ExpectedWorkspace"
+        },
+        "attachmentId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "content": {
+          "type": "object",
+          "properties": {
+            "object": {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            "byteLength": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8388608
+            },
+            "contentHash": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+            }
+          },
+          "required": [
+            "object",
+            "byteLength",
+            "contentHash"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "taskId",
+        "expectedRevision",
+        "attachmentId",
+        "filename",
+        "mediaType",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "ReferencedUploadRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "uploadAttachment"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "taskId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expectedWorkspace": {
+          "$ref": "#/$defs/ExpectedWorkspace"
+        },
+        "attachmentId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "originalRequest": {
+          "type": "object",
+          "properties": {
+            "objectId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "revision": {
+              "const": 1
+            }
+          },
+          "required": [
+            "objectId",
+            "revision"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "taskId",
+        "expectedRevision",
+        "attachmentId",
+        "filename",
+        "mediaType",
+        "originalRequest"
+      ],
+      "additionalProperties": false
+    },
     "RetainedDurableRequest": {
       "anyOf": [
         {
@@ -5910,6 +6049,12 @@
         },
         {
           "$ref": "#/$defs/RetainedQuestionRequest"
+        },
+        {
+          "$ref": "#/$defs/CompletedUploadRequest"
+        },
+        {
+          "$ref": "#/$defs/ReferencedUploadRequest"
         }
       ]
     },
@@ -6388,6 +6533,66 @@
                     "const": "native"
                   }
                 }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "request": {
+                "$ref": "#/$defs/CompletedUploadRequest"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "phase": {
+                "const": "succeeded"
+              },
+              "writes": {
+                "items": {
+                  "properties": {
+                    "outcome": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  }
+                }
+              },
+              "outcome": {
+                "type": "object",
+                "required": [
+                  "attachment"
+                ],
+                "properties": {
+                  "attachment": {
+                    "$ref": "#/$defs/TaskAttachment"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "request": {
+                "$ref": "#/$defs/ReferencedUploadRequest"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "phase": {
+                "enum": [
+                  "accepted",
+                  "preparing",
+                  "publishing",
+                  "failed",
+                  "needs_attention"
+                ]
               }
             }
           }

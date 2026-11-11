@@ -97,18 +97,41 @@ fn snapshot(store: &Store, step: &Value) -> Value {
     let compact_events = step["compactEvents"] == true;
     // Frozen traces predate parent-scoped write hints. Compare their family
     // projection here; direct write tests assert the precise new scopes.
+    let families = rows(store, "SELECT key FROM contract_families ORDER BY key")
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| JsString::from(format!("objects/{}", row["key"].as_str().unwrap())))
+        .collect::<Vec<_>>();
+    let root_suffix = JsString::from("/root");
+    let parent_prefix = JsString::from("/parent/");
     let mut legacy_changes = Vec::new();
     for scope in store.changes() {
-        let parts: Vec<_> = scope.0.split(|c| *c == u16::from(b'/')).collect();
-        let scope = if parts.len() >= 4
-            && parts[0] == "objects".encode_utf16().collect::<Vec<_>>()
-            && (parts[3] == "root".encode_utf16().collect::<Vec<_>>() && parts.len() == 4
-                || parts[3] == "parent".encode_utf16().collect::<Vec<_>>() && parts.len() == 5)
-        {
-            JsString(scope.0[..parts[0].len() + parts[1].len() + parts[2].len() + 2].to_vec())
+        // SQL preserves replacement characters in legacy contract keys, which need
+        // not have the public namespace/name shape. Keep whole-family hints exact.
+        let family = if families.contains(scope) {
+            None
         } else {
-            scope.clone()
+            families.iter().find(|family| {
+                scope
+                    .0
+                    .strip_prefix(family.0.as_slice())
+                    .is_some_and(|suffix| {
+                        suffix == root_suffix.0.as_slice()
+                            || suffix
+                                .strip_prefix(parent_prefix.0.as_slice())
+                                .is_some_and(|id| {
+                                    !id.is_empty()
+                                        && id.iter().all(|c| {
+                                            u8::try_from(*c).is_ok_and(|c| {
+                                                c.is_ascii_alphanumeric() || b"._-".contains(&c)
+                                            })
+                                        })
+                                })
+                    })
+            })
         };
+        let scope = family.unwrap_or(scope).clone();
         if !legacy_changes.contains(&scope) {
             legacy_changes.push(scope);
         }

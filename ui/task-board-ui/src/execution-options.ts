@@ -1,6 +1,6 @@
 import { IvyError } from '../../../packages/sdk/src/client.js';
 import type { Agent } from '../../../packages/sdk/src/client.js';
-import { validateAgent } from '../../../packages/contracts/src/agent-validation.js';
+import { validateAgent } from '../../../packages/sdk/src/native-backend.js';
 import { backendRead, nativeBackendModels, nativeBackendScopes, sameBackend } from '../../../packages/ui-client/src/native-backends';
 import type { NativeBackendScope } from '../../../packages/ui-client/src/native-backends';
 import { nativeHosts, nativeServiceNodes } from '../../../packages/ui-client/src/native-hosts';

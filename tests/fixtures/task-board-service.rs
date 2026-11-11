@@ -268,9 +268,6 @@ impl GenerationRuntime for Runtime<'_> {
     fn diagnostics(&self) -> IvyResult<Vec<Json>> {
         Ok(vec!["fixture diagnostic".into()])
     }
-    fn task_changed(&self) {
-        self.event("changed");
-    }
     fn notification(&self, value: &Json) -> bool {
         assert_eq!(value.get("method"), Some(&"notifications.provider".into()));
         let params = value.get("params").unwrap();

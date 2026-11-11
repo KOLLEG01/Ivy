@@ -11,7 +11,7 @@ export interface DraftAttachment extends Partial<StagedAttachment> {
 }
 const imageTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'], maximumBytes = 8 * 1024 * 1024;
 const maximumFiles = 8, maximumQueuedBytes = 32 * 1024 * 1024;
-const base64 = async (file: Blob, check: () => void) => {
+export const attachmentBase64 = async (file: Blob, check: () => void) => {
   let value = '';
   // A multiple of three keeps each intermediate slice unpadded. Retain only the final base64 wire value.
   for (let offset = 0; offset < file.size; offset += 24576) {
@@ -53,7 +53,7 @@ export function useMessageAttachments(client: RpcClient, node: () => string, bac
       };
       try {
         check();
-        const dataBase64 = await base64(upload.file, check);
+        const dataBase64 = await attachmentBase64(upload.file, check);
         check();
         const staged = await serviceTools(client, upload.node, [{ namespace: 'agent', interfaceVersion: '1.0.0' }])
           .call('agent.stageFile', backendArguments({ name: upload.name, dataBase64 }, upload.backend)) as Agent.StagedFile;

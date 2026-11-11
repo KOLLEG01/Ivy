@@ -16,7 +16,7 @@ import {
   serviceTools,
 } from "../../../packages/sdk/src/client.js";
 import { backendRead, nativeBackendLabel } from '../../../packages/ui-client/src/native-backends';
-import { backendArguments } from '../../../packages/contracts/src/native-backend';
+import { backendArguments } from '../../../packages/sdk/src/native-backend.js';
 import { route } from "../../../packages/ui-client/src/runtime";
 import AgentEnvironment from "./AgentEnvironment.vue";
 import AgentInstructions from "./AgentInstructions.vue";

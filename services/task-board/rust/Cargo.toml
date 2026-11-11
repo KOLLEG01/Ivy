@@ -61,6 +61,10 @@ name = "task-board-document-json"
 path = "../../../tests/rust/task-board-document-json.rs"
 
 [[test]]
+name = "task-board-schemas"
+path = "../../../tests/rust/task-board-schemas.rs"
+
+[[test]]
 name = "task-board-actions"
 path = "../../../tests/rust/task-board-actions.rs"
 

@@ -24,7 +24,7 @@ use std::{
 use tokio::sync::{Notify, Semaphore, oneshot};
 use tokio_tungstenite::{
     connect_async_with_config,
-    tungstenite::{Message, client::IntoClientRequest, http::HeaderValue},
+    tungstenite::{Error as WebSocketError, Message, client::IntoClientRequest, http::HeaderValue},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -134,6 +134,24 @@ fn unknown(code: &str, message: &str) -> IvyError {
 fn websocket_failed() -> IvyError {
     unknown("service_unavailable", "Hive WebSocket failed.")
 }
+fn transport_failed(code: &str, operation: &str, error: &WebSocketError) -> IvyError {
+    // Preserve the transport cause without retaining payloads, HTTP headers or
+    // arbitrary I/O/TLS error text in a connection's shared close reason.
+    let detail = match error {
+        WebSocketError::Io(error) => {
+            format!("I/O {:?}, OS {:?}", error.kind(), error.raw_os_error())
+        }
+        WebSocketError::Tls(_) => "TLS error".into(),
+        WebSocketError::Utf8(_) => "Invalid UTF-8".into(),
+        WebSocketError::WriteBufferFull(_) => "Write buffer full".into(),
+        error => error.to_string(),
+    };
+    let detail: String = detail.chars().take(192).collect();
+    unknown(
+        code,
+        &format!("Hive WebSocket {operation} failed: {detail}"),
+    )
+}
 fn socket_closed() -> IvyError {
     unknown(
         "outcome_unknown",
@@ -212,7 +230,7 @@ impl ServiceConnection {
         let (socket, _) = tokio::select! {
             biased;
             _=cancellation.cancelled()=>return Err(stopping()),
-            result=tokio::time::timeout(Duration::from_secs(10),connect_async_with_config(request,Some(config),true))=>result.map_err(|_|websocket_failed())?.map_err(|_|websocket_failed())?,
+            result=tokio::time::timeout(Duration::from_secs(10),connect_async_with_config(request,Some(config),true))=>result.map_err(|_|websocket_failed())?.map_err(|error|transport_failed("service_unavailable", "connect", &error))?,
         };
         Ok(Self::connected(socket, options))
     }
@@ -252,10 +270,13 @@ impl ServiceConnection {
                     }
                     in_flight = Some(pending);
                     let message = in_flight.as_mut().unwrap().take_message();
-                    if crate::websocket::send(&mut sink, message).await.is_err() {
+                    if let Err(error) = crate::websocket::send(&mut sink, message).await {
                         if let Some(inner) = weak.upgrade() {
-                            Self(inner)
-                                .close_with(unknown("outcome_unknown", "Hive write failed."));
+                            Self(inner).close_with(transport_failed(
+                                "outcome_unknown",
+                                "write",
+                                &error,
+                            ));
                         }
                         return;
                     }
@@ -291,8 +312,12 @@ impl ServiceConnection {
                             connection.close_with(socket_closed());
                             return;
                         }
-                        Some(Err(_)) => {
-                            connection.close_with(websocket_failed());
+                        Some(Err(error)) => {
+                            connection.close_with(transport_failed(
+                                "service_unavailable",
+                                "receive",
+                                &error,
+                            ));
                             return;
                         }
                         _ => {}

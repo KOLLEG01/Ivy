@@ -311,8 +311,8 @@ pub fn wake_condition(task: &Json, questions: &[Json]) -> Json {
     }
     if missing_wake_trigger(task, false) {
         return condition(
-            "failed",
-            "Waiting without a question, watched ticket or appointment. The agent retries automatically after 30 seconds.",
+            "queued",
+            "No question, watched ticket or appointment remains. The agent continues automatically after 30 seconds.",
         );
     }
     condition("idle", "Waiting for a comment or ticket change.")

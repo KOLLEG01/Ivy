@@ -293,13 +293,11 @@ struct Completion {
 struct PendingPage {
     ids: Vec<JsString>,
     next: Option<JsString>,
-    task_changes: u64,
 }
 struct State {
     recovering: Option<Lane>,
     recovery_scanned: bool,
     lane: usize,
-    task_changes: u64,
     busy: bool,
     last_cleanup: f64,
     sources_checked_at: Option<f64>,
@@ -316,7 +314,6 @@ impl Default for State {
             recovering: Some(Lane::Operations),
             recovery_scanned: false,
             lane: 0,
-            task_changes: 0,
             busy: false,
             last_cleanup: 0.0,
             sources_checked_at: None,
@@ -468,6 +465,7 @@ impl<S: ReconcileStore, E: ReconcileEngine> Shared<'_, S, E> {
         }
     }
     async fn process(&self, l: Lane, id: &JsString) -> IvyResult<()> {
+        let mut archived_routing = false;
         let result: IvyResult<()> = async {
             match l {
                 Lane::Operations => {
@@ -490,6 +488,10 @@ impl<S: ReconcileStore, E: ReconcileEngine> Shared<'_, S, E> {
                         ));
                     }
                     let routing_error = self.engine.route_task_questions(id).await.err();
+                    archived_routing = routing_error.as_ref().is_some_and(|error| {
+                        error.code == "task_board_record_archived"
+                            && error.outcome == Outcome::NotExecuted
+                    });
                     self.record(&prefix("questions:", id), routing_error);
                     if let Some(run) = self.engine.adopt_direct_turn(id).await? {
                         self.process_native_run(&run).await?;
@@ -503,6 +505,22 @@ impl<S: ReconcileStore, E: ReconcileEngine> Shared<'_, S, E> {
         .await;
         if let Err(error) = result {
             if ["revision_conflict", "task_board_publication_busy"].contains(&error.code.as_str()) {
+                return Ok(());
+            }
+            // A buffered scan can outlive its source task's membership. Confirm
+            // that task, rather than hiding a failure at an archived recipient.
+            if l == Lane::Tasks
+                && error.code == "task_board_record_archived"
+                && error.outcome == Outcome::NotExecuted
+                && matches!(
+                    self.store.read_task_header(&Json::String(id.clone()), true).await,
+                    Err(confirmed) if confirmed.code == "task_board_record_archived"
+                        && confirmed.outcome == Outcome::NotExecuted
+                )
+            {
+                if archived_routing {
+                    self.record(&prefix("questions:", id), None);
+                }
                 return Ok(());
             }
             if l == Lane::Operations {
@@ -552,18 +570,8 @@ impl<'a, 'x, S: ReconcileStore + 'a, E: ReconcileEngine + 'a, X: ReconcileExecut
         }
         Ok(())
     }
-    pub fn task_changed(&self) {
-        let mut st = self.shared.state.borrow_mut();
-        st.task_changes = st.task_changes.wrapping_add(1);
-        st.cursors.remove(&Lane::Tasks);
-        st.pages.remove(&Lane::Tasks);
-    }
     pub fn notification(&self, value: &Json) -> bool {
-        let relevant = self.shared.engine.direct_turn_notification(value);
-        if relevant {
-            self.task_changed();
-        }
-        relevant
+        self.shared.engine.direct_turn_notification(value)
     }
     pub fn diagnostics(&self) -> Vec<Json> {
         self.shared
@@ -673,10 +681,9 @@ impl<'a, 'x, S: ReconcileStore + 'a, E: ReconcileEngine + 'a, X: ReconcileExecut
     }
     async fn scan(&self, l: Lane) -> IvyResult<bool> {
         let sh = &self.shared;
-        let (changes, cursor, saved) = {
+        let (cursor, saved) = {
             let st = sh.state.borrow();
             (
-                st.task_changes,
                 st.cursors.get(&l).cloned().flatten(),
                 st.pages.get(&l).cloned(),
             )
@@ -713,11 +720,7 @@ impl<'a, 'x, S: ReconcileStore + 'a, E: ReconcileEngine + 'a, X: ReconcileExecut
                     .iter()
                     .map(|p| s(p, "objectId").cloned())
                     .collect::<IvyResult<Vec<_>>>()?;
-                let p = Rc::new(RefCell::new(PendingPage {
-                    ids,
-                    next,
-                    task_changes: changes,
-                }));
+                let p = Rc::new(RefCell::new(PendingPage { ids, next }));
                 sh.state.borrow_mut().pages.insert(l, p.clone());
                 p
             }
@@ -752,9 +755,11 @@ impl<'a, 'x, S: ReconcileStore + 'a, E: ReconcileEngine + 'a, X: ReconcileExecut
         if st.pages.get(&l).is_some_and(|v| Rc::ptr_eq(v, &pending)) {
             st.pages.remove(&l);
         }
-        if l != Lane::Tasks || p.task_changes == st.task_changes {
-            st.cursors.insert(l, p.next.clone());
-        }
+        // A page contains identities, not cached task state. Each worker reads
+        // the current task before acting. Keep progressing under changes; a
+        // new scan starts naturally after the last page, including new tasks
+        // or priority changes that moved before this cursor.
+        st.cursors.insert(l, p.next.clone());
         Ok(p.next.is_none())
     }
     pub async fn tick(&self) {

@@ -10,8 +10,8 @@ pub enum Location<'a> {
 }
 #[path = "object_pages.rs"]
 mod pages;
-pub use pages::{history, list, tree};
 pub(crate) use pages::identity as page_identity;
+pub use pages::{history, list, tree};
 #[path = "object_search.rs"]
 mod searching;
 pub use searching::search;
@@ -134,6 +134,18 @@ fn raw_object(store: &Store, location: Location<'_>) -> IvyResult<IvyJson> {
 }
 pub fn stat(store: &Store, location: Location<'_>) -> IvyResult<IvyJson> {
     complete_object(store, raw_object(store, location)?)
+}
+/// An explicitly requested read fence uses the existing runtime identity and
+/// durable sequence counter. Retention may remove every event without rewinding it.
+pub fn observation(store: &Store) -> IvyResult<IvyJson> {
+    let (epoch, sequence) = store.connection().query_row(
+        "SELECT value,COALESCE((SELECT seq FROM sqlite_sequence WHERE name='events'),0) FROM metadata WHERE key='runtime_epoch'",
+        [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+    ).map_err(|e| store.query_error(e))?;
+    Ok(IvyJson::object([
+        ("runtimeEpoch", epoch.into()),
+        ("sequence", crate::events::sequence_value(sequence)?),
+    ]))
 }
 pub fn read(store: &Store, location: Location<'_>, revision: Option<u64>) -> IvyResult<IvyJson> {
     let object = stat(store, location)?;

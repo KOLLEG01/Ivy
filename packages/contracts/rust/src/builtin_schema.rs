@@ -1,12 +1,12 @@
 //! Evaluation of trusted repository schema documents against the lossless wire domain.
 //! Dynamic registry schemas require their separate RE2 admission path.
 use crate::{IvyError, IvyJson, IvyResult, JsString, json::parse, limits::MANAGEMENT_FRAME_BYTES};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 #[path = "schema_evaluation.rs"]
 mod evaluation;
 
 pub struct SchemaBundle {
-    documents: Vec<IvyJson>,
+    documents: Vec<Arc<IvyJson>>,
     identities: HashMap<String, usize>,
     patterns: HashMap<JsString, regress::Regex>,
 }
@@ -22,6 +22,10 @@ impl SchemaBundle {
     /// Build from owned, trusted repository documents, such as packaged schemas.
     /// Dynamic registry schemas require their separate admission path.
     pub fn from_documents(documents: Vec<IvyJson>) -> IvyResult<Self> {
+        Self::from_shared_documents(documents.into_iter().map(Arc::new).collect())
+    }
+    /// Share immutable trusted document roots with other schema consumers.
+    pub fn from_shared_documents(documents: Vec<Arc<IvyJson>>) -> IvyResult<Self> {
         let mut identities = HashMap::new();
         let mut patterns = HashMap::new();
         for (index, document) in documents.iter().enumerate() {
@@ -37,8 +41,23 @@ impl SchemaBundle {
         })
     }
     pub fn matches(&self, reference: &str, value: &IvyJson) -> IvyResult<bool> {
-        let (document, schema) = self.resolve(0, reference)?;
+        self.matches_document(0, reference, value)
+    }
+    /// Local references resolve within the selected root, including schemas without an $id.
+    pub fn matches_document(
+        &self,
+        document: usize,
+        reference: &str,
+        value: &IvyJson,
+    ) -> IvyResult<bool> {
+        self.documents
+            .get(document)
+            .ok_or_else(IvyError::internal)?;
+        let (document, schema) = self.resolve(document, reference)?;
         self.evaluate(document, schema, value)
+    }
+    pub fn documents(&self) -> &[Arc<IvyJson>] {
+        &self.documents
     }
     /// Named definition lookup into a trusted repository document.
     pub(crate) fn matches_named(
@@ -51,7 +70,7 @@ impl SchemaBundle {
             .identities
             .get(document)
             .ok_or_else(IvyError::internal)?;
-        let mut selected = &self.documents[document];
+        let mut selected = self.documents[document].as_ref();
         for part in std::iter::once("$defs").chain(name.split('/')) {
             let key = crate::schema_lookup::pointer_key(part)?;
             let Some(child) = crate::schema_lookup::property(selected, &key) else {
@@ -125,7 +144,7 @@ impl SchemaBundle {
             .documents
             .get(document)
             .ok_or_else(IvyError::internal)?;
-        let mut selected = schema;
+        let mut selected = schema.as_ref();
         if let Some(start) = split.filter(|start| start + 1 < units.len()) {
             let fragment = JsString(units[start + 1..].to_vec());
             for key in crate::schema_lookup::compiler_pointer_parts(&fragment, strict_percent)? {

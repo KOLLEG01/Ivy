@@ -12,14 +12,17 @@ import type { Agent } from '../packages/contracts/src/generated.js';
 
 const { generateProjection } = await import(pathToFileURL(resolve('tools/contracts/native-projection.mjs')).href) as typeof import('../tools/contracts/native-projection.mjs');
 
-const input = (version: string) => JSON.parse(gunzipSync(readFileSync(`specs/native/codex-${version}/source.json.gz`), { maxOutputLength: 32 * 1024 * 1024 }).toString('utf8')) as {
+const input = (version: string, target = '') => JSON.parse(gunzipSync(readFileSync(`specs/native/codex-${version}/source${target}.json.gz`), { maxOutputLength: 32 * 1024 * 1024 }).toString('utf8')) as {
   json: Record<string, string>; typescript: Record<string, string>; commonRust: string;
 };
-const catalog = (version: string) => JSON.parse(readFileSync(`specs/native/codex-${version}/catalog.json`, 'utf8')) as Agent.Catalog;
+const catalog = (version: string, target = '') => JSON.parse(readFileSync(`specs/native/codex-${version}/catalog${target}.json`, 'utf8')) as Agent.Catalog;
 
 test('the complete installed native exports regenerate and compile without excluding legacy methods, notifications or alternatives', { timeout: 60_000 }, () => {
-  for (const [version, requests, notifications] of [['0.154.0', 162, 83], ['0.158.0', 170, 85], ['0.159.2', 170, 85]] as const) {
-    const saved = catalog(version), actual = generateProjection(input(version));
+  for (const [version, target, requests, notifications] of [
+    ['0.154.0', '', 162, 83], ['0.158.0', '', 170, 85], ['0.159.2', '', 170, 85],
+    ['0.163.0', '', 175, 87], ['0.163.0', '.linux-x64', 175, 87], ['0.163.0', '.darwin-arm64', 175, 87],
+  ] as const) {
+    const saved = catalog(version, target), actual = generateProjection(input(version, target));
     assert.deepEqual(actual, saved); validateAgent('Catalog', saved);
     assert.equal(saved.clientRequests.length, requests); assert.equal(saved.serverRequests.length, 11);
     assert.equal(saved.serverNotifications.length, notifications); assert.equal(saved.clientNotifications.length, 1);

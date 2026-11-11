@@ -143,7 +143,7 @@ function readBinding(client: RpcClient, node: string, method: string): Promise<B
   binding.catch(() => { if (cache.get(key)?.binding === binding) cache.delete(key); });
   return binding;
 }
-async function executeRead(client: RpcClient, node: string, method: string, args: Wire.Json, signal: AbortSignal): Promise<Wire.Json> {
+async function executeReadAttempt(client: RpcClient, node: string, method: string, args: Wire.Json, signal: AbortSignal): Promise<Wire.Json> {
   // Service readiness is shared. A selected provider's outage is confined to its
   // namespace, including the same backend's management observations.
   const namespace = method === 'agent.backends' ? '$host' : method.startsWith('agent.') ? text(record(record(args).backend).backendId) || 'codex' : method.split('.')[0]!;
@@ -170,6 +170,23 @@ async function executeRead(client: RpcClient, node: string, method: string, args
     }
   }
 }
+async function executeRead(client: RpcClient, node: string, method: string, args: Wire.Json, signal: AbortSignal): Promise<Wire.Json> {
+  try {
+    return await executeReadAttempt(client, node, method, args, signal);
+  } catch (error) {
+    if (signal.aborted || !(error instanceof IvyError) || !['service_unavailable', 'service_not_ready', 'outcome_unknown', 'deadline_exceeded'].includes(error.code)) throw error;
+    // Observations may cross a provider reconnect. Retry once after the shared
+    // readiness window; keep the same owner and never retry actions here.
+    await new Promise<void>((resolve, reject) => {
+      const abort = () => { clearTimeout(timer); reject(signal.reason); };
+      const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, readinessMs);
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) { signal.removeEventListener('abort', abort); abort(); }
+    });
+    return executeReadAttempt(client, node, method, args, signal);
+  }
+}
+
 type SharedRead = { work: Promise<Wire.Json>; controller: AbortController; users: number };
 const pendingReads = new WeakMap<RpcClient, Map<string, SharedRead>>();
 /** Coalesce simultaneous identical observations. A cancelled panel cannot cancel other readers. */
