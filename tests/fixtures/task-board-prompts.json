@@ -293,8 +293,8 @@
     {
       "name": "handoff ordinary question",
       "method": "handoff",
-      "expectedHash": "sha256:0d201762f900bdde353ce7b09988d6f99dd96749a1e56d0f8aff6cba05c6e0cc",
-      "units": 769
+      "expectedHash": "sha256:5e8d81347400f1ffe73fc8a11b3b85287e5afd5e05b5726c26250eb9d3ec7341",
+      "units": 1068
     },
     {
       "name": "handoff ready result",
@@ -302,8 +302,8 @@
       "comment": {
         "purpose": "handoff"
       },
-      "expectedHash": "sha256:2d25f2cd08850555267086884dcbdf44a66ef5f4603803b62e2b2ca7c37c363a",
-      "units": 808
+      "expectedHash": "sha256:14d8914b67f4a42d0c519873e777b36e11fc48cc2eed7fd3fe0d7d189b9e9e37",
+      "units": 1107
     },
     {
       "name": "handoff typed requests",
@@ -317,8 +317,8 @@
           }
         ]
       },
-      "expectedHash": "sha256:516833b368b8cdd48c5bd9fc8061ab59f5fc7ad5cf8b0a7a03f0d20eeecdaeba",
-      "units": 842
+      "expectedHash": "sha256:51a9f02afb707683f1ff8f169dbe2fcc7bd31dae7b18a4e950bda7a7b91f405f",
+      "units": 1141
     },
     {
       "name": "handoff native identity wins",
@@ -337,8 +337,8 @@
           }
         ]
       },
-      "expectedHash": "sha256:6bed5c2d84b79cbd59e90c69054bc3203a46130bbe3f010c8e34fddefaa44b05",
-      "units": 853
+      "expectedHash": "sha256:1d1e73d4384caf3426f489afdd594b0bb6f4513ffa19674b79634de5098d6600",
+      "units": 1152
     },
     {
       "name": "handoff UTF16 truncation",
@@ -350,8 +350,8 @@
     {
       "name": "voice ordinary question",
       "method": "voice",
-      "expectedHash": "sha256:afd31990eab9282e23c89f3b61a7eb3a36ad8f5e861883361a5f2c7ea815acb0",
-      "units": 653
+      "expectedHash": "sha256:802348572f61db4324c4224961b02f53315de9750eff0cf499eae52cb532f897",
+      "units": 952
     },
     {
       "name": "voice ready result",
@@ -359,8 +359,8 @@
       "comment": {
         "purpose": "handoff"
       },
-      "expectedHash": "sha256:11eb76cce0e29827a870d84e33ae2c949cba57c2cceb66e82973e7e50460b766",
-      "units": 692
+      "expectedHash": "sha256:bd9bb4f50fc6858f993813c4019d4923dbe4d90bcda822dbe345653cab58b626",
+      "units": 991
     },
     {
       "name": "voice typed requests",
@@ -374,8 +374,8 @@
           }
         ]
       },
-      "expectedHash": "sha256:2cd3e352e9ede18856bed09ac7b52b57a1dbd3f903443ef401d0459cca59466d",
-      "units": 726
+      "expectedHash": "sha256:3b164f97bd87040b77c5db71098b54b72f8aeda4863d6c80a327e04782d9851a",
+      "units": 1025
     },
     {
       "name": "voice native identity wins",
@@ -394,8 +394,8 @@
           }
         ]
       },
-      "expectedHash": "sha256:03ee219d9d8a8c629ebbcad1eb812ad405547c1be7ddefb21d3425ee0582abe9",
-      "units": 737
+      "expectedHash": "sha256:252d0f8e56ff3ea3e0af1535a496925818a4f6d7b322f99e919e7476d81e43ee",
+      "units": 1036
     },
     {
       "name": "voice UTF16 truncation",

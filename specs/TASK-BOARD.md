@@ -303,8 +303,9 @@ Sources: [allocation](../services/task-board/rust/src/scheduler.rs),
   identifying the Task and owning service through Ivy MCP. It asks the agent to read the ticket
   and decide what to do; it never assigns a next-step ID or repeats the general workflow guide.
   Agents reread the current ticket/settings/comments at every turn, work in the assigned workspace,
-  post meaningful progress/questions with `authorKind=agent`, and follow the shared
-  [attachment guidance](../instructions/task-board.ts) included in prompts and tool instructions.
+  follow the shared writing guidance in `registryText.guideMarkdown` in the
+  [TaskBoard runtime inputs](../services/task-board/rust/src/runtime-inputs.json),
+  and the [attachment guidance](../instructions/task-board.ts).
 - Comments are the single conversation and handoff surface. Ordinary decisions need no separate
   approval workflow. Native requests retain their original identities in comments; UI buttons and
   MCP answer them through AgentManager. Responses are mirrored into the same timeline; secret
@@ -339,10 +340,8 @@ Sources: [allocation](../services/task-board/rust/src/scheduler.rs),
   after its attempt. Omitted scheduling fields preserve the current values.
 - Questions remain local and open until an addressed answer or explained resolution. Cards with
   pending questions addressed to the user have a yellow border. Those questions stay above the composer.
-- Verification findings, execution errors and unavailable evidence belong in ordinary result text,
-  comments and attachments, not structured check lists or board badges. Preserve earlier findings and
-  exact evidence references when reading retained records. Repeated observations explicitly publish
-  their next wakeAt; unrelated comments never shift it.
+- Keep verification and handoff detail in the ticket according to the shared writing guidance.
+  Repeated observations explicitly publish their next wakeAt; unrelated comments never shift it.
 - Delegated tasks retain parentTaskId. Parents review exact child results at idle, accept and archive
   completed children. Saved results wake watching tasks before overall completion.
 - A confirmed native completion applies an optional handoff workflowState. Only overall Review
@@ -357,7 +356,8 @@ Sources: [allocation](../services/task-board/rust/src/scheduler.rs),
   Failed publication recovery yields before retrying so unrelated Tasks can progress. Advisory native
   signals retain only their current checkpoint; immutable execution receipts and evidence remain separate.
   New ticket revisions do not replace a pending scheduler action; finish its original admission first.
-- Final comments retain actual verification, limitations and artifact/Git links. Internal Run outcome
+- A work outcome has one handoff comment; user notices summarize it and refer back to the ticket.
+  Exact proposed public text remains available when approval depends on it. Internal Run outcome
   records remain available for recovery; they are not a second user-facing result or acceptance workflow.
   Unavailable evidence is not success; local commits are not represented as confirmed remote commits.
 - Completion requires the exact native turn's terminal status and uses its ticket handoff comment.
