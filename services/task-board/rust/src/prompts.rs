@@ -5,6 +5,8 @@ use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, json::string
 
 pub const ATTACHMENT_GUIDANCE: &str = "Attach files only when explicitly requested or when they add clear value. Limit attachments to what is necessary and keep them as small as possible. Attach build artifacts only when explicitly requested by the user.";
 
+const NOTICE_GUIDANCE: &str = "For a TaskBoard notice, summarize the outcome and any decision the user needs to make, and include the ticket reference. Leave detailed working evidence in the ticket. Preserve exact proposed public text when approval depends on that text. Do not request an acknowledgement for an unchanged status. ";
+
 /// The current prompt policy consumes the declared execution-change boolean.
 #[derive(Clone, Copy, Default)]
 pub struct CurrentTaskPrompts;
@@ -117,6 +119,7 @@ pub fn handoff(task: &Json, comment: &Json) -> IvyResult<JsString> {
     output.0.extend(requests.0);
     push(&mut output, "\n\n");
     push(&mut output, instructions(comment));
+    push(&mut output, NOTICE_GUIDANCE);
     push(&mut output, "Tell the user about this comment now. Keep ");
     output.0.extend(&text(task, "taskKey")?.0);
     push(
@@ -139,6 +142,7 @@ pub fn voice_prompt(task: &Json, comment: &Json) -> IvyResult<JsString> {
     output.0.extend(requests.0);
     push(&mut output, "\n\n");
     push(&mut output, instructions(comment));
+    push(&mut output, NOTICE_GUIDANCE);
     push(
         &mut output,
         "When the user answers or supplies relevant information, use the connected Ivy Hive TaskBoard tools: read ",
