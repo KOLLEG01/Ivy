@@ -502,10 +502,9 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
         let mut identity = field(data(), "identity").clone();
         identity.insert("nativeVersion", field(&catalog, "version").clone());
         same(&options.identity, &identity);
-        assert_eq!(
-            options.heartbeat.as_millis(),
-            field(data(), "heartbeatMs").as_f64().unwrap() as u128
-        );
+        // The historical fixture retains the former two-second heartbeat.
+        // Current hosts use the shared five-second service cadence.
+        assert_eq!(options.heartbeat, Duration::from_secs(5));
         same(&(options.registry)().await.unwrap(), &registry);
         assert_eq!((options.credential)().await.unwrap(), "fixture-only");
         // Exercise the real Shared provider registry gate over a local socket.
