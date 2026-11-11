@@ -17,7 +17,7 @@ use ivy_sdk::{
     clock::date_to_iso, native_evidence::native_instant, operation_ids::scoped_operation_id,
     rpc::RpcClient, tools::ToolClients,
 };
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 #[allow(async_fn_in_trait)]
 pub trait SchedulerStore: AllocationStore + WakeStore {
     fn free_bytes(&self) -> IvyResult<Option<f64>>;
@@ -57,11 +57,23 @@ impl<S: Store, C: Fn() -> String> SchedulerOperations for Operations<S, C> {
 #[allow(async_fn_in_trait)]
 pub trait SchedulerPolicies: TaskPrompts {
     async fn read_task(&self, id: &JsString) -> IvyResult<Document>;
-    async fn pending_comment_ids(&self, task: &Document) -> IvyResult<Vec<Json>> {
+    async fn queued_comment_ids(&self, task: &Document) -> IvyResult<Vec<Json>> {
+        arr(f(&task.value, "commentDeliveries"))
+            .iter()
+            .filter(|delivery| eq(delivery, "state", "queued"))
+            .map(|delivery| delivery.required("commentId").cloned())
+            .collect()
+    }
+    async fn pending_comment_ids(
+        &self,
+        task: &Document,
+        excluded: &[Json],
+    ) -> IvyResult<Vec<Json>> {
         Ok(arr(f(&task.value, "commentDeliveries"))
             .iter()
             .filter(|delivery| {
                 eq(delivery, "state", "queued")
+                    && !excluded.contains(f(delivery, "commentId"))
                     && arr(f(&task.value, "comments")).iter().any(|comment| {
                         f(comment, "commentId") == f(delivery, "commentId") && queued_input(comment)
                     })
@@ -137,8 +149,15 @@ impl<R: RpcClient + 'static, P: SchedulerPolicies> SchedulerPolicies for Schedul
     async fn read_task(&self, id: &JsString) -> IvyResult<Document> {
         self.policies.read_task(id).await
     }
-    async fn pending_comment_ids(&self, task: &Document) -> IvyResult<Vec<Json>> {
-        self.policies.pending_comment_ids(task).await
+    async fn queued_comment_ids(&self, task: &Document) -> IvyResult<Vec<Json>> {
+        self.policies.queued_comment_ids(task).await
+    }
+    async fn pending_comment_ids(
+        &self,
+        task: &Document,
+        excluded: &[Json],
+    ) -> IvyResult<Vec<Json>> {
+        self.policies.pending_comment_ids(task, excluded).await
     }
     fn enabled(&self) -> bool {
         self.policies.enabled()
@@ -245,23 +264,33 @@ pub async fn queued_input_ids<S: LifecycleStore>(
     store: &S,
     task: &Document,
 ) -> IvyResult<Vec<Json>> {
+    queued_input_ids_excluding(store, task, &[]).await
+}
+pub async fn queued_input_ids_excluding<S: LifecycleStore>(
+    store: &S,
+    task: &Document,
+    excluded: &[Json],
+) -> IvyResult<Vec<Json>> {
     let id = &task.pin.object_id;
-    queued_inputs(store, &task.value, id, 256).await
+    queued_inputs(store, &task.value, id, 256, excluded).await
 }
 pub(crate) async fn has_queued_input<S: LifecycleStore>(
     store: &S,
     task: &Json,
     id: &JsString,
 ) -> IvyResult<bool> {
-    Ok(!queued_inputs(store, task, id, 1).await?.is_empty())
+    Ok(!queued_inputs(store, task, id, 1, &[]).await?.is_empty())
 }
 async fn queued_inputs<S: LifecycleStore>(
     store: &S,
     task: &Json,
     id: &JsString,
     maximum: usize,
+    excluded: &[Json],
 ) -> IvyResult<Vec<Json>> {
-    let queued = store.queued_comment_ids(task, id).await?;
+    let excluded: HashSet<_> = excluded.iter().filter_map(Json::as_js_string).collect();
+    let mut queued = store.queued_comment_ids(task, id).await?;
+    queued.retain(|id| id.as_js_string().is_none_or(|id| !excluded.contains(id)));
     let mut selected = vec![];
     for ids in queued.chunks(16) {
         let comments = store.read_task_comments(task, id, ids).await?;
@@ -533,7 +562,38 @@ impl<S: SchedulerStore, E: SchedulerEngine, A: SchedulerAllocation, O: Scheduler
         if present(f(value, "claim")) || present(f(value, "publication")) {
             return Ok(Json::Null);
         }
-        let comments = self.engine.pending_comment_ids(&task).await?;
+        let mut comments = self.engine.pending_comment_ids(&task, &[]).await?;
+        let issue = f(value, "completionIssue");
+        if !comments.is_empty() && present(issue) && !present(f(issue, "retryAt")) {
+            let run = self
+                .store
+                .read("task-board/run", value.required("lastRun")?, true)
+                .await?;
+            require(
+                f(&run.value, "taskId") == &Json::String(task_id.clone())
+                    && f(f(issue, "run"), "objectId") == &Json::String(run.pin.object_id.clone()),
+                "task_board_identity_conflict",
+                "A blocked continuation must retain its original Run and Task.",
+            )?;
+            // A permanent preparation failure is not a new input. Compare the
+            // original compact header so older queued inputs beyond the native
+            // batch limit cannot alternate forever. A new comment still wakes.
+            let original = self
+                .store
+                .read_task_header(
+                    &Json::object([
+                        ("objectId", Json::String(task_id.clone())),
+                        (
+                            "revision",
+                            f(f(&run.value, "originalRequest"), "expectedRevision").clone(),
+                        ),
+                    ]),
+                    true,
+                )
+                .await?;
+            let excluded = self.engine.queued_comment_ids(&original).await?;
+            comments = self.engine.pending_comment_ids(&task, &excluded).await?;
+        }
         if !next_execution_mode_with_inputs(value, &at, !comments.is_empty())
             || !should_wake_with_inputs(self.store, value, &at, !comments.is_empty()).await?
         {

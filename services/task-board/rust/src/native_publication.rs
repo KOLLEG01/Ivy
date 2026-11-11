@@ -1127,9 +1127,19 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                             "failed",
                             Json::String(join(
                                 &[
-                                    "Native ".into(),
-                                    slot.clone(),
-                                    " operation failed.\n\n".into(),
+                                    if f(&observation, "epoch").is_null() && reply.is_null() {
+                                        "Agent preparation failed before native dispatch.\n\n"
+                                            .into()
+                                    } else {
+                                        join(
+                                            &[
+                                                "Native ".into(),
+                                                slot.clone(),
+                                                " operation failed.\n\n".into(),
+                                            ],
+                                            "",
+                                        )
+                                    },
                                     text(&reason),
                                 ],
                                 "",

@@ -263,8 +263,19 @@ impl<
     async fn read_task(&self, id: &JsString) -> IvyResult<Document> {
         (self.task_read)(id.clone()).await
     }
-    async fn pending_comment_ids(&self, task: &Document) -> IvyResult<Vec<Json>> {
-        crate::scheduler::queued_input_ids(self.checks.core.store, task).await
+    async fn queued_comment_ids(&self, task: &Document) -> IvyResult<Vec<Json>> {
+        self.checks
+            .core
+            .store
+            .queued_comment_ids(&task.value, &task.pin.object_id)
+            .await
+    }
+    async fn pending_comment_ids(
+        &self,
+        task: &Document,
+        excluded: &[Json],
+    ) -> IvyResult<Vec<Json>> {
+        crate::scheduler::queued_input_ids_excluding(self.checks.core.store, task, excluded).await
     }
     fn enabled(&self) -> bool {
         self.current.scheduler_enabled()

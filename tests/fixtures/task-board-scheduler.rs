@@ -534,6 +534,106 @@ async fn queued_inputs_are_bounded_and_retain_context_even_for_manual_terminal_t
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn permanent_preparation_failure_waits_for_new_input_beyond_the_original_batch() {
+    let mut original = task();
+    original.insert("workflowState", "waiting".into());
+    let primary = Json::object([("nativeId", "saved-thread".into())]);
+    original.insert("primaryResourceRef", primary.clone());
+    let ids: Vec<Json> = (0..270).map(|i| format!("old{i}").into()).collect();
+    original.insert(
+        "comments",
+        Json::Array(
+            ids.iter()
+                .map(|id| Json::object([("commentId", id.clone()), ("authorKind", "user".into())]))
+                .collect(),
+        ),
+    );
+    original.insert(
+        "commentDeliveries",
+        Json::Array(
+            ids.iter()
+                .map(|id| Json::object([("commentId", id.clone()), ("state", "queued".into())]))
+                .collect(),
+        ),
+    );
+    let world = World::new(original.clone());
+    let run = Json::object([
+        ("taskId", "task".into()),
+        ("phase", "failed".into()),
+        (
+            "originalRequest",
+            Json::object([
+                ("expectedRevision", Json::Number(1.0)),
+                ("commentIds", Json::Array(ids[..256].to_vec())),
+            ]),
+        ),
+        ("primaryResourceRef", primary.clone()),
+    ]);
+    world
+        .local()
+        .create(
+            "task-board/run",
+            &"Failed Run".into(),
+            Some(&"root".into()),
+            &run,
+            &AT.into(),
+            &"failed-run".into(),
+        )
+        .unwrap();
+    let mut blocked = original;
+    blocked.insert("lastRun", pin("failed-run", 1.0));
+    blocked.insert(
+        "completionIssue",
+        Json::object([
+            ("code", "command_failed".into()),
+            ("run", pin("failed-run", 1.0)),
+            ("retryAt", Json::Null),
+        ]),
+    );
+    world.set_task(blocked.clone());
+    let before = world.read_task();
+    for _ in 0..3 {
+        assert!(world.run().await.unwrap().is_null());
+    }
+    assert_eq!(world.count("allocate"), 0);
+    assert_eq!(world.count("schedule"), 0);
+    let after = world.read_task();
+    assert_eq!(after.pin.object_id, before.pin.object_id);
+    assert_eq!(after.pin.revision, before.pin.revision);
+    assert_eq!(after.content_hash, hash_json(&blocked).unwrap());
+    let mut fresh = blocked;
+    if let Json::Array(comments) = fresh.get_mut("comments").unwrap() {
+        comments.push(Json::object([
+            ("commentId", "repair".into()),
+            ("authorKind", "user".into()),
+        ]));
+    }
+    if let Json::Array(receipts) = fresh.get_mut("commentDeliveries").unwrap() {
+        receipts.push(Json::object([
+            ("commentId", "repair".into()),
+            ("state", "queued".into()),
+        ]));
+    }
+    world.set_task(fresh);
+    let request = world.run().await.unwrap();
+    assert_eq!(f(&request, "action"), &Json::from("continue"));
+    assert_eq!(
+        f(&request, "commentIds"),
+        &Json::Array(vec!["repair".into()])
+    );
+    assert_eq!(f(&world.read_task().value, "primaryResourceRef"), &primary);
+    assert_eq!(world.values("allocate"), vec![Json::Bool(true)]);
+    assert_eq!(
+        world
+            .local()
+            .read("task-board/run", &pin("failed-run", 1.0), true)
+            .unwrap()
+            .content_hash,
+        hash_json(&run).unwrap()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn review_comments_continue_the_saved_context_and_recover_the_same_admission() {
     for (author, queued) in [("user", true), ("agent", true), ("agent", false)] {
         let mut value = task();

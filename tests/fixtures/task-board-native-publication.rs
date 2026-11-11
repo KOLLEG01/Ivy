@@ -1739,6 +1739,106 @@ fn owner(phase: &str, result: Json) -> Json {
 }
 
 #[tokio::test]
+async fn unstarted_failures_retry_only_explicit_transient_native_errors() {
+    for slot in ["thread", "turn"] {
+        for mode in ["preparation", "permanent", "transient"] {
+            let mut run = base_run();
+            run.insert("turnId", Json::Null);
+            run.insert("nativeEpoch", Json::Null);
+            set(&mut run, "calls", slot, pin(10));
+            let w = World::new(base_task(), run);
+            let original = native_call(
+                10,
+                if slot == "thread" {
+                    "thread/resume"
+                } else {
+                    "turn/start"
+                },
+                Json::Null,
+                None,
+            );
+            w.put("task-board/native-call", pin(10), original.clone());
+            let epoch = if mode == "preparation" {
+                Json::Null
+            } else {
+                "epoch".into()
+            };
+            let reply = if mode == "preparation" {
+                Json::Null
+            } else {
+                Json::object([(
+                    "error",
+                    Json::object([
+                        ("message", "Original native error".into()),
+                        (
+                            "codexErrorInfo",
+                            if mode == "transient" {
+                                "serverOverloaded".into()
+                            } else {
+                                "invalidRequest".into()
+                            },
+                        ),
+                    ]),
+                )])
+            };
+            let code = if mode == "preparation" {
+                Json::from("command_failed")
+            } else {
+                "native_operation_failed".into()
+            };
+            let mut observed = original;
+            for (key, value) in [
+                ("state", "observed".into()),
+                ("ownerPhase", "failed".into()),
+                ("epoch", epoch.clone()),
+                ("code", code.clone()),
+                ("observedAt", AT.into()),
+                ("evidence", proof(110)),
+            ] {
+                observed.insert(key, value);
+            }
+            let mut p = pin(10);
+            p.insert("revision", Json::Number(2.0));
+            w.observe(
+                p.clone(),
+                observed,
+                Json::object([
+                    ("phase", "failed".into()),
+                    ("epoch", epoch),
+                    ("code", code.clone()),
+                    ("reply", reply),
+                ]),
+            );
+            w.publish(Json::object([
+                ("kind", "observeCall".into()),
+                ("slot", slot.into()),
+                ("call", p),
+            ]))
+            .await
+            .unwrap();
+            let t = w.final_task();
+            assert_eq!(
+                !f(f(&t, "completionIssue"), "retryAt").is_null(),
+                mode == "transient",
+                "{slot}/{mode}"
+            );
+            assert_eq!(f(f(&t, "completionIssue"), "code"), &code);
+            assert_eq!(f(&t, "primaryResourceRef"), &primary());
+            assert_eq!(f(&t, "latestResult"), &pin(901));
+            assert_eq!(!f(&t, "runtimeWait").is_null(), mode == "transient");
+            if mode == "preparation" {
+                assert_eq!(
+                    f(f(&w.result(), "content"), "summary"),
+                    &Json::from(
+                        "Agent preparation failed before native dispatch.\n\ncommand_failed"
+                    )
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn initial_cancelled_attachment_requires_the_active_claim_and_a_known_turn() {
     for (active, known_turn, expected) in [
         (true, true, None),

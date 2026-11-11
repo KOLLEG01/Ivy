@@ -139,7 +139,7 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
         } else {
             let retry = if !f(done, "retryAt").is_null() {
                 f(done, "retryAt").clone()
-            } else if f(next, "turnId").is_null() || changing_execution(task, run) {
+            } else if changing_execution(task, run) {
                 after(at, 30_000.0)?
             } else {
                 Json::Null

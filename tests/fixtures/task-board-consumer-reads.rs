@@ -10,7 +10,7 @@ use ivy_task_board::{
     lifecycle_journal::LifecycleJournal,
     local_executor::LocalExecutor,
     native_lifecycle::LifecycleDocument,
-    scheduler::queued_input_ids,
+    scheduler::{queued_input_ids, queued_input_ids_excluding},
     task_routing::{RoutingEngine, RoutingRuntime},
 };
 
@@ -165,6 +165,12 @@ async fn reviewed_compact_tasks_select_original_user_and_peer_deliveries() {
         for _ in 0..2 {
             assert_eq!(queued_input_ids(&store, &header).await.unwrap(), expected);
         }
+        assert!(
+            queued_input_ids_excluding(&store, &header, &expected)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(header.value.get("primaryResourceRef"), Some(&primary));
         assert_eq!(
             header.value.get("workflowState"),
