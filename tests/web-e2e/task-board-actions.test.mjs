@@ -28,6 +28,13 @@ const noTechnicalProgress = async page => {
 };
 const commentEditor = f => f.page.getByRole('textbox', { name: 'Comment', exact: true });
 const send = f => f.page.getByRole('button', { name: 'Add comment', exact: true });
+const copiedTab = async f => {
+  const popup = f.page.waitForEvent('popup');
+  await f.page.evaluate(() => { window.open('about:blank', '_blank'); });
+  const page = await popup;
+  page.on('pageerror', error => f.pageErrors.push(error.message));
+  return { ...f, page };
+};
 const measure = async (t, sample) => {
   t.diagnostic(JSON.stringify(sample));
   if (process.env.IVY_TASKBOARD_TIMINGS) await appendFile(process.env.IVY_TASKBOARD_TIMINGS, JSON.stringify(sample) + '\n');
@@ -210,6 +217,133 @@ for (const width of [1440, 390]) {
     await noTechnicalProgress(f.page); assert.deepEqual(f.pageErrors, []);
     await measure(t, { scenario: 'rapid comments and offline reload', width,
       visiblePerCommentMs, threeVisibleMs: visibleAt - startedAt, allAuthoritativeMs: Date.now() - startedAt, mutationCalls: requests.length });
+  });
+
+  test(`copied tabs reconcile one original comment while keeping independent drafts at ${width}px`, { timeout: 120000 }, async t => {
+    const f = await taskBoardFixture(t, { viewport: { width, height: 900 } });
+    const a = await create(f, 'Copied conversation'), b = await create(f, 'Another tab ticket');
+    const url = f.url + '#/tasks?node=browser-task-board&id=' + a.objectId;
+    await f.open('#/tasks?node=browser-task-board&id=' + a.objectId);
+    const dispatch = gate(t), acknowledgement = gate(t), requests = [];
+    let saved = false, dropped = false;
+    await f.context.route('**/api/v1/rpc', async route => {
+      const body = route.request().postDataJSON();
+      if (!toolCall(body, 'comment', a.objectId)) return route.continue();
+      requests.push(body.params);
+      assert.equal(requests.length, 1, 'Both tabs must reconcile the same accepted original without sending another comment.');
+      await dispatch.promise;
+      const response = await route.fetch();
+      assert.ok(!(await response.json()).error);
+      saved = true; await acknowledgement.promise;
+      await route.abort(); dropped = true;
+    });
+    await commentEditor(f).fill('One original across two tabs'); await send(f).click();
+    await expect.poll(() => requests.length).toBe(1);
+    await expect(f.page.locator('[data-slot=conversation-message]').filter({ hasText: 'One original across two tabs' })).toHaveCount(1);
+    await commentEditor(f).fill('First tab future draft');
+    const retained = await f.page.evaluate(() => Object.fromEntries(Object.entries(sessionStorage)
+      .filter(([key]) => key.startsWith('ivy:task-board:action:') || key.startsWith('ivy.task-board.pending-comment:'))));
+    const other = await copiedTab(f);
+    assert.deepEqual(await other.page.evaluate(() => Object.fromEntries(Object.entries(sessionStorage)
+      .filter(([key]) => key.startsWith('ivy:task-board:action:') || key.startsWith('ivy.task-board.pending-comment:')))), retained,
+    'A real opener-created tab inherits the retained original, unlike an unrelated new browser page.');
+    assert.ok(Object.values(retained).some(raw => JSON.parse(raw).call?.operationId === requests[0].operationId));
+    assert.equal((await f.task(a.objectId)).comments.length, 0, 'The optimistic message has no backend effect before dispatch.');
+    dispatch.release(); await expect.poll(() => saved).toBe(true);
+    let current = await f.client.request('objects.read', { objectId: a.objectId });
+    await f.invoke({ action: 'comment', taskId: a.objectId, expectedRevision: current.revision.revision,
+      authorKind: 'agent', commentId: 'copied-tab-agent-comment', body: 'A later agent contribution',
+      requests: [], responses: [], attachments: [], replyTo: null });
+    current = await f.client.request('objects.read', { objectId: a.objectId });
+    await f.invoke({ action: 'edit', taskId: a.objectId, expectedRevision: current.revision.revision,
+      fields: { ...current.content.value.fields, title: 'Newer title across tabs' } });
+    await other.page.goto(url);
+    await expect(commentEditor(other)).toContainText('First tab future draft');
+    await commentEditor(other).fill('Second tab future draft');
+    for (const body of ['One original across two tabs', 'A later agent contribution'])
+      await expect(other.page.locator('[data-slot=conversation-message]').filter({ hasText: body })).toHaveCount(1);
+    await expect(send(other)).toBeEnabled({ timeout: 20000 });
+    await other.page.getByRole('button', { name: 'Close', exact: true }).click();
+    await move(other, 'Another tab ticket');
+    await expect.poll(async () => (await f.task(b.objectId)).workflowState).toBe('todo');
+    await other.page.getByRole('link', { name: 'Newer title across tabs', exact: true }).click();
+    await expect(commentEditor(other)).toContainText('Second tab future draft');
+    acknowledgement.release(); await expect.poll(() => dropped).toBe(true);
+    await f.page.reload();
+    await expect(commentEditor(f)).toContainText('First tab future draft');
+    await expect(send(f)).toBeEnabled({ timeout: 20000 });
+    const task = await f.task(a.objectId);
+    assert.equal(task.fields.title, 'Newer title across tabs');
+    assert.equal(task.comments.length, 2);
+    assert.equal(task.comments.filter(comment => comment.commentId === requests[0].arguments.commentId).length, 1);
+    assert.equal(requests.length, 1);
+    for (const tab of [f, other]) {
+      for (const body of ['One original across two tabs', 'A later agent contribution'])
+        await expect(tab.page.locator('[data-slot=conversation-message]').filter({ hasText: body })).toHaveCount(1);
+      await noTechnicalProgress(tab.page);
+    }
+    assert.deepEqual(f.pageErrors, []); assert.deepEqual(f.externalRequests, []);
+    await measure(t, { scenario: 'copied pending original and independent tab drafts', width, mutationCalls: requests.length });
+  });
+
+  test(`a late archive reply cannot undo another tab's restore and newer edit at ${width}px`, { timeout: 120000 }, async t => {
+    const f = await taskBoardFixture(t, { viewport: { width, height: 900 } });
+    const a = await create(f, 'Archive across tabs');
+    const b = await create(f, 'Independent during archive');
+    const url = f.url + '#/tasks?node=browser-task-board&id=' + a.objectId + '&tab=details';
+    await f.open('#/tasks?node=browser-task-board&id=' + a.objectId + '&tab=details');
+    const acknowledgement = gate(t), requests = [];
+    let saved = false, delivered = false;
+    await f.context.route('**/api/v1/rpc', async route => {
+      const body = route.request().postDataJSON();
+      if (!toolCall(body, 'archive', a.objectId)) return route.continue();
+      requests.push(body.params);
+      const response = await route.fetch();
+      assert.ok(!(await response.json()).error);
+      if (body.params.arguments.archived) {
+        assert.equal(requests.filter(request => request.arguments.archived).length, 1);
+        saved = true; await acknowledgement.promise;
+        await route.fulfill({ response }); delivered = true;
+      } else await route.fulfill({ response });
+    });
+    const archiveAction = async (tab, name) => {
+      await tab.page.getByRole('button', { name: 'More actions', exact: true }).click();
+      await expect(tab.page.getByRole('menuitem', { name, exact: true })).toBeEnabled({ timeout: 20000 });
+      await tab.page.getByRole('menuitem', { name, exact: true }).click();
+    };
+    await archiveAction(f, 'Archive task'); await expect.poll(() => saved).toBe(true);
+    assert.equal((await f.client.request('objects.stat', { objectId: a.objectId })).effectivelyArchived, true);
+    const other = await copiedTab(f);
+    await other.page.goto(url);
+    await archiveAction(other, 'Restore task');
+    await expect.poll(async () => (await f.client.request('objects.stat', { objectId: a.objectId })).effectivelyArchived).toBe(false);
+    await expect(other.page.getByRole('button', { name: 'Edit task', exact: true })).toBeEnabled();
+    await other.page.getByRole('button', { name: 'Edit task', exact: true }).click();
+    await other.page.getByLabel('Title', { exact: true }).fill('Edited after another tab restored');
+    await other.page.getByRole('button', { name: 'Save changes', exact: true }).click();
+    await expect.poll(async () => (await f.task(a.objectId)).fields.title).toBe('Edited after another tab restored');
+    await other.page.getByRole('button', { name: 'Close', exact: true }).click();
+    await move(other, 'Independent during archive');
+    await expect.poll(async () => (await f.task(b.objectId)).workflowState).toBe('todo');
+    const metadata = await f.client.request('objects.stat', { objectId: a.objectId });
+    const content = await f.task(a.objectId);
+    acknowledgement.release(); await expect.poll(() => delivered).toBe(true);
+    await expect(f.page.getByRole('heading', { name: /Edited after another tab restored$/ }).first()).toBeVisible();
+    await f.page.getByRole('button', { name: 'More actions', exact: true }).click();
+    await expect(f.page.getByRole('menuitem', { name: 'Archive task', exact: true })).toBeEnabled({ timeout: 20000 });
+    await expect(f.page.getByRole('menuitem', { name: 'Restore task', exact: true })).toHaveCount(0);
+    await f.page.keyboard.press('Escape');
+    const finalMetadata = await f.client.request('objects.stat', { objectId: a.objectId });
+    const final = await f.task(a.objectId);
+    assert.equal(finalMetadata.effectivelyArchived, false);
+    assert.equal(finalMetadata.archivedAt, null);
+    assert.equal(finalMetadata.currentRevision, metadata.currentRevision);
+    assert.equal(final.fields.title, content.fields.title); assert.equal(final.workflowState, 'backlog');
+    assert.deepEqual(requests.map(request => request.arguments.archived), [true, false]);
+    assert.equal(new Set(requests.map(request => request.operationId)).size, 2);
+    await noTechnicalProgress(f.page); await noTechnicalProgress(other.page);
+    assert.deepEqual(f.pageErrors, []); assert.deepEqual(f.externalRequests, []);
+    await measure(t, { scenario: 'late archive receipt after another tab restore and edit', width, archiveCalls: requests.length });
   });
 
   test(`a browser storage failure retains the unsent draft without blocking another ticket at ${width}px`, { timeout: 90000 }, async t => {

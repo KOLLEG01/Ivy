@@ -786,11 +786,11 @@ test(
   },
 );
 
-test(
-  "the backlog and, when chosen, every other column are ranked by hand through the menu and by dragging",
+for (const width of [1440, 390]) test(
+  `the backlog and, when chosen, every other column are ranked by hand through the menu and by dragging at ${width}px`,
   { timeout: 180000 },
   async (t) => {
-    const f = await taskBoardFixture(t);
+    const f = await taskBoardFixture(t, { viewport: { width, height: 900 } });
     for (const title of ["First ranked", "Second ranked", "Third ranked"])
       await f.invoke({ action: "create", workflowState: "backlog", fields: fields(title) });
     await f.open("#/tasks?node=browser-task-board");
