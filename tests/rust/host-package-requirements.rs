@@ -3,6 +3,34 @@ use ivy_host_runtime::package_requirements::{
 };
 
 #[test]
+fn package_catalog_accepts_darwin_manifests_and_rejects_unknown_platforms() {
+    use ivy_contracts::IvyJson;
+    use ivy_host_runtime::package_validation::validate_package_authorization;
+    let hash = format!("sha256:{}", "0".repeat(64));
+    let mut input = serde_json::json!({
+        "componentId":"fixture", "version":"1.0.0", "buildId":hash,
+        "archiveHash":hash, "bytes":1,
+        "manifest":{
+            "schemaVersion":1, "componentId":"fixture", "kind":"service",
+            "version":"1.0.0", "buildId":hash, "connectsToHive":true,
+            "requirements":{"node":">=24.18.0 <25.0.0", "hiveProtocol":1,
+                "contracts":[], "os":["darwin"], "arch":["arm64"]},
+            "entrypoint":{"executable":"node", "args":[], "timeoutMs":1000},
+            "readiness":{"timeoutMs":1000,
+                "command":{"executable":"node", "args":[], "timeoutMs":1000}},
+            "shutdown":{"timeoutMs":1000},
+            "restart":{"policy":"never", "minimumDelayMs":100, "maximumDelayMs":100}
+        }
+    });
+    for platforms in [serde_json::json!(["darwin"]), serde_json::json!(["win32", "linux", "darwin"])] {
+        input["manifest"]["requirements"]["os"] = platforms;
+        validate_package_authorization(&IvyJson::from_serde(&input).unwrap()).unwrap();
+    }
+    input["manifest"]["requirements"]["os"] = serde_json::json!(["plan9"]);
+    assert_eq!(validate_package_authorization(&IvyJson::from_serde(&input).unwrap()).unwrap_err().code, "invalid_arguments");
+}
+
+#[test]
 fn exact_candidate_platform_and_node_range_never_fall_back() {
     let requirements = Requirements {
         node: ">=24.18.0 <25.0.0",
