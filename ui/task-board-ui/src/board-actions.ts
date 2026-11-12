@@ -165,15 +165,17 @@ export function useBoardActions(workspace: () => TaskBoard.WorkspaceInfo, synchr
   };
   const run = async (taskId: string, work: (action: ReturnType<typeof useAction>, archive: Slot['archive']) => Promise<void>,
     intent?: { card: TaskBoard.TaskCardView; state: TaskBoard.Task['workflowState'] } | { card: TaskBoard.TaskCardView; archived: boolean }) => {
-    if (disposed || identity() !== owner || active.has(taskId) || slots.get(taskId)?.action.locked.value) return;
+    if (disposed || identity() !== owner || active.has(taskId) || slots.get(taskId)?.action.locked.value) return false;
     active.add(taskId);
+    let admitted = false;
     let slot = slots.get(taskId);
     let cancelPreparation: (() => void) | undefined;
     try {
       assertTaskActionAvailable(workspace(), taskId, 'board:task:' + encodeURIComponent(taskId));
       if (intent && intent.card.object.objectId !== taskId) throw new Error('The displayed card belongs to another task.');
       if (!slot) slot = slots.size < maximum ? add(taskId) : await retain(taskId);
-      if (disposed || identity() !== owner) return;
+      if (disposed || identity() !== owner) return false;
+      admitted = true;
       error.value = null;
       if (intent) {
         observe([intent.card]);
@@ -185,6 +187,7 @@ export function useBoardActions(workspace: () => TaskBoard.WorkspaceInfo, synchr
       if (slot) slot.action.error.value = message;
       else error.value = { taskId, message };
     } finally { cancelPreparation?.(); active.delete(taskId); }
+    return admitted;
   };
   return {
     run, detail, observe, release, error, recoveryError,

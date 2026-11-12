@@ -152,14 +152,21 @@ for (const width of [1440, 390]) test(`posting with an open question stays writa
     createdAt: current.createdAt, operationId: 'existing-' + (index + 1),
   }));
   await f.seedComments(id, comments.map(({ author, sequence, createdAt, operationId, delivery, run, turnId, ...comment }) => comment));
-  const nodes = await f.client.request('objects.query', { contractKey: 'task-board/comment-node',
-    where: { field: 'object.parentId', op: 'eq', value: id }, limit: 200 });
-  assert.equal(nodes.nextCursor, null);
-  const historyIds = new Set(nodes.items.map(item => item.objectId)), historyReads = [];
+  const historyIds = new Set(), historyReads = [];
+  let cursor;
+  do {
+    const nodes = await f.client.request('objects.query', { contractKey: 'task-board/comment-node',
+      where: { field: 'object.parentId', op: 'eq', value: id }, limit: 200, ...(cursor ? { cursor } : {}) });
+    for (const item of nodes.items) historyIds.add(item.objectId);
+    cursor = nodes.nextCursor;
+  } while (cursor);
+  assert.ok(historyIds.size > 0);
+  assert.equal((await f.task(id)).comments.length, 120);
   await f.open(routeTo(id));
   const questions = f.page.locator('[data-slot=task-pending-questions]');
   await expect(questions).toContainText('Which implementation should continue?');
-  await expect(f.page.locator('[data-slot=conversation-message]')).toHaveCount(50);
+  await expect(f.page.locator('#comment-existing-120')).toBeVisible();
+  assert.ok(await f.page.locator('[data-slot=conversation-message]').count() <= 50);
   f.page.on('request', request => {
     if (!request.url().endsWith('/api/v1/rpc') || request.method() !== 'POST') return;
     for (const body of [].concat(request.postDataJSON()))
@@ -182,13 +189,19 @@ for (const width of [1440, 390]) test(`posting with an open question stays writa
   }));
   await f.seedComments(id, newer.map(({ author, sequence, createdAt, operationId, delivery, run, turnId, ...comment }) => comment));
   await f.page.reload();
-  await expect(f.page.locator('[data-slot=conversation-message]')).toHaveCount(50);
+  await expect(f.page.locator('#comment-newer-59')).toBeVisible();
+  assert.ok(await f.page.locator('[data-slot=conversation-message]').count() <= 50);
   await expect(f.page.locator('[data-slot=conversation-message]').filter({ hasText: 'An ordinary comment while the question stays open' })).toHaveCount(0);
   await editor.fill('A new message after reopening');
   await expect(send).toBeEnabled();
   await send.click();
   await expect.poll(async () => (await f.task(id)).comments.some(comment => comment.body === 'A new message after reopening')).toBe(true);
   await expect(f.page.locator('[data-slot=conversation-message]').filter({ hasText: 'A new message after reopening' })).toBeInViewport();
+  await f.page.locator('[data-slot=task-comment-messages]').evaluate(element => {
+    element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight - 500);
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect(f.page.locator('[data-slot=conversation-message]').filter({ hasText: 'A new message after reopening' })).not.toBeInViewport();
   const beforeFollowUp = await f.client.request('objects.read', { objectId: id });
   await f.invoke({ action: 'comment', taskId: id, expectedRevision: beforeFollowUp.revision.revision, authorKind: 'agent',
     commentId: 'agent-follow-up', body: 'One short follow-up below the composer', requests: [], responses: [], attachments: [], replyTo: null });
@@ -349,7 +362,7 @@ test('approval responses use one optimistic message and retain the composer draf
   const f = await taskBoardFixture(t);
   const created = await f.invoke({ action: 'create', fields: fields('Approval conversation') }), id = created.task.objectId;
   await f.invoke({ action: 'comment', taskId: id, expectedRevision: created.task.revision, authorKind: 'agent',
-    commentId: 'approval-question', body: 'Approve the requested action',
+    purpose: 'question', recipient: { kind: 'user' }, commentId: 'approval-question', body: 'Approve the requested action',
     requests: [{ requestId: 'approval-request', type: 'approval', title: 'Requested action', detail: 'Approve this action.' }],
     responses: [], attachments: [], replyTo: null });
   await f.open(routeTo(id));

@@ -83,6 +83,7 @@ import { useExecutionDefaults } from "./execution-defaults";
 import { useCommentPreferences } from "./comment-preferences";
 import { useCommentVisibility } from './comment-visibility';
 import { useOptimisticComment } from './optimistic-comment';
+import { useCommentDraft } from './comment-draft';
 import TaskHistory from "./TaskHistory.vue";
 import TaskQuestions from "./TaskQuestions.vue";
 import TaskAttachment from "./TaskAttachment.vue";
@@ -172,11 +173,11 @@ const displayComments = computed(() => [...conversation.comments.value, ...optim
 ));
 const pendingQuestions = computed(() => taskView.value.value?.openQuestions ??
   openQuestions({ comments: task.value.value?.value.comments ?? [] }).filter(question => question.recipient?.kind !== 'task'));
-const replyTarget = ref<string | null>(null), commentComposer = ref<HTMLElement[]>([]);
-const replyingTo = shallowRef<TaskBoard.Comment | undefined>();
-watch(replyTarget, id => {
-  replyingTo.value = id ? [...conversation.comments.value, ...pendingQuestions.value].find(comment => comment.commentId === id) : undefined;
-}, { flush: 'sync' });
+const commentDraft = useCommentDraft(() => props.workspace, props.taskId);
+const replyTarget = commentDraft.replyTo, commentComposer = ref<HTMLElement[]>([]);
+const replyingTo = computed(() => replyTarget.value
+  ? [...conversation.comments.value, ...pendingQuestions.value].find(comment => comment.commentId === replyTarget.value)
+  : undefined);
 const answerQuestion = async (id: string) => {
   tab.value = 'chat'; replyTarget.value = id; await nextTick();
   commentComposer.value[0]?.scrollIntoView({ block: 'nearest' });
@@ -252,9 +253,9 @@ const editConflict = shallowRef<EditSnapshot | null>(null);
 const panel = ref(""),
   deleteOpen = ref(false),
   error = ref<string | null>(null),
-  moveToTodo = ref(false),
-  commentBody = ref("");
-const pendingAttachments = ref<TaskBoard.TaskAttachment[]>([]),
+  moveToTodo = commentDraft.moveToTodo,
+  commentBody = commentDraft.body;
+const pendingAttachments = commentDraft.attachments,
   uploading = ref(false),
   attachmentsOpen = ref(false),
   historyOpen = ref(false),
@@ -1432,7 +1433,7 @@ const showArrived = async () => {
                 class="ivy-chat-surface max-h-[60dvh] shrink-0 space-y-1.5 overflow-y-auto px-3 py-3 sm:px-6"
               >
                 <ActionState v-if="!uploading && !((statusProjection.pending.value || archiveProjection.pending.value) && action.busy.value) && !optimistic.isComment.value && (action.saved.value?.phase !== 'succeeded' || action.error.value) && (!failedChange || failedChange.operationId !== action.saved.value?.call.operationId)" :action="action" @changed="refresh" />
-                <p v-if="optimistic.submissionIssue.value" role="alert" class="text-sm text-destructive">{{ optimistic.submissionIssue.value }}</p>
+                <p v-if="optimistic.submissionIssue.value || commentDraft.issue.value" role="alert" class="text-sm text-destructive">{{ optimistic.submissionIssue.value || commentDraft.issue.value }}</p>
                 <p v-if="error || failedChange || archive.error.value" role="alert" class="text-sm text-destructive">
                   {{ error || failedChange?.message || archive.error.value }}
                   <Button v-if="failedChange && !error" size="sm" variant="ghost" @click="failedChange = null">{{ tr('Fehlermeldung schließen', 'Dismiss change error') }}</Button>

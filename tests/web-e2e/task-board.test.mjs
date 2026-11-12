@@ -38,17 +38,19 @@ for (const width of [1440, 390]) test(`task drafts and comments keep keyboard fo
     const original = await editor.elementHandle();
     const save = f.page.getByRole('button', { name: label === 'Comment' ? 'Add comment' : 'Create task', exact: true });
     await expect(save).toBeEnabled();
+    let failedReads = 0;
     await f.page.route('**/api/v1/rpc', route => {
       const body = route.request().postDataJSON();
       const requests = Array.isArray(body) ? body : [body];
-      return requests.some(request => label !== 'Comment'
+      const fail = requests.some(request => label !== 'Comment'
         ? request.method === 'tools.call' && request.params.qualifiedName === 'task-board.workspace'
-        : request.method === 'tools.call' && request.params.qualifiedName === 'task-board.read' && request.params.arguments.task === id)
-        ? route.abort() : route.continue();
+        : request.method === 'tools.call' && request.params.qualifiedName === 'task-board.read' && request.params.arguments.task === id);
+      if (fail) { failedReads++; return route.abort(); }
+      return route.continue();
     });
     await f.page.evaluate(() => window.dispatchEvent(new Event('online')));
-    await expect(f.page.getByRole('alert').filter({ hasText: 'Showing the last successful response' }).first()).toBeVisible();
-    await expect(save).toBeDisabled();
+    await expect.poll(() => failedReads).toBeGreaterThan(0);
+    await expect(save).toBeEnabled();
     await expect(editor).toBeEditable();
     assert.equal(await original.evaluate(element => element.isConnected && element === document.activeElement), true);
     await f.page.keyboard.type(' during outage');
@@ -64,6 +66,27 @@ for (const width of [1440, 390]) test(`task drafts and comments keep keyboard fo
       await expect.poll(async () => (await f.task(id)).comments.at(-1)?.body).toContain('Before outage during outage');
     }
   }
+  const editor = f.page.getByRole('textbox', { name: 'Comment', exact: true });
+  await editor.fill('Retained while access is denied');
+  let deniedReads = 0;
+  await f.page.route('**/api/v1/rpc', async route => {
+    const body = route.request().postDataJSON();
+    const denied = [].concat(body).filter(frame => frame.method === 'tools.call' && frame.params.qualifiedName === 'task-board.workspace');
+    if (!denied.length) return route.continue();
+    deniedReads++;
+    const rejected = id => ({ jsonrpc: '2.0', id, error: { code: -32000,
+      message: 'Workspace access is denied.', data: { code: 'forbidden', outcome: 'not_executed' } } });
+    if (!Array.isArray(body)) return route.fulfill({ json: rejected(body.id) });
+    const response = await route.fetch(), replies = await response.json();
+    return route.fulfill({ response, json: replies.map(frame => denied.some(request => request.id === frame.id) ? rejected(frame.id) : frame) });
+  });
+  await f.page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect.poll(() => deniedReads).toBeGreaterThan(0);
+  await expect(f.page.getByRole('button', { name: 'Add comment', exact: true })).toBeDisabled();
+  await expect(editor).toContainText('Retained while access is denied');
+  await f.page.unroute('**/api/v1/rpc');
+  await f.page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect(f.page.getByRole('button', { name: 'Add comment', exact: true })).toBeEnabled();
   assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   assert.deepEqual(f.pageErrors, []);
 });
@@ -338,6 +361,8 @@ test("task edits ignore runtime revisions, clear saved drafts and retain field c
   await f.invoke({ action: "edit", taskId: id, expectedRevision: current.revision.revision,
     fields: { ...current.content.value.fields, title: "Another client's title" } });
   await save();
+  await expect(f.page.getByRole('alert')).toContainText('The task changed while you were editing. Your draft is retained for comparison.');
+  await f.page.getByRole('button', { name: 'Review draft', exact: true }).click();
   await expect(f.page.getByText("The task changed while you were editing", { exact: true })).toBeVisible();
   await expect(f.page.getByLabel("Title", { exact: true })).toHaveValue("My retained title");
   assert.equal((await f.task(id)).fields.title, "Another client's title");

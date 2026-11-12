@@ -16,6 +16,7 @@ import UiFrame from "../../../packages/ui-client/src/UiFrame.vue";
 import { nativeRead, serviceNodeLabel } from "../../../packages/ui-client/src/native";
 import { route } from "../../../packages/ui-client/src/runtime";
 import { base, client, tr } from "./runtime";
+import { IvyError } from '../../../packages/sdk/src/client';
 import type { Operation, TaskBoard } from "./runtime";
 import TaskList from "./TaskList.vue";
 import { provideCommentVisibility } from './comment-visibility';
@@ -28,15 +29,19 @@ const props = defineProps<{
   section: string;
   query: URLSearchParams;
 }>();
+const workspaceDenied = ref(false);
 const workspace = useRemote(
-  async (signal) =>
-    (await nativeRead(
-      client,
-      props.node,
-      "task-board.workspace",
-      {},
-      signal,
-    )) as TaskBoard.WorkspaceInfo,
+  async (signal) => {
+    try {
+      const value = await nativeRead(client, props.node, 'task-board.workspace', {}, signal) as TaskBoard.WorkspaceInfo;
+      if (!signal.aborted) workspaceDenied.value = false;
+      return value;
+    } catch (cause) {
+      if (!signal.aborted && cause instanceof IvyError && ['unauthenticated', 'forbidden'].includes(cause.code))
+        workspaceDenied.value = true;
+      throw cause;
+    }
+  },
   15000,
   () => ["services/task-board/" + props.node, "objects/task-board"],
 );
@@ -132,19 +137,19 @@ const switchHref = (node: string) =>
         v-if="section === 'settings'"
         :key="identity"
         :workspace="workspace.value.value"
-        :available="!workspace.error.value"
+        :available="!workspaceDenied"
       />
       <TaskEditor
         v-else-if="section === 'new'"
         :key="identity"
         :workspace="workspace.value.value"
-        :available="!workspace.error.value"
+        :available="!workspaceDenied"
       />
       <TaskList
         v-else
         :key="identity"
         :workspace="workspace.value.value"
-        :available="!workspace.error.value"
+        :available="!workspaceDenied"
         :query="query"
         @host="usageHost = $event"
         @agent-node="usageNode = $event"

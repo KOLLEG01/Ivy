@@ -1811,9 +1811,11 @@ test('Board batch archive skips changed or blocked tickets and retains a lost or
   const result = await f.batch(id => id === f.ids[1]);
   assert.deepEqual(result, { skipped: 2, stopped: false }); assert.deepEqual(f.calls.map(call => call.arguments.taskId), f.ids.slice(2));
   const earlier = f.calls.length; f.actionBehavior.lost = true;
-  const stopped = await f.batch(); assert.equal(stopped.stopped, true); assert.equal(f.calls.length, earlier + 1);
+  f.cards.get(f.ids[2]).archived = false;
+  const continued = await f.batch(); assert.equal(continued.stopped, false); assert.equal(f.calls.length, earlier + 2);
   const original = f.entry(f.board, f.ids[1]); assert.equal(original.saved.value.phase, 'unknown');
-  await original.reconcile(); assert.equal(original.saved.value.phase, 'succeeded'); assert.equal(f.calls.length, earlier + 1);
+  assert.equal(f.entry(f.board, f.ids[2]).saved.value.phase, 'unknown');
+  await original.reconcile(); assert.equal(original.saved.value.phase, 'succeeded'); assert.equal(f.calls.length, earlier + 2);
 });
 
 test('Board archive capacity keeps confirmed originals until current metadata and held views are both usable', async t => {

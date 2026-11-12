@@ -31,9 +31,8 @@ export async function readArchiveCards(workspace: TaskBoard.WorkspaceInfo, ids: 
 export async function archiveBoardCard(workspace: Workspace, board: Actions, card: TaskBoard.TaskCardView,
   changed: () => void, readCurrent = true) {
   const id = card.object.objectId;
-  let confirmed = false;
   forgetTask(workspace().serviceNodeId, id);
-  await board.run(id, async (action, projection) => {
+  const admitted = await board.run(id, async (action, projection) => {
     let base = card.observation;
     const result = await action.start('Archive task', async () => {
       if (!eligible(card)) throw new Error('This task changed. Refresh the board before archiving it.');
@@ -50,10 +49,9 @@ export async function archiveBoardCard(workspace: Workspace, board: Actions, car
       }
       return { action: 'archive', taskId: id, expectedRevision: card.object.revision, archived: true };
     }, () => base);
-    confirmed = !!result;
     if (result) { forgetTask(workspace().serviceNodeId, id); changed(); }
   }, { card, archived: true });
-  return confirmed;
+  return admitted;
 }
 
 /** Collect the filtered selection before any mutation changes its pages. Only
