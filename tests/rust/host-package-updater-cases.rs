@@ -605,9 +605,22 @@ async fn package_polling_keeps_heartbeat_and_executor_lock_until_blocked_catalog
     let before = read_optional(&status).await;
     let owner = executor.clone();
     let close = tokio::spawn(async move { owner.close().await });
-    tokio::time::sleep(Duration::from_millis(1250)).await;
+    // The five-second heartbeat must remain owned while close drains the
+    // blocked request. Observe a real new pulse instead of assuming one second.
+    let after = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let after = read_optional(&status).await;
+            if after.get("observedAt").is_some()
+                && before.get("observedAt") != after.get("observedAt")
+            {
+                break after;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("heartbeat continues while the admitted package request drains");
     assert!(!close.is_finished());
-    let after = read_optional(&status).await;
     assert_eq!(after.get("state"), Some(&"ready".into()));
     assert_ne!(before.get("observedAt"), after.get("observedAt"));
     assert_eq!(
