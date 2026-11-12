@@ -6,7 +6,7 @@ use std::{fs, io::Read, path::{Path, PathBuf}};
 fn internal<T, E>(value: Result<T, E>) -> IvyResult<T> { value.map_err(|_| IvyError::internal()) }
 pub(super) fn hash_file(source: &Path) -> IvyResult<String> {
     let mut file = internal(fs::File::open(source))?;
-    let mut hash = Sha256::new(); let mut buffer = vec![0; 4 * 1024 * 1024];
+    let mut hash = Sha256::new(); let mut buffer = vec![0; 256 * 1024];
     loop { let count = internal(file.read(&mut buffer))?; if count == 0 { break } hash.update(&buffer[..count]); }
     Ok(format!("sha256:{}", hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect::<String>()))
 }
